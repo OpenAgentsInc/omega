@@ -46,6 +46,7 @@ use crate::conversation_view::elicitation::{
     ElicitationCard, ElicitationCardHandlers, ElicitationFormState, should_render_elicitation,
 };
 use crate::message_editor::SessionCapabilities;
+use crate::plan_presentation::{PlanStatusKind, plan_label_markdown_style};
 use crate::{AgentThreadSource, DEFAULT_THREAD_TITLE, resolve_agent_image};
 use lru::LruCache;
 use rope::Point;
@@ -431,6 +432,7 @@ impl Conversation {
                     | AcpThreadEvent::ModeUpdated(_)
                     | AcpThreadEvent::ConfigOptionsUpdated(_)
                     | AcpThreadEvent::WorkingDirectoriesUpdated
+                    | AcpThreadEvent::PlanUpdated(_)
                     | AcpThreadEvent::PromptUpdated => {}
                 }
             }
@@ -685,6 +687,7 @@ fn affects_thread_metadata(event: &AcpThreadEvent) -> bool {
         | AcpThreadEvent::ModeUpdated(_)
         | AcpThreadEvent::ConfigOptionsUpdated(_)
         | AcpThreadEvent::SubagentSpawned(_)
+        | AcpThreadEvent::PlanUpdated(_)
         | AcpThreadEvent::PromptUpdated => false,
     }
 }
@@ -2630,6 +2633,9 @@ impl ConversationView {
                 cx.notify();
             }
             AcpThreadEvent::WorkingDirectoriesUpdated => {
+                cx.notify();
+            }
+            AcpThreadEvent::PlanUpdated(_) => {
                 cx.notify();
             }
             AcpThreadEvent::PromptUpdated => {
@@ -4801,30 +4807,6 @@ impl AgentCodeSpanResolver {
         path.extension()
             .and_then(|extension| extension.to_str())
             .is_some_and(|extension| !extension.is_empty())
-    }
-}
-
-fn plan_label_markdown_style(
-    status: &acp::PlanEntryStatus,
-    window: &Window,
-    cx: &App,
-) -> MarkdownStyle {
-    let default_md_style = MarkdownStyle::themed(MarkdownFont::Agent, window, cx);
-
-    MarkdownStyle {
-        base_text_style: TextStyle {
-            color: cx.theme().colors().text_muted,
-            strikethrough: if matches!(status, acp::PlanEntryStatus::Completed) {
-                Some(gpui::StrikethroughStyle {
-                    thickness: px(1.),
-                    color: Some(cx.theme().colors().text_muted.opacity(0.8)),
-                })
-            } else {
-                None
-            },
-            ..default_md_style.base_text_style
-        },
-        ..default_md_style
     }
 }
 

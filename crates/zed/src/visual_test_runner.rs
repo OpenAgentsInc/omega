@@ -196,9 +196,9 @@ use {
     },
     omega_workbench_harness::{
         CheckStatus, HERMETIC_SCENES, PixelProof, PixelStatus, ProofCheck, ProofLane, ProofOutcome,
-        ProofReceipt, RegionPixelProof, ScenePhase, SemanticProbe, WORKBENCH_SHELL_PIXEL_SCENES,
-        WORKBENCH_TERMINAL_PIXEL_SCENES, WorkSurfaceId, WorkbenchScene,
-        compare_images as compare_workbench_images, scene_spec, select_scenes,
+        ProofReceipt, RegionPixelProof, ScenePhase, SemanticProbe, WORKBENCH_PLAN_PIXEL_SCENES,
+        WORKBENCH_SHELL_PIXEL_SCENES, WORKBENCH_TERMINAL_PIXEL_SCENES, WorkSurfaceId,
+        WorkbenchScene, compare_images as compare_workbench_images, scene_spec, select_scenes,
     },
     project::{AgentId, Project},
     project_panel::ProjectPanel,
@@ -569,6 +569,11 @@ fn is_workbench_terminal_scene(name: &str) -> bool {
 }
 
 #[cfg(target_os = "macos")]
+fn is_workbench_plan_scene(name: &str) -> bool {
+    WORKBENCH_PLAN_PIXEL_SCENES.contains(&name)
+}
+
+#[cfg(target_os = "macos")]
 fn workbench_fixture_for_scene(name: &str) -> Result<WorkbenchScene> {
     use omega_workbench_harness::{
         ContentStateFixture, EventFixture, EventKindFixture, MessageFixture, MessageRoleFixture,
@@ -584,6 +589,9 @@ fn workbench_fixture_for_scene(name: &str) -> Result<WorkbenchScene> {
     }
     if is_workbench_terminal_scene(name) {
         return omega_workbench_harness::workbench_terminal_scene(name);
+    }
+    if is_workbench_plan_scene(name) {
+        return omega_workbench_harness::workbench_plan_scene(name);
     }
 
     let spec =
@@ -2009,6 +2017,160 @@ fn verify_workbench_render_preflight(
                 }
                 record_workbench_semantic_check(test_name, "terminal-native-content-containment");
             }
+            record_workbench_semantic_checks(test_name, probe.into_checks());
+        }
+        if is_workbench_plan_scene(test_name) {
+            let mut probe = SemanticProbe::new(&snapshot);
+            probe.require_visible("omega.workbench.surface.plan")?;
+            probe.require_visible("omega.workbench.plan.content")?;
+            probe.require_inside(
+                "omega.workbench.plan.content",
+                "omega.workbench.surface.plan",
+            )?;
+            probe.require_accessible("omega.workbench.plan.entries", "List", "Plan steps")?;
+            probe.require_inside(
+                "omega.workbench.plan.entries",
+                "omega.workbench.plan.content",
+            )?;
+            let summary_label = match test_name {
+                "omega_workbench_plan_empty" => "No plan for this thread",
+                "omega_workbench_plan_replacement" => "1/4 complete · 2 pending · 1 in progress",
+                "omega_workbench_plan_all_complete" => "All 3 steps complete",
+                "omega_workbench_plan_historical" => "1 completed plans · 2 historical steps",
+                _ => "1/3 complete · 1 pending · 1 in progress",
+            };
+            probe.require_accessible("omega.workbench.plan.summary", "Status", summary_label)?;
+
+            let step_selectors = snapshot
+                .selectors()
+                .map(|(selector, _)| selector)
+                .filter(|selector| selector.starts_with("omega.workbench.plan.step."))
+                .collect::<Vec<_>>();
+            if test_name == "omega_workbench_plan_empty" {
+                anyhow::ensure!(
+                    step_selectors.is_empty(),
+                    "empty Plan scene rendered step selectors {step_selectors:?}"
+                );
+                probe.require_accessible(
+                    "omega.workbench.plan.empty",
+                    "Status",
+                    "No plan for this thread",
+                )?;
+            } else {
+                anyhow::ensure!(
+                    !step_selectors.is_empty(),
+                    "populated Plan scene rendered no semantic steps"
+                );
+                for selector in &step_selectors {
+                    probe.require_visible(selector)?;
+                    probe.require_inside(selector, "omega.workbench.plan.entries")?;
+                }
+                probe.require_absent("omega.workbench.plan.empty")?;
+
+                let tree = snapshot
+                    .accessibility_tree_json()
+                    .context("Plan accessibility tree was not active")?;
+                let tree: serde_json::Value =
+                    serde_json::from_str(tree).context("parsing Plan accessibility tree")?;
+                let nodes = tree
+                    .get("nodes")
+                    .and_then(serde_json::Value::as_object)
+                    .context("Plan accessibility tree has no nodes")?;
+                let accessible_steps = nodes
+                    .values()
+                    .filter_map(|node| node.get("aria").and_then(serde_json::Value::as_object))
+                    .filter(|aria| {
+                        aria.get("role").and_then(serde_json::Value::as_str) == Some("ListItem")
+                            && aria
+                                .get("label")
+                                .and_then(serde_json::Value::as_str)
+                                .is_some_and(|label| label.contains("plan step:"))
+                    })
+                    .collect::<Vec<_>>();
+                anyhow::ensure!(
+                    accessible_steps.len() == step_selectors.len(),
+                    "Plan rendered {} step selectors but {} labelled ListItem accessibility nodes",
+                    step_selectors.len(),
+                    accessible_steps.len()
+                );
+                let selected_steps = accessible_steps
+                    .iter()
+                    .filter(|aria| {
+                        aria.get("selected")
+                            .and_then(serde_json::Value::as_bool)
+                            .unwrap_or(false)
+                    })
+                    .count();
+                let expected_selected = usize::from(matches!(
+                    test_name,
+                    "omega_workbench_plan_historical"
+                        | "omega_workbench_plan_no_source_navigation"
+                        | "omega_workbench_plan_collapse_reopen"
+                ));
+                anyhow::ensure!(
+                    selected_steps == expected_selected,
+                    "Plan scene expected {expected_selected} selected steps, got {selected_steps}"
+                );
+                record_workbench_semantic_check(
+                    test_name,
+                    "plan-step-accessibility-role-label-selection",
+                );
+            }
+
+            probe.require_focus("omega.workbench.plan.content", true)?;
+
+            match test_name {
+                "omega_workbench_plan_interrupted" => probe.require_accessible(
+                    "omega.workbench.plan.lifecycle",
+                    "Alert",
+                    "Plan interrupted · Agent execution was interrupted",
+                )?,
+                "omega_workbench_plan_stale" => probe.require_accessible(
+                    "omega.workbench.plan.lifecycle",
+                    "Status",
+                    "Plan may be stale while offline",
+                )?,
+                "omega_workbench_plan_reconnecting" => probe.require_accessible(
+                    "omega.workbench.plan.lifecycle",
+                    "Status",
+                    "Reconnecting · retained plan may be stale",
+                )?,
+                "omega_workbench_plan_malformed" => probe.require_accessible(
+                    "omega.workbench.plan.lifecycle",
+                    "Alert",
+                    "Plan update rejected · the provider returned a blank plan step",
+                )?,
+                _ => probe.require_absent("omega.workbench.plan.lifecycle")?,
+            }
+            if matches!(
+                test_name,
+                "omega_workbench_plan_no_source_navigation"
+                    | "omega_workbench_plan_collapse_reopen"
+            ) {
+                probe.require_accessible(
+                    "omega.workbench.plan.navigation-status",
+                    "Status",
+                    "This live plan step has no transcript event yet",
+                )?;
+            } else if test_name == "omega_workbench_plan_historical" {
+                probe.require_accessible(
+                    "omega.workbench.plan.navigation-status",
+                    "Status",
+                    "Opened transcript event 1",
+                )?;
+            } else {
+                probe.require_absent("omega.workbench.plan.navigation-status")?;
+            }
+            if test_name == "omega_workbench_plan_narrow_foreign_binding" {
+                probe.require_fully_visible("omega.workbench.plan.content")?;
+                probe.require_disjoint(
+                    "omega.workbench.surface.plan",
+                    "omega.workbench.transcript",
+                )?;
+                probe
+                    .require_disjoint("omega.workbench.surface.plan", "omega.workbench.composer")?;
+            }
+            record_workbench_semantic_check(test_name, "plan-native-content-containment");
             record_workbench_semantic_checks(test_name, probe.into_checks());
         }
         if test_name.starts_with("omega_workbench_identity_") {
@@ -4865,6 +5027,208 @@ fn set_workbench_identity_observation_phase(
 }
 
 #[cfg(all(target_os = "macos", feature = "visual-tests"))]
+fn apply_workbench_plan_update(
+    panel: &Entity<agent_ui::AgentPanel>,
+    entries: Vec<acp::PlanEntry>,
+    cx: &mut VisualTestAppContext,
+) -> Result<()> {
+    let thread = cx
+        .read(|cx| panel.read(cx).active_agent_thread(cx))
+        .context("active agent thread is unavailable for Plan update")?;
+    cx.update(|cx| {
+        thread.update(cx, |thread, cx| {
+            thread
+                .handle_session_update(acp::SessionUpdate::Plan(acp::Plan::new(entries)), cx)
+                .map_err(anyhow::Error::new)
+        })
+    })?;
+    cx.run_until_parked();
+    Ok(())
+}
+
+#[cfg(all(target_os = "macos", feature = "visual-tests"))]
+fn workbench_plan_entries(completed: bool) -> Vec<acp::PlanEntry> {
+    vec![
+        acp::PlanEntry::new(
+            "Inspect the active workbench",
+            acp::PlanEntryPriority::High,
+            acp::PlanEntryStatus::Completed,
+        ),
+        acp::PlanEntry::new(
+            "Mount the native Plan surface",
+            acp::PlanEntryPriority::High,
+            if completed {
+                acp::PlanEntryStatus::Completed
+            } else {
+                acp::PlanEntryStatus::InProgress
+            },
+        ),
+        acp::PlanEntry::new(
+            "Verify deterministic behavior",
+            acp::PlanEntryPriority::Medium,
+            if completed {
+                acp::PlanEntryStatus::Completed
+            } else {
+                acp::PlanEntryStatus::Pending
+            },
+        ),
+    ]
+}
+
+#[cfg(all(target_os = "macos", feature = "visual-tests"))]
+fn workbench_plan_snapshot(
+    panel: &Entity<agent_ui::AgentPanel>,
+    cx: &VisualTestAppContext,
+) -> Result<(
+    Entity<agent_ui::workbench_shell::NativePlanSurface>,
+    agent_ui::workbench_shell::NativePlanSnapshot,
+)> {
+    let surface = cx
+        .read(|cx| panel.read(cx).workbench_plan_surface_for_tests(cx))
+        .context("active production Plan surface is unavailable")?;
+    let snapshot = cx.read(|cx| surface.read(cx).snapshot());
+    Ok((surface, snapshot))
+}
+
+#[cfg(all(target_os = "macos", feature = "visual-tests"))]
+fn normalize_workbench_plan_snapshot(
+    expected: &omega_workbench_harness::PlanSnapshotFixture,
+    actual: &agent_ui::workbench_shell::NativePlanSnapshot,
+) -> Result<omega_workbench_harness::PlanSnapshotFixture> {
+    use agent_ui::plan_presentation::{PlanPriorityKind, PlanStatusKind};
+    use agent_ui::workbench_shell::{NativePlanLifecycle, PlanSurfaceState};
+    use omega_workbench_harness::{
+        PlanLifecycleFixture, PlanPriorityFixture, PlanSnapshotFixture, PlanStatusFixture,
+        PlanSurfaceStateFixture, PlanSurfaceStepFixture,
+    };
+
+    let normalize_step = |step: &agent_ui::workbench_shell::NativePlanStepSnapshot,
+                          expected_step: &PlanSurfaceStepFixture| {
+        PlanSurfaceStepFixture {
+            id: expected_step.id,
+            label: step.label.to_string(),
+            status: match step.status {
+                PlanStatusKind::Pending => PlanStatusFixture::Pending,
+                PlanStatusKind::InProgress => PlanStatusFixture::InProgress,
+                PlanStatusKind::Completed => PlanStatusFixture::Completed,
+                PlanStatusKind::Unknown => PlanStatusFixture::Unknown,
+            },
+            priority: match step.priority {
+                PlanPriorityKind::High => PlanPriorityFixture::High,
+                PlanPriorityKind::Medium => PlanPriorityFixture::Medium,
+                PlanPriorityKind::Low => PlanPriorityFixture::Low,
+                PlanPriorityKind::Unknown => PlanPriorityFixture::Unknown,
+            },
+            source_entry_index: step.source_entry_index,
+            historical: step.historical,
+        }
+    };
+    anyhow::ensure!(
+        actual.current_steps.len() == expected.current_steps.len()
+            && actual.historical_steps.len() == expected.historical_steps.len(),
+        "production Plan step cardinality differs from the typed scene contract"
+    );
+    let current_steps = actual
+        .current_steps
+        .iter()
+        .zip(&expected.current_steps)
+        .map(|(actual, expected)| normalize_step(actual, expected))
+        .collect::<Vec<_>>();
+    let historical_steps = actual
+        .historical_steps
+        .iter()
+        .zip(&expected.historical_steps)
+        .map(|(actual, expected)| normalize_step(actual, expected))
+        .collect::<Vec<_>>();
+    let selected_step_id = actual
+        .selected_step_id
+        .map(|selected| {
+            actual
+                .current_steps
+                .iter()
+                .chain(&actual.historical_steps)
+                .position(|step| step.id == selected)
+                .and_then(|index| {
+                    expected
+                        .current_steps
+                        .iter()
+                        .chain(&expected.historical_steps)
+                        .nth(index)
+                        .map(|step| step.id)
+                })
+                .context("selected production Plan step has no expected identity alias")
+        })
+        .transpose()?;
+
+    Ok(PlanSnapshotFixture {
+        binding: expected.binding.clone(),
+        revision: actual.revision,
+        lifecycle: match &actual.lifecycle {
+            NativePlanLifecycle::Ready => PlanLifecycleFixture::Ready,
+            NativePlanLifecycle::Interrupted(message) => {
+                PlanLifecycleFixture::Interrupted(message.to_string())
+            }
+            NativePlanLifecycle::Stale => PlanLifecycleFixture::Stale,
+            NativePlanLifecycle::Reconnecting => PlanLifecycleFixture::Reconnecting,
+            NativePlanLifecycle::Malformed(message) => {
+                PlanLifecycleFixture::Malformed(message.to_string())
+            }
+        },
+        state: match &actual.state {
+            PlanSurfaceState::Empty => PlanSurfaceStateFixture::Empty,
+            PlanSurfaceState::Active {
+                pending,
+                in_progress,
+                completed,
+                unknown,
+                total,
+            } => PlanSurfaceStateFixture::Active {
+                pending: u32::try_from(*pending).context("Plan pending count overflow")?,
+                in_progress: u32::try_from(*in_progress)
+                    .context("Plan in-progress count overflow")?,
+                completed: u32::try_from(*completed).context("Plan completed count overflow")?,
+                unknown: u32::try_from(*unknown).context("Plan unknown count overflow")?,
+                total: u32::try_from(*total).context("Plan total count overflow")?,
+            },
+            PlanSurfaceState::AllComplete { total } => PlanSurfaceStateFixture::AllComplete {
+                total: u32::try_from(*total).context("Plan total count overflow")?,
+            },
+            PlanSurfaceState::Historical {
+                completed_plans,
+                total,
+            } => PlanSurfaceStateFixture::Historical {
+                completed_plans: u32::try_from(*completed_plans)
+                    .context("completed Plan count overflow")?,
+                total: u32::try_from(*total).context("historical Plan count overflow")?,
+            },
+            PlanSurfaceState::Interrupted(_) => PlanSurfaceStateFixture::Interrupted,
+            PlanSurfaceState::Stale => PlanSurfaceStateFixture::Stale,
+            PlanSurfaceState::Reconnecting => PlanSurfaceStateFixture::Reconnecting,
+            PlanSurfaceState::Malformed(_) => PlanSurfaceStateFixture::Malformed,
+        },
+        current_steps,
+        historical_steps,
+        active_step_id: actual
+            .active_step_id
+            .map(|active| {
+                actual
+                    .current_steps
+                    .iter()
+                    .position(|step| step.id == active)
+                    .and_then(|index| expected.current_steps.get(index))
+                    .map(|step| step.id)
+                    .context("active production Plan step has no expected identity alias")
+            })
+            .transpose()?,
+        selected_step_id,
+        navigation_status: actual.navigation_status.as_ref().map(ToString::to_string),
+        retained_surface_token: expected.retained_surface_token.clone(),
+        rejected_update_count: u32::try_from(actual.rejected_update_count)
+            .context("rejected Plan update count overflow")?,
+    })
+}
+
+#[cfg(all(target_os = "macos", feature = "visual-tests"))]
 fn active_workbench_search(
     panel: &Entity<agent_ui::AgentPanel>,
     cx: &VisualTestAppContext,
@@ -5856,6 +6220,7 @@ fn configure_workbench_shell_scene(
         && !is_workbench_review_scene(scene_name)
         && !is_workbench_git_scene(scene_name)
         && !is_workbench_terminal_scene(scene_name)
+        && !is_workbench_plan_scene(scene_name)
     {
         anyhow::ensure!(
             active_thread.binding.is_none() && active_thread.available_surfaces.len() == 1,
@@ -7507,6 +7872,9 @@ fn configure_workbench_shell_scene(
                 cx,
             )?;
         }
+        name if is_workbench_plan_scene(name) => {
+            configure_workbench_plan_scene(name, workspace_window, panel, cx)?;
+        }
         "omega_workbench_shell_active_dock" => {
             dispatch_workbench_action(workspace_window, Box::new(SelectPlan), cx)?;
             let projection = cx.read(|cx| panel.read(cx).workbench_projection_for_tests().clone());
@@ -7687,6 +8055,281 @@ fn configure_workbench_shell_scene(
         }
         _ => anyhow::bail!("unsupported workbench shell scene {scene_name:?}"),
     }
+    Ok(())
+}
+
+#[cfg(all(target_os = "macos", feature = "visual-tests"))]
+fn configure_workbench_plan_scene(
+    scene_name: &str,
+    workspace_window: WindowHandle<Workspace>,
+    panel: &Entity<agent_ui::AgentPanel>,
+    cx: &mut VisualTestAppContext,
+) -> Result<()> {
+    use agent_ui::workbench_shell::{
+        FocusLastSurface, NativePlanBinding, NativePlanLifecycle, SelectPlan,
+    };
+
+    dispatch_workbench_action(workspace_window, Box::new(SelectPlan), cx)?;
+    let scene = omega_workbench_harness::workbench_plan_scene(scene_name)?;
+    let expected = scene
+        .active_plan_snapshot()
+        .context("Plan visual scene has no active typed snapshot")?;
+    let (initial_surface, initial_snapshot) = workbench_plan_snapshot(panel, cx)?;
+    let initial_surface_id = initial_surface.entity_id();
+    let mut stable_step_ids = Vec::new();
+
+    if scene_name != "omega_workbench_plan_empty" {
+        for update_index in 0..3 {
+            apply_workbench_plan_update(panel, workbench_plan_entries(false), cx)?;
+            if update_index == 0 {
+                stable_step_ids = workbench_plan_snapshot(panel, cx)?
+                    .1
+                    .current_steps
+                    .iter()
+                    .map(|step| step.id)
+                    .collect();
+            }
+        }
+        let after_base = workbench_plan_snapshot(panel, cx)?.1;
+        anyhow::ensure!(
+            after_base
+                .current_steps
+                .iter()
+                .map(|step| step.id)
+                .eq(stable_step_ids.iter().copied()),
+            "repeated typed Plan replacement changed stable step identities"
+        );
+        record_workbench_semantic_check(scene_name, "plan-replacement-preserves-stable-ids");
+    }
+
+    match scene_name {
+        "omega_workbench_plan_empty" | "omega_workbench_plan_active" => {}
+        "omega_workbench_plan_replacement" => {
+            apply_workbench_plan_update(
+                panel,
+                vec![
+                    acp::PlanEntry::new(
+                        "Inspect the retained workbench",
+                        acp::PlanEntryPriority::High,
+                        acp::PlanEntryStatus::Completed,
+                    ),
+                    acp::PlanEntry::new(
+                        "Render the replacement Plan payload",
+                        acp::PlanEntryPriority::High,
+                        acp::PlanEntryStatus::InProgress,
+                    ),
+                    acp::PlanEntry::new(
+                        "Verify deterministic behavior",
+                        acp::PlanEntryPriority::Medium,
+                        acp::PlanEntryStatus::Pending,
+                    ),
+                    acp::PlanEntry::new(
+                        "Prove appended steps receive new identities",
+                        acp::PlanEntryPriority::Low,
+                        acp::PlanEntryStatus::Pending,
+                    ),
+                ],
+                cx,
+            )?;
+            let replacement_ids = workbench_plan_snapshot(panel, cx)?
+                .1
+                .current_steps
+                .iter()
+                .map(|step| step.id)
+                .collect::<Vec<_>>();
+            anyhow::ensure!(
+                replacement_ids.get(..stable_step_ids.len()) == Some(stable_step_ids.as_slice())
+                    && replacement_ids.last().is_some_and(|last| {
+                        !stable_step_ids.iter().any(|stable| stable == last)
+                    }),
+                "Plan replacement did not retain existing IDs and allocate one appended ID"
+            );
+            record_workbench_semantic_check(scene_name, "plan-appended-step-has-new-id");
+        }
+        "omega_workbench_plan_all_complete" => {
+            apply_workbench_plan_update(panel, workbench_plan_entries(true), cx)?;
+            apply_workbench_plan_update(panel, workbench_plan_entries(true), cx)?;
+        }
+        "omega_workbench_plan_historical" => {
+            let completed = vec![
+                acp::PlanEntry::new(
+                    "Define workbench acceptance criteria",
+                    acp::PlanEntryPriority::High,
+                    acp::PlanEntryStatus::Completed,
+                ),
+                acp::PlanEntry::new(
+                    "Land the activity rail",
+                    acp::PlanEntryPriority::Medium,
+                    acp::PlanEntryStatus::Completed,
+                ),
+            ];
+            apply_workbench_plan_update(panel, completed.clone(), cx)?;
+            apply_workbench_plan_update(panel, completed, cx)?;
+            let thread = cx
+                .read(|cx| panel.read(cx).active_agent_thread(cx))
+                .context("active agent thread is unavailable for completed Plan snapshot")?;
+            cx.update(|cx| {
+                thread.update(cx, |thread, cx| thread.snapshot_completed_plan(cx));
+            });
+            cx.run_until_parked();
+            let historical = workbench_plan_snapshot(panel, cx)?.1;
+            let step_id = historical
+                .historical_steps
+                .first()
+                .context("historical Plan scene produced no historical step")?
+                .id;
+            cx.simulate_click_selector(
+                workspace_window.into(),
+                &format!("omega.workbench.plan.step.{step_id}"),
+            )?;
+            cx.run_until_parked();
+        }
+        "omega_workbench_plan_interrupted" => {
+            cx.update(|cx| {
+                panel.update(cx, |panel, cx| {
+                    panel.set_workbench_plan_lifecycle_for_tests(
+                        Some(NativePlanLifecycle::Interrupted(
+                            "Agent execution was interrupted".into(),
+                        )),
+                        cx,
+                    );
+                });
+            });
+            cx.run_until_parked();
+        }
+        "omega_workbench_plan_stale"
+        | "omega_workbench_plan_reconnecting"
+        | "omega_workbench_plan_narrow_foreign_binding" => {
+            let (surface, snapshot) = workbench_plan_snapshot(panel, cx)?;
+            cx.update(|cx| {
+                surface.update(cx, |surface, cx| {
+                    anyhow::ensure!(
+                        !surface.bind_thread(
+                            NativePlanBinding {
+                                thread_id: "foreign-thread".into(),
+                                generation: snapshot.binding.generation,
+                            },
+                            None,
+                            cx,
+                        ),
+                        "foreign Plan binding was accepted"
+                    );
+                    Ok::<_, anyhow::Error>(())
+                })
+            })?;
+            let lifecycle = if scene_name == "omega_workbench_plan_stale" {
+                Some(NativePlanLifecycle::Stale)
+            } else if scene_name == "omega_workbench_plan_reconnecting" {
+                Some(NativePlanLifecycle::Reconnecting)
+            } else {
+                None
+            };
+            if let Some(lifecycle) = lifecycle {
+                cx.update(|cx| {
+                    panel.update(cx, |panel, cx| {
+                        panel.set_workbench_plan_lifecycle_for_tests(Some(lifecycle), cx);
+                    });
+                });
+            }
+            if scene_name == "omega_workbench_plan_narrow_foreign_binding" {
+                for _ in 0..5 {
+                    apply_workbench_plan_update(panel, workbench_plan_entries(false), cx)?;
+                }
+            }
+            cx.run_until_parked();
+            record_workbench_semantic_check(scene_name, "plan-foreign-binding-rejected");
+        }
+        "omega_workbench_plan_malformed" => {
+            apply_workbench_plan_update(
+                panel,
+                vec![acp::PlanEntry::new(
+                    "   ",
+                    acp::PlanEntryPriority::Medium,
+                    acp::PlanEntryStatus::Pending,
+                )],
+                cx,
+            )?;
+        }
+        "omega_workbench_plan_no_source_navigation" => {
+            let (_, snapshot) = workbench_plan_snapshot(panel, cx)?;
+            let step_id = snapshot
+                .current_steps
+                .get(1)
+                .context("no-source Plan scene has no second step")?
+                .id;
+            cx.simulate_click_selector(
+                workspace_window.into(),
+                &format!("omega.workbench.plan.step.{step_id}"),
+            )?;
+            cx.run_until_parked();
+        }
+        "omega_workbench_plan_collapse_reopen" => {
+            apply_workbench_plan_update(panel, workbench_plan_entries(false), cx)?;
+            let (_, snapshot) = workbench_plan_snapshot(panel, cx)?;
+            let step_id = snapshot
+                .current_steps
+                .get(2)
+                .context("collapse Plan scene has no third step")?
+                .id;
+            cx.simulate_click_selector(
+                workspace_window.into(),
+                &format!("omega.workbench.plan.step.{step_id}"),
+            )?;
+            cx.run_until_parked();
+            dispatch_workbench_action(workspace_window, Box::new(SelectPlan), cx)?;
+            dispatch_workbench_action(workspace_window, Box::new(SelectPlan), cx)?;
+        }
+        _ => anyhow::bail!("unsupported Plan workbench scene {scene_name:?}"),
+    }
+
+    dispatch_workbench_action(workspace_window, Box::new(FocusLastSurface), cx)?;
+    cx.update_window(workspace_window.into(), |_, window, cx| {
+        initial_surface.update(cx, |surface, cx| {
+            surface.focus_handle(cx).focus(window, cx);
+        });
+    })?;
+    cx.run_until_parked();
+
+    let (final_surface, final_snapshot) = workbench_plan_snapshot(panel, cx)?;
+    anyhow::ensure!(
+        initial_surface.entity_id() == initial_surface_id
+            && final_surface.entity_id() == initial_surface_id,
+        "Plan scene replaced the retained native surface entity"
+    );
+    anyhow::ensure!(
+        initial_snapshot.binding.thread_id == final_snapshot.binding.thread_id,
+        "Plan scene rebound the retained surface to a foreign thread"
+    );
+    let (visible_projection, active_thread_id) = cx.read(|cx| {
+        let panel = panel.read(cx);
+        (
+            panel
+                .workbench_projection_for_tests()
+                .visible_projection()
+                .context("Plan scene has no active workbench projection"),
+            panel
+                .active_thread_id(cx)
+                .map(|thread_id| thread_id.to_key_string()),
+        )
+    });
+    let visible_projection = visible_projection?;
+    anyhow::ensure!(
+        final_snapshot.binding.thread_id == visible_projection.thread_id
+            && final_snapshot.binding.generation == visible_projection.generation
+            && active_thread_id.as_deref() == Some(visible_projection.thread_id.as_str()),
+        "Plan binding {:?} does not match active thread {:?} and visible projection {:?}",
+        final_snapshot.binding,
+        active_thread_id,
+        visible_projection
+    );
+    record_workbench_semantic_check(scene_name, "plan-retained-surface-identity");
+    record_workbench_semantic_check(scene_name, "plan-active-thread-binding-retained");
+    record_workbench_semantic_check(scene_name, "plan-binding-matches-visible-projection");
+
+    let normalized = normalize_workbench_plan_snapshot(expected, &final_snapshot)?;
+    let checks = omega_workbench_harness::prove_plan_surface(&scene, &normalized)
+        .with_context(|| format!("proving native Plan scene {scene_name:?}"))?;
+    record_workbench_semantic_checks(scene_name, checks);
     Ok(())
 }
 

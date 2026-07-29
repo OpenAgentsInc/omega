@@ -909,6 +909,7 @@ impl AgentDiffPane {
             | AcpThreadEvent::AvailableCommandsUpdated(_)
             | AcpThreadEvent::ModeUpdated(_)
             | AcpThreadEvent::ConfigOptionsUpdated(_)
+            | AcpThreadEvent::PlanUpdated(_)
             | AcpThreadEvent::WorkingDirectoriesUpdated => {}
         }
     }
@@ -2370,6 +2371,7 @@ impl AgentDiff {
             | AcpThreadEvent::Retry(_)
             | AcpThreadEvent::ModeUpdated(_)
             | AcpThreadEvent::ConfigOptionsUpdated(_)
+            | AcpThreadEvent::PlanUpdated(_)
             | AcpThreadEvent::WorkingDirectoriesUpdated
             | AcpThreadEvent::PromptUpdated => {}
         }

@@ -23,8 +23,8 @@ issue 134 mounts native project Search, and issue 136 mounts native agent
 change review. Issue 132 rehomes the native Git Panel under an exact
 repository/worktree scope. Issue 137 rehomes the Workspace-owned native
 Terminal Panel and gives explicit terminal creation the active thread's exact
-worktree path. Plan is the remaining generic host; it renders its retained
-loading, ready, error, or offline content until its typed adapter lands.
+worktree path. Issue 130 mounts the active thread's typed ACP plan in a retained
+native Plan surface.
 
 The remaining work is deliberately split so each native adapter can prove its
 own identity, behavior, and lifecycle:
@@ -39,8 +39,7 @@ own identity, behavior, and lifecycle:
 | [Issue 136](https://github.com/OpenAgentsInc/omega/issues/136) | Mounted a thread-bound native review entity        |
 | [Issue 137](https://github.com/OpenAgentsInc/omega/issues/137) | Mounted the existing Terminal Panel without implicit spawning |
 
-Files, Search, Review, Git, and Terminal are production content. Plan retains
-the generic-host foundation rather than replacing a native panel.
+Files, Search, Review, Git, Terminal, and Plan are production content.
 
 ## Composition boundary {#composition-boundary}
 
@@ -430,6 +429,53 @@ factory can defer an explicit production-path creation, then deterministically
 succeed or fail it, so tests observe pending badges, failure propagation, and
 late completion after a worktree switch without launching a process.
 
+### Native Plan adapter {#native-plan-adapter}
+
+Plan is a retained `NativePlanSurface` bound to the exact active
+`Entity<AcpThread>`. It reads `acp_thread::Plan` and `PlanEntry` directly; it
+does not recover steps, status, or priority from message text or Markdown.
+The dock and inline transcript plan use the shared `plan_presentation` mapping
+for pending, in-progress, completed, and forward-compatible unknown status
+icons, colors, labels, and completed-step text styling.
+
+Each accepted session Plan update advances the thread's monotonic local plan
+revision. Exact content matches retain
+their IDs through insertion, removal, and reorder. A same-shape replacement
+also retains positional IDs for edited content; a structural replacement gives
+unmatched steps new IDs rather than transferring selection to another logical
+step. ACP currently supplies neither a provider revision nor a provider step
+ID, so this remains client projection identity, not a claim that Omega can
+recognize reordered packets within one still-current ACP session. The surface
+additionally binds the logical thread
+ID, workbench binding generation, and exact observed thread entity. Older
+generations, a different logical thread at any generation, an event from a
+replaced entity, and a revision below the surface's accepted revision cannot
+publish into it.
+
+Malformed updates, including blank steps, advance the observed revision but
+retain the last good plan and expose an accessible error lifecycle. Empty,
+active, all-complete, historical-only, interrupted, stale, reconnecting, and
+malformed states are explicit. Stale, reconnecting, interrupted, and malformed
+states keep the last good steps, selection, and counts visible while a separate
+lifecycle banner discloses that the projection is not current.
+
+Completed plans are copied into `AgentThreadEntry::CompletedPlan` only when
+every step has the explicit completed status. Those historical steps carry the
+source transcript entry index. Selecting one invokes the existing thread-view
+scroll path after revalidating the active thread and source entry. Current ACP
+plan steps have no stable source event; selecting one keeps the selection and
+explicitly reports that no transcript event exists instead of inventing a
+navigation target. Collapse and reopen retain the surface entity and ID-based
+selection. Thread switches retain independent hosts, subscriptions, revisions,
+and step sets.
+
+Deterministic tests feed typed `SessionUpdate::Plan` values through
+`AcpThread::handle_session_update`. Seed sweeps assert revisions, stable IDs,
+order, status, priority, active step, malformed retention, completion history,
+source navigation, lifecycle retention, collapse/reopen identity, and late
+inactive-thread isolation. Visual scenes must prove the same typed snapshot and
+accessibility contract before their pixels are captured.
+
 ## State ownership {#state-ownership}
 
 `omega_workbench_state::WorkbenchProjection` remains the semantic source of
@@ -756,6 +802,12 @@ Stable selectors include:
 | Terminal create  | `omega.workbench.terminal.new`                 |
 | Terminal owner   | `omega.workbench.terminal.owner`               |
 | Terminal state   | `omega.workbench.terminal.owner-state`         |
+| Plan content     | `omega.workbench.plan.content`                 |
+| Plan summary     | `omega.workbench.plan.summary`                 |
+| Plan lifecycle   | `omega.workbench.plan.lifecycle`               |
+| Plan history     | `omega.workbench.plan.history`                 |
+| Plan step        | `omega.workbench.plan.step.<stable-id>`        |
+| Plan navigation  | `omega.workbench.plan.navigation-status`       |
 
 For every interaction, assert logical state and rendered semantics:
 
@@ -796,6 +848,12 @@ owners, retained output through lifecycle changes, and explicit rejection or
 isolation of stale and foreign spawn epochs. The typed harness defines nineteen
 Terminal visual scene contracts; the proof page lists their exact names and
 commands. Registration is not evidence that reviewed pixel baselines exist.
+
+Plan tests additionally assert the exact bound thread and generation, accepted
+revision, stable step IDs and order, status and priority mapping, active and
+selected IDs, historical source indices, no-source disclosure, lifecycle
+retention, independent per-thread host identity, and absence of cross-thread
+steps after late inactive-thread updates.
 
 Identity tests additionally assert exact picker candidates, one-generation
 binding replacement, full tooltip/accessibility values under visual

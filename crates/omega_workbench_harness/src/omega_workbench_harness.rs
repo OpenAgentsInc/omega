@@ -727,6 +727,93 @@ pub struct GitSnapshotFixture {
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PlanBindingFixture {
+    pub thread_id: String,
+    pub generation: u64,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case", tag = "state", content = "message")]
+pub enum PlanLifecycleFixture {
+    Ready,
+    Interrupted(String),
+    Stale,
+    Reconnecting,
+    Malformed(String),
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum PlanStatusFixture {
+    Pending,
+    InProgress,
+    Completed,
+    Unknown,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum PlanPriorityFixture {
+    High,
+    Medium,
+    Low,
+    Unknown,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PlanSurfaceStepFixture {
+    pub id: u64,
+    pub label: String,
+    pub status: PlanStatusFixture,
+    pub priority: PlanPriorityFixture,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub source_entry_index: Option<usize>,
+    pub historical: bool,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case", tag = "state")]
+pub enum PlanSurfaceStateFixture {
+    Empty,
+    Active {
+        pending: u32,
+        in_progress: u32,
+        completed: u32,
+        unknown: u32,
+        total: u32,
+    },
+    AllComplete {
+        total: u32,
+    },
+    Historical {
+        completed_plans: u32,
+        total: u32,
+    },
+    Interrupted,
+    Stale,
+    Reconnecting,
+    Malformed,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PlanSnapshotFixture {
+    pub binding: PlanBindingFixture,
+    pub revision: u64,
+    pub lifecycle: PlanLifecycleFixture,
+    pub state: PlanSurfaceStateFixture,
+    pub current_steps: Vec<PlanSurfaceStepFixture>,
+    pub historical_steps: Vec<PlanSurfaceStepFixture>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub active_step_id: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub selected_step_id: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub navigation_status: Option<String>,
+    pub retained_surface_token: String,
+    pub rejected_update_count: u32,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct TerminalBindingFixture {
     pub thread_id: String,
     pub repository_id: String,
@@ -910,6 +997,8 @@ pub struct WorkbenchScene {
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub git_snapshots: Vec<GitSnapshotFixture>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub plan_snapshots: Vec<PlanSnapshotFixture>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub terminal_snapshots: Vec<TerminalSnapshotFixture>,
     pub persisted: Option<PersistedSceneFixture>,
 }
@@ -946,6 +1035,7 @@ impl WorkbenchScene {
             thread_workbenches: Vec::new(),
             review_sessions: Vec::new(),
             git_snapshots: Vec::new(),
+            plan_snapshots: Vec::new(),
             terminal_snapshots: Vec::new(),
             persisted: None,
         }
@@ -1141,6 +1231,7 @@ impl WorkbenchScene {
         self.validate_thread_workbenches()?;
         self.validate_review_sessions()?;
         self.validate_git_snapshots()?;
+        self.validate_plan_snapshots()?;
         self.validate_terminal_snapshots()?;
 
         for artifact in &self.artifacts {
@@ -1722,6 +1813,114 @@ impl WorkbenchScene {
             .find(|snapshot| snapshot.binding.thread_id == active_thread_id)
     }
 
+    fn validate_plan_snapshots(&self) -> Result<()> {
+        unique_ids(
+            "Plan snapshot thread",
+            self.plan_snapshots
+                .iter()
+                .map(|snapshot| snapshot.binding.thread_id.as_str()),
+        )?;
+
+        for snapshot in &self.plan_snapshots {
+            let binding = &snapshot.binding;
+            if !self
+                .threads
+                .iter()
+                .any(|thread| thread.id == binding.thread_id)
+            {
+                bail!(
+                    "Plan snapshot references missing thread {:?}",
+                    binding.thread_id
+                );
+            }
+            let workbench = self
+                .thread_workbenches
+                .iter()
+                .find(|workbench| workbench.thread_id == binding.thread_id)
+                .ok_or_else(|| {
+                    anyhow!(
+                        "Plan snapshot for thread {:?} has no workbench projection",
+                        binding.thread_id
+                    )
+                })?;
+            if workbench.generation != binding.generation {
+                bail!(
+                    "Plan snapshot for thread {:?} does not match its workbench generation",
+                    binding.thread_id
+                );
+            }
+            if snapshot.retained_surface_token.trim().is_empty() {
+                bail!("Plan retained surface token must not be empty");
+            }
+            match &snapshot.lifecycle {
+                PlanLifecycleFixture::Interrupted(message)
+                | PlanLifecycleFixture::Malformed(message)
+                    if message.trim().is_empty() =>
+                {
+                    bail!("Plan lifecycle message must not be empty");
+                }
+                _ => {}
+            }
+
+            let mut step_ids = BTreeSet::new();
+            for step in snapshot
+                .current_steps
+                .iter()
+                .chain(snapshot.historical_steps.iter())
+            {
+                if step.id == 0 || !step_ids.insert(step.id) {
+                    bail!("Plan step IDs must be non-zero and unique within a snapshot");
+                }
+                if step.label.trim().is_empty() {
+                    bail!("Plan step labels must not be empty");
+                }
+            }
+            if snapshot
+                .current_steps
+                .iter()
+                .any(|step| step.historical || step.source_entry_index.is_some())
+            {
+                bail!("current Plan steps must not claim a transcript source");
+            }
+            if snapshot
+                .historical_steps
+                .iter()
+                .any(|step| !step.historical || step.source_entry_index.is_none())
+            {
+                bail!("historical Plan steps must retain a transcript source");
+            }
+            if let Some(selected_step_id) = snapshot.selected_step_id
+                && !step_ids.contains(&selected_step_id)
+            {
+                bail!("Plan selection references missing step {selected_step_id}");
+            }
+            let expected_active_step_id = snapshot
+                .current_steps
+                .iter()
+                .find(|step| step.status == PlanStatusFixture::InProgress)
+                .map(|step| step.id);
+            if snapshot.active_step_id != expected_active_step_id {
+                bail!(
+                    "Plan active step {:?} does not match first in-progress step {expected_active_step_id:?}",
+                    snapshot.active_step_id
+                );
+            }
+            if snapshot.navigation_status.is_some() && snapshot.selected_step_id.is_none() {
+                bail!("Plan navigation status requires a selected step");
+            }
+
+            validate_plan_state(snapshot)?;
+        }
+        Ok(())
+    }
+
+    pub fn active_plan_snapshot(&self) -> Option<&PlanSnapshotFixture> {
+        let active_thread_id = self.active_thread_id.as_deref()?;
+        self.plan_snapshots
+            .iter()
+            .find(|snapshot| snapshot.binding.thread_id == active_thread_id)
+    }
+
     fn validate_terminal_snapshots(&self) -> Result<()> {
         unique_ids(
             "Terminal snapshot thread",
@@ -2084,6 +2283,83 @@ fn unique_ids<'a>(kind: &str, ids: impl Iterator<Item = &'a str>) -> Result<()> 
         if !seen.insert(id) {
             bail!("duplicate {kind} ID {id:?}");
         }
+    }
+    Ok(())
+}
+
+fn validate_plan_state(snapshot: &PlanSnapshotFixture) -> Result<()> {
+    let total = u32::try_from(snapshot.current_steps.len())
+        .context("Plan fixture contains more current steps than can be represented")?;
+    let pending = u32::try_from(
+        snapshot
+            .current_steps
+            .iter()
+            .filter(|step| step.status == PlanStatusFixture::Pending)
+            .count(),
+    )
+    .context("Plan pending step count overflow")?;
+    let in_progress = u32::try_from(
+        snapshot
+            .current_steps
+            .iter()
+            .filter(|step| step.status == PlanStatusFixture::InProgress)
+            .count(),
+    )
+    .context("Plan in-progress step count overflow")?;
+    let completed = u32::try_from(
+        snapshot
+            .current_steps
+            .iter()
+            .filter(|step| step.status == PlanStatusFixture::Completed)
+            .count(),
+    )
+    .context("Plan completed step count overflow")?;
+    let unknown = u32::try_from(
+        snapshot
+            .current_steps
+            .iter()
+            .filter(|step| step.status == PlanStatusFixture::Unknown)
+            .count(),
+    )
+    .context("Plan unknown step count overflow")?;
+    let historical_total = u32::try_from(snapshot.historical_steps.len())
+        .context("Plan fixture contains more historical steps than can be represented")?;
+    let completed_plans = snapshot
+        .historical_steps
+        .iter()
+        .filter_map(|step| step.source_entry_index)
+        .collect::<BTreeSet<_>>();
+    let completed_plans =
+        u32::try_from(completed_plans.len()).context("Plan completed-plan count overflow")?;
+
+    let expected_state = match snapshot.lifecycle {
+        PlanLifecycleFixture::Interrupted(_) => PlanSurfaceStateFixture::Interrupted,
+        PlanLifecycleFixture::Stale => PlanSurfaceStateFixture::Stale,
+        PlanLifecycleFixture::Reconnecting => PlanSurfaceStateFixture::Reconnecting,
+        PlanLifecycleFixture::Malformed(_) => PlanSurfaceStateFixture::Malformed,
+        PlanLifecycleFixture::Ready if total == 0 && historical_total == 0 => {
+            PlanSurfaceStateFixture::Empty
+        }
+        PlanLifecycleFixture::Ready if total > 0 && completed == total => {
+            PlanSurfaceStateFixture::AllComplete { total }
+        }
+        PlanLifecycleFixture::Ready if total > 0 => PlanSurfaceStateFixture::Active {
+            pending,
+            in_progress,
+            completed,
+            unknown,
+            total,
+        },
+        PlanLifecycleFixture::Ready => PlanSurfaceStateFixture::Historical {
+            completed_plans,
+            total: historical_total,
+        },
+    };
+    if snapshot.state != expected_state {
+        bail!(
+            "Plan state {:?} does not match typed steps/lifecycle {expected_state:?}",
+            snapshot.state
+        );
     }
     Ok(())
 }
@@ -2474,7 +2750,22 @@ pub const WORKBENCH_TERMINAL_PIXEL_SCENES: [&str; 19] = [
     "omega_workbench_terminal_error",
 ];
 
-pub const WORKBENCH_SHELL_PIXEL_SCENES: [&str; 66] = [
+pub const WORKBENCH_PLAN_PIXEL_SCENES: [&str; 12] = [
+    "omega_workbench_plan_empty",
+    "omega_workbench_plan_active",
+    "omega_workbench_plan_replacement",
+    "omega_workbench_plan_all_complete",
+    "omega_workbench_plan_historical",
+    "omega_workbench_plan_interrupted",
+    "omega_workbench_plan_stale",
+    "omega_workbench_plan_reconnecting",
+    "omega_workbench_plan_malformed",
+    "omega_workbench_plan_no_source_navigation",
+    "omega_workbench_plan_collapse_reopen",
+    "omega_workbench_plan_narrow_foreign_binding",
+];
+
+pub const WORKBENCH_SHELL_PIXEL_SCENES: [&str; 78] = [
     "omega_workbench_shell_default",
     "omega_workbench_shell_active_dock",
     "omega_workbench_shell_focus_visible",
@@ -2537,6 +2828,18 @@ pub const WORKBENCH_SHELL_PIXEL_SCENES: [&str; 66] = [
     "omega_workbench_terminal_stale_spawn",
     "omega_workbench_terminal_foreign_spawn_rejected",
     "omega_workbench_terminal_error",
+    "omega_workbench_plan_empty",
+    "omega_workbench_plan_active",
+    "omega_workbench_plan_replacement",
+    "omega_workbench_plan_all_complete",
+    "omega_workbench_plan_historical",
+    "omega_workbench_plan_interrupted",
+    "omega_workbench_plan_stale",
+    "omega_workbench_plan_reconnecting",
+    "omega_workbench_plan_malformed",
+    "omega_workbench_plan_no_source_navigation",
+    "omega_workbench_plan_collapse_reopen",
+    "omega_workbench_plan_narrow_foreign_binding",
     "omega_workbench_identity_clean",
     "omega_workbench_identity_dirty_conflict",
     "omega_workbench_identity_long_narrow",
@@ -2582,6 +2885,12 @@ pub const WORKBENCH_GIT_REGIONS: &[CaptureRegionSpec] = &[CaptureRegionSpec::sel
 pub const WORKBENCH_TERMINAL_REGIONS: &[CaptureRegionSpec] = &[CaptureRegionSpec::selector_union(
     "terminal-surface",
     &["omega.workbench.surface.terminal"],
+    8,
+)];
+
+pub const WORKBENCH_PLAN_REGIONS: &[CaptureRegionSpec] = &[CaptureRegionSpec::selector_union(
+    "plan-surface",
+    &["omega.workbench.surface.plan"],
     8,
 )];
 
@@ -3086,6 +3395,102 @@ pub const HERMETIC_SCENES: &[SceneSpec] = &[
         fixture_version: 2,
         pixel_policy: APPLE_SILICON_METAL_POLICY,
         regions: WORKBENCH_TERMINAL_REGIONS,
+    },
+    SceneSpec {
+        name: "omega_workbench_plan_empty",
+        phase: ScenePhase::Recording,
+        viewport: ViewportFixture::new(1200, 720, 2000),
+        fixture_version: 2,
+        pixel_policy: APPLE_SILICON_METAL_POLICY,
+        regions: WORKBENCH_PLAN_REGIONS,
+    },
+    SceneSpec {
+        name: "omega_workbench_plan_active",
+        phase: ScenePhase::Recording,
+        viewport: ViewportFixture::new(1200, 720, 2000),
+        fixture_version: 2,
+        pixel_policy: APPLE_SILICON_METAL_POLICY,
+        regions: WORKBENCH_PLAN_REGIONS,
+    },
+    SceneSpec {
+        name: "omega_workbench_plan_replacement",
+        phase: ScenePhase::Recording,
+        viewport: ViewportFixture::new(1200, 720, 2000),
+        fixture_version: 2,
+        pixel_policy: APPLE_SILICON_METAL_POLICY,
+        regions: WORKBENCH_PLAN_REGIONS,
+    },
+    SceneSpec {
+        name: "omega_workbench_plan_all_complete",
+        phase: ScenePhase::Recording,
+        viewport: ViewportFixture::new(1200, 720, 2000),
+        fixture_version: 2,
+        pixel_policy: APPLE_SILICON_METAL_POLICY,
+        regions: WORKBENCH_PLAN_REGIONS,
+    },
+    SceneSpec {
+        name: "omega_workbench_plan_historical",
+        phase: ScenePhase::Recording,
+        viewport: ViewportFixture::new(1200, 720, 2000),
+        fixture_version: 2,
+        pixel_policy: APPLE_SILICON_METAL_POLICY,
+        regions: WORKBENCH_PLAN_REGIONS,
+    },
+    SceneSpec {
+        name: "omega_workbench_plan_interrupted",
+        phase: ScenePhase::Recording,
+        viewport: ViewportFixture::new(1200, 720, 2000),
+        fixture_version: 2,
+        pixel_policy: APPLE_SILICON_METAL_POLICY,
+        regions: WORKBENCH_PLAN_REGIONS,
+    },
+    SceneSpec {
+        name: "omega_workbench_plan_stale",
+        phase: ScenePhase::Recording,
+        viewport: ViewportFixture::new(1200, 720, 2000),
+        fixture_version: 2,
+        pixel_policy: APPLE_SILICON_METAL_POLICY,
+        regions: WORKBENCH_PLAN_REGIONS,
+    },
+    SceneSpec {
+        name: "omega_workbench_plan_reconnecting",
+        phase: ScenePhase::Recording,
+        viewport: ViewportFixture::new(1200, 720, 2000),
+        fixture_version: 2,
+        pixel_policy: APPLE_SILICON_METAL_POLICY,
+        regions: WORKBENCH_PLAN_REGIONS,
+    },
+    SceneSpec {
+        name: "omega_workbench_plan_malformed",
+        phase: ScenePhase::Recording,
+        viewport: ViewportFixture::new(1200, 720, 2000),
+        fixture_version: 2,
+        pixel_policy: APPLE_SILICON_METAL_POLICY,
+        regions: WORKBENCH_PLAN_REGIONS,
+    },
+    SceneSpec {
+        name: "omega_workbench_plan_no_source_navigation",
+        phase: ScenePhase::Recording,
+        viewport: ViewportFixture::new(1200, 720, 2000),
+        fixture_version: 2,
+        pixel_policy: APPLE_SILICON_METAL_POLICY,
+        regions: WORKBENCH_PLAN_REGIONS,
+    },
+    SceneSpec {
+        name: "omega_workbench_plan_collapse_reopen",
+        phase: ScenePhase::Recording,
+        viewport: ViewportFixture::new(1200, 720, 2000),
+        fixture_version: 2,
+        pixel_policy: APPLE_SILICON_METAL_POLICY,
+        regions: WORKBENCH_PLAN_REGIONS,
+    },
+    SceneSpec {
+        name: "omega_workbench_plan_narrow_foreign_binding",
+        phase: ScenePhase::Recording,
+        viewport: ViewportFixture::new(910, 720, 2000),
+        fixture_version: 2,
+        pixel_policy: APPLE_SILICON_METAL_POLICY,
+        regions: WORKBENCH_PLAN_REGIONS,
     },
     SceneSpec {
         name: "omega_workbench_identity_clean",
@@ -4955,6 +5360,281 @@ impl<'a> SemanticProbe<'a> {
     }
 }
 
+pub fn workbench_plan_scene(name: &str) -> Result<WorkbenchScene> {
+    let spec = scene_spec(name).ok_or_else(|| anyhow!("unknown workbench scene {name:?}"))?;
+    if !name.starts_with("omega_workbench_plan_") {
+        bail!("{name:?} is not a Plan workbench scene");
+    }
+
+    let active_snapshot = plan_fixture_for_scene(
+        name,
+        PlanBindingFixture {
+            thread_id: "active-thread".into(),
+            generation: 11,
+        },
+    )?;
+    let foreign_snapshot = PlanSnapshotFixture {
+        binding: PlanBindingFixture {
+            thread_id: "foreign-thread".into(),
+            generation: 4,
+        },
+        revision: 7,
+        lifecycle: PlanLifecycleFixture::Ready,
+        state: PlanSurfaceStateFixture::Active {
+            pending: 0,
+            in_progress: 1,
+            completed: 0,
+            unknown: 0,
+            total: 1,
+        },
+        current_steps: vec![plan_step(
+            1,
+            "Foreign thread only",
+            PlanStatusFixture::InProgress,
+            PlanPriorityFixture::High,
+            None,
+            false,
+        )],
+        historical_steps: Vec::new(),
+        active_step_id: Some(1),
+        selected_step_id: Some(1),
+        navigation_status: Some("This live plan step has no transcript event yet".into()),
+        retained_surface_token: "foreign-plan-surface".into(),
+        rejected_update_count: 0,
+    };
+
+    let mut scene = spec.fixture();
+    scene.content_state = ContentStateFixture::Ready;
+    scene.threads = vec![
+        ThreadFixture {
+            id: "active-thread".into(),
+            project_id: None,
+            repository_id: None,
+            worktree_id: None,
+        },
+        ThreadFixture {
+            id: "foreign-thread".into(),
+            project_id: None,
+            repository_id: None,
+            worktree_id: None,
+        },
+    ];
+    scene.active_thread_id = Some("active-thread".into());
+    for surface in &mut scene.surfaces {
+        surface.available = surface.id == WorkSurfaceId::Plan;
+    }
+    scene.active_surface = Some(WorkSurfaceId::Plan);
+    scene.dock_open = true;
+    let active_surfaces = scene.surfaces.clone();
+    let foreign_surfaces = scene.surfaces.clone();
+    scene.thread_workbenches = vec![
+        ThreadWorkbenchFixture {
+            thread_id: "active-thread".into(),
+            generation: active_snapshot.binding.generation,
+            binding: None,
+            requested_surface: Some(WorkSurfaceId::Plan),
+            effective_surface: Some(WorkSurfaceId::Plan),
+            dock_open: true,
+            surfaces: active_surfaces,
+        },
+        ThreadWorkbenchFixture {
+            thread_id: "foreign-thread".into(),
+            generation: foreign_snapshot.binding.generation,
+            binding: None,
+            requested_surface: Some(WorkSurfaceId::Plan),
+            effective_surface: Some(WorkSurfaceId::Plan),
+            dock_open: false,
+            surfaces: foreign_surfaces,
+        },
+    ];
+    scene.plan_snapshots = vec![active_snapshot, foreign_snapshot];
+    scene.validate()?;
+    Ok(scene)
+}
+
+fn plan_fixture_for_scene(name: &str, binding: PlanBindingFixture) -> Result<PlanSnapshotFixture> {
+    let current_steps = vec![
+        plan_step(
+            1,
+            "Inspect the active workbench",
+            PlanStatusFixture::Completed,
+            PlanPriorityFixture::High,
+            None,
+            false,
+        ),
+        plan_step(
+            2,
+            "Mount the native Plan surface",
+            PlanStatusFixture::InProgress,
+            PlanPriorityFixture::High,
+            None,
+            false,
+        ),
+        plan_step(
+            3,
+            "Verify deterministic behavior",
+            PlanStatusFixture::Pending,
+            PlanPriorityFixture::Medium,
+            None,
+            false,
+        ),
+    ];
+    let historical_steps = vec![
+        plan_step(
+            1,
+            "Define workbench acceptance criteria",
+            PlanStatusFixture::Completed,
+            PlanPriorityFixture::High,
+            Some(0),
+            true,
+        ),
+        plan_step(
+            2,
+            "Land the activity rail",
+            PlanStatusFixture::Completed,
+            PlanPriorityFixture::Medium,
+            Some(0),
+            true,
+        ),
+    ];
+    let mut snapshot = PlanSnapshotFixture {
+        binding,
+        revision: 3,
+        lifecycle: PlanLifecycleFixture::Ready,
+        state: PlanSurfaceStateFixture::Active {
+            pending: 1,
+            in_progress: 1,
+            completed: 1,
+            unknown: 0,
+            total: 3,
+        },
+        current_steps,
+        historical_steps: Vec::new(),
+        active_step_id: Some(2),
+        selected_step_id: None,
+        navigation_status: None,
+        retained_surface_token: "active-plan-surface".into(),
+        rejected_update_count: 0,
+    };
+
+    match name {
+        "omega_workbench_plan_empty" => {
+            snapshot.revision = 0;
+            snapshot.state = PlanSurfaceStateFixture::Empty;
+            snapshot.current_steps.clear();
+            snapshot.active_step_id = None;
+            snapshot.selected_step_id = None;
+        }
+        "omega_workbench_plan_active" => {}
+        "omega_workbench_plan_replacement" => {
+            snapshot.revision = 4;
+            snapshot
+                .current_steps
+                .first_mut()
+                .context("active Plan fixture has no first step")?
+                .label = "Inspect the retained workbench".into();
+            snapshot
+                .current_steps
+                .get_mut(1)
+                .context("active Plan fixture has no second step")?
+                .label = "Render the replacement Plan payload".into();
+            snapshot.current_steps.push(plan_step(
+                4,
+                "Prove appended steps receive new identities",
+                PlanStatusFixture::Pending,
+                PlanPriorityFixture::Low,
+                None,
+                false,
+            ));
+            snapshot.state = PlanSurfaceStateFixture::Active {
+                pending: 2,
+                in_progress: 1,
+                completed: 1,
+                unknown: 0,
+                total: 4,
+            };
+        }
+        "omega_workbench_plan_all_complete" => {
+            snapshot.revision = 5;
+            for step in &mut snapshot.current_steps {
+                step.status = PlanStatusFixture::Completed;
+            }
+            snapshot.state = PlanSurfaceStateFixture::AllComplete { total: 3 };
+            snapshot.active_step_id = None;
+        }
+        "omega_workbench_plan_historical" => {
+            snapshot.revision = 6;
+            snapshot.current_steps.clear();
+            snapshot.historical_steps = historical_steps;
+            snapshot.active_step_id = None;
+            snapshot.state = PlanSurfaceStateFixture::Historical {
+                completed_plans: 1,
+                total: 2,
+            };
+            snapshot.selected_step_id = Some(1);
+            snapshot.navigation_status = Some("Opened transcript event 1".into());
+        }
+        "omega_workbench_plan_interrupted" => {
+            snapshot.lifecycle =
+                PlanLifecycleFixture::Interrupted("Agent execution was interrupted".into());
+            snapshot.state = PlanSurfaceStateFixture::Interrupted;
+        }
+        "omega_workbench_plan_stale" => {
+            snapshot.lifecycle = PlanLifecycleFixture::Stale;
+            snapshot.state = PlanSurfaceStateFixture::Stale;
+            snapshot.rejected_update_count = 1;
+        }
+        "omega_workbench_plan_reconnecting" => {
+            snapshot.lifecycle = PlanLifecycleFixture::Reconnecting;
+            snapshot.state = PlanSurfaceStateFixture::Reconnecting;
+            snapshot.rejected_update_count = 1;
+        }
+        "omega_workbench_plan_malformed" => {
+            snapshot.revision = 4;
+            snapshot.lifecycle =
+                PlanLifecycleFixture::Malformed("the provider returned a blank plan step".into());
+            snapshot.state = PlanSurfaceStateFixture::Malformed;
+            snapshot.rejected_update_count = 0;
+        }
+        "omega_workbench_plan_no_source_navigation" => {
+            snapshot.selected_step_id = Some(2);
+            snapshot.navigation_status =
+                Some("This live plan step has no transcript event yet".into());
+        }
+        "omega_workbench_plan_collapse_reopen" => {
+            snapshot.revision = 4;
+            snapshot.selected_step_id = Some(3);
+            snapshot.navigation_status =
+                Some("This live plan step has no transcript event yet".into());
+        }
+        "omega_workbench_plan_narrow_foreign_binding" => {
+            snapshot.revision = 8;
+            snapshot.selected_step_id = None;
+            snapshot.rejected_update_count = 1;
+        }
+        _ => bail!("unknown Plan workbench scene {name:?}"),
+    }
+    Ok(snapshot)
+}
+
+fn plan_step(
+    id: u64,
+    label: &str,
+    status: PlanStatusFixture,
+    priority: PlanPriorityFixture,
+    source_entry_index: Option<usize>,
+    historical: bool,
+) -> PlanSurfaceStepFixture {
+    PlanSurfaceStepFixture {
+        id,
+        label: label.into(),
+        status,
+        priority,
+        source_entry_index,
+        historical,
+    }
+}
+
 #[cfg(feature = "gpui-support")]
 pub fn prove_workbench_shell(
     scene: &WorkbenchScene,
@@ -5282,6 +5962,170 @@ pub fn prove_git_surface(
 }
 
 fn require_git_match<T>(
+    name: &str,
+    expected: &T,
+    actual: &T,
+    checks: &mut Vec<ProofCheck>,
+) -> Result<()>
+where
+    T: std::fmt::Debug + PartialEq,
+{
+    if expected != actual {
+        let detail = format!("expected {expected:?}, got {actual:?}");
+        checks.push(ProofCheck::failed(name, &detail));
+        bail!("{name}: {detail}");
+    }
+    checks.push(ProofCheck::passed(name));
+    Ok(())
+}
+
+pub fn prove_plan_surface(
+    scene: &WorkbenchScene,
+    actual: &PlanSnapshotFixture,
+) -> Result<Vec<ProofCheck>> {
+    scene.validate()?;
+    let expected = scene
+        .active_plan_snapshot()
+        .context("Plan proof scene has no active Plan snapshot")?;
+    let mut checks = Vec::new();
+
+    require_plan_match(
+        "plan-binding-generation",
+        &expected.binding,
+        &actual.binding,
+        &mut checks,
+    )?;
+    require_plan_match(
+        "plan-revision",
+        &expected.revision,
+        &actual.revision,
+        &mut checks,
+    )?;
+    require_plan_match(
+        "plan-lifecycle",
+        &expected.lifecycle,
+        &actual.lifecycle,
+        &mut checks,
+    )?;
+    require_plan_match(
+        "plan-summary-state",
+        &expected.state,
+        &actual.state,
+        &mut checks,
+    )?;
+
+    let expected_signatures = expected
+        .current_steps
+        .iter()
+        .chain(expected.historical_steps.iter())
+        .map(plan_step_signature)
+        .collect::<BTreeSet<_>>();
+    let foreign_signatures = scene
+        .plan_snapshots
+        .iter()
+        .filter(|snapshot| snapshot.binding.thread_id != expected.binding.thread_id)
+        .flat_map(|snapshot| {
+            snapshot
+                .current_steps
+                .iter()
+                .chain(snapshot.historical_steps.iter())
+        })
+        .map(plan_step_signature)
+        .filter(|signature| !expected_signatures.contains(signature))
+        .collect::<BTreeSet<_>>();
+    let leaked_signatures = actual
+        .current_steps
+        .iter()
+        .chain(actual.historical_steps.iter())
+        .map(plan_step_signature)
+        .filter(|signature| foreign_signatures.contains(signature))
+        .collect::<Vec<_>>();
+    if !leaked_signatures.is_empty() {
+        let detail =
+            format!("active Plan snapshot leaked foreign-thread steps {leaked_signatures:?}");
+        checks.push(ProofCheck::failed("plan-no-foreign-thread-steps", &detail));
+        bail!("{detail}");
+    }
+    checks.push(ProofCheck::passed("plan-no-foreign-thread-steps"));
+
+    require_plan_match(
+        "plan-current-step-identities-labels-status-priority",
+        &expected.current_steps,
+        &actual.current_steps,
+        &mut checks,
+    )?;
+    require_plan_match(
+        "plan-historical-step-sources",
+        &expected.historical_steps,
+        &actual.historical_steps,
+        &mut checks,
+    )?;
+    require_plan_match(
+        "plan-active-step",
+        &expected.active_step_id,
+        &actual.active_step_id,
+        &mut checks,
+    )?;
+    require_plan_match(
+        "plan-selected-step",
+        &expected.selected_step_id,
+        &actual.selected_step_id,
+        &mut checks,
+    )?;
+    require_plan_match(
+        "plan-navigation-status",
+        &expected.navigation_status,
+        &actual.navigation_status,
+        &mut checks,
+    )?;
+    require_plan_match(
+        "plan-retained-surface-entity",
+        &expected.retained_surface_token,
+        &actual.retained_surface_token,
+        &mut checks,
+    )?;
+    require_plan_match(
+        "plan-rejected-update-count",
+        &expected.rejected_update_count,
+        &actual.rejected_update_count,
+        &mut checks,
+    )?;
+
+    let active_workbench = scene
+        .active_thread_workbench()
+        .context("Plan proof scene has no active workbench projection")?;
+    let rail_badge = surface_fixture(&active_workbench.surfaces, WorkSurfaceId::Plan)?.badge;
+    require_plan_match(
+        "plan-no-derived-rail-badge",
+        &None::<u32>,
+        &rail_badge,
+        &mut checks,
+    )?;
+
+    Ok(checks)
+}
+
+fn plan_step_signature(
+    step: &PlanSurfaceStepFixture,
+) -> (
+    u64,
+    &str,
+    PlanStatusFixture,
+    PlanPriorityFixture,
+    Option<usize>,
+    bool,
+) {
+    (
+        step.id,
+        step.label.as_str(),
+        step.status,
+        step.priority,
+        step.source_entry_index,
+        step.historical,
+    )
+}
+
+fn require_plan_match<T>(
     name: &str,
     expected: &T,
     actual: &T,
@@ -7231,6 +8075,214 @@ mod tests {
         let decoded: WorkbenchScene = serde_json::from_slice(&encoded)?;
         assert_eq!(decoded, scene);
         decoded.validate()?;
+        Ok(())
+    }
+
+    #[test]
+    fn plan_scene_catalog_models_typed_lifecycle_history_and_thread_isolation() -> Result<()> {
+        for name in WORKBENCH_PLAN_PIXEL_SCENES {
+            let spec = scene_spec(name).context("registered Plan scene")?;
+            assert_eq!(spec.regions, WORKBENCH_PLAN_REGIONS);
+            let scene = workbench_plan_scene(name)?;
+            assert_eq!(scene.fixture_version, 2);
+            assert_eq!(scene.plan_snapshots.len(), 2);
+            assert_eq!(scene.active_surface, Some(WorkSurfaceId::Plan));
+            assert!(scene.dock_open);
+
+            let active = scene
+                .active_plan_snapshot()
+                .context("Plan fixture has no active snapshot")?;
+            let foreign = scene
+                .plan_snapshots
+                .iter()
+                .find(|snapshot| snapshot.binding.thread_id != active.binding.thread_id)
+                .context("Plan fixture has no foreign snapshot")?;
+            assert_ne!(active.binding.thread_id, foreign.binding.thread_id);
+            assert_ne!(active.binding.generation, foreign.binding.generation);
+            assert_ne!(
+                active.retained_surface_token,
+                foreign.retained_surface_token
+            );
+        }
+        assert_eq!(
+            scene_spec("omega_workbench_plan_narrow_foreign_binding")
+                .context("registered narrow Plan scene")?
+                .viewport,
+            ViewportFixture::new(910, 720, 2000)
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn plan_fixture_validation_rejects_cross_generation_sources_counts_and_selection() -> Result<()>
+    {
+        let scene = workbench_plan_scene("omega_workbench_plan_active")?;
+
+        let mut cross_generation = scene.clone();
+        cross_generation.plan_snapshots[0].binding.generation += 1;
+        assert!(
+            cross_generation
+                .validate()
+                .expect_err("cross-generation Plan fixture must fail")
+                .to_string()
+                .contains("does not match its workbench generation")
+        );
+
+        let mut false_source = scene.clone();
+        false_source.plan_snapshots[0].current_steps[0].source_entry_index = Some(3);
+        assert!(
+            false_source
+                .validate()
+                .expect_err("live Plan source must fail")
+                .to_string()
+                .contains("must not claim a transcript source")
+        );
+
+        let mut wrong_counts = scene.clone();
+        wrong_counts.plan_snapshots[0].state = PlanSurfaceStateFixture::Active {
+            pending: 1,
+            in_progress: 0,
+            completed: 1,
+            unknown: 0,
+            total: 2,
+        };
+        assert!(
+            wrong_counts
+                .validate()
+                .expect_err("incorrect Plan counts must fail")
+                .to_string()
+                .contains("does not match typed steps/lifecycle")
+        );
+
+        let mut missing_selection = scene;
+        missing_selection.plan_snapshots[0].selected_step_id = Some(999_999);
+        assert!(
+            missing_selection
+                .validate()
+                .expect_err("missing Plan selection must fail")
+                .to_string()
+                .contains("selection references missing step")
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn plan_proof_checks_typed_projection_retention_navigation_and_leaks() -> Result<()> {
+        let scene = workbench_plan_scene("omega_workbench_plan_no_source_navigation")?;
+        let actual = scene
+            .active_plan_snapshot()
+            .context("Plan fixture has no active snapshot")?
+            .clone();
+        let checks = prove_plan_surface(&scene, &actual)?;
+        let names = checks
+            .iter()
+            .map(|check| check.name.as_str())
+            .collect::<BTreeSet<_>>();
+        for required in [
+            "plan-binding-generation",
+            "plan-revision",
+            "plan-lifecycle",
+            "plan-summary-state",
+            "plan-current-step-identities-labels-status-priority",
+            "plan-historical-step-sources",
+            "plan-active-step",
+            "plan-selected-step",
+            "plan-navigation-status",
+            "plan-retained-surface-entity",
+            "plan-rejected-update-count",
+            "plan-no-foreign-thread-steps",
+            "plan-no-derived-rail-badge",
+        ] {
+            assert!(names.contains(required), "missing Plan proof {required}");
+        }
+
+        let mut leaked = actual;
+        let foreign_step = scene
+            .plan_snapshots
+            .iter()
+            .find(|snapshot| snapshot.binding.thread_id == "foreign-thread")
+            .and_then(|snapshot| snapshot.current_steps.first())
+            .context("foreign Plan step")?
+            .clone();
+        *leaked
+            .current_steps
+            .first_mut()
+            .context("active Plan step")? = foreign_step;
+        assert!(
+            prove_plan_surface(&scene, &leaked)
+                .expect_err("foreign Plan signature must fail the isolation proof")
+                .to_string()
+                .contains("foreign-thread steps")
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn plan_replacement_and_lifecycle_scenes_retain_last_good_projection() -> Result<()> {
+        let active = workbench_plan_scene("omega_workbench_plan_active")?;
+        let replacement = workbench_plan_scene("omega_workbench_plan_replacement")?;
+        let active_snapshot = active
+            .active_plan_snapshot()
+            .context("active Plan snapshot")?;
+        let replacement_snapshot = replacement
+            .active_plan_snapshot()
+            .context("replacement Plan snapshot")?;
+        assert_eq!(
+            active_snapshot
+                .current_steps
+                .iter()
+                .take(3)
+                .map(|step| step.id)
+                .collect::<Vec<_>>(),
+            replacement_snapshot
+                .current_steps
+                .iter()
+                .take(3)
+                .map(|step| step.id)
+                .collect::<Vec<_>>()
+        );
+        assert_eq!(
+            replacement_snapshot
+                .current_steps
+                .last()
+                .map(|step| step.id),
+            Some(4)
+        );
+
+        for name in [
+            "omega_workbench_plan_interrupted",
+            "omega_workbench_plan_stale",
+            "omega_workbench_plan_reconnecting",
+            "omega_workbench_plan_malformed",
+        ] {
+            let scene = workbench_plan_scene(name)?;
+            let snapshot = scene
+                .active_plan_snapshot()
+                .context("lifecycle Plan snapshot")?;
+            assert_eq!(snapshot.current_steps, active_snapshot.current_steps);
+            assert_eq!(
+                snapshot.retained_surface_token,
+                active_snapshot.retained_surface_token
+            );
+            prove_plan_surface(&scene, snapshot)?;
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn plan_fixture_round_trip_preserves_history_and_no_source_navigation() -> Result<()> {
+        for name in [
+            "omega_workbench_plan_historical",
+            "omega_workbench_plan_no_source_navigation",
+            "omega_workbench_plan_collapse_reopen",
+            "omega_workbench_plan_narrow_foreign_binding",
+        ] {
+            let scene = workbench_plan_scene(name)?;
+            let encoded = serde_json::to_vec(&scene)?;
+            let decoded: WorkbenchScene = serde_json::from_slice(&encoded)?;
+            assert_eq!(decoded, scene);
+            decoded.validate()?;
+        }
         Ok(())
     }
 

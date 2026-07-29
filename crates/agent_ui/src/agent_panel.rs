@@ -1439,7 +1439,6 @@ pub struct AgentPanel {
     _workbench_terminal_panel_observation: Option<Subscription>,
     _workbench_terminal_panel_event_subscription: Option<Subscription>,
     workbench_terminal_surface: Option<Entity<workbench_shell::NativeTerminalSurface>>,
-    workbench_plan_revision: u64,
     #[cfg(any(test, feature = "test-support"))]
     workbench_identity_phase_override: Option<IdentityPhase>,
     #[cfg(any(test, feature = "test-support"))]
@@ -1448,6 +1447,10 @@ pub struct AgentPanel {
     workbench_git_lifecycle_override: Option<workbench_shell::NativeGitLifecycle>,
     #[cfg(any(test, feature = "test-support"))]
     workbench_terminal_owner_state_override: Option<workbench_shell::NativeTerminalOwnerState>,
+    #[cfg(any(test, feature = "test-support"))]
+    workbench_plan_lifecycle_override: Option<workbench_shell::NativePlanLifecycle>,
+    #[cfg(any(test, feature = "test-support"))]
+    workbench_plan_navigation_target: Option<usize>,
     #[cfg(any(test, feature = "test-support"))]
     workbench_terminal_badge_override: Option<workbench_shell::SurfaceBadge>,
 }
@@ -1961,7 +1964,6 @@ impl AgentPanel {
             _workbench_terminal_panel_event_subscription:
                 workbench_terminal_panel_event_subscription,
             workbench_terminal_surface: None,
-            workbench_plan_revision: 0,
             #[cfg(any(test, feature = "test-support"))]
             workbench_identity_phase_override: None,
             #[cfg(any(test, feature = "test-support"))]
@@ -1970,6 +1972,10 @@ impl AgentPanel {
             workbench_git_lifecycle_override: None,
             #[cfg(any(test, feature = "test-support"))]
             workbench_terminal_owner_state_override: None,
+            #[cfg(any(test, feature = "test-support"))]
+            workbench_plan_lifecycle_override: None,
+            #[cfg(any(test, feature = "test-support"))]
+            workbench_plan_navigation_target: None,
             #[cfg(any(test, feature = "test-support"))]
             workbench_terminal_badge_override: None,
         };
@@ -9290,6 +9296,13 @@ impl AgentPanel {
                 );
             }
         }
+        if let Some(plan_surface) = self.workbench_shell.plan_surface_for_active_binding(cx) {
+            let generation = plan_surface.read(cx).binding().generation;
+            let lifecycle = self.native_plan_lifecycle(cx);
+            plan_surface.update(cx, |plan_surface, cx| {
+                plan_surface.set_lifecycle(generation, lifecycle, cx);
+            });
+        }
         let review_is_visible = self
             .workbench_shell
             .projection()
@@ -10077,14 +10090,44 @@ impl AgentPanel {
             .ok_or_else(|| anyhow!("open a thread before preparing native Plan"))?;
         let thread_id = visible.thread_id.clone();
         let acp_thread = self.active_agent_thread(cx);
-        // Monotonic revision: one bump per bind so older async plan updates
-        // cannot replace a newer host selection.
-        self.workbench_plan_revision = self.workbench_plan_revision.saturating_add(1);
-        let plan_revision = self.workbench_plan_revision;
+        let binding = workbench_shell::NativePlanBinding {
+            thread_id: thread_id.clone(),
+            generation: visible.generation,
+        };
         let plan_surface =
-            cx.new(|cx| workbench_shell::NativePlanSurface::new(thread_id.clone(), cx));
+            if let Some(surface) = self.workbench_shell.plan_surface_for_active_binding(cx) {
+                surface.update(cx, |surface, cx| {
+                    surface.bind_thread(binding.clone(), acp_thread.clone(), cx);
+                });
+                surface
+            } else {
+                let mut navigation_handler = {
+                    let panel = cx.entity().downgrade();
+                    Some(Rc::new(
+                        move |entry_index: usize, _window: &mut Window, cx: &mut App| {
+                            panel
+                                .update(cx, |panel, cx| {
+                                    panel.navigate_to_plan_entry(&thread_id, entry_index, cx)
+                                })
+                                .unwrap_or(false)
+                        },
+                    )
+                        as Rc<dyn Fn(usize, &mut Window, &mut App) -> bool>)
+                };
+                let surface = cx.new(|cx| {
+                    let mut surface = workbench_shell::NativePlanSurface::new(binding.clone(), cx);
+                    if let Some(handler) = navigation_handler.take() {
+                        surface.set_navigation_handler(handler);
+                    }
+                    surface.bind_thread(binding, acp_thread, cx);
+                    surface
+                });
+                surface
+            };
+        let generation = plan_surface.read(cx).binding().generation;
+        let lifecycle = self.native_plan_lifecycle(cx);
         plan_surface.update(cx, |surface, cx| {
-            surface.bind_thread(thread_id, acp_thread, plan_revision, cx);
+            surface.set_lifecycle(generation, lifecycle, cx);
         });
         Ok(plan_surface)
     }
@@ -10270,6 +10313,43 @@ impl AgentPanel {
             workbench_shell::NativeGitLifecycle::Dirty
         } else {
             workbench_shell::NativeGitLifecycle::Clean
+        }
+    }
+
+    fn native_plan_lifecycle(&self, cx: &App) -> workbench_shell::NativePlanLifecycle {
+        #[cfg(any(test, feature = "test-support"))]
+        if let Some(lifecycle) = self.workbench_plan_lifecycle_override.as_ref() {
+            return lifecycle.clone();
+        }
+        match self.workbench_shell.projection().connection {
+            omega_workbench_state::ConnectionPhase::Offline
+            | omega_workbench_state::ConnectionPhase::StaleProjection => {
+                return workbench_shell::NativePlanLifecycle::Stale;
+            }
+            omega_workbench_state::ConnectionPhase::Reconnecting => {
+                return workbench_shell::NativePlanLifecycle::Reconnecting;
+            }
+            omega_workbench_state::ConnectionPhase::Online => {}
+        }
+        if let Some(error) = self
+            .active_agent_thread(cx)
+            .and_then(|thread| thread.read(cx).plan_error().cloned())
+        {
+            return workbench_shell::NativePlanLifecycle::Malformed(error);
+        }
+        if let Some(interruption) = self
+            .active_agent_thread(cx)
+            .and_then(|thread| thread.read(cx).plan_interruption().cloned())
+        {
+            return workbench_shell::NativePlanLifecycle::Interrupted(interruption);
+        }
+        if self
+            .active_agent_thread(cx)
+            .is_some_and(|thread| thread.read(cx).had_error())
+        {
+            workbench_shell::NativePlanLifecycle::Interrupted("agent error".into())
+        } else {
+            workbench_shell::NativePlanLifecycle::Ready
         }
     }
 
@@ -10662,6 +10742,40 @@ impl AgentPanel {
         cx.notify();
     }
 
+    fn navigate_to_plan_entry(
+        &mut self,
+        expected_thread_id: &str,
+        entry_index: usize,
+        cx: &mut Context<Self>,
+    ) -> bool {
+        let Some(visible) = self.workbench_shell.projection().visible_projection() else {
+            return false;
+        };
+        if visible.thread_id != expected_thread_id {
+            return false;
+        }
+        let Some(thread) = self.active_agent_thread(cx) else {
+            return false;
+        };
+        if !matches!(
+            thread.read(cx).entries().get(entry_index),
+            Some(acp_thread::AgentThreadEntry::CompletedPlan(_))
+        ) {
+            return false;
+        }
+        let Some(thread_view) = self.active_thread_view(cx) else {
+            return false;
+        };
+        let navigated = thread_view.update(cx, |thread_view, cx| {
+            thread_view.scroll_to_entry_index(entry_index, cx)
+        });
+        #[cfg(any(test, feature = "test-support"))]
+        if navigated {
+            self.workbench_plan_navigation_target = Some(entry_index);
+        }
+        navigated
+    }
+
     fn select_work_surface(
         &mut self,
         surface: omega_workbench_state::WorkSurface,
@@ -10758,7 +10872,7 @@ impl AgentPanel {
         } else if let Some(terminal_surface) = terminal_surface.clone() {
             self.workbench_shell
                 .select_terminal_surface(terminal_surface, cx)
-        } else if let Some(plan_surface) = plan_surface.clone() {
+        } else if let Some(plan_surface) = plan_surface {
             self.workbench_shell.select_plan_surface(plan_surface, cx)
         } else {
             self.workbench_shell.select_surface(
@@ -12071,6 +12185,17 @@ impl AgentPanel {
         self.workbench_terminal_surface.clone()
     }
 
+    pub fn workbench_plan_surface_for_tests(
+        &self,
+        cx: &App,
+    ) -> Option<Entity<workbench_shell::NativePlanSurface>> {
+        self.workbench_shell.plan_surface_for_active_binding(cx)
+    }
+
+    pub fn workbench_plan_navigation_target_for_tests(&self) -> Option<usize> {
+        self.workbench_plan_navigation_target
+    }
+
     pub fn workbench_terminal_panel_for_tests(&self) -> Option<Entity<TerminalPanel>> {
         self.workbench_terminal_panel.clone()
     }
@@ -12081,6 +12206,22 @@ impl AgentPanel {
         cx: &mut Context<Self>,
     ) {
         self.workbench_terminal_owner_state_override = owner_state;
+        cx.notify();
+    }
+
+    pub fn set_workbench_plan_lifecycle_for_tests(
+        &mut self,
+        lifecycle: Option<workbench_shell::NativePlanLifecycle>,
+        cx: &mut Context<Self>,
+    ) {
+        self.workbench_plan_lifecycle_override = lifecycle;
+        if let Some(surface) = self.workbench_shell.plan_surface_for_active_binding(cx) {
+            let generation = surface.read(cx).binding().generation;
+            let lifecycle = self.native_plan_lifecycle(cx);
+            surface.update(cx, |surface, cx| {
+                surface.set_lifecycle(generation, lifecycle, cx);
+            });
+        }
         cx.notify();
     }
 
@@ -16688,6 +16829,8 @@ mod tests {
             ui_scroll_position: None,
             sandboxed_terminal_temp_dir: None,
             sandbox_grants: Default::default(),
+            thread_log: Default::default(),
+            fork_origin: None,
         };
 
         let thread_store = cx.update(|cx| ThreadStore::global(cx));

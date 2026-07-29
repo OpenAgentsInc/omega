@@ -2040,14 +2040,16 @@ impl Plan {
 
 #[derive(Debug)]
 pub struct PlanEntry {
+    pub id: u64,
     pub content: Entity<Markdown>,
     pub priority: acp::PlanEntryPriority,
     pub status: acp::PlanEntryStatus,
 }
 
 impl PlanEntry {
-    pub fn from_acp(entry: acp::PlanEntry, cx: &mut App) -> Self {
+    pub fn from_acp(id: u64, entry: acp::PlanEntry, cx: &mut App) -> Self {
         Self {
+            id,
             content: cx.new(|cx| Markdown::new(entry.content.into(), None, None, cx)),
             priority: entry.priority,
             status: entry.status,
@@ -2140,6 +2142,10 @@ pub struct AcpThread {
     entries: Vec<AgentThreadEntry>,
     elicitations: ElicitationStore,
     plan: Plan,
+    plan_revision: u64,
+    next_plan_entry_id: u64,
+    plan_error: Option<SharedString>,
+    plan_interruption: Option<SharedString>,
     project: Entity<Project>,
     action_log: Entity<ActionLog>,
     _git_store_subscription: Subscription,
@@ -2220,6 +2226,7 @@ pub enum AcpThreadEvent {
     ModeUpdated(acp::SessionModeId),
     ConfigOptionsUpdated(Vec<acp::SessionConfigOption>),
     WorkingDirectoriesUpdated,
+    PlanUpdated(u64),
 }
 
 impl EventEmitter<AcpThreadEvent> for AcpThread {}
@@ -2367,6 +2374,10 @@ impl AcpThread {
             entries: Default::default(),
             elicitations: ElicitationStore::default(),
             plan: Default::default(),
+            plan_revision: 0,
+            next_plan_entry_id: 1,
+            plan_error: None,
+            plan_interruption: None,
             title,
             provisional_title: None,
             project,
@@ -3686,48 +3697,157 @@ impl AcpThread {
         &self.plan
     }
 
-    pub fn update_plan(&mut self, request: acp::Plan, cx: &mut Context<Self>) {
-        let new_entries_len = request.entries.len();
-        let mut new_entries = request.entries.into_iter();
+    pub fn plan_revision(&self) -> u64 {
+        self.plan_revision
+    }
 
-        // Reuse existing markdown to prevent flickering
-        for (old, new) in self.plan.entries.iter_mut().zip(new_entries.by_ref()) {
-            let PlanEntry {
-                content,
-                priority,
-                status,
-            } = old;
-            content.update(cx, |old, cx| {
-                old.replace(new.content, cx);
-            });
-            *priority = new.priority;
-            *status = new.status;
-        }
-        for new in new_entries {
-            self.plan.entries.push(PlanEntry::from_acp(new, cx))
-        }
-        self.plan.entries.truncate(new_entries_len);
+    pub fn plan_error(&self) -> Option<&SharedString> {
+        self.plan_error.as_ref()
+    }
 
+    pub fn plan_interruption(&self) -> Option<&SharedString> {
+        self.plan_interruption.as_ref()
+    }
+
+    #[cfg(any(test, feature = "test-support"))]
+    pub fn set_plan_interruption_for_tests(
+        &mut self,
+        interruption: Option<SharedString>,
+        cx: &mut Context<Self>,
+    ) {
+        self.plan_interruption = interruption;
+        cx.emit(AcpThreadEvent::StatusChanged);
+    }
+
+    fn mark_plan_updated(&mut self, cx: &mut Context<Self>) {
+        self.plan_revision = self.plan_revision.saturating_add(1);
+        cx.emit(AcpThreadEvent::PlanUpdated(self.plan_revision));
         cx.notify();
     }
 
+    pub fn update_plan(&mut self, request: acp::Plan, cx: &mut Context<Self>) {
+        if request
+            .entries
+            .iter()
+            .any(|entry| entry.content.trim().is_empty())
+        {
+            self.plan_error = Some("the provider returned a blank plan step".into());
+            self.mark_plan_updated(cx);
+            return;
+        }
+        self.plan_error = None;
+        self.plan_interruption = None;
+        let new_entries = request.entries;
+        let mut old_entries = std::mem::take(&mut self.plan.entries)
+            .into_iter()
+            .map(Some)
+            .collect::<Vec<_>>();
+        let mut old_claimed = vec![false; old_entries.len()];
+        let mut assignments = vec![None; new_entries.len()];
+
+        // ACP replaces the whole plan and provides no step IDs. Match unchanged
+        // content first so inserting or reordering a step cannot transfer the
+        // user's selection to a different logical step.
+        for (new_index, new_entry) in new_entries.iter().enumerate() {
+            let matching_old_index =
+                old_entries
+                    .iter()
+                    .enumerate()
+                    .find_map(|(old_index, old_entry)| {
+                        let is_claimed = old_claimed.get(old_index).copied().unwrap_or(true);
+                        let matches_content = old_entry.as_ref().is_some_and(|old_entry| {
+                            *old_entry.content.read(cx).source() == new_entry.content
+                        });
+                        (!is_claimed && matches_content).then_some(old_index)
+                    });
+            if let Some(old_index) = matching_old_index {
+                if let Some(claimed) = old_claimed.get_mut(old_index) {
+                    *claimed = true;
+                }
+                if let Some(assignment) = assignments.get_mut(new_index) {
+                    *assignment = Some(old_index);
+                }
+            }
+        }
+
+        // When every exact match stayed in its slot, unmatched slots are edits
+        // rather than evidence of a structural reorder and can retain identity.
+        let can_preserve_positional_edits = assignments
+            .iter()
+            .enumerate()
+            .all(|(new_index, old_index)| old_index.is_none_or(|old_index| old_index == new_index));
+        if can_preserve_positional_edits {
+            for (new_index, assignment) in assignments.iter_mut().enumerate() {
+                if assignment.is_some() || old_claimed.get(new_index).copied().unwrap_or(true) {
+                    continue;
+                }
+                *assignment = Some(new_index);
+                if let Some(claimed) = old_claimed.get_mut(new_index) {
+                    *claimed = true;
+                }
+            }
+        }
+
+        let mut next_plan_entry_id = self.next_plan_entry_id;
+        let reconciled_entries = new_entries
+            .into_iter()
+            .enumerate()
+            .map(|(new_index, new_entry)| {
+                let old_entry = assignments
+                    .get(new_index)
+                    .and_then(|assignment| *assignment)
+                    .and_then(|old_index| old_entries.get_mut(old_index))
+                    .and_then(Option::take);
+                if let Some(mut old_entry) = old_entry {
+                    old_entry.content.update(cx, |content, cx| {
+                        content.replace(new_entry.content, cx);
+                    });
+                    old_entry.priority = new_entry.priority;
+                    old_entry.status = new_entry.status;
+                    old_entry
+                } else {
+                    let id = next_plan_entry_id;
+                    next_plan_entry_id = next_plan_entry_id.saturating_add(1);
+                    PlanEntry::from_acp(id, new_entry, cx)
+                }
+            })
+            .collect();
+        self.next_plan_entry_id = next_plan_entry_id;
+        self.plan.entries = reconciled_entries;
+
+        self.mark_plan_updated(cx);
+    }
+
     pub fn snapshot_completed_plan(&mut self, cx: &mut Context<Self>) {
-        if !self.plan.is_empty() && self.plan.stats().pending == 0 {
+        if !self.plan.is_empty()
+            && self
+                .plan
+                .entries
+                .iter()
+                .all(|entry| matches!(entry.status, acp::PlanEntryStatus::Completed))
+        {
             let completed_entries = std::mem::take(&mut self.plan.entries);
             self.push_entry(AgentThreadEntry::CompletedPlan(completed_entries), cx);
+            self.mark_plan_updated(cx);
         }
     }
 
     fn clear_completed_plan_entries(&mut self, cx: &mut Context<Self>) {
+        let previous_len = self.plan.entries.len();
         self.plan
             .entries
             .retain(|entry| !matches!(entry.status, acp::PlanEntryStatus::Completed));
-        cx.notify();
+        if self.plan.entries.len() != previous_len {
+            self.mark_plan_updated(cx);
+        }
     }
 
     pub fn clear_plan(&mut self, cx: &mut Context<Self>) {
-        self.plan.entries.clear();
-        cx.notify();
+        if !self.plan.entries.is_empty() || self.plan_error.is_some() {
+            self.plan.entries.clear();
+            self.plan_error = None;
+            self.mark_plan_updated(cx);
+        }
     }
 
     #[cfg(any(test, feature = "test-support"))]
@@ -3850,6 +3970,7 @@ impl AcpThread {
     ) -> BoxFuture<'static, Result<Option<acp::PromptResponse>>> {
         self.clear_completed_plan_entries(cx);
         self.had_error = false;
+        self.plan_interruption = None;
 
         let (tx, rx) = oneshot::channel();
         let cancel_task = self.cancel(cx);
@@ -3908,6 +4029,7 @@ impl AcpThread {
                                 cx.emit(AcpThreadEvent::StatusChanged);
                             }
                             this.had_error = true;
+                            this.plan_interruption = Some("maximum tokens reached".into());
                             cx.emit(AcpThreadEvent::Error);
                             log::error!("Max tokens reached. Usage: {:?}", this.token_usage);
 
@@ -3933,6 +4055,7 @@ impl AcpThread {
 
                         let canceled = matches!(r.stop_reason, acp::StopReason::Cancelled);
                         if canceled && is_same_turn {
+                            this.plan_interruption = Some("agent cancelled".into());
                             this.cancel_pending_turn_entries(cx);
                         }
 
@@ -3943,6 +4066,7 @@ impl AcpThread {
                         // Handle refusal - distinguish between user prompt and tool call refusals
                         if let acp::StopReason::Refusal = r.stop_reason {
                             this.had_error = true;
+                            this.plan_interruption = Some("agent refused".into());
                             if let Some((user_msg_ix, _)) = this.last_user_message() {
                                 // Check if there's a completed tool call with results after the last user message
                                 // This indicates the refusal is in response to tool output, not the user's prompt
@@ -4000,6 +4124,7 @@ impl AcpThread {
                             this.cancel_pending_turn_entries(cx);
                         }
                         this.had_error = true;
+                        this.plan_interruption = Some("agent error".into());
                         cx.emit(AcpThreadEvent::Error);
                         log::error!("Error in run turn: {:?}", e);
                         Err(e)

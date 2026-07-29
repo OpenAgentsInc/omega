@@ -2,16 +2,17 @@ use std::{
     cell::Cell,
     collections::{BTreeMap, BTreeSet},
     path::PathBuf,
+    rc::Rc,
 };
 
-use acp_thread::AcpThread;
-use agent_client_protocol::schema::v1 as acp;
+use acp_thread::{AcpThread, AcpThreadEvent, AgentThreadEntry, PlanEntry};
 use anyhow::{Result, anyhow, bail};
 use git_ui::git_panel::{GitPanel, GitPanelRepositoryScope};
 use gpui::{
-    Action, App, Context, Entity, FocusHandle, Focusable, Pixels, Render, SharedString, WeakEntity,
-    Window, actions, px,
+    Action, App, Context, Entity, EntityId, FocusHandle, Focusable, Pixels, Render, SharedString,
+    Subscription, WeakEntity, Window, actions, px,
 };
+use markdown::{Markdown, MarkdownElement};
 use omega_workbench_state::{
     ConnectionPhase, ProjectionSnapshot, ProjectionTransition, RepositoryBinding, WorkSurface,
     WorkbenchProjection,
@@ -35,6 +36,7 @@ use workspace::{Panel, ToolbarItemView, Workspace, item::Item};
 use crate::{
     AgentDiff, AgentDiffBinding, AgentDiffLifecycle, AgentDiffPane, AgentDiffToolbar,
     omega_sidebar,
+    plan_presentation::{PlanPriorityKind, PlanStatusKind, plan_label_markdown_style},
     thread_identity::{
         BranchIdentity, IdentityPhase, ThreadIdentityObservation, ThreadIdentityProjection,
         ThreadIdentityState,
@@ -1212,111 +1214,394 @@ impl Render for NativeSearchSurface {
     }
 }
 
-/// Thread-local Plan dock. Reads typed ACP plan entries from the active
-/// agent thread — never markdown heuristics.
-pub struct NativePlanSurface {
-    focus_handle: FocusHandle,
-    thread: Option<Entity<AcpThread>>,
-    thread_id: String,
-    plan_revision: u64,
-    selected_step: Option<usize>,
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct NativePlanBinding {
+    pub thread_id: String,
+    pub generation: u64,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum NativePlanLifecycle {
+    Ready,
+    Interrupted(SharedString),
+    Stale,
+    Reconnecting,
+    Malformed(SharedString),
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct NativePlanStepSnapshot {
+    pub id: u64,
+    pub label: SharedString,
+    pub content: Entity<Markdown>,
+    pub status: PlanStatusKind,
+    pub priority: PlanPriorityKind,
+    pub source_entry_index: Option<usize>,
+    pub historical: bool,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum PlanSurfaceState {
     Empty,
     Active {
-        pending: u32,
-        completed: u32,
+        pending: usize,
+        in_progress: usize,
+        completed: usize,
+        unknown: usize,
         total: usize,
     },
     AllComplete {
         total: usize,
     },
+    Historical {
+        completed_plans: usize,
+        total: usize,
+    },
+    Interrupted(SharedString),
     Stale,
+    Reconnecting,
+    Malformed(SharedString),
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct NativePlanSnapshot {
+    pub binding: NativePlanBinding,
+    pub revision: u64,
+    pub lifecycle: NativePlanLifecycle,
+    pub state: PlanSurfaceState,
+    pub current_steps: Vec<NativePlanStepSnapshot>,
+    pub historical_steps: Vec<NativePlanStepSnapshot>,
+    pub active_step_id: Option<u64>,
+    pub selected_step_id: Option<u64>,
+    pub navigation_status: Option<SharedString>,
+    pub rejected_update_count: u64,
+}
+
+type PlanNavigationHandler = Rc<dyn Fn(usize, &mut Window, &mut App) -> bool>;
+
+pub struct NativePlanSurface {
+    focus_handle: FocusHandle,
+    binding: NativePlanBinding,
+    thread: Option<Entity<AcpThread>>,
+    observed_thread_id: Option<EntityId>,
+    thread_observation: Option<Subscription>,
+    revision: u64,
+    lifecycle: NativePlanLifecycle,
+    current_steps: Vec<NativePlanStepSnapshot>,
+    historical_steps: Vec<NativePlanStepSnapshot>,
+    selected_step_id: Option<u64>,
+    navigation_status: Option<SharedString>,
+    navigation_handler: Option<PlanNavigationHandler>,
+    rejected_update_count: u64,
 }
 
 impl NativePlanSurface {
-    pub fn new(thread_id: impl Into<String>, cx: &mut Context<Self>) -> Self {
+    pub fn new(binding: NativePlanBinding, cx: &mut Context<Self>) -> Self {
         Self {
             focus_handle: cx.focus_handle(),
+            binding,
             thread: None,
-            thread_id: thread_id.into(),
-            plan_revision: 0,
-            selected_step: None,
+            observed_thread_id: None,
+            thread_observation: None,
+            revision: 0,
+            lifecycle: NativePlanLifecycle::Ready,
+            current_steps: Vec::new(),
+            historical_steps: Vec::new(),
+            selected_step_id: None,
+            navigation_status: None,
+            navigation_handler: None,
+            rejected_update_count: 0,
         }
     }
 
-    pub fn thread_id(&self) -> &str {
-        &self.thread_id
+    pub fn binding(&self) -> &NativePlanBinding {
+        &self.binding
+    }
+
+    pub fn set_navigation_handler(&mut self, handler: PlanNavigationHandler) {
+        self.navigation_handler = Some(handler);
     }
 
     pub fn bind_thread(
         &mut self,
-        thread_id: impl Into<String>,
+        binding: NativePlanBinding,
         thread: Option<Entity<AcpThread>>,
-        plan_revision: u64,
         cx: &mut Context<Self>,
-    ) {
-        self.thread_id = thread_id.into();
-        self.thread = thread;
-        if plan_revision < self.plan_revision {
-            // Reject stale foreign/older plan updates.
-            return;
-        }
-        self.plan_revision = plan_revision;
-        if self
-            .selected_step
-            .is_some_and(|index| self.entry_count(cx) <= index)
+    ) -> bool {
+        if binding.generation < self.binding.generation
+            || binding.thread_id != self.binding.thread_id
         {
-            self.selected_step = None;
+            self.rejected_update_count = self.rejected_update_count.saturating_add(1);
+            return false;
         }
+
+        let next_observed_thread_id = thread.as_ref().map(Entity::entity_id);
+        if self.observed_thread_id != next_observed_thread_id {
+            self.revision = 0;
+            self.current_steps.clear();
+            self.historical_steps.clear();
+            self.selected_step_id = None;
+            self.navigation_status = None;
+        }
+        self.binding = binding;
+        self.thread = thread.clone();
+        self.observed_thread_id = next_observed_thread_id;
+        self.thread_observation = thread.as_ref().map(|thread| {
+            cx.subscribe(thread, |this, thread, event, cx| {
+                if this.observed_thread_id != Some(thread.entity_id()) {
+                    return;
+                }
+                match event {
+                    AcpThreadEvent::PlanUpdated(revision) if *revision >= this.revision => {
+                        this.refresh_from_thread(&thread, cx);
+                    }
+                    AcpThreadEvent::PlanUpdated(_) => {
+                        this.rejected_update_count = this.rejected_update_count.saturating_add(1);
+                    }
+                    AcpThreadEvent::Stopped(_)
+                    | AcpThreadEvent::Refusal
+                    | AcpThreadEvent::Error
+                    | AcpThreadEvent::StatusChanged => this.sync_thread_lifecycle(&thread, cx),
+                    _ => {}
+                }
+            })
+        });
+        if let Some(thread) = thread {
+            self.refresh_from_thread(&thread, cx);
+        } else {
+            self.revision = 0;
+            self.current_steps.clear();
+            self.historical_steps.clear();
+            self.selected_step_id = None;
+            self.navigation_status = None;
+            cx.notify();
+        }
+        true
+    }
+
+    pub fn set_lifecycle(
+        &mut self,
+        generation: u64,
+        lifecycle: NativePlanLifecycle,
+        cx: &mut Context<Self>,
+    ) -> bool {
+        if generation != self.binding.generation {
+            return false;
+        }
+        self.lifecycle = lifecycle;
         cx.notify();
+        true
     }
 
-    pub fn plan_revision(&self) -> u64 {
-        self.plan_revision
-    }
-
-    pub fn selected_step(&self) -> Option<usize> {
-        self.selected_step
-    }
-
-    pub fn select_step(&mut self, index: Option<usize>, cx: &mut Context<Self>) {
-        if index.is_some_and(|index| self.entry_count(cx) <= index) {
-            return;
+    pub fn snapshot(&self) -> NativePlanSnapshot {
+        NativePlanSnapshot {
+            binding: self.binding.clone(),
+            revision: self.revision,
+            lifecycle: self.lifecycle.clone(),
+            state: self.state(),
+            current_steps: self.current_steps.clone(),
+            historical_steps: self.historical_steps.clone(),
+            active_step_id: self
+                .current_steps
+                .iter()
+                .find(|step| step.status == PlanStatusKind::InProgress)
+                .map(|step| step.id),
+            selected_step_id: self.selected_step_id,
+            navigation_status: self.navigation_status.clone(),
+            rejected_update_count: self.rejected_update_count,
         }
-        self.selected_step = index;
-        cx.notify();
     }
 
-    fn entry_count(&self, cx: &App) -> usize {
-        self.thread
-            .as_ref()
-            .map(|thread| thread.read(cx).plan().entries.len())
-            .unwrap_or(0)
-    }
-
-    pub fn state(&self, cx: &App) -> PlanSurfaceState {
-        let Some(thread) = self.thread.as_ref() else {
-            return PlanSurfaceState::Empty;
-        };
-        let plan = thread.read(cx).plan();
-        if plan.is_empty() {
-            return PlanSurfaceState::Empty;
+    pub fn state(&self) -> PlanSurfaceState {
+        match &self.lifecycle {
+            NativePlanLifecycle::Interrupted(message) => {
+                return PlanSurfaceState::Interrupted(message.clone());
+            }
+            NativePlanLifecycle::Stale => return PlanSurfaceState::Stale,
+            NativePlanLifecycle::Reconnecting => return PlanSurfaceState::Reconnecting,
+            NativePlanLifecycle::Malformed(message) => {
+                return PlanSurfaceState::Malformed(message.clone());
+            }
+            NativePlanLifecycle::Ready => {}
         }
-        let stats = plan.stats();
-        if stats.pending == 0 {
+
+        self.data_state()
+    }
+
+    fn data_state(&self) -> PlanSurfaceState {
+        if self.current_steps.is_empty() {
+            if self.historical_steps.is_empty() {
+                return PlanSurfaceState::Empty;
+            }
+            let completed_plans = self
+                .historical_steps
+                .iter()
+                .filter_map(|step| step.source_entry_index)
+                .collect::<BTreeSet<_>>()
+                .len();
+            return PlanSurfaceState::Historical {
+                completed_plans,
+                total: self.historical_steps.len(),
+            };
+        }
+
+        let completed = self
+            .current_steps
+            .iter()
+            .filter(|step| step.status == PlanStatusKind::Completed)
+            .count();
+        let pending = self
+            .current_steps
+            .iter()
+            .filter(|step| step.status == PlanStatusKind::Pending)
+            .count();
+        let in_progress = self
+            .current_steps
+            .iter()
+            .filter(|step| step.status == PlanStatusKind::InProgress)
+            .count();
+        let unknown = self
+            .current_steps
+            .iter()
+            .filter(|step| step.status == PlanStatusKind::Unknown)
+            .count();
+        if completed == self.current_steps.len() {
             PlanSurfaceState::AllComplete {
-                total: plan.entries.len(),
+                total: self.current_steps.len(),
             }
         } else {
             PlanSurfaceState::Active {
-                pending: stats.pending,
-                completed: stats.completed,
-                total: plan.entries.len(),
+                pending,
+                in_progress,
+                completed,
+                unknown,
+                total: self.current_steps.len(),
             }
         }
+    }
+
+    pub fn select_step(
+        &mut self,
+        step_id: Option<u64>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(step_id) = step_id else {
+            self.selected_step_id = None;
+            self.navigation_status = None;
+            cx.notify();
+            return;
+        };
+        let step = self
+            .current_steps
+            .iter()
+            .chain(&self.historical_steps)
+            .find(|step| step.id == step_id);
+        let Some(step) = step else {
+            return;
+        };
+        self.selected_step_id = Some(step_id);
+        if let Some(source_entry_index) = step.source_entry_index {
+            let navigated = self
+                .navigation_handler
+                .clone()
+                .is_some_and(|handler| handler(source_entry_index, window, cx));
+            self.navigation_status = Some(if navigated {
+                format!("Opened transcript event {}", source_entry_index + 1).into()
+            } else {
+                "Transcript event is no longer available".into()
+            });
+        } else {
+            self.navigation_status = Some("This live plan step has no transcript event yet".into());
+        }
+        cx.notify();
+    }
+
+    fn refresh_from_thread(&mut self, thread: &Entity<AcpThread>, cx: &mut Context<Self>) {
+        if self.observed_thread_id != Some(thread.entity_id()) {
+            return;
+        }
+        self.sync_thread_lifecycle(thread, cx);
+        let thread = thread.read(cx);
+        let revision = thread.plan_revision();
+        if revision < self.revision {
+            self.rejected_update_count = self.rejected_update_count.saturating_add(1);
+            return;
+        }
+        self.revision = revision;
+        self.current_steps = thread
+            .plan()
+            .entries
+            .iter()
+            .map(|entry| plan_step_snapshot(entry, None, false, cx))
+            .collect();
+        self.historical_steps = thread
+            .entries()
+            .iter()
+            .enumerate()
+            .flat_map(|(entry_index, entry)| match entry {
+                AgentThreadEntry::CompletedPlan(entries) => entries
+                    .iter()
+                    .map(|entry| plan_step_snapshot(entry, Some(entry_index), true, cx))
+                    .collect::<Vec<_>>(),
+                _ => Vec::new(),
+            })
+            .collect();
+        if self.selected_step_id.is_some_and(|selected_step_id| {
+            !self
+                .current_steps
+                .iter()
+                .chain(&self.historical_steps)
+                .any(|step| step.id == selected_step_id)
+        }) {
+            self.selected_step_id = None;
+            self.navigation_status = None;
+        }
+        cx.notify();
+    }
+
+    fn sync_thread_lifecycle(&mut self, thread: &Entity<AcpThread>, cx: &mut Context<Self>) {
+        let lifecycle = {
+            let thread = thread.read(cx);
+            thread
+                .plan_error()
+                .cloned()
+                .map(NativePlanLifecycle::Malformed)
+                .or_else(|| {
+                    thread
+                        .plan_interruption()
+                        .cloned()
+                        .map(NativePlanLifecycle::Interrupted)
+                })
+        };
+        if let Some(lifecycle) = lifecycle {
+            self.lifecycle = lifecycle;
+        } else if matches!(
+            self.lifecycle,
+            NativePlanLifecycle::Malformed(_) | NativePlanLifecycle::Interrupted(_)
+        ) {
+            self.lifecycle = NativePlanLifecycle::Ready;
+        }
+        cx.notify();
+    }
+}
+
+fn plan_step_snapshot(
+    entry: &PlanEntry,
+    source_entry_index: Option<usize>,
+    historical: bool,
+    cx: &App,
+) -> NativePlanStepSnapshot {
+    let status = PlanStatusKind::from_acp(&entry.status);
+    let priority = PlanPriorityKind::from_acp(&entry.priority);
+    NativePlanStepSnapshot {
+        id: entry.id,
+        label: entry.content.read(cx).source().to_string().into(),
+        content: entry.content.clone(),
+        status,
+        priority,
+        source_entry_index,
+        historical,
     }
 }
 
@@ -1327,47 +1612,80 @@ impl Focusable for NativePlanSurface {
 }
 
 impl Render for NativePlanSurface {
-    fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-        let state = self.state(cx);
-        let entries = self
-            .thread
-            .as_ref()
-            .map(|thread| {
-                thread
-                    .read(cx)
-                    .plan()
-                    .entries
-                    .iter()
-                    .enumerate()
-                    .map(|(index, entry)| {
-                        let label = entry.content.read(cx).source().to_string();
-                        let status = entry.status.clone();
-                        (index, label, status)
-                    })
-                    .collect::<Vec<_>>()
-            })
-            .unwrap_or_default();
-        let selected = self.selected_step;
-        let summary: SharedString = match &state {
+    fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        let summary: SharedString = match self.data_state() {
             PlanSurfaceState::Empty => "No plan for this thread".into(),
             PlanSurfaceState::Active {
                 pending,
+                in_progress,
                 completed,
+                unknown,
                 total,
-            } => format!("{completed}/{total} complete · {pending} remaining").into(),
+            } => {
+                let mut counts = vec![format!("{completed}/{total} complete")];
+                if pending > 0 {
+                    counts.push(format!("{pending} pending"));
+                }
+                if in_progress > 0 {
+                    counts.push(format!("{in_progress} in progress"));
+                }
+                if unknown > 0 {
+                    counts.push(format!("{unknown} unknown"));
+                }
+                counts.join(" · ").into()
+            }
             PlanSurfaceState::AllComplete { total } => format!("All {total} steps complete").into(),
-            PlanSurfaceState::Stale => "Plan is stale".into(),
+            PlanSurfaceState::Historical {
+                completed_plans,
+                total,
+            } => format!("{completed_plans} completed plans · {total} historical steps").into(),
+            PlanSurfaceState::Interrupted(_)
+            | PlanSurfaceState::Stale
+            | PlanSurfaceState::Reconnecting
+            | PlanSurfaceState::Malformed(_) => "Plan status unavailable".into(),
         };
+        let lifecycle_message: Option<(SharedString, bool)> = match &self.lifecycle {
+            NativePlanLifecycle::Ready => None,
+            NativePlanLifecycle::Interrupted(message) => {
+                Some((format!("Plan interrupted · {message}").into(), true))
+            }
+            NativePlanLifecycle::Stale => Some(("Plan may be stale while offline".into(), false)),
+            NativePlanLifecycle::Reconnecting => {
+                Some(("Reconnecting · retained plan may be stale".into(), false))
+            }
+            NativePlanLifecycle::Malformed(message) => {
+                Some((format!("Plan update rejected · {message}").into(), true))
+            }
+        };
+        let selected_step_id = self.selected_step_id;
+        let mut steps = self
+            .current_steps
+            .iter()
+            .cloned()
+            .map(Some)
+            .collect::<Vec<_>>();
+        if !self.historical_steps.is_empty() {
+            steps.push(None);
+            steps.extend(self.historical_steps.iter().cloned().map(Some));
+        }
+        let navigation_status = self.navigation_status.clone();
 
         v_flex()
             .id("omega.workbench.plan.content")
             .debug_selector(|| "omega.workbench.plan.content".to_string())
             .role(gpui::Role::Group)
-            .aria_label("Plan")
+            .aria_label(format!(
+                "Plan for thread {}, revision {}",
+                self.binding.thread_id, self.revision
+            ))
             .track_focus(&self.focus_handle)
             .size_full()
             .child(
                 v_flex()
+                    .id("omega.workbench.plan.summary")
+                    .debug_selector(|| "omega.workbench.plan.summary".to_string())
+                    .role(gpui::Role::Status)
+                    .aria_label(summary.clone())
                     .flex_none()
                     .w_full()
                     .border_b_1()
@@ -1380,6 +1698,29 @@ impl Render for NativePlanSurface {
                             .color(Color::Muted),
                     ),
             )
+            .when_some(lifecycle_message, |this, (message, is_error)| {
+                this.child(
+                    div()
+                        .id("omega.workbench.plan.lifecycle")
+                        .debug_selector(|| "omega.workbench.plan.lifecycle".to_string())
+                        .role(if is_error {
+                            gpui::Role::Alert
+                        } else {
+                            gpui::Role::Status
+                        })
+                        .aria_label(message.clone())
+                        .w_full()
+                        .border_b_1()
+                        .border_color(cx.theme().colors().border)
+                        .px_2()
+                        .py_1()
+                        .child(Label::new(message).size(LabelSize::XSmall).color(if is_error {
+                            Color::Error
+                        } else {
+                            Color::Warning
+                        })),
+                )
+            })
             .child(
                 v_flex()
                     .id("omega.workbench.plan.entries")
@@ -1389,7 +1730,7 @@ impl Render for NativePlanSurface {
                     .flex_1()
                     .min_h_0()
                     .overflow_y_scroll()
-                    .when(entries.is_empty(), |this| {
+                    .when(self.current_steps.is_empty() && self.historical_steps.is_empty(), |this| {
                         this.child(
                             div()
                                 .id("omega.workbench.plan.empty")
@@ -1404,21 +1745,40 @@ impl Render for NativePlanSurface {
                                 ),
                         )
                     })
-                    .children(entries.into_iter().map(|(index, label, status)| {
-                        let selected = selected == Some(index);
-                        let (icon, color) = match status {
-                            acp::PlanEntryStatus::InProgress => {
-                                (IconName::TodoProgress, Color::Accent)
-                            }
-                            acp::PlanEntryStatus::Completed => {
-                                (IconName::TodoComplete, Color::Success)
-                            }
-                            _ => (IconName::TodoPending, Color::Muted),
+                    .children(steps.into_iter().map(|step| {
+                        let Some(step) = step else {
+                            return div()
+                                .id("omega.workbench.plan.history")
+                                .debug_selector(|| "omega.workbench.plan.history".to_string())
+                                .role(gpui::Role::Heading)
+                                .aria_label("Completed plans")
+                                .border_y_1()
+                                .border_color(cx.theme().colors().border)
+                                .px_2()
+                                .py_1()
+                                .child(
+                                    Label::new("Completed plans")
+                                        .size(LabelSize::XSmall)
+                                        .color(Color::Muted),
+                                )
+                                .into_any_element();
                         };
-                        ListItem::new(("omega.workbench.plan.step", index))
-                            .debug_selector(format!("omega.workbench.plan.step.{index}"))
+                        let step_id = step.id;
+                        let selected = selected_step_id == Some(step_id);
+                        let icon = step.status.icon();
+                        let color = step.status.color();
+                        let status_label = step.status.label();
+                        let priority_label = step.priority.label();
+                        let history_label = if step.historical { "historical " } else { "" };
+                        ListItem::new(("omega.workbench.plan.step", step_id as usize))
+                            .debug_selector(format!("omega.workbench.plan.step.{step_id}"))
                             .spacing(ListItemSpacing::Sparse)
                             .toggle_state(selected)
+                            .aria_role(gpui::Role::ListItem)
+                            .aria_label(format!(
+                                "{history_label}plan step: {}; {status_label}; {priority_label} priority",
+                                step.label
+                            ))
                             .child(
                                 h_flex()
                                     .w_full()
@@ -1426,21 +1786,48 @@ impl Render for NativePlanSurface {
                                     .min_w_0()
                                     .child(Icon::new(icon).size(IconSize::Small).color(color))
                                     .child(
-                                        Label::new(label)
-                                            .size(LabelSize::Small)
-                                            .color(if selected {
-                                                Color::Default
-                                            } else {
-                                                Color::Muted
-                                            })
-                                            .truncate(),
+                                        div()
+                                            .min_w_0()
+                                            .flex_1()
+                                            .text_sm()
+                                            .overflow_hidden()
+                                            .child(MarkdownElement::new(
+                                                step.content,
+                                                plan_label_markdown_style(step.status, window, cx),
+                                            )),
+                                    )
+                                    .child(
+                                        Label::new(priority_label)
+                                            .size(LabelSize::XSmall)
+                                            .color(Color::Muted),
                                     ),
                             )
-                            .on_click(cx.listener(move |this, _, _window, cx| {
-                                this.select_step(Some(index), cx);
+                            .on_click(cx.listener(move |this, _, window, cx| {
+                                this.select_step(Some(step_id), window, cx);
                             }))
+                            .into_any_element()
                     })),
             )
+            .when_some(navigation_status, |this, status| {
+                this.child(
+                    div()
+                        .id("omega.workbench.plan.navigation-status")
+                        .debug_selector(|| {
+                            "omega.workbench.plan.navigation-status".to_string()
+                        })
+                        .role(gpui::Role::Status)
+                        .aria_label(status.clone())
+                        .px_2()
+                        .py_1()
+                        .border_t_1()
+                        .border_color(cx.theme().colors().border)
+                        .child(
+                            Label::new(status)
+                                .size(LabelSize::XSmall)
+                                .color(Color::Muted),
+                        ),
+                )
+            })
     }
 }
 
@@ -1513,6 +1900,11 @@ impl WorkSurfaceHost {
         self.terminal_surface.as_ref()
     }
 
+    #[cfg(any(test, feature = "test-support"))]
+    pub fn plan_surface(&self) -> Option<&Entity<NativePlanSurface>> {
+        self.plan_surface.as_ref()
+    }
+
     fn native_content_contains_focus(&self, window: &Window, cx: &App) -> bool {
         self.files_panel
             .as_ref()
@@ -1533,6 +1925,10 @@ impl WorkSurfaceHost {
                 .terminal_surface
                 .as_ref()
                 .is_some_and(|surface| surface.read(cx).contains_focus(window, cx))
+            || self
+                .plan_surface
+                .as_ref()
+                .is_some_and(|surface| surface.focus_handle(cx).contains_focused(window, cx))
     }
 
     fn focus_native_content(&self, window: &mut Window, cx: &mut App) {
@@ -1545,6 +1941,8 @@ impl WorkSurfaceHost {
         } else if let Some(surface) = self.git_surface.as_ref() {
             surface.focus_handle(cx).focus(window, cx);
         } else if let Some(surface) = self.terminal_surface.as_ref() {
+            surface.focus_handle(cx).focus(window, cx);
+        } else if let Some(surface) = self.plan_surface.as_ref() {
             surface.focus_handle(cx).focus(window, cx);
         }
     }
@@ -1612,6 +2010,11 @@ impl Focusable for WorkSurfaceHost {
                 })
                 .or_else(|| {
                     self.terminal_surface
+                        .as_ref()
+                        .map(|surface| surface.focus_handle(cx))
+                })
+                .or_else(|| {
+                    self.plan_surface
                         .as_ref()
                         .map(|surface| surface.focus_handle(cx))
                 })
@@ -2733,6 +3136,49 @@ impl WorkbenchShell {
             None,
             Some(terminal_surface),
             None,
+            cx,
+        )
+        .map(Some)
+    }
+
+    pub fn plan_surface_for_active_binding(&self, cx: &App) -> Option<Entity<NativePlanSurface>> {
+        let visible = self.projection.visible_projection()?;
+        let key = SurfaceHostKey {
+            thread_id: visible.thread_id,
+            binding: visible.binding,
+            surface: WorkSurface::Plan,
+        };
+        self.hosts
+            .get(&key)?
+            .read(cx)
+            .plan_surface
+            .as_ref()
+            .cloned()
+    }
+
+    pub fn ensure_visible_plan_host(
+        &mut self,
+        plan_surface: Entity<NativePlanSurface>,
+        cx: &mut Context<crate::AgentPanel>,
+    ) -> Result<Option<Entity<WorkSurfaceHost>>> {
+        let Some(visible) = self.projection.visible_projection() else {
+            return Ok(None);
+        };
+        if !visible.dock_open || visible.effective_surface != Some(WorkSurface::Plan) {
+            return Ok(None);
+        }
+        let thread_id = visible.thread_id.clone();
+        let binding = visible.binding;
+        self.ensure_host(
+            &thread_id,
+            binding,
+            WorkSurface::Plan,
+            None,
+            None,
+            None,
+            None,
+            None,
+            Some(plan_surface),
             cx,
         )
         .map(Some)

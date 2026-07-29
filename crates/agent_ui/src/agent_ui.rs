@@ -43,6 +43,7 @@ pub mod omega_router;
 pub mod omega_send_queue;
 pub mod omega_sidebar;
 pub mod omega_threads_sidebar;
+pub mod plan_presentation;
 mod profile_selector;
 mod terminal_codegen;
 mod terminal_inline_assistant;

@@ -791,6 +791,95 @@ impl AgentWorkbenchFrontDoor {
             .map(|surface| surface.read_with(cx, |surface, _cx| surface.lifecycle().clone()))
     }
 
+    pub fn native_plan_surface(
+        &self,
+        cx: &TestAppContext,
+    ) -> Option<Entity<crate::workbench_shell::NativePlanSurface>> {
+        self.panel
+            .read_with(cx, |panel, cx| panel.workbench_plan_surface_for_tests(cx))
+            .or_else(|| {
+                self.visible_surface_host(cx)
+                    .and_then(|host| host.read_with(cx, |host, _cx| host.plan_surface().cloned()))
+            })
+    }
+
+    pub fn native_plan_snapshot(
+        &self,
+        cx: &TestAppContext,
+    ) -> Option<crate::workbench_shell::NativePlanSnapshot> {
+        self.native_plan_surface(cx)
+            .map(|surface| surface.read_with(cx, |surface, _cx| surface.snapshot()))
+    }
+
+    pub fn native_plan_navigation_target(&self, cx: &TestAppContext) -> Option<usize> {
+        self.panel.read_with(cx, |panel, _cx| {
+            panel.workbench_plan_navigation_target_for_tests()
+        })
+    }
+
+    pub fn apply_plan_update(
+        &self,
+        entries: Vec<acp::PlanEntry>,
+        cx: &TestAppContext,
+    ) -> Result<()> {
+        let thread = self
+            .panel
+            .read_with(cx, |panel, cx| panel.active_agent_thread(cx))
+            .context("active agent thread is unavailable")?;
+        cx.update(|cx| {
+            thread.update(cx, |thread, cx| {
+                thread
+                    .handle_session_update(acp::SessionUpdate::Plan(acp::Plan::new(entries)), cx)
+                    .map_err(anyhow::Error::new)
+            })
+        })?;
+        self.settle(cx);
+        Ok(())
+    }
+
+    pub fn snapshot_completed_plan(&self, cx: &TestAppContext) -> Result<()> {
+        let thread = self
+            .panel
+            .read_with(cx, |panel, cx| panel.active_agent_thread(cx))
+            .context("active agent thread is unavailable")?;
+        cx.update(|cx| {
+            thread.update(cx, |thread, cx| thread.snapshot_completed_plan(cx));
+        });
+        self.settle(cx);
+        Ok(())
+    }
+
+    pub fn set_plan_lifecycle(
+        &self,
+        lifecycle: Option<crate::workbench_shell::NativePlanLifecycle>,
+        cx: &TestAppContext,
+    ) {
+        cx.update(|cx| {
+            self.panel.update(cx, |panel, cx| {
+                panel.set_workbench_plan_lifecycle_for_tests(lifecycle, cx);
+            });
+        });
+        self.settle(cx);
+    }
+
+    pub fn set_plan_interruption(
+        &self,
+        interruption: Option<SharedString>,
+        cx: &TestAppContext,
+    ) -> Result<()> {
+        let thread = self
+            .panel
+            .read_with(cx, |panel, cx| panel.active_agent_thread(cx))
+            .context("active agent thread is unavailable")?;
+        cx.update(|cx| {
+            thread.update(cx, |thread, cx| {
+                thread.set_plan_interruption_for_tests(interruption, cx);
+            });
+        });
+        self.settle(cx);
+        Ok(())
+    }
+
     pub fn native_terminal_surface(
         &self,
         cx: &TestAppContext,
@@ -6406,6 +6495,620 @@ mod workbench_front_door_tests {
         front_door
             .teardown(cx)
             .expect("offline Plan workbench should tear down");
+    }
+
+    #[gpui::test(iterations = 8)]
+    async fn native_plan_tracks_typed_updates_stable_ids_and_history(cx: &mut TestAppContext) {
+        let mut scene = scene_with_thread("native_plan_updates", 1200, false);
+        scene.active_surface = Some(WorkSurfaceId::Plan);
+        scene.dock_open = true;
+        let front_door = AgentWorkbenchFrontDoor::mount(scene, cx)
+            .await
+            .expect("native Plan scene should mount");
+
+        let initial_surface_id = front_door
+            .native_plan_surface(cx)
+            .expect("native Plan surface")
+            .entity_id();
+        assert_eq!(
+            front_door
+                .native_plan_snapshot(cx)
+                .expect("initial Plan snapshot")
+                .state,
+            crate::workbench_shell::PlanSurfaceState::Empty
+        );
+
+        front_door
+            .apply_plan_update(
+                vec![
+                    acp::PlanEntry::new(
+                        "Inspect the projection",
+                        acp::PlanEntryPriority::High,
+                        acp::PlanEntryStatus::Completed,
+                    ),
+                    acp::PlanEntry::new(
+                        "Implement the retained surface",
+                        acp::PlanEntryPriority::Medium,
+                        acp::PlanEntryStatus::InProgress,
+                    ),
+                    acp::PlanEntry::new(
+                        "Verify reconnect behavior",
+                        acp::PlanEntryPriority::Low,
+                        acp::PlanEntryStatus::Pending,
+                    ),
+                ],
+                cx,
+            )
+            .expect("initial typed Plan update");
+        let active = front_door
+            .native_plan_snapshot(cx)
+            .expect("active Plan snapshot");
+        assert_eq!(active.revision, 1);
+        assert_eq!(active.current_steps.len(), 3);
+        assert_eq!(
+            active.state,
+            crate::workbench_shell::PlanSurfaceState::Active {
+                pending: 1,
+                in_progress: 1,
+                completed: 1,
+                unknown: 0,
+                total: 3,
+            }
+        );
+        let stable_ids = active
+            .current_steps
+            .iter()
+            .map(|step| step.id)
+            .collect::<Vec<_>>();
+        assert_eq!(active.active_step_id, stable_ids.get(1).copied());
+        assert_eq!(
+            active
+                .current_steps
+                .iter()
+                .map(|step| (step.status, step.priority))
+                .collect::<Vec<_>>(),
+            vec![
+                (
+                    crate::plan_presentation::PlanStatusKind::Completed,
+                    crate::plan_presentation::PlanPriorityKind::High,
+                ),
+                (
+                    crate::plan_presentation::PlanStatusKind::InProgress,
+                    crate::plan_presentation::PlanPriorityKind::Medium,
+                ),
+                (
+                    crate::plan_presentation::PlanStatusKind::Pending,
+                    crate::plan_presentation::PlanPriorityKind::Low,
+                ),
+            ]
+        );
+
+        front_door
+            .apply_plan_update(
+                vec![
+                    acp::PlanEntry::new(
+                        "Inspect the projection",
+                        acp::PlanEntryPriority::High,
+                        acp::PlanEntryStatus::Completed,
+                    ),
+                    acp::PlanEntry::new(
+                        "Implement the retained native surface",
+                        acp::PlanEntryPriority::High,
+                        acp::PlanEntryStatus::Completed,
+                    ),
+                    acp::PlanEntry::new(
+                        "Verify reconnect behavior",
+                        acp::PlanEntryPriority::Low,
+                        acp::PlanEntryStatus::InProgress,
+                    ),
+                ],
+                cx,
+            )
+            .expect("replacement typed Plan update");
+        let replacement = front_door
+            .native_plan_snapshot(cx)
+            .expect("replacement Plan snapshot");
+        assert_eq!(replacement.revision, 2);
+        assert_eq!(replacement.active_step_id, stable_ids.get(2).copied());
+        assert_eq!(
+            replacement
+                .current_steps
+                .iter()
+                .map(|step| step.id)
+                .collect::<Vec<_>>(),
+            stable_ids,
+            "full ACP replacements must preserve positional step identity"
+        );
+
+        front_door
+            .apply_plan_update(
+                vec![acp::PlanEntry::new(
+                    "   ",
+                    acp::PlanEntryPriority::Medium,
+                    acp::PlanEntryStatus::Pending,
+                )],
+                cx,
+            )
+            .expect("malformed typed Plan update should be retained as state");
+        let malformed = front_door
+            .native_plan_snapshot(cx)
+            .expect("malformed Plan snapshot");
+        assert_eq!(malformed.revision, 3);
+        assert!(matches!(
+            malformed.state,
+            crate::workbench_shell::PlanSurfaceState::Malformed(_)
+        ));
+        assert_eq!(
+            malformed
+                .current_steps
+                .iter()
+                .map(|step| step.id)
+                .collect::<Vec<_>>(),
+            stable_ids,
+            "malformed input must retain the last good typed plan"
+        );
+
+        front_door
+            .apply_plan_update(
+                replacement
+                    .current_steps
+                    .iter()
+                    .map(|step| {
+                        acp::PlanEntry::new(
+                            step.label.to_string(),
+                            acp::PlanEntryPriority::Medium,
+                            acp::PlanEntryStatus::Completed,
+                        )
+                    })
+                    .collect(),
+                cx,
+            )
+            .expect("all-complete typed Plan update");
+        assert!(matches!(
+            front_door
+                .native_plan_snapshot(cx)
+                .expect("all-complete Plan snapshot")
+                .state,
+            crate::workbench_shell::PlanSurfaceState::AllComplete { total: 3 }
+        ));
+        front_door
+            .snapshot_completed_plan(cx)
+            .expect("snapshot completed Plan into typed history");
+        let historical = front_door
+            .native_plan_snapshot(cx)
+            .expect("historical Plan snapshot");
+        assert_eq!(historical.revision, 5);
+        assert!(historical.current_steps.is_empty());
+        assert_eq!(historical.historical_steps.len(), 3);
+        assert!(
+            historical
+                .historical_steps
+                .iter()
+                .all(|step| step.source_entry_index.is_some())
+        );
+        let historical_step = historical
+            .historical_steps
+            .first()
+            .expect("completed plan should expose one historical step");
+        let historical_step_id = historical_step.id;
+        let source_entry_index = historical_step
+            .source_entry_index
+            .expect("historical step source entry");
+        front_door
+            .click(
+                &format!("omega.workbench.plan.step.{historical_step_id}"),
+                cx,
+            )
+            .expect("historical Plan step should navigate");
+        let navigated = front_door
+            .native_plan_snapshot(cx)
+            .expect("navigated historical Plan snapshot");
+        assert_eq!(navigated.selected_step_id, Some(historical_step_id));
+        assert_eq!(
+            navigated.navigation_status.as_deref(),
+            Some(format!("Opened transcript event {}", source_entry_index + 1).as_str())
+        );
+        assert_eq!(
+            front_door.native_plan_navigation_target(cx),
+            Some(source_entry_index),
+            "the validated navigation path must reach ThreadView"
+        );
+        assert_eq!(
+            front_door
+                .native_plan_surface(cx)
+                .expect("retained native Plan surface")
+                .entity_id(),
+            initial_surface_id
+        );
+
+        front_door
+            .teardown(cx)
+            .expect("native Plan scene should tear down");
+    }
+
+    #[gpui::test(iterations = 8)]
+    async fn native_plan_retains_selection_across_lifecycle_and_collapse(cx: &mut TestAppContext) {
+        let mut scene = scene_with_thread("native_plan_retention", 1200, false);
+        scene.active_surface = Some(WorkSurfaceId::Plan);
+        scene.dock_open = true;
+        let front_door = AgentWorkbenchFrontDoor::mount(scene, cx)
+            .await
+            .expect("native Plan retention scene should mount");
+        front_door
+            .apply_plan_update(
+                vec![acp::PlanEntry::new(
+                    "Retain this step",
+                    acp::PlanEntryPriority::High,
+                    acp::PlanEntryStatus::InProgress,
+                )],
+                cx,
+            )
+            .expect("typed Plan update");
+        let initial = front_door
+            .native_plan_snapshot(cx)
+            .expect("initial Plan snapshot");
+        let step_id = initial
+            .current_steps
+            .first()
+            .expect("one current Plan step")
+            .id;
+        let surface_id = front_door
+            .native_plan_surface(cx)
+            .expect("native Plan surface")
+            .entity_id();
+        let plan_surface = front_door
+            .native_plan_surface(cx)
+            .expect("native Plan surface for stale binding check");
+        let binding = plan_surface.read_with(cx, |surface, _cx| surface.binding().clone());
+        let rejected = cx.update(|cx| {
+            plan_surface.update(cx, |surface, cx| {
+                surface.bind_thread(
+                    crate::workbench_shell::NativePlanBinding {
+                        thread_id: "foreign-thread".to_string(),
+                        generation: binding.generation.saturating_add(1),
+                    },
+                    None,
+                    cx,
+                )
+            })
+        });
+        assert!(
+            !rejected,
+            "a foreign binding in a higher epoch must be rejected"
+        );
+        assert_eq!(
+            front_door
+                .native_plan_snapshot(cx)
+                .expect("Plan snapshot after rejected stale binding")
+                .rejected_update_count,
+            1
+        );
+        front_door
+            .click(&format!("omega.workbench.plan.step.{step_id}"), cx)
+            .expect("select live Plan step");
+        let selected = front_door
+            .native_plan_snapshot(cx)
+            .expect("selected Plan snapshot");
+        assert_eq!(selected.selected_step_id, Some(step_id));
+        assert_eq!(
+            selected.navigation_status.as_deref(),
+            Some("This live plan step has no transcript event yet")
+        );
+
+        front_door
+            .set_plan_interruption(Some("agent cancelled".into()), cx)
+            .expect("persist Plan interruption");
+        let interrupted = front_door
+            .native_plan_snapshot(cx)
+            .expect("interrupted Plan snapshot");
+        assert_eq!(
+            interrupted.state,
+            crate::workbench_shell::PlanSurfaceState::Interrupted("agent cancelled".into())
+        );
+        assert_eq!(interrupted.current_steps, selected.current_steps);
+        front_door
+            .set_plan_interruption(None, cx)
+            .expect("clear Plan interruption at the next turn boundary");
+        assert!(matches!(
+            front_door
+                .native_plan_snapshot(cx)
+                .expect("resumed Plan snapshot")
+                .state,
+            crate::workbench_shell::PlanSurfaceState::Active { .. }
+        ));
+
+        front_door.set_plan_lifecycle(Some(crate::workbench_shell::NativePlanLifecycle::Stale), cx);
+        let stale = front_door
+            .native_plan_snapshot(cx)
+            .expect("stale Plan snapshot");
+        assert_eq!(stale.state, crate::workbench_shell::PlanSurfaceState::Stale);
+        assert_eq!(stale.current_steps, selected.current_steps);
+        assert_eq!(stale.selected_step_id, Some(step_id));
+        front_door.set_plan_lifecycle(
+            Some(crate::workbench_shell::NativePlanLifecycle::Reconnecting),
+            cx,
+        );
+        assert_eq!(
+            front_door
+                .native_plan_snapshot(cx)
+                .expect("reconnecting Plan snapshot")
+                .state,
+            crate::workbench_shell::PlanSurfaceState::Reconnecting
+        );
+
+        front_door.dispatch_action(crate::workbench_shell::SelectPlan, cx);
+        front_door.dispatch_action(crate::workbench_shell::SelectPlan, cx);
+        let reopened = front_door
+            .native_plan_snapshot(cx)
+            .expect("reopened Plan snapshot");
+        assert_eq!(
+            front_door
+                .native_plan_surface(cx)
+                .expect("reopened Plan surface")
+                .entity_id(),
+            surface_id
+        );
+        assert_eq!(reopened.selected_step_id, Some(step_id));
+        assert_eq!(reopened.current_steps, selected.current_steps);
+
+        front_door
+            .teardown(cx)
+            .expect("native Plan retention scene should tear down");
+    }
+
+    #[gpui::test(iterations = 8)]
+    async fn native_plan_rejects_cross_thread_projection_updates(cx: &mut TestAppContext) {
+        let scene = scene_with_thread("native_plan_thread_isolation", 1200, false);
+        let front_door = AgentWorkbenchFrontDoor::mount(scene, cx)
+            .await
+            .expect("native Plan isolation scene should mount");
+
+        let thread_a_id = front_door.open_external_thread(StubAgentConnection::new(), cx);
+        let thread_a = front_door
+            .panel()
+            .read_with(cx, |panel, cx| panel.active_agent_thread(cx))
+            .expect("thread A agent projection");
+        front_door.dispatch_action(crate::workbench_shell::SelectPlan, cx);
+        front_door
+            .apply_plan_update(
+                vec![acp::PlanEntry::new(
+                    "Thread A initial step",
+                    acp::PlanEntryPriority::High,
+                    acp::PlanEntryStatus::InProgress,
+                )],
+                cx,
+            )
+            .expect("thread A Plan update");
+        let surface_a_id = front_door
+            .native_plan_surface(cx)
+            .expect("thread A Plan surface")
+            .entity_id();
+
+        let thread_b_id = front_door.open_external_thread(StubAgentConnection::new(), cx);
+        let thread_b = front_door
+            .panel()
+            .read_with(cx, |panel, cx| panel.active_agent_thread(cx))
+            .expect("thread B agent projection");
+        assert_ne!(thread_a_id, thread_b_id);
+        front_door.dispatch_action(crate::workbench_shell::SelectPlan, cx);
+        front_door
+            .apply_plan_update(
+                vec![acp::PlanEntry::new(
+                    "Thread B retained step",
+                    acp::PlanEntryPriority::Low,
+                    acp::PlanEntryStatus::Pending,
+                )],
+                cx,
+            )
+            .expect("thread B Plan update");
+        let surface_b = front_door
+            .native_plan_surface(cx)
+            .expect("thread B Plan surface");
+        let surface_b_id = surface_b.entity_id();
+        assert_ne!(surface_a_id, surface_b_id);
+        let before_old_thread_update = surface_b.read_with(cx, |surface, _cx| surface.snapshot());
+
+        cx.update(|cx| {
+            thread_a.update(cx, |thread, cx| {
+                thread
+                    .handle_session_update(
+                        acp::SessionUpdate::Plan(acp::Plan::new(vec![acp::PlanEntry::new(
+                            "Thread A late step",
+                            acp::PlanEntryPriority::Medium,
+                            acp::PlanEntryStatus::Completed,
+                        )])),
+                        cx,
+                    )
+                    .expect("late thread A Plan update");
+            });
+        });
+        front_door.settle(cx);
+
+        assert_eq!(
+            front_door
+                .native_plan_surface(cx)
+                .expect("active thread B Plan surface")
+                .entity_id(),
+            surface_b_id
+        );
+        assert_eq!(
+            front_door
+                .native_plan_snapshot(cx)
+                .expect("thread B snapshot after old-thread update"),
+            before_old_thread_update,
+            "a retained thread update must not mutate the active thread projection"
+        );
+
+        front_door.activate_thread(thread_a_id, cx);
+        let restored_a = front_door
+            .native_plan_snapshot(cx)
+            .expect("restored thread A Plan snapshot");
+        assert_eq!(
+            restored_a
+                .current_steps
+                .first()
+                .map(|step| step.label.as_ref()),
+            Some("Thread A late step")
+        );
+        let restored_surface_a = front_door
+            .native_plan_surface(cx)
+            .expect("restored thread A Plan surface");
+        let restored_binding =
+            restored_surface_a.read_with(cx, |surface, _cx| surface.binding().clone());
+        let rebound = cx.update(|cx| {
+            restored_surface_a.update(cx, |surface, cx| {
+                surface.bind_thread(restored_binding, Some(thread_b), cx)
+            })
+        });
+        assert!(
+            rebound,
+            "a replacement entity for the same logical binding should bind"
+        );
+        let replaced_entity_snapshot =
+            restored_surface_a.read_with(cx, |surface, _cx| surface.snapshot());
+        assert_eq!(replaced_entity_snapshot.revision, 1);
+        assert_eq!(
+            replaced_entity_snapshot
+                .current_steps
+                .first()
+                .map(|step| step.label.as_ref()),
+            Some("Thread B retained step"),
+            "a replacement entity must reset the old accepted revision and snapshot"
+        );
+
+        front_door
+            .teardown(cx)
+            .expect("native Plan isolation scene should tear down");
+    }
+
+    #[gpui::test(iterations = 8)]
+    async fn native_plan_reconciles_ids_through_insert_remove_and_reorder(cx: &mut TestAppContext) {
+        let mut scene = scene_with_thread("native_plan_identity_reconciliation", 1200, false);
+        scene.active_surface = Some(WorkSurfaceId::Plan);
+        scene.dock_open = true;
+        let front_door = AgentWorkbenchFrontDoor::mount(scene, cx)
+            .await
+            .expect("native Plan identity scene should mount");
+        front_door
+            .apply_plan_update(
+                vec![
+                    acp::PlanEntry::new(
+                        "Alpha",
+                        acp::PlanEntryPriority::High,
+                        acp::PlanEntryStatus::Pending,
+                    ),
+                    acp::PlanEntry::new(
+                        "Beta",
+                        acp::PlanEntryPriority::Medium,
+                        acp::PlanEntryStatus::InProgress,
+                    ),
+                    acp::PlanEntry::new(
+                        "Gamma",
+                        acp::PlanEntryPriority::Low,
+                        acp::PlanEntryStatus::Pending,
+                    ),
+                ],
+                cx,
+            )
+            .expect("initial identity Plan update");
+        let initial = front_door
+            .native_plan_snapshot(cx)
+            .expect("initial identity Plan snapshot");
+        let alpha_id = initial
+            .current_steps
+            .iter()
+            .find(|step| step.label.as_ref() == "Alpha")
+            .expect("Alpha step")
+            .id;
+        let beta_id = initial
+            .current_steps
+            .iter()
+            .find(|step| step.label.as_ref() == "Beta")
+            .expect("Beta step")
+            .id;
+        let gamma_id = initial
+            .current_steps
+            .iter()
+            .find(|step| step.label.as_ref() == "Gamma")
+            .expect("Gamma step")
+            .id;
+        front_door
+            .click(&format!("omega.workbench.plan.step.{beta_id}"), cx)
+            .expect("select Beta before reconciliation");
+
+        front_door
+            .apply_plan_update(
+                vec![
+                    acp::PlanEntry::new(
+                        "Inserted",
+                        acp::PlanEntryPriority::Low,
+                        acp::PlanEntryStatus::Pending,
+                    ),
+                    acp::PlanEntry::new(
+                        "Gamma",
+                        acp::PlanEntryPriority::Low,
+                        acp::PlanEntryStatus::Completed,
+                    ),
+                    acp::PlanEntry::new(
+                        "Alpha",
+                        acp::PlanEntryPriority::High,
+                        acp::PlanEntryStatus::InProgress,
+                    ),
+                    acp::PlanEntry::new(
+                        "Beta",
+                        acp::PlanEntryPriority::Medium,
+                        acp::PlanEntryStatus::Pending,
+                    ),
+                ],
+                cx,
+            )
+            .expect("inserted and reordered Plan update");
+        let reordered = front_door
+            .native_plan_snapshot(cx)
+            .expect("reordered Plan snapshot");
+        assert_eq!(
+            reordered
+                .current_steps
+                .iter()
+                .map(|step| step.label.as_ref())
+                .collect::<Vec<_>>(),
+            vec!["Inserted", "Gamma", "Alpha", "Beta"]
+        );
+        assert_eq!(
+            reordered
+                .current_steps
+                .iter()
+                .find(|step| step.label.as_ref() == "Alpha")
+                .map(|step| step.id),
+            Some(alpha_id)
+        );
+        assert_eq!(
+            reordered
+                .current_steps
+                .iter()
+                .find(|step| step.label.as_ref() == "Beta")
+                .map(|step| step.id),
+            Some(beta_id)
+        );
+        assert_eq!(
+            reordered
+                .current_steps
+                .iter()
+                .find(|step| step.label.as_ref() == "Gamma")
+                .map(|step| step.id),
+            Some(gamma_id)
+        );
+        assert_eq!(reordered.selected_step_id, Some(beta_id));
+        assert!(
+            reordered
+                .current_steps
+                .first()
+                .is_some_and(|step| ![alpha_id, beta_id, gamma_id].contains(&step.id))
+        );
+
+        front_door
+            .teardown(cx)
+            .expect("native Plan identity scene should tear down");
     }
 
     #[gpui::test]

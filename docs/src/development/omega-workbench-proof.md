@@ -529,6 +529,81 @@ Native persistence may recreate eligible terminal layout and cwd by starting a
 new shell; it cannot reconnect to the pre-restart operating-system process,
 and task terminals are not serialized.
 
+### Native Plan scenes {#native-plan-scenes}
+
+The Plan lane is a typed projection proof, not a screenshot of markdown that
+resembles a checklist. Every scene feeds `acp::SessionUpdate::Plan` through the
+active `AcpThread`, then reads the retained `NativePlanSurface` snapshot before
+the semantic or pixel boundary.
+
+| Scene | Contract |
+| --- | --- |
+| `omega_workbench_plan_empty` | A mounted Plan surface at revision zero exposes an accessible no-plan state and no step rows. |
+| `omega_workbench_plan_active` | Ordered completed, in-progress, and pending entries retain their typed statuses and priorities; the in-progress entry is the active step. |
+| `omega_workbench_plan_replacement` | A full ACP replacement preserves existing positional step identities, updates labels/status, and assigns only appended entries a new identity. |
+| `omega_workbench_plan_all_complete` | An all-completed current plan has an explicit all-complete summary rather than being mistaken for empty or historical state. |
+| `omega_workbench_plan_historical` | Snapshotting a completed plan clears the live projection, retains typed historical entries, and gives every historical step a transcript source. |
+| `omega_workbench_plan_interrupted` | An interrupted agent run retains the last good steps under an accessible alert. |
+| `omega_workbench_plan_stale` | Offline/stale projection state retains the last good steps, selection, and revision while warning that the data may be stale. |
+| `omega_workbench_plan_reconnecting` | Reconnect state retains the same projection and rejects an older lifecycle generation. |
+| `omega_workbench_plan_malformed` | A provider update containing a blank step is rejected, surfaced as an accessible alert, and cannot replace the last good plan. |
+| `omega_workbench_plan_no_source_navigation` | Selecting a live step records the explicit no-source result instead of inventing a transcript target. |
+| `omega_workbench_plan_collapse_reopen` | Collapse and reopen preserve the exact Plan surface entity, revision, ordered step identities, and selection. |
+| `omega_workbench_plan_narrow_foreign_binding` | At the narrow viewport, the active thread's Plan remains fully visible and disjoint from transcript/composer while a foreign binding is rejected and cannot leak steps into the visible projection. |
+
+The portable seeded tests are authoritative for scheduler-sensitive update
+ordering, stable IDs, thread switching, stale/foreign rejection, lifecycle
+retention, and collapse/reopen identity. They run the production ACP session
+update path and compare the surface's binding, revision, active step, ordered
+current and historical entries, source indices, selection, navigation status,
+and rejected-update count. A provider revision is not present in the ACP Plan
+payload, so ordering within one live ACP session is the order accepted by
+`AcpThread`; the client can reject an older local projection revision or a
+foreign retained-thread event, but must not claim a server-supplied Plan
+revision that the protocol does not carry.
+
+The visual runner adds a second boundary. Before capture it proves the typed
+snapshot against `PlanSnapshotFixture`, then requires unique Plan selectors,
+the native content inside `omega.workbench.surface.plan`, an accessible summary
+and list, accessible lifecycle or navigation status where applicable, and no
+empty-state/step-row contradiction. The narrow scene also proves the Plan
+surface is fully visible and does not overlap the transcript or composer.
+Every scene captures the full workbench and the selector-derived
+`plan-surface` region from `WORKBENCH_PLAN_REGIONS`.
+
+Run the portable model and production front-door layers with:
+
+```sh
+cargo test -p omega_workbench_harness plan_
+cargo test -p agent_ui --features test-support native_plan_
+```
+
+Inspect registration and run all Plan scenes semantically with:
+
+```sh
+script/omega-workbench-proof --list | grep omega_workbench_plan_
+for scene in $(script/omega-workbench-proof --list --no-build | rg '^omega_workbench_plan_' | cut -f1); do
+  script/omega-workbench-proof --scene "$scene" --semantic-only
+done
+```
+
+To reproduce one scheduler seed or inspect one reviewed pixel baseline:
+
+```sh
+script/omega-workbench-proof \
+  --scene omega_workbench_plan_replacement \
+  --semantic-only \
+  --seed 37
+
+script/omega-workbench-proof \
+  --scene omega_workbench_plan_replacement \
+  --pixel-only
+```
+
+The catalog and region contract do not prove that a run passed. Require the
+scene receipt, non-empty semantic checks, and a reviewed matching baseline
+before treating the pixel lane as evidence.
+
 ### Registering a scene {#registering-a-scene}
 
 Add every named scene to `HERMETIC_SCENES`. A `SceneSpec` defines:

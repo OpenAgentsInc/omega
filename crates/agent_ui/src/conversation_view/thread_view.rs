@@ -1,6 +1,5 @@
 use crate::{
     DEFAULT_THREAD_TITLE, SelectPermissionGranularity,
-    agent_configuration::configure_context_server_modal::default_markdown_style,
     conversation_view::thread_search_bar::{ThreadSearchBar, ThreadSearchBarEvent},
     open_abs_path_at_point,
     thread_metadata_store::{ThreadId, ThreadMetadataStore},
@@ -3926,7 +3925,11 @@ impl ThreadView {
                         .line_clamp(1)
                         .child(MarkdownElement::new(
                             entry.content.clone(),
-                            plan_label_markdown_style(&entry.status, window, cx),
+                            plan_label_markdown_style(
+                                PlanStatusKind::from_acp(&entry.status),
+                                window,
+                                cx,
+                            ),
                         )),
                 )
                 .when(stats.pending > 0, |this| {
@@ -4039,30 +4042,24 @@ impl ThreadView {
                                     .min_w_0()
                                     .text_xs()
                                     .text_color(cx.theme().colors().text_muted)
-                                    .child(match entry.status {
-                                        acp::PlanEntryStatus::InProgress => {
-                                            Icon::new(IconName::TodoProgress)
-                                                .size(IconSize::Small)
-                                                .color(Color::Accent)
-                                                .with_rotate_animation(2)
-                                                .into_any_element()
-                                        }
-                                        acp::PlanEntryStatus::Completed => {
-                                            Icon::new(IconName::TodoComplete)
-                                                .size(IconSize::Small)
-                                                .color(Color::Success)
-                                                .into_any_element()
-                                        }
-                                        acp::PlanEntryStatus::Pending | _ => {
-                                            Icon::new(IconName::TodoPending)
-                                                .size(IconSize::Small)
-                                                .color(Color::Muted)
-                                                .into_any_element()
+                                    .child({
+                                        let status = PlanStatusKind::from_acp(&entry.status);
+                                        let icon = Icon::new(status.icon())
+                                            .size(IconSize::Small)
+                                            .color(status.color());
+                                        if status == PlanStatusKind::InProgress {
+                                            icon.with_rotate_animation(2).into_any_element()
+                                        } else {
+                                            icon.into_any_element()
                                         }
                                     })
                                     .child(MarkdownElement::new(
                                         entry.content.clone(),
-                                        plan_label_markdown_style(&entry.status, window, cx),
+                                        plan_label_markdown_style(
+                                            PlanStatusKind::from_acp(&entry.status),
+                                            window,
+                                            cx,
+                                        ),
                                     )),
                             )
                             .child(div().absolute().top_0().right_0().h_full().w_8().bg(
@@ -4120,6 +4117,7 @@ impl ThreadView {
                     )
                     .child(
                         v_flex().children(entries.iter().enumerate().map(|(index, entry)| {
+                            let status = PlanStatusKind::from_acp(&entry.status);
                             h_flex()
                                 .py_1()
                                 .px_2()
@@ -4128,9 +4126,9 @@ impl ThreadView {
                                     this.border_b_1().border_color(cx.theme().colors().border)
                                 })
                                 .child(
-                                    Icon::new(IconName::TodoComplete)
+                                    Icon::new(status.icon())
                                         .size(IconSize::Small)
-                                        .color(Color::Success),
+                                        .color(status.color()),
                                 )
                                 .child(
                                     div()
@@ -4140,7 +4138,7 @@ impl ThreadView {
                                         .text_color(cx.theme().colors().text_muted)
                                         .child(MarkdownElement::new(
                                             entry.content.clone(),
-                                            default_markdown_style(window, cx),
+                                            plan_label_markdown_style(status, window, cx),
                                         )),
                                 )
                         })),
@@ -7359,6 +7357,22 @@ impl ThreadView {
         } else {
             self.scroll_to_end(cx);
         }
+    }
+
+    pub(crate) fn scroll_to_entry_index(
+        &mut self,
+        entry_index: usize,
+        cx: &mut Context<Self>,
+    ) -> bool {
+        if entry_index >= self.thread.read(cx).entries().len() {
+            return false;
+        }
+        self.list_state.scroll_to(ListOffset {
+            item_ix: entry_index,
+            offset_in_item: px(0.0),
+        });
+        cx.notify();
+        true
     }
 
     pub fn scroll_to_end(&mut self, cx: &mut Context<Self>) {
