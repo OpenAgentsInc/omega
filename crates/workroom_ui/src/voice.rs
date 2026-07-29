@@ -1415,7 +1415,8 @@ impl Drop for MicrophoneCapture {
 
 struct VoicePlayback {
     output_device_id: Option<DeviceId>,
-    output: rodio::MixerDeviceSink,
+    player: rodio::Player,
+    _output: rodio::MixerDeviceSink,
 }
 
 #[derive(Default)]
@@ -1451,9 +1452,11 @@ impl PlaybackCaptureGate {
 impl VoicePlayback {
     fn open(output_device_id: Option<DeviceId>) -> Result<Self> {
         let output = audio::open_test_output(output_device_id.clone())?;
+        let player = rodio::Player::connect_new(output.mixer());
         Ok(Self {
             output_device_id,
-            output,
+            player,
+            _output: output,
         })
     }
 
@@ -1462,15 +1465,17 @@ impl VoicePlayback {
     }
 
     fn play_pcm16(&self, bytes: &[u8]) -> Result<()> {
-        if !bytes.len().is_multiple_of(2) {
-            bail!("Sarah audio frame had an odd byte count");
-        }
-        let samples = decode_pcm16(bytes);
-        self.output
-            .mixer()
-            .add(SamplesBuffer::new(nz!(1), nz!(24_000), samples));
-        Ok(())
+        append_pcm16(&self.player, bytes)
     }
+}
+
+fn append_pcm16(player: &rodio::Player, bytes: &[u8]) -> Result<()> {
+    if !bytes.len().is_multiple_of(2) {
+        bail!("Sarah audio frame had an odd byte count");
+    }
+    let samples = decode_pcm16(bytes);
+    player.append(SamplesBuffer::new(nz!(1), nz!(24_000), samples));
+    Ok(())
 }
 
 fn encode_pcm16(samples: &[f32]) -> Vec<u8> {
@@ -1546,6 +1551,20 @@ mod tests {
 
         gate.clear();
         assert!(gate.should_forward(started_at + Duration::from_millis(900)));
+    }
+
+    #[test]
+    fn playback_queues_adjacent_pcm_chunks_instead_of_mixing_them() {
+        let (player, mut queued_audio) = rodio::Player::new();
+        let first = encode_pcm16(&[0.25, 0.5]);
+        let second = encode_pcm16(&[-0.25, -0.5]);
+
+        append_pcm16(&player, &first).expect("append first PCM chunk");
+        append_pcm16(&player, &second).expect("append second PCM chunk");
+
+        let actual = queued_audio.by_ref().take(4).collect::<Vec<_>>();
+        let expected = decode_pcm16(&[first, second].concat());
+        assert_eq!(actual, expected);
     }
 
     #[test]
