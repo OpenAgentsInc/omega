@@ -28,6 +28,7 @@ pub mod omega_audience_control;
 pub mod omega_community_control;
 pub mod omega_executor_disclosure;
 pub mod omega_executor_selector;
+pub mod omega_model_tier;
 pub mod omega_executor_warmth;
 pub mod omega_exo_connection;
 pub mod omega_file_peek;

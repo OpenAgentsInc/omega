@@ -7577,3 +7577,18 @@ current image build does not decode it inline.
 - **Enforced by:** `a_live_tailnet_becomes_the_default_pairing_endpoint` and
   `live_tailnet_is_parsed_from_tailscale_status_json` in `agent_ui`, plus
   `phone_pairing_prefers_the_live_tailnet` in `crates/omega_deltas`.
+
+### OMEGA-DELTA-0172 — Flash / Pro model tier in the zero-base input bar
+
+- **Upstream Zed:** full model picker with every provider model.
+- **Omega before:** zero base hid the model picker; the default stayed
+  `google/gemini-3.6-flash` with no Pro path to hosted Kimi K3.
+- **Omega now:** the zero-base composer bar has a **Flash | Pro** dropdown.
+  Flash (default) selects `google/gemini-3.6-flash`. Pro selects
+  `openagents/kimi-k3` through the new OpenAgents language-model provider,
+  which streams OpenAI-compatible completions via the signed-in OpenAgents
+  session to `POST /api/v1/chat/completions`. OpenAgents cloud accepts the
+  user bearer for those exact hosted lanes.
+- **Enforced by:** `omega_model_tier` unit tests, `language_models` openagents
+  provider tests, and the OpenAgents chat-completions dual-auth path.
+

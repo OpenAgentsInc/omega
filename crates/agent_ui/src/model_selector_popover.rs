@@ -1,7 +1,8 @@
 use std::rc::Rc;
 
-use acp_thread::{AgentModelIcon, AgentModelInfo, AgentModelSelector};
-use gpui::{Entity, FocusHandle};
+use acp_thread::{AgentModelIcon, AgentModelId, AgentModelInfo, AgentModelSelector};
+use anyhow::Result;
+use gpui::{Entity, FocusHandle, Task};
 use picker::popover_menu::PickerPopoverMenu;
 use ui::{PopoverMenuHandle, Tooltip, prelude::*};
 
@@ -10,6 +11,8 @@ use crate::{ModelSelector, model_selector::acp_model_selector};
 
 pub struct ModelSelectorPopover {
     selector: Entity<ModelSelector>,
+    /// The ACP selector used to apply tier choices without opening the picker.
+    agent_selector: Rc<dyn AgentModelSelector>,
     menu_handle: PopoverMenuHandle<ModelSelector>,
 }
 
@@ -21,9 +24,11 @@ impl ModelSelectorPopover {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> Self {
+        let agent_selector = selector.clone();
         Self {
             selector: cx
                 .new(move |cx| acp_model_selector(selector, focus_handle.clone(), window, cx)),
+            agent_selector,
             menu_handle,
         }
     }
@@ -34,6 +39,20 @@ impl ModelSelectorPopover {
 
     pub fn active_model<'a>(&self, cx: &'a App) -> Option<&'a AgentModelInfo> {
         self.selector.read(cx).delegate.active_model()
+    }
+
+    /// The underlying ACP model selector (for Flash/Pro tier application).
+    pub fn agent_selector(&self) -> Rc<dyn AgentModelSelector> {
+        self.agent_selector.clone()
+    }
+
+    /// Select a model by id (e.g. `google/gemini-3.6-flash` or `openagents/kimi-k3`).
+    pub fn select_model_id(
+        &self,
+        model_id: AgentModelId,
+        cx: &mut App,
+    ) -> Task<Result<()>> {
+        self.agent_selector.select_model(model_id, cx)
     }
 
     pub fn cycle_favorite_models(&self, window: &mut Window, cx: &mut Context<Self>) {

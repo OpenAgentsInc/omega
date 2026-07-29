@@ -13434,6 +13434,9 @@ impl ThreadView {
     /// Routing still reads the typed `omega_front_door::ExecutorDisclosure`;
     /// this presentation no longer offers or labels an executor choice.
     ///
+    /// Flash / Pro is the model-tier dropdown for Omega's hosted lanes:
+    /// Flash → `google/gemini-3.6-flash`, Pro → `openagents/kimi-k3`.
+    ///
     /// **Nothing here pins, and nothing here offers to.** `OMEGA-DELTA-0055`
     /// removed the pin control from this row. It read `pin: none ⌄` and opened
     /// a menu listing `native_loop`, `external_acp` and `engine_lane` — wire
@@ -13451,6 +13454,7 @@ impl ThreadView {
         let exo = self.exo_connection(cx);
         let inspector_open = self.exo_inspector_expanded;
         let turn_phase = exo.as_ref().map(|exo| exo.turn().phase);
+        let turn_running = self.thread.read(cx).status() != ThreadStatus::Idle;
 
         h_flex()
             .w_full()
@@ -13486,6 +13490,8 @@ impl ThreadView {
                     .flex_wrap()
                     .gap_1()
                     .children(self.render_zero_base_provider_notice(cx))
+                    // Flash / Pro — Omega's hosted model tiers.
+                    .child(self.render_model_tier_selector(!turn_running, cx))
                     // omega#99. The inspector's contents are the conversation's
                     // — identity, runtime, capabilities and the authority
                     // receipt for the turn a person just watched — so in zero
@@ -13515,6 +13521,36 @@ impl ThreadView {
                     .child(self.render_send_button(cx)),
             )
             .into_any_element()
+    }
+
+    /// Flash / Pro dropdown for Omega's hosted inference lanes.
+    fn render_model_tier_selector(&self, enabled: bool, _cx: &mut Context<Self>) -> AnyElement {
+        use crate::omega_model_tier::{render_model_tier_selector, select, selected};
+        use acp_thread::AgentModelId;
+        use std::rc::Rc;
+
+        let current = selected();
+        let model_selector = self.model_selector.clone();
+
+        render_model_tier_selector(
+            current,
+            enabled,
+            Rc::new(move |tier, _window, cx| {
+                select(tier);
+                if let Some(entity) = model_selector.as_ref() {
+                    let agent = entity.read(cx).agent_selector();
+                    let model_id = AgentModelId::new(tier.agent_model_id());
+                    agent
+                        .select_model(model_id, cx)
+                        .detach_and_log_err(cx);
+                } else {
+                    log::warn!(
+                        "omega_model_tier: chose {} but this thread has no model selector",
+                        tier.name()
+                    );
+                }
+            }),
+        )
     }
 
     /// The main dropdown: which executor runs this conversation.
