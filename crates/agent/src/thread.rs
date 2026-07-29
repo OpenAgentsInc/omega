@@ -334,6 +334,30 @@ fn transcript_blocks(message: &Message) -> Vec<TranscriptBlock> {
     }
 }
 
+pub(crate) fn transcript_window_for_messages(
+    messages: &[Arc<Message>],
+    window: TranscriptWindowRequest,
+) -> (Vec<TranscriptEntry>, usize) {
+    let total = messages.len();
+    let entries = messages
+        .iter()
+        .enumerate()
+        .skip(window.offset)
+        .take(window.limit)
+        .map(|(index, message)| TranscriptEntry {
+            index,
+            role: match message.as_ref() {
+                Message::User(_) => TranscriptRole::User,
+                Message::Agent(_) => TranscriptRole::Assistant,
+                Message::Resume => TranscriptRole::Resume,
+                Message::Compaction(_) => TranscriptRole::Compaction,
+            },
+            blocks: transcript_blocks(message),
+        })
+        .collect();
+    (entries, total)
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct UserMessage {
     pub id: ClientUserMessageId,
@@ -889,23 +913,19 @@ pub trait ThreadEnvironment {
         cx: &mut App,
     ) -> Task<Result<Rc<dyn SubagentHandle>>>;
 
-    /// Read a window of the transcript of a subagent **this thread**
-    /// spawned.
+    /// Read a window of a thread transcript by session ID.
     ///
-    /// The caller is not a parameter. The environment already knows which
-    /// thread is asking, so the tool cannot name a thread and therefore
-    /// cannot ask for one it did not spawn. Scoping is a property of the
-    /// signature, not of the tool's discipline.
-    ///
-    /// The error is the sentence shown to the model, so a refusal always
-    /// arrives already explained.
-    fn read_subagent_transcript(
+    /// The environment may resolve the session from a live thread or durable
+    /// storage. The error is shown directly to the model.
+    fn read_thread_transcript(
         &self,
         _session_id: acp::SessionId,
         _window: TranscriptWindowRequest,
         _cx: &mut App,
-    ) -> Result<SubagentTranscript, String> {
-        Err("Reading subagent transcripts is not supported in this environment".into())
+    ) -> Task<Result<SubagentTranscript, String>> {
+        Task::ready(Err(
+            "Reading thread transcripts is not supported in this environment".into(),
+        ))
     }
 
     fn resume_subagent(
@@ -4659,25 +4679,7 @@ impl Thread {
         &self,
         window: TranscriptWindowRequest,
     ) -> (Vec<TranscriptEntry>, usize) {
-        let total = self.messages.len();
-        let entries = self
-            .messages
-            .iter()
-            .enumerate()
-            .skip(window.offset)
-            .take(window.limit)
-            .map(|(index, message)| TranscriptEntry {
-                index,
-                role: match message.as_ref() {
-                    Message::User(_) => TranscriptRole::User,
-                    Message::Agent(_) => TranscriptRole::Assistant,
-                    Message::Resume => TranscriptRole::Resume,
-                    Message::Compaction(_) => TranscriptRole::Compaction,
-                },
-                blocks: transcript_blocks(message),
-            })
-            .collect();
-        (entries, total)
+        transcript_window_for_messages(&self.messages, window)
     }
 
     pub fn parent_thread_id(&self) -> Option<acp::SessionId> {

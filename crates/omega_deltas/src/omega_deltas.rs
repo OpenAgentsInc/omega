@@ -847,7 +847,7 @@ pub const EXTERNAL_SUBAGENT_CARD_PATH: &str =
 pub const SUBAGENT_TRANSCRIPT_TOOL_PATH: &str =
     "crates/agent/src/tools/read_subagent_transcript_tool.rs";
 
-/// OMEGA-DELTA-0060. Where the scoping decision is applied to a real thread.
+/// OMEGA-DELTA-0060. Where live and persisted transcript lookup is applied.
 pub const SUBAGENT_TRANSCRIPT_ENVIRONMENT_PATH: &str = "crates/agent/src/agent.rs";
 
 /// OMEGA-DELTA-0060. Where the tool is registered and the environment trait
@@ -856,18 +856,6 @@ pub const SUBAGENT_TRANSCRIPT_REGISTRATION_PATH: &str = "crates/agent/src/thread
 
 /// OMEGA-DELTA-0060. The tool name the model sees.
 pub const SUBAGENT_TRANSCRIPT_TOOL_NAME: &str = "read_subagent_transcript";
-
-/// OMEGA-DELTA-0060. Every refusal the scoping decision can produce.
-///
-/// A closed list, not a denylist. The invariant is "the access decision is
-/// total", so a fifth outcome must fail by existing rather than pass by not
-/// being on a list of the four somebody already thought of.
-pub const SUBAGENT_TRANSCRIPT_ACCESS_VARIANTS: &[&str] = &[
-    "Granted",
-    "RefusedIsCaller",
-    "RefusedNotASubagent",
-    "RefusedOtherParent",
-];
 
 /// OMEGA-DELTA-0036. The uninstall script embedded in the shipped `cli`.
 pub const UNINSTALL_SCRIPT_PATH: &str = "script/uninstall.sh";
@@ -10561,129 +10549,50 @@ mod tests {
         }
     }
 
-    /// OMEGA-DELTA-0060. A thread reads only the subagents it spawned.
-    ///
-    /// The scoping rule is the whole risk of this tool. Three things have to
-    /// hold together, and each one is a way the rule could be lost without
-    /// anybody noticing:
-    ///
-    /// 1. The decision is a **total** function over the immediate parent. A new
-    ///    outcome, or a `_ =>` arm, would let a future case fall through to
-    ///    whatever the last arm happens to be.
-    /// 2. The environment reads the caller from **its own** thread. If the
-    ///    caller ever became a parameter, the tool would be naming the thread
-    ///    whose subagents it may read, and the scope would be the tool's
-    ///    discipline rather than the signature's.
-    /// 3. The ancestor chain is never walked. This tool is what makes a
-    ///    grandchild's session ID visible to a root thread, so transitive
-    ///    access would follow from raising `MAX_SUBAGENT_DEPTH` alone.
+    /// OMEGA-DELTA-0060. A session ID reads a live or persisted Omega thread.
     #[test]
-    fn a_thread_reads_only_the_subagents_it_spawned() {
+    fn a_session_id_reads_a_live_or_persisted_thread() {
         let tool_path = repository_path(SUBAGENT_TRANSCRIPT_TOOL_PATH);
         let tool = std::fs::read_to_string(&tool_path)
             .unwrap_or_else(|error| panic!("cannot read {}: {error}", tool_path.display()));
-
-        for variant in SUBAGENT_TRANSCRIPT_ACCESS_VARIANTS {
-            assert!(
-                tool.contains(&format!("TranscriptAccess::{variant}"))
-                    || tool.contains(&format!("{variant} ")),
-                "OMEGA-DELTA-0060: {} no longer names the `{variant}` access \
-                 outcome. The decision is a closed set; a removed or renamed \
-                 outcome is a change to who may read a transcript.",
-                tool_path.display()
-            );
-        }
-
-        // The decision function takes the *immediate* parent, one `Option`, and
-        // nothing that could carry a chain. A `Vec`, an iterator or an
-        // `ancestors` argument here would be transitive access arriving quietly.
-        let compact = without_whitespace(&tool);
         assert!(
-            compact.contains(&without_whitespace(
-                "pub fn subagent_transcript_access(
-                    caller: &acp::SessionId,
-                    target: &acp::SessionId,
-                    target_parent: Option<&acp::SessionId>,
-                ) -> TranscriptAccess"
-            )),
-            "OMEGA-DELTA-0060: the access decision in {} changed shape. It takes \
-             the immediate parent and nothing else on purpose — a chain, a list \
-             or an ancestor walk here grants a root thread everything its \
-             delegates named.",
+            tool.contains("live and persisted Omega")
+                && !tool.contains("Only subagents this thread spawned"),
+            "OMEGA-DELTA-0060: {} reverted its documented scope to direct \
+             subagents instead of general Omega sessions.",
             tool_path.display()
         );
 
-        // No catch-all. A total match over two inputs is what makes "there is
-        // no case that quietly allows" checkable.
-        assert!(
-            !compact.contains(&without_whitespace("_ => TranscriptAccess::Granted")),
-            "OMEGA-DELTA-0060: {} grants access from a catch-all arm. Every \
-             grant must name the case it is granting.",
-            tool_path.display()
-        );
-
-        // The refusal tells the caller whose thread it is. Reporting a real
-        // session as missing sends a caller debugging its own delegation after
-        // a bug that is not there, and withholds nothing it did not already
-        // have.
-        assert!(
-            tool.contains("is a subagent of thread {parent}, not of this"),
-            "OMEGA-DELTA-0060: {} no longer says whose subagent the refused \
-             session is. A refusal that claims the session does not exist is a \
-             lie to a caller that already holds the ID.",
-            tool_path.display()
-        );
-
-        // The environment derives the caller from its own thread. The trait
-        // method has no caller parameter, so the tool cannot ask on behalf of
-        // anyone else.
         let registration_path = repository_path(SUBAGENT_TRANSCRIPT_REGISTRATION_PATH);
         let registration = std::fs::read_to_string(&registration_path)
             .unwrap_or_else(|error| panic!("cannot read {}: {error}", registration_path.display()));
         let registration_compact = without_whitespace(&registration);
         assert!(
             registration_compact.contains(&without_whitespace(
-                "fn read_subagent_transcript(
+                "fn read_thread_transcript(
                     &self,
                     _session_id: acp::SessionId,
                     _window: TranscriptWindowRequest,
                     _cx: &mut App,
-                ) -> Result<SubagentTranscript, String>"
+                ) -> Task<Result<SubagentTranscript, String>>"
             )),
             "OMEGA-DELTA-0060: the transcript read in {} changed shape. It must \
-             not take the calling thread as an argument — the environment knows \
-             which thread is asking, and that is what keeps the scope out of \
-             the tool's hands.",
+             remain asynchronous so a session absent from memory can be loaded \
+             from ThreadStore.",
             registration_path.display()
         );
 
         let environment_path = repository_path(SUBAGENT_TRANSCRIPT_ENVIRONMENT_PATH);
         let environment = std::fs::read_to_string(&environment_path)
             .unwrap_or_else(|error| panic!("cannot read {}: {error}", environment_path.display()));
+        let environment_compact = without_whitespace(&environment);
         assert!(
-            environment.contains("subagent_transcript_access(&caller, target.id(), target.parent_thread_id().as_ref())"),
-            "OMEGA-DELTA-0060: {} no longer decides transcript access from the \
-             target's stored parent. Any other source for that comparison is a \
-             second answer to who may read a transcript.",
-            environment_path.display()
-        );
-        // The refusal returns before any message is read. A shape that builds
-        // the transcript first and filters afterwards is one early return away
-        // from leaking.
-        let refusal_index = environment
-            .find("if let Some(refusal) = access.refusal(&session_id)")
-            .expect(
-                "OMEGA-DELTA-0060: the environment no longer refuses before \
-                 reading. Access must be decided before any content is touched.",
-            );
-        let read_index = environment
-            .find("target.transcript_window(window)")
-            .expect("OMEGA-DELTA-0060: the environment no longer reads a bounded window");
-        assert!(
-            refusal_index < read_index,
-            "OMEGA-DELTA-0060: {} reads transcript content before refusing. \
-             Decide access first; a filter after the read is a leak waiting for \
-             an early return.",
+            environment_compact.contains(".sessions.get(&session_id)")
+                && environment_compact.contains("store.load_thread(session_id.clone(),cx)")
+                && environment_compact
+                    .contains("transcript_window_for_messages(&thread.messages,window)"),
+            "OMEGA-DELTA-0060: {} no longer checks both the live session map \
+             and ThreadStore while preserving bounded transcript windows.",
             environment_path.display()
         );
     }
@@ -18661,9 +18570,9 @@ mod tests {
     }
 
     /// OMEGA-DELTA-0136. The one basic-profile read name routes every address
-    /// through the already-scoped canonical readers.
+    /// through the canonical readers.
     #[test]
-    fn the_basic_read_tool_spends_only_thread_scoped_addresses() {
+    fn the_basic_read_tool_spends_supported_addresses() {
         let tools = read_repository_file("crates/agent/src/tools.rs");
         assert!(
             tools.contains("ReadTool::NAME => Some(\"read\")")
@@ -18691,7 +18600,10 @@ mod tests {
             "skill_file_path",
             "tool:",
             "terminal:",
+            "thread:",
             "session:",
+            "agent:",
+            "delegate:",
             "ReadFileToolInput",
             "ReadSubagentTranscriptToolInput",
             "ReadToolResultArtifactToolInput",
@@ -18713,15 +18625,13 @@ mod tests {
              points at a hidden tool, or reads stopped recording mtimes."
         );
 
-        let transcript =
-            read_repository_file("crates/agent/src/tools/read_subagent_transcript_tool.rs");
-        let access = function_body(&transcript, "subagent_transcript_access")
-            .expect("OMEGA-DELTA-0136: transcript scope decision is gone");
+        let environment = read_repository_file(SUBAGENT_TRANSCRIPT_ENVIRONMENT_PATH);
+        let environment = without_whitespace(&environment);
         assert!(
-            access.contains("Some(parent) if parent == caller => TranscriptAccess::Granted")
-                && access.contains("RefusedOtherParent"),
-            "OMEGA-DELTA-0136: a foreign transcript can pass without the \
-             calling thread being its direct parent."
+            environment.contains(".sessions.get(&session_id)")
+                && environment.contains("store.load_thread(session_id.clone(),cx)"),
+            "OMEGA-DELTA-0136: transcript addresses no longer resolve from \
+             both live sessions and ThreadStore."
         );
 
         let delegate = read_repository_file("crates/agent/src/tools/spawn_agent_tool.rs");

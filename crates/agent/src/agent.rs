@@ -3740,153 +3740,162 @@ impl ThreadEnvironment for NativeThreadEnvironment {
         self.resume_subagent_thread(session_id, cx)
     }
 
-    /// Read a window of a subagent's transcript, refusing anything this thread
-    /// did not spawn.
-    ///
-    /// The order here matters. The access decision is made from the *stored*
-    /// parent of the target thread, before any content is read, and a refusal
-    /// returns without ever touching the messages. There is no path that
-    /// assembles a transcript first and filters afterwards, because that shape
-    /// is one early `return` away from leaking.
-    fn read_subagent_transcript(
+    fn read_thread_transcript(
         &self,
         session_id: acp::SessionId,
         window: TranscriptWindowRequest,
         cx: &mut App,
-    ) -> Result<SubagentTranscript, String> {
+    ) -> Task<Result<SubagentTranscript, String>> {
         if self.external_subagents.borrow().contains_key(&session_id) {
-            let thread = crate::external_subagent_thread(&session_id, cx)
-                .ok_or_else(|| crate::no_transcript_available(&session_id))?;
-            let thread = thread.read(cx);
-            let entries = thread
-                .entries()
-                .iter()
-                .enumerate()
-                .filter_map(|(index, entry)| {
-                    let (role, blocks) = match entry {
-                        acp_thread::AgentThreadEntry::UserMessage(message) => (
-                            TranscriptRole::User,
-                            vec![TranscriptBlock::Text(
-                                message.content.to_markdown(cx).to_string(),
-                            )],
-                        ),
-                        acp_thread::AgentThreadEntry::AssistantMessage(message) => (
-                            TranscriptRole::Assistant,
-                            message
-                                .chunks
-                                .iter()
-                                .map(|chunk| match chunk {
-                                    acp_thread::AssistantMessageChunk::Message {
-                                        block, ..
-                                    } => TranscriptBlock::Text(block.to_markdown(cx).to_string()),
-                                    acp_thread::AssistantMessageChunk::Thought {
-                                        block, ..
-                                    } => {
-                                        TranscriptBlock::Thinking(block.to_markdown(cx).to_string())
-                                    }
-                                })
-                                .collect(),
-                        ),
-                        acp_thread::AgentThreadEntry::ToolCall(tool_call) => {
-                            let name = tool_call.tool_name.as_ref().map_or_else(
-                                || tool_call.label.read(cx).source().to_string(),
-                                ToString::to_string,
-                            );
-                            let id = tool_call.id.to_string();
-                            let input = tool_call.raw_input.as_ref().map_or_else(
-                                || "{}".to_owned(),
-                                |input| {
-                                    serde_json::to_string(input).unwrap_or_else(|error| {
-                                        format!("{{\"serialization_error\":\"{error}\"}}")
+            let transcript = (|| {
+                let thread = crate::external_subagent_thread(&session_id, cx)
+                    .ok_or_else(|| crate::no_transcript_available(&session_id))?;
+                let thread = thread.read(cx);
+                let entries = thread
+                    .entries()
+                    .iter()
+                    .enumerate()
+                    .filter_map(|(index, entry)| {
+                        let (role, blocks) = match entry {
+                            acp_thread::AgentThreadEntry::UserMessage(message) => (
+                                TranscriptRole::User,
+                                vec![TranscriptBlock::Text(
+                                    message.content.to_markdown(cx).to_string(),
+                                )],
+                            ),
+                            acp_thread::AgentThreadEntry::AssistantMessage(message) => (
+                                TranscriptRole::Assistant,
+                                message
+                                    .chunks
+                                    .iter()
+                                    .map(|chunk| match chunk {
+                                        acp_thread::AssistantMessageChunk::Message {
+                                            block,
+                                            ..
+                                        } => {
+                                            TranscriptBlock::Text(block.to_markdown(cx).to_string())
+                                        }
+                                        acp_thread::AssistantMessageChunk::Thought {
+                                            block,
+                                            ..
+                                        } => TranscriptBlock::Thinking(
+                                            block.to_markdown(cx).to_string(),
+                                        ),
                                     })
-                                },
-                            );
-                            let mut blocks = vec![TranscriptBlock::ToolUse {
-                                name: name.clone(),
-                                id: id.clone(),
-                                input,
-                            }];
-                            if let Some(output) = &tool_call.raw_output {
-                                blocks.push(TranscriptBlock::ToolResult {
-                                    name,
-                                    id,
-                                    is_error: matches!(
-                                        tool_call.status,
-                                        acp_thread::ToolCallStatus::Failed
-                                            | acp_thread::ToolCallStatus::Rejected
-                                            | acp_thread::ToolCallStatus::Canceled
-                                    ),
-                                    text: serde_json::to_string(output).unwrap_or_else(|error| {
-                                        format!("{{\"serialization_error\":\"{error}\"}}")
-                                    }),
-                                });
+                                    .collect(),
+                            ),
+                            acp_thread::AgentThreadEntry::ToolCall(tool_call) => {
+                                let name = tool_call.tool_name.as_ref().map_or_else(
+                                    || tool_call.label.read(cx).source().to_string(),
+                                    ToString::to_string,
+                                );
+                                let id = tool_call.id.to_string();
+                                let input = tool_call.raw_input.as_ref().map_or_else(
+                                    || "{}".to_owned(),
+                                    |input| {
+                                        serde_json::to_string(input).unwrap_or_else(|error| {
+                                            format!("{{\"serialization_error\":\"{error}\"}}")
+                                        })
+                                    },
+                                );
+                                let mut blocks = vec![TranscriptBlock::ToolUse {
+                                    name: name.clone(),
+                                    id: id.clone(),
+                                    input,
+                                }];
+                                if let Some(output) = &tool_call.raw_output {
+                                    blocks.push(TranscriptBlock::ToolResult {
+                                        name,
+                                        id,
+                                        is_error: matches!(
+                                            tool_call.status,
+                                            acp_thread::ToolCallStatus::Failed
+                                                | acp_thread::ToolCallStatus::Rejected
+                                                | acp_thread::ToolCallStatus::Canceled
+                                        ),
+                                        text: serde_json::to_string(output).unwrap_or_else(
+                                            |error| {
+                                                format!("{{\"serialization_error\":\"{error}\"}}")
+                                            },
+                                        ),
+                                    });
+                                }
+                                (TranscriptRole::Assistant, blocks)
                             }
-                            (TranscriptRole::Assistant, blocks)
-                        }
-                        _ => return None,
-                    };
-                    Some(TranscriptEntry {
-                        index,
-                        role,
-                        blocks,
+                            _ => return None,
+                        };
+                        Some(TranscriptEntry {
+                            index,
+                            role,
+                            blocks,
+                        })
                     })
+                    .collect::<Vec<_>>();
+                let total_messages = entries.len();
+                let entries = entries
+                    .into_iter()
+                    .skip(window.offset)
+                    .take(window.limit)
+                    .collect();
+                Ok(SubagentTranscript {
+                    session_id,
+                    title: "external delegate".to_owned(),
+                    total_messages,
+                    first_index: window.offset,
+                    entries,
                 })
-                .collect::<Vec<_>>();
-            let total_messages = entries.len();
-            let entries = entries
-                .into_iter()
-                .skip(window.offset)
-                .take(window.limit)
-                .collect();
-            return Ok(SubagentTranscript {
+            })();
+            return Task::ready(transcript);
+        }
+
+        let Some(agent) = self.agent.upgrade() else {
+            return Task::ready(Err("The agent is no longer running".to_string()));
+        };
+        let (target, thread_store) = {
+            let agent = agent.read(cx);
+            (
+                agent
+                    .sessions
+                    .get(&session_id)
+                    .map(|session| session.thread.clone()),
+                agent.thread_store.clone(),
+            )
+        };
+
+        if let Some(target) = target {
+            let target = target.read(cx);
+            let (entries, total_messages) = target.transcript_window(window);
+            return Task::ready(Ok(SubagentTranscript {
                 session_id,
-                title: "external delegate".to_owned(),
+                title: target
+                    .title()
+                    .map_or_else(|| "untitled".to_string(), |title| title.to_string()),
                 total_messages,
                 first_index: window.offset,
                 entries,
-            });
+            }));
         }
 
-        let caller = self
-            .thread
-            .upgrade()
-            .ok_or_else(|| "This thread no longer exists".to_string())?
-            .read(cx)
-            .id()
-            .clone();
-
-        let target = self
-            .agent
-            .upgrade()
-            .ok_or_else(|| "The agent is no longer running".to_string())?
-            .read(cx)
-            .sessions
-            .get(&session_id)
-            .map(|session| session.thread.clone())
-            // An external ACP subagent is a real session that this map
-            // genuinely does not hold — its transcript lives in the agent
-            // server's own process. The sentence lives with the tool that owns
-            // this tool's other sentences, beside `TranscriptAccess::refusal`,
-            // so it can be read and tested without a live agent.
-            .ok_or_else(|| crate::no_transcript_available(&session_id))?;
-
-        let target = target.read(cx);
-        let access =
-            subagent_transcript_access(&caller, target.id(), target.parent_thread_id().as_ref());
-        if let Some(refusal) = access.refusal(&session_id) {
-            return Err(refusal);
-        }
-        debug_assert!(access.is_granted());
-
-        let (entries, total_messages) = target.transcript_window(window);
-        Ok(SubagentTranscript {
-            session_id,
-            title: target
-                .title()
-                .map_or_else(|| "untitled".to_string(), |title| title.to_string()),
-            total_messages,
-            first_index: window.offset,
-            entries,
+        let load_task =
+            thread_store.update(cx, |store, cx| store.load_thread(session_id.clone(), cx));
+        cx.spawn(async move |_| {
+            let thread = load_task
+                .await
+                .map_err(|error| format!("Failed to load session {session_id}: {error:#}"))?
+                .ok_or_else(|| crate::no_transcript_available(&session_id))?;
+            let (entries, total_messages) =
+                crate::thread::transcript_window_for_messages(&thread.messages, window);
+            Ok(SubagentTranscript {
+                session_id,
+                title: if thread.title.is_empty() {
+                    "untitled".to_string()
+                } else {
+                    thread.title.to_string()
+                },
+                total_messages,
+                first_index: window.offset,
+                entries,
+            })
         })
     }
 
@@ -4836,7 +4845,7 @@ mod internal_tests {
     use language_model::fake_provider::{FakeLanguageModel, FakeLanguageModelProvider};
     use language_model::{
         CompletionIntent, LanguageModelCompletionEvent, LanguageModelProviderId,
-        LanguageModelProviderName,
+        LanguageModelProviderName, LanguageModelToolUse, MessageContent,
     };
     use serde_json::json;
     use settings::SettingsStore;
@@ -5073,6 +5082,155 @@ mod internal_tests {
         agent.read_with(cx, |agent, _cx| {
             agent.sessions.get(session_id).unwrap().thread.clone()
         })
+    }
+
+    async fn transcript_read_result(
+        thread: &Entity<Thread>,
+        model: &FakeLanguageModel,
+        path: String,
+        cx: &mut TestAppContext,
+    ) -> String {
+        thread
+            .update(cx, |thread, cx| {
+                thread.send(ClientUserMessageId::new(), ["read it"], cx)
+            })
+            .unwrap();
+        cx.run_until_parked();
+
+        let input = json!({ "path": path, "detail": "full" });
+        model.send_last_completion_stream_event(LanguageModelCompletionEvent::ToolUse(
+            LanguageModelToolUse {
+                id: "read_transcript".into(),
+                name: ReadTool::NAME.into(),
+                raw_input: input.to_string(),
+                input: language_model::LanguageModelToolUseInput::Json(input),
+                is_input_complete: true,
+                thought_signature: None,
+            },
+        ));
+        model.end_last_completion_stream();
+        cx.run_until_parked();
+
+        let request = model
+            .pending_completions()
+            .pop()
+            .expect("the read result should be sent back to the model");
+        let result = request
+            .messages
+            .last()
+            .and_then(|message| message.content.last())
+            .and_then(|content| match content {
+                MessageContent::ToolResult(result) => Some(result),
+                _ => None,
+            })
+            .expect("the last request content should be the read tool result");
+        result.text_contents()
+    }
+
+    #[gpui::test]
+    async fn read_tool_reads_its_own_thread(cx: &mut TestAppContext) {
+        init_test(cx);
+        let (_connection, agent, project, acp_thread) = setup_native_agent_session(cx).await;
+        let session_id = acp_thread.read_with(cx, |thread, _| thread.session_id().clone());
+        let thread = cx.update(|cx| native_thread_for_session(&agent, &session_id, cx));
+        let model = Arc::new(FakeLanguageModel::default());
+        cx.update(|cx| {
+            let path_style = project.read(cx).path_style(cx);
+            thread.update(cx, |thread, cx| {
+                thread.set_model(model.clone(), cx);
+                thread.push_acp_user_block(
+                    ClientUserMessageId::new(),
+                    [acp::ContentBlock::from("own-thread-marker")],
+                    path_style,
+                    cx,
+                );
+            });
+        });
+
+        let result =
+            transcript_read_result(&thread, &model, format!("thread:{session_id}"), cx).await;
+        assert!(result.contains("own-thread-marker"), "{result}");
+    }
+
+    #[gpui::test]
+    async fn read_tool_reads_another_open_top_level_thread(cx: &mut TestAppContext) {
+        init_test(cx);
+        let (connection, agent, project, caller_acp_thread) = setup_native_agent_session(cx).await;
+        let caller_id = caller_acp_thread.read_with(cx, |thread, _| thread.session_id().clone());
+        let caller = cx.update(|cx| native_thread_for_session(&agent, &caller_id, cx));
+        let target_acp_thread = cx
+            .update(|cx| {
+                connection.clone().new_session(
+                    project.clone(),
+                    PathList::new(&[Path::new("/a")]),
+                    cx,
+                )
+            })
+            .await
+            .unwrap();
+        let target_id = target_acp_thread.read_with(cx, |thread, _| thread.session_id().clone());
+        let target = cx.update(|cx| native_thread_for_session(&agent, &target_id, cx));
+        let model = Arc::new(FakeLanguageModel::default());
+        cx.update(|cx| {
+            let path_style = project.read(cx).path_style(cx);
+            caller.update(cx, |thread, cx| thread.set_model(model.clone(), cx));
+            target.update(cx, |thread, cx| {
+                thread.push_acp_user_block(
+                    ClientUserMessageId::new(),
+                    [acp::ContentBlock::from("open-top-level-marker")],
+                    path_style,
+                    cx,
+                );
+            });
+        });
+
+        let result =
+            transcript_read_result(&caller, &model, format!("session:{target_id}"), cx).await;
+        assert!(result.contains("open-top-level-marker"), "{result}");
+    }
+
+    #[gpui::test]
+    async fn read_tool_loads_a_persisted_thread(cx: &mut TestAppContext) {
+        init_test(cx);
+        let (connection, agent, project, caller_acp_thread) = setup_native_agent_session(cx).await;
+        let caller_id = caller_acp_thread.read_with(cx, |thread, _| thread.session_id().clone());
+        let caller = cx.update(|cx| native_thread_for_session(&agent, &caller_id, cx));
+        let target_acp_thread = cx
+            .update(|cx| {
+                connection.clone().new_session(
+                    project.clone(),
+                    PathList::new(&[Path::new("/a")]),
+                    cx,
+                )
+            })
+            .await
+            .unwrap();
+        let target_id = target_acp_thread.read_with(cx, |thread, _| thread.session_id().clone());
+        let target = cx.update(|cx| native_thread_for_session(&agent, &target_id, cx));
+        let model = Arc::new(FakeLanguageModel::default());
+        cx.update(|cx| {
+            let path_style = project.read(cx).path_style(cx);
+            caller.update(cx, |thread, cx| thread.set_model(model.clone(), cx));
+            target.update(cx, |thread, cx| {
+                thread.push_acp_user_block(
+                    ClientUserMessageId::new(),
+                    [acp::ContentBlock::from("persisted-thread-marker")],
+                    path_style,
+                    cx,
+                );
+            });
+        });
+        cx.update(|cx| connection.clone().close_session(&target_id, cx))
+            .await
+            .unwrap();
+        assert!(
+            agent.read_with(cx, |agent, _| !agent.sessions.contains_key(&target_id)),
+            "the target must be absent from the live session map"
+        );
+
+        let result =
+            transcript_read_result(&caller, &model, format!("agent:{target_id}"), cx).await;
+        assert!(result.contains("persisted-thread-marker"), "{result}");
     }
 
     fn request_texts_after_system(

@@ -17,7 +17,7 @@ use crate::{AgentTool, ToolCallEventStream, ToolInput};
 const DEFAULT_FILE_LINE_LIMIT: usize = 2_000;
 const MAX_FILE_LINE_LIMIT: usize = 2_000;
 
-/// Read a file, image, tool-result artifact, delegated-agent transcript, or
+/// Read a file, image, tool-result artifact, thread transcript, or
 /// skill from an address already present in your context.
 ///
 /// File output is line-numbered. Large files return an outline. Use `offset`
@@ -28,7 +28,8 @@ const MAX_FILE_LINE_LIMIT: usize = 2_000;
 /// Address forms:
 /// - Project or global-skill file path: `root/src/main.rs`
 /// - Tool-result artifact: copy `tool:...@v...` or `terminal:...@v...` exactly
-/// - Delegated-agent transcript: `session:<session_id>`
+/// - Thread transcript: `thread:<session_id>`, `session:<session_id>`,
+///   `agent:<session_id>`, or `delegate:<session_id>`
 /// - Skill: copy its catalog `location` exactly, or use `skill:<name>`
 ///
 /// Directories are not readable. Use `bash` with `ls` to inspect them.
@@ -146,25 +147,24 @@ impl AgentTool for ReadTool {
 
             if let Some(session_id) = input
                 .path
-                .strip_prefix("session:")
+                .strip_prefix("thread:")
+                .or_else(|| input.path.strip_prefix("session:"))
                 .or_else(|| input.path.strip_prefix("agent:"))
                 .or_else(|| input.path.strip_prefix("delegate:"))
             {
-                return cx
-                    .update(|cx| {
-                        self.transcripts.read(
-                            ReadSubagentTranscriptToolInput {
-                                session_id: acp::SessionId::from(session_id.to_owned()),
-                                offset: input.offset,
-                                limit: input.limit,
-                                detail: input.detail,
-                            },
-                            &event_stream,
-                            cx,
-                        )
-                    })
-                    .map(Into::into)
-                    .map_err(Into::into);
+                let task = cx.update(|cx| {
+                    self.transcripts.read(
+                        ReadSubagentTranscriptToolInput {
+                            session_id: acp::SessionId::from(session_id.to_owned()),
+                            offset: input.offset,
+                            limit: input.limit,
+                            detail: input.detail,
+                        },
+                        &event_stream,
+                        cx,
+                    )
+                });
+                return task.await.map(Into::into).map_err(Into::into);
             }
 
             let start_line = input.offset.map(|offset| offset.max(1));
