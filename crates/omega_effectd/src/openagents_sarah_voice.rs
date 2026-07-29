@@ -156,12 +156,17 @@ pub(crate) async fn issue_nostr_sarah_voice_session(
             return Err(blocker);
         }
         if status.is_success() {
+            log::error!(
+                "Sarah voice authentication challenge returned unexpected success status {status}"
+            );
             return Err(HostedSessionBlocker::ResponseInvalid);
         }
         return Err(authentication_status_blocker(status));
     }
-    let challenge: ChallengeResponse = serde_json::from_slice(&response_body)
-        .map_err(|_| HostedSessionBlocker::ResponseInvalid)?;
+    let challenge: ChallengeResponse = serde_json::from_slice(&response_body).map_err(|error| {
+        log::error!("Sarah voice authentication challenge could not be decoded: {error}");
+        HostedSessionBlocker::ResponseInvalid
+    })?;
     validate_challenge(&challenge)?;
 
     let request_body = serde_json::to_vec(&VoiceSessionRequest {
@@ -194,6 +199,7 @@ pub(crate) async fn issue_nostr_sarah_voice_session(
             return Err(blocker);
         }
         if status.is_success() {
+            log::error!("Sarah voice session request returned unexpected success status {status}");
             return Err(HostedSessionBlocker::ResponseInvalid);
         }
         return Err(signed_voice_status_blocker(status));
@@ -246,6 +252,7 @@ pub(crate) async fn issue_bearer_sarah_voice_session(
             return Err(blocker);
         }
         if status.is_success() {
+            log::error!("Sarah voice session request returned unexpected success status {status}");
             return Err(HostedSessionBlocker::ResponseInvalid);
         }
         return Err(voice_status_blocker(status));
@@ -349,12 +356,21 @@ fn parse_voice_session_response(
 
 fn validate_challenge(challenge: &ChallengeResponse) -> Result<(), HostedSessionBlocker> {
     let now_ms = now_ms()?;
-    if challenge.schema != SARAH_VOICE_CHALLENGE_PROTOCOL
-        || !valid_ref(&challenge.owner_ref)
-        || !valid_base64url(&challenge.challenge)
-        || challenge.expires_at_ms <= now_ms
+    let invalid_reason = if challenge.schema != SARAH_VOICE_CHALLENGE_PROTOCOL {
+        Some("schema")
+    } else if !valid_ref(&challenge.owner_ref) {
+        Some("owner reference")
+    } else if !valid_base64url(&challenge.challenge) {
+        Some("challenge format")
+    } else if challenge.expires_at_ms <= now_ms
         || challenge.expires_at_ms - now_ms > MAX_CHALLENGE_LIFETIME_MS
     {
+        Some("lifetime")
+    } else {
+        None
+    };
+    if let Some(reason) = invalid_reason {
+        log::error!("Sarah voice authentication challenge failed validation: {reason}");
         return Err(HostedSessionBlocker::ResponseInvalid);
     }
     Ok(())
