@@ -2469,12 +2469,14 @@ than it sounds, because the harness omega#81's acceptance sentence names —
   window opens while `cargo check --workspace` stays green. `0.2.0-rc6` died
   that way.
 - **Omega now:** Zero base hides by two mechanisms and removes nothing. The
-  panels, the editor's status-bar indicators, the editor pane and the tab bar
-  are **not rendered** — their `add_panel_when_ready` calls in
-  `initialize_panels` are skipped and the Exo panel is zoomed. Everything
-  outside the admitted set is **disabled** — the command palette is restricted
-  to `omega_zero_base::ADMITTED_NAMESPACES` and `ADMITTED_ACTIONS`, and an
-  action outside that set is refused at dispatch.
+  editor-only panels, status-bar indicators, editor pane and tab bar are **not
+  rendered**. Files, Git, and Terminal are the deliberate exception: the
+  default surface draws those workbench controls, so production and the proof
+  harness both call `agent_ui::initialize_workbench_panels` to fully load and
+  register their three native panels before constructing `AgentPanel`.
+  Everything outside the admitted set is **disabled** — the command palette is
+  restricted to `omega_zero_base::ADMITTED_NAMESPACES` and
+  `ADMITTED_ACTIONS`, and an action outside that set is refused at dispatch.
 - **A refusal is a sentence, never a silent no-op.** The refusal names the
   action, names the mode, and names the way to get the thing it refused.
   `OMEGA-DELTA-0052` cut the first of the two ways out it used to name: there is
@@ -2487,6 +2489,13 @@ than it sounds, because the harness omega#81's acceptance sentence names —
 - **No action and no key binding is deleted.** `assets/keymaps/default-macos.json`
   and its Linux and Windows siblings are untouched, and every namespace zero
   base hides is still bound in all three.
+- **The shipped and proof front doors share the initializer.** This ordering is
+  not an optimization: `AgentPanel::new` snapshots
+  `workspace.panel::<ProjectPanel>()`, `GitPanel`, and `TerminalPanel`. Loading
+  them concurrently with Agent Panel can permanently capture three `None`
+  values. The helper returns only after all three registrations exist; the
+  zero-base branch and `AgentWorkbenchFrontDoor::mount` both await it before
+  constructing Agent Panel.
 - **Enforced by:** `the_transitional_shell_hides_by_filter_and_refusal_until_subtraction_lands`
   in `crates/omega_deltas/`, which also requires the three keymap files to still
   bind the hidden namespaces, and `keymaps_name_no_deleted_action`, which stays

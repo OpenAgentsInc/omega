@@ -12718,6 +12718,10 @@ impl AgentPanel {
         self.workbench_files_panel.clone()
     }
 
+    pub fn workbench_git_panel_for_tests(&self) -> Option<Entity<GitPanel>> {
+        self.workbench_git_panel.clone()
+    }
+
     pub fn workbench_search_surface_for_tests(
         &self,
         cx: &App,

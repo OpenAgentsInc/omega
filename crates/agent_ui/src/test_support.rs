@@ -528,31 +528,22 @@ impl AgentWorkbenchFrontDoor {
             .update_in(&mut visual, |workspace, window, cx| {
                 (workspace.weak_handle(), window.to_async(cx))
             });
-        let project_panel = ProjectPanel::load(weak_workspace, async_window_context)
+        crate::initialize_workbench_panels(weak_workspace, async_window_context)
             .await
-            .context("loading the native ProjectPanel for the Files surface")?;
-        let (weak_workspace, async_window_context) = workspace
-            .update_in(&mut visual, |workspace, window, cx| {
-                (workspace.weak_handle(), window.to_async(cx))
-            });
-        let git_panel = git_ui::git_panel::GitPanel::load(weak_workspace, async_window_context)
-            .await
-            .context("loading the native GitPanel for the Git surface")?;
-        let (weak_workspace, async_window_context) = workspace
-            .update_in(&mut visual, |workspace, window, cx| {
-                (workspace.weak_handle(), window.to_async(cx))
-            });
-        let terminal_panel = TerminalPanel::load(weak_workspace, async_window_context)
-            .await
-            .context("loading the native TerminalPanel for the Terminal surface")?;
-        workspace.update_in(&mut visual, |workspace, window, cx| {
-            workspace.add_panel(project_panel, window, cx);
-            workspace.add_panel(git_panel, window, cx);
-            workspace.add_panel(terminal_panel, window, cx);
-        });
+            .context("initializing the native workbench panels through the shipped path")?;
         visual.run_until_parked();
 
         let (panel, focused) = workspace.update_in(&mut visual, |workspace, window, cx| {
+            if workspace.panel::<ProjectPanel>(cx).is_none()
+                || workspace
+                    .panel::<git_ui::git_panel::GitPanel>(cx)
+                    .is_none()
+                || workspace.panel::<TerminalPanel>(cx).is_none()
+            {
+                bail!(
+                    "Files, Git, and Terminal must all exist before the test front door constructs AgentPanel"
+                );
+            }
             let panel = cx.new(|cx| AgentPanel::new(workspace, window, cx));
             panel.update(cx, |panel, cx| {
                 panel.enable_workbench_shell_for_tests(cx);
@@ -560,8 +551,8 @@ impl AgentWorkbenchFrontDoor {
             });
             workspace.add_panel(panel.clone(), window, cx);
             let focused = workspace.focus_panel::<AgentPanel>(window, cx).is_some();
-            (panel, focused)
-        });
+            Ok((panel, focused))
+        })?;
         if !focused {
             bail!("AgentPanel was not focusable after being mounted");
         }
@@ -2403,6 +2394,52 @@ mod workbench_front_door_tests {
             }],
         });
         scene
+    }
+
+    #[gpui::test(iterations = 8)]
+    async fn shared_initializer_registers_workbench_panels_before_agent_panel(
+        cx: &mut TestAppContext,
+    ) {
+        let scene = scene_with_thread("shared_workbench_panel_initializer", 1200, true);
+        let front_door = AgentWorkbenchFrontDoor::mount(scene, cx)
+            .await
+            .expect("front door should mount through the shared panel initializer");
+
+        let registered = front_door.workspace.read_with(cx, |workspace, cx| {
+            (
+                workspace
+                    .panel::<ProjectPanel>(cx)
+                    .map(|panel| panel.entity_id()),
+                workspace
+                    .panel::<git_ui::git_panel::GitPanel>(cx)
+                    .map(|panel| panel.entity_id()),
+                workspace
+                    .panel::<TerminalPanel>(cx)
+                    .map(|panel| panel.entity_id()),
+            )
+        });
+        let captured = front_door.panel.read_with(cx, |panel, _cx| {
+            (
+                panel
+                    .workbench_files_panel_for_tests()
+                    .map(|panel| panel.entity_id()),
+                panel
+                    .workbench_git_panel_for_tests()
+                    .map(|panel| panel.entity_id()),
+                panel
+                    .workbench_terminal_panel_for_tests()
+                    .map(|panel| panel.entity_id()),
+            )
+        });
+
+        assert!(
+            registered.0.is_some() && registered.1.is_some() && registered.2.is_some(),
+            "the shared initializer must register Files, Git, and Terminal"
+        );
+        assert_eq!(
+            captured, registered,
+            "AgentPanel must snapshot the exact three entities registered by the shared initializer"
+        );
     }
 
     #[gpui::test(iterations = 8)]

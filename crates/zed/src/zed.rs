@@ -815,13 +815,11 @@ pub(crate) fn initialize_panels(
     window: &mut Window,
     cx: &mut Context<Workspace>,
 ) -> Task<anyhow::Result<()>> {
-    // omega#99. Zero base loads the agent panel and nothing else, opens it, and
-    // zooms it. The project, outline, terminal, git, debug, Agent Computer and
-    // Sarah workroom panels are *not rendered*: their `add_panel_when_ready`
-    // calls are skipped rather than their code removed, so a person who leaves
-    // the mode gets them back in the same window. Zooming is what takes the
-    // editor pane and the tab bar off the screen; no project is opened, so
-    // there is no buffer for them to show.
+    // The workbench rail draws Files, Git, and Terminal, so their native panels
+    // must be registered before AgentPanel snapshots them. The remaining
+    // editor-only panels stay out of this branch. AgentPanel is then opened and
+    // zoomed before the structural seal removes the legacy dock and editor
+    // layout from the rendered surface.
     if omega_zero_base::is_active() {
         return cx.spawn_in(window, async move |workspace_handle, cx| {
             // omega#99. Read the app state inside the task, not outside it.
@@ -851,6 +849,10 @@ pub(crate) fn initialize_panels(
             // Keep startup readiness ahead of the front door so the optional
             // onboarding journey can be restored without racing this panel.
             await_identity_ready(app_state, cx).await.log_err();
+
+            agent_ui::initialize_workbench_panels(workspace_handle.clone(), cx.clone())
+                .await
+                .context("failed to initialize the native workbench panels")?;
 
             initialize_agent_panel(workspace_handle.clone(), cx.clone())
                 .await

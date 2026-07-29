@@ -68,16 +68,24 @@ host can unzoom the Agent Panel or reveal the editor, so native adapters must
 render or delegate to retained native entities without routing through the
 ordinary Workspace open-panel path.
 
+Files, Git, and Terminal share one initialization boundary. Production startup
+and `AgentWorkbenchFrontDoor::mount` both call
+`agent_ui::initialize_workbench_panels`, which fully loads and registers the
+native `ProjectPanel`, `GitPanel`, and `TerminalPanel` before either path may
+construct `AgentPanel`. This ordering is required because `AgentPanel::new`
+captures those exact workspace entities for its adapters. The shared helper
+verifies all three registrations before it returns; a partial load fails the
+front door instead of leaving an enabled rail control permanently waiting for a
+panel that cannot arrive.
+
 ### Native Files adapter {#native-files-adapter}
 
-Workspace creates the native `ProjectPanel` and initially registers it with the
-legacy Workspace dock. Agent Panel captures that exact `Entity<ProjectPanel>`
-when both panels are available. If concurrent startup finishes in the other
-order, the first Files action resolves it from
-`workspace.panel::<ProjectPanel>()`. Merely constructing or rendering Agent
-Panel does not scope, clear, or detach the legacy Project Panel. It remains
-unscoped and retains its existing state outside the first Files handoff
-transaction.
+The shared initializer creates the native `ProjectPanel` and initially
+registers it with the legacy Workspace dock before Agent Panel construction.
+Agent Panel captures that exact `Entity<ProjectPanel>`. Merely constructing or
+rendering Agent Panel does not scope, clear, or detach the legacy Project Panel.
+It remains unscoped and retains its existing state outside the first Files
+handoff transaction.
 
 The first successful Files activation establishes the canonical ownership
 boundary. Agent Panel resolves and applies the typed worktree scope, asks the

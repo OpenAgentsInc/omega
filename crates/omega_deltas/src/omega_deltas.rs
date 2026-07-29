@@ -2845,6 +2845,12 @@ pub const PUBLIC_CHANNEL_VIEW_PATH: &str = "crates/agent_ui/src/omega_public_cha
 /// and where the mode seals the window after the identity gate.
 pub const WORKSPACE_INITIALIZATION_PATH: &str = "crates/zed/src/zed.rs";
 
+/// OMEGA-DELTA-0048. The one initializer shared by shipped and proof front doors.
+pub const AGENT_UI_INITIALIZATION_PATH: &str = "crates/agent_ui/src/agent_ui.rs";
+
+/// OMEGA-DELTA-0048. The proof front door that must call the shipped initializer.
+pub const AGENT_UI_TEST_SUPPORT_PATH: &str = "crates/agent_ui/src/test_support.rs";
+
 /// OMEGA-DELTA-0053. The workspace render, which draws no editor pane or
 /// status bar once zero base is sealed and retains only the platform drag
 /// titlebar.
@@ -8459,17 +8465,73 @@ mod tests {
         let panels_path = repository_path(WORKSPACE_INITIALIZATION_PATH);
         let panels = std::fs::read_to_string(&panels_path)
             .unwrap_or_else(|error| panic!("cannot read {}: {error}", panels_path.display()));
+        let zero_base_branch = panels
+            .split_once("if omega_zero_base::is_active() {")
+            .and_then(|(_, rest)| rest.split_once("\n    cx.spawn_in(window"))
+            .map(|(branch, _)| branch)
+            .unwrap_or_default();
+        assert!(
+            zero_base_branch.contains("agent_ui::initialize_workbench_panels(")
+                && zero_base_branch.find("agent_ui::initialize_workbench_panels(")
+                    < zero_base_branch.find("initialize_agent_panel("),
+            "OMEGA-DELTA-0048: the zero-base branch in {} no longer awaits the \
+             native workbench panels before AgentPanel construction. Files, \
+             Git, and Terminal would render enabled and wait forever on \
+             entities AgentPanel already snapshotted as absent.",
+            panels_path.display()
+        );
+
+        let initializer_path = repository_path(AGENT_UI_INITIALIZATION_PATH);
+        let initializer = std::fs::read_to_string(&initializer_path)
+            .unwrap_or_else(|error| panic!("cannot read {}: {error}", initializer_path.display()));
+        let initializer = function_body(&initializer, "initialize_workbench_panels")
+            .expect("OMEGA-DELTA-0048: the shared workbench panel initializer is gone");
         for token in [
-            "if omega_zero_base::is_active()",
-            "add_panel_when_ready(project_panel",
-            "add_panel_when_ready(sarah_workroom_panel",
+            "ProjectPanel::load(",
+            "GitPanel::load(",
+            "TerminalPanel::load(",
+            "workspace.add_panel(project_panel",
+            "workspace.add_panel(git_panel",
+            "workspace.add_panel(terminal_panel",
+            "workspace.panel::<ProjectPanel>(cx).is_some()",
+            "workspace.panel::<GitPanel>(cx).is_some()",
+            "workspace.panel::<TerminalPanel>(cx).is_some()",
         ] {
             assert!(
-                panels.contains(token),
-                "OMEGA-DELTA-0048: {} lost `{token}`. The panels are skipped in \
-                 zero base and kept everywhere else; deleting their load calls \
-                 would make the mode irreversible inside the window.",
-                panels_path.display()
+                initializer.contains(token),
+                "OMEGA-DELTA-0048: the shared initializer in {} lost \
+                 `{token}`. It must load, register, and verify all three \
+                 native workbench panels as one boundary.",
+                initializer_path.display()
+            );
+        }
+
+        let test_support_path = repository_path(AGENT_UI_TEST_SUPPORT_PATH);
+        let test_support = std::fs::read_to_string(&test_support_path)
+            .unwrap_or_else(|error| panic!("cannot read {}: {error}", test_support_path.display()));
+        let mount = function_body(&test_support, "mount")
+            .expect("OMEGA-DELTA-0048: AgentWorkbenchFrontDoor::mount is gone");
+        assert!(
+            mount.contains("crate::initialize_workbench_panels(")
+                && mount.find("crate::initialize_workbench_panels(")
+                    < mount.find("AgentPanel::new("),
+            "OMEGA-DELTA-0048: the proof front door in {} no longer uses the \
+             shipped initializer before AgentPanel construction. A harness \
+             with its own panel setup can prove a configuration production \
+             never runs.",
+            test_support_path.display()
+        );
+
+        for token in [
+            "ProjectPanel::load(weak_workspace",
+            "GitPanel::load(weak_workspace",
+            "TerminalPanel::load(weak_workspace",
+        ] {
+            assert!(
+                !mount.contains(token),
+                "OMEGA-DELTA-0048: the proof front door in {} still carries \
+                 the duplicate initializer `{token}`.",
+                test_support_path.display()
             );
         }
 

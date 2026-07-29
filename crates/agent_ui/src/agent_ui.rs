@@ -69,13 +69,15 @@ use std::sync::Arc;
 use ::ui::IconName;
 use agent_client_protocol::schema::v1 as acp;
 use agent_settings::{AgentProfileId, AgentSettings};
+use anyhow::Context as _;
 use command_palette_hooks::CommandPaletteFilter;
 use editor::{Editor, SelectionEffects, scroll::Autoscroll};
 use feature_flags::FeatureFlagAppExt as _;
 use fs::Fs;
+use git_ui::git_panel::GitPanel;
 use gpui::{
-    Action, App, Context, Entity, ImageSource, ReadGlobal as _, Resource, SharedString, SharedUri,
-    TaskExt, Window, actions,
+    Action, App, AsyncWindowContext, Context, Entity, ImageSource, ReadGlobal as _, Resource,
+    SharedString, SharedUri, TaskExt, WeakEntity, Window, actions,
 };
 use language::{
     LanguageRegistry,
@@ -85,6 +87,7 @@ use language_model::{
     ConfiguredModel, LanguageModelId, LanguageModelProviderId, LanguageModelRegistry,
 };
 use project::{AgentId, DisableAiSettings};
+use project_panel::ProjectPanel;
 use prompt_store::{self, PromptBuilder, rules_to_skills_migration};
 use rope::Point;
 use schemars::JsonSchema;
@@ -92,6 +95,7 @@ use serde::{Deserialize, Serialize};
 use settings::{LanguageModelSelection, Settings as _, SettingsStore, SidebarSide};
 use std::any::TypeId;
 use std::path::{Path, PathBuf};
+use terminal_view::terminal_panel::TerminalPanel;
 use workspace::{OpenOptions, Workspace};
 
 use crate::agent_configuration::ManageProfilesModal;
@@ -118,6 +122,52 @@ pub use conversation_view::open_markdown_in_workspace;
 pub use conversation_view::{ConversationView, StateChange};
 pub use external_source_prompt::ExternalSourcePrompt;
 pub(crate) use mode_selector::ModeSelector;
+
+/// Registers the native workbench panels before `AgentPanel` construction because
+/// `AgentPanel::new` snapshots these workspace entities.
+pub async fn initialize_workbench_panels(
+    workspace: WeakEntity<Workspace>,
+    mut cx: AsyncWindowContext,
+) -> anyhow::Result<()> {
+    let project_panel = ProjectPanel::load(workspace.clone(), cx.clone());
+    let git_panel = GitPanel::load(workspace.clone(), cx.clone());
+    let terminal_panel = TerminalPanel::load(workspace.clone(), cx.clone());
+
+    let (project_panel, git_panel, terminal_panel) = futures::try_join!(
+        async {
+            project_panel
+                .await
+                .context("loading the native ProjectPanel for the Files workbench surface")
+        },
+        async {
+            git_panel
+                .await
+                .context("loading the native GitPanel for the Git workbench surface")
+        },
+        async {
+            terminal_panel
+                .await
+                .context("loading the native TerminalPanel for the Terminal workbench surface")
+        },
+    )?;
+
+    workspace.update_in(&mut cx, |workspace, window, cx| {
+        workspace.add_panel(project_panel, window, cx);
+        workspace.add_panel(git_panel, window, cx);
+        workspace.add_panel(terminal_panel, window, cx);
+
+        anyhow::ensure!(
+            workspace.panel::<ProjectPanel>(cx).is_some()
+                && workspace.panel::<GitPanel>(cx).is_some()
+                && workspace.panel::<TerminalPanel>(cx).is_some(),
+            "the Files, Git, and Terminal panels must be registered before AgentPanel is constructed"
+        );
+
+        anyhow::Ok(())
+    })??;
+
+    Ok(())
+}
 pub(crate) use model_selector::ModelSelector;
 pub(crate) use model_selector_popover::ModelSelectorPopover;
 pub use thread_import::{
