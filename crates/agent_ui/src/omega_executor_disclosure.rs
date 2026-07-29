@@ -123,7 +123,8 @@ fn classify_connection(
     if let Some(acp_connection) = connection.clone().downcast::<AcpConnection>() {
         let model = acp_connection
             .session_config_options(session_id, cx)
-            .and_then(|options| selected_acp_model(&options.config_options()));
+            .and_then(|options| selected_acp_model(&options.config_options()))
+            .or_else(|| (agent_id == agent_servers::GROK_ID).then(|| "grok".to_string()));
         return ExecutorDisclosure {
             class: ExecutorClass::ExternalAcp,
             agent_id,
