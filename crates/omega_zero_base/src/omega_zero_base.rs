@@ -104,6 +104,13 @@ static SEALED: AtomicBool = AtomicBool::new(false);
 /// - `markdown` is copying out of the transcript.
 /// - `omega_workbench` owns the desktop activity rail and work-surface dock.
 ///
+/// Terminal, pane, buffer-search, and workspace actions remain absent here.
+/// The workbench terminal admits terminal input and search actions
+/// individually below. Terminal creation uses `omega_workbench`'s
+/// thread-bound wrapper instead of admitting a workspace action. Pane actions
+/// stay refused because this process-wide gate cannot prove they were
+/// dispatched from the terminal.
+///
 /// `OMEGA-DELTA-0052` removed `omega_zero_base` from this list. That namespace
 /// held one action, `Leave`, and there is no leaving now. An admitted namespace
 /// with nothing in it is a door left standing where the room was demolished.
@@ -141,6 +148,10 @@ pub const ADMITTED_NAMESPACES: &[&str] = &[
 /// `ResetHints` stays refused because it belongs to the welcome-screen journey
 /// zero base does not render.
 pub const ADMITTED_ACTIONS: &[&str] = &[
+    "buffer_search::Deploy",
+    "buffer_search::Dismiss",
+    "buffer_search::FocusEditor",
+    "buffer_search::UseSelectionForFind",
     "omega::DecreaseBufferFontSize",
     "omega::DecreaseUiFontSize",
     "omega::Hide",
@@ -157,6 +168,25 @@ pub const ADMITTED_ACTIONS: &[&str] = &[
     "omega::ResetUiFontSize",
     "omega::ToggleFullScreen",
     "onboarding::Finish",
+    "search::SelectNextMatch",
+    "search::SelectPreviousMatch",
+    "terminal::Clear",
+    "terminal::Copy",
+    "terminal::Paste",
+    "terminal::PasteText",
+    "terminal::RenameTerminal",
+    "terminal::RerunTask",
+    "terminal::ScrollLineDown",
+    "terminal::ScrollLineUp",
+    "terminal::ScrollPageDown",
+    "terminal::ScrollPageUp",
+    "terminal::ScrollToBottom",
+    "terminal::ScrollToTop",
+    "terminal::SelectAll",
+    "terminal::SendKeystroke",
+    "terminal::SendText",
+    "terminal::ShowCharacterPalette",
+    "terminal::ToggleViMode",
     // OMEGA-DELTA-0054, omega#100. The one control that gives the thread a
     // folder to work in.
     //
@@ -172,6 +202,11 @@ pub const ADMITTED_ACTIONS: &[&str] = &[
     // point is choosing what the thread can see, not opening arbitrary editor
     // surfaces.
     "workspace::Open",
+    // The Agent Panel intercepts this action before Workspace and accepts only
+    // non-local paths inside the active thread worktree. This keeps the native
+    // Files "Open in Terminal" route while preventing the legacy dock/default
+    // cwd path from bypassing workbench ownership.
+    "workspace::OpenTerminal",
     // OMEGA-DELTA-0139, omega#119. A plain transcript file-link click reveals
     // the ordinary editable centre pane. Admit its standard save action
     // without admitting the rest of the workspace namespace.
@@ -315,6 +350,11 @@ mod tests {
             "command_palette::Toggle",
             "omega_workbench::SelectFiles",
             "omega_workbench::CollapseWorkSurfaceDock",
+            "omega_workbench::NewTerminalForThread",
+            "workspace::OpenTerminal",
+            "terminal::SendKeystroke",
+            "terminal::Copy",
+            "buffer_search::Deploy",
             "omega::Quit",
             "omega::OpenSettings",
             "omega::OpenLegacySettings",
@@ -339,6 +379,23 @@ mod tests {
             "workroom::Toggle",
             "omega::Extensions",
             "workspace::ToggleLeftDock",
+            "workspace::ToggleRightDock",
+            "workspace::ToggleBottomDock",
+            "workspace::CloseWindow",
+            "pane::ActivateItem",
+            "pane::ActivateLastItem",
+            "pane::ActivateNextItem",
+            "pane::ActivatePreviousItem",
+            "pane::CloseActiveItem",
+            "pane::CloseAllItems",
+            "pane::SplitDown",
+            "pane::SplitLeft",
+            "pane::SplitRight",
+            "pane::SplitUp",
+            "terminal_panel::Toggle",
+            "terminal::SearchTest",
+            "buffer_search::DeployReplace",
+            "workspace::NewTerminal",
             // The hosted-account path OMEGA-DELTA-0010 and OMEGA-DELTA-0011
             // removed. Admitting `onboarding::Finish` must not drag the rest of
             // its namespace in with it.
@@ -351,6 +408,57 @@ mod tests {
             "omega_zero_base::Leave",
         ] {
             assert!(!admits_action(refused), "{refused} must be refused");
+        }
+    }
+
+    #[test]
+    fn workbench_terminal_keymaps_win_without_admitting_pane_actions() {
+        const AGENT_TERMINAL_CONTEXT: &str = "\"context\": \"AgentPanel > Terminal\"";
+        const WORKBENCH_TERMINAL_CONTEXT: &str = "\"context\": \"WorkbenchTerminal > Terminal\"";
+
+        for (platform, keymap) in [
+            (
+                "linux",
+                include_str!("../../../assets/keymaps/default-linux.json"),
+            ),
+            (
+                "macos",
+                include_str!("../../../assets/keymaps/default-macos.json"),
+            ),
+            (
+                "windows",
+                include_str!("../../../assets/keymaps/default-windows.json"),
+            ),
+        ] {
+            let Some(agent_context_offset) = keymap.find(AGENT_TERMINAL_CONTEXT) else {
+                panic!("{platform} keymap must contain the agent terminal context");
+            };
+            let Some(workbench_context_offset) = keymap.find(WORKBENCH_TERMINAL_CONTEXT) else {
+                panic!("{platform} keymap must contain the workbench terminal context");
+            };
+            assert!(
+                workbench_context_offset > agent_context_offset,
+                "{platform} must place workbench terminal bindings after the broader agent-panel \
+                 terminal bindings so new-terminal and search are not shadowed"
+            );
+
+            let Some(workbench_tail) = keymap.get(workbench_context_offset..) else {
+                panic!("{platform} workbench terminal context offset must be in bounds");
+            };
+            let workbench_section = workbench_tail
+                .split("\n  },")
+                .next()
+                .unwrap_or(workbench_tail);
+            assert!(
+                workbench_section.contains("omega_workbench::NewTerminalForThread"),
+                "{platform} must create terminals through the thread-bound workbench action"
+            );
+            assert!(
+                !workbench_section.contains("workspace::NewTerminal")
+                    && !workbench_section.contains("pane::"),
+                "{platform} workbench terminal bindings must not rely on globally admitted \
+                 workspace or pane actions"
+            );
         }
     }
 

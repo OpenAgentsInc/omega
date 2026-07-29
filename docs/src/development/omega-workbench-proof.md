@@ -427,6 +427,105 @@ Every scene captures the whole workbench plus the named `git-surface` region
 from `WORKBENCH_GIT_REGIONS`; baselines are admitted only after typed identity,
 mutation, focus, accessibility, safety, no-leak, and teardown assertions pass.
 
+### Native Terminal scenes {#native-terminal-scenes}
+
+The typed catalog defines exactly nineteen Terminal scene contracts:
+
+| Scene | Contract |
+| --- | --- |
+| `omega_workbench_terminal_empty` | The one Workspace-owned panel is mounted with no tabs, pending creation, process, or badge. Selecting Terminal performs no implicit spawn. |
+| `omega_workbench_terminal_starting` | One explicit creation is pending with the immutable owner captured by its request and contributes to the running badge. |
+| `omega_workbench_terminal_running` | A native terminal has a stable item/view/process identity, exact initial cwd and immutable creation owner, with the badge derived from native running state. |
+| `omega_workbench_terminal_typed_input` | The focused native `TerminalView` receives the exact deterministic input bytes; transcript focus prevents subsequent bytes from reaching it. |
+| `omega_workbench_terminal_multiple_tabs` | Multiple terminals share one native pane with stable order, unique IDs, one active tab, and immutable owner records. |
+| `omega_workbench_terminal_split` | Native pane splitting preserves exact pane membership, active pane/tab identity, and each terminal's owner and content. |
+| `omega_workbench_terminal_exited` | An exited terminal retains its output and identity but no longer contributes to the running count. |
+| `omega_workbench_terminal_failed_to_spawn` | A failed explicit creation has a non-empty error, balances the pending count, creates no running process, and remains attributable to its request binding. |
+| `omega_workbench_terminal_hidden_running` | A running terminal remains alive and counted while the retained Terminal dock is collapsed. |
+| `omega_workbench_terminal_collapse_reopen` | Collapse and reopen preserve the panel, host, pane, terminal, owner, selection, and output identities without spawning or killing. |
+| `omega_workbench_terminal_focus_return` | Opening focuses native terminal content; the explicit workbench return action restores transcript/composer keyboard ownership. |
+| `omega_workbench_terminal_worktree_removed` | Removing the target disables new creation while retaining existing output and the original terminal owner; no neighboring worktree is selected. |
+| `omega_workbench_terminal_offline` | Offline project state retains local terminal entities/output and blocks new creation instead of treating the process as disconnected state. |
+| `omega_workbench_terminal_reconnecting` | Reconnecting retains the native panel and owners, blocks new creation, and rejects an older lifecycle generation. |
+| `omega_workbench_terminal_thread_switch` | The next-creation binding follows a worktree identity switch while already-created terminals retain their original thread/worktree owners. |
+| `omega_workbench_terminal_stale_spawn` | A completion captured under an older binding is counted as stale and cannot relabel or replace current terminal state. |
+| `omega_workbench_terminal_foreign_spawn_rejected` | A request for a binding other than the authoritative creation target is rejected rather than redirected to a convenient cwd. |
+| `omega_workbench_terminal_error` | A typed owner error is accessible, retains existing output and owners, disables creation, and does not expose stale commands as successful. |
+| `omega_workbench_terminal_narrow` | At a 910×720 viewport, the native Terminal surface and New control remain fully visible and disjoint from the transcript and composer. |
+
+The model fixture distinguishes the current creation binding from every
+process's creation owner. `prove_terminal_surface` compares panel identity,
+lifecycle, pane layout, ordered tab membership and selection, process/item
+identities, cwd, process lifecycle, exact input bytes, spawn results, pending
+and running counts, badge agreement, focus owner, stale/foreign rejection
+counts, and owner immutability. Fixture validation rejects an implicit spawn,
+owner relabel, pane leak, or badge mismatch before GPUI rendering is involved.
+
+The rendered lane deliberately uses display-only `Terminal` entities so it can
+exercise the real `TerminalPanel`, terminal emulator, panes, tabs, focus, and
+surface ownership without launching a shell. Consequently, its
+running/exited/failed text and rail badge are controlled projections of the
+typed fixture rather than observations of an operating-system process. The
+portable front-door tests dispatch focus return and lifecycle transitions; the
+independent typed checker covers pending/running/exited/failed lifecycle,
+stale-generation rejection, and foreign-spawn rejection. A scene receipt
+should be read as the combination of those layers, not as evidence that its
+display-only terminal acquired a PID.
+
+Portable front-door tests then mount the production Agent Panel and retained
+`TerminalPanel`. They dispatch the production Terminal selection, collapse,
+focus-return, explicit-create, and native pane paths. A TerminalPanel-owned
+test factory makes that same explicit-create path record the requested cwd and
+return a display-only terminal, proving the production action passes the
+canonical active worktree and records immutable ownership without starting a
+shell. It can hold completion across a worktree switch and then
+deterministically succeed or fail, proving pending-badge balance,
+captured-owner immutability, and UI-visible failure propagation. Display-only
+terminals receive output through the real terminal emulator and are inserted
+through native tab/split APIs. This makes output retention, selection, focus,
+and byte-level input assertions deterministic. The seam must not be described
+as proof that an operating-system process started.
+
+Run the portable model and front-door layers with:
+
+```sh
+cargo test -p omega_workbench_harness terminal_
+cargo test -p agent_ui --features test-support native_terminal_
+cargo test -p terminal_view --features test-support \
+  test_display_terminal_insertion_and_split_are_deterministic
+```
+
+Inspect registration and run all registered semantic scenes with:
+
+```sh
+script/omega-workbench-proof --list
+script/omega-workbench-proof --semantic-only
+```
+
+To isolate a Terminal scene, pass its exact catalog name:
+
+```sh
+script/omega-workbench-proof \
+  --scene omega_workbench_terminal_collapse_reopen \
+  --semantic-only
+```
+
+The nineteen catalog entries define contracts; they do not by themselves
+prove that semantic execution succeeded or that reviewed pixel baselines are
+committed. Confirm a scene's receipt before making either claim. Run its pixel
+lane only when a baseline has been reviewed and admitted:
+
+```sh
+script/omega-workbench-proof \
+  --scene omega_workbench_terminal_collapse_reopen \
+  --pixel-only
+```
+
+Application restart is deliberately outside the live-process retention claim.
+Native persistence may recreate eligible terminal layout and cwd by starting a
+new shell; it cannot reconnect to the pre-restart operating-system process,
+and task terminals are not serialized.
+
 ### Registering a scene {#registering-a-scene}
 
 Add every named scene to `HERMETIC_SCENES`. A `SceneSpec` defines:

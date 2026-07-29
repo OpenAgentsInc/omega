@@ -727,6 +727,131 @@ pub struct GitSnapshotFixture {
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct TerminalBindingFixture {
+    pub thread_id: String,
+    pub repository_id: String,
+    pub worktree_id: String,
+    pub worktree_abs_path: String,
+    pub generation: u64,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct TerminalOwnerFixture {
+    pub thread_id: String,
+    pub repository_id: String,
+    pub worktree_id: String,
+    pub worktree_abs_path: String,
+    pub initial_cwd: String,
+    pub generation: u64,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case", tag = "state", content = "value")]
+pub enum TerminalProcessLifecycleFixture {
+    Starting,
+    Running { process_id: u32 },
+    Exited { exit_code: i32 },
+    FailedToSpawn(String),
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct TerminalProcessFixture {
+    pub terminal_id: String,
+    pub item_id: String,
+    pub title: String,
+    pub owner: TerminalOwnerFixture,
+    pub current_cwd: String,
+    pub lifecycle: TerminalProcessLifecycleFixture,
+    pub input_bytes: Vec<Vec<u8>>,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum TerminalSplitAxisFixture {
+    Horizontal,
+    Vertical,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case", tag = "node")]
+pub enum TerminalPaneLayoutFixture {
+    Pane {
+        pane_id: String,
+    },
+    Split {
+        axis: TerminalSplitAxisFixture,
+        children: Vec<TerminalPaneLayoutFixture>,
+    },
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct TerminalPaneFixture {
+    pub pane_id: String,
+    pub terminal_ids: Vec<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub active_terminal_id: Option<String>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case", tag = "result", content = "value")]
+pub enum TerminalSpawnResultFixture {
+    Pending,
+    Started { terminal_id: String },
+    IgnoredStale,
+    RejectedForeignBinding,
+    Failed(String),
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct TerminalSpawnFixture {
+    pub request_id: String,
+    pub binding: TerminalBindingFixture,
+    pub requested_cwd: String,
+    pub result: TerminalSpawnResultFixture,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case", tag = "state", content = "message")]
+pub enum TerminalLifecycleFixture {
+    Empty,
+    Ready,
+    Starting,
+    Offline,
+    Reconnecting,
+    WorktreeRemoved,
+    Error(String),
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case", tag = "target", content = "id")]
+pub enum TerminalFocusFixture {
+    Surface,
+    Pane(String),
+    Terminal(String),
+    Search,
+    NewTerminal,
+    Transcript,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct TerminalSnapshotFixture {
+    pub creation_binding: TerminalBindingFixture,
+    pub panel_entity_id: String,
+    pub lifecycle: TerminalLifecycleFixture,
+    pub panes: Vec<TerminalPaneFixture>,
+    pub pane_layout: TerminalPaneLayoutFixture,
+    pub processes: Vec<TerminalProcessFixture>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub selected_terminal_id: Option<String>,
+    pub requested_spawns: Vec<TerminalSpawnFixture>,
+    pub running_badge_count: u32,
+    pub implicit_spawn_count: u32,
+    pub ignored_stale_completion_count: u32,
+    pub rejected_foreign_spawn_count: u32,
+    pub focus: TerminalFocusFixture,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ThreadWorkbenchFixture {
     pub thread_id: String,
     pub generation: u64,
@@ -784,6 +909,8 @@ pub struct WorkbenchScene {
     pub review_sessions: Vec<ReviewSessionFixture>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub git_snapshots: Vec<GitSnapshotFixture>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub terminal_snapshots: Vec<TerminalSnapshotFixture>,
     pub persisted: Option<PersistedSceneFixture>,
 }
 
@@ -819,6 +946,7 @@ impl WorkbenchScene {
             thread_workbenches: Vec::new(),
             review_sessions: Vec::new(),
             git_snapshots: Vec::new(),
+            terminal_snapshots: Vec::new(),
             persisted: None,
         }
     }
@@ -1013,6 +1141,7 @@ impl WorkbenchScene {
         self.validate_thread_workbenches()?;
         self.validate_review_sessions()?;
         self.validate_git_snapshots()?;
+        self.validate_terminal_snapshots()?;
 
         for artifact in &self.artifacts {
             if let Some(worktree_id) = &artifact.worktree_id
@@ -1593,6 +1722,266 @@ impl WorkbenchScene {
             .find(|snapshot| snapshot.binding.thread_id == active_thread_id)
     }
 
+    fn validate_terminal_snapshots(&self) -> Result<()> {
+        unique_ids(
+            "Terminal snapshot thread",
+            self.terminal_snapshots
+                .iter()
+                .map(|snapshot| snapshot.creation_binding.thread_id.as_str()),
+        )?;
+
+        let panel_entity_ids = self
+            .terminal_snapshots
+            .iter()
+            .map(|snapshot| snapshot.panel_entity_id.as_str())
+            .collect::<BTreeSet<_>>();
+        if panel_entity_ids.len() > 1 {
+            bail!("Terminal snapshots must retain one workspace panel entity");
+        }
+
+        for snapshot in &self.terminal_snapshots {
+            let binding = &snapshot.creation_binding;
+            validate_terminal_binding(binding)?;
+            if snapshot.panel_entity_id.trim().is_empty() {
+                bail!("Terminal panel entity ID must not be empty");
+            }
+            let thread = self
+                .threads
+                .iter()
+                .find(|thread| thread.id == binding.thread_id)
+                .ok_or_else(|| {
+                    anyhow!(
+                        "Terminal snapshot references missing thread {:?}",
+                        binding.thread_id
+                    )
+                })?;
+            if thread.repository_id.as_deref() != Some(binding.repository_id.as_str())
+                || thread.worktree_id.as_deref() != Some(binding.worktree_id.as_str())
+            {
+                bail!(
+                    "Terminal snapshot for thread {:?} does not match its repository/worktree binding",
+                    binding.thread_id
+                );
+            }
+            let workbench = self
+                .thread_workbenches
+                .iter()
+                .find(|workbench| workbench.thread_id == binding.thread_id)
+                .ok_or_else(|| {
+                    anyhow!(
+                        "Terminal snapshot for thread {:?} has no workbench projection",
+                        binding.thread_id
+                    )
+                })?;
+            if workbench.generation != binding.generation
+                || workbench.binding.as_ref()
+                    != Some(&WorkbenchBindingFixture {
+                        repository_id: binding.repository_id.clone(),
+                        worktree_id: binding.worktree_id.clone(),
+                    })
+            {
+                bail!(
+                    "Terminal snapshot for thread {:?} does not match its workbench generation/binding",
+                    binding.thread_id
+                );
+            }
+
+            if let TerminalLifecycleFixture::Error(message) = &snapshot.lifecycle
+                && message.trim().is_empty()
+            {
+                bail!("Terminal error lifecycle must contain a message");
+            }
+            if snapshot.implicit_spawn_count != 0 {
+                bail!("selecting or reopening Terminal must not implicitly spawn a process");
+            }
+
+            unique_ids(
+                "Terminal process",
+                snapshot
+                    .processes
+                    .iter()
+                    .map(|process| process.terminal_id.as_str()),
+            )?;
+            unique_ids(
+                "Terminal item",
+                snapshot
+                    .processes
+                    .iter()
+                    .map(|process| process.item_id.as_str()),
+            )?;
+            for process in &snapshot.processes {
+                validate_terminal_process(process, self)?;
+            }
+
+            unique_ids(
+                "Terminal pane",
+                snapshot.panes.iter().map(|pane| pane.pane_id.as_str()),
+            )?;
+            let process_ids = snapshot
+                .processes
+                .iter()
+                .map(|process| process.terminal_id.as_str())
+                .collect::<BTreeSet<_>>();
+            let mut pane_process_ids = BTreeSet::new();
+            for pane in &snapshot.panes {
+                if pane.pane_id.trim().is_empty() {
+                    bail!("Terminal pane ID must not be empty");
+                }
+                for terminal_id in &pane.terminal_ids {
+                    if !process_ids.contains(terminal_id.as_str()) {
+                        bail!(
+                            "Terminal pane {:?} references missing process {terminal_id:?}",
+                            pane.pane_id
+                        );
+                    }
+                    if !pane_process_ids.insert(terminal_id.as_str()) {
+                        bail!("Terminal process {terminal_id:?} appears in multiple panes");
+                    }
+                }
+                if let Some(active_terminal_id) = &pane.active_terminal_id
+                    && !pane
+                        .terminal_ids
+                        .iter()
+                        .any(|terminal_id| terminal_id == active_terminal_id)
+                {
+                    bail!(
+                        "Terminal pane {:?} activates missing process {active_terminal_id:?}",
+                        pane.pane_id
+                    );
+                }
+            }
+            if pane_process_ids != process_ids {
+                bail!("Terminal panes must contain every process exactly once");
+            }
+
+            let mut layout_pane_ids = Vec::new();
+            collect_terminal_layout_panes(&snapshot.pane_layout, &mut layout_pane_ids)?;
+            let layout_pane_ids = layout_pane_ids.into_iter().collect::<BTreeSet<_>>();
+            let pane_ids = snapshot
+                .panes
+                .iter()
+                .map(|pane| pane.pane_id.as_str())
+                .collect::<BTreeSet<_>>();
+            if layout_pane_ids != pane_ids {
+                bail!("Terminal pane layout must contain every pane exactly once");
+            }
+
+            if let Some(selected_terminal_id) = &snapshot.selected_terminal_id {
+                if !process_ids.contains(selected_terminal_id.as_str()) {
+                    bail!("Terminal selection references missing process {selected_terminal_id:?}");
+                }
+                if !snapshot
+                    .panes
+                    .iter()
+                    .any(|pane| pane.active_terminal_id.as_ref() == Some(selected_terminal_id))
+                {
+                    bail!(
+                        "selected Terminal process {selected_terminal_id:?} is not active in its pane"
+                    );
+                }
+            } else if !snapshot.processes.is_empty() {
+                bail!("non-empty Terminal snapshot must select a process");
+            }
+            validate_terminal_focus(&snapshot.focus, snapshot)?;
+
+            unique_ids(
+                "Terminal spawn request",
+                snapshot
+                    .requested_spawns
+                    .iter()
+                    .map(|spawn| spawn.request_id.as_str()),
+            )?;
+            for spawn in &snapshot.requested_spawns {
+                validate_terminal_spawn(spawn, snapshot)?;
+            }
+            let ignored_stale_count = u32::try_from(
+                snapshot
+                    .requested_spawns
+                    .iter()
+                    .filter(|spawn| {
+                        matches!(spawn.result, TerminalSpawnResultFixture::IgnoredStale)
+                    })
+                    .count(),
+            )
+            .context("Terminal stale spawn count overflow")?;
+            if snapshot.ignored_stale_completion_count != ignored_stale_count {
+                bail!("Terminal ignored stale completion count does not match spawn records");
+            }
+            let rejected_foreign_count = u32::try_from(
+                snapshot
+                    .requested_spawns
+                    .iter()
+                    .filter(|spawn| {
+                        matches!(
+                            spawn.result,
+                            TerminalSpawnResultFixture::RejectedForeignBinding
+                        )
+                    })
+                    .count(),
+            )
+            .context("Terminal rejected foreign spawn count overflow")?;
+            if snapshot.rejected_foreign_spawn_count != rejected_foreign_count {
+                bail!("Terminal rejected foreign spawn count does not match spawn records");
+            }
+
+            let running_count = u32::try_from(
+                snapshot
+                    .processes
+                    .iter()
+                    .filter(|process| {
+                        matches!(
+                            process.lifecycle,
+                            TerminalProcessLifecycleFixture::Starting
+                                | TerminalProcessLifecycleFixture::Running { .. }
+                        )
+                    })
+                    .count(),
+            )
+            .context("Terminal running badge count overflow")?;
+            if snapshot.running_badge_count != running_count {
+                bail!(
+                    "Terminal running badge {} does not match {running_count} live processes",
+                    snapshot.running_badge_count
+                );
+            }
+            let expected_badge = (running_count > 0).then_some(running_count);
+            let terminal_surface = surface_fixture(&workbench.surfaces, WorkSurfaceId::Terminal)?;
+            if terminal_surface.badge != expected_badge {
+                bail!(
+                    "Terminal rail badge {:?} disagrees with typed snapshot badge {expected_badge:?}",
+                    terminal_surface.badge
+                );
+            }
+
+            match snapshot.lifecycle {
+                TerminalLifecycleFixture::Empty
+                    if !snapshot.processes.is_empty() || !snapshot.requested_spawns.is_empty() =>
+                {
+                    bail!("empty Terminal lifecycle cannot expose processes or spawn requests");
+                }
+                TerminalLifecycleFixture::Starting
+                    if !snapshot.requested_spawns.iter().any(|spawn| {
+                        matches!(spawn.result, TerminalSpawnResultFixture::Pending)
+                    }) && !snapshot.processes.iter().any(|process| {
+                        matches!(process.lifecycle, TerminalProcessLifecycleFixture::Starting)
+                    }) =>
+                {
+                    bail!("starting Terminal lifecycle requires pending spawn state");
+                }
+                _ => {}
+            }
+        }
+
+        Ok(())
+    }
+
+    pub fn active_terminal_snapshot(&self) -> Option<&TerminalSnapshotFixture> {
+        let active_thread_id = self.active_thread_id.as_deref()?;
+        self.terminal_snapshots
+            .iter()
+            .find(|snapshot| snapshot.creation_binding.thread_id == active_thread_id)
+    }
+
     fn validate_mutation(&self, mutation: &SceneMutation) -> Result<()> {
         match mutation {
             SceneMutation::SetActiveThread { thread_id } => {
@@ -1853,6 +2242,198 @@ fn validate_git_mutation(mutation: &GitMutationFixture) -> Result<()> {
     Ok(())
 }
 
+fn validate_terminal_binding(binding: &TerminalBindingFixture) -> Result<()> {
+    if binding.thread_id.trim().is_empty()
+        || binding.repository_id.trim().is_empty()
+        || binding.worktree_id.trim().is_empty()
+        || binding.worktree_abs_path.trim().is_empty()
+    {
+        bail!("Terminal binding identifiers and worktree path must not be empty");
+    }
+    if !Path::new(&binding.worktree_abs_path).is_absolute() {
+        bail!("Terminal worktree path must be absolute");
+    }
+    Ok(())
+}
+
+fn validate_terminal_process(
+    process: &TerminalProcessFixture,
+    scene: &WorkbenchScene,
+) -> Result<()> {
+    if process.terminal_id.trim().is_empty()
+        || process.item_id.trim().is_empty()
+        || process.title.trim().is_empty()
+    {
+        bail!("Terminal process, item, and title values must not be empty");
+    }
+    let owner = &process.owner;
+    if owner.thread_id.trim().is_empty()
+        || owner.repository_id.trim().is_empty()
+        || owner.worktree_id.trim().is_empty()
+        || owner.worktree_abs_path.trim().is_empty()
+        || owner.initial_cwd.trim().is_empty()
+        || process.current_cwd.trim().is_empty()
+    {
+        bail!("Terminal ownership and cwd values must not be empty");
+    }
+    if !Path::new(&owner.worktree_abs_path).is_absolute()
+        || !Path::new(&owner.initial_cwd).is_absolute()
+        || !Path::new(&process.current_cwd).is_absolute()
+    {
+        bail!("Terminal ownership and cwd paths must be absolute");
+    }
+    if !Path::new(&owner.initial_cwd).starts_with(&owner.worktree_abs_path) {
+        bail!("Terminal initial cwd must remain inside its owning worktree");
+    }
+    let owner_thread = scene
+        .threads
+        .iter()
+        .find(|thread| thread.id == owner.thread_id)
+        .ok_or_else(|| {
+            anyhow!(
+                "Terminal owner references missing thread {:?}",
+                owner.thread_id
+            )
+        })?;
+    if owner_thread.repository_id.as_deref() != Some(owner.repository_id.as_str())
+        || owner_thread.worktree_id.as_deref() != Some(owner.worktree_id.as_str())
+    {
+        bail!(
+            "Terminal owner {:?} does not match its repository/worktree binding",
+            owner.thread_id
+        );
+    }
+    let owner_snapshot = scene
+        .terminal_snapshots
+        .iter()
+        .find(|snapshot| snapshot.creation_binding.thread_id == owner.thread_id)
+        .ok_or_else(|| {
+            anyhow!(
+                "Terminal owner {:?} has no typed creation binding",
+                owner.thread_id
+            )
+        })?;
+    let owner_binding = &owner_snapshot.creation_binding;
+    if owner.repository_id != owner_binding.repository_id
+        || owner.worktree_id != owner_binding.worktree_id
+        || owner.worktree_abs_path != owner_binding.worktree_abs_path
+        || owner.generation != owner_binding.generation
+    {
+        bail!(
+            "Terminal process {:?} was relabeled away from its immutable owner",
+            process.terminal_id
+        );
+    }
+    match &process.lifecycle {
+        TerminalProcessLifecycleFixture::Running { process_id } if *process_id == 0 => {
+            bail!("running Terminal process ID must be non-zero");
+        }
+        TerminalProcessLifecycleFixture::FailedToSpawn(message) if message.trim().is_empty() => {
+            bail!("failed Terminal process must contain a message");
+        }
+        _ => {}
+    }
+    Ok(())
+}
+
+fn collect_terminal_layout_panes<'a>(
+    layout: &'a TerminalPaneLayoutFixture,
+    pane_ids: &mut Vec<&'a str>,
+) -> Result<()> {
+    match layout {
+        TerminalPaneLayoutFixture::Pane { pane_id } => {
+            if pane_id.trim().is_empty() || pane_ids.contains(&pane_id.as_str()) {
+                bail!("Terminal layout pane IDs must be non-empty and unique");
+            }
+            pane_ids.push(pane_id);
+        }
+        TerminalPaneLayoutFixture::Split { children, .. } => {
+            if children.len() < 2 {
+                bail!("Terminal split layout must contain at least two children");
+            }
+            for child in children {
+                collect_terminal_layout_panes(child, pane_ids)?;
+            }
+        }
+    }
+    Ok(())
+}
+
+fn validate_terminal_focus(
+    focus: &TerminalFocusFixture,
+    snapshot: &TerminalSnapshotFixture,
+) -> Result<()> {
+    match focus {
+        TerminalFocusFixture::Pane(pane_id)
+            if !snapshot.panes.iter().any(|pane| pane.pane_id == *pane_id) =>
+        {
+            bail!("Terminal focus references missing pane {pane_id:?}");
+        }
+        TerminalFocusFixture::Terminal(terminal_id)
+            if !snapshot
+                .processes
+                .iter()
+                .any(|process| process.terminal_id == *terminal_id) =>
+        {
+            bail!("Terminal focus references missing process {terminal_id:?}");
+        }
+        _ => {}
+    }
+    Ok(())
+}
+
+fn validate_terminal_spawn(
+    spawn: &TerminalSpawnFixture,
+    snapshot: &TerminalSnapshotFixture,
+) -> Result<()> {
+    if spawn.request_id.trim().is_empty() || spawn.requested_cwd.trim().is_empty() {
+        bail!("Terminal spawn request ID and cwd must not be empty");
+    }
+    validate_terminal_binding(&spawn.binding)?;
+    if !Path::new(&spawn.requested_cwd).is_absolute()
+        || !Path::new(&spawn.requested_cwd).starts_with(&spawn.binding.worktree_abs_path)
+    {
+        bail!("Terminal spawn cwd must remain inside the requested worktree");
+    }
+    let matches_creation_binding = spawn.binding == snapshot.creation_binding;
+    match &spawn.result {
+        TerminalSpawnResultFixture::Pending | TerminalSpawnResultFixture::Failed(_)
+            if !matches_creation_binding =>
+        {
+            bail!("live Terminal spawn request does not match the current creation binding");
+        }
+        TerminalSpawnResultFixture::IgnoredStale if matches_creation_binding => {
+            bail!("ignored Terminal spawn completion is not stale");
+        }
+        TerminalSpawnResultFixture::RejectedForeignBinding if matches_creation_binding => {
+            bail!("rejected Terminal spawn request is not foreign");
+        }
+        TerminalSpawnResultFixture::Started { terminal_id } => {
+            let process = snapshot
+                .processes
+                .iter()
+                .find(|process| process.terminal_id == *terminal_id)
+                .ok_or_else(|| {
+                    anyhow!("Terminal spawn references missing process {terminal_id:?}")
+                })?;
+            if process.owner.thread_id != spawn.binding.thread_id
+                || process.owner.repository_id != spawn.binding.repository_id
+                || process.owner.worktree_id != spawn.binding.worktree_id
+                || process.owner.worktree_abs_path != spawn.binding.worktree_abs_path
+                || process.owner.generation != spawn.binding.generation
+                || process.owner.initial_cwd != spawn.requested_cwd
+            {
+                bail!("started Terminal process does not retain its spawn owner");
+            }
+        }
+        TerminalSpawnResultFixture::Failed(message) if message.trim().is_empty() => {
+            bail!("failed Terminal spawn must contain a message");
+        }
+        _ => {}
+    }
+    Ok(())
+}
+
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct SceneSpec {
     pub name: &'static str,
@@ -1871,7 +2452,29 @@ impl SceneSpec {
     }
 }
 
-pub const WORKBENCH_SHELL_PIXEL_SCENES: [&str; 47] = [
+pub const WORKBENCH_TERMINAL_PIXEL_SCENES: [&str; 19] = [
+    "omega_workbench_terminal_empty",
+    "omega_workbench_terminal_starting",
+    "omega_workbench_terminal_running",
+    "omega_workbench_terminal_typed_input",
+    "omega_workbench_terminal_multiple_tabs",
+    "omega_workbench_terminal_split",
+    "omega_workbench_terminal_narrow",
+    "omega_workbench_terminal_exited",
+    "omega_workbench_terminal_failed_to_spawn",
+    "omega_workbench_terminal_hidden_running",
+    "omega_workbench_terminal_collapse_reopen",
+    "omega_workbench_terminal_focus_return",
+    "omega_workbench_terminal_worktree_removed",
+    "omega_workbench_terminal_offline",
+    "omega_workbench_terminal_reconnecting",
+    "omega_workbench_terminal_thread_switch",
+    "omega_workbench_terminal_stale_spawn",
+    "omega_workbench_terminal_foreign_spawn_rejected",
+    "omega_workbench_terminal_error",
+];
+
+pub const WORKBENCH_SHELL_PIXEL_SCENES: [&str; 66] = [
     "omega_workbench_shell_default",
     "omega_workbench_shell_active_dock",
     "omega_workbench_shell_focus_visible",
@@ -1915,6 +2518,25 @@ pub const WORKBENCH_SHELL_PIXEL_SCENES: [&str; 47] = [
     "omega_workbench_git_offline",
     "omega_workbench_git_reconnect",
     "omega_workbench_git_error",
+    "omega_workbench_terminal_empty",
+    "omega_workbench_terminal_starting",
+    "omega_workbench_terminal_running",
+    "omega_workbench_terminal_typed_input",
+    "omega_workbench_terminal_multiple_tabs",
+    "omega_workbench_terminal_split",
+    "omega_workbench_terminal_narrow",
+    "omega_workbench_terminal_exited",
+    "omega_workbench_terminal_failed_to_spawn",
+    "omega_workbench_terminal_hidden_running",
+    "omega_workbench_terminal_collapse_reopen",
+    "omega_workbench_terminal_focus_return",
+    "omega_workbench_terminal_worktree_removed",
+    "omega_workbench_terminal_offline",
+    "omega_workbench_terminal_reconnecting",
+    "omega_workbench_terminal_thread_switch",
+    "omega_workbench_terminal_stale_spawn",
+    "omega_workbench_terminal_foreign_spawn_rejected",
+    "omega_workbench_terminal_error",
     "omega_workbench_identity_clean",
     "omega_workbench_identity_dirty_conflict",
     "omega_workbench_identity_long_narrow",
@@ -1954,6 +2576,12 @@ pub const WORKBENCH_REVIEW_REGIONS: &[CaptureRegionSpec] = &[CaptureRegionSpec::
 pub const WORKBENCH_GIT_REGIONS: &[CaptureRegionSpec] = &[CaptureRegionSpec::selector_union(
     "git-surface",
     &["omega.workbench.surface.git"],
+    8,
+)];
+
+pub const WORKBENCH_TERMINAL_REGIONS: &[CaptureRegionSpec] = &[CaptureRegionSpec::selector_union(
+    "terminal-surface",
+    &["omega.workbench.surface.terminal"],
     8,
 )];
 
@@ -2301,6 +2929,158 @@ pub const HERMETIC_SCENES: &[SceneSpec] = &[
         fixture_version: 2,
         pixel_policy: APPLE_SILICON_METAL_POLICY,
         regions: WORKBENCH_GIT_REGIONS,
+    },
+    SceneSpec {
+        name: "omega_workbench_terminal_empty",
+        phase: ScenePhase::Recording,
+        viewport: ViewportFixture::new(1200, 720, 2000),
+        fixture_version: 2,
+        pixel_policy: APPLE_SILICON_METAL_POLICY,
+        regions: WORKBENCH_TERMINAL_REGIONS,
+    },
+    SceneSpec {
+        name: "omega_workbench_terminal_starting",
+        phase: ScenePhase::Recording,
+        viewport: ViewportFixture::new(1200, 720, 2000),
+        fixture_version: 2,
+        pixel_policy: APPLE_SILICON_METAL_POLICY,
+        regions: WORKBENCH_TERMINAL_REGIONS,
+    },
+    SceneSpec {
+        name: "omega_workbench_terminal_running",
+        phase: ScenePhase::Recording,
+        viewport: ViewportFixture::new(1200, 720, 2000),
+        fixture_version: 2,
+        pixel_policy: APPLE_SILICON_METAL_POLICY,
+        regions: WORKBENCH_TERMINAL_REGIONS,
+    },
+    SceneSpec {
+        name: "omega_workbench_terminal_typed_input",
+        phase: ScenePhase::Recording,
+        viewport: ViewportFixture::new(1200, 720, 2000),
+        fixture_version: 2,
+        pixel_policy: APPLE_SILICON_METAL_POLICY,
+        regions: WORKBENCH_TERMINAL_REGIONS,
+    },
+    SceneSpec {
+        name: "omega_workbench_terminal_multiple_tabs",
+        phase: ScenePhase::Recording,
+        viewport: ViewportFixture::new(1200, 720, 2000),
+        fixture_version: 2,
+        pixel_policy: APPLE_SILICON_METAL_POLICY,
+        regions: WORKBENCH_TERMINAL_REGIONS,
+    },
+    SceneSpec {
+        name: "omega_workbench_terminal_split",
+        phase: ScenePhase::Recording,
+        viewport: ViewportFixture::new(1200, 720, 2000),
+        fixture_version: 2,
+        pixel_policy: APPLE_SILICON_METAL_POLICY,
+        regions: WORKBENCH_TERMINAL_REGIONS,
+    },
+    SceneSpec {
+        name: "omega_workbench_terminal_narrow",
+        phase: ScenePhase::Recording,
+        viewport: ViewportFixture::new(910, 720, 2000),
+        fixture_version: 2,
+        pixel_policy: APPLE_SILICON_METAL_POLICY,
+        regions: WORKBENCH_TERMINAL_REGIONS,
+    },
+    SceneSpec {
+        name: "omega_workbench_terminal_exited",
+        phase: ScenePhase::Recording,
+        viewport: ViewportFixture::new(1200, 720, 2000),
+        fixture_version: 2,
+        pixel_policy: APPLE_SILICON_METAL_POLICY,
+        regions: WORKBENCH_TERMINAL_REGIONS,
+    },
+    SceneSpec {
+        name: "omega_workbench_terminal_failed_to_spawn",
+        phase: ScenePhase::Recording,
+        viewport: ViewportFixture::new(1200, 720, 2000),
+        fixture_version: 2,
+        pixel_policy: APPLE_SILICON_METAL_POLICY,
+        regions: WORKBENCH_TERMINAL_REGIONS,
+    },
+    SceneSpec {
+        name: "omega_workbench_terminal_hidden_running",
+        phase: ScenePhase::Recording,
+        viewport: ViewportFixture::new(1200, 720, 2000),
+        fixture_version: 2,
+        pixel_policy: APPLE_SILICON_METAL_POLICY,
+        regions: WORKBENCH_TERMINAL_REGIONS,
+    },
+    SceneSpec {
+        name: "omega_workbench_terminal_collapse_reopen",
+        phase: ScenePhase::Restart,
+        viewport: ViewportFixture::new(1200, 720, 2000),
+        fixture_version: 2,
+        pixel_policy: APPLE_SILICON_METAL_POLICY,
+        regions: WORKBENCH_TERMINAL_REGIONS,
+    },
+    SceneSpec {
+        name: "omega_workbench_terminal_focus_return",
+        phase: ScenePhase::Recording,
+        viewport: ViewportFixture::new(1200, 720, 2000),
+        fixture_version: 2,
+        pixel_policy: APPLE_SILICON_METAL_POLICY,
+        regions: WORKBENCH_TERMINAL_REGIONS,
+    },
+    SceneSpec {
+        name: "omega_workbench_terminal_worktree_removed",
+        phase: ScenePhase::Recording,
+        viewport: ViewportFixture::new(1200, 720, 2000),
+        fixture_version: 2,
+        pixel_policy: APPLE_SILICON_METAL_POLICY,
+        regions: WORKBENCH_TERMINAL_REGIONS,
+    },
+    SceneSpec {
+        name: "omega_workbench_terminal_offline",
+        phase: ScenePhase::Recording,
+        viewport: ViewportFixture::new(1200, 720, 2000),
+        fixture_version: 2,
+        pixel_policy: APPLE_SILICON_METAL_POLICY,
+        regions: WORKBENCH_TERMINAL_REGIONS,
+    },
+    SceneSpec {
+        name: "omega_workbench_terminal_reconnecting",
+        phase: ScenePhase::Recording,
+        viewport: ViewportFixture::new(1200, 720, 2000),
+        fixture_version: 2,
+        pixel_policy: APPLE_SILICON_METAL_POLICY,
+        regions: WORKBENCH_TERMINAL_REGIONS,
+    },
+    SceneSpec {
+        name: "omega_workbench_terminal_thread_switch",
+        phase: ScenePhase::Recording,
+        viewport: ViewportFixture::new(1200, 720, 2000),
+        fixture_version: 2,
+        pixel_policy: APPLE_SILICON_METAL_POLICY,
+        regions: WORKBENCH_TERMINAL_REGIONS,
+    },
+    SceneSpec {
+        name: "omega_workbench_terminal_stale_spawn",
+        phase: ScenePhase::Recording,
+        viewport: ViewportFixture::new(1200, 720, 2000),
+        fixture_version: 2,
+        pixel_policy: APPLE_SILICON_METAL_POLICY,
+        regions: WORKBENCH_TERMINAL_REGIONS,
+    },
+    SceneSpec {
+        name: "omega_workbench_terminal_foreign_spawn_rejected",
+        phase: ScenePhase::Recording,
+        viewport: ViewportFixture::new(1200, 720, 2000),
+        fixture_version: 2,
+        pixel_policy: APPLE_SILICON_METAL_POLICY,
+        regions: WORKBENCH_TERMINAL_REGIONS,
+    },
+    SceneSpec {
+        name: "omega_workbench_terminal_error",
+        phase: ScenePhase::Recording,
+        viewport: ViewportFixture::new(1200, 720, 2000),
+        fixture_version: 2,
+        pixel_policy: APPLE_SILICON_METAL_POLICY,
+        regions: WORKBENCH_TERMINAL_REGIONS,
     },
     SceneSpec {
         name: "omega_workbench_identity_clean",
@@ -3106,6 +3886,417 @@ fn git_status(
         status,
         staging,
     }
+}
+
+pub fn workbench_terminal_scene(name: &str) -> Result<WorkbenchScene> {
+    let spec = scene_spec(name).ok_or_else(|| anyhow!("unknown workbench scene {name:?}"))?;
+    if !name.starts_with("omega_workbench_terminal_") {
+        bail!("{name:?} is not a Terminal workbench scene");
+    }
+
+    let active_binding = TerminalBindingFixture {
+        thread_id: "active-thread".into(),
+        repository_id: "visual-repository-beta".into(),
+        worktree_id: "beta-worktree".into(),
+        worktree_abs_path: "/workspace/beta".into(),
+        generation: 11,
+    };
+    let foreign_binding = TerminalBindingFixture {
+        thread_id: "foreign-thread".into(),
+        repository_id: "visual-repository-alpha".into(),
+        worktree_id: "alpha-worktree".into(),
+        worktree_abs_path: "/workspace/alpha".into(),
+        generation: 4,
+    };
+    let active_snapshot = terminal_fixture_for_scene(
+        name,
+        active_binding.clone(),
+        &foreign_binding,
+        "workspace-terminal-panel",
+    )?;
+    let foreign_process = terminal_process(
+        "terminal-alpha",
+        "terminal-item-alpha",
+        "alpha shell",
+        terminal_owner(&foreign_binding, "/workspace/alpha"),
+        TerminalProcessLifecycleFixture::Running { process_id: 4104 },
+    );
+    let foreign_snapshot = TerminalSnapshotFixture {
+        creation_binding: foreign_binding.clone(),
+        panel_entity_id: "workspace-terminal-panel".into(),
+        lifecycle: TerminalLifecycleFixture::Ready,
+        panes: vec![TerminalPaneFixture {
+            pane_id: "foreign-pane".into(),
+            terminal_ids: vec![foreign_process.terminal_id.clone()],
+            active_terminal_id: Some(foreign_process.terminal_id.clone()),
+        }],
+        pane_layout: TerminalPaneLayoutFixture::Pane {
+            pane_id: "foreign-pane".into(),
+        },
+        processes: vec![foreign_process.clone()],
+        selected_terminal_id: Some(foreign_process.terminal_id.clone()),
+        requested_spawns: Vec::new(),
+        running_badge_count: 1,
+        implicit_spawn_count: 0,
+        ignored_stale_completion_count: 0,
+        rejected_foreign_spawn_count: 0,
+        focus: TerminalFocusFixture::Terminal(foreign_process.terminal_id),
+    };
+
+    let mut scene = spec.fixture();
+    scene.content_state = ContentStateFixture::Ready;
+    scene.connectivity = match name {
+        "omega_workbench_terminal_offline" => ConnectivityFixture::Offline,
+        "omega_workbench_terminal_reconnecting" => ConnectivityFixture::Reconnecting,
+        _ => ConnectivityFixture::Online,
+    };
+    scene.project = Some(ProjectFixture {
+        id: "visual-project".into(),
+        display_name: "Omega".into(),
+    });
+    scene.repositories = vec![
+        RepositoryFixture {
+            id: foreign_binding.repository_id.clone(),
+            project_id: "visual-project".into(),
+            worktrees: vec![WorktreeFixture {
+                id: foreign_binding.worktree_id.clone(),
+                branch: Some("alpha-work".into()),
+                git_state: None,
+                dirty_files: 0,
+                conflicts: 0,
+                ahead: 0,
+                behind: 0,
+            }],
+        },
+        RepositoryFixture {
+            id: active_binding.repository_id.clone(),
+            project_id: "visual-project".into(),
+            worktrees: vec![WorktreeFixture {
+                id: active_binding.worktree_id.clone(),
+                branch: Some("codex/terminal-surface".into()),
+                git_state: None,
+                dirty_files: 0,
+                conflicts: 0,
+                ahead: 0,
+                behind: 0,
+            }],
+        },
+    ];
+    scene.threads = vec![
+        ThreadFixture {
+            id: active_binding.thread_id.clone(),
+            project_id: Some("visual-project".into()),
+            repository_id: Some(active_binding.repository_id.clone()),
+            worktree_id: Some(active_binding.worktree_id.clone()),
+        },
+        ThreadFixture {
+            id: foreign_binding.thread_id.clone(),
+            project_id: Some("visual-project".into()),
+            repository_id: Some(foreign_binding.repository_id.clone()),
+            worktree_id: Some(foreign_binding.worktree_id.clone()),
+        },
+    ];
+    scene.active_thread_id = Some(active_binding.thread_id.clone());
+    for surface in &mut scene.surfaces {
+        surface.available = !matches!(surface.id, WorkSurfaceId::Review | WorkSurfaceId::Git);
+        if surface.id == WorkSurfaceId::Terminal {
+            surface.badge = (active_snapshot.running_badge_count > 0)
+                .then_some(active_snapshot.running_badge_count);
+        }
+    }
+    scene.active_surface = Some(WorkSurfaceId::Terminal);
+    scene.dock_open = name != "omega_workbench_terminal_hidden_running";
+    let active_surfaces = scene.surfaces.clone();
+    let mut foreign_surfaces = scene.surfaces.clone();
+    surface_fixture_mut(&mut foreign_surfaces, WorkSurfaceId::Terminal)?.badge =
+        Some(foreign_snapshot.running_badge_count);
+    scene.thread_workbenches = vec![
+        ThreadWorkbenchFixture {
+            thread_id: active_binding.thread_id.clone(),
+            generation: active_binding.generation,
+            binding: Some(WorkbenchBindingFixture {
+                repository_id: active_binding.repository_id.clone(),
+                worktree_id: active_binding.worktree_id.clone(),
+            }),
+            requested_surface: Some(WorkSurfaceId::Terminal),
+            effective_surface: Some(WorkSurfaceId::Terminal),
+            dock_open: scene.dock_open,
+            surfaces: active_surfaces,
+        },
+        ThreadWorkbenchFixture {
+            thread_id: foreign_binding.thread_id.clone(),
+            generation: foreign_binding.generation,
+            binding: Some(WorkbenchBindingFixture {
+                repository_id: foreign_binding.repository_id.clone(),
+                worktree_id: foreign_binding.worktree_id.clone(),
+            }),
+            requested_surface: Some(WorkSurfaceId::Terminal),
+            effective_surface: Some(WorkSurfaceId::Terminal),
+            dock_open: false,
+            surfaces: foreign_surfaces,
+        },
+    ];
+    scene.terminal_snapshots = vec![active_snapshot, foreign_snapshot];
+    if name == "omega_workbench_terminal_collapse_reopen" {
+        scene.persisted = Some(PersistedSceneFixture {
+            requested_surface: Some(WorkSurfaceId::Terminal),
+            dock_open: true,
+            revision: 9,
+            mutations_before_restart: vec![
+                SceneMutation::SetActiveSurface {
+                    surface: Some(WorkSurfaceId::Terminal),
+                },
+                SceneMutation::SetDockOpen { open: false },
+                SceneMutation::SetDockOpen { open: true },
+            ],
+        });
+    }
+    scene.validate()?;
+    Ok(scene)
+}
+
+fn terminal_fixture_for_scene(
+    name: &str,
+    binding: TerminalBindingFixture,
+    foreign_binding: &TerminalBindingFixture,
+    panel_entity_id: &str,
+) -> Result<TerminalSnapshotFixture> {
+    let active_owner = terminal_owner(&binding, "/workspace/beta");
+    let running_process = || {
+        terminal_process(
+            "terminal-beta",
+            "terminal-item-beta",
+            "beta shell",
+            active_owner.clone(),
+            TerminalProcessLifecycleFixture::Running { process_id: 1117 },
+        )
+    };
+    let mut snapshot = TerminalSnapshotFixture {
+        creation_binding: binding.clone(),
+        panel_entity_id: panel_entity_id.into(),
+        lifecycle: TerminalLifecycleFixture::Ready,
+        panes: vec![TerminalPaneFixture {
+            pane_id: "beta-pane".into(),
+            terminal_ids: vec!["terminal-beta".into()],
+            active_terminal_id: Some("terminal-beta".into()),
+        }],
+        pane_layout: TerminalPaneLayoutFixture::Pane {
+            pane_id: "beta-pane".into(),
+        },
+        processes: vec![running_process()],
+        selected_terminal_id: Some("terminal-beta".into()),
+        requested_spawns: vec![TerminalSpawnFixture {
+            request_id: "spawn-beta".into(),
+            binding: binding.clone(),
+            requested_cwd: "/workspace/beta".into(),
+            result: TerminalSpawnResultFixture::Started {
+                terminal_id: "terminal-beta".into(),
+            },
+        }],
+        running_badge_count: 1,
+        implicit_spawn_count: 0,
+        ignored_stale_completion_count: 0,
+        rejected_foreign_spawn_count: 0,
+        focus: TerminalFocusFixture::Terminal("terminal-beta".into()),
+    };
+
+    match name {
+        "omega_workbench_terminal_empty" => {
+            snapshot.lifecycle = TerminalLifecycleFixture::Empty;
+            snapshot.panes[0].terminal_ids.clear();
+            snapshot.panes[0].active_terminal_id = None;
+            snapshot.processes.clear();
+            snapshot.selected_terminal_id = None;
+            snapshot.requested_spawns.clear();
+            snapshot.running_badge_count = 0;
+            snapshot.focus = TerminalFocusFixture::NewTerminal;
+        }
+        "omega_workbench_terminal_starting" => {
+            snapshot.lifecycle = TerminalLifecycleFixture::Starting;
+            snapshot.processes[0].lifecycle = TerminalProcessLifecycleFixture::Starting;
+            snapshot.requested_spawns[0].result = TerminalSpawnResultFixture::Pending;
+        }
+        "omega_workbench_terminal_running"
+        | "omega_workbench_terminal_hidden_running"
+        | "omega_workbench_terminal_collapse_reopen"
+        | "omega_workbench_terminal_narrow" => {}
+        "omega_workbench_terminal_typed_input" => {
+            snapshot.processes[0].input_bytes =
+                vec![b"cargo test -p omega_workbench_harness\r".to_vec()];
+        }
+        "omega_workbench_terminal_multiple_tabs" => {
+            let second = terminal_process(
+                "terminal-beta-tests",
+                "terminal-item-beta-tests",
+                "tests",
+                active_owner,
+                TerminalProcessLifecycleFixture::Running { process_id: 1129 },
+            );
+            snapshot.panes[0]
+                .terminal_ids
+                .push(second.terminal_id.clone());
+            snapshot.panes[0].active_terminal_id = Some(second.terminal_id.clone());
+            snapshot.selected_terminal_id = Some(second.terminal_id.clone());
+            snapshot.processes.push(second.clone());
+            snapshot.requested_spawns.push(TerminalSpawnFixture {
+                request_id: "spawn-beta-tests".into(),
+                binding,
+                requested_cwd: "/workspace/beta".into(),
+                result: TerminalSpawnResultFixture::Started {
+                    terminal_id: second.terminal_id,
+                },
+            });
+            snapshot.running_badge_count = 2;
+        }
+        "omega_workbench_terminal_split" => {
+            let split = terminal_process(
+                "terminal-beta-split",
+                "terminal-item-beta-split",
+                "split",
+                active_owner,
+                TerminalProcessLifecycleFixture::Running { process_id: 1133 },
+            );
+            snapshot.panes.push(TerminalPaneFixture {
+                pane_id: "beta-split-pane".into(),
+                terminal_ids: vec![split.terminal_id.clone()],
+                active_terminal_id: Some(split.terminal_id.clone()),
+            });
+            snapshot.pane_layout = TerminalPaneLayoutFixture::Split {
+                axis: TerminalSplitAxisFixture::Horizontal,
+                children: vec![
+                    TerminalPaneLayoutFixture::Pane {
+                        pane_id: "beta-pane".into(),
+                    },
+                    TerminalPaneLayoutFixture::Pane {
+                        pane_id: "beta-split-pane".into(),
+                    },
+                ],
+            };
+            snapshot.selected_terminal_id = Some(split.terminal_id.clone());
+            snapshot.processes.push(split.clone());
+            snapshot.requested_spawns.push(TerminalSpawnFixture {
+                request_id: "spawn-beta-split".into(),
+                binding,
+                requested_cwd: "/workspace/beta".into(),
+                result: TerminalSpawnResultFixture::Started {
+                    terminal_id: split.terminal_id,
+                },
+            });
+            snapshot.running_badge_count = 2;
+        }
+        "omega_workbench_terminal_exited" => {
+            snapshot.processes[0].lifecycle =
+                TerminalProcessLifecycleFixture::Exited { exit_code: 0 };
+            snapshot.running_badge_count = 0;
+            snapshot.focus = TerminalFocusFixture::Surface;
+        }
+        "omega_workbench_terminal_failed_to_spawn" => {
+            snapshot.processes[0].lifecycle = TerminalProcessLifecycleFixture::FailedToSpawn(
+                "configured shell was not found".into(),
+            );
+            snapshot.requested_spawns[0].result =
+                TerminalSpawnResultFixture::Failed("configured shell was not found".into());
+            snapshot.running_badge_count = 0;
+            snapshot.focus = TerminalFocusFixture::Surface;
+        }
+        "omega_workbench_terminal_focus_return" => {
+            snapshot.focus = TerminalFocusFixture::Transcript;
+        }
+        "omega_workbench_terminal_worktree_removed" => {
+            snapshot.lifecycle = TerminalLifecycleFixture::WorktreeRemoved;
+            snapshot.focus = TerminalFocusFixture::Surface;
+        }
+        "omega_workbench_terminal_offline" => {
+            snapshot.lifecycle = TerminalLifecycleFixture::Offline;
+            snapshot.focus = TerminalFocusFixture::Surface;
+        }
+        "omega_workbench_terminal_reconnecting" => {
+            snapshot.lifecycle = TerminalLifecycleFixture::Reconnecting;
+            snapshot.focus = TerminalFocusFixture::Surface;
+        }
+        "omega_workbench_terminal_thread_switch" => {
+            let foreign = terminal_process(
+                "terminal-alpha-visible",
+                "terminal-item-alpha-visible",
+                "alpha shell",
+                terminal_owner(foreign_binding, "/workspace/alpha"),
+                TerminalProcessLifecycleFixture::Running { process_id: 4105 },
+            );
+            snapshot.panes[0]
+                .terminal_ids
+                .push(foreign.terminal_id.clone());
+            snapshot.panes[0].active_terminal_id = Some(foreign.terminal_id.clone());
+            snapshot.selected_terminal_id = Some(foreign.terminal_id.clone());
+            snapshot.processes.push(foreign);
+            snapshot.running_badge_count = 2;
+        }
+        "omega_workbench_terminal_stale_spawn" => {
+            let mut stale_binding = binding;
+            stale_binding.generation = stale_binding.generation.saturating_sub(1);
+            snapshot.requested_spawns.push(TerminalSpawnFixture {
+                request_id: "stale-spawn".into(),
+                binding: stale_binding,
+                requested_cwd: "/workspace/beta".into(),
+                result: TerminalSpawnResultFixture::IgnoredStale,
+            });
+            snapshot.ignored_stale_completion_count = 1;
+        }
+        "omega_workbench_terminal_foreign_spawn_rejected" => {
+            snapshot.requested_spawns.push(TerminalSpawnFixture {
+                request_id: "foreign-spawn".into(),
+                binding: foreign_binding.clone(),
+                requested_cwd: "/workspace/alpha".into(),
+                result: TerminalSpawnResultFixture::RejectedForeignBinding,
+            });
+            snapshot.rejected_foreign_spawn_count = 1;
+        }
+        "omega_workbench_terminal_error" => {
+            snapshot.lifecycle =
+                TerminalLifecycleFixture::Error("terminal state could not be restored".into());
+            snapshot.focus = TerminalFocusFixture::Surface;
+        }
+        _ => bail!("unknown Terminal workbench scene {name:?}"),
+    }
+    Ok(snapshot)
+}
+
+fn terminal_owner(binding: &TerminalBindingFixture, initial_cwd: &str) -> TerminalOwnerFixture {
+    TerminalOwnerFixture {
+        thread_id: binding.thread_id.clone(),
+        repository_id: binding.repository_id.clone(),
+        worktree_id: binding.worktree_id.clone(),
+        worktree_abs_path: binding.worktree_abs_path.clone(),
+        initial_cwd: initial_cwd.into(),
+        generation: binding.generation,
+    }
+}
+
+fn terminal_process(
+    terminal_id: &str,
+    item_id: &str,
+    title: &str,
+    owner: TerminalOwnerFixture,
+    lifecycle: TerminalProcessLifecycleFixture,
+) -> TerminalProcessFixture {
+    TerminalProcessFixture {
+        terminal_id: terminal_id.into(),
+        item_id: item_id.into(),
+        title: title.into(),
+        current_cwd: owner.initial_cwd.clone(),
+        owner,
+        lifecycle,
+        input_bytes: Vec::new(),
+    }
+}
+
+fn surface_fixture_mut(
+    fixtures: &mut [SurfaceFixture],
+    surface_id: WorkSurfaceId,
+) -> Result<&mut SurfaceFixture> {
+    fixtures
+        .iter_mut()
+        .find(|fixture| fixture.id == surface_id)
+        .ok_or_else(|| anyhow!("missing {surface_id:?} surface fixture"))
 }
 
 pub fn validate_scene_catalog() -> Result<()> {
@@ -4086,6 +5277,205 @@ pub fn prove_git_surface(
 }
 
 fn require_git_match<T>(
+    name: &str,
+    expected: &T,
+    actual: &T,
+    checks: &mut Vec<ProofCheck>,
+) -> Result<()>
+where
+    T: std::fmt::Debug + PartialEq,
+{
+    if expected != actual {
+        let detail = format!("expected {expected:?}, got {actual:?}");
+        checks.push(ProofCheck::failed(name, &detail));
+        bail!("{name}: {detail}");
+    }
+    checks.push(ProofCheck::passed(name));
+    Ok(())
+}
+
+pub fn prove_terminal_surface(
+    scene: &WorkbenchScene,
+    actual: &TerminalSnapshotFixture,
+) -> Result<Vec<ProofCheck>> {
+    scene.validate()?;
+    let expected = scene
+        .active_terminal_snapshot()
+        .context("Terminal proof scene has no active Terminal snapshot")?;
+    let mut checks = Vec::new();
+
+    require_terminal_match(
+        "terminal-creation-binding",
+        &expected.creation_binding,
+        &actual.creation_binding,
+        &mut checks,
+    )?;
+    require_terminal_match(
+        "terminal-panel-entity",
+        &expected.panel_entity_id,
+        &actual.panel_entity_id,
+        &mut checks,
+    )?;
+    require_terminal_match(
+        "terminal-lifecycle",
+        &expected.lifecycle,
+        &actual.lifecycle,
+        &mut checks,
+    )?;
+    require_terminal_match(
+        "terminal-pane-layout",
+        &expected.pane_layout,
+        &actual.pane_layout,
+        &mut checks,
+    )?;
+    require_terminal_match(
+        "terminal-pane-tabs-selection",
+        &(&expected.panes, &expected.selected_terminal_id),
+        &(&actual.panes, &actual.selected_terminal_id),
+        &mut checks,
+    )?;
+    require_terminal_match(
+        "terminal-process-identities",
+        &expected
+            .processes
+            .iter()
+            .map(|process| (&process.terminal_id, &process.item_id, &process.title))
+            .collect::<Vec<_>>(),
+        &actual
+            .processes
+            .iter()
+            .map(|process| (&process.terminal_id, &process.item_id, &process.title))
+            .collect::<Vec<_>>(),
+        &mut checks,
+    )?;
+    require_terminal_match(
+        "terminal-immutable-owners",
+        &expected
+            .processes
+            .iter()
+            .map(|process| &process.owner)
+            .collect::<Vec<_>>(),
+        &actual
+            .processes
+            .iter()
+            .map(|process| &process.owner)
+            .collect::<Vec<_>>(),
+        &mut checks,
+    )?;
+    require_terminal_match(
+        "terminal-cwd-identity",
+        &expected
+            .processes
+            .iter()
+            .map(|process| &process.current_cwd)
+            .collect::<Vec<_>>(),
+        &actual
+            .processes
+            .iter()
+            .map(|process| &process.current_cwd)
+            .collect::<Vec<_>>(),
+        &mut checks,
+    )?;
+    require_terminal_match(
+        "terminal-process-lifecycles",
+        &expected
+            .processes
+            .iter()
+            .map(|process| &process.lifecycle)
+            .collect::<Vec<_>>(),
+        &actual
+            .processes
+            .iter()
+            .map(|process| &process.lifecycle)
+            .collect::<Vec<_>>(),
+        &mut checks,
+    )?;
+    require_terminal_match(
+        "terminal-input-bytes",
+        &expected
+            .processes
+            .iter()
+            .map(|process| &process.input_bytes)
+            .collect::<Vec<_>>(),
+        &actual
+            .processes
+            .iter()
+            .map(|process| &process.input_bytes)
+            .collect::<Vec<_>>(),
+        &mut checks,
+    )?;
+    require_terminal_match(
+        "terminal-spawn-results",
+        &expected.requested_spawns,
+        &actual.requested_spawns,
+        &mut checks,
+    )?;
+    require_terminal_match(
+        "terminal-running-badge",
+        &expected.running_badge_count,
+        &actual.running_badge_count,
+        &mut checks,
+    )?;
+    require_terminal_match(
+        "terminal-no-implicit-spawn",
+        &expected.implicit_spawn_count,
+        &actual.implicit_spawn_count,
+        &mut checks,
+    )?;
+    require_terminal_match(
+        "terminal-ignored-stale-completion-count",
+        &expected.ignored_stale_completion_count,
+        &actual.ignored_stale_completion_count,
+        &mut checks,
+    )?;
+    require_terminal_match(
+        "terminal-rejected-foreign-spawn-count",
+        &expected.rejected_foreign_spawn_count,
+        &actual.rejected_foreign_spawn_count,
+        &mut checks,
+    )?;
+    require_terminal_match(
+        "terminal-focus-owner",
+        &expected.focus,
+        &actual.focus,
+        &mut checks,
+    )?;
+
+    let active_workbench = scene
+        .active_thread_workbench()
+        .context("Terminal proof scene has no active workbench projection")?;
+    let rail_badge = surface_fixture(&active_workbench.surfaces, WorkSurfaceId::Terminal)?.badge;
+    let actual_badge = (actual.running_badge_count > 0).then_some(actual.running_badge_count);
+    require_terminal_match(
+        "terminal-badge-agreement",
+        &rail_badge,
+        &actual_badge,
+        &mut checks,
+    )?;
+
+    let expected_foreign_owners = expected
+        .processes
+        .iter()
+        .filter(|process| process.owner.thread_id != expected.creation_binding.thread_id)
+        .map(|process| (&process.terminal_id, &process.owner))
+        .collect::<Vec<_>>();
+    let actual_foreign_owners = actual
+        .processes
+        .iter()
+        .filter(|process| process.owner.thread_id != expected.creation_binding.thread_id)
+        .map(|process| (&process.terminal_id, &process.owner))
+        .collect::<Vec<_>>();
+    require_terminal_match(
+        "terminal-no-owner-relabel",
+        &expected_foreign_owners,
+        &actual_foreign_owners,
+        &mut checks,
+    )?;
+
+    Ok(checks)
+}
+
+fn require_terminal_match<T>(
     name: &str,
     expected: &T,
     actual: &T,
@@ -5840,11 +7230,195 @@ mod tests {
     }
 
     #[test]
+    fn terminal_scene_catalog_models_shared_panel_and_distinct_creation_bindings() -> Result<()> {
+        for name in WORKBENCH_TERMINAL_PIXEL_SCENES {
+            let scene = workbench_terminal_scene(name)?;
+            assert_eq!(scene.fixture_version, 2);
+            assert_eq!(scene.terminal_snapshots.len(), 2);
+            assert_eq!(scene.active_surface, Some(WorkSurfaceId::Terminal));
+
+            let active = scene
+                .active_terminal_snapshot()
+                .context("Terminal fixture has no active snapshot")?;
+            let foreign = scene
+                .terminal_snapshots
+                .iter()
+                .find(|snapshot| {
+                    snapshot.creation_binding.thread_id != active.creation_binding.thread_id
+                })
+                .context("Terminal fixture has no foreign snapshot")?;
+            assert_eq!(active.panel_entity_id, foreign.panel_entity_id);
+            assert_ne!(
+                active.creation_binding.thread_id,
+                foreign.creation_binding.thread_id
+            );
+            assert_ne!(
+                active.creation_binding.worktree_id,
+                foreign.creation_binding.worktree_id
+            );
+            assert_ne!(
+                active.creation_binding.generation,
+                foreign.creation_binding.generation
+            );
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn terminal_fixture_validation_rejects_implicit_spawn_owner_relabel_and_pane_leaks()
+    -> Result<()> {
+        let scene = workbench_terminal_scene("omega_workbench_terminal_running")?;
+
+        let mut implicit_spawn = scene.clone();
+        implicit_spawn.terminal_snapshots[0].implicit_spawn_count = 1;
+        assert!(
+            implicit_spawn
+                .validate()
+                .expect_err("implicit Terminal spawn must fail")
+                .to_string()
+                .contains("must not implicitly spawn")
+        );
+
+        let mut relabeled = scene.clone();
+        relabeled.terminal_snapshots[0].processes[0]
+            .owner
+            .generation += 1;
+        assert!(
+            relabeled
+                .validate()
+                .expect_err("relabeled Terminal owner must fail")
+                .to_string()
+                .contains("immutable owner")
+        );
+
+        let mut missing_pane_membership = scene.clone();
+        missing_pane_membership.terminal_snapshots[0].panes[0]
+            .terminal_ids
+            .clear();
+        missing_pane_membership.terminal_snapshots[0].panes[0].active_terminal_id = None;
+        assert!(
+            missing_pane_membership
+                .validate()
+                .expect_err("orphaned Terminal process must fail")
+                .to_string()
+                .contains("every process exactly once")
+        );
+
+        let mut bad_badge = scene;
+        bad_badge.terminal_snapshots[0].running_badge_count = 0;
+        assert!(
+            bad_badge
+                .validate()
+                .expect_err("incorrect Terminal badge must fail")
+                .to_string()
+                .contains("live processes")
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn terminal_proof_checks_structure_processes_spawn_focus_and_owner_identity() -> Result<()> {
+        let scene = workbench_terminal_scene("omega_workbench_terminal_thread_switch")?;
+        let actual = scene
+            .active_terminal_snapshot()
+            .context("Terminal fixture has no active snapshot")?
+            .clone();
+        let checks = prove_terminal_surface(&scene, &actual)?;
+        let names = checks
+            .iter()
+            .map(|check| check.name.as_str())
+            .collect::<BTreeSet<_>>();
+        for required in [
+            "terminal-creation-binding",
+            "terminal-panel-entity",
+            "terminal-lifecycle",
+            "terminal-pane-layout",
+            "terminal-pane-tabs-selection",
+            "terminal-process-identities",
+            "terminal-immutable-owners",
+            "terminal-cwd-identity",
+            "terminal-process-lifecycles",
+            "terminal-input-bytes",
+            "terminal-spawn-results",
+            "terminal-running-badge",
+            "terminal-badge-agreement",
+            "terminal-no-implicit-spawn",
+            "terminal-ignored-stale-completion-count",
+            "terminal-rejected-foreign-spawn-count",
+            "terminal-focus-owner",
+            "terminal-no-owner-relabel",
+        ] {
+            assert!(
+                names.contains(required),
+                "missing Terminal proof {required}"
+            );
+        }
+
+        let mut relabeled = actual;
+        relabeled.processes[1].owner = relabeled.processes[0].owner.clone();
+        assert!(prove_terminal_surface(&scene, &relabeled).is_err());
+        Ok(())
+    }
+
+    #[test]
+    fn terminal_proof_observes_stale_and_foreign_spawn_rejection() -> Result<()> {
+        let stale = workbench_terminal_scene("omega_workbench_terminal_stale_spawn")?;
+        let stale_actual = stale
+            .active_terminal_snapshot()
+            .context("stale Terminal fixture has no active snapshot")?
+            .clone();
+        assert_eq!(stale_actual.ignored_stale_completion_count, 1);
+        assert!(matches!(
+            stale_actual
+                .requested_spawns
+                .last()
+                .map(|spawn| &spawn.result),
+            Some(TerminalSpawnResultFixture::IgnoredStale)
+        ));
+        prove_terminal_surface(&stale, &stale_actual)?;
+
+        let foreign = workbench_terminal_scene("omega_workbench_terminal_foreign_spawn_rejected")?;
+        let foreign_actual = foreign
+            .active_terminal_snapshot()
+            .context("foreign Terminal fixture has no active snapshot")?
+            .clone();
+        assert_eq!(foreign_actual.rejected_foreign_spawn_count, 1);
+        assert!(matches!(
+            foreign_actual
+                .requested_spawns
+                .last()
+                .map(|spawn| &spawn.result),
+            Some(TerminalSpawnResultFixture::RejectedForeignBinding)
+        ));
+        prove_terminal_surface(&foreign, &foreign_actual)?;
+
+        let mut missed_rejection = foreign_actual;
+        missed_rejection.rejected_foreign_spawn_count = 0;
+        assert!(prove_terminal_surface(&foreign, &missed_rejection).is_err());
+        Ok(())
+    }
+
+    #[test]
+    fn terminal_fixture_round_trip_preserves_split_and_spawn_ownership() -> Result<()> {
+        let scene = workbench_terminal_scene("omega_workbench_terminal_split")?;
+        let encoded = serde_json::to_vec(&scene)?;
+        let decoded: WorkbenchScene = serde_json::from_slice(&encoded)?;
+        assert_eq!(decoded, scene);
+        assert!(matches!(
+            decoded.terminal_snapshots[0].pane_layout,
+            TerminalPaneLayoutFixture::Split { .. }
+        ));
+        decoded.validate()?;
+        Ok(())
+    }
+
+    #[test]
     fn version_1_fixture_encoding_remains_backward_compatible() {
         let scene = valid_scene();
         let encoded = serde_json::to_value(&scene).expect("encode version 1 scene");
         assert!(encoded.get("thread_workbenches").is_none());
         assert!(encoded.get("git_snapshots").is_none());
+        assert!(encoded.get("terminal_snapshots").is_none());
 
         let decoded: WorkbenchScene =
             serde_json::from_value(encoded).expect("decode version 1 scene without new field");
@@ -6212,6 +7786,35 @@ mod tests {
             assert_eq!(scene.regions, WORKBENCH_GIT_REGIONS);
             assert!(WORKBENCH_SHELL_PIXEL_SCENES.contains(&name));
         }
+    }
+
+    #[test]
+    fn terminal_pixel_catalog_covers_required_states_and_region() {
+        let registered = HERMETIC_SCENES
+            .iter()
+            .filter(|scene| scene.name.starts_with("omega_workbench_terminal_"))
+            .map(|scene| scene.name)
+            .collect::<BTreeSet<_>>();
+        assert_eq!(
+            registered,
+            WORKBENCH_TERMINAL_PIXEL_SCENES.into_iter().collect()
+        );
+        for name in registered {
+            let scene = scene_spec(name).expect("registered Terminal scene");
+            let expected_phase = if name == "omega_workbench_terminal_collapse_reopen" {
+                ScenePhase::Restart
+            } else {
+                ScenePhase::Recording
+            };
+            assert_eq!(scene.phase, expected_phase);
+            assert_eq!(scene.fixture_version, 2);
+            assert_eq!(scene.regions, WORKBENCH_TERMINAL_REGIONS);
+            assert!(WORKBENCH_SHELL_PIXEL_SCENES.contains(&name));
+        }
+        let narrow = scene_spec("omega_workbench_terminal_narrow")
+            .expect("registered narrow Terminal scene");
+        assert_eq!(narrow.viewport, ViewportFixture::new(910, 720, 2000));
+        assert_eq!(narrow.regions, WORKBENCH_TERMINAL_REGIONS);
     }
 
     #[test]

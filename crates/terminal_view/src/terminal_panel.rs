@@ -20,7 +20,7 @@ use project::{Fs, Project};
 
 use settings::{Settings, TerminalDockPosition};
 use task::{RevealStrategy, RevealTarget, Shell, ShellBuilder, SpawnInTerminal, TaskId};
-use terminal::{Terminal, terminal_settings::TerminalSettings};
+use terminal::{TaskStatus, Terminal, terminal_settings::TerminalSettings};
 use ui::{
     ButtonLike, Clickable, ContextMenu, FluentBuilder, PopoverMenu, SplitButton, Toggleable,
     Tooltip, prelude::*,
@@ -84,7 +84,159 @@ pub struct TerminalPanel {
     pending_terminals_to_add: usize,
     deferred_tasks: HashMap<TaskId, Task<()>>,
     assistant_enabled: bool,
+    new_terminal_enabled: bool,
     active: bool,
+    #[cfg(any(test, feature = "test-support"))]
+    display_only_creation_for_tests: bool,
+    #[cfg(any(test, feature = "test-support"))]
+    defer_display_only_creation_for_tests: bool,
+    #[cfg(any(test, feature = "test-support"))]
+    creation_working_directories_for_tests: Vec<Option<PathBuf>>,
+    #[cfg(any(test, feature = "test-support"))]
+    deferred_creation_requests_for_tests: Vec<TestTerminalCreationRequest>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct TerminalPanelSnapshot {
+    pub panes: Vec<TerminalPaneSnapshot>,
+    pub pending_terminal_count: usize,
+    pub new_terminal_enabled: bool,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct TerminalPaneSnapshot {
+    pub pane_id: u64,
+    pub active: bool,
+    pub active_item_id: Option<u64>,
+    pub items: Vec<TerminalPanelItemSnapshot>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct TerminalPanelItemSnapshot {
+    pub item_id: u64,
+    pub kind: TerminalPanelItemKind,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum TerminalPanelItemKind {
+    Terminal {
+        terminal_view_id: u64,
+        terminal_id: u64,
+        working_directory: Option<PathBuf>,
+        process_id: Option<u32>,
+        exited: bool,
+        task_status: Option<TaskStatus>,
+    },
+    FailedToSpawn {
+        error: String,
+    },
+    Other,
+}
+
+impl TerminalPanelItemKind {
+    pub fn is_running(&self) -> bool {
+        match self {
+            Self::Terminal { exited: true, .. } => false,
+            Self::Terminal {
+                task_status: Some(task_status),
+                ..
+            } => *task_status == TaskStatus::Running,
+            Self::Terminal {
+                process_id,
+                task_status: None,
+                ..
+            } => process_id.is_some(),
+            Self::FailedToSpawn { .. } | Self::Other => false,
+        }
+    }
+
+    pub fn terminal_id(&self) -> Option<u64> {
+        match self {
+            Self::Terminal { terminal_id, .. } => Some(*terminal_id),
+            Self::FailedToSpawn { .. } | Self::Other => None,
+        }
+    }
+}
+
+impl TerminalPanelSnapshot {
+    pub fn running_terminal_count(&self) -> usize {
+        self.panes
+            .iter()
+            .flat_map(|pane| &pane.items)
+            .filter(|item| item.kind.is_running())
+            .count()
+            .saturating_add(self.pending_terminal_count)
+    }
+
+    pub fn terminal_ids(&self) -> impl Iterator<Item = u64> + '_ {
+        self.panes
+            .iter()
+            .flat_map(|pane| &pane.items)
+            .filter_map(|item| item.kind.terminal_id())
+    }
+}
+
+#[cfg(any(test, feature = "test-support"))]
+#[derive(Clone)]
+pub struct TestTerminalInsertion {
+    pub pane_id: u64,
+    pub item_id: u64,
+    pub terminal_view_id: u64,
+    pub terminal_id: u64,
+    terminal: Entity<Terminal>,
+    terminal_view: Entity<TerminalView>,
+}
+
+#[cfg(any(test, feature = "test-support"))]
+pub struct TestTerminalCreationRequest {
+    pub working_directory: Option<PathBuf>,
+    completion: Option<oneshot::Sender<Result<(), String>>>,
+}
+
+#[cfg(any(test, feature = "test-support"))]
+impl TestTerminalCreationRequest {
+    pub fn succeed(mut self) -> bool {
+        self.completion
+            .take()
+            .is_some_and(|completion| completion.send(Ok(())).is_ok())
+    }
+
+    pub fn fail(mut self, error: impl Into<String>) -> bool {
+        self.completion
+            .take()
+            .is_some_and(|completion| completion.send(Err(error.into())).is_ok())
+    }
+}
+
+#[cfg(any(test, feature = "test-support"))]
+impl TestTerminalInsertion {
+    pub fn terminal(&self) -> Entity<Terminal> {
+        self.terminal.clone()
+    }
+
+    pub fn terminal_view(&self) -> Entity<TerminalView> {
+        self.terminal_view.clone()
+    }
+
+    pub fn write_output(&self, bytes: impl AsRef<[u8]>, cx: &mut App) {
+        self.terminal.update(cx, |terminal, cx| {
+            terminal.write_output(bytes.as_ref(), cx);
+        });
+    }
+
+    pub fn content(&self, cx: &App) -> String {
+        self.terminal.read(cx).get_content()
+    }
+
+    pub fn input(&self, bytes: impl Into<std::borrow::Cow<'static, [u8]>>, cx: &mut App) {
+        self.terminal
+            .update(cx, |terminal, _| terminal.input(bytes));
+    }
+
+    pub fn take_input_log(&self, cx: &mut App) -> Vec<Vec<u8>> {
+        self.terminal
+            .update(cx, |terminal, _| terminal.take_input_log())
+    }
 }
 
 impl TerminalPanel {
@@ -102,7 +254,16 @@ impl TerminalPanel {
             pending_terminals_to_add: 0,
             deferred_tasks: HashMap::default(),
             assistant_enabled: false,
+            new_terminal_enabled: true,
             active: false,
+            #[cfg(any(test, feature = "test-support"))]
+            display_only_creation_for_tests: false,
+            #[cfg(any(test, feature = "test-support"))]
+            defer_display_only_creation_for_tests: false,
+            #[cfg(any(test, feature = "test-support"))]
+            creation_working_directories_for_tests: Vec::new(),
+            #[cfg(any(test, feature = "test-support"))]
+            deferred_creation_requests_for_tests: Vec::new(),
         };
         terminal_panel.apply_tab_bar_buttons(&terminal_panel.active_pane, cx);
         terminal_panel
@@ -115,12 +276,24 @@ impl TerminalPanel {
         }
     }
 
+    pub fn set_new_terminal_enabled(&mut self, enabled: bool, cx: &mut Context<Self>) {
+        if self.new_terminal_enabled == enabled {
+            return;
+        }
+        self.new_terminal_enabled = enabled;
+        for pane in self.center.panes() {
+            self.apply_tab_bar_buttons(pane, cx);
+        }
+        cx.notify();
+    }
+
     pub(crate) fn apply_tab_bar_buttons(
         &self,
         terminal_pane: &Entity<Pane>,
         cx: &mut Context<Self>,
     ) {
         let assistant_enabled = self.assistant_enabled;
+        let new_terminal_enabled = self.new_terminal_enabled;
         terminal_pane.update(cx, |pane, cx| {
             pane.set_render_tab_bar_buttons(cx, move |pane, window, cx| {
                 let split_context = pane
@@ -143,12 +316,17 @@ impl TerminalPanel {
                     .child(
                         PopoverMenu::new("terminal-tab-bar-popover-menu")
                             .trigger_with_tooltip(
-                                IconButton::new("plus", IconName::Plus).icon_size(IconSize::Small),
+                                IconButton::new("plus", IconName::Plus)
+                                    .icon_size(IconSize::Small)
+                                    .disabled(!new_terminal_enabled),
                                 Tooltip::text("New…"),
                             )
                             .anchor(Anchor::TopRight)
                             .with_handle(pane.new_item_context_menu_handle.clone())
                             .menu(move |window, cx| {
+                                if !new_terminal_enabled {
+                                    return None;
+                                }
                                 let focus_handle = focus_handle.clone();
                                 let menu = ContextMenu::build(window, cx, |menu, _, _| {
                                     menu.context(focus_handle.clone())
@@ -220,6 +398,15 @@ impl TerminalPanel {
                 (None, right_children)
             });
         });
+    }
+
+    fn observe_terminal_lifecycle(&self, item: &dyn workspace::ItemHandle, cx: &mut Context<Self>) {
+        let Some(terminal_view) = item.downcast::<TerminalView>() else {
+            return;
+        };
+        let terminal = terminal_view.read(cx).terminal().clone();
+        cx.observe(&terminal, |_panel, _terminal, cx| cx.notify())
+            .detach();
     }
 
     fn serialization_key(workspace: &Workspace) -> Option<String> {
@@ -369,6 +556,7 @@ impl TerminalPanel {
                 cx.notify();
             }
             pane::Event::AddItem { item } => {
+                self.observe_terminal_lifecycle(item.as_ref(), cx);
                 if let Some(workspace) = self.workspace.upgrade() {
                     workspace.update(cx, |workspace, cx| {
                         item.added_to_pane(workspace, pane.clone(), window, cx)
@@ -843,6 +1031,86 @@ impl TerminalPanel {
         })
     }
 
+    pub fn create_terminal_at_working_directory(
+        &mut self,
+        working_directory: Option<PathBuf>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> Task<Result<WeakEntity<Terminal>>> {
+        #[cfg(any(test, feature = "test-support"))]
+        if self.display_only_creation_for_tests {
+            self.creation_working_directories_for_tests
+                .push(working_directory.clone());
+            let output = working_directory
+                .as_ref()
+                .map(|path| format!("Omega test terminal\r\ncwd: {}\r\n$ ", path.display()))
+                .unwrap_or_else(|| "Omega test terminal\r\n$ ".to_string());
+            if self.defer_display_only_creation_for_tests {
+                let (completion, result) = oneshot::channel();
+                self.deferred_creation_requests_for_tests
+                    .push(TestTerminalCreationRequest {
+                        working_directory,
+                        completion: Some(completion),
+                    });
+                self.pending_terminals_to_add += 1;
+                cx.notify();
+                return cx.spawn_in(window, async move |panel, cx| {
+                    let completion = result.await;
+                    panel.update_in(cx, |panel, window, cx| {
+                        panel.pending_terminals_to_add =
+                            panel.pending_terminals_to_add.saturating_sub(1);
+                        let result = match completion {
+                            Ok(Ok(())) => panel
+                                .create_and_insert_display_only_test_terminal(
+                                    output, true, None, window, cx,
+                                )
+                                .map(|insertion| insertion.terminal.downgrade()),
+                            Ok(Err(error)) => Err(anyhow!(error)),
+                            Err(_) => Err(anyhow!("test terminal creation request was dropped")),
+                        };
+                        cx.notify();
+                        result
+                    })?
+                });
+            }
+            return Task::ready(
+                self.create_and_insert_display_only_test_terminal(output, true, None, window, cx)
+                    .map(|insertion| insertion.terminal.downgrade()),
+            );
+        }
+        self.add_terminal_shell_internal(
+            false,
+            working_directory,
+            RevealStrategy::Never,
+            window,
+            cx,
+        )
+    }
+
+    #[cfg(any(test, feature = "test-support"))]
+    pub fn use_display_only_terminal_creation_for_tests(&mut self, enabled: bool) {
+        self.display_only_creation_for_tests = enabled;
+    }
+
+    #[cfg(any(test, feature = "test-support"))]
+    pub fn defer_display_only_terminal_creation_for_tests(&mut self, enabled: bool) {
+        self.defer_display_only_creation_for_tests = enabled;
+    }
+
+    #[cfg(any(test, feature = "test-support"))]
+    pub fn take_test_terminal_creation_request(&mut self) -> Option<TestTerminalCreationRequest> {
+        if self.deferred_creation_requests_for_tests.is_empty() {
+            None
+        } else {
+            Some(self.deferred_creation_requests_for_tests.remove(0))
+        }
+    }
+
+    #[cfg(any(test, feature = "test-support"))]
+    pub fn creation_working_directories_for_tests(&self) -> &[Option<PathBuf>] {
+        &self.creation_working_directories_for_tests
+    }
+
     fn add_terminal_shell(
         &mut self,
         cwd: Option<PathBuf>,
@@ -937,6 +1205,11 @@ impl TerminalPanel {
                             focus_handle: cx.focus_handle(),
                         });
                         pane.add_item(Box::new(failed_to_spawn), true, focus, None, window, cx);
+                    })?;
+                    terminal_panel.update(cx, |terminal_panel, cx| {
+                        terminal_panel.pending_terminals_to_add =
+                            terminal_panel.pending_terminals_to_add.saturating_sub(1);
+                        terminal_panel.serialize(cx);
                     })?;
                     Err(error)
                 }
@@ -1103,6 +1376,231 @@ impl TerminalPanel {
     /// Returns all panes in the terminal panel.
     pub fn panes(&self) -> Vec<&Entity<Pane>> {
         self.center.panes()
+    }
+
+    pub fn active_terminal_view(&self, cx: &App) -> Option<Entity<TerminalView>> {
+        self.active_pane
+            .read(cx)
+            .active_item()
+            .and_then(|item| item.downcast::<TerminalView>())
+    }
+
+    pub fn terminal_views(&self, cx: &App) -> Vec<Entity<TerminalView>> {
+        self.center
+            .panes()
+            .into_iter()
+            .flat_map(|pane| {
+                pane.read(cx)
+                    .items()
+                    .filter_map(|item| item.downcast::<TerminalView>())
+                    .collect::<Vec<_>>()
+            })
+            .collect()
+    }
+
+    pub fn pending_terminal_count(&self) -> usize {
+        self.pending_terminals_to_add
+    }
+
+    pub fn snapshot(&self, cx: &App) -> TerminalPanelSnapshot {
+        let panes = self
+            .center
+            .panes()
+            .into_iter()
+            .map(|pane| {
+                let pane_id = pane.entity_id().as_u64();
+                let pane_ref = pane.read(cx);
+                let active_item_id = pane_ref.active_item().map(|item| item.item_id().as_u64());
+                let items = pane_ref
+                    .items()
+                    .map(|item| {
+                        let item_id = item.item_id().as_u64();
+                        let kind = if let Some(terminal_view) = item.downcast::<TerminalView>() {
+                            let terminal_view_id = terminal_view.entity_id().as_u64();
+                            let terminal = terminal_view.read(cx).terminal().clone();
+                            let terminal_id = terminal.entity_id().as_u64();
+                            let terminal = terminal.read(cx);
+                            TerminalPanelItemKind::Terminal {
+                                terminal_view_id,
+                                terminal_id,
+                                working_directory: terminal.working_directory(),
+                                process_id: terminal.pid().map(|process_id| process_id.as_u32()),
+                                exited: terminal.has_exited(),
+                                task_status: terminal.task().map(|task| task.status),
+                            }
+                        } else if let Some(failed) = item.downcast::<FailedToSpawnTerminal>() {
+                            TerminalPanelItemKind::FailedToSpawn {
+                                error: failed.read(cx).error.clone(),
+                            }
+                        } else {
+                            TerminalPanelItemKind::Other
+                        };
+                        TerminalPanelItemSnapshot { item_id, kind }
+                    })
+                    .collect();
+                TerminalPaneSnapshot {
+                    pane_id,
+                    active: self.active_pane == *pane,
+                    active_item_id,
+                    items,
+                }
+            })
+            .collect();
+        TerminalPanelSnapshot {
+            panes,
+            pending_terminal_count: self.pending_terminals_to_add,
+            new_terminal_enabled: self.new_terminal_enabled,
+        }
+    }
+
+    #[cfg(any(test, feature = "test-support"))]
+    pub fn insert_test_terminal(
+        &mut self,
+        terminal: Entity<Terminal>,
+        activate: bool,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> Result<TestTerminalInsertion> {
+        let terminal_view = self.test_terminal_view(terminal.clone(), window, cx)?;
+        let pane = self.active_pane.clone();
+        pane.update(cx, |pane, cx| {
+            pane.add_item(
+                Box::new(terminal_view.clone()),
+                activate,
+                false,
+                None,
+                window,
+                cx,
+            );
+        });
+        self.serialize(cx);
+        Ok(TestTerminalInsertion {
+            pane_id: pane.entity_id().as_u64(),
+            item_id: terminal_view.entity_id().as_u64(),
+            terminal_view_id: terminal_view.entity_id().as_u64(),
+            terminal_id: terminal.entity_id().as_u64(),
+            terminal,
+            terminal_view,
+        })
+    }
+
+    #[cfg(any(test, feature = "test-support"))]
+    pub fn insert_test_terminal_in_split(
+        &mut self,
+        terminal: Entity<Terminal>,
+        direction: SplitDirection,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> Result<TestTerminalInsertion> {
+        let terminal_view = self.test_terminal_view(terminal.clone(), window, cx)?;
+        let project = self
+            .workspace
+            .read_with(cx, |workspace, _| workspace.project().clone())?;
+        let pane = new_terminal_pane(self.workspace.clone(), project, false, window, cx);
+        pane.update(cx, |pane, cx| {
+            pane.add_item(
+                Box::new(terminal_view.clone()),
+                true,
+                false,
+                None,
+                window,
+                cx,
+            );
+        });
+        self.center.split(&self.active_pane, &pane, direction, cx);
+        self.active_pane = pane.clone();
+        self.serialize(cx);
+        Ok(TestTerminalInsertion {
+            pane_id: pane.entity_id().as_u64(),
+            item_id: terminal_view.entity_id().as_u64(),
+            terminal_view_id: terminal_view.entity_id().as_u64(),
+            terminal_id: terminal.entity_id().as_u64(),
+            terminal,
+            terminal_view,
+        })
+    }
+
+    #[cfg(any(test, feature = "test-support"))]
+    pub fn create_and_insert_display_only_test_terminal(
+        &mut self,
+        output: impl AsRef<[u8]>,
+        activate: bool,
+        split_direction: Option<SplitDirection>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> Result<TestTerminalInsertion> {
+        let terminal = cx.new(|cx| {
+            terminal::TerminalBuilder::new_display_only(
+                terminal::terminal_settings::CursorShape::default(),
+                terminal::terminal_settings::AlternateScroll::On,
+                None,
+                0,
+                cx.background_executor(),
+                util::paths::PathStyle::local(),
+            )
+            .subscribe(cx)
+        });
+        terminal.update(cx, |terminal, cx| {
+            terminal.write_output(output.as_ref(), cx);
+        });
+
+        if let Some(split_direction) = split_direction {
+            self.insert_test_terminal_in_split(terminal, split_direction, window, cx)
+        } else {
+            self.insert_test_terminal(terminal, activate, window, cx)
+        }
+    }
+
+    #[cfg(any(test, feature = "test-support"))]
+    pub fn activate_test_terminal(
+        &mut self,
+        terminal_view_id: u64,
+        focus: bool,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> bool {
+        for pane in self.center.panes() {
+            let item_index = pane.read(cx).items().enumerate().find_map(|(index, item)| {
+                item.downcast::<TerminalView>()
+                    .is_some_and(|view| view.entity_id().as_u64() == terminal_view_id)
+                    .then_some(index)
+            });
+            let Some(item_index) = item_index else {
+                continue;
+            };
+            pane.update(cx, |pane, cx| {
+                pane.activate_item(item_index, true, focus, window, cx);
+            });
+            self.active_pane = pane.clone();
+            self.serialize(cx);
+            return true;
+        }
+        false
+    }
+
+    #[cfg(any(test, feature = "test-support"))]
+    fn test_terminal_view(
+        &self,
+        terminal: Entity<Terminal>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> Result<Entity<TerminalView>> {
+        let workspace_id = self
+            .workspace
+            .read_with(cx, |workspace, _| workspace.database_id())?;
+        let project = self
+            .workspace
+            .read_with(cx, |workspace, _| workspace.project().downgrade())?;
+        Ok(cx.new(|cx| {
+            TerminalView::new(
+                terminal,
+                self.workspace.clone(),
+                workspace_id,
+                project,
+                window,
+                cx,
+            )
+        }))
     }
 
     /// Returns all non-empty terminal selections from all terminal views in all panes.
@@ -1737,7 +2235,10 @@ impl RenderOnce for InlineAssistTabBarButton {
 
 #[cfg(test)]
 mod tests {
-    use std::num::NonZero;
+    use std::{
+        num::NonZero,
+        sync::atomic::{AtomicUsize, Ordering},
+    };
 
     use super::*;
     use gpui::{Modifiers, TestAppContext, UpdateGlobal as _, VisualTestContext};
@@ -2110,6 +2611,214 @@ mod tests {
             .expect("Failed to initialize workspace with terminal panel");
 
         (window_handle, terminal_panel)
+    }
+
+    #[gpui::test]
+    async fn test_explicit_terminal_creation_does_not_open_dock(cx: &mut TestAppContext) {
+        cx.executor().allow_parking();
+        init_test(cx);
+
+        let (window_handle, terminal_panel) = init_workspace_with_panel(cx).await;
+        window_handle
+            .update(cx, |multi_workspace, _, cx| {
+                multi_workspace.workspace().update(cx, |workspace, cx| {
+                    for position in [
+                        DockPosition::Left,
+                        DockPosition::Bottom,
+                        DockPosition::Right,
+                    ] {
+                        assert!(!workspace.is_dock_at_position_open(position, cx));
+                    }
+                })
+            })
+            .expect("Failed to read terminal dock state");
+
+        window_handle
+            .update(cx, |_, window, cx| {
+                terminal_panel.update(cx, |panel, cx| {
+                    panel.create_terminal_at_working_directory(None, window, cx)
+                })
+            })
+            .expect("Failed to request terminal")
+            .await
+            .expect("Failed to create terminal");
+        cx.run_until_parked();
+
+        window_handle
+            .update(cx, |multi_workspace, _, cx| {
+                multi_workspace.workspace().update(cx, |workspace, cx| {
+                    for position in [
+                        DockPosition::Left,
+                        DockPosition::Bottom,
+                        DockPosition::Right,
+                    ] {
+                        assert!(!workspace.is_dock_at_position_open(position, cx));
+                    }
+                })
+            })
+            .expect("Failed to read terminal dock state");
+
+        let snapshot = terminal_panel.read_with(cx, |panel, cx| panel.snapshot(cx));
+        assert_eq!(snapshot.pending_terminal_count, 0);
+        assert_eq!(snapshot.panes.len(), 1);
+        assert_eq!(snapshot.panes[0].items.len(), 1);
+        assert!(snapshot.panes[0].active);
+        assert!(matches!(
+            snapshot.panes[0].items[0].kind,
+            TerminalPanelItemKind::Terminal { .. }
+        ));
+    }
+
+    #[gpui::test]
+    async fn test_display_terminal_insertion_and_split_are_deterministic(cx: &mut TestAppContext) {
+        init_test(cx);
+
+        let (window_handle, terminal_panel) = init_workspace_with_panel(cx).await;
+        let (first, second) = window_handle
+            .update(cx, |_, window, cx| {
+                terminal_panel.update(cx, |panel, cx| {
+                    let first = panel.create_and_insert_display_only_test_terminal(
+                        "first output",
+                        true,
+                        None,
+                        window,
+                        cx,
+                    )?;
+                    let second = panel.create_and_insert_display_only_test_terminal(
+                        "second output",
+                        true,
+                        Some(SplitDirection::Right),
+                        window,
+                        cx,
+                    )?;
+                    anyhow::Ok((first, second))
+                })
+            })
+            .expect("Failed to insert display terminals")
+            .expect("Failed to prepare display terminals");
+
+        assert_ne!(first.pane_id, second.pane_id);
+        assert_ne!(first.terminal_view_id, second.terminal_view_id);
+        assert_eq!(first.terminal_id, first.terminal().entity_id().as_u64());
+        assert_eq!(
+            second.terminal_view_id,
+            second.terminal_view().entity_id().as_u64()
+        );
+        assert!(cx.read(|cx| first.content(cx)).contains("first output"));
+        assert!(cx.read(|cx| second.content(cx)).contains("second output"));
+
+        let split_snapshot = terminal_panel.read_with(cx, |panel, cx| panel.snapshot(cx));
+        assert_eq!(split_snapshot.panes.len(), 2);
+        assert_eq!(
+            split_snapshot
+                .panes
+                .iter()
+                .find(|pane| pane.active)
+                .map(|pane| pane.pane_id),
+            Some(second.pane_id)
+        );
+
+        window_handle
+            .update(cx, |_, window, cx| {
+                terminal_panel.update(cx, |panel, cx| {
+                    assert!(panel.activate_test_terminal(
+                        first.terminal_view_id,
+                        false,
+                        window,
+                        cx,
+                    ));
+                })
+            })
+            .expect("Failed to activate first display terminal");
+        let selected_snapshot = terminal_panel.read_with(cx, |panel, cx| panel.snapshot(cx));
+        assert_eq!(
+            selected_snapshot
+                .panes
+                .iter()
+                .find(|pane| pane.active)
+                .map(|pane| (pane.pane_id, pane.active_item_id)),
+            Some((first.pane_id, Some(first.item_id)))
+        );
+
+        cx.update(|cx| first.input(b"test input".as_slice(), cx));
+        assert_eq!(
+            cx.update(|cx| first.take_input_log(cx)),
+            vec![b"test input".to_vec()]
+        );
+        assert!(cx.update(|cx| second.take_input_log(cx)).is_empty());
+        cx.update(|cx| first.write_output("\nretained output", cx));
+        assert!(cx.read(|cx| first.content(cx)).contains("retained output"));
+    }
+
+    #[test]
+    fn completed_and_unknown_tasks_are_not_running_terminal_processes() {
+        let terminal_item = |process_id, task_status| TerminalPanelItemKind::Terminal {
+            terminal_view_id: 1,
+            terminal_id: 2,
+            working_directory: None,
+            process_id,
+            exited: false,
+            task_status,
+        };
+
+        assert!(terminal_item(Some(7), None).is_running());
+        assert!(terminal_item(None, Some(TaskStatus::Running)).is_running());
+        assert!(
+            !terminal_item(Some(7), Some(TaskStatus::Completed { success: true })).is_running()
+        );
+        assert!(!terminal_item(Some(7), Some(TaskStatus::Unknown)).is_running());
+        assert!(
+            !TerminalPanelItemKind::Terminal {
+                terminal_view_id: 1,
+                terminal_id: 2,
+                working_directory: None,
+                process_id: Some(7),
+                exited: true,
+                task_status: None,
+            }
+            .is_running()
+        );
+    }
+
+    #[gpui::test]
+    async fn test_terminal_lifecycle_notifies_panel_and_creation_can_be_disabled(
+        cx: &mut TestAppContext,
+    ) {
+        init_test(cx);
+
+        let (window_handle, terminal_panel) = init_workspace_with_panel(cx).await;
+        let insertion = window_handle
+            .update(cx, |_, window, cx| {
+                terminal_panel.update(cx, |panel, cx| {
+                    panel.create_and_insert_display_only_test_terminal(
+                        "running", true, None, window, cx,
+                    )
+                })
+            })
+            .expect("Failed to insert display terminal")
+            .expect("Failed to prepare display terminal");
+
+        let notification_count = Arc::new(AtomicUsize::new(0));
+        cx.update(|cx| {
+            let notification_count = notification_count.clone();
+            cx.observe(&terminal_panel, move |_, _| {
+                notification_count.fetch_add(1, Ordering::SeqCst);
+            })
+            .detach();
+        });
+
+        cx.update(|cx| insertion.write_output("\nlifecycle changed", cx));
+        cx.run_until_parked();
+        assert!(
+            notification_count.load(Ordering::SeqCst) > 0,
+            "terminal lifecycle notifications must propagate through TerminalPanel"
+        );
+
+        terminal_panel.update(cx, |panel, cx| {
+            panel.set_new_terminal_enabled(false, cx);
+        });
+        let snapshot = terminal_panel.read_with(cx, |panel, cx| panel.snapshot(cx));
+        assert!(!snapshot.new_terminal_enabled);
     }
 
     #[gpui::test]

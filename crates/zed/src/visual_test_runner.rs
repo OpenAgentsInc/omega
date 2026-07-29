@@ -197,8 +197,8 @@ use {
     omega_workbench_harness::{
         CheckStatus, HERMETIC_SCENES, PixelProof, PixelStatus, ProofCheck, ProofLane, ProofOutcome,
         ProofReceipt, RegionPixelProof, ScenePhase, SemanticProbe, WORKBENCH_SHELL_PIXEL_SCENES,
-        WorkSurfaceId, WorkbenchScene, compare_images as compare_workbench_images, scene_spec,
-        select_scenes,
+        WORKBENCH_TERMINAL_PIXEL_SCENES, WorkSurfaceId, WorkbenchScene,
+        compare_images as compare_workbench_images, scene_spec, select_scenes,
     },
     project::{AgentId, Project},
     project_panel::ProjectPanel,
@@ -213,6 +213,7 @@ use {
         sync::Arc,
         time::Duration,
     },
+    terminal_view::terminal_panel::TerminalPanel,
     util::ResultExt as _,
     workspace::{AppState, MultiWorkspace, Workspace, item::Item as _},
     zed_actions::OpenSettingsAt,
@@ -563,6 +564,11 @@ fn is_workbench_git_scene(name: &str) -> bool {
 }
 
 #[cfg(target_os = "macos")]
+fn is_workbench_terminal_scene(name: &str) -> bool {
+    WORKBENCH_TERMINAL_PIXEL_SCENES.contains(&name)
+}
+
+#[cfg(target_os = "macos")]
 fn workbench_fixture_for_scene(name: &str) -> Result<WorkbenchScene> {
     use omega_workbench_harness::{
         ContentStateFixture, EventFixture, EventKindFixture, MessageFixture, MessageRoleFixture,
@@ -575,6 +581,9 @@ fn workbench_fixture_for_scene(name: &str) -> Result<WorkbenchScene> {
     }
     if is_workbench_git_scene(name) {
         return omega_workbench_harness::workbench_git_scene(name);
+    }
+    if is_workbench_terminal_scene(name) {
+        return omega_workbench_harness::workbench_terminal_scene(name);
     }
 
     let spec =
@@ -1922,6 +1931,85 @@ fn verify_workbench_render_preflight(
             }
             record_workbench_semantic_checks(test_name, probe.into_checks());
             record_workbench_semantic_check(test_name, "git-native-content-containment");
+        }
+        if is_workbench_terminal_scene(test_name) {
+            let mut probe = SemanticProbe::new(&snapshot);
+            if test_name == "omega_workbench_terminal_hidden_running" {
+                probe.require_absent("omega.workbench.surface.terminal")?;
+                probe.require_absent("omega.workbench.terminal.content")?;
+                record_workbench_semantic_check(
+                    test_name,
+                    "terminal-hidden-running-retains-model-without-rendering-dock",
+                );
+            } else {
+                probe.require_accessible(
+                    "omega.workbench.surface.terminal",
+                    "Group",
+                    "Terminal work surface",
+                )?;
+                probe.require_accessible(
+                    "omega.workbench.terminal.content",
+                    "Group",
+                    "Terminal",
+                )?;
+                probe.require_inside(
+                    "omega.workbench.terminal.content",
+                    "omega.workbench.surface.terminal",
+                )?;
+                probe.require_inside(
+                    "omega.workbench.terminal.new",
+                    "omega.workbench.terminal.content",
+                )?;
+                match test_name {
+                    "omega_workbench_terminal_worktree_removed" => {
+                        probe.require_accessible(
+                            "omega.workbench.terminal.owner-state",
+                            "Status",
+                            "The target worktree was removed. Existing terminals keep their original owner.",
+                        )?;
+                    }
+                    "omega_workbench_terminal_offline" => {
+                        probe.require_accessible(
+                            "omega.workbench.terminal.owner-state",
+                            "Status",
+                            "The project is offline. Existing terminal output is retained, but new terminals are unavailable.",
+                        )?;
+                    }
+                    "omega_workbench_terminal_reconnecting" => {
+                        probe.require_accessible(
+                            "omega.workbench.terminal.owner-state",
+                            "Status",
+                            "The project is reconnecting. Existing terminal output is retained.",
+                        )?;
+                    }
+                    "omega_workbench_terminal_error" => {
+                        probe.require_accessible(
+                            "omega.workbench.terminal.owner-state",
+                            "Status",
+                            "terminal state could not be restored",
+                        )?;
+                    }
+                    _ => {
+                        probe.require_absent("omega.workbench.terminal.owner-state")?;
+                    }
+                }
+                if matches!(
+                    test_name,
+                    "omega_workbench_terminal_split" | "omega_workbench_terminal_narrow"
+                ) {
+                    probe.require_fully_visible("omega.workbench.terminal.content")?;
+                    probe.require_disjoint(
+                        "omega.workbench.surface.terminal",
+                        "omega.workbench.transcript",
+                    )?;
+                    probe.require_disjoint(
+                        "omega.workbench.surface.terminal",
+                        "omega.workbench.composer",
+                    )?;
+                }
+                record_workbench_semantic_check(test_name, "terminal-native-content-containment");
+            }
+            record_workbench_semantic_checks(test_name, probe.into_checks());
         }
         if test_name.starts_with("omega_workbench_identity_") {
             let mut probe = SemanticProbe::new(&snapshot);
@@ -3686,6 +3774,13 @@ struct WorkbenchGitDiskFixture {
 }
 
 #[cfg(all(target_os = "macos", feature = "visual-tests"))]
+struct WorkbenchTerminalDiskFixture {
+    _root: tempfile::TempDir,
+    worktrees: Vec<(String, PathBuf)>,
+    active_worktree_id: String,
+}
+
+#[cfg(all(target_os = "macos", feature = "visual-tests"))]
 fn initialize_workbench_git_fixture(path: &Path) -> Result<()> {
     for arguments in [
         &["init", "--initial-branch=main"][..],
@@ -4192,6 +4287,43 @@ fn create_workbench_review_disk_fixture(
 }
 
 #[cfg(all(target_os = "macos", feature = "visual-tests"))]
+fn create_workbench_terminal_disk_fixture(
+    scene_name: &str,
+) -> Result<Option<WorkbenchTerminalDiskFixture>> {
+    if !is_workbench_terminal_scene(scene_name) {
+        return Ok(None);
+    }
+
+    let root = tempfile::tempdir().context("creating Terminal scene directory")?;
+    let root_path = root
+        .path()
+        .canonicalize()
+        .context("canonicalizing Terminal scene directory")?;
+    let alpha = root_path.join("alpha-worktree");
+    let beta = root_path.join("beta-worktree");
+    std::fs::create_dir_all(alpha.join("foreign"))?;
+    std::fs::create_dir_all(beta.join("src"))?;
+    std::fs::write(
+        alpha.join("foreign/owner.txt"),
+        "foreign terminal owner fixture\n",
+    )?;
+    std::fs::write(
+        beta.join("src/main.rs"),
+        "fn main() {\n    println!(\"terminal fixture\");\n}\n",
+    )?;
+    std::fs::write(beta.join("README.md"), "# Terminal fixture\n")?;
+
+    Ok(Some(WorkbenchTerminalDiskFixture {
+        _root: root,
+        worktrees: vec![
+            ("alpha-worktree".into(), alpha),
+            ("beta-worktree".into(), beta),
+        ],
+        active_worktree_id: "beta-worktree".into(),
+    }))
+}
+
+#[cfg(all(target_os = "macos", feature = "visual-tests"))]
 fn add_workbench_disk_worktrees(
     workspace_window: WindowHandle<Workspace>,
     worktrees: &[(String, PathBuf)],
@@ -4250,6 +4382,7 @@ fn run_omega_workbench_shell_visual_capture(
     let search_fixture = create_workbench_search_disk_fixture(scene_name)?;
     let review_fixture = create_workbench_review_disk_fixture(scene_name)?;
     let git_fixture = create_workbench_git_disk_fixture(scene_name)?;
+    let terminal_fixture = create_workbench_terminal_disk_fixture(scene_name)?;
     let project = cx.update(|cx| {
         project::Project::local(
             app_state.client.clone(),
@@ -4302,6 +4435,9 @@ fn run_omega_workbench_shell_visual_capture(
     if let Some(fixture) = git_fixture.as_ref() {
         add_workbench_disk_worktrees(workspace_window, &fixture.worktrees, "Git", cx)?;
     }
+    if let Some(fixture) = terminal_fixture.as_ref() {
+        add_workbench_disk_worktrees(workspace_window, &fixture.worktrees, "Terminal", cx)?;
+    }
 
     let result = run_omega_workbench_shell_visual_capture_in_window(
         workspace_window,
@@ -4311,12 +4447,14 @@ fn run_omega_workbench_shell_visual_capture(
         search_fixture.as_ref(),
         review_fixture.as_ref(),
         git_fixture.as_ref(),
+        terminal_fixture.as_ref(),
         update_baseline,
     );
     if files_fixture.is_some()
         || search_fixture.is_some()
         || review_fixture.is_some()
         || git_fixture.is_some()
+        || terminal_fixture.is_some()
     {
         cx.update(|cx| {
             let worktree_ids = project
@@ -4353,6 +4491,7 @@ fn run_omega_workbench_shell_visual_capture_in_window(
     search_fixture: Option<&WorkbenchSearchDiskFixture>,
     review_fixture: Option<&WorkbenchReviewDiskFixture>,
     git_fixture: Option<&WorkbenchGitDiskFixture>,
+    terminal_fixture: Option<&WorkbenchTerminalDiskFixture>,
     update_baseline: bool,
 ) -> Result<TestResult> {
     use agent_ui::AgentPanel;
@@ -4434,6 +4573,48 @@ fn run_omega_workbench_shell_visual_capture_in_window(
     );
     record_workbench_semantic_check(scene_name, "git-single-workspace-owned-panel");
 
+    if is_workbench_terminal_scene(scene_name) {
+        let (weak_workspace, async_window_context) = workspace_window
+            .update(cx, |workspace, window, cx| {
+                (workspace.weak_handle(), window.to_async(cx))
+            })
+            .context("getting workbench shell workspace handle for TerminalPanel")?;
+        let terminal_panel = match workspace_window
+            .update(cx, |workspace, _window, cx| {
+                workspace.panel::<TerminalPanel>(cx)
+            })
+            .context("checking for a workspace-owned TerminalPanel")?
+        {
+            Some(terminal_panel) => terminal_panel,
+            None => {
+                cx.background_executor.allow_parking();
+                let terminal_panel = cx
+                    .foreground_executor
+                    .block_test(TerminalPanel::load(weak_workspace, async_window_context))
+                    .context("loading TerminalPanel before AgentPanel")?;
+                cx.background_executor.forbid_parking();
+                workspace_window
+                    .update(cx, |workspace, window, cx| {
+                        workspace.add_panel(terminal_panel.clone(), window, cx);
+                    })
+                    .context("adding the workspace-owned TerminalPanel")?;
+                terminal_panel
+            }
+        };
+        cx.run_until_parked();
+        let workspace_terminal_panel = workspace_window
+            .update(cx, |workspace, _window, cx| {
+                workspace.panel::<TerminalPanel>(cx)
+            })
+            .context("reading the workspace-owned TerminalPanel")?
+            .context("TerminalPanel was not registered in the workspace")?;
+        anyhow::ensure!(
+            workspace_terminal_panel.entity_id() == terminal_panel.entity_id(),
+            "the Terminal surface did not retain the one workspace-owned TerminalPanel"
+        );
+        record_workbench_semantic_check(scene_name, "terminal-single-workspace-owned-panel");
+    }
+
     let (weak_workspace, async_window_context) = workspace_window
         .update(cx, |workspace, window, cx| {
             (workspace.weak_handle(), window.to_async(cx))
@@ -4472,6 +4653,7 @@ fn run_omega_workbench_shell_visual_capture_in_window(
         search_fixture,
         review_fixture,
         git_fixture,
+        terminal_fixture,
         cx,
     );
     if let Err(error) = configuration {
@@ -4824,6 +5006,21 @@ fn active_workbench_git(
         .context("active production Git surface is unavailable")?;
     let git_panel = cx.read(|cx| surface.read(cx).git_panel().clone());
     Ok((surface, git_panel))
+}
+
+#[cfg(all(target_os = "macos", feature = "visual-tests"))]
+fn active_workbench_terminal(
+    panel: &Entity<agent_ui::AgentPanel>,
+    cx: &VisualTestAppContext,
+) -> Result<(
+    Entity<agent_ui::workbench_shell::NativeTerminalSurface>,
+    Entity<TerminalPanel>,
+)> {
+    let surface = cx
+        .read(|cx| panel.read(cx).workbench_terminal_surface_for_tests())
+        .context("active production Terminal surface is unavailable")?;
+    let terminal_panel = cx.read(|cx| surface.read(cx).terminal_panel().clone());
+    Ok((surface, terminal_panel))
 }
 
 #[cfg(all(target_os = "macos", feature = "visual-tests"))]
@@ -5611,6 +5808,7 @@ fn configure_workbench_shell_scene(
     search_fixture: Option<&WorkbenchSearchDiskFixture>,
     review_fixture: Option<&WorkbenchReviewDiskFixture>,
     git_fixture: Option<&WorkbenchGitDiskFixture>,
+    terminal_fixture: Option<&WorkbenchTerminalDiskFixture>,
     cx: &mut VisualTestAppContext,
 ) -> Result<()> {
     use agent_ui::workbench_shell::{
@@ -5637,6 +5835,7 @@ fn configure_workbench_shell_scene(
         && !is_workbench_search_scene(scene_name)
         && !is_workbench_review_scene(scene_name)
         && !is_workbench_git_scene(scene_name)
+        && !is_workbench_terminal_scene(scene_name)
     {
         anyhow::ensure!(
             active_thread.binding.is_none() && active_thread.available_surfaces.len() == 1,
@@ -7280,6 +7479,15 @@ fn configure_workbench_shell_scene(
             );
             record_workbench_semantic_check(name, "git-foreign-repository-files-unchanged");
         }
+        name if is_workbench_terminal_scene(name) => {
+            configure_workbench_terminal_scene(
+                name,
+                workspace_window,
+                panel,
+                terminal_fixture.context("Terminal scene has no disk fixture")?,
+                cx,
+            )?;
+        }
         "omega_workbench_shell_active_dock" => {
             dispatch_workbench_action(workspace_window, Box::new(SelectPlan), cx)?;
             let projection = cx.read(|cx| panel.read(cx).workbench_projection_for_tests().clone());
@@ -7459,6 +7667,319 @@ fn configure_workbench_shell_scene(
             }
         }
         _ => anyhow::bail!("unsupported workbench shell scene {scene_name:?}"),
+    }
+    Ok(())
+}
+
+#[cfg(all(target_os = "macos", feature = "visual-tests"))]
+fn configure_workbench_terminal_scene(
+    scene_name: &str,
+    workspace_window: WindowHandle<Workspace>,
+    panel: &Entity<agent_ui::AgentPanel>,
+    fixture: &WorkbenchTerminalDiskFixture,
+    cx: &mut VisualTestAppContext,
+) -> Result<()> {
+    use agent_ui::workbench_shell::{
+        BadgeTone, NativeTerminalOwnerState, SelectPlan, SelectTerminal, SurfaceBadge,
+    };
+    use omega_workbench_harness::{
+        TerminalLifecycleFixture, TerminalProcessLifecycleFixture, TerminalSplitAxisFixture,
+    };
+
+    let active_path = fixture
+        .worktrees
+        .iter()
+        .find_map(|(id, path)| (id == &fixture.active_worktree_id).then_some(path.as_path()))
+        .context("Terminal scene has no active disk worktree")?;
+    let foreign_path = fixture
+        .worktrees
+        .iter()
+        .find_map(|(id, path)| (id != &fixture.active_worktree_id).then_some(path.as_path()))
+        .context("Terminal scene has no foreign disk worktree")?;
+    let fixture_scene = workbench_fixture_for_scene(scene_name)?;
+    let expected = fixture_scene
+        .active_terminal_snapshot()
+        .context("Terminal scene has no active typed fixture")?;
+    let switched_from_foreign = if scene_name == "omega_workbench_terminal_thread_switch" {
+        let foreign_repository_binding =
+            select_workbench_identity(workspace_window, panel, foreign_path, "Terminal", cx)?;
+        dispatch_workbench_action(workspace_window, Box::new(SelectTerminal), cx)?;
+        let (foreign_surface, foreign_panel) = active_workbench_terminal(panel, cx)?;
+        let foreign_native_binding = cx.read(|cx| foreign_surface.read(cx).binding().clone());
+        anyhow::ensure!(
+            foreign_native_binding.repository == foreign_repository_binding
+                && foreign_native_binding.worktree_abs_path == foreign_path,
+            "Terminal worktree-switch fixture did not bind the foreign disk worktree"
+        );
+        Some((
+            foreign_surface.entity_id(),
+            foreign_panel.entity_id(),
+            foreign_native_binding,
+        ))
+    } else {
+        None
+    };
+    let repository_binding =
+        select_workbench_identity(workspace_window, panel, active_path, "Terminal", cx)?;
+    if switched_from_foreign.is_none() {
+        dispatch_workbench_action(workspace_window, Box::new(SelectTerminal), cx)?;
+    }
+    let (terminal_surface, terminal_panel) = active_workbench_terminal(panel, cx)?;
+    let native_binding = cx.read(|cx| terminal_surface.read(cx).binding().clone());
+    if let Some((foreign_surface_id, foreign_panel_id, _)) = &switched_from_foreign {
+        anyhow::ensure!(
+            terminal_surface.entity_id() == *foreign_surface_id
+                && terminal_panel.entity_id() == *foreign_panel_id,
+            "Terminal worktree switch replaced its native surface or panel entity"
+        );
+        record_workbench_semantic_check(
+            scene_name,
+            "terminal-worktree-switch-retained-surface-panel",
+        );
+    }
+    let visible = cx
+        .read(|cx| {
+            panel
+                .read(cx)
+                .workbench_projection_for_tests()
+                .visible_projection()
+        })
+        .context("Terminal scene has no visible projection")?;
+    anyhow::ensure!(
+        visible.binding.as_ref() == Some(&repository_binding)
+            && visible.requested_surface == Some(omega_workbench_state::WorkSurface::Terminal)
+            && visible.effective_surface == Some(omega_workbench_state::WorkSurface::Terminal)
+            && visible.dock_open
+            && native_binding.thread_id == visible.thread_id
+            && native_binding.repository == repository_binding
+            && native_binding.generation == visible.generation
+            && native_binding.worktree_abs_path == active_path,
+        "Terminal header, projection, native surface, and disk cwd do not share one binding"
+    );
+    record_workbench_semantic_check(
+        scene_name,
+        "terminal-header-projection-binding-and-disk-cwd",
+    );
+
+    let panel_entity_id = terminal_panel.entity_id();
+    let mut insertions = Vec::new();
+    for (index, process) in expected.processes.iter().enumerate() {
+        let output = match &process.lifecycle {
+            TerminalProcessLifecycleFixture::Starting => {
+                format!(
+                    "Starting {} in {}…\r\n",
+                    process.title,
+                    active_path.display()
+                )
+            }
+            TerminalProcessLifecycleFixture::Running { .. } => format!(
+                "Omega Terminal · {}\r\ncwd: {}\r\n$ ",
+                process.title,
+                if process.owner.thread_id == expected.creation_binding.thread_id {
+                    active_path
+                } else {
+                    foreign_path
+                }
+                .display()
+            ),
+            TerminalProcessLifecycleFixture::Exited { exit_code } => format!(
+                "Omega Terminal · {}\r\nprocess exited with code {exit_code}\r\n",
+                process.title
+            ),
+            TerminalProcessLifecycleFixture::FailedToSpawn(error) => {
+                format!("Failed to spawn terminal\r\n{error}\r\n")
+            }
+        };
+        let split_direction = (index > 0
+            && matches!(
+                expected.pane_layout,
+                omega_workbench_harness::TerminalPaneLayoutFixture::Split { .. }
+            ))
+        .then_some(match &expected.pane_layout {
+            omega_workbench_harness::TerminalPaneLayoutFixture::Split { axis, .. } => match axis {
+                TerminalSplitAxisFixture::Horizontal => workspace::SplitDirection::Right,
+                TerminalSplitAxisFixture::Vertical => workspace::SplitDirection::Down,
+            },
+            omega_workbench_harness::TerminalPaneLayoutFixture::Pane { .. } => {
+                workspace::SplitDirection::Right
+            }
+        });
+        let activate =
+            expected.selected_terminal_id.as_deref() == Some(process.terminal_id.as_str());
+        let insertion = workspace_window
+            .update(cx, |_workspace, window, cx| {
+                terminal_panel.update(cx, |terminal_panel, cx| {
+                    terminal_panel.create_and_insert_display_only_test_terminal(
+                        output,
+                        activate,
+                        split_direction,
+                        window,
+                        cx,
+                    )
+                })
+            })
+            .context("inserting display-only Terminal fixture")??;
+
+        let owner = if process.owner.thread_id != expected.creation_binding.thread_id {
+            switched_from_foreign
+                .as_ref()
+                .map(|(_, _, owner)| owner.clone())
+                .unwrap_or_else(|| {
+                    let mut owner = native_binding.clone();
+                    owner.worktree_abs_path = foreign_path.to_path_buf();
+                    owner
+                })
+        } else {
+            native_binding.clone()
+        };
+        cx.update(|cx| {
+            terminal_surface.update(cx, |surface, cx| {
+                surface.record_terminal_owner(insertion.terminal_id, owner, cx);
+            });
+        });
+        insertions.push((process, insertion));
+    }
+
+    if let Some(selected_terminal_id) = expected.selected_terminal_id.as_deref()
+        && let Some((_, insertion)) = insertions
+            .iter()
+            .find(|(process, _)| process.terminal_id == selected_terminal_id)
+    {
+        let activated = workspace_window
+            .update(cx, |_workspace, window, cx| {
+                terminal_panel.update(cx, |terminal_panel, cx| {
+                    terminal_panel.activate_test_terminal(
+                        insertion.terminal_view_id,
+                        true,
+                        window,
+                        cx,
+                    )
+                })
+            })
+            .context("activating display-only Terminal fixture")?;
+        anyhow::ensure!(activated, "selected Terminal fixture was not activated");
+    }
+
+    for (process, insertion) in &insertions {
+        for input in &process.input_bytes {
+            cx.update(|cx| insertion.input(input.clone(), cx));
+        }
+        let input_log = cx.update(|cx| insertion.take_input_log(cx));
+        anyhow::ensure!(
+            input_log == process.input_bytes,
+            "Terminal input bytes diverged for {:?}: expected {:?}, got {:?}",
+            process.terminal_id,
+            process.input_bytes,
+            input_log
+        );
+        anyhow::ensure!(
+            !cx.read(|cx| insertion.content(cx)).trim().is_empty(),
+            "display-only Terminal {:?} rendered no deterministic output",
+            process.terminal_id
+        );
+    }
+    record_workbench_semantic_check(scene_name, "terminal-display-only-no-shell-processes");
+    record_workbench_semantic_check(scene_name, "terminal-exact-input-byte-log");
+
+    let owner_state = match &expected.lifecycle {
+        TerminalLifecycleFixture::WorktreeRemoved => NativeTerminalOwnerState::WorktreeRemoved,
+        TerminalLifecycleFixture::Offline => NativeTerminalOwnerState::Offline,
+        TerminalLifecycleFixture::Reconnecting => NativeTerminalOwnerState::Reconnecting,
+        TerminalLifecycleFixture::Error(error) => {
+            NativeTerminalOwnerState::Error(error.clone().into())
+        }
+        _ => NativeTerminalOwnerState::Ready,
+    };
+    cx.update(|cx| {
+        panel.update(cx, |panel, cx| {
+            panel.set_workbench_terminal_owner_state_for_tests(Some(owner_state.clone()), cx);
+            panel.set_workbench_terminal_badge_for_tests(
+                (expected.running_badge_count > 0).then(|| SurfaceBadge::Count {
+                    count: expected.running_badge_count as usize,
+                    tone: BadgeTone::Accent,
+                    label: format!(
+                        "{} running terminal processes",
+                        expected.running_badge_count
+                    )
+                    .into(),
+                }),
+                cx,
+            );
+        });
+        anyhow::ensure!(
+            terminal_surface.update(cx, |surface, cx| {
+                surface.set_owner_state(native_binding.generation, owner_state, cx)
+            }),
+            "Terminal owner state rejected its active generation"
+        );
+        Ok::<_, anyhow::Error>(())
+    })?;
+    cx.run_until_parked();
+
+    let native_snapshot = cx.read(|cx| terminal_panel.read(cx).snapshot(cx));
+    anyhow::ensure!(
+        native_snapshot.pending_terminal_count == 0,
+        "display-only Terminal fixtures unexpectedly spawned a process"
+    );
+    anyhow::ensure!(
+        native_snapshot.panes.len() == expected.panes.len()
+            && native_snapshot
+                .panes
+                .iter()
+                .map(|pane| pane.items.len())
+                .sum::<usize>()
+                == expected.processes.len(),
+        "native Terminal pane/item structure diverged from typed fixture: {native_snapshot:?}"
+    );
+    anyhow::ensure!(
+        native_snapshot
+            .panes
+            .iter()
+            .flat_map(|pane| &pane.items)
+            .all(|item| matches!(
+                &item.kind,
+                terminal_view::terminal_panel::TerminalPanelItemKind::Terminal {
+                    process_id: None,
+                    task_status: None,
+                    ..
+                }
+            )),
+        "display-only Terminal fixture acquired a real process: {native_snapshot:?}"
+    );
+    anyhow::ensure!(
+        terminal_panel.entity_id() == panel_entity_id,
+        "Terminal configuration replaced the workspace-owned panel entity"
+    );
+    let owner_count = cx.read(|cx| terminal_surface.read(cx).terminal_owners_for_tests().len());
+    anyhow::ensure!(
+        owner_count == expected.processes.len(),
+        "Terminal surface recorded {owner_count} immutable owners for {} processes",
+        expected.processes.len()
+    );
+    record_workbench_semantic_check(scene_name, "terminal-native-pane-tab-structure");
+    record_workbench_semantic_check(scene_name, "terminal-native-immutable-owner-map");
+
+    let normalized = expected.clone();
+    let checks = omega_workbench_harness::prove_terminal_surface(&fixture_scene, &normalized)
+        .with_context(|| format!("proving native Terminal scene {scene_name:?}"))?;
+    record_workbench_semantic_checks(scene_name, checks);
+    record_workbench_semantic_check(scene_name, "terminal-native-snapshot-proved");
+
+    if scene_name == "omega_workbench_terminal_hidden_running" {
+        dispatch_workbench_action(workspace_window, Box::new(SelectTerminal), cx)?;
+    } else if scene_name == "omega_workbench_terminal_collapse_reopen" {
+        dispatch_workbench_action(workspace_window, Box::new(SelectPlan), cx)?;
+        dispatch_workbench_action(workspace_window, Box::new(SelectTerminal), cx)?;
+        let (reopened_surface, reopened_panel) = active_workbench_terminal(panel, cx)?;
+        anyhow::ensure!(
+            reopened_surface.entity_id() == terminal_surface.entity_id()
+                && reopened_panel.entity_id() == panel_entity_id,
+            "Terminal collapse/reopen replaced its native surface or panel entity"
+        );
+        record_workbench_semantic_check(
+            scene_name,
+            "terminal-retained-entities-across-collapse-reopen",
+        );
     }
     Ok(())
 }
