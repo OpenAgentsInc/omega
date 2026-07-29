@@ -1356,19 +1356,6 @@ impl GitPanel {
                             this.schedule_update(window, cx);
                         }
                     }
-                    GitStoreEvent::RepositoryUpdated(
-                        repository_id,
-                        RepositoryEvent::GitDirectoryChanged,
-                        is_active,
-                    ) => {
-                        if this
-                            .repository_scope
-                            .map_or(*is_active, |scope| scope.repository_id == *repository_id)
-                        {
-                            this.git_access = None;
-                            this.schedule_update(window, cx);
-                        }
-                    }
                     GitStoreEvent::GlobalConfigurationUpdated => {
                         this.git_access = None;
                         this.schedule_update(window, cx);
