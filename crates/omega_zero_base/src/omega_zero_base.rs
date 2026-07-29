@@ -130,6 +130,9 @@ pub const ADMITTED_NAMESPACES: &[&str] = &[
 /// finishes identity onboarding. The settings actions are admitted
 /// individually so provider errors can open the real settings window without
 /// admitting the extensions surface or the rest of the `omega` namespace.
+/// Sarah voice controls are likewise admitted individually: the composer owns
+/// those five controls in zero base, while opening or focusing the unrendered
+/// workroom remains refused.
 ///
 /// # Why `onboarding::Finish` is here
 ///
@@ -210,6 +213,11 @@ pub const ADMITTED_ACTIONS: &[&str] = &[
     // the ordinary editable centre pane. Admit its standard save action
     // without admitting the rest of the workspace namespace.
     "workspace::Save",
+    "workroom::StartVoice",
+    "workroom::ToggleVoiceMute",
+    "workroom::InterruptVoice",
+    "workroom::EndVoice",
+    "workroom::RetryVoice",
 ];
 
 /// Enter zero base, from the parsed command line and from nowhere else.
@@ -363,6 +371,11 @@ mod tests {
             // Without it a fresh profile can reach identity onboarding and
             // never leave it, which is a dead end rather than a subtraction.
             "onboarding::Finish",
+            "workroom::StartVoice",
+            "workroom::ToggleVoiceMute",
+            "workroom::InterruptVoice",
+            "workroom::EndVoice",
+            "workroom::RetryVoice",
         ] {
             assert!(admits_action(admitted), "{admitted} must be admitted");
         }
@@ -376,6 +389,7 @@ mod tests {
             "git_panel::ToggleFocus",
             "debugger::Start",
             "workroom::Toggle",
+            "workroom::OpenPanel",
             "omega::Extensions",
             "workspace::ToggleLeftDock",
             "workspace::ToggleRightDock",

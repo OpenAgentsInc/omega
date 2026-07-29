@@ -6,6 +6,7 @@ mod agent_panel;
 mod agent_registry_ui;
 mod buffer_codegen;
 mod completion_provider;
+pub mod composer_voice;
 mod config_options;
 mod context;
 mod context_server_configuration;

@@ -856,6 +856,13 @@ pub(crate) fn initialize_panels(
                 .await
                 .log_err();
 
+            // Voice keeps its existing Sarah workroom owner and state machine,
+            // but zero base does not add that owner to a dock.
+            SarahWorkroomPanel::load(workspace_handle.clone(), cx.clone())
+                .await
+                .context("failed to load Sarah voice owner")
+                .log_err();
+
             workspace_handle
                 .update_in(cx, |workspace, window, cx| {
                     workspace.open_panel::<agent_ui::AgentPanel>(window, cx);

@@ -151,6 +151,9 @@ pub(crate) async fn issue_nostr_sarah_voice_session(
     )
     .await?;
     if status != StatusCode::CREATED {
+        if let Some(blocker) = insufficient_credit_blocker(status, &response_body) {
+            return Err(blocker);
+        }
         if status.is_success() {
             return Err(HostedSessionBlocker::ResponseInvalid);
         }
@@ -186,6 +189,9 @@ pub(crate) async fn issue_nostr_sarah_voice_session(
     )
     .await?;
     if status != StatusCode::CREATED {
+        if let Some(blocker) = insufficient_credit_blocker(status, &response_body) {
+            return Err(blocker);
+        }
         if status.is_success() {
             return Err(HostedSessionBlocker::ResponseInvalid);
         }
@@ -235,6 +241,9 @@ pub(crate) async fn issue_bearer_sarah_voice_session(
     )
     .await?;
     if status != StatusCode::CREATED {
+        if let Some(blocker) = insufficient_credit_blocker(status, &response_body) {
+            return Err(blocker);
+        }
         if status.is_success() {
             return Err(HostedSessionBlocker::ResponseInvalid);
         }
@@ -329,6 +338,24 @@ fn validate_challenge(challenge: &ChallengeResponse) -> Result<(), HostedSession
         return Err(HostedSessionBlocker::ResponseInvalid);
     }
     Ok(())
+}
+
+fn insufficient_credit_blocker(
+    status: StatusCode,
+    response_body: &[u8],
+) -> Option<HostedSessionBlocker> {
+    let body = String::from_utf8_lossy(response_body).to_ascii_lowercase();
+    let names_insufficient_credits = (body.contains("insufficient")
+        && (body.contains("credit") || body.contains("fund")))
+        || body.contains("payment_required")
+        || body.contains("voice_access_required");
+    if status == StatusCode::PAYMENT_REQUIRED || names_insufficient_credits {
+        Some(HostedSessionBlocker::InsufficientVoiceCredits {
+            status: status.as_u16(),
+        })
+    } else {
+        None
+    }
 }
 
 fn validate_ref(value: &str) -> Result<(), HostedSessionBlocker> {

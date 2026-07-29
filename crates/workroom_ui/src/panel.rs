@@ -17,16 +17,19 @@
 //! Membership, work units, and experience rank are community-only projections.
 //! Two-room rule: rooms never share membership or history.
 
-use std::time::{Duration, SystemTime, UNIX_EPOCH};
+use std::{
+    collections::HashMap,
+    time::{Duration, SystemTime, UNIX_EPOCH},
+};
 
 use agent_ui::{AgentPanel, ThreadId};
 use anyhow::{Context as _, Result};
 use audio::AudioSettings;
 use editor::{Editor, SelectionEffects, actions as editor_actions, scroll::Autoscroll};
 use gpui::{
-    App, AsyncWindowContext, Context, Entity, EventEmitter, FocusHandle, Focusable,
-    InteractiveElement, IntoElement, ParentElement, Render, SharedString, Styled, Task, WeakEntity,
-    Window, div, px,
+    App, AsyncWindowContext, Context, Entity, EntityId, EventEmitter, FocusHandle, Focusable,
+    Global, InteractiveElement, IntoElement, ParentElement, Render, SharedString, Styled, Task,
+    WeakEntity, Window, div, px,
 };
 use omega_effectd::{
     BindingProjection, BindingState, Issue31GrantProjection, OpenAgentsBinding,
@@ -71,6 +74,11 @@ use crate::voice::{
 const PANEL_KEY: &str = "SarahWorkroomPanel";
 const MAX_NOSTR_RECORD_ROWS: usize = 64;
 const MAX_VOICE_TRANSCRIPT_CHARS: usize = 16 * 1024;
+
+#[derive(Default)]
+struct SarahVoicePanels(HashMap<EntityId, Entity<SarahWorkroomPanel>>);
+
+impl Global for SarahVoicePanels {}
 
 #[derive(Clone, Debug)]
 struct NostrRecordRow {
@@ -144,6 +152,7 @@ pub struct SarahWorkroomPanel {
     voice_status: SharedString,
     voice_muted: bool,
     voice_retryable: bool,
+    voice_access_required: bool,
     voice_session_id: Option<String>,
     voice_transcript: Vec<VoiceTranscriptItem>,
     pending_voice_command: Option<VoiceCommandRequest>,
@@ -154,7 +163,15 @@ pub struct SarahWorkroomPanel {
 }
 
 pub fn init(cx: &mut App) {
-    cx.observe_new(|workspace: &mut Workspace, _, _| {
+    cx.observe_new(|workspace: &mut Workspace, _, cx| {
+        let workspace_id = cx.entity_id();
+        cx.on_release(move |_, cx| {
+            cx.default_global::<SarahVoicePanels>()
+                .0
+                .remove(&workspace_id);
+            agent_ui::composer_voice::remove_composer_voice_status(workspace_id, cx);
+        })
+        .detach();
         workspace
             .register_action(|workspace, _: &OpenPanel, window, cx| {
                 workspace.focus_panel::<SarahWorkroomPanel>(window, cx);
@@ -181,38 +198,40 @@ pub fn init(cx: &mut App) {
                 }
                 workspace.focus_panel::<SarahWorkroomPanel>(window, cx);
             })
-            .register_action(|workspace, _: &StartVoice, window, cx| {
-                if let Some(panel) = workspace.panel::<SarahWorkroomPanel>(cx) {
+            .register_action(|_workspace, _: &StartVoice, window, cx| {
+                if let Some(panel) = voice_panel(cx.entity_id(), cx) {
                     panel.update(cx, |panel, cx| panel.start_voice(window, cx));
                 }
-                workspace.focus_panel::<SarahWorkroomPanel>(window, cx);
             })
-            .register_action(|workspace, _: &ToggleVoiceMute, window, cx| {
-                if let Some(panel) = workspace.panel::<SarahWorkroomPanel>(cx) {
+            .register_action(|_workspace, _: &ToggleVoiceMute, _window, cx| {
+                if let Some(panel) = voice_panel(cx.entity_id(), cx) {
                     panel.update(cx, |panel, cx| panel.toggle_voice_mute(cx));
                 }
-                workspace.focus_panel::<SarahWorkroomPanel>(window, cx);
             })
-            .register_action(|workspace, _: &InterruptVoice, window, cx| {
-                if let Some(panel) = workspace.panel::<SarahWorkroomPanel>(cx) {
+            .register_action(|_workspace, _: &InterruptVoice, _window, cx| {
+                if let Some(panel) = voice_panel(cx.entity_id(), cx) {
                     panel.update(cx, |panel, cx| panel.interrupt_voice(cx));
                 }
-                workspace.focus_panel::<SarahWorkroomPanel>(window, cx);
             })
-            .register_action(|workspace, _: &EndVoice, window, cx| {
-                if let Some(panel) = workspace.panel::<SarahWorkroomPanel>(cx) {
+            .register_action(|_workspace, _: &EndVoice, _window, cx| {
+                if let Some(panel) = voice_panel(cx.entity_id(), cx) {
                     panel.update(cx, |panel, cx| panel.end_voice(cx));
                 }
-                workspace.focus_panel::<SarahWorkroomPanel>(window, cx);
             })
-            .register_action(|workspace, _: &RetryVoice, window, cx| {
-                if let Some(panel) = workspace.panel::<SarahWorkroomPanel>(cx) {
+            .register_action(|_workspace, _: &RetryVoice, window, cx| {
+                if let Some(panel) = voice_panel(cx.entity_id(), cx) {
                     panel.update(cx, |panel, cx| panel.retry_voice(window, cx));
                 }
-                workspace.focus_panel::<SarahWorkroomPanel>(window, cx);
             });
     })
     .detach();
+}
+
+fn voice_panel(workspace_id: EntityId, cx: &mut App) -> Option<Entity<SarahWorkroomPanel>> {
+    cx.default_global::<SarahVoicePanels>()
+        .0
+        .get(&workspace_id)
+        .cloned()
 }
 
 impl SarahWorkroomPanel {
@@ -223,9 +242,47 @@ impl SarahWorkroomPanel {
         cx.spawn(async move |cx| {
             let workspace_for_panel = workspace.clone();
             workspace.update_in(cx, |_workspace, window, cx| {
-                Ok(cx.new(|cx| Self::new(workspace_for_panel, window, cx)))
+                let workspace_id = cx.entity_id();
+                let panel = cx.new(|cx| Self::new(workspace_for_panel, window, cx));
+                cx.default_global::<SarahVoicePanels>()
+                    .0
+                    .insert(workspace_id, panel.clone());
+                let status = panel.read(cx).composer_voice_status();
+                agent_ui::composer_voice::set_composer_voice_status(workspace_id, status, cx);
+                cx.observe(&panel, move |_workspace, panel, cx| {
+                    let status = panel.read(cx).composer_voice_status();
+                    agent_ui::composer_voice::set_composer_voice_status(workspace_id, status, cx);
+                })
+                .detach();
+                Ok(panel)
             })?
         })
+    }
+
+    fn composer_voice_status(&self) -> agent_ui::composer_voice::ComposerVoiceStatus {
+        use agent_ui::composer_voice::{ComposerVoicePhase, ComposerVoiceStatus};
+
+        let phase = match self.voice_state {
+            SarahVoiceState::Idle => ComposerVoicePhase::Idle,
+            SarahVoiceState::Authenticating => ComposerVoicePhase::Authenticating,
+            SarahVoiceState::RequestingMicrophone => ComposerVoicePhase::RequestingMicrophone,
+            SarahVoiceState::Connecting => ComposerVoicePhase::Connecting,
+            SarahVoiceState::Listening => ComposerVoicePhase::Listening,
+            SarahVoiceState::UserSpeaking => ComposerVoicePhase::UserSpeaking,
+            SarahVoiceState::SarahSpeaking => ComposerVoicePhase::SarahSpeaking,
+            SarahVoiceState::Reconnecting => ComposerVoicePhase::Reconnecting,
+            SarahVoiceState::Ending => ComposerVoicePhase::Ending,
+            SarahVoiceState::Error if self.voice_access_required => {
+                ComposerVoicePhase::AccessRequired
+            }
+            SarahVoiceState::Error => ComposerVoicePhase::Error,
+        };
+        ComposerVoiceStatus {
+            phase,
+            detail: self.voice_status.clone(),
+            muted: self.voice_muted,
+            retryable: self.voice_retryable,
+        }
     }
 
     fn new(workspace: WeakEntity<Workspace>, window: &mut Window, cx: &mut Context<Self>) -> Self {
@@ -281,6 +338,7 @@ impl SarahWorkroomPanel {
             voice_status: "Managed voice is ready to start.".into(),
             voice_muted: false,
             voice_retryable: false,
+            voice_access_required: false,
             voice_session_id: None,
             voice_transcript: Vec::new(),
             pending_voice_command: None,
@@ -1276,6 +1334,7 @@ impl SarahWorkroomPanel {
         self.voice_controls.take();
         self.pending_voice_command = None;
         self.voice_retryable = false;
+        self.voice_access_required = false;
         self.voice_state = SarahVoiceState::Authenticating;
         self.voice_status =
             "Checking the existing OpenAgents session. No OpenAI API key is used.".into();
@@ -1295,6 +1354,7 @@ impl SarahWorkroomPanel {
                     this.update(cx, |panel, cx| {
                         panel.voice_state = SarahVoiceState::Error;
                         panel.voice_retryable = blocker.is_retryable();
+                        panel.voice_access_required = blocker.requires_voice_access();
                         panel.voice_status = blocker.summary().into();
                         cx.notify();
                     })?;
@@ -1311,6 +1371,7 @@ impl SarahWorkroomPanel {
                     this.update(cx, |panel, cx| {
                         panel.voice_state = SarahVoiceState::Error;
                         panel.voice_retryable = true;
+                        panel.voice_access_required = false;
                         panel.voice_status =
                             format!("Sarah voice could not start: {error:#}").into();
                         cx.notify();
@@ -1414,6 +1475,7 @@ impl SarahWorkroomPanel {
         self.voice_session_id = None;
         self.voice_muted = false;
         self.voice_retryable = false;
+        self.voice_access_required = false;
         self.voice_state = SarahVoiceState::Idle;
         self.voice_status = "Managed voice is ready to start.".into();
     }
@@ -2112,7 +2174,11 @@ impl Render for SarahWorkroomPanel {
             || voice_is_active
             || self.voice_state == SarahVoiceState::Ending;
         let voice_status = self.voice_status.clone();
-        let voice_state_label = self.voice_state.label();
+        let voice_state_label = if self.voice_access_required {
+            "Voice credits required"
+        } else {
+            self.voice_state.label()
+        };
         let voice_session_id = self.voice_session_id.clone();
         let pending_voice_command = self.pending_voice_command.clone();
         let created_agent_thread = self.created_agent_thread.clone();
@@ -2139,7 +2205,13 @@ impl Render for SarahWorkroomPanel {
                             .size(LabelSize::Small),
                     ),
             )
-            .child(Label::new(voice_status).color(Color::Muted))
+            .child(
+                Label::new(voice_status).color(if self.voice_state == SarahVoiceState::Error {
+                    Color::Error
+                } else {
+                    Color::Muted
+                }),
+            )
             .child(
                 Label::new("Managed by OpenAgents · OpenAI Realtime gpt-realtime-2.1 · no API key")
                     .color(Color::Muted)

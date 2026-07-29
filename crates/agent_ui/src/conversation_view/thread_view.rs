@@ -990,6 +990,10 @@ impl ThreadView {
             Self::handle_message_editor_event,
         ));
 
+        let composer_voice_status =
+            crate::composer_voice::composer_voice_status(workspace.entity_id(), cx);
+        subscriptions.push(cx.observe(&composer_voice_status, |_, _, cx| cx.notify()));
+
         // If this thread is backed by a NativeAgent, listen for skill loading
         // issues so we can surface them as banners. The agent emits a single
         // replacement-style event per project refresh, so we overwrite our
@@ -5807,6 +5811,119 @@ impl ThreadView {
                 }))
                 .into_any_element()
         }
+    }
+
+    fn render_voice_controls(&self, cx: &mut Context<Self>) -> AnyElement {
+        use crate::composer_voice::{ComposerVoicePhase, composer_voice_status};
+        use zed_actions::workroom::{EndVoice, RetryVoice, StartVoice, ToggleVoiceMute};
+
+        let status = composer_voice_status(self.workspace.entity_id(), cx)
+            .read(cx)
+            .clone();
+        let phase = status.phase;
+        if phase == ComposerVoicePhase::Unavailable {
+            return div().into_any_element();
+        }
+        let detail = status.detail.clone();
+        let label = if status.muted {
+            "Microphone muted"
+        } else {
+            phase.label()
+        };
+        let label_color = match phase {
+            ComposerVoicePhase::AccessRequired
+            | ComposerVoicePhase::Error
+            | ComposerVoicePhase::Reconnecting => Color::Error,
+            phase if phase.is_active() || phase.is_starting() => Color::Accent,
+            _ => Color::Muted,
+        };
+        let primary_icon = if status.muted {
+            IconName::MicMute
+        } else {
+            IconName::Mic
+        };
+
+        h_flex()
+            .id("agent-composer-voice-controls")
+            .debug_selector(|| "agent.composer.voice-controls".into())
+            .gap_0p5()
+            .when(
+                phase.is_active()
+                    || phase.is_starting()
+                    || matches!(
+                        phase,
+                        ComposerVoicePhase::Ending
+                            | ComposerVoicePhase::AccessRequired
+                            | ComposerVoicePhase::Error
+                    ),
+                |this| this.child(Label::new(label).size(LabelSize::XSmall).color(label_color)),
+            )
+            .child(
+                IconButton::new("agent-composer-voice", primary_icon)
+                    .debug_selector(|| "agent.composer.voice".into())
+                    .icon_size(IconSize::Small)
+                    .icon_color(label_color)
+                    .style(if phase.is_active() {
+                        ButtonStyle::Tinted(TintColor::Accent)
+                    } else {
+                        ButtonStyle::Subtle
+                    })
+                    .toggle_state(phase.is_active() && !status.muted)
+                    .disabled(
+                        matches!(
+                            phase,
+                            ComposerVoicePhase::Unavailable
+                                | ComposerVoicePhase::Authenticating
+                                | ComposerVoicePhase::Ending
+                        ) || (matches!(
+                            phase,
+                            ComposerVoicePhase::AccessRequired
+                                | ComposerVoicePhase::Error
+                                | ComposerVoicePhase::Reconnecting
+                        ) && !status.retryable),
+                    )
+                    .aria_label(label)
+                    .aria_description(detail.clone())
+                    .tooltip(move |_, cx| Tooltip::with_meta(label, None, detail.clone(), cx))
+                    .on_click(move |_, window, cx| match phase {
+                        ComposerVoicePhase::Idle => {
+                            window.dispatch_action(StartVoice.boxed_clone(), cx)
+                        }
+                        ComposerVoicePhase::AccessRequired
+                        | ComposerVoicePhase::Error
+                        | ComposerVoicePhase::Reconnecting
+                            if status.retryable =>
+                        {
+                            window.dispatch_action(RetryVoice.boxed_clone(), cx)
+                        }
+                        phase if phase.is_active() => {
+                            window.dispatch_action(ToggleVoiceMute.boxed_clone(), cx)
+                        }
+                        _ => {}
+                    }),
+            )
+            .when(
+                phase.is_active()
+                    || phase.is_starting()
+                    || matches!(
+                        phase,
+                        ComposerVoicePhase::AccessRequired | ComposerVoicePhase::Error
+                    ),
+                |this| {
+                    this.child(
+                        IconButton::new("agent-composer-end-voice", IconName::Stop)
+                            .debug_selector(|| "agent.composer.end-voice".into())
+                            .icon_size(IconSize::Small)
+                            .icon_color(Color::Error)
+                            .aria_label("End voice")
+                            .tooltip(Tooltip::text("End Sarah voice"))
+                            .on_click(|_, window, cx| {
+                                window.dispatch_action(EndVoice.boxed_clone(), cx);
+                            }),
+                    )
+                },
+            )
+            .into_any_element()
     }
 
     fn render_add_context_button(&mut self, cx: &mut Context<Self>) -> impl IntoElement {
@@ -13542,6 +13659,7 @@ impl ThreadView {
                     // into a stop control while a turn is generating, so the
                     // Exo header's separate `Stop` was a second button for the
                     // same act.
+                    .child(self.render_voice_controls(cx))
                     .child(self.render_send_button(cx)),
             )
             .into_any_element()

@@ -77,6 +77,11 @@ pub enum HostedSessionBlocker {
          Check voice access and credits in your OpenAgents account."
     )]
     VoiceSessionRejected { status: u16 },
+    #[error(
+        "Insufficient OpenAgents voice credits (HTTP {status}). \
+         Add credits or enable voice access in your OpenAgents account, then try again."
+    )]
+    InsufficientVoiceCredits { status: u16 },
     #[error("OpenAgents returned a sign-in response Omega could not use.")]
     ResponseInvalid,
     #[error("OpenAgents did not accept the session it had just issued.")]
@@ -104,9 +109,14 @@ impl HostedSessionBlocker {
                 | Self::VoiceProofExpired
                 | Self::ServiceUnavailable { .. }
                 | Self::VoiceSessionRejected { status: 409 | 429 }
+                | Self::InsufficientVoiceCredits { .. }
                 | Self::SessionNotVerified
                 | Self::CredentialStorageFailed
         )
+    }
+
+    pub fn requires_voice_access(&self) -> bool {
+        matches!(self, Self::InsufficientVoiceCredits { .. })
     }
 }
 
@@ -379,6 +389,7 @@ mod tests {
             HostedSessionBlocker::RequestFramingRejected,
             HostedSessionBlocker::ServiceUnavailable { status: 503 },
             HostedSessionBlocker::VoiceSessionRejected { status: 402 },
+            HostedSessionBlocker::InsufficientVoiceCredits { status: 402 },
             HostedSessionBlocker::ResponseInvalid,
             HostedSessionBlocker::SessionNotVerified,
             HostedSessionBlocker::CredentialStorageFailed,
