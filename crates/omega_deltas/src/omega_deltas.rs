@@ -167,8 +167,7 @@ pub const GOOGLE_PROVIDER_PATH: &str = "crates/language_models/src/provider/goog
 pub const GOOGLE_CLIENT_PATH: &str = "crates/google_ai/src/google_ai.rs";
 pub const OPENAGENTS_PROVIDER_PATH: &str = "crates/language_models/src/provider/openagents.rs";
 pub const OMEGA_MODEL_TIER_PATH: &str = "crates/agent_ui/src/omega_model_tier.rs";
-pub const ZERO_BASE_THREAD_VIEW_PATH: &str =
-    "crates/agent_ui/src/conversation_view/thread_view.rs";
+pub const ZERO_BASE_THREAD_VIEW_PATH: &str = "crates/agent_ui/src/conversation_view/thread_view.rs";
 pub const BASIC_SYSTEM_PROMPT_PATH: &str = "crates/agent/src/templates/basic_system_prompt.hbs";
 pub const AGENT_THREAD_PATH: &str = "crates/agent/src/thread.rs";
 pub const SESSION_DIRECTORIES_PATH: &str = "crates/agent_servers/src/acp.rs";

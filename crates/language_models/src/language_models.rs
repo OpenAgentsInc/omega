@@ -26,8 +26,8 @@ pub use crate::provider::mistral::MistralLanguageModelProvider;
 use crate::provider::ollama::OllamaLanguageModelProvider;
 use crate::provider::open_ai::OpenAiLanguageModelProvider;
 use crate::provider::open_ai_compatible::OpenAiCompatibleLanguageModelProvider;
-use crate::provider::openagents::OpenAgentsLanguageModelProvider;
 use crate::provider::open_router::OpenRouterLanguageModelProvider;
+use crate::provider::openagents::OpenAgentsLanguageModelProvider;
 use crate::provider::openai_subscribed::OpenAiSubscribedProvider;
 use crate::provider::opencode::OpenCodeLanguageModelProvider;
 use crate::provider::vercel_ai_gateway::VercelAiGatewayLanguageModelProvider;
@@ -294,7 +294,10 @@ fn register_language_model_providers(
     // Hosted Pro lane (Kimi K3 via OpenAgents / Fireworks). Flash stays on the
     // Google provider; this provider only exposes kimi-k3 for the tier control.
     registry.register_provider(
-        Arc::new(OpenAgentsLanguageModelProvider::new(client.http_client(), cx)),
+        Arc::new(OpenAgentsLanguageModelProvider::new(
+            client.http_client(),
+            cx,
+        )),
         cx,
     );
     registry.register_provider(

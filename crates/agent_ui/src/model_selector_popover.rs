@@ -47,11 +47,7 @@ impl ModelSelectorPopover {
     }
 
     /// Select a model by id (e.g. `google/gemini-3.6-flash` or `openagents/kimi-k3`).
-    pub fn select_model_id(
-        &self,
-        model_id: AgentModelId,
-        cx: &mut App,
-    ) -> Task<Result<()>> {
+    pub fn select_model_id(&self, model_id: AgentModelId, cx: &mut App) -> Task<Result<()>> {
         self.agent_selector.select_model(model_id, cx)
     }
 

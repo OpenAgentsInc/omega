@@ -258,8 +258,7 @@ fn hosted_sign_in_failure_message(blocker: Option<&omega_effectd::HostedSessionB
             "OpenAgents hosted Pro (Kimi K3) needs a signed-in account. {}",
             blocker.summary()
         ),
-        None => "OpenAgents hosted Pro (Kimi K3) needs a signed-in OpenAgents account."
-            .to_string(),
+        None => "OpenAgents hosted Pro (Kimi K3) needs a signed-in OpenAgents account.".to_string(),
     }
 }
 

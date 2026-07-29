@@ -222,10 +222,7 @@ mod tests {
     #[test]
     fn there_are_exactly_two_tiers() {
         assert_eq!(
-            ModelTier::ALL
-                .iter()
-                .map(|t| t.name())
-                .collect::<Vec<_>>(),
+            ModelTier::ALL.iter().map(|t| t.name()).collect::<Vec<_>>(),
             vec!["Flash", "Pro"]
         );
     }

@@ -13540,9 +13540,7 @@ impl ThreadView {
                 if let Some(entity) = model_selector.as_ref() {
                     let agent = entity.read(cx).agent_selector();
                     let model_id = AgentModelId::new(tier.agent_model_id());
-                    agent
-                        .select_model(model_id, cx)
-                        .detach_and_log_err(cx);
+                    agent.select_model(model_id, cx).detach_and_log_err(cx);
                 } else {
                     log::warn!(
                         "omega_model_tier: chose {} but this thread has no model selector",
