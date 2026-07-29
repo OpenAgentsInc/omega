@@ -167,6 +167,7 @@ members = [
     "crates/workroom_receipts",
     "crates/workroom_ui",
     "crates/onboarding",
+    "crates/openai_subscribed",
     "crates/opencode",
     "crates/open_ai",
     "crates/open_path_prompt",
@@ -453,6 +454,7 @@ agent_computer_ui = { path = "crates/agent_computer_ui" }
 workroom_receipts = { path = "crates/workroom_receipts" }
 workroom_ui = { path = "crates/workroom_ui" }
 onboarding = { path = "crates/onboarding" }
+openai_subscribed = { path = "crates/openai_subscribed" }
 opencode = { path = "crates/opencode" }
 open_ai = { path = "crates/open_ai" }
 open_path_prompt = { path = "crates/open_path_prompt" }
@@ -932,6 +934,9 @@ wasmtime-wasi = "36"
 wax = "0.7"
 which = "6.0.0"
 wasm-bindgen = "0.2.120"
+wasm-bindgen-futures = "0.4"
+js-sys = "0.3"
+console_error_panic_hook = "0.1.7"
 web-time = "1.1.0"
 webrtc-sys = "0.3.23"
 wgpu = "29.0.4"

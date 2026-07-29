@@ -397,7 +397,7 @@ mod tests {
             observation(1, IdentityPhase::Ready, vec![selected.clone()]),
         );
 
-        let mut refreshed = selected.clone();
+        let mut refreshed = selected;
         refreshed.binding = RepositoryBinding::new("refreshed-repository", "refreshed-worktree")
             .expect("valid refreshed binding");
         let effect = projection.sync_active_thread(

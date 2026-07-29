@@ -3142,11 +3142,11 @@ mod tests {
         let mismatch = replay_ok(
             &pending,
             &Transition::CompleteSurfaceLoad {
-                request_id: request_id.clone(),
+                request_id,
                 thread_id: thread_id.clone(),
                 surface: SurfaceId::Search,
                 generation: 0,
-                binding: binding.clone(),
+                binding,
             },
         );
         assert_eq!(

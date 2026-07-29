@@ -1,7 +1,7 @@
 use anyhow::{Context as _, Result};
 use collections::BTreeMap;
 use credentials_provider::CredentialsProvider;
-use futures::{FutureExt, StreamExt, future::BoxFuture};
+use futures::{AsyncReadExt as _, FutureExt, StreamExt, future::BoxFuture};
 use google_ai::GenerateContentResponse;
 pub use google_ai::completion::{GoogleEventMapper, into_google};
 use gpui::{App, AppContext, AsyncApp, Context, Entity, SharedString, Task};
@@ -22,7 +22,7 @@ use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 pub use settings::GoogleAvailableModel as AvailableModel;
 use settings::{Settings, SettingsStore};
-use smol::io::AsyncReadExt as _;
+
 use std::{
     sync::{Arc, LazyLock},
     time::{Duration, SystemTime, UNIX_EPOCH},

@@ -2849,26 +2849,32 @@ mod tests {
         init_test(cx);
 
         let fs = FakeFs::new(cx.executor());
-        let project_without_worktree = Project::test(fs.clone(), None::<&Path>, cx).await;
+        fs.create_dir(Path::new("/project-a")).await.unwrap();
         let project_with_worktree = Project::test(fs, [Path::new("/project-a")], cx).await;
 
-        // Thread in project without worktree
-        let (panel_no_wt, mut vcx_no_wt) = setup_panel_with_project(project_without_worktree, cx);
-        crate::test_support::open_thread_with_connection(
-            &panel_no_wt,
-            StubAgentConnection::new(),
-            &mut vcx_no_wt,
-        );
-        let thread_no_wt = panel_no_wt.read_with(&vcx_no_wt, |panel, cx| {
-            panel.active_agent_thread(cx).unwrap()
+        // Thread without worktree association
+        let session_without_worktree = acp::SessionId::new("session-without-worktree");
+        let thread_id_without_worktree = ThreadId::new();
+        cx.update(|cx| {
+            ThreadMetadataStore::global(cx).update(cx, |store, cx| {
+                store.save(
+                    ThreadMetadata {
+                        thread_id: thread_id_without_worktree,
+                        session_id: Some(session_without_worktree.clone()),
+                        agent_id: AgentId::from("stub"),
+                        title: Some("No Project Thread".into()),
+                        title_override: None,
+                        updated_at: Utc::now(),
+                        created_at: Some(Utc::now()),
+                        interacted_at: None,
+                        worktree_paths: WorktreePaths::from_folder_paths(&PathList::default()),
+                        remote_connection: None,
+                        archived: true,
+                    },
+                    cx,
+                );
+            });
         });
-        thread_no_wt.update_in(&mut vcx_no_wt, |thread, _window, cx| {
-            thread.push_user_content_block(None, "content".into(), cx);
-            thread.set_title("No Project Thread".into(), cx).detach();
-        });
-        vcx_no_wt.run_until_parked();
-        let session_without_worktree =
-            crate::test_support::active_session_id(&panel_no_wt, &vcx_no_wt);
 
         // Thread in project with worktree
         let (panel_wt, mut vcx_wt) = setup_panel_with_project(project_with_worktree, cx);

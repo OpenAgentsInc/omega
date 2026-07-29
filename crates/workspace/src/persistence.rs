@@ -1704,6 +1704,12 @@ impl WorkspaceDb {
                 host = Some(format!("mock-{}", id));
                 user = Some(format!("mock-user-{}", id));
             }
+            #[allow(unreachable_patterns)]
+            _ => {
+                kind = RemoteConnectionKind::Ssh;
+                host = Some("mock".to_string());
+                user = None;
+            }
         }
 
         if let RemoteConnectionOptions::Docker(options) = options {

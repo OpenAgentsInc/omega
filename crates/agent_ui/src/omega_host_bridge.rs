@@ -552,10 +552,12 @@ fn resolve_approved_device_scopes(
 /// binary is missing we fall back to loopback so a same-machine simulator
 /// still pairs.
 fn discover_live_tailnet() -> Option<LiveTailnetEndpoint> {
-    let output = std::process::Command::new("tailscale")
-        .args(["status", "--json"])
-        .output()
-        .ok()?;
+    let output = smol::block_on(
+        smol::process::Command::new("tailscale")
+            .args(["status", "--json"])
+            .output(),
+    )
+    .ok()?;
     if !output.status.success() {
         return None;
     }

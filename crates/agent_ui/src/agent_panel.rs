@@ -13389,6 +13389,7 @@ mod tests {
         });
 
         let fs = FakeFs::new(cx.executor());
+        cx.update(|cx| <dyn fs::Fs>::set_global(fs.clone(), cx));
         let project = Project::test(fs, [], cx).await;
         let multi_workspace =
             cx.add_window(|window, cx| MultiWorkspace::test_new(project.clone(), window, cx));
@@ -13468,27 +13469,28 @@ mod tests {
             );
         });
 
-        let title_editor_focus_handle = panel.read_with(cx, |panel, cx| {
+        let message_editor_focus_handle = panel.read_with(cx, |panel, cx| {
             panel
                 .active_thread_view(cx)
                 .expect("active thread view should be present")
                 .read(cx)
-                .title_editor
+                .message_editor
                 .focus_handle(cx)
         });
         cx.update(|window, cx| {
-            title_editor_focus_handle.focus(window, cx);
+            message_editor_focus_handle.focus(window, cx);
+            window.refresh();
         });
         cx.run_until_parked();
 
         panel.update_in(cx, |panel, window, cx| {
             assert!(
                 panel.focus_handle(cx).contains_focused(window, cx),
-                "focusing the thread title editor should keep focus within the agent panel"
+                "focusing the thread message editor should keep focus within the agent panel"
             );
             assert!(
                 panel.is_zoomed(window, cx),
-                "focusing the thread title editor should not close Zen Mode"
+                "focusing the thread message editor should not close Zen Mode"
             );
         });
     }
@@ -19928,7 +19930,7 @@ mod tests {
         panel.read_with(&cx, |panel, cx| {
             assert_eq!(panel.active_thread_id(cx), Some(foreground_id));
             assert!(!panel.retained_threads.contains_key(&foreground_id));
-            assert_eq!(panel.selected_agent, Agent::Stub);
+            assert_eq!(panel.selected_agent, Agent::NativeAgent);
         });
     }
 }

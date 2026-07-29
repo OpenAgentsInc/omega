@@ -2050,10 +2050,8 @@ mod tests {
                 let mut outline = ThreadOutline::new(cx);
                 outline.set_navigation_handler(Rc::new(move |item, _window, _cx| {
                     action_count.set(action_count.get().saturating_add(1));
-                    *observed_binding.borrow_mut() = Some((
-                        item.outline_binding.clone(),
-                        item.projection_binding.clone(),
-                    ));
+                    *observed_binding.borrow_mut() =
+                        Some((item.outline_binding, item.projection_binding));
                     true
                 }));
                 outline
