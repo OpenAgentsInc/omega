@@ -17,7 +17,7 @@ from typing import Any
 
 ROOT = Path(__file__).resolve().parent.parent
 DEFAULT_OUTPUT = ROOT / "target/omega-slim-agent-proof"
-FIVE_TOOLS = ["bash", "delegate", "edit", "read", "write"]
+BASIC_TOOLS = ["bash", "delegate", "edit", "read", "resume_thread", "write"]
 SLIM_DELTAS = [
     "OMEGA-DELTA-0133",
     "OMEGA-DELTA-0134",
@@ -138,9 +138,9 @@ def validate_installed_journey(value: dict[str, Any]) -> str:
     if (
         not isinstance(model_visible_tools, list)
         or any(not isinstance(tool, str) for tool in model_visible_tools)
-        or sorted(model_visible_tools) != FIVE_TOOLS
+        or sorted(model_visible_tools) != BASIC_TOOLS
     ):
-        raise ProofError(f"{label}.model_visible_tools must be exactly {FIVE_TOOLS}")
+        raise ProofError(f"{label}.model_visible_tools must be exactly {BASIC_TOOLS}")
     if value["model"] != {
         "provider": "google",
         "model": "gemini-3.6-flash",
@@ -188,7 +188,7 @@ def validate_installed_journey(value: dict[str, Any]) -> str:
         raise ProofError(f"{label}.turn must complete with end_turn")
     if not isinstance(turn["tool_calls"], list):
         raise ProofError(f"{label}.turn.tool_calls must be an array")
-    unknown_tools = sorted(set(turn["tool_calls"]) - set(FIVE_TOOLS))
+    unknown_tools = sorted(set(turn["tool_calls"]) - set(BASIC_TOOLS))
     if unknown_tools:
         raise ProofError(f"{label}.turn used tools outside the basic surface: {unknown_tools}")
     validate_reference(value["transcript"], f"{label}.transcript")
@@ -413,7 +413,7 @@ def self_test() -> None:
             "transport": "direct",
         },
         "installed_external_executors": [],
-        "model_visible_tools": FIVE_TOOLS,
+        "model_visible_tools": BASIC_TOOLS,
         "task": {
             "id": "fixture",
             "instruction_sha256": digest,
@@ -477,7 +477,7 @@ def self_test() -> None:
     if not completed:
         raise ProofError("self-test comparison did not complete")
     invalid = dict(installed)
-    invalid["model_visible_tools"] = FIVE_TOOLS + ["search_web"]
+    invalid["model_visible_tools"] = BASIC_TOOLS + ["search_web"]
     try:
         validate_installed_journey(invalid)
     except ProofError:

@@ -15588,7 +15588,7 @@ mod tests {
         let selector = read_repository_file(EXECUTOR_SELECTOR_PATH);
         assert!(
             without_whitespace(&selector).contains(&without_whitespace(
-                "&[Self::Omega, Self::Exo, Self::Codex, Self::Claude, Self::Grok]"
+                "&[Self::Omega, Self::Exo, Self::Codex, Self::Claude, Self::Grok,]"
             )),
             "OMEGA-DELTA-0115: the selectable executors in {} changed.",
             repository_path(EXECUTOR_SELECTOR_PATH).display()
@@ -18400,10 +18400,10 @@ mod tests {
         );
     }
 
-    /// OMEGA-DELTA-0133. The default agent surface is the closed five-tool
+    /// OMEGA-DELTA-0133. The default agent surface is the closed six-tool
     /// basic profile.
     #[test]
-    fn the_basic_profile_is_the_default_five_tool_surface() {
+    fn the_basic_profile_is_the_default_six_tool_surface() {
         let settings = default_settings().expect("default settings must parse");
         let agent = settings
             .get("agent")
@@ -18448,13 +18448,13 @@ mod tests {
                 name.as_str()
             })
             .collect::<std::collections::BTreeSet<_>>();
-        let expected = ["bash", "delegate", "edit", "read", "write"]
+        let expected = ["bash", "delegate", "edit", "read", "resume_thread", "write"]
             .into_iter()
             .collect::<std::collections::BTreeSet<_>>();
         assert_eq!(
             actual, expected,
             "OMEGA-DELTA-0133: the model-visible basic surface must be exactly \
-             read, write, edit, bash, and delegate."
+             read, write, edit, bash, delegate, and resume_thread."
         );
         assert!(
             !actual.contains("search_web"),
@@ -19670,7 +19670,7 @@ mod tests {
             "selectable_here()",
         ] {
             assert!(
-                render.contains(required),
+                without_whitespace(&render).contains(&without_whitespace(required)),
                 "OMEGA-DELTA-0146: the selector face or clickable list lost \
                  `{required}`."
             );
@@ -19683,7 +19683,7 @@ mod tests {
         assert!(
             warm.contains("omega_executor_selector::ready_here()")
                 && !warm.contains("selectable_here()"),
-            "OMEGA-DELTA-0146: hiding Codex and Claude Code from direct \
+            "OMEGA-DELTA-0146: hiding external ACP executors from direct \
              selection also stopped their adapter preload."
         );
     }

@@ -6418,28 +6418,28 @@ field, which the lane already held for the pin check.
   supported configuration and this suite will not object — what it will not
   allow again is an `exo`-harness lane that cannot find its own runner.
 
-### OMEGA-DELTA-0133 — A fresh Omega Agent has five tools, and the broad editor is explicit
+### OMEGA-DELTA-0133 — A fresh Omega Agent has six tools, and the broad editor is explicit
 
 ProductSpec revision 2 makes the reliable no-harness agent the default. A fresh
 thread now starts on `basic`, whose entire model-visible surface is `read`,
-`write`, `edit`, `bash`, and `delegate`. Context-server tools are off, so an MCP
-installation cannot silently make a sixth tool appear. `search_web` is absent;
-every provider Omega ships refuses it.
+`write`, `edit`, `bash`, `delegate`, and `resume_thread`. Context-server tools
+are off, so an MCP installation cannot silently add another tool. `search_web`
+is absent; every provider Omega ships refuses it.
 
 The existing implementations and permission identifiers remain intact. The
 basic profile aliases `ReadTool`, `WriteFileTool`, `EditFileTool`,
-`TerminalTool`, and `SpawnAgentTool` only where `Thread::enabled_tools` builds
-the model request. (`OMEGA-DELTA-0136` later replaced the original file-only
-read alias with the scoped read dispatcher.) Persisted permission rules
-therefore keep their meaning.
+`TerminalTool`, `SpawnAgentTool`, and `ResumeThreadTool` only where
+`Thread::enabled_tools` builds the model request. (`OMEGA-DELTA-0136` later
+replaced the original file-only read alias with the scoped read dispatcher.)
+Persisted permission rules therefore keep their meaning.
 The former `write` surface remains available as the explicit `editor` profile,
 including its broad built-in and context-server tool sets. No tool was deleted.
 
 `OMEGA-DELTA-0013` already pins the fresh-install model to
 `google/gemini-3.6-flash`; this delta composes that provider default with the
-five-tool profile instead of duplicating the model check.
+six-tool profile instead of duplicating the model check.
 
-- **Enforced by:** `the_basic_profile_is_the_default_five_tool_surface` in
+- **Enforced by:** `the_basic_profile_is_the_default_six_tool_surface` in
   `crates/omega_deltas`.
 
 ### OMEGA-DELTA-0134 — Destructive Git commands inspect the dirty tree first
@@ -6471,7 +6471,7 @@ terminal output replaces the visible tool-call content.
 
 The `basic` profile renders `basic_system_prompt.hbs`; every other profile keeps
 the inherited broad system prompt. The slim template is ordered as identity,
-communication, five-tool use, work safety, task execution, delegation, system
+communication, six-tool use, work safety, task execution, delegation, system
 information, optional sandbox guidance, optional skills, and instruction
 files. It omits the wide surface's Mermaid essay, grep/find and LSP workflows,
 and editor-specific tool guidance.
@@ -6494,7 +6494,7 @@ continue to hit the provider prompt cache.
 
 ### OMEGA-DELTA-0136 — Basic `read` spends every address the thread can hold
 
-The five-tool profile no longer aliases `read_file` and then leaves artifact,
+The six-tool profile no longer aliases `read_file` and then leaves artifact,
 delegation, and skill addresses stranded behind hidden canonical tools. Its
 `read` is a dispatcher over the existing readers: project files and images,
 this thread's tool-result registry, direct-child transcripts as answered by the
@@ -6556,7 +6556,7 @@ created.
 
 The slim-agent proof protocol validates three distinct observations. The
 out-of-box journey binds a candidate, source commit, empty external-executor
-inventory, exact five-tool request surface, direct
+inventory, exact six-tool request surface, direct
 `google/gemini-3.6-flash` model, coding change, passing verification command,
 completed turn, and content-addressed transcript. The harness journey binds an
 exact installed executor to its successful disclosure and readable session
@@ -6568,7 +6568,7 @@ source commit, and task IDs.
 `result.json`. The `zed-eval` launcher records and forwards the selection to
 both Harbor and Pier agents. The fixed basic surface refuses
 `ZED_EVAL_DISABLE_TOOLS`; a comparison cannot quietly make that profile easier
-by removing one of its five tools. A skipped basic-versus-wide run is a typed
+by removing one of its six tools. A skipped basic-versus-wide run is a typed
 gap in the proof output, not a passing comparison.
 
 The integrated sweep requires OMEGA-DELTA-0133 through OMEGA-DELTA-0138 in
@@ -6704,14 +6704,14 @@ separate action.
 ### OMEGA-DELTA-0146 — Direct executor selection is restricted to Omega
 
 Before `OMEGA-DELTA-0149` removed the selector from the composer, it offered
-**Omega** as the only ordinary clickable choice. Codex and Claude Code remained
-disabled implementation lanes. They remain fully detected, attached, warmed,
-and available to Omega's internal router; removing their direct selection
-cannot turn off their infrastructure.
+**Omega** as the only ordinary clickable choice. Codex, Claude Code, and Grok
+remain disabled implementation lanes. They remain fully detected, attached,
+warmed, and available to Omega's internal router; removing their direct
+selection cannot turn off their infrastructure.
 
 Exo keeps its separate process-level contract. It is absent by default and may
 join the internal selector inventory only when the launch explicitly includes
-`--enable-exo` and a lane resolves. A direct Codex or Claude Code selection is
+`--enable-exo` and a lane resolves. A direct external ACP executor selection is
 refused rather than changing the route.
 
 - **Enforced by:** `only_omega_is_an_ordinary_selectable_executor` in
@@ -6753,10 +6753,10 @@ only public executor, so a selector with one usable choice is unnecessary
 chrome. `OMEGA-DELTA-0150` subsequently removed external provider controls too;
 the send/stop control remains.
 
-This is a presentation boundary only. Codex and Claude Code detection,
+This is a presentation boundary only. Codex, Claude Code, and Grok detection,
 attachment, warming, and Omega's internal routing remain loaded exactly as
-before. Exo retains its process-level `--enable-exo` boundary but is not exposed
-through a composer selector.
+before. Exo retains its process-level `--enable-exo` boundary but is not
+exposed through a composer selector.
 
 - **Enforced by:** `the_composer_shows_no_executor_or_external_provider_controls`
   and `only_omega_is_an_ordinary_selectable_executor` in `crates/omega_deltas`.
@@ -6764,9 +6764,9 @@ through a composer selector.
 ### OMEGA-DELTA-0150 — Every new chat belongs to Omega
 
 A new zero-base chat always creates its session on Omega's native loop. Merely
-detecting or attaching Codex, Claude Code, or Exo is not authority to hand that
-executor the conversation. The unpinned routing decision is therefore always
-`NativeLoop` with `UnpinnedDefault`.
+detecting or attaching Codex, Claude Code, Grok, or Exo is not authority to hand
+that executor the conversation. The unpinned routing decision is therefore
+always `NativeLoop` with `UnpinnedDefault`.
 
 External executors remain detected, attached, and warmed behind Omega so its
 internal routing and delegation infrastructure stays available. They do not
@@ -6806,9 +6806,9 @@ assistant's name, so the prompt neither presents the backing model as system
 identity nor permits the assistant to identify as Gemini or Google.
 
 The same process-level detector used to resolve a `delegate` call supplies the
-prompt's installed executor catalog. Codex and Claude Code remain absent from
-public executor controls, but Omega can see their stable IDs and names before
-deciding whether to delegate. Detection, prompt disclosure, and runtime
+prompt's installed executor catalog. Codex, Claude Code, and Grok remain absent
+from public executor controls, but Omega can see their stable IDs and names
+before deciding whether to delegate. Detection, prompt disclosure, and runtime
 resolution therefore cannot silently become three different inventories.
 
 - **Enforced by:** `omega_names_itself_and_the_executors_it_can_delegate_to`
@@ -7591,4 +7591,3 @@ current image build does not decode it inline.
   user bearer for those exact hosted lanes.
 - **Enforced by:** `omega_model_tier` unit tests, `language_models` openagents
   provider tests, and the OpenAgents chat-completions dual-auth path.
-

@@ -33,14 +33,14 @@ The `openagents.omega.slim-agent-installed-journey.v1` observation records:
 
 - The full Omega source commit and candidate digest.
 - An empty external-executor inventory.
-- The `basic` profile and exactly `bash`, `delegate`, `edit`, `read`, and
-  `write` in the model request.
+- The `basic` profile and exactly `bash`, `delegate`, `edit`, `read`,
+  `resume_thread`, and `write` in the model request.
 - The direct Google provider and `gemini-3.6-flash` model.
 - Different content digests before and after the coding change.
 - The verification command and its zero exit code.
 - A completed `end_turn` result and a content-addressed transcript.
 
-The model can use any subset of the five tools. It cannot use another tool.
+The model can use any subset of the six tools. It cannot use another tool.
 The transcript reference must be a safe relative path and a SHA-256 digest.
 
 ## Record the harness journey {#record-the-harness-journey}
@@ -80,10 +80,10 @@ Record both run references and the exact ordered task IDs in
 another prerequisite prevents the runs, record both profiles as `skipped` with
 a reason. A skipped comparison is a gap and keeps the proof incomplete.
 
-`eval-cli --profile basic` uses the closed five-tool profile.
+`eval-cli --profile basic` uses the closed six-tool profile.
 `eval-cli --profile wide` uses the inherited write profile. The basic mode
 rejects `ZED_EVAL_DISABLE_TOOLS` so the comparison cannot remove a tool from
-the admitted five-tool surface.
+the admitted six-tool surface.
 
 ## Validate the integrated record {#validate-the-integrated-record}
 
