@@ -846,6 +846,34 @@ impl ConversationView {
         cx.notify();
     }
 
+    pub fn open_subagent_in_right_pane(
+        &mut self,
+        session_id: acp::SessionId,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(connected) = self.as_connected_mut() else {
+            return;
+        };
+        let Some(view) = connected.threads.get(&session_id).cloned() else {
+            return;
+        };
+
+        connected.right_pane_session_id = Some(session_id);
+        view.read(cx).activation_focus_handle(cx).focus(window, cx);
+        cx.notify();
+    }
+
+    pub fn close_right_pane(&mut self, cx: &mut Context<Self>) {
+        let Some(connected) = self.as_connected_mut() else {
+            return;
+        };
+
+        if connected.right_pane_session_id.take().is_some() {
+            cx.notify();
+        }
+    }
+
     pub fn set_work_dirs(&mut self, work_dirs: PathList, cx: &mut Context<Self>) {
         self.desired_work_dirs = work_dirs.clone();
         if let Some(connected) = self.as_connected() {
@@ -1056,6 +1084,7 @@ enum ServerState {
 pub struct ConnectedServerState {
     auth_state: AuthState,
     active_id: Option<acp::SessionId>,
+    right_pane_session_id: Option<acp::SessionId>,
     pub(crate) threads: HashMap<acp::SessionId, Entity<ThreadView>>,
     connection: Rc<dyn AgentConnection>,
     conversation: Entity<Conversation>,
@@ -1930,6 +1959,7 @@ impl ConversationView {
                                 connection,
                                 auth_state: AuthState::Ok,
                                 active_id: Some(root_session_id.clone()),
+                                right_pane_session_id: None,
                                 threads: HashMap::from_iter([(root_session_id, current.clone())]),
                                 conversation,
                                 _connection_entry_subscription: connection_entry_subscription,
@@ -2209,6 +2239,7 @@ impl ConversationView {
                     ServerState::Connected(ConnectedServerState {
                         auth_state,
                         active_id: None,
+                        right_pane_session_id: None,
                         threads: HashMap::default(),
                         connection,
                         conversation: cx.new(|_cx| Conversation::default()),
@@ -4563,7 +4594,26 @@ impl Render for ConversationView {
                 .into_any_element(),
             ServerState::Connected(connected) => {
                 if let Some(view) = connected.active_view() {
-                    view.clone().into_any_element()
+                    if let Some(right_pane_view) = connected
+                        .right_pane_session_id
+                        .as_ref()
+                        .and_then(|session_id| connected.threads.get(session_id))
+                    {
+                        h_flex()
+                            .size_full()
+                            .child(div().flex_1().min_w_0().size_full().child(view.clone()))
+                            .child(Divider::vertical())
+                            .child(
+                                div()
+                                    .flex_1()
+                                    .min_w_0()
+                                    .size_full()
+                                    .child(right_pane_view.clone()),
+                            )
+                            .into_any_element()
+                    } else {
+                        view.clone().into_any_element()
+                    }
                 } else {
                     debug_panic!("This state should never be reached");
                     div().into_any_element()
@@ -12230,6 +12280,60 @@ pub(crate) mod tests {
             "a subagent's turn ending spent the root thread's queued message"
         );
         assert_eq!(text.as_deref(), Some("queued message"));
+    }
+
+    #[gpui::test]
+    async fn opening_subagent_in_right_pane_preserves_active_thread(cx: &mut TestAppContext) {
+        init_test(cx);
+
+        let (conversation_view, cx) =
+            setup_conversation_view(StubAgentServer::default_response(), cx).await;
+        add_to_workspace(conversation_view.clone(), cx);
+
+        let root_session_id = conversation_view.read_with(cx, |view, cx| {
+            view.active_thread()
+                .expect("conversation should have an active thread")
+                .read(cx)
+                .session_id
+                .clone()
+        });
+        let subagent_session_id = acp::SessionId::new("right-pane-subagent");
+        let fs = FakeFs::new(cx.executor());
+        let project = Project::test(fs, [], cx).await;
+        let connection: Rc<dyn AgentConnection> = Rc::new(StubAgentConnection::new());
+        let subagent_thread = cx.update(|_window, cx| {
+            create_test_acp_thread(
+                Some(root_session_id.clone()),
+                subagent_session_id.0.as_ref(),
+                connection,
+                project,
+                cx,
+            )
+        });
+        conversation_view.update_in(cx, |view, window, cx| {
+            view.register_subagent_thread_view(subagent_thread, window, cx);
+            view.open_subagent_in_right_pane(subagent_session_id.clone(), window, cx);
+        });
+
+        conversation_view.read_with(cx, |view, _cx| {
+            let connected = view
+                .as_connected()
+                .expect("conversation should be connected");
+            assert_eq!(connected.active_id.as_ref(), Some(&root_session_id));
+            assert_eq!(
+                connected.right_pane_session_id.as_ref(),
+                Some(&subagent_session_id)
+            );
+        });
+
+        conversation_view.update(cx, |view, cx| view.close_right_pane(cx));
+        conversation_view.read_with(cx, |view, _cx| {
+            let connected = view
+                .as_connected()
+                .expect("conversation should be connected");
+            assert_eq!(connected.active_id.as_ref(), Some(&root_session_id));
+            assert!(connected.right_pane_session_id.is_none());
+        });
     }
 
     #[gpui::test]

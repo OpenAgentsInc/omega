@@ -4483,7 +4483,6 @@ impl ThreadView {
         if self.parent_session_id.is_none() {
             return None;
         }
-        let parent_session_id = self.thread.read(cx).parent_session_id()?.clone();
 
         let server_view = self.server_view.clone();
         let thread = self.thread.clone();
@@ -4554,14 +4553,12 @@ impl ThreadView {
                                     IconButton::new("minimize_subagent", IconName::Minimize)
                                         .icon_size(IconSize::Small)
                                         .tooltip(Tooltip::text("Minimize Subagent (esc)"))
-                                        .on_click(move |_, window, cx| {
-                                            let _ = server_view.update(cx, |server_view, cx| {
-                                                server_view.navigate_to_thread(
-                                                    parent_session_id.clone(),
-                                                    window,
-                                                    cx,
-                                                );
-                                            });
+                                        .on_click(move |_, _window, cx| {
+                                            server_view
+                                                .update(cx, |server_view, cx| {
+                                                    server_view.close_right_pane(cx);
+                                                })
+                                                .log_err();
                                         }),
                                 ),
                         ),
@@ -11325,14 +11322,18 @@ impl ThreadView {
                             .color(Color::Muted)
                             .size(IconSize::Small),
                     )
-                    .tooltip(Tooltip::text("Make Subagent Full Screen"))
+                    .tooltip(Tooltip::text("Open Subagent in Right Pane"))
                     .on_click(cx.listener(move |this, _event, window, cx| {
-                        telemetry::event!("Subagent Maximized");
+                        telemetry::event!("Subagent Opened in Right Pane");
                         this.server_view
                             .update(cx, |this, cx| {
-                                this.navigate_to_thread(nav_session_id.clone(), window, cx);
+                                this.open_subagent_in_right_pane(
+                                    nav_session_id.clone(),
+                                    window,
+                                    cx,
+                                );
                             })
-                            .ok();
+                            .log_err();
                     }));
 
                 let collapse_toggle = h_flex()
@@ -13959,15 +13960,11 @@ impl Render for ThreadView {
                 if this.close_thread_search(window, cx) {
                     return;
                 }
-                let Some(parent_session_id) = this.thread.read(cx).parent_session_id().cloned()
-                else {
-                    return;
-                };
                 this.server_view
                     .update(cx, |view, cx| {
-                        view.navigate_to_thread(parent_session_id, window, cx);
+                        view.close_right_pane(cx);
                     })
-                    .ok();
+                    .log_err();
             }))
             .on_action(cx.listener(
                 |this, _: &super::thread_search_bar::DismissThreadSearch, window, cx| {
@@ -14052,13 +14049,13 @@ impl Render for ThreadView {
                     }
                 }),
             )
-            .on_action(cx.listener(|this, _: &workspace::GoBack, window, cx| {
-                if let Some(parent_session_id) = this.thread.read(cx).parent_session_id().cloned() {
+            .on_action(cx.listener(|this, _: &workspace::GoBack, _window, cx| {
+                if this.parent_session_id.is_some() {
                     this.server_view
                         .update(cx, |view, cx| {
-                            view.navigate_to_thread(parent_session_id, window, cx);
+                            view.close_right_pane(cx);
                         })
-                        .ok();
+                        .log_err();
                 }
             }))
             .on_action(cx.listener(Self::keep_all))
