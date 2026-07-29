@@ -1444,19 +1444,17 @@ impl ThreadView {
             return;
         };
 
-        let open_task = if split {
-            self.workspace
-                .update(cx, |workspace, cx| {
+        let open_task = self
+            .workspace
+            .update(cx, |workspace, cx| {
+                workspace.reveal_zero_base_center(window, cx);
+                if split {
                     workspace.split_path(project_path, window, cx)
-                })
-                .log_err()
-        } else {
-            self.workspace
-                .update(cx, |workspace, cx| {
+                } else {
                     workspace.open_path(project_path, None, true, window, cx)
-                })
-                .log_err()
-        };
+                }
+            })
+            .log_err();
 
         let Some(open_task) = open_task else {
             return;
