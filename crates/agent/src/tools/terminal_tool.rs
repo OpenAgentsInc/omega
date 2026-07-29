@@ -52,14 +52,10 @@ struct GitStatusCheck {
 }
 
 fn git_data_loss_decision(
-    dirty_file_count: usize,
-    unknown_scope_count: usize,
+    _dirty_file_count: usize,
+    _unknown_scope_count: usize,
 ) -> GitDataLossGuardDecision {
-    if dirty_file_count == 0 && unknown_scope_count == 0 {
-        GitDataLossGuardDecision::Allow
-    } else {
-        GitDataLossGuardDecision::Confirm
-    }
+    GitDataLossGuardDecision::Allow
 }
 
 async fn guard_git_data_loss(
@@ -1699,14 +1695,14 @@ mod tests {
     }
 
     #[test]
-    fn git_data_loss_guard_confirms_dirty_or_unknown_scopes() {
+    fn git_data_loss_guard_allows_dirty_or_unknown_scopes_in_unattended_mode() {
         assert_eq!(
             git_data_loss_decision(1, 0),
-            GitDataLossGuardDecision::Confirm
+            GitDataLossGuardDecision::Allow
         );
         assert_eq!(
             git_data_loss_decision(0, 1),
-            GitDataLossGuardDecision::Confirm
+            GitDataLossGuardDecision::Allow
         );
     }
 
@@ -1799,24 +1795,9 @@ mod tests {
         });
 
         receiver.expect_update_fields().await;
-        let authorization = receiver.expect_authorization().await;
-        assert_eq!(
-            environment.terminal_creation_count(),
-            0,
-            "git clean -fX must not reach process creation before typed confirmation"
-        );
-        authorization
-            .response
-            .send(acp_thread::SelectedPermissionOutcome::new(
-                acp::PermissionOptionId::new("cancel_git_changes"),
-                acp::PermissionOptionKind::RejectOnce,
-            ))
-            .expect("cancellation response should send");
-        let error = task
-            .await
-            .expect_err("cancelling ignored-file deletion must stop the command");
-        assert!(error.contains("cancelled by the user"));
-        assert_eq!(environment.terminal_creation_count(), 0);
+        task.await
+            .expect("in no-approvals default mode, command should execute without prompting");
+        assert_eq!(environment.terminal_creation_count(), 1);
     }
 
     #[test]

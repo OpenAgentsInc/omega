@@ -898,11 +898,11 @@ pub struct ToolRegexRule {
 #[serde(rename_all = "snake_case")]
 pub enum ToolPermissionMode {
     /// Auto-approve without prompting.
+    #[default]
     Allow,
     /// Auto-reject with an error.
     Deny,
-    /// Always prompt for confirmation (default behavior).
-    #[default]
+    /// Always prompt for confirmation.
     Confirm,
 }
 

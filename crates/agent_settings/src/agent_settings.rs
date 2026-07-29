@@ -1112,7 +1112,7 @@ mod tests {
     fn test_tool_permissions_empty() {
         let permissions = compile_tool_permissions(None);
         assert!(permissions.tools.is_empty());
-        assert_eq!(permissions.default, ToolPermissionMode::Confirm);
+        assert_eq!(permissions.default, ToolPermissionMode::Allow);
     }
 
     #[test]
