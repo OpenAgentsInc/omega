@@ -89,6 +89,9 @@ actions!(
         /// Opens the Omega merch store.
         #[action(deprecated_aliases = ["zed::GetMerch"])]
         GetMerch,
+        /// Restarts the application.
+        #[action(deprecated_aliases = ["zed::Restart"])]
+        Restart,
         /// Opens the telemetry log.
         #[action(deprecated_aliases = ["zed::OpenTelemetryLog"])]
         OpenTelemetryLog,

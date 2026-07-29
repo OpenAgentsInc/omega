@@ -78,8 +78,14 @@ pub(crate) fn start(client: Arc<Client>, cx: &mut App) {
 fn start_hang_detection(report_longer_then: Duration, client: Arc<Client>, cx: &App) {
     let foreground_thread = thread::current().id();
     let monitor_interval = Duration::from_secs(1);
+    let background_report_longer_then = report_longer_then.max(Duration::from_secs(1));
     let telemetry = Arc::new(Mutex::new(telemetry::Reporter::new(foreground_thread)));
-    let mut log = logging::Reporter::new(monitor_interval, report_longer_then, foreground_thread);
+    let mut log = logging::Reporter::new(
+        monitor_interval,
+        report_longer_then,
+        background_report_longer_then,
+        foreground_thread,
+    );
 
     let telemetry2 = Arc::clone(&telemetry);
     cx.on_app_quit({

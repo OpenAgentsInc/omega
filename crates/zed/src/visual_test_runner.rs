@@ -2019,6 +2019,24 @@ fn verify_workbench_render_preflight(
             probe.require_interactive("omega.workbench.control.identity.worktree")?;
             if test_name == "omega_workbench_identity_clean" {
                 probe.require_focus("omega.workbench.control.identity.repository", true)?;
+                let identity_bounds = probe.require_unique("omega.workbench.thread-identity")?;
+                let repository_bounds =
+                    probe.require_unique("omega.workbench.control.identity.repository")?;
+                let worktree_bounds =
+                    probe.require_unique("omega.workbench.control.identity.worktree")?;
+                let branch_bounds =
+                    probe.require_unique("omega.workbench.control.identity.branch")?;
+                anyhow::ensure!(
+                    identity_bounds.size.width < px(360.)
+                        && repository_bounds.size.width < px(180.)
+                        && worktree_bounds.size.width < px(120.)
+                        && branch_bounds.size.width < px(120.),
+                    "clean repository identity controls reserve excess horizontal space: identity={identity_bounds:?}, repository={repository_bounds:?}, worktree={worktree_bounds:?}, branch={branch_bounds:?}"
+                );
+                record_workbench_semantic_check(
+                    test_name,
+                    "identity-controls-use-compact-content-widths",
+                );
             }
             if test_name == "omega_workbench_identity_offline_error" {
                 probe.require_accessible(

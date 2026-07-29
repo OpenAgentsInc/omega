@@ -2,9 +2,9 @@
 //!
 //! The owner asked for this while looking at the running app, in as many
 //! words: *"I need to be able to switch the executor. No selection of model
-//! like Gemini. You select between Omega, Exo, Codex, Claude. If some of those
+//! like Gemini. You select between Omega, Exo, Codex, Claude, and Grok. If some of those
 //! are not implemented yet, don't add them, but that's what I want. Whichever
-//! of those are ready, put those in now. Those are the only four choices."*
+//! of those are ready, put those in now."* Grok extends that runtime catalog.
 //!
 //! So the control this module renders names a **runtime**, never a model. What
 //! it replaced in the composer bar named `google/gemini-3.6-flash`, which is
@@ -12,11 +12,11 @@
 //!
 //! # One public executor, with Exo admitted only by an explicit launch
 //!
-//! [`SelectableExecutor`] retains the four runtime identities because routing,
+//! [`SelectableExecutor`] retains the five runtime identities because routing,
 //! disclosure, thread recovery, and adapter warming still need to distinguish
 //! them. The public selector is narrower: Omega is the only ordinary choice,
 //! and Exo joins it only when this process was launched with `--enable-exo`.
-//! Codex and Claude remain loaded as routing infrastructure behind Omega, but
+//! Codex, Claude, and Grok remain loaded as routing infrastructure behind Omega, but
 //! their disabled rows say that direct selection is coming in a future
 //! version.
 //!
@@ -24,7 +24,7 @@
 //! [`selectable`] applies the separate public-selection policy:
 //!
 //! - **Omega** is the native loop, which is compiled in. Always ready.
-//! - **Codex** and **Claude** are ready when `omega_agent_detect` finds their
+//! - **Codex**, **Claude**, and **Grok** are ready when `omega_agent_detect` finds their
 //!   binary on `PATH` *and* `omega_agent_attach` can host them over ACP. Both
 //!   halves matter: GitHub Copilot and Cursor are detected and have no ACP
 //!   server here, so offering one would produce a failure at connect time
@@ -46,7 +46,7 @@
 //! the connection is built: the Exo lane if there is one, otherwise the
 //! detected agent. `pin_session` chooses between the *classes* the router
 //! already holds — it cannot make Claude reachable on a machine where Codex
-//! filled that slot. So a pin alone could never honour three of the four
+//! filled that slot. So a pin alone could never honour the external choices
 //! names, and a control that silently did nothing for two of them would be the
 //! worst version of this.
 //!
@@ -100,12 +100,12 @@ pub const CHOOSING_RECONNECTS: &str =
 pub const ONLY_BEFORE_THE_FIRST_MESSAGE: &str = "The executor is chosen before the first message. Start a new conversation \
      to run on a different one.";
 
-/// Why Codex and Claude Code are visible but not directly selectable.
+/// Why external ACP executors are visible but not directly selectable.
 pub const DIRECT_SELECTION_COMING_SOON: &str = "Coming soon — selectable in an upcoming version";
 
-/// The four executors a person may choose between.
+/// The five executors a person may choose between.
 ///
-/// Closed, and closed on purpose. "Those are the only four choices" is a
+/// Closed, and closed on purpose. The named choices are a
 /// product decision, and a `&str` here would let a later edit add a fifth name
 /// with no review — which is exactly how the wire tokens `OMEGA-DELTA-0055`
 /// removed had reached a person in the first place.
@@ -119,6 +119,8 @@ pub enum SelectableExecutor {
     Codex,
     /// Claude, through the `claude-acp` adapter.
     Claude,
+    /// Grok, through its native ACP server.
+    Grok,
 }
 
 impl SelectableExecutor {
@@ -127,7 +129,13 @@ impl SelectableExecutor {
     /// Omega first because it is the one that is always there, and the order
     /// is fixed here rather than derived from what is installed so the menu
     /// does not reorder itself between launches.
-    pub const ALL: &'static [Self] = &[Self::Omega, Self::Exo, Self::Codex, Self::Claude];
+    pub const ALL: &'static [Self] = &[
+        Self::Omega,
+        Self::Exo,
+        Self::Codex,
+        Self::Claude,
+        Self::Grok,
+    ];
 
     /// The name a person reads. This is the only rendering of this type.
     #[must_use]
@@ -137,6 +145,7 @@ impl SelectableExecutor {
             Self::Exo => "Exo",
             Self::Codex => "Codex",
             Self::Claude => "Claude",
+            Self::Grok => "Grok",
         }
     }
 
@@ -161,6 +170,7 @@ impl SelectableExecutor {
             Self::Exo => "exo",
             Self::Codex => "codex",
             Self::Claude => "claude",
+            Self::Grok => "grok",
         }
     }
 
@@ -172,10 +182,11 @@ impl SelectableExecutor {
             Self::Exo => "The Exo harness lane, driving your Exo install.",
             Self::Codex => "Codex on this machine, through the codex-acp adapter.",
             Self::Claude => "Claude on this machine, through the claude-acp adapter.",
+            Self::Grok => "Grok on this machine, through its native ACP server.",
         }
     }
 
-    /// The ACP adapter id this name attaches through, for the two that are
+    /// The ACP adapter id this name attaches through, for the three that are
     /// detected agents.
     ///
     /// Taken from `agent_servers` rather than spelled again, so an id renamed
@@ -185,14 +196,15 @@ impl SelectableExecutor {
         match self {
             Self::Codex => Some(agent_servers::CODEX_ID),
             Self::Claude => Some(agent_servers::CLAUDE_AGENT_ID),
+            Self::Grok => Some(agent_servers::GROK_ID),
             Self::Omega | Self::Exo => None,
         }
     }
 
-    /// Which of the four a live thread is running on, if it is one of them.
+    /// Which of the five a live thread is running on, if it is one of them.
     ///
     /// `None` for an engine lane, and for an external agent that is not one of
-    /// the two named here. Neither is a fifth choice: the first is Full Auto
+    /// the three named here. Neither is a sixth choice: the first is Full Auto
     /// authority, which this control does not reach, and the second is
     /// somebody else's adapter. A control that answered `Omega` for either
     /// would be the dishonest attribution `omega#77` exists to stop.
@@ -225,6 +237,7 @@ pub fn runtime_choices() -> &'static [SelectableExecutor] {
         SelectableExecutor::Omega,
         SelectableExecutor::Codex,
         SelectableExecutor::Claude,
+        SelectableExecutor::Grok,
     ];
 
     if omega_front_door::exo_enabled() {
@@ -250,7 +263,7 @@ pub fn ready(detected: &[DetectedAgent], exo_lane_resolves: bool) -> Vec<Selecta
             // list that could be empty would be a composer with no executor.
             SelectableExecutor::Omega => true,
             SelectableExecutor::Exo => exo_lane_resolves,
-            SelectableExecutor::Codex | SelectableExecutor::Claude => {
+            SelectableExecutor::Codex | SelectableExecutor::Claude | SelectableExecutor::Grok => {
                 let Some(adapter) = choice.adapter_id() else {
                     return false;
                 };
@@ -280,7 +293,7 @@ pub fn ready_here() -> Vec<SelectableExecutor> {
 
 /// Apply the public executor-selection policy to a capability inventory.
 ///
-/// Codex and Claude remain in the inventory so Omega can route to them and
+/// Codex, Claude, and Grok remain in the inventory so Omega can route to them and
 /// keep their adapters warm. They are deliberately absent from this result,
 /// which is the only list the menu makes clickable.
 #[must_use]
@@ -338,7 +351,9 @@ pub fn unavailable(
                 // what stops a fifth variant arriving here unnoticed.
                 SelectableExecutor::Omega => "compiled in",
                 SelectableExecutor::Exo => exo_absence.unwrap_or("no Exo lane"),
-                SelectableExecutor::Codex | SelectableExecutor::Claude => {
+                SelectableExecutor::Codex
+                | SelectableExecutor::Claude
+                | SelectableExecutor::Grok => {
                     // The two halves `ready` checks, told apart. "Installed and
                     // Omega cannot drive it" and "not installed" are different
                     // things to do next, and collapsing them would send
@@ -375,7 +390,7 @@ pub fn unavailable_here() -> Vec<(SelectableExecutor, &'static str)> {
 /// Disabled rows shown by the public executor menu.
 ///
 /// Exo keeps its machine-specific reason when the launch opted in but no lane
-/// resolves. Codex and Claude Code always use the product-timeline message:
+/// resolves. External ACP executors always use the product-timeline message:
 /// installation status does not make direct selection available yet.
 #[must_use]
 pub fn selector_unavailable_here() -> Vec<(SelectableExecutor, &'static str)> {
@@ -391,9 +406,9 @@ pub fn selector_unavailable_here() -> Vec<(SelectableExecutor, &'static str)> {
             }
             match choice {
                 SelectableExecutor::Omega => None,
-                SelectableExecutor::Codex | SelectableExecutor::Claude => {
-                    Some((choice, DIRECT_SELECTION_COMING_SOON))
-                }
+                SelectableExecutor::Codex
+                | SelectableExecutor::Claude
+                | SelectableExecutor::Grok => Some((choice, DIRECT_SELECTION_COMING_SOON)),
                 SelectableExecutor::Exo => Some((
                     choice,
                     unavailable
@@ -500,7 +515,7 @@ pub fn selected() -> Option<SelectableExecutor> {
 pub fn select(choice: SelectableExecutor) {
     if matches!(
         choice,
-        SelectableExecutor::Codex | SelectableExecutor::Claude
+        SelectableExecutor::Codex | SelectableExecutor::Claude | SelectableExecutor::Grok
     ) {
         log::warn!(
             "OMEGA-DELTA-0146: ignored a direct {} selection because only \
@@ -597,14 +612,16 @@ pub fn attach_plan(
             exo: exo_enabled,
             agents: Vec::new(),
         },
-        SelectableExecutor::Codex | SelectableExecutor::Claude => AttachPlan {
-            exo: false,
-            agents: detected
-                .iter()
-                .filter(|agent| Some(agent.id) == choice.adapter_id())
-                .cloned()
-                .collect(),
-        },
+        SelectableExecutor::Codex | SelectableExecutor::Claude | SelectableExecutor::Grok => {
+            AttachPlan {
+                exo: false,
+                agents: detected
+                    .iter()
+                    .filter(|agent| Some(agent.id) == choice.adapter_id())
+                    .cloned()
+                    .collect(),
+            }
+        }
     }
 }
 
@@ -666,7 +683,7 @@ pub fn render_executor_selector(
     connecting: bool,
     on_select: Rc<dyn Fn(SelectableExecutor, &mut Window, &mut App)>,
 ) -> AnyElement {
-    // An executor that is not one of the four is named by its own id rather
+    // An executor that is not one of the five is named by its own id rather
     // than rounded to the nearest of them. This is an engine lane, or an
     // adapter Omega did not attach; both are facts, and neither is a fifth
     // choice, so the control reports and does not offer.
@@ -841,21 +858,23 @@ mod tests {
         detected(agent_servers::CLAUDE_AGENT_ID, "Claude")
     }
 
+    fn grok() -> DetectedAgent {
+        detected(agent_servers::GROK_ID, "Grok")
+    }
+
     fn copilot() -> DetectedAgent {
         detected("github-copilot-cli", "Copilot")
     }
 
-    /// The owner's sentence, as a test: exactly these four names exist.
+    /// The complete named executor catalog.
     #[test]
-    fn there_are_four_names_and_no_others() {
+    fn there_are_five_names_and_no_others() {
         assert_eq!(
             SelectableExecutor::ALL
                 .iter()
                 .map(|choice| choice.name())
                 .collect::<Vec<_>>(),
-            vec!["Omega", "Exo", "Codex", "Claude"],
-            "\"those are the only four choices\" is a product decision, and a \
-             fifth entry here is the edit that quietly reverses it"
+            vec!["Omega", "Exo", "Codex", "Claude", "Grok"],
         );
     }
 
@@ -877,7 +896,7 @@ mod tests {
         assert_eq!(
             selectable(&ready, false),
             vec![SelectableExecutor::Omega],
-            "Codex and Claude stay ready for Omega's router without becoming \
+            "External ACP executors stay ready for Omega's router without becoming \
              direct choices"
         );
         assert_eq!(
@@ -928,12 +947,13 @@ mod tests {
             "Claude is installed and Codex is not"
         );
         assert_eq!(
-            ready(&[codex(), claude()], true),
+            ready(&[codex(), claude(), grok()], true),
             vec![
                 SelectableExecutor::Omega,
                 SelectableExecutor::Exo,
                 SelectableExecutor::Codex,
                 SelectableExecutor::Claude,
+                SelectableExecutor::Grok,
             ],
             "the order is ALL's order, not detection's, so the menu does not \
              reorder itself between launches"
@@ -1004,7 +1024,7 @@ mod tests {
     /// would otherwise have taken the same slot.
     #[test]
     fn choosing_an_agent_excludes_every_other_external_executor() {
-        let installed = vec![codex(), claude()];
+        let installed = vec![codex(), claude(), grok()];
 
         let plan = attach_plan(Some(SelectableExecutor::Claude), &installed, true);
         assert!(
@@ -1022,6 +1042,12 @@ mod tests {
         assert_eq!(
             plan.agents.iter().map(|agent| agent.id).collect::<Vec<_>>(),
             vec![agent_servers::CODEX_ID],
+        );
+
+        let plan = attach_plan(Some(SelectableExecutor::Grok), &installed, true);
+        assert_eq!(
+            plan.agents.iter().map(|agent| agent.id).collect::<Vec<_>>(),
+            vec![agent_servers::GROK_ID],
         );
     }
 
@@ -1064,14 +1090,18 @@ mod tests {
             Some(SelectableExecutor::Claude)
         );
         assert_eq!(
+            SelectableExecutor::of(ExecutorClass::ExternalAcp, agent_servers::GROK_ID),
+            Some(SelectableExecutor::Grok)
+        );
+        assert_eq!(
             SelectableExecutor::of(ExecutorClass::ExternalAcp, omega_exo_lane::EXO_HARNESS_ID),
             Some(SelectableExecutor::Exo)
         );
     }
 
-    /// An engine lane is not one of the four, and is not rounded to one.
+    /// An engine lane is not one of the five, and is not rounded to one.
     #[test]
-    fn an_engine_lane_is_not_answered_with_one_of_the_four() {
+    fn an_engine_lane_is_not_answered_with_one_of_the_five() {
         assert_eq!(
             SelectableExecutor::of(ExecutorClass::EngineLane, agent_servers::CODEX_ID),
             None,
@@ -1093,7 +1123,7 @@ mod tests {
     /// would be a menu whose entries fail when they are clicked.
     #[test]
     fn every_offered_name_produces_a_plan_that_reaches_it() {
-        let installed = vec![codex(), claude()];
+        let installed = vec![codex(), claude(), grok()];
 
         for choice in ready(&installed, true) {
             let plan = attach_plan(Some(choice), &installed, true);
@@ -1102,7 +1132,9 @@ mod tests {
                     assert!(!plan.exo && plan.agents.is_empty());
                 }
                 SelectableExecutor::Exo => assert!(plan.exo),
-                SelectableExecutor::Codex | SelectableExecutor::Claude => assert_eq!(
+                SelectableExecutor::Codex
+                | SelectableExecutor::Claude
+                | SelectableExecutor::Grok => assert_eq!(
                     plan.agents.iter().map(|agent| agent.id).collect::<Vec<_>>(),
                     vec![
                         choice
@@ -1116,7 +1148,7 @@ mod tests {
 
     /// `OMEGA-DELTA-0123`. Nothing is silently missing.
     ///
-    /// The two lists partition the four names: nothing in both, and — the half
+    /// The two lists partition the five names: nothing in both, and — the half
     /// that matters — nothing in neither. A name dropped from `ready` with no
     /// entry here is exactly the absence the owner had to ask about.
     #[test]
@@ -1170,16 +1202,16 @@ mod tests {
     ///
     /// The honest version of this check, and the second one written. The first
     /// claimed to hold "not installed" and "installed and undrivable" apart,
-    /// and could not: for Codex and Claude the second case cannot happen at
+    /// and could not: for the drivable external agents the second case cannot happen at
     /// all. `ready` offers a name when it is **detected and drivable**, and
-    /// `DRIVABLE_AGENT_IDS` names both of them — so a detected Codex is always
+    /// `DRIVABLE_AGENT_IDS` names all of them — so a detected Codex is always
     /// offered and never explained, and the "installed; Omega hosts no adapter
     /// for it" arm is dead code. Collapsing that arm into the other passed the
     /// test, which is how the claim was found to be empty.
     ///
     /// So the arm is kept and the *reachability* is what is asserted. It is the
     /// truthful answer on the day somebody removes an id from
-    /// `DRIVABLE_AGENT_IDS` while it is still one of the four names, and this
+    /// `DRIVABLE_AGENT_IDS` while it is still one of the five names, and this
     /// check fails on exactly that edit — which is when the sentence starts
     /// being read by somebody.
     #[test]
@@ -1212,7 +1244,7 @@ mod tests {
             };
             assert!(
                 crate::omega_agent_attach::DRIVABLE_AGENT_IDS.contains(&adapter),
-                "{} is one of the four names and Omega no longer hosts an \
+                "{} is one of the five names and Omega no longer hosts an \
                  adapter for it. The \"installed; Omega hosts no adapter for \
                  it\" reason becomes reachable at that moment — check it says \
                  something useful before shipping this.",

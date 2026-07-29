@@ -2909,6 +2909,9 @@ impl Terminal {
         exit_status: Option<ExitStatus>,
         cx: &mut Context<Terminal>,
     ) {
+        if let TerminalType::Pty { pty_tx, .. } = &self.terminal_type {
+            pty_tx.mark_closed();
+        }
         if let Some(tx) = &self.completion_tx {
             tx.try_send(exit_status).ok();
         }
@@ -3950,6 +3953,12 @@ mod tests {
             completion_rx.recv().await.unwrap(),
             Some(ExitStatus::default())
         );
+        terminal.read_with(cx, |terminal, _| {
+            let TerminalType::Pty { pty_tx, .. } = &terminal.terminal_type else {
+                panic!("test terminal should use a PTY");
+            };
+            assert!(pty_tx.is_closed());
+        });
         assert_content_eventually(&terminal, "hello", cx).await;
 
         // Inject additional output directly into the emulator (display-only path)

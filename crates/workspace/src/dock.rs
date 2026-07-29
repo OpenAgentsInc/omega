@@ -573,6 +573,34 @@ impl Dock {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
+        self.set_panel_zoomed_state(panel, zoomed, window, cx);
+
+        self.workspace
+            .update(cx, |workspace, cx| {
+                workspace.serialize_workspace(window, cx);
+            })
+            .ok();
+        cx.notify();
+    }
+
+    pub(crate) fn set_panel_zoomed_from_workspace(
+        &mut self,
+        panel: &AnyView,
+        zoomed: bool,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.set_panel_zoomed_state(panel, zoomed, window, cx);
+        cx.notify();
+    }
+
+    fn set_panel_zoomed_state(
+        &mut self,
+        panel: &AnyView,
+        zoomed: bool,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
         for entry in &mut self.panel_entries {
             if entry.panel.panel_id() == panel.entity_id() {
                 if zoomed != entry.panel.is_zoomed(window, cx) {
@@ -582,13 +610,6 @@ impl Dock {
                 entry.panel.set_zoomed(false, window, cx);
             }
         }
-
-        self.workspace
-            .update(cx, |workspace, cx| {
-                workspace.serialize_workspace(window, cx);
-            })
-            .ok();
-        cx.notify();
     }
 
     pub fn zoom_out(&mut self, window: &mut Window, cx: &mut Context<Self>) {

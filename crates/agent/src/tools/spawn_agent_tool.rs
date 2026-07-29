@@ -38,8 +38,8 @@ use crate::{
 ///
 /// ### Choosing what runs the agent
 /// - Use `native` (or omit `executor` for stored-call compatibility) to run on Omega's own loop.
-/// - Set `executor` to run the sub-agent as a *different* agent entirely — Codex or Claude Code, each with its own login, its own tools and its own loop. Use this when the task suits another agent better, or when you want a second opinion from a genuinely independent one.
-/// - Accepted values are installed agent ids such as `codex-acp` and `claude-acp`, `exo`, and `engine:<lane>`. `auto` is not accepted.
+/// - Set `executor` to run the sub-agent as a *different* agent entirely — Codex, Claude Code, or Grok, each with its own login, its own tools and its own loop. Use this when the task suits another agent better, or when you want a second opinion from a genuinely independent one.
+/// - Accepted values are installed agent ids such as `codex-acp`, `claude-acp`, and `grok`, plus `exo` and `engine:<lane>`. `auto` is not accepted.
 /// - `executor` names an agent, not a language model. A model name such as `gpt-5` is not accepted and will fail rather than silently running on your own model.
 /// - You may give different sub-agents different executors in the same turn, and they run concurrently.
 ///
@@ -142,7 +142,7 @@ pub struct SubagentExecutorReport {
     /// `ExecutorClass::token()` — `native_loop` or `external_acp` for a
     /// subagent. A stable wire token, which is what a machine reader wants.
     pub class: String,
-    /// The executor's own identifier: `codex-acp`, `claude-acp`, or Omega's own
+    /// The executor's own identifier: `codex-acp`, `claude-acp`, `grok`, or Omega's own
     /// for an inherited subagent.
     pub agent_id: String,
     /// `None` is **not disclosed**, and is different from an empty string.

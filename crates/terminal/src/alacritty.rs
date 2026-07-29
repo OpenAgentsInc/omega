@@ -2,7 +2,16 @@
 use std::num::NonZeroU32;
 #[cfg(unix)]
 use std::os::fd::AsRawFd;
-use std::{borrow::Cow, io, ops::RangeInclusive, path::PathBuf, sync::Arc};
+use std::{
+    borrow::Cow,
+    io,
+    ops::RangeInclusive,
+    path::PathBuf,
+    sync::{
+        Arc,
+        atomic::{AtomicBool, Ordering},
+    },
+};
 
 mod hyperlinks;
 
@@ -83,24 +92,44 @@ impl From<&AlacrittyPty> for ProcessIdGetter {
 
 pub(super) struct PtySender {
     notifier: Notifier,
+    closed: AtomicBool,
 }
 
 impl PtySender {
     pub(super) fn notify(&self, input: impl Into<Cow<'static, [u8]>>) {
-        self.notifier.notify(input);
+        if !self.closed.load(Ordering::Acquire) {
+            self.notifier.notify(input);
+        }
     }
 
     pub(super) fn resize(&self, bounds: TerminalBounds) {
+        if self.closed.load(Ordering::Acquire) {
+            return;
+        }
         if let Err(error) = self
             .notifier
             .0
             .send(Msg::Resize(window_size_from_terminal_bounds(bounds)))
         {
-            log::error!("failed to resize alacritty pty: {error}");
+            if !self.closed.swap(true, Ordering::AcqRel) {
+                log::debug!("alacritty pty closed before resize: {error}");
+            }
         }
     }
 
+    pub(super) fn mark_closed(&self) {
+        self.closed.store(true, Ordering::Release);
+    }
+
+    #[cfg(test)]
+    pub(super) fn is_closed(&self) -> bool {
+        self.closed.load(Ordering::Acquire)
+    }
+
     pub(super) fn shutdown(&self) {
+        if self.closed.swap(true, Ordering::AcqRel) {
+            return;
+        }
         if let Err(error) = self.notifier.0.send(Msg::Shutdown) {
             log::debug!("failed to shut down alacritty pty loop: {error}");
         }
@@ -210,6 +239,7 @@ pub(super) fn spawn_event_loop(
 
     Ok(PtySender {
         notifier: Notifier(pty_tx),
+        closed: AtomicBool::new(false),
     })
 }
 

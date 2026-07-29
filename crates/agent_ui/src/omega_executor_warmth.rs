@@ -35,25 +35,18 @@
 //!
 //! # What it costs while nobody is using it
 //!
-//! A warmed adapter is two live processes: the `npm exec` wrapper and the Node
-//! child it spawns. Measured, idle, immediately after `initialize`:
-//! **~100 MB RSS each, ~200 MB the pair**, per warmed executor.
+//! A warmed adapter holds a live process tree and its initialized connection.
+//! That is the real price and it is why [`warmable`] is as narrow as it is: the
+//! one already attached is excluded, while every other installed external
+//! executor remains warm only until [`WARM_LIFETIME`].
 //!
-//! That is the real price and it is why [`warmable`] is as narrow as it is. On
-//! a machine with both agents installed, one of them is already attached, so
-//! the standing cost is one warm adapter — around 200 MB — for the one name in
-//! the menu the person has not chosen. On a machine sitting on Omega's own loop
-//! or an Exo lane, both are warm and it is around 400 MB. A person who never
-//! opens the menu pays that for nothing, which is the honest statement of the
-//! trade, and [`WARM_LIFETIME`] is what stops them paying it forever.
-//!
-//! # Exactly two names are ever warmed, and Exo is not one of them
+//! # Exactly three names are ever warmed, and Exo is not one of them
 //!
 //! [`warmable`] is a subset of what the selector offers, never a superset:
 //! warming something the menu does not list would be Omega starting a process
 //! for an executor a person cannot even choose.
 //!
-//! Within that, only the two names that *are* an adapter:
+//! Within that, only the three names that *are* an adapter:
 //!
 //! - **Omega** is compiled in. There is no process to start.
 //! - **Exo** must never be started. `OMEGA-DELTA-0107` took route A: Omega
@@ -181,7 +174,7 @@ struct WarmEntry {
 
 /// Every adapter this process has warmed, is warming, or has failed to warm.
 ///
-/// A `Vec` rather than a map because it holds at most two entries per open
+/// A `Vec` rather than a map because it holds at most three entries per open
 /// project, and because iterating it has an order that does not depend on a
 /// hash seed.
 #[derive(Default)]
@@ -488,6 +481,7 @@ mod tests {
         SelectableExecutor::Exo,
         SelectableExecutor::Codex,
         SelectableExecutor::Claude,
+        SelectableExecutor::Grok,
     ];
 
     /// `OMEGA-DELTA-0107`, held from the other side. Warming is exactly the
@@ -511,12 +505,16 @@ mod tests {
         assert!(!warmable(EVERYTHING, None).contains(&SelectableExecutor::Omega));
     }
 
-    /// The two that are an adapter, and only those.
+    /// The three that are an adapter, and only those.
     #[test]
-    fn the_two_adapters_are_what_gets_warmed() {
+    fn the_three_adapters_are_what_gets_warmed() {
         assert_eq!(
             warmable(EVERYTHING, None),
-            vec![SelectableExecutor::Codex, SelectableExecutor::Claude],
+            vec![
+                SelectableExecutor::Codex,
+                SelectableExecutor::Claude,
+                SelectableExecutor::Grok,
+            ],
         );
     }
 
@@ -525,21 +523,25 @@ mod tests {
     fn the_attached_executor_is_not_warmed_again() {
         assert_eq!(
             warmable(EVERYTHING, Some(agent_servers::CODEX_ID)),
-            vec![SelectableExecutor::Claude],
+            vec![SelectableExecutor::Claude, SelectableExecutor::Grok],
         );
         assert_eq!(
             warmable(EVERYTHING, Some(agent_servers::CLAUDE_AGENT_ID)),
-            vec![SelectableExecutor::Codex],
+            vec![SelectableExecutor::Codex, SelectableExecutor::Grok],
         );
     }
 
-    /// An Exo lane fills the same single external slot, and warming both
-    /// adapters underneath it is right: neither is running.
+    /// An Exo lane fills the same single external slot, and warming all
+    /// adapters underneath it is right: none is running.
     #[test]
-    fn an_exo_lane_leaves_both_adapters_worth_warming() {
+    fn an_exo_lane_leaves_all_adapters_worth_warming() {
         assert_eq!(
             warmable(EVERYTHING, Some(omega_exo_lane::EXO_HARNESS_ID)),
-            vec![SelectableExecutor::Codex, SelectableExecutor::Claude],
+            vec![
+                SelectableExecutor::Codex,
+                SelectableExecutor::Claude,
+                SelectableExecutor::Grok,
+            ],
         );
     }
 

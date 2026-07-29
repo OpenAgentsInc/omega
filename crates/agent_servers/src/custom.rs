@@ -18,6 +18,7 @@ pub const GEMINI_ID: &str = "gemini";
 pub const CLAUDE_AGENT_ID: &str = "claude-acp";
 pub const CODEX_ID: &str = "codex-acp";
 pub const CURSOR_ID: &str = "cursor";
+pub const GROK_ID: &str = "grok";
 
 /// An ACP server whose exact command was resolved by another admitted lane.
 ///
@@ -78,11 +79,22 @@ impl AgentServer for CommandAgentServer {
 /// A generic agent server implementation for custom user-defined agents
 pub struct CustomAgentServer {
     agent_id: AgentId,
+    unattended: bool,
 }
 
 impl CustomAgentServer {
     pub fn new(agent_id: AgentId) -> Self {
-        Self { agent_id }
+        Self {
+            agent_id,
+            unattended: false,
+        }
+    }
+
+    pub fn new_unattended(agent_id: AgentId) -> Self {
+        Self {
+            agent_id,
+            unattended: true,
+        }
     }
 }
 
@@ -263,6 +275,7 @@ impl AgentServer for CustomAgentServer {
         cx: &mut App,
     ) -> Task<Result<Rc<dyn AgentConnection>>> {
         let agent_id = self.agent_id();
+        let unattended = self.unattended;
         let default_mode = self.default_mode(cx);
         let is_registry_agent = is_registry_agent(agent_id.clone(), cx);
         let default_config_options = cx.read_global(|settings: &SettingsStore, _| {
@@ -318,7 +331,7 @@ impl AgentServer for CustomAgentServer {
                     extra_env.insert("GEMINI_API_KEY".into(), api_key);
                 }
             }
-            let command = store
+            let mut command = store
                 .update(cx, |store, cx| {
                     let agent = store.get_external_agent(&agent_id).with_context(|| {
                         format!("Custom agent server `{}` is not registered", agent_id)
@@ -332,6 +345,7 @@ impl AgentServer for CustomAgentServer {
                     anyhow::Ok(agent.get_command(vec![], extra_env, &mut cx.to_async()))
                 })??
                 .await?;
+            prepend_launch_args_for_agent(agent_id.as_ref(), unattended, &mut command.args);
             let connection = crate::acp::connect(
                 agent_id,
                 project,
@@ -349,6 +363,19 @@ impl AgentServer for CustomAgentServer {
     fn into_any(self: Rc<Self>) -> Rc<dyn std::any::Any> {
         self
     }
+}
+
+fn prepend_launch_args_for_agent(agent_id: &str, unattended: bool, args: &mut Vec<String>) {
+    if agent_id != GROK_ID {
+        return;
+    }
+
+    let mut launch_args = vec!["--no-auto-update".to_owned()];
+    if unattended {
+        launch_args.push("--always-approve".to_owned());
+    }
+    launch_args.append(args);
+    *args = launch_args;
 }
 
 /// The session mode a delegated coding agent has to be in to run unattended.
@@ -436,6 +463,21 @@ mod tests {
             Some("bypassPermissions")
         );
         assert_eq!(unattended_mode_for_agent(GEMINI_ID), None);
+        assert_eq!(unattended_mode_for_agent(GROK_ID), None);
+    }
+
+    #[test]
+    fn grok_launch_flags_precede_the_acp_subcommand() {
+        let mut args = vec!["agent".to_owned(), "stdio".to_owned()];
+        prepend_launch_args_for_agent(GROK_ID, false, &mut args);
+        assert_eq!(args, ["--no-auto-update", "agent", "stdio"]);
+
+        let mut args = vec!["agent".to_owned(), "stdio".to_owned()];
+        prepend_launch_args_for_agent(GROK_ID, true, &mut args);
+        assert_eq!(
+            args,
+            ["--no-auto-update", "--always-approve", "agent", "stdio"]
+        );
     }
 
     fn init_test(cx: &mut TestAppContext) {

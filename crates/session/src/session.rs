@@ -81,7 +81,12 @@ impl AppSession {
                         if let Some(windows) = cx.update(|cx| window_stack(cx))
                             && windows != current_window_stack
                         {
-                            store_window_stack(db.clone(), &windows).await;
+                            let db = db.clone();
+                            let windows_to_store = windows.clone();
+                            cx.background_spawn(async move {
+                                store_window_stack(db, &windows_to_store).await;
+                            })
+                            .await;
                             current_window_stack = windows;
                         }
 

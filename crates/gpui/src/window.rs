@@ -90,6 +90,22 @@ pub struct DebugRenderSnapshot {
     bounds: std::collections::BTreeMap<String, Bounds<Pixels>>,
     occurrences: std::collections::BTreeMap<String, Vec<DebugElementOccurrence>>,
     accessibility_tree_json: Option<String>,
+    element_count: usize,
+    element_hotspots: Vec<DebugElementHotspot>,
+}
+
+#[cfg(any(test, feature = "test-support"))]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+/// The number of elements constructed at one source location in the most recently rendered frame.
+pub struct DebugElementHotspot {
+    /// Source file where the elements were constructed.
+    pub file: &'static str,
+    /// One-based source line where the elements were constructed.
+    pub line: u32,
+    /// One-based source column where the elements were constructed.
+    pub column: u32,
+    /// Number of elements attributed to this location.
+    pub count: usize,
 }
 
 #[cfg(any(test, feature = "test-support"))]
@@ -166,6 +182,35 @@ impl DebugRenderSnapshot {
     pub fn accessibility_tree_json(&self) -> Option<&str> {
         self.accessibility_tree_json.as_deref()
     }
+
+    /// Returns the number of elements that requested layout in the most recently rendered frame.
+    ///
+    /// Use deterministic limits on this value to guard dense visualizations and long collections.
+    /// Pixel grids, QR codes, charts, and diagrams should generally render through an image, SVG,
+    /// canvas, or custom element instead of producing one child element per datum.
+    pub fn element_count(&self) -> usize {
+        self.element_count
+    }
+
+    /// Returns element construction locations ordered from most to least elements.
+    pub fn element_hotspots(&self) -> &[DebugElementHotspot] {
+        &self.element_hotspots
+    }
+}
+
+#[cfg(any(test, feature = "test-support", debug_assertions))]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+struct ElementSourceLocation {
+    file: &'static str,
+    line: u32,
+    column: u32,
+}
+
+#[cfg(any(test, feature = "test-support", debug_assertions))]
+#[derive(Default)]
+struct ElementTreeStats {
+    element_count: usize,
+    by_source: FxHashMap<ElementSourceLocation, usize>,
 }
 
 /// Represents the two different phases when dispatching events.
@@ -1007,6 +1052,8 @@ pub(crate) struct Frame {
     pub(crate) debug_bounds: FxHashMap<String, Bounds<Pixels>>,
     #[cfg(any(test, feature = "test-support"))]
     pub(crate) debug_selector_entries: Vec<(String, DebugElementOccurrence)>,
+    #[cfg(any(test, feature = "test-support", debug_assertions))]
+    element_tree_stats: ElementTreeStats,
     #[cfg(any(feature = "inspector", debug_assertions))]
     pub(crate) next_inspector_instance_ids: FxHashMap<Rc<crate::InspectorElementPath>, usize>,
     #[cfg(any(feature = "inspector", debug_assertions))]
@@ -1058,6 +1105,8 @@ impl Frame {
             debug_bounds: FxHashMap::default(),
             #[cfg(any(test, feature = "test-support"))]
             debug_selector_entries: Vec::new(),
+            #[cfg(any(test, feature = "test-support", debug_assertions))]
+            element_tree_stats: ElementTreeStats::default(),
 
             #[cfg(any(feature = "inspector", debug_assertions))]
             next_inspector_instance_ids: FxHashMap::default(),
@@ -1087,6 +1136,11 @@ impl Frame {
         {
             self.debug_bounds.clear();
             self.debug_selector_entries.clear();
+        }
+        #[cfg(any(test, feature = "test-support", debug_assertions))]
+        {
+            self.element_tree_stats.element_count = 0;
+            self.element_tree_stats.by_source.clear();
         }
 
         #[cfg(any(feature = "inspector", debug_assertions))]
@@ -2938,6 +2992,8 @@ impl Window {
         }
         if !cx.mode.skip_drawing() {
             self.draw_roots(cx);
+            #[cfg(any(test, feature = "test-support", debug_assertions))]
+            self.report_large_element_tree();
         }
         self.dirty_views.clear();
         self.next_frame.window_active = self.active.get();
@@ -4636,6 +4692,63 @@ impl Window {
         )
     }
 
+    #[cfg(any(test, feature = "test-support", debug_assertions))]
+    pub(crate) fn record_element_layout(
+        &mut self,
+        source_location: Option<&'static core::panic::Location<'static>>,
+    ) {
+        let stats = &mut self.next_frame.element_tree_stats;
+        stats.element_count += 1;
+        if let Some(source_location) = source_location {
+            let source = ElementSourceLocation {
+                file: source_location.file(),
+                line: source_location.line(),
+                column: source_location.column(),
+            };
+            *stats.by_source.entry(source).or_default() += 1;
+        }
+    }
+
+    #[cfg(any(test, feature = "test-support", debug_assertions))]
+    fn report_large_element_tree(&self) {
+        use std::sync::OnceLock;
+
+        static ELEMENT_TREE_BUDGET: OnceLock<usize> = OnceLock::new();
+        let budget = *ELEMENT_TREE_BUDGET.get_or_init(|| {
+            std::env::var("GPUI_ELEMENT_TREE_BUDGET")
+                .ok()
+                .and_then(|value| value.parse().ok())
+                .unwrap_or(10_000)
+        });
+        let stats = &self.next_frame.element_tree_stats;
+        if stats.element_count <= budget
+            || self.rendered_frame.element_tree_stats.element_count > budget
+        {
+            return;
+        }
+
+        let mut hotspots = stats.by_source.iter().collect::<Vec<_>>();
+        hotspots.sort_unstable_by_key(|(_, count)| std::cmp::Reverse(**count));
+        let hotspots = hotspots
+            .into_iter()
+            .take(5)
+            .map(|(source, count)| {
+                format!(
+                    "{} from {}:{}:{}",
+                    count, source.file, source.line, source.column
+                )
+            })
+            .join("\n");
+        log::warn!(
+            "Large element tree: {} elements (budget {})\n{}\n\
+             Dense visuals should use an image, SVG, canvas, or custom element; long collections \
+             should be virtualized. Override with GPUI_ELEMENT_TREE_BUDGET.",
+            stats.element_count,
+            budget,
+            hotspots
+        );
+    }
+
     /// Add a node to the layout tree for the current frame. Instead of taking a `Style` and children,
     /// this variant takes a function that is invoked during layout so you can use arbitrary logic to
     /// determine the element's size. One place this is used internally is when measuring text.
@@ -6027,6 +6140,23 @@ impl Window {
                 .collect(),
             occurrences,
             accessibility_tree_json: self.debug_a11y_tree_json(),
+            element_count: self.rendered_frame.element_tree_stats.element_count,
+            element_hotspots: {
+                let mut hotspots = self
+                    .rendered_frame
+                    .element_tree_stats
+                    .by_source
+                    .iter()
+                    .map(|(source, count)| DebugElementHotspot {
+                        file: source.file,
+                        line: source.line,
+                        column: source.column,
+                        count: *count,
+                    })
+                    .collect::<Vec<_>>();
+                hotspots.sort_unstable_by_key(|hotspot| std::cmp::Reverse(hotspot.count));
+                hotspots
+            },
         }
     }
 

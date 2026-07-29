@@ -170,7 +170,11 @@ use project::{AgentId, Project, agent_server_store::AgentServerStore};
 /// Taken from `agent_servers` rather than spelled again, so an id that is
 /// renamed there cannot leave this list pointing at an agent that no longer
 /// exists.
-pub const DRIVABLE_AGENT_IDS: &[&str] = &[agent_servers::CODEX_ID, agent_servers::CLAUDE_AGENT_ID];
+pub const DRIVABLE_AGENT_IDS: &[&str] = &[
+    agent_servers::CODEX_ID,
+    agent_servers::CLAUDE_AGENT_ID,
+    agent_servers::GROK_ID,
+];
 
 /// How long a chosen agent is given to appear in the agent-server store.
 ///

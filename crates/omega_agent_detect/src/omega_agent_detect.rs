@@ -61,6 +61,11 @@ pub const CANDIDATES: &[AgentCandidate] = &[
         binaries: &["claude"],
     },
     AgentCandidate {
+        id: "grok",
+        name: "Grok",
+        binaries: &["grok"],
+    },
+    AgentCandidate {
         id: "github-copilot-cli",
         name: "GitHub Copilot",
         binaries: &["copilot"],
@@ -232,6 +237,18 @@ mod tests {
             vec!["codex-acp", "claude-acp"],
             "the shell that launched Omega must not change which agent it picks"
         );
+    }
+
+    #[test]
+    fn grok_on_the_path_is_found() {
+        let directory = tempfile::tempdir().expect("a temporary directory");
+        write_executable(directory.path(), "grok");
+
+        let detected = detect_on_path(&directory.path().to_string_lossy());
+
+        assert_eq!(detected.len(), 1);
+        assert_eq!(detected[0].id, "grok");
+        assert_eq!(detected[0].name, "Grok");
     }
 
     #[test]

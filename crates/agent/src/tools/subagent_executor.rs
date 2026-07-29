@@ -5,7 +5,7 @@
 //! one global setting for all of them. It could not say "this one is Codex and
 //! that one is Claude".
 //!
-//! The choice is an **executor**, not a model. Codex and Claude Code are not
+//! The choice is an **executor**, not a model. Codex, Claude Code, and Grok are not
 //! language models — they are external ACP agents reached through
 //! `crates/agent_servers`, each with its own login, tools and loop. Treating
 //! the choice as a model swap only ever reaches the native loop.
@@ -337,12 +337,15 @@ mod tests {
     fn claude() -> InstalledAgent {
         InstalledAgent::new("claude-acp", "Claude")
     }
+    fn grok() -> InstalledAgent {
+        InstalledAgent::new("grok", "Grok")
+    }
     fn cursor() -> InstalledAgent {
         InstalledAgent::new("cursor", "Cursor")
     }
 
     fn known() -> Vec<InstalledAgent> {
-        vec![codex(), claude(), cursor()]
+        vec![codex(), claude(), grok(), cursor()]
     }
 
     #[test]
@@ -477,7 +480,7 @@ mod tests {
         // Detection pointed at an empty PATH. Every named agent must refuse,
         // and the message must say the machine is empty rather than implying
         // the caller picked the wrong name.
-        for requested in ["codex-acp", "claude-acp", "cursor"] {
+        for requested in ["codex-acp", "claude-acp", "grok", "cursor"] {
             let resolution = resolve_subagent_executor(Some(requested), &known(), &[]);
             let refusal = resolution.refusal().expect("must refuse with empty PATH");
             assert!(refusal.contains("No external agents were found"));
@@ -559,7 +562,7 @@ mod tests {
     /// presenting somebody else's work as Omega's.
     #[test]
     fn an_external_subagent_never_discloses_as_the_native_loop() {
-        for agent_id in ["codex-acp", "claude-acp", "cursor"] {
+        for agent_id in ["codex-acp", "claude-acp", "grok", "cursor"] {
             let disclosure = external_acp_disclosure(agent_id);
             assert_ne!(disclosure.class, ExecutorClass::NativeLoop);
             assert!(

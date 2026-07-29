@@ -18,7 +18,8 @@ pub struct Reporter {
     monitor_interval: Duration,
     forget_after: Duration,
     history: HashMap<PerfIssue, Instant>,
-    report_longer_then: Duration,
+    foreground_report_longer_then: Duration,
+    background_report_longer_then: Duration,
     foreground_thread: ThreadId,
 }
 
@@ -26,14 +27,16 @@ type ReportMade = bool;
 impl Reporter {
     pub fn new(
         monitor_interval: Duration,
-        report_longer_then: Duration,
+        foreground_report_longer_then: Duration,
+        background_report_longer_then: Duration,
         foreground_thread: ThreadId,
     ) -> Self {
         Self {
             monitor_interval,
             forget_after: Duration::from_mins(5),
             history: HashMap::default(),
-            report_longer_then,
+            foreground_report_longer_then,
+            background_report_longer_then,
             foreground_thread,
         }
     }
@@ -84,7 +87,7 @@ impl Reporter {
             .stats
             .longest_poll_times
             .into_iter()
-            .filter(|task| task.poll_duration() > self.report_longer_then)
+            .filter(|task| task.poll_duration() > self.foreground_report_longer_then)
             .filter(|task| !self.hold_report(PerfIssue::Foreground(task.location)))
             .collect();
         self.update_reported(
@@ -112,7 +115,7 @@ impl Reporter {
                 .stats
                 .longest_poll_times
                 .into_iter()
-                .filter(|stat| stat.poll_duration() > self.report_longer_then)
+                .filter(|stat| stat.poll_duration() > self.background_report_longer_then)
                 .filter(|task| !self.hold_report(PerfIssue::Background(task.location)))
                 .collect();
 
@@ -139,7 +142,7 @@ impl Reporter {
     fn report_hanging_actions(&mut self, action_stats: &gpui::ActionStatistics) {
         let hangs: Vec<_> = action_stats
             .longest_runtimes(true)
-            .filter(|action| action.runtime() > self.report_longer_then)
+            .filter(|action| action.runtime() > self.foreground_report_longer_then)
             .filter(|action| !self.hold_report(PerfIssue::Action(action.name)))
             .collect();
 

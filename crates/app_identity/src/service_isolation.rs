@@ -104,6 +104,12 @@ fn default_settings_enable_registry_acp_without_enabling_zed_production() {
     // OMEGA-DELTA-0027. Full Auto is routed through this agent, so an empty
     // `agent_servers` is a Full Auto run that cannot start.
     assert_eq!(settings["agent_servers"]["codex-acp"]["type"], "registry");
+    assert_eq!(settings["agent_servers"]["grok"]["type"], "custom");
+    assert_eq!(settings["agent_servers"]["grok"]["command"], "grok");
+    assert_eq!(
+        settings["agent_servers"]["grok"]["args"],
+        serde_json::json!(["agent", "stdio"])
+    );
     // The next four are OMEGA-DELTA-0026: the settings-layer half of the
     // service isolation this test is named for. `auto_update` and
     // `auto_install_extensions` look off-topic here and are not — they are the

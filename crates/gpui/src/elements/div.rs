@@ -4962,6 +4962,32 @@ mod tests {
         child: Entity<CachedDebugSelector>,
     }
 
+    struct ElementBudgetView;
+
+    impl Render for ElementBudgetView {
+        fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
+            div().child(div()).child(div())
+        }
+    }
+
+    #[gpui::test]
+    fn debug_render_snapshot_counts_elements_and_attributes_hotspots(cx: &mut TestAppContext) {
+        let window = cx.open_window(size(px(200.), px(200.)), |_, _| ElementBudgetView);
+        cx.run_until_parked();
+
+        let snapshot = window
+            .update(cx, |_, window, _| window.debug_render_snapshot())
+            .expect("test window should remain open");
+        assert_eq!(snapshot.element_count(), 4);
+        let div_elements = snapshot
+            .element_hotspots()
+            .iter()
+            .filter(|hotspot| hotspot.file.ends_with("elements/div.rs"))
+            .map(|hotspot| hotspot.count)
+            .sum::<usize>();
+        assert_eq!(div_elements, 3);
+    }
+
     impl Render for CachedDebugSelectorRoot {
         fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
             div().size_full().child(

@@ -854,6 +854,7 @@ impl<T> AppContext for Context<'_, T> {
     }
 
     #[inline]
+    #[track_caller]
     fn background_spawn<R>(&self, future: impl Future<Output = R> + Send + 'static) -> Task<R>
     where
         R: Send + 'static,

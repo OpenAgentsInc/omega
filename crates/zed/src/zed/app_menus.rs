@@ -2,7 +2,7 @@ use app_identity::{PRODUCT_DOCS_URL, PRODUCT_NAME, PRODUCT_REPOSITORY_URL};
 use gpui::{App, Menu, MenuItem, OsAction};
 use release_channel::ReleaseChannel;
 use terminal_view::terminal_panel;
-use zed_actions::{Quit, assistant, debug_panel, dev, git_panel, project_panel};
+use zed_actions::{Quit, Restart, assistant, debug_panel, dev, git_panel, project_panel};
 
 pub fn app_menus(cx: &mut App) -> Vec<Menu> {
     let mut view_items = vec![
@@ -101,6 +101,7 @@ pub fn app_menus(cx: &mut App) -> Vec<Menu> {
                 #[cfg(target_os = "macos")]
                 MenuItem::action("Show All", super::ShowAll),
                 MenuItem::separator(),
+                MenuItem::action("Restart Omega", Restart),
                 MenuItem::action("Quit Omega", Quit),
             ],
         },

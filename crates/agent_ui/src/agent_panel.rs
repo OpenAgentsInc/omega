@@ -92,9 +92,9 @@ use git_ui::git_panel::{
 };
 use gpui::{
     Action, Anchor, Animation, AnimationExt, AnyElement, App, AsyncWindowContext, ClipboardItem,
-    Entity, EventEmitter, ExternalPaths, FocusHandle, Focusable, Hsla, KeyContext, Pixels,
-    PlatformDisplay, Subscription, Task, TaskExt, WeakEntity, WindowHandle, prelude::*,
-    pulsating_between,
+    Entity, EventEmitter, ExternalPaths, FocusHandle, Focusable, Hsla, ImageSource, KeyContext,
+    ObjectFit, Pixels, PlatformDisplay, RenderImage, Subscription, Task, TaskExt, WeakEntity,
+    WindowHandle, img, prelude::*, pulsating_between,
 };
 use language::LanguageRegistry;
 use language_model::LanguageModelRegistry;
@@ -1244,9 +1244,73 @@ impl BaseView {
 enum DevicePairingSurface {
     Ready {
         bootstrap: omega_effectd::PairingBootstrap,
-        qr: omega_effectd::PairingQr,
+        image: Arc<RenderImage>,
+        image_size: Pixels,
     },
     Unavailable(SharedString),
+}
+
+const PAIRING_QR_MODULE_SIZE: u32 = 3;
+
+fn render_pairing_qr(pairing_qr: &omega_effectd::PairingQr) -> Result<(Arc<RenderImage>, Pixels)> {
+    let module_count = pairing_qr
+        .width
+        .checked_mul(pairing_qr.width)
+        .context("pairing QR dimensions overflow")?;
+    anyhow::ensure!(
+        pairing_qr.modules.len() == module_count,
+        "pairing QR has invalid module dimensions"
+    );
+    anyhow::ensure!(pairing_qr.width > 0, "pairing QR is empty");
+
+    let module_width =
+        u32::try_from(pairing_qr.width).context("pairing QR is too wide to render")?;
+    let image_width = module_width
+        .checked_mul(PAIRING_QR_MODULE_SIZE)
+        .context("pairing QR image dimensions overflow")?;
+    let buffer = image::ImageBuffer::from_fn(image_width, image_width, |image_x, image_y| {
+        let module_x = (image_x / PAIRING_QR_MODULE_SIZE) as usize;
+        let module_y = (image_y / PAIRING_QR_MODULE_SIZE) as usize;
+        let module_index = module_y * pairing_qr.width + module_x;
+        if pairing_qr.modules.get(module_index) == Some(&true) {
+            image::Rgba([0, 0, 0, 255])
+        } else {
+            image::Rgba([255, 255, 255, 255])
+        }
+    });
+    Ok((
+        Arc::new(RenderImage::new(vec![image::Frame::new(buffer)])),
+        px(image_width as f32),
+    ))
+}
+
+fn render_ready_device_pairing_content(
+    magic_dns_name: &str,
+    port: u16,
+    image: Arc<RenderImage>,
+    image_size: Pixels,
+) -> AnyElement {
+    v_flex()
+        .items_center()
+        .gap_2()
+        .child(
+            div().p_2().bg(Hsla::white()).child(
+                img(ImageSource::Render(image))
+                    .size(image_size)
+                    .object_fit(ObjectFit::Fill),
+            ),
+        )
+        .child(
+            Label::new(format!("{magic_dns_name}:{port}"))
+                .size(LabelSize::XSmall)
+                .color(Color::Muted),
+        )
+        .child(
+            Label::new("Scan in OpenAgents Mobile. This code works once for 5 minutes.")
+                .size(LabelSize::XSmall)
+                .color(Color::Muted),
+        )
+        .into_any_element()
 }
 
 #[derive(Clone)]
@@ -3635,7 +3699,16 @@ impl AgentPanel {
                     Ok(()) => match omega_effectd::issue_device_pairing_bootstrap(cx).and_then(
                         |bootstrap| bootstrap.qr().map(|qr| (bootstrap, qr)).map_err(Into::into),
                     ) {
-                        Ok((bootstrap, qr)) => DevicePairingSurface::Ready { bootstrap, qr },
+                        Ok((bootstrap, qr)) => match render_pairing_qr(&qr) {
+                            Ok((image, image_size)) => DevicePairingSurface::Ready {
+                                bootstrap,
+                                image,
+                                image_size,
+                            },
+                            Err(error) => {
+                                DevicePairingSurface::Unavailable(error.to_string().into())
+                            }
+                        },
                         Err(error) => DevicePairingSurface::Unavailable(error.to_string().into()),
                     },
                 });
@@ -3649,34 +3722,16 @@ impl AgentPanel {
         let surface = self.device_pairing_surface.as_ref()?;
         let border = cx.theme().colors().border;
         let content = match surface {
-            DevicePairingSurface::Ready { bootstrap, qr } => {
-                let rows = qr.modules.chunks(qr.width).map(|row| {
-                    h_flex()
-                        .children(row.iter().map(|dark| {
-                            div()
-                                .size(px(3.))
-                                .bg(if *dark { Hsla::black() } else { Hsla::white() })
-                        }))
-                        .into_any_element()
-                });
-                v_flex()
-                    .items_center()
-                    .gap_2()
-                    .child(v_flex().p_2().bg(Hsla::white()).children(rows))
-                    .child(
-                        Label::new(format!("{}:{}", bootstrap.magic_dns_name, bootstrap.port))
-                            .size(LabelSize::XSmall)
-                            .color(Color::Muted),
-                    )
-                    .child(
-                        Label::new(
-                            "Scan in OpenAgents Mobile. This code works once for 5 minutes.",
-                        )
-                        .size(LabelSize::XSmall)
-                        .color(Color::Muted),
-                    )
-                    .into_any_element()
-            }
+            DevicePairingSurface::Ready {
+                bootstrap,
+                image,
+                image_size,
+            } => render_ready_device_pairing_content(
+                &bootstrap.magic_dns_name,
+                bootstrap.port,
+                image.clone(),
+                *image_size,
+            ),
             DevicePairingSurface::Unavailable(message) => Label::new(message.clone())
                 .size(LabelSize::XSmall)
                 .color(Color::Muted)
@@ -8132,6 +8187,8 @@ impl AgentPanel {
         } else {
             format!("{} / {}", selected.project_name, selected.repository_name).into()
         };
+        let repository_label =
+            util::truncate_and_trailoff(&repository_label, if compact { 18 } else { 26 });
         let repository_target_selection_unavailable_reason =
             target_selection_unavailable_reason.clone();
         let repository_menu = PopoverMenu::new("omega.workbench.identity.repository-picker")
@@ -8146,7 +8203,6 @@ impl AgentPanel {
                     repository_label,
                 )
                 .debug_selector(|| "omega.workbench.control.identity.repository".into())
-                .width(if compact { rems(7.) } else { rems(12.) })
                 .style(ButtonStyle::Subtle)
                 .size(ButtonSize::Compact)
                 .label_size(LabelSize::Small)
@@ -8183,10 +8239,12 @@ impl AgentPanel {
             .trigger_with_tooltip(
                 Button::new(
                     "omega.workbench.control.identity.worktree",
-                    selected.worktree_name.clone(),
+                    util::truncate_and_trailoff(
+                        &selected.worktree_name,
+                        if compact { 12 } else { 18 },
+                    ),
                 )
                 .debug_selector(|| "omega.workbench.control.identity.worktree".into())
-                .width(if compact { rems(6.) } else { rems(9.) })
                 .style(ButtonStyle::Subtle)
                 .size(ButtonSize::Compact)
                 .label_size(LabelSize::Small)
@@ -8228,7 +8286,8 @@ impl AgentPanel {
                 .cloned()
         });
         let branch_label = selected.branch.label();
-        let branch_menu_label = branch_label.clone();
+        let branch_menu_label: SharedString =
+            util::truncate_and_trailoff(&branch_label, if compact { 16 } else { 24 }).into();
         let branch_selection = {
             let panel = cx.entity().downgrade();
             let repository = repository.clone();
@@ -8386,6 +8445,8 @@ impl AgentPanel {
             )
             && branch_selection_unavailable_reason.is_none())
         .then(|| {
+            let branch_accessible_label = branch_label.clone();
+            let branch_tooltip_label = branch_label.clone();
             PopoverMenu::new("omega.workbench.identity.branch-picker")
                 .with_handle(self.thread_branch_menu_handle.clone())
                 .menu({
@@ -8410,21 +8471,20 @@ impl AgentPanel {
                         branch_menu_label.clone(),
                     )
                     .debug_selector(|| "omega.workbench.control.identity.branch".into())
-                    .width(if compact { rems(7.) } else { rems(9.) })
                     .style(ButtonStyle::Subtle)
                     .size(ButtonSize::Compact)
                     .label_size(LabelSize::Small)
                     .truncate(true)
                     .tab_index(0isize)
                     .aria_expanded(self.thread_branch_menu_handle.is_deployed())
-                    .aria_label(format!("Branch {branch_menu_label}"))
+                    .aria_label(format!("Branch {branch_accessible_label}"))
                     .aria_description(format!(
                         "Git branch state for repository {}",
                         selected.repository_name
                     )),
                     move |_, cx| {
                         Tooltip::with_meta(
-                            branch_menu_label.clone(),
+                            branch_tooltip_label.clone(),
                             Some(&workbench_shell::ToggleBranchPicker),
                             "Switch branch with the Git branch picker",
                             cx,
@@ -8465,10 +8525,9 @@ impl AgentPanel {
                             let branch_tooltip_label = branch_label.clone();
                             Button::new(
                                 "omega.workbench.control.identity.branch",
-                                branch_label.clone(),
+                                branch_menu_label.clone(),
                             )
                             .debug_selector(|| "omega.workbench.control.identity.branch".into())
-                            .width(if compact { rems(7.) } else { rems(9.) })
                             .style(ButtonStyle::Subtle)
                             .size(ButtonSize::Compact)
                             .label_size(LabelSize::Small)
@@ -12456,12 +12515,82 @@ mod tests {
     use std::sync::Arc;
     use std::time::Instant;
 
+    struct PairingContentBudgetView {
+        image: Arc<RenderImage>,
+        image_size: Pixels,
+    }
+
+    impl Render for PairingContentBudgetView {
+        fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
+            render_ready_device_pairing_content(
+                "omega-dev.example",
+                4317,
+                self.image.clone(),
+                self.image_size,
+            )
+        }
+    }
+
     #[test]
     fn test_is_known_terminal_agent_command() {
         assert!(is_known_terminal_agent_command("claude"));
         assert!(is_known_terminal_agent_command("codex"));
         assert!(!is_known_terminal_agent_command("cargo"));
         assert!(!is_known_terminal_agent_command("internal-agent"));
+    }
+
+    #[test]
+    fn test_render_pairing_qr_creates_one_scaled_image() {
+        let pairing_qr = omega_effectd::PairingQr {
+            width: 2,
+            modules: vec![true, false, false, true],
+        };
+
+        let (image, image_size) = render_pairing_qr(&pairing_qr).expect("valid QR should render");
+        let bytes = image
+            .as_bytes(0)
+            .expect("rendered QR should have one frame");
+
+        assert_eq!(image_size, px(6.));
+        assert_eq!(bytes.len(), 6 * 6 * 4);
+        assert_eq!(bytes.get(0..4), Some([0, 0, 0, 255].as_slice()));
+        assert_eq!(bytes.get(12..16), Some([255, 255, 255, 255].as_slice()));
+        assert_eq!(bytes.get(84..88), Some([0, 0, 0, 255].as_slice()));
+    }
+
+    #[test]
+    fn test_render_pairing_qr_rejects_invalid_dimensions() {
+        let pairing_qr = omega_effectd::PairingQr {
+            width: 2,
+            modules: vec![true],
+        };
+
+        assert!(render_pairing_qr(&pairing_qr).is_err());
+    }
+
+    #[gpui::test]
+    fn test_pairing_content_stays_within_element_budget(cx: &mut TestAppContext) {
+        init_test(cx);
+        let module_width = 57;
+        let pairing_qr = omega_effectd::PairingQr {
+            width: module_width,
+            modules: vec![false; module_width * module_width],
+        };
+        let (image, image_size) = render_pairing_qr(&pairing_qr).expect("valid QR should render");
+        let window = cx.open_window(size(px(360.), px(480.)), move |_, _| {
+            PairingContentBudgetView { image, image_size }
+        });
+        cx.run_until_parked();
+
+        let snapshot = window
+            .update(cx, |_, window, _| window.debug_render_snapshot())
+            .expect("test window should remain open");
+        assert!(
+            snapshot.element_count() <= 40,
+            "pairing content rendered {} elements; hotspots: {:?}",
+            snapshot.element_count(),
+            snapshot.element_hotspots()
+        );
     }
 
     #[test]

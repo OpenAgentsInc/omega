@@ -106,7 +106,7 @@ use workspace::{
 use workspace::{Pane, notifications::DetachAndPromptErr};
 use zed_actions::{
     About, GetMerch, OpenAccountSettings, OpenAppUrl, OpenBrowser, OpenDocs, OpenProjectTasks,
-    OpenServerSettings, OpenSettingsFile, OpenStatusPage, Quit,
+    OpenServerSettings, OpenSettingsFile, OpenStatusPage, Quit, Restart,
 };
 
 const DOCS_URL: &str = app_identity::PRODUCT_DOCS_URL;
@@ -211,7 +211,7 @@ pub fn init(cx: &mut App) {
     cx.on_action(|_: &HideOthers, cx| cx.hide_other_apps());
     #[cfg(target_os = "macos")]
     cx.on_action(|_: &ShowAll, cx| cx.unhide_other_apps());
-    cx.on_action(quit);
+    cx.on_action(quit).on_action(restart);
 
     cx.on_action(|_: &RestoreBanner, cx| title_bar::restore_banner(cx));
 
@@ -1883,6 +1883,10 @@ fn install_cli(
 }
 
 static WAITING_QUIT_CONFIRMATION: AtomicBool = AtomicBool::new(false);
+fn restart(_: &Restart, cx: &mut App) {
+    workspace::reload(cx);
+}
+
 fn quit(_: &Quit, cx: &mut App) {
     if WAITING_QUIT_CONFIRMATION.load(atomic::Ordering::Acquire) {
         return;

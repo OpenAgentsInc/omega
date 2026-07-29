@@ -217,6 +217,12 @@ impl ThreadIdentityProjection {
                 .candidates
                 .iter()
                 .find(|candidate| candidate.binding == previous.binding)
+                .or_else(|| {
+                    observation.candidates.iter().find(|candidate| {
+                        candidate.worktree_abs_path == previous.worktree_abs_path
+                            && candidate.repository_name == previous.repository_name
+                    })
+                })
                 .cloned()
         });
         let selection_missing = previous_selected.is_some()
@@ -372,6 +378,30 @@ mod tests {
             Some(&second.binding),
             "a failed recovery may retain the missing label but not revive its authority"
         );
+    }
+
+    #[test]
+    fn refreshed_runtime_ids_preserve_selection_for_the_same_worktree() {
+        let mut projection = ThreadIdentityProjection::default();
+        let selected = candidate("repo", "tree");
+        projection.sync_active_thread(
+            Some("thread".into()),
+            observation(1, IdentityPhase::Ready, vec![selected.clone()]),
+        );
+
+        let mut refreshed = selected.clone();
+        refreshed.binding = RepositoryBinding::new("refreshed-repository", "refreshed-worktree")
+            .expect("valid refreshed binding");
+        let effect = projection.sync_active_thread(
+            Some("thread".into()),
+            observation(2, IdentityPhase::Ready, vec![refreshed.clone()]),
+        );
+
+        assert_eq!(effect, IdentitySyncEffect::Applied);
+        let state = projection.active().expect("active state");
+        assert_eq!(state.phase, IdentityPhase::Ready);
+        assert_eq!(state.selected, Some(refreshed.clone()));
+        assert_eq!(state.binding(), Some(&refreshed.binding));
     }
 
     #[test]

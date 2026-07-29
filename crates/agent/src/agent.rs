@@ -3093,7 +3093,7 @@ impl NativeThreadEnvironment {
         });
         let harness = request.harness.clone();
         let server: Rc<dyn agent_servers::AgentServer> =
-            Rc::new(agent_servers::CustomAgentServer::new(
+            Rc::new(agent_servers::CustomAgentServer::new_unattended(
                 project::agent_server_store::AgentId::new(harness.clone()),
             ));
         let delegate = agent_servers::AgentServerDelegate::new(
@@ -3428,7 +3428,7 @@ impl NativeThreadEnvironment {
             .map(|acp_thread| acp_thread.read(cx).session_id().clone());
 
         let server: Rc<dyn agent_servers::AgentServer> =
-            Rc::new(agent_servers::CustomAgentServer::new(
+            Rc::new(agent_servers::CustomAgentServer::new_unattended(
                 project::agent_server_store::AgentId::new(agent_id.clone()),
             ));
         let delegate = agent_servers::AgentServerDelegate::new(
