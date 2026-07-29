@@ -160,10 +160,15 @@ pub const ENFORCED_DELTAS: &[&str] = &[
     "OMEGA-DELTA-0169",
     "OMEGA-DELTA-0170",
     "OMEGA-DELTA-0171",
+    "OMEGA-DELTA-0172",
 ];
 
 pub const GOOGLE_PROVIDER_PATH: &str = "crates/language_models/src/provider/google.rs";
 pub const GOOGLE_CLIENT_PATH: &str = "crates/google_ai/src/google_ai.rs";
+pub const OPENAGENTS_PROVIDER_PATH: &str = "crates/language_models/src/provider/openagents.rs";
+pub const OMEGA_MODEL_TIER_PATH: &str = "crates/agent_ui/src/omega_model_tier.rs";
+pub const ZERO_BASE_THREAD_VIEW_PATH: &str =
+    "crates/agent_ui/src/conversation_view/thread_view.rs";
 pub const BASIC_SYSTEM_PROMPT_PATH: &str = "crates/agent/src/templates/basic_system_prompt.hbs";
 pub const AGENT_THREAD_PATH: &str = "crates/agent/src/thread.rs";
 pub const SESSION_DIRECTORIES_PATH: &str = "crates/agent_servers/src/acp.rs";
@@ -20722,6 +20727,43 @@ mod tests {
                 && shipped.contains("resolve_bind_address_with(")
                 && shipped.contains("live_tailnet_endpoint()"),
             "OMEGA-DELTA-0171: production resolution no longer consults the              live tailnet. Environment overrides alone leave every Finder              launch on localhost."
+        );
+    }
+
+    /// OMEGA-DELTA-0172. Zero base offers Flash / Pro in the input bar.
+    /// Flash is google/gemini-3.6-flash; Pro is openagents/kimi-k3 via the
+    /// OpenAgents hosted chat-completions provider.
+    #[test]
+    fn zero_base_input_bar_offers_flash_and_pro_hosted_lanes() {
+        let tier = read_repository_file(OMEGA_MODEL_TIER_PATH);
+        let provider = read_repository_file(OPENAGENTS_PROVIDER_PATH);
+        let thread_view = read_repository_file(ZERO_BASE_THREAD_VIEW_PATH);
+
+        assert!(
+            tier.contains("enum ModelTier")
+                && tier.contains("Flash")
+                && tier.contains("Pro")
+                && tier.contains("google/gemini-3.6-flash")
+                && tier.contains("openagents/kimi-k3")
+                && tier.contains("render_model_tier_selector"),
+            "OMEGA-DELTA-0172: {} lost the Flash/Pro tier mapping or renderer.",
+            repository_path(OMEGA_MODEL_TIER_PATH).display()
+        );
+        assert!(
+            provider.contains("kimi-k3")
+                && provider.contains("/api/v1")
+                && provider.contains("openagents_session")
+                && provider.contains("stream_completion"),
+            "OMEGA-DELTA-0172: {} no longer streams Kimi K3 through the \
+             OpenAgents hosted chat-completions path.",
+            repository_path(OPENAGENTS_PROVIDER_PATH).display()
+        );
+        assert!(
+            thread_view.contains("render_model_tier_selector")
+                && thread_view.contains("render_zero_base_executor_bar"),
+            "OMEGA-DELTA-0172: {} no longer mounts the Flash/Pro control on \
+             the zero-base input bar.",
+            repository_path(ZERO_BASE_THREAD_VIEW_PATH).display()
         );
     }
 
