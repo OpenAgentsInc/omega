@@ -1178,11 +1178,12 @@ cargo test -p omega_deltas
   action lives. An engine lane *is* Full Auto authority, so a router that
   preferred a ready lane for an unpinned thread would be exactly that
   forbidden start, through a door nobody had flagged — which is how
-  `full_auto_enable` survived until it was removed today. v1 therefore routes an
-  unpinned thread to the native loop, always, and engine lanes are reachable
-  only through a pin a person sets on a visible control. Model-advisory routing
-  is out of scope for v1 by the packet's own terms; this is the shape that keeps
-  it out.
+  `full_auto_enable` survived until it was removed today. The original v1 law
+  routed an unpinned thread to the native loop; the 2026-07-29 three-mode
+  direction supersedes that default so Omega Agent can choose eligible ordinary
+  executors. The retained boundary is narrower and stronger: an engine lane is
+  reachable only through explicit human authority. Model-advisory entry into
+  Full Auto remains out of scope.
 - **The router owns no execution, and that is read off the source.**
   `the_router_owns_no_execution_and_starts_no_run` scans the dispatch file for
   execution vocabulary and for run-control verbs;
@@ -1722,10 +1723,12 @@ than it sounds, because the harness omega#81's acceptance sentence names —
   composer mode flag for Full Auto because a boolean the send path reads can be
   set by a slash command, a restored draft, or a model-authored insertion; a pin
   stored as a mode would be the same construct wearing a different name.
-- **Engine lanes are still reachable only through a pin.** The unpinned default
-  is the native loop, always. Nothing here auto-prefers a ready lane, and
-  `an_unpinned_thread_never_reaches_an_engine_lane` in
-  `crates/omega_front_door/src/router.rs` fails if the law changes.
+- **Engine lanes are still reachable only through explicit human authority.**
+  An unpinned Omega Agent route never auto-enters Full Auto authority. Direct
+  Agent creation and ordinary external-ACP routing are not engine-lane
+  authority, so this rule does not force those conversations onto the native
+  loop. `an_unpinned_thread_never_reaches_an_engine_lane` in
+  `crates/omega_front_door/src/router.rs` fails if that boundary changes.
 - **A human pin re-decides; capacity moving does not.** Setting or clearing a
   pin re-runs the decision for that session and records it, so an unhonourable
   pin appears on the thread's own line as a fallback with its typed reason
@@ -2449,7 +2452,15 @@ than it sounds, because the harness omega#81's acceptance sentence names —
   `crates/omega_deltas/`, and the mode's own tests in
   `crates/omega_zero_base/`.
 
-### OMEGA-DELTA-0048 — Zero base hides by filter and by refusal, and deletes nothing
+### OMEGA-DELTA-0048 — The transitional shell hides by filter and refusal until subtraction becomes the product
+
+- **Amended by the 2026-07-29 single-experience direction.** “Deletes
+  nothing” was a safe migration constraint, not the final product shape. Omega
+  is converging on one application surface; the legacy editor and its bindings
+  are scheduled for post-alpha removal in dependency-safe batches. Until those
+  batches land, the filter, refusal gate, and intact keymaps remain
+  load-bearing and this delta continues to check them rather than pretending
+  the deletion has already happened.
 
 - **Before this change:** Omega's two ways to make a surface go away were
   deletion (`OMEGA-DELTA-0009`, `OMEGA-DELTA-0012`) and a settings default.
@@ -2476,7 +2487,7 @@ than it sounds, because the harness omega#81's acceptance sentence names —
 - **No action and no key binding is deleted.** `assets/keymaps/default-macos.json`
   and its Linux and Windows siblings are untouched, and every namespace zero
   base hides is still bound in all three.
-- **Enforced by:** `zero_base_hides_by_filter_and_refusal_and_deletes_nothing`
+- **Enforced by:** `the_transitional_shell_hides_by_filter_and_refusal_until_subtraction_lands`
   in `crates/omega_deltas/`, which also requires the three keymap files to still
   bind the hidden namespaces, and `keymaps_name_no_deleted_action`, which stays
   green.
@@ -2630,7 +2641,15 @@ than it sounds, because the harness omega#81's acceptance sentence names —
   unchanged. This does not make onboarding unclosable, and closing it is still
   the dead end `OMEGA-DELTA-0040` already records.
 
-### OMEGA-DELTA-0052 — Zero base is the default, the editor is a flag, and there is no way out
+### OMEGA-DELTA-0052 — The flag-free surface is the product and the legacy editor flag is transitional
+
+- **Amended by the 2026-07-29 single-experience direction.** A normal,
+  flag-free launch is the only advertised Omega experience. The
+  `--full-editor` path may remain for the alpha transition, but it is not a
+  second product and is scheduled for removal after the alpha gate. While it
+  remains, there is still no runtime switch between the two shapes; removing
+  that one-way boundary early would reintroduce the hidden-editor escape this
+  delta was written to prevent.
 
 - **Upstream Zed:** starting the binary with no arguments opens the editor. There
   is no mode, so there is nothing to leave.
@@ -2638,7 +2657,8 @@ than it sounds, because the harness omega#81's acceptance sentence names —
   opened one Exo thread. A control on the status bar read "Zero base" beside a
   button reading "Leave zero base", and pressing it put the editor back in the
   running window.
-- **Omega now:** `omega` opens zero base. `omega --full-editor` opens the editor.
+- **Omega during the transition:** `omega` opens the product surface.
+  `omega --full-editor` opens the legacy editor compatibility path.
   A process that starts in zero base stays in zero base until it exits: the
   status-bar control, the `Leave` action, and the runtime unwind behind them are
   removed. The owner asked for exactly this: *"remove the 'zero base / leave zero
@@ -2695,16 +2715,23 @@ than it sounds, because the harness omega#81's acceptance sentence names —
   longer installs a status-bar control, and each capture now asserts that the
   mode's state matches the surface the scene declares, so a scene recorded in the
   wrong order fails instead of filing a subtracted window under an ordinary name.
-- **Enforced by:** `zero_base_is_the_default_and_has_no_way_out` in
+- **Enforced by:** `the_flag_free_surface_has_no_runtime_switch_to_the_legacy_editor` in
   `crates/omega_deltas/`, the mode's own tests in `crates/omega_zero_base/`, and
-  the unchanged `zero_base_hides_by_filter_and_refusal_and_deletes_nothing`.
+  the transitional
+  `the_transitional_shell_hides_by_filter_and_refusal_until_subtraction_lands`.
 - **What this does not cover.** This says nothing about what zero base *shows*.
   The composer, the transcript and the executor line are `OMEGA-DELTA-0049` and
   `OMEGA-DELTA-0051`. It also does not make the mode persistent: it is still
   never written to disk, so ending the process is still a complete repair, and
-  `omega --full-editor` is always available to the person at the keyboard.
+  `omega --full-editor` remains available during the alpha transition.
 
-### OMEGA-DELTA-0053 — A sealed zero base does not render the editor
+### OMEGA-DELTA-0053 — The sealed layout becomes the one application layout
+
+- **Amended by the 2026-07-29 single-experience direction.** The seal is a
+  transition mechanism around a still-compiled editor, not a permanent launch
+  mode. Post-alpha subtraction collapses the sealed render into the ordinary
+  render. Until then, the structural seal remains checked so the advertised
+  surface cannot reveal the legacy editor accidentally.
 
 - **Upstream Zed:** the workspace is an editor. Panels sit in docks around a
   centre pane group, and a zoomed panel is drawn over that group rather than
@@ -2722,7 +2749,7 @@ than it sounds, because the harness omega#81's acceptance sentence names —
   control that did this is an ordinary click listener on the title bar that
   calls a workspace method, so nothing was dispatched and nothing was refused.
   A gate over actions cannot cover a surface that is merely covered.
-- **Omega now:** once zero base is **sealed**, the workspace renders no centre
+- **Omega during the transition:** once zero base is **sealed**, the workspace renders no centre
   pane group, tab bar, inherited title-bar controls, or status bar. The titlebar
   view reduces to Zed's platform drag strip so the window remains movable and
   retains native double-click behavior without restoring any of the controls
@@ -2755,7 +2782,7 @@ than it sounds, because the harness omega#81's acceptance sentence names —
   and `seal()` does nothing when it is not, so a build started with the flag
   cannot be sealed by a stray call. Every surface above renders exactly as it
   did.
-- **Enforced by:** `a_sealed_zero_base_renders_no_editor` in
+- **Enforced by:** `the_transitional_sealed_layout_starts_without_the_legacy_editor` in
   `crates/omega_deltas/`, which pins the seal's four render sites, the early
   return in the reveal path, the requirement that `is_sealed` implies the mode
   is on, and the ordering of the seal after `await_identity_ready`.
@@ -2852,9 +2879,10 @@ than it sounds, because the harness omega#81's acceptance sentence names —
   exactly that. The owner: *"that UI selector makes no sense, i have no fucking
   clue what youre talking about so the user won't, remove that UI piece and
   handle it smartly in the background"*.
-- **Omega now:** the control is removed. `OMEGA-DELTA-0150` later made every
-  unpinned new chat run on Omega's native loop, even when external executors are
-  detected and preloaded behind the router.
+- **Omega now:** the wire-token pin control is removed. The 2026-07-29
+  amendment to `OMEGA-DELTA-0150` restores human-readable mode and executor
+  choice at conversation creation; it does not restore a picker exposing
+  `native_loop`, `external_acp`, or `engine_lane` tokens.
 - **Owner gate 8 is untouched, and the distinction is why this is admissible.**
   The gate forbids any model-initiated path from starting Full Auto authority.
   An engine lane *is* that authority: the engine-lane arm of `route` is
@@ -2866,8 +2894,8 @@ than it sounds, because the harness omega#81's acceptance sentence names —
   startup from what is installed on the machine. `PinGesture` still has exactly
   two variants and nothing new calls `pin_session`.
 - **Old records remain readable.** `DetectedExternalAcp` remains in the durable
-  reason vocabulary because older sessions may carry it. The current unpinned
-  law no longer produces it.
+  reason vocabulary because older sessions may carry it. Creation-time choice
+  changes policy, not the decoder for durable route history.
 - **What the disclosure line says now.** It still names who ran the turn and on
   what model, because a person is entitled to know which runtime and model spent
   their budget — the owner objected to the *selector*, not to being told. The
@@ -2885,7 +2913,7 @@ than it sounds, because the harness omega#81's acceptance sentence names —
   `NativeLoop`, and both now assert the property they are named for — not an
   engine lane — with the native answer kept for the case where nothing is
   attached.
-- **Enforced by:** `routing_is_decided_rather_than_selected` in
+- **Enforced by:** `an_unpinned_thread_never_reaches_an_engine_lane` in
   `crates/omega_deltas/`, and
   `an_unpinned_thread_runs_on_the_external_agent_that_is_attached` in
   `crates/omega_front_door/`.
@@ -6236,7 +6264,19 @@ question rather than leaving it to whoever next reads the menu.
   holding a live subscription, and it reads no moderation state — a message
   deleted after the fetch stays drawn until the next one.
 
-### OMEGA-DELTA-0131 — Zero base has one agent selection, and the label never names a choice the application is not keeping
+### OMEGA-DELTA-0131 — Conversation creation offers agent choice and every executor label stays truthful
+
+**Superseded in part by the 2026-07-29 three-mode direction.** The clamp that
+forced every new zero-base thread through `Agent::NativeAgent` repaired a lying
+selector, but it was not a product-shape law. A person must be able to choose a
+Direct Agent, Omega Agent, or Sarah when creating a conversation. The chosen
+mode and concrete executor are shown before send, and an existing transcript
+never changes executors underneath its entries.
+
+The invariant this delta originally protected is retained without exception:
+every title, composer label, pending state, and disclosure names the executor
+that is doing the work, or clearly distinguishes “will be” from “is”. Restoring
+choice must not restore the disconnected selections described below.
 
 The owner selected Exo, was shown **Exo** in the composer's executor selector,
 typed `who are you`, and read back *"I'm Codex, your AI coding collaborator."*
@@ -6274,11 +6314,11 @@ blank strip in front of the label with no control in it. The header now draws
 **Omega** flush left with the same padding as the rows under it, and the
 collapsed rail's expand control starts at the top of the column.
 
-**So in zero base a new thread is built on Omega's router and nothing else.**
-The router implements all four executors; sitting directly on one of them is
-precisely what took the choice away. The clamp is in `AgentPanel::selected_agent`
-— the accessor every new thread is built from — beside the collaboration rule
-that was already there for the same reason.
+**The immediate repair built every new zero-base thread on Omega's router.**
+That historical clamp made the displayed choice and actual connection agree,
+but the 2026-07-29 direction supersedes it with an explicit creation-time
+choice. The accessor remains the single answer consumed by both the new-thread
+action and its heading so those surfaces cannot drift apart.
 
 **The clamp is on the accessor and not on the stored field, and that correction
 cost a launch.** The first version of this fix clamped every *write*. That
@@ -6328,16 +6368,15 @@ turn may switch.
   and requires the thread to be a new one. It would have failed for cause two,
   and it fails today for a fourth nobody has thought of.
 
-- **Enforced by:** `a_new_thread_in_zero_base_is_built_on_omegas_router` and
+- **Enforced by:** `the_new_conversation_heading_names_the_agent_it_will_open` and
   `the_executor_label_separates_the_choice_from_the_connection` in
   `crates/omega_deltas`, and
   `choosing_an_executor_rebuilds_the_thread_once_the_presses_stop` in
   `crates/agent_ui/src/conversation_view.rs`.
 
-- **What this does not cover.** Outside zero base the two selections are still
-  two, and that is deliberate — the full editor is Zed's surface and the panel's
-  agent menu is Zed's control. The clamp is scoped to the mode where the
-  executor selector is the only agent choice on screen.
+- **What this does not cover.** The three-mode front door lands separately.
+  These checks keep the truthful-labeling and immutable-transcript laws live
+  while that selection surface is built.
 
 ### OMEGA-DELTA-0132 — The Exo child is told where Exo's harness lives, and the Exo lane runs Exo's own harness
 
@@ -6693,21 +6732,22 @@ separate action.
 - **Enforced by:** `focused_settings_separates_provider_keys_from_legacy_settings`
   in `crates/omega_deltas`.
 
-### OMEGA-DELTA-0146 — Direct executor selection is restricted to Omega
+### OMEGA-DELTA-0146 — Direct-agent inventory and background warming remain separate
 
-Before `OMEGA-DELTA-0149` removed the selector from the composer, it offered
-**Omega** as the only ordinary clickable choice. Codex, Claude Code, and Grok
-remain disabled implementation lanes. They remain fully detected, attached,
-warmed, and available to Omega's internal router; removing their direct
-selection cannot turn off their infrastructure.
+**Superseded in part by the 2026-07-29 three-mode direction.** Restricting
+ordinary selection to Omega was a temporary public boundary, not the product
+contract. Ready Codex, Claude Code, Grok Build, and configured ACP agents return
+as Direct Agent choices at conversation creation. Exo remains subject to its
+own readiness and launch contract.
 
-Exo keeps its separate process-level contract. It is absent by default and may
-join the internal selector inventory only when the launch explicitly includes
-`--enable-exo` and a lane resolves. A direct external ACP executor selection is
-refused rather than changing the route.
+The separation this delta established remains: the public creation-time list
+is derived from honest readiness, while detection and background warming use
+the complete runtime inventory. Hiding or disabling a row must never turn off
+the infrastructure Omega Agent needs for routing, and warming an adapter must
+never by itself authorize a direct conversation.
 
-- **Enforced by:** `only_omega_is_an_ordinary_selectable_executor` in
-  `crates/omega_deltas`, plus selector policy tests in `agent_ui`.
+- **Enforced by:** `direct_agent_inventory_stays_separate_from_background_warming`
+  in `crates/omega_deltas`, plus selector policy tests in `agent_ui`.
 
 ### OMEGA-DELTA-0147 — Sealed zero base keeps the native window drag strip
 
@@ -6721,7 +6761,8 @@ The workspace owns titlebar dragging through the same
 region cannot restore the editor or create an action-gate bypass.
 
 - **Enforced by:** `sealed_zero_base_keeps_only_zeds_platform_drag_strip` in
-  `crates/omega_deltas`, plus `a_sealed_zero_base_starts_without_an_editor`.
+  `crates/omega_deltas`, plus
+  `the_transitional_sealed_layout_starts_without_the_legacy_editor`.
 
 ### OMEGA-DELTA-0148 — The sidebar contains no empty rate-limits section
 
@@ -6738,39 +6779,40 @@ so removing the section cannot corrupt a person's other sidebar preferences.
 - **Enforced by:** `zero_bases_sidebar_is_persistent_sectioned_and_silent_when_it_fails`
   in `crates/omega_deltas`, plus sidebar state tests in `agent_ui`.
 
-### OMEGA-DELTA-0149 — The composer does not render an executor selector
+### OMEGA-DELTA-0149 — Executor choice belongs to conversation creation, not the turn composer
 
-Zero base does not show the executor dropdown in the composer. Omega is the
-only public executor, so a selector with one usable choice is unnecessary
-chrome. `OMEGA-DELTA-0150` subsequently removed external provider controls too;
-the send/stop control remains.
+**Superseded in part by the 2026-07-29 three-mode direction.** Executor
+selection returns at the conversation front door. It does not return as a
+provider/model control that can silently retarget a transcript between turns.
+The mode, executor, project, and readiness are visible before the first send;
+after that point the composer reports what the conversation owns.
 
-This is a presentation boundary only. Codex, Claude Code, and Grok detection,
-attachment, warming, and Omega's internal routing remain loaded exactly as
-before. Exo retains its process-level `--enable-exo` boundary but is not
-exposed through a composer selector.
+Codex, Claude Code, Grok Build, configured ACP agents, Omega's routing
+infrastructure, and Sarah remain available to the creation surface. Their
+provider-specific model, mode, reasoning, and fast-mode controls do not leak
+into the shared turn composer.
 
-- **Enforced by:** `the_composer_shows_no_executor_or_external_provider_controls`
-  and `only_omega_is_an_ordinary_selectable_executor` in `crates/omega_deltas`.
+- **Enforced by:** `executor_choice_belongs_to_creation_not_the_turn_composer`
+  and `direct_agent_inventory_stays_separate_from_background_warming` in
+  `crates/omega_deltas`.
 
-### OMEGA-DELTA-0150 — Every new chat belongs to Omega
+### OMEGA-DELTA-0150 — A conversation keeps the mode and executor chosen at creation
 
-A new zero-base chat always creates its session on Omega's native loop. Merely
-detecting or attaching Codex, Claude Code, Grok, or Exo is not authority to hand
-that executor the conversation. The unpinned routing decision is therefore
-always `NativeLoop` with `UnpinnedDefault`.
+**Superseded by the 2026-07-29 three-mode direction.** A new conversation may
+belong to a directly selected ACP agent, to Omega Agent and its disclosed
+router, or to Sarah voice. Detection and warming are readiness observations,
+not consent; the explicit creation choice is the authority to create the
+conversation on that mode.
 
-External executors remain detected, attached, and warmed behind Omega so its
-internal routing and delegation infrastructure stays available. They do not
-contribute selector, model, mode, reasoning, or fast-mode controls to the
-zero-base composer, and the retired keyboard executor cycle cannot switch a
-draft away from Omega.
+Once created, the conversation retains its owner and concrete executor across
+turns and relaunch. A keyboard cycle, provider control, readiness change, or
+router observation cannot retarget an existing transcript. Durable historical
+route reasons remain readable even when the current creation policy no longer
+emits them.
 
-`DetectedExternalAcp` remains readable in durable route records for sessions
-created by older builds, but the current routing law no longer emits it.
-
-- **Enforced by:** `routing_is_decided_rather_than_selected` and
-  `the_composer_shows_no_executor_or_external_provider_controls` in
+- **Enforced by:** `an_unpinned_thread_never_reaches_an_engine_lane`,
+  `conversation_creation_does_not_retarget_an_existing_transcript`, and
+  `executor_choice_belongs_to_creation_not_the_turn_composer` in
   `crates/omega_deltas`, plus router behavior tests in `omega_front_door` and
   `agent_ui`.
 
@@ -7585,3 +7627,32 @@ current image build does not decode it inline.
   user bearer for those exact hosted lanes.
 - **Enforced by:** `omega_model_tier` unit tests, `language_models` openagents
   provider tests, and the OpenAgents chat-completions dual-auth path.
+
+### OMEGA-DELTA-0173 — One flag-free surface creates three kinds of conversation
+
+- **Omega's product contract:** a normal launch has one surface and no launch
+  mode choice. From that surface, a person creates a **Direct Agent**,
+  **Omega Agent**, or **Sarah** conversation. This is the reconciliation of the
+  owner's 2026-07-29 single-experience and Episode 263 directions: one
+  experience is not one agent.
+- **Choice happens at creation.** Before the first send, the surface names the
+  mode, concrete executor, project, and readiness. A conversation then keeps
+  that ownership underneath its transcript. Direct Agent uses the selected ACP
+  agent; Omega Agent routes among eligible executors and discloses its concrete
+  choice; Sarah owns the voice session and states its authority and limits.
+- **Truthful labeling survives the supersession.** Every title, composer label,
+  pending state, status, and turn disclosure names the executor that actually
+  does the work. A pending change distinguishes “will be” from “is”, and no
+  readiness observation silently substitutes an executor.
+- **The shell is converging, not multiplying.** The legacy `--full-editor`
+  compatibility path may remain during the alpha transition but is not an
+  advertised experience. `OMEGA-DELTA-0048`, `0052`, and `0053` keep its
+  transitional hiding and sealing mechanisms honest until post-alpha removal
+  collapses them into the one application layout.
+- **Vim stays.** The `vim` crate and `assets/keymaps/vim.json` remain in the
+  kept product closure. Modal editing belongs in the composer and focused
+  editing surface; admitting its action set and re-homing its mode indicator
+  are implementation work, not an open product decision.
+- **Enforced by:** `one_surface_three_conversation_modes_is_the_product_contract`
+  in `crates/omega_deltas`, plus the creation and restore behavior tests that
+  land with the three-mode front door.

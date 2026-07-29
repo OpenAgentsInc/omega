@@ -207,8 +207,18 @@ though it were the present is a mistake this document exists to stop.
 
 ### Zero base
 
-The default surface: one thread, a composer, and nothing else. `--full-editor`
-opens the editor.
+The legacy implementation name for Omega's one normal, flag-free launch
+surface. It is not a one-agent product contract and it is not a second product:
+the surface contains the conversation, composer, navigation sidebar, tester
+channels, and workbench rail. New conversations begin in one of three modes:
+**Direct Agent**, **Omega Agent**, or **Sarah**.
+
+The conversation mode is chosen at creation. A direct conversation belongs to
+the selected ACP agent, an Omega Agent conversation belongs to the router and
+discloses the concrete executor it selects, and a Sarah conversation belongs to
+the voice session. An existing transcript never changes executors underneath
+its entries. Every title, composer label, status, and disclosure names the
+executor actually doing the work.
 
 Sealed, structurally: the window starts with no centre pane group, tab bar,
 title bar, or status bar. It is not the editor hidden behind a zoomed panel.
@@ -217,20 +227,21 @@ ordinary editable centre pane beside the thread for that file. Command-click
 keeps the compact read-only peek, and closing the last editor tab restores the
 agent-only surface.
 
-There is no way out at runtime. Started in zero base means staying there for the
-life of the process.
+There is no runtime switch to a second application surface. The legacy
+`--full-editor` compatibility path may remain during the alpha transition, but
+it is not part of the normal launch and is scheduled for post-alpha removal.
+Vim remains supported in the composer and the focused editing surface.
 
 A **path argument names the project, not the mode**. `omega <path>` opens zero
 base with `<path>` as the folder the thread reads, searches and runs in; a file
 argument names the folder that holds it. The folder is named in the panel
 header, because an agent whose directory is invisible cannot be checked. That
 header value is always clickable: it chooses a folder when none is attached and
-changes the directory after one has been chosen. Only `--full-editor` opens the
-editor. `--diff`, `--dev-container`, and `--demo-workroom` describe editor-only
-work and are refused unless `--full-editor` is also present — see
-`OMEGA-DELTA-0116`. Local development preserves the same default:
-`script/zed-local` opens zero base unless its caller explicitly passes
-`--full-editor`.
+changes the directory after one has been chosen. During the alpha transition,
+`--diff`, `--dev-container`, and `--demo-workroom` remain legacy editor-only
+arguments and require the compatibility `--full-editor` path — see
+`OMEGA-DELTA-0116`. None of those flags changes what a normal, flag-free Omega
+launch exposes.
 
 ### Words for evidence
 

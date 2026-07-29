@@ -6,11 +6,23 @@ product
 
 ## Users
 
-Developers and human-agent teams who need to understand, delegate, review, approve, and ship work from one native workspace. They may arrive with existing editors, projects, and authenticated external agents, and should not have to surrender those configurations to begin working in Omega.
+Developers and human-agent teams who need to understand, delegate, review, approve, and ship work from one native workspace. They may arrive with existing projects and authenticated external agents, and should not have to surrender those configurations to begin working in Omega.
 
 ## Product Purpose
 
-Omega is the primary OpenAgents desktop client: an IDE and durable workroom connecting people, agents, conversations, code, reviews, decisions, approvals, and execution. Success means identity and authority are explicit, work remains attached to durable evidence, and existing agents can join without losing their own configuration or authentication boundaries.
+Omega is the primary OpenAgents desktop client: a native, durable workroom connecting people, agents, conversations, code, reviews, decisions, approvals, and execution. Success means identity and authority are explicit, work remains attached to durable evidence, and existing agents can join without losing their own configuration or authentication boundaries.
+
+## Product Shape
+
+Omega has one normal, flag-free launch surface: a conversation, composer, navigation sidebar, tester channels, and workbench rail. A person chooses one of three conversation modes when creating a conversation:
+
+- **Direct Agent** runs Codex, Claude Code, Grok Build, or another configured ACP agent directly.
+- **Omega Agent** routes work among eligible executors and discloses the route it chose.
+- **Sarah** is the voice conversation mode and states its eligibility, price, limits, and authority before a session starts.
+
+The chosen mode, concrete executor, project, and readiness are visible before the first send. Once a conversation starts, its executor does not change underneath its transcript, and every surface names the executor that actually does the work.
+
+The legacy `--full-editor` compatibility path may remain during the alpha transition, but it is not a second advertised experience and is scheduled for post-alpha removal. Vim remains part of the product in the composer and the focused editing surface.
 
 ## Brand Personality
 
@@ -26,8 +38,8 @@ Sovereign, capable, and direct. Omega should feel like a trustworthy native tool
 
 ## Design Principles
 
-- Establish portable identity before asking the user to configure the editor.
-- Preserve familiar editor controls and the selected Zed theme structure while Omega-specific surfaces mature.
+- Establish portable identity before asking the user to configure the workroom.
+- Preserve familiar editing controls, Vim, and the selected Zed theme structure inside Omega's focused editing surfaces.
 - Keep authority boundaries explicit: external agents own their runtime, authentication, billing, and configuration.
 - Prefer real setup actions over tutorials; onboarding should create durable state users immediately keep using.
 - Fail closed and explain the smallest next action without exposing secrets or encouraging repeated permission prompts.

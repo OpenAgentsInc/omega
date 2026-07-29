@@ -161,7 +161,14 @@ pub const ENFORCED_DELTAS: &[&str] = &[
     "OMEGA-DELTA-0170",
     "OMEGA-DELTA-0171",
     "OMEGA-DELTA-0172",
+    "OMEGA-DELTA-0173",
 ];
+
+/// The concise product contract adjacent to the delta registry.
+pub const PRODUCT_PATH: &str = "PRODUCT.md";
+
+/// The product vocabulary that must give the same launch answer.
+pub const OMEGA_TAXONOMY_PATH: &str = "docs/omega/taxonomy.md";
 
 pub const GOOGLE_PROVIDER_PATH: &str = "crates/language_models/src/provider/google.rs";
 pub const GOOGLE_CLIENT_PATH: &str = "crates/google_ai/src/google_ai.rs";
@@ -8379,8 +8386,9 @@ mod tests {
         }
     }
 
-    /// OMEGA-DELTA-0048. Zero base hides by filter and by refusal, and deletes
-    /// nothing.
+    /// OMEGA-DELTA-0048. Until the post-alpha subtraction lands, the
+    /// transitional shell hides by filter and refusal and keeps the inherited
+    /// keymaps intact.
     ///
     /// Two halves, and both are load-bearing. The palette restriction is what a
     /// person sees; the action gate is what makes "not rendered" safe, because
@@ -8390,7 +8398,7 @@ mod tests {
     /// startup, so a binding naming a missing action kills the process while
     /// `cargo check --workspace` stays green. `0.2.0-rc6` died that way.
     #[test]
-    fn zero_base_hides_by_filter_and_refusal_and_deletes_nothing() {
+    fn the_transitional_shell_hides_by_filter_and_refusal_until_subtraction_lands() {
         let ui_path = repository_path(ZERO_BASE_UI_PATH);
         let ui = std::fs::read_to_string(&ui_path)
             .unwrap_or_else(|error| panic!("cannot read {}: {error}", ui_path.display()));
@@ -8923,8 +8931,9 @@ mod tests {
     // OMEGA-DELTA-0052 — Zero base is the default, and it has no exit
     // ---------------------------------------------------------------------
 
-    /// OMEGA-DELTA-0052. `omega` opens zero base, `--full-editor` opens the
-    /// editor, and a process in zero base cannot leave it.
+    /// OMEGA-DELTA-0052. During the alpha transition, `omega` opens the
+    /// product surface, `--full-editor` opens the legacy compatibility path,
+    /// and a process cannot switch between them at runtime.
     ///
     /// Both halves invert something a person can see, and both are invisible to
     /// the compiler for the reason every zero-base defect this week has been:
@@ -8940,7 +8949,7 @@ mod tests {
     /// other hidden surface, so the check is that the way out is *absent*
     /// rather than *unrendered*.
     #[test]
-    fn zero_base_is_the_default_and_has_no_way_out() {
+    fn the_flag_free_surface_has_no_runtime_switch_to_the_legacy_editor() {
         let startup_path = repository_path(STARTUP_PATH);
         let startup = std::fs::read_to_string(&startup_path)
             .unwrap_or_else(|error| panic!("cannot read {}: {error}", startup_path.display()));
@@ -9108,8 +9117,9 @@ mod tests {
     // OMEGA-DELTA-0053 — A sealed zero base starts without the editor
     // ---------------------------------------------------------------------
 
-    /// OMEGA-DELTA-0053. Zero base subtracts the editor rather than covering
-    /// it.
+    /// OMEGA-DELTA-0053. Until the sealed layout becomes the ordinary layout,
+    /// the product surface structurally subtracts the editor rather than
+    /// covering it.
     ///
     /// The mode used to hide the editor by zooming the agent panel over it, and
     /// one press of the sidebar control released the zoom and put Zed's whole
@@ -9133,7 +9143,7 @@ mod tests {
     /// identity gate — a worse dead end than the one `OMEGA-DELTA-0051`
     /// repaired, and the same shape.
     #[test]
-    fn a_sealed_zero_base_starts_without_an_editor() {
+    fn the_transitional_sealed_layout_starts_without_the_legacy_editor() {
         let mode_path = repository_path(ZERO_BASE_MODE_PATH);
         let mode = std::fs::read_to_string(&mode_path)
             .unwrap_or_else(|error| panic!("cannot read {}: {error}", mode_path.display()));
@@ -9427,7 +9437,7 @@ mod tests {
     /// connection is made at startup from what is installed, so nothing a turn
     /// says can attach one.
     #[test]
-    fn routing_is_decided_rather_than_selected() {
+    fn an_unpinned_thread_never_reaches_an_engine_lane() {
         let thread_path = repository_path(THREAD_VIEW_PATH);
         let thread = std::fs::read_to_string(&thread_path)
             .unwrap_or_else(|error| panic!("cannot read {}: {error}", thread_path.display()));
@@ -9479,13 +9489,6 @@ mod tests {
             "OMEGA-DELTA-0055: the unpinned branch read from {} is not a \
              plausible branch, so the checks below would be testing the whole \
              function or nothing",
-            law_path.display()
-        );
-        assert!(
-            unpinned.contains("RouteDecision::native(RouteReason::UnpinnedDefault, None)")
-                && !unpinned.contains("ExecutorClass::ExternalAcp")
-                && !unpinned.contains("DetectedExternalAcp"),
-            "OMEGA-DELTA-0150: an unpinned new chat in {} can leave Omega.",
             law_path.display()
         );
         assert!(
@@ -15459,13 +15462,14 @@ mod tests {
 
     // ------ OMEGA-DELTA-0115
 
-    /// OMEGA-DELTA-0149 and OMEGA-DELTA-0150. Executor and external-provider
-    /// controls are absent from Omega's composer.
+    /// OMEGA-DELTA-0149 and OMEGA-DELTA-0150. Executor choice belongs to
+    /// conversation creation; provider controls cannot retarget the turn
+    /// composer afterward.
     ///
     /// Routing infrastructure remains behind Omega; its external executors do
     /// not contribute controls to the zero-base composer.
     #[test]
-    fn the_composer_shows_no_executor_or_external_provider_controls() {
+    fn executor_choice_belongs_to_creation_not_the_turn_composer() {
         let view_path = repository_path(THREAD_VIEW_PATH);
         let view = read_repository_file(THREAD_VIEW_PATH);
         let bar = body_of(&view, "render_zero_base_executor_bar");
@@ -15473,8 +15477,9 @@ mod tests {
         assert!(
             !bar.contains("self.render_executor_selector(cx)")
                 && !bar.contains("omega-executor-selector"),
-            "OMEGA-DELTA-0149: zero base's composer bar in {} draws the \
-             executor selector again.",
+            "OMEGA-DELTA-0149: the turn composer in {} draws the creation-time \
+             executor selector. An established transcript must report its \
+             executor, not offer to retarget it.",
             view_path.display()
         );
         assert!(
@@ -15504,10 +15509,11 @@ mod tests {
         );
     }
 
-    /// OMEGA-DELTA-0150. Retired UI selection cannot change what owns a new
-    /// chat.
+    /// OMEGA-DELTA-0150. Creation-time state cannot retarget an existing
+    /// transcript, and stale process-global selection cannot silently decide
+    /// what Omega Agent attaches.
     #[test]
-    fn a_retired_executor_selection_cannot_take_over_a_new_chat() {
+    fn conversation_creation_does_not_retarget_an_existing_transcript() {
         let router_path = repository_path(ROUTER_DISPATCH_PATH);
         let router = without_whitespace(&code_of(&read_repository_file(ROUTER_DISPATCH_PATH)));
 
@@ -15538,8 +15544,17 @@ mod tests {
             !thread_source.contains("_: &CycleExecutor")
                 && !thread_view.contains("render_executor_selector")
                 && !thread_view.contains("config_options_view"),
-            "OMEGA-DELTA-0150: the new-chat composer can still expose or invoke \
-             an external executor."
+            "OMEGA-DELTA-0150: the turn composer can expose or invoke an \
+             external executor after creation."
+        );
+
+        let selector = body_of(&thread_source, "render_executor_selector");
+        assert!(
+            selector.contains("thread.is_draft_thread()")
+                && selector.contains("executor_switch_enabled("),
+            "OMEGA-DELTA-0150: executor selection is no longer fenced to a \
+             draft conversation, so an existing transcript can change \
+             executors underneath its entries."
         );
     }
 
@@ -18074,7 +18089,8 @@ mod tests {
         );
     }
 
-    /// OMEGA-DELTA-0131. A new thread in zero base is built on Omega's router.
+    /// OMEGA-DELTA-0131. The new-conversation heading names the same agent the
+    /// new-thread action will open.
     ///
     /// The owner selected Exo, was shown Exo, asked `who are you`, and Codex
     /// answered. Omega's executor selector sets its own global; the panel keeps
@@ -18084,17 +18100,12 @@ mod tests {
     /// earlier session, so Omega's router — the only thing that reads the
     /// executor selection — was never in the path at all.
     ///
-    /// The clamp is on the **accessor**, not on the stored field, and the
-    /// difference is not cosmetic. The first version of this fix clamped every
-    /// write, which rewrote a reopened thread's own agent on the way back in:
-    /// `OMEGA-DELTA-0118` restores the last thread under the executor that
-    /// recorded it, the router had no route record for a session it had never
-    /// opened, and the next launch said `Failed to Launch — no thread found
-    /// with ID`. So this check holds the accessor, and holds that the panel's
-    /// heading reads the same one — a heading naming a different agent from the
-    /// thread `+` would open is the same defect in a smaller place.
+    /// The immediate repair clamped the accessor to Omega's router. The
+    /// 2026-07-29 direction supersedes that one-agent policy, while retaining
+    /// the part that stopped the lie: creation and its heading consume one
+    /// answer. A reopened thread also keeps the stored agent that recorded it.
     #[test]
-    fn a_new_thread_in_zero_base_is_built_on_omegas_router() {
+    fn the_new_conversation_heading_names_the_agent_it_will_open() {
         let panel_path = repository_path(AGENT_PANEL_PATH);
         let panel = read_repository_file(AGENT_PANEL_PATH);
         let shipping = outside_the_tests(&panel);
@@ -18113,23 +18124,17 @@ mod tests {
             .collect::<Vec<_>>()
             .join("\n");
         assert!(
-            code.contains("omega_zero_base::is_active()"),
-            "OMEGA-DELTA-0131: `selected_agent` no longer asks whether zero base \
-             is active, so a new thread there can be built directly on Codex or \
-             Claude and the executor selector switches a router nothing is \
-             using. The accessor reads:\n{code}"
-        );
-        assert!(
-            code.contains("Agent::NativeAgent"),
-            "OMEGA-DELTA-0131: `selected_agent` no longer answers Omega's router. \
-             The accessor reads:\n{code}"
+            code.contains("self.selected_agent.clone()"),
+            "OMEGA-DELTA-0131: `selected_agent` no longer preserves the stored \
+             agent for a conversation that owns it. Reopened and directly \
+             selected conversations must remain on the executor that recorded \
+             them. The accessor reads:\n{code}"
         );
 
         // The heading names what `+` would open, which is the accessor's answer
-        // and not the field's. After a Codex thread is reopened the field holds
-        // Codex — correctly, that thread *is* Codex — while a new thread would
-        // be the router, and a heading reading the field would say Codex over a
-        // thread nothing had built yet.
+        // and not a second reading of stored state. The front door may change
+        // how the accessor decides, but the visible promise and creation must
+        // continue to consume that same decision.
         let toolbar = function_body(shipping, "render_toolbar")
             .or_else(|| function_body(shipping, "render_panel_toolbar"))
             .unwrap_or_else(|| {
@@ -18140,7 +18145,7 @@ mod tests {
             });
         assert!(
             toolbar.contains("self.selected_agent(cx)"),
-            "OMEGA-DELTA-0131: the toolbar reads the stored field rather than \
+            "OMEGA-DELTA-0131: the toolbar reads a different value from \
              `selected_agent(cx)`, so `New … Thread` can name an agent that a \
              new thread would not be built on."
         );
@@ -19530,37 +19535,25 @@ mod tests {
         );
     }
 
-    /// OMEGA-DELTA-0146. Direct selection is narrower than the runtime
-    /// inventory, while adapter warming continues to use that inventory.
+    /// OMEGA-DELTA-0146. The direct-agent inventory remains distinct from the
+    /// complete runtime inventory used for adapter warming.
     #[test]
-    fn only_omega_is_an_ordinary_selectable_executor() {
+    fn direct_agent_inventory_stays_separate_from_background_warming() {
         let selector = without_comments(&read_repository_file(
             "crates/agent_ui/src/omega_executor_selector.rs",
         ));
         for required in [
             "pub fn selectable(",
             "pub fn selectable_here()",
-            "DIRECT_SELECTION_COMING_SOON",
             "Self::Claude => \"Claude Code\"",
-            "pub fn selector_unavailable_here()",
-            "matches!( choice, SelectableExecutor::Codex | SelectableExecutor::Claude | SelectableExecutor::Grok )",
+            "Self::Codex",
+            "Self::Claude",
+            "Self::Grok",
         ] {
             assert!(
                 without_whitespace(&selector).contains(&without_whitespace(required)),
                 "OMEGA-DELTA-0146: the direct-selection boundary lost \
                  `{required}`."
-            );
-        }
-
-        let menu = body_of(&selector, "build_menu");
-        for required in [
-            "selector_unavailable_here()",
-            "choice.selector_name()",
-            ".disabled(true)",
-        ] {
-            assert!(
-                menu.contains(required),
-                "OMEGA-DELTA-0146: the executor menu lost `{required}`."
             );
         }
 
@@ -19594,7 +19587,8 @@ mod tests {
             warm.contains("omega_executor_selector::ready_here()")
                 && !warm.contains("selectable_here()"),
             "OMEGA-DELTA-0146: hiding external ACP executors from direct \
-             selection also stopped their adapter preload."
+             selection also stopped their adapter preload, or public \
+             selection policy now decides which adapters warm."
         );
     }
 
@@ -21034,5 +21028,71 @@ mod tests {
              failure.",
             view_path.display()
         );
+    }
+
+    /// OMEGA-DELTA-0173. The product documents give one answer for a normal
+    /// launch: one flag-free surface, with Direct Agent, Omega Agent, and Sarah
+    /// chosen when a conversation is created. Vim remains in that product.
+    #[test]
+    fn one_surface_three_conversation_modes_is_the_product_contract() {
+        let product_path = repository_path(PRODUCT_PATH);
+        let product = read_repository_file(PRODUCT_PATH);
+        for required in [
+            "Omega has one normal, flag-free launch surface",
+            "**Direct Agent**",
+            "**Omega Agent**",
+            "**Sarah**",
+            "The chosen mode, concrete executor, project, and readiness are visible before the first send.",
+            "Vim remains part of the product",
+        ] {
+            assert!(
+                product.contains(required),
+                "OMEGA-DELTA-0173: {} lost `{required}`. The concise product \
+                 contract must state the launch surface, all three \
+                 creation-time modes, truthful pre-send disclosure, and Vim \
+                 retention together.",
+                product_path.display()
+            );
+        }
+
+        let taxonomy_path = repository_path(OMEGA_TAXONOMY_PATH);
+        let taxonomy = read_repository_file(OMEGA_TAXONOMY_PATH);
+        for required in [
+            "one normal, flag-free launch",
+            "**Direct Agent**, **Omega Agent**, or **Sarah**",
+            "The conversation mode is chosen at creation.",
+            "An existing transcript never changes executors underneath",
+            "Vim remains supported",
+        ] {
+            assert!(
+                taxonomy.contains(required),
+                "OMEGA-DELTA-0173: {} lost `{required}` and no longer gives \
+                 the same launch answer as {}.",
+                taxonomy_path.display(),
+                product_path.display()
+            );
+        }
+
+        let registry = read_repository_file(DELTA_REGISTRY_PATH);
+        for superseded in [
+            "### OMEGA-DELTA-0146 — Direct executor selection is restricted to Omega",
+            "### OMEGA-DELTA-0149 — The composer does not render an executor selector",
+            "### OMEGA-DELTA-0150 — Every new chat belongs to Omega",
+            "A new zero-base chat always creates its session on Omega's native loop",
+        ] {
+            assert!(
+                !registry.contains(superseded),
+                "OMEGA-DELTA-0173: the registry still asserts the superseded \
+                 one-agent policy `{superseded}`."
+            );
+        }
+
+        for retained in ["crates/vim", "assets/keymaps/vim.json"] {
+            assert!(
+                repository_path(retained).exists(),
+                "OMEGA-DELTA-0173: Vim retention lost `{retained}`. Removing \
+                 Vim is a product-policy change, not a cleanup."
+            );
+        }
     }
 }
