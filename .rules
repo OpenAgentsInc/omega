@@ -135,7 +135,7 @@ Other entities can then register a callback to handle these events by doing `cx.
 
 - Use `./script/clippy` instead of `cargo clippy`
 - When editing Omega code, do it on a fresh worktree off the remote `main` branch so not to conflict with other changes locally — when done, merge to `main`.
-- Unless the user tells you not to, rebuild the app using the fast release build, then merge that to `main`.
+- Rebuilding the app using the fast release build (`cargo build --profile release-fast`) is available if requested by the user/owner, but do not rebuild automatically at the end of every session.
 - Generally, use your main toolset (`read`, `bash`, etc.) for looking around to gather information, then delegate to a sub-agent (preferably Codex if available) to do the heavy lifting and the coding.
 
 # Pull request hygiene
