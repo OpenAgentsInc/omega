@@ -10315,6 +10315,17 @@ fn run_omega_sarah_admission_visual_tests(
         return Ok(Vec::new());
     }
 
+    // OMEGA-DELTA-0185. Both Sarah scenes ship on the structurally sealed
+    // zero-base surface. Until now they relied on running after the seal in
+    // `run_omega_visual_tests` — an ordering, not a guarantee. The front-door
+    // and tester-channel scenes each assert the seal per scene; these two
+    // must not be the pair that silently photographs an unsealed window when
+    // the call order changes.
+    anyhow::ensure!(
+        omega_zero_base::is_sealed(),
+        "the Sarah admission scenes cannot be captured outside sealed zero base"
+    );
+
     cx.update_window(workspace_window, |_root, window, cx| {
         panel.update(cx, |panel, cx| {
             use workspace::dock::Panel as _;

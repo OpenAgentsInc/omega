@@ -173,6 +173,7 @@ pub const ENFORCED_DELTAS: &[&str] = &[
     "OMEGA-DELTA-0182",
     "OMEGA-DELTA-0183",
     "OMEGA-DELTA-0184",
+    "OMEGA-DELTA-0185",
 ];
 
 /// The concise product contract adjacent to the delta registry.
@@ -22763,6 +22764,144 @@ mod tests {
             assert!(
                 without_whitespace(&document).contains(&without_whitespace(required)),
                 "OMEGA-DELTA-0184: {path} lost `{required}`"
+            );
+        }
+    }
+
+    /// OMEGA-DELTA-0185. The sealed visual baselines and the installed
+    /// release gate are the alpha's release evidence.
+    ///
+    /// Two halves, one property: the shipped sealed surface is photographed
+    /// by scenes that cannot run unsealed, and the packaged candidate is
+    /// gated by a scripted matrix whose rows never claim more than what was
+    /// observed. GitHub-hosted CI is locked (billing), so the local proof
+    /// runner and this gate are the only render-evidence authorities — which
+    /// is exactly why both must be pinned in source rather than trusted to a
+    /// green checkmark that does not exist.
+    #[test]
+    fn the_sealed_baselines_and_the_installed_release_gate_hold() {
+        // Every scene family that photographs the shipped sealed surface
+        // asserts the seal at its own capture site. Ordering after the seal
+        // call in `run_omega_agent_visual_tests_inner` is not a guarantee:
+        // it is exactly the arrangement that silently photographs an
+        // unsealed window when the call order changes.
+        let runner = read_repository_file(VISUAL_TEST_RUNNER_PATH);
+        for guard in [
+            "omega_front_door_no_project cannot be captured outside sealed zero base",
+            "omega_front_door_typing cannot be captured outside sealed zero base",
+            "the Sarah admission scenes cannot be captured outside sealed zero base",
+            "tester-channel visual proof must run in the shipped sealed zero-base surface",
+        ] {
+            assert!(
+                runner.contains(guard),
+                "OMEGA-DELTA-0185: {VISUAL_TEST_RUNNER_PATH} lost the per-scene \
+                 seal ensure `{guard}`. A sealed scene captured without its own \
+                 `omega_zero_base::is_sealed()` assertion photographs whatever \
+                 surface the call order happens to leave behind."
+            );
+        }
+
+        // The six sealed baselines exist and are non-empty. A sealed render
+        // site that regresses must fail a picture, not only a source token.
+        for scene in [
+            "omega_front_door_no_project",
+            "omega_front_door_typing",
+            "omega_sarah_admission_ready",
+            "omega_sarah_session_settled",
+            "omega_tester_channel_first_launch",
+            "omega_tester_channel_relay_unavailable",
+        ] {
+            let baseline = repository_path(&format!(
+                "crates/zed/test_fixtures/visual_tests/{scene}.png"
+            ));
+            let recorded = std::fs::metadata(&baseline).unwrap_or_else(|error| {
+                panic!(
+                    "OMEGA-DELTA-0185: the sealed baseline {} is missing \
+                     ({error}). The sealed surface cannot lose its picture.",
+                    baseline.display()
+                )
+            });
+            assert!(
+                recorded.len() > 0,
+                "OMEGA-DELTA-0185: the sealed baseline {} is empty.",
+                baseline.display()
+            );
+        }
+
+        // The release-gate harness exists and its zero-refusal sweep is bound
+        // to the sentence `omega_zero_base::refusal` actually produces. Hold
+        // both sides in agreement so the sweep cannot rot into scanning for a
+        // sentence the product no longer says.
+        let zero_base = read_repository_file(ZERO_BASE_MODE_PATH);
+        assert!(
+            zero_base.contains("pub const MODE_NAME: &str = \"zero base\";")
+                && zero_base.contains("pub const FULL_EDITOR_FLAG: &str = \"--full-editor\";")
+                && zero_base.contains("is off in {MODE_NAME}")
+                && zero_base.contains("{FULL_EDITOR_FLAG} for the editor."),
+            "OMEGA-DELTA-0185: the refusal sentence in {ZERO_BASE_MODE_PATH} \
+             changed shape. Update REFUSAL_MARKERS in script/omega-release-gate \
+             and this check together, or the installed zero-refusal sweep scans \
+             for a sentence the product no longer says."
+        );
+        let gate = read_repository_file("script/omega-release-gate");
+        for fragment in ["is off in zero base", "--full-editor for the editor"] {
+            assert!(
+                gate.contains(fragment),
+                "OMEGA-DELTA-0185: script/omega-release-gate lost the refusal \
+                 sweep fragment `{fragment}`."
+            );
+        }
+        for honesty in [
+            "openagents.omega.release-gate.v1",
+            "automated-pass",
+            "automated-fail",
+            "owner-assisted-pending",
+            "blocked",
+        ] {
+            assert!(
+                gate.contains(honesty),
+                "OMEGA-DELTA-0185: script/omega-release-gate lost the `{honesty}` \
+                 status vocabulary. \"Nothing was found\" and \"nobody looked\" \
+                 must never read the same."
+            );
+        }
+
+        // Every row of the Episode 263 section 7 matrix is present in the
+        // harness and named in the committed gate report. A row that vanishes
+        // from either is a release claim that quietly stopped being checked.
+        let report = read_repository_file("docs/omega/release-gate.md");
+        for row in [
+            "package-integrity",
+            "version-truth",
+            "flag-free-launch",
+            "zero-refusal-log-sweep",
+            "tester-channel-destination",
+            "update-safety-staged",
+            "menu-honesty",
+            "direct-codex",
+            "direct-claude-code",
+            "direct-grok",
+            "generic-acp",
+            "concurrency-supervision",
+            "three-mode-journeys",
+            "omega-routing",
+            "sarah-journey",
+            "channels-send-receive",
+            "work-surfaces",
+            "update-safety-lifecycle",
+            "distribution",
+            "independent-review",
+        ] {
+            assert!(
+                gate.contains(row),
+                "OMEGA-DELTA-0185: script/omega-release-gate lost the gate row \
+                 `{row}` from the Episode 263 section 7 matrix."
+            );
+            assert!(
+                report.contains(row),
+                "OMEGA-DELTA-0185: docs/omega/release-gate.md no longer names \
+                 the gate row `{row}`. The committed report must show every \
+                 row's last honest disposition."
             );
         }
     }

@@ -8154,3 +8154,46 @@ startup recheck — survives unchanged behind that dropdown.
   Agent Panel GPUI tests for the compose path, and the sealed
   `omega_front_door_no_project` / `omega_front_door_typing` visual baselines,
   which photograph the composer landing.
+
+### OMEGA-DELTA-0185 — The sealed baselines and the installed release gate are release evidence
+
+- **Every scene that photographs the shipped sealed surface asserts the seal
+  per scene.** The front-door pair, the Sarah admission pair, and the
+  tester-channel pair each carry an explicit `omega_zero_base::is_sealed()`
+  ensure at their own capture site in
+  `crates/zed/src/visual_test_runner.rs`. Ordering after the seal call is not
+  a guarantee: the Sarah pair used to rely on running after the front-door
+  seal, which is exactly the arrangement that silently photographs an
+  unsealed window when the call order changes. The six committed baselines
+  under `crates/zed/test_fixtures/visual_tests/` must exist non-empty.
+- **The Exo-lane `omega_zero_base_wide` / `omega_zero_base_narrow` baselines
+  photograph the pre-seal transitional form** (active zero base under a
+  zoomed panel, `seal()` never called on that path) and require a live
+  `exo acp` runtime to re-record. They are not evidence for the sealed
+  surface; the six sealed scenes are.
+- **The installed-candidate release gate is scripted, not heroic.**
+  `script/omega-release-gate` runs the Episode 263 gap-analysis section 7
+  matrix against the packaged candidate from `script/bundle-omega-rc`,
+  staged from its DMG and launched from a clean `--user-data-dir` profile.
+  Every row emits a preserved evidence record bound to the candidate's
+  package digest. A row is `automated-pass` / `automated-fail` only when the
+  harness observed it end-to-end; a row needing a human account, interactive
+  provider auth, a second person, or a judgment call is
+  `owner-assisted-pending` with the exact instruction; a host refusal is
+  `blocked` with the reason. No row is ever fabricated.
+- **The zero-refusal sweep is bound to the refusal sentence.** The harness
+  scans the clean-profile log for the sentence
+  `omega_zero_base::refusal` produces ("… is off in zero base …
+  Start Omega with --full-editor for the editor.") and the flag-free journey
+  must log zero of them. The delta test holds the harness fragments and the
+  `crates/omega_zero_base` source in agreement so the sweep cannot rot into
+  scanning for a sentence the product no longer says.
+- **Why:** omega#158 — the alpha cut needs the sealed render photographed and
+  the release gate runnable on every packaged candidate; the manual checklist
+  does not survive contact with a real release cadence, and GitHub-hosted CI
+  is currently locked (billing), so the local proof runner and this gate are
+  the only render-evidence authorities.
+- **Enforced by:**
+  `the_sealed_baselines_and_the_installed_release_gate_hold` in
+  `crates/omega_deltas`, the per-scene seal ensures in the visual test
+  runner, and the generated gate report at `docs/omega/release-gate.md`.

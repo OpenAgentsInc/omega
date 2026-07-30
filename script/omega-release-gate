@@ -1,0 +1,947 @@
+#!/usr/bin/env python3
+"""Run the installed-candidate release gate against a packaged Omega RC.
+
+OMEGA-DELTA-0185. The Episode 263 gap analysis (section 7, "Installed-candidate
+release gate") defines the release matrix: source tests are necessary and
+insufficient, so every release row must be observed on a PACKAGED candidate
+launched from a CLEAN profile, and every row must leave preserved evidence.
+This harness scripts that matrix. It never fabricates a row: a row it can
+observe end-to-end is `automated-pass` or `automated-fail`, a row that needs a
+human account, interactive provider auth, a second person, or a judgment call
+is `owner-assisted-pending` with the exact instruction the owner must follow,
+and a row the host refuses (missing screen-recording permission, missing
+artifact) is `blocked` with the reason. "Nothing was found" and "nobody
+looked" must never read the same.
+
+The candidate is the DMG produced by `script/bundle-omega-rc` together with
+its release record. Every receipt this harness writes is bound to the
+package digest from that record so evidence cannot be re-attributed to a
+different build.
+
+The zero-refusal sweep is anchored to `omega_zero_base::refusal` in
+`crates/omega_zero_base/src/omega_zero_base.rs`: every refused action logs one
+sentence ending "Start Omega with --full-editor for the editor." via
+`report_refusal` in `crates/zed/src/omega_zero_base_ui.rs`. A flag-free launch
+that reaches the composer without dispatching a single refused action must
+leave a log with zero such sentences.
+
+Usage:
+    script/omega-release-gate [--dmg PATH] [--release-record PATH]
+                              [--output-dir DIR] [--skip-launch]
+                              [--launch-settle SECONDS] [--report PATH]
+                              [--receipt-copy PATH] [--self-test]
+
+Exit codes: 0 = no automated row failed (owner-assisted rows may remain
+pending), 1 = at least one automated row failed, 2 = harness error,
+3 = self-test failure.
+"""
+
+from __future__ import annotations
+
+import argparse
+import datetime
+import hashlib
+import json
+import os
+import plistlib
+import re
+import shutil
+import signal
+import subprocess
+import sys
+import tempfile
+import time
+from pathlib import Path
+
+SCHEMA = "openagents.omega.release-gate.v1"
+
+ROOT = Path(__file__).resolve().parent.parent
+
+#: The one sentence a refused action logs, from `omega_zero_base::refusal`.
+#: Pinned here as two fragments so the sweep survives reflowed whitespace in
+#: the log line but still fails closed if the sentence shape changes: the
+#: OMEGA-DELTA-0185 check in `crates/omega_deltas` holds this file and the
+#: refusal source in agreement.
+REFUSAL_MARKERS = ("is off in zero base", "--full-editor for the editor")
+
+#: OCR phrases that prove the flag-free launch reached the shipped composer
+#: front door (OMEGA-DELTA-0184: the composer executor dropdown is the
+#: new-conversation front door; its trigger face reads the active executor).
+FRONT_DOOR_POSITIVE = ("Omega Agent",)
+
+#: OCR phrases that prove the launch did NOT land on a chooser or onboarding
+#: page (OMEGA-DELTA-0184 removed the interstitial chooser; onboarding renders
+#: "Welcome to Omega").
+FRONT_DOOR_NEGATIVE = ("Welcome to Omega",)
+
+#: The tester-channel sidebar section label (omega#156).
+TESTER_CHANNEL_LABEL = "Tester channels"
+
+#: The version the footer Settings row renders (`v{AppVersion}` in
+#: `crates/agent_ui/src/agent_panel.rs`); AppVersion for a preview-channel
+#: bundle is `0.2.0+preview.<sha>`.
+VERSION_FOOTER_PREFIX = "v0.2.0"
+
+#: Neighbouring-app data roots the candidate must never touch
+#: (gap analysis section 7, "Update safety").
+NEIGHBOUR_DATA_ROOTS = (
+    "~/Library/Application Support/Zed",
+    "~/.config/zed",
+    "~/Library/Application Support/OpenAgents",
+    "~/Library/Application Support/OpenAgents Desktop",
+)
+
+OWNER_ASSISTED_ROWS = [
+    {
+        "id": "direct-codex",
+        "title": "Direct Codex: send, stream, tool use, stop, resume, relaunch",
+        "issues": ["omega#152"],
+        "owner_instruction": (
+            "In the staged candidate (launched with a clean --user-data-dir), "
+            "open the composer executor dropdown, choose Codex, and complete "
+            "one turn that streams and uses a tool; stop it mid-turn; resume; "
+            "quit and relaunch; confirm the restored thread still names Codex "
+            "in title, composer label, and disclosure. Codex auth must use an "
+            "ISOLATED home (for example CODEX_HOME=$(mktemp -d) codex login "
+            "--device-auth) — NEVER reuse or copy ~/.codex or any owner "
+            "credential file into the candidate profile."
+        ),
+    },
+    {
+        "id": "direct-claude-code",
+        "title": "Direct Claude Code: send, stream, tool use, stop, resume, relaunch",
+        "issues": ["omega#152"],
+        "owner_instruction": (
+            "Same journey as the Codex row with Claude Code selected. Use an "
+            "isolated CLAUDE_CONFIG_DIR for auth; never reuse or copy the "
+            "owner's ~/.claude state."
+        ),
+    },
+    {
+        "id": "direct-grok",
+        "title": "Direct Grok Build: native ACP server, send, stream, stop, resume, relaunch",
+        "issues": ["omega#152"],
+        "owner_instruction": (
+            "Same journey with Grok Build selected: the native ACP server must "
+            "launch with the shipped command order. Use an isolated Grok "
+            "config/auth home; never reuse owner credentials."
+        ),
+    },
+    {
+        "id": "generic-acp",
+        "title": "Generic ACP: add one registry agent, authenticate, run a turn, restore it",
+        "issues": ["omega#152"],
+        "owner_instruction": (
+            "Use Add More Agents to open the ACP registry visibly, add one "
+            "agent that is not Codex/Claude/Grok, authenticate through that "
+            "agent's own flow if required, run one turn, relaunch, and confirm "
+            "the restored session names the same agent."
+        ),
+    },
+    {
+        "id": "concurrency-supervision",
+        "title": "Two direct agents concurrently; cancel one; relaunch restores honestly",
+        "issues": ["omega#155"],
+        "owner_instruction": (
+            "Run two different direct agents concurrently; switch views "
+            "between them; cancel one and confirm the other continues; point "
+            "a second write-capable agent at the occupied worktree and confirm "
+            "the collision rule fires visibly; relaunch and confirm both "
+            "threads restore with honest Failed/Cancelled lifecycle states "
+            "and independent history."
+        ),
+    },
+    {
+        "id": "three-mode-journeys",
+        "title": "Keyboard-only and pointer journeys create one conversation per mode",
+        "issues": ["omega#151"],
+        "owner_instruction": (
+            "From a clean profile, create one conversation in each mode "
+            "(Direct Agent, Omega Agent, Sarah) twice: once keyboard-only, "
+            "once pointer-only, all through the composer executor dropdown. "
+            "Confirm transcript title, composer label, and disclosure agree "
+            "on the executor each time, and every dropdown row shows one of "
+            "the four honest readiness states."
+        ),
+    },
+    {
+        "id": "omega-routing",
+        "title": "Two materially different fixtures route to different executors with disclosure",
+        "issues": [],
+        "owner_instruction": (
+            "Send two materially different Omega Agent fixtures; confirm they "
+            "choose different eligible executors and that decision, reason, "
+            "override, fallback, and disclosure are visible and durable."
+        ),
+    },
+    {
+        "id": "sarah-journey",
+        "title": "Sarah admission, voice, bounded command, reconnect, settle",
+        "issues": [],
+        "owner_instruction": (
+            "As an eligible alpha user: confirm price/hold/limit renders "
+            "before the microphone opens, start voice, confirm one bounded "
+            "command, start an agent thread, survive a transient reconnect, "
+            "end, and confirm the final charge."
+        ),
+    },
+    {
+        "id": "channels-send-receive",
+        "title": "Tester channel send/receive with a second account",
+        "issues": ["omega#156"],
+        "owner_instruction": (
+            "From the staged candidate send one message to the tester "
+            "destination; confirm a SECOND account receives it there; kill "
+            "the relay connection and confirm the outage state renders the "
+            "documented fallback, not a spinner; exercise moderation/"
+            "reporting once."
+        ),
+    },
+    {
+        "id": "work-surfaces",
+        "title": "Every visible work-surface action works or is visibly disabled with a reason",
+        "issues": [],
+        "owner_instruction": (
+            "Walk every visible Files/Search/Git/Terminal/Review/Settings/"
+            "agent-registry/Sarah action in the installed candidate; each must "
+            "work or be visibly disabled with a reason. The hermetic workbench "
+            "proof (script/omega-workbench-proof) covers the rendered states "
+            "and is attached as supporting evidence, not as the installed "
+            "verdict."
+        ),
+    },
+    {
+        "id": "update-safety-lifecycle",
+        "title": "Install to /Applications, upgrade, rollback, uninstall touch only Omega paths",
+        "issues": [],
+        "owner_instruction": (
+            "Drag the DMG's Omega.app beside the existing Zed and OpenAgents "
+            "Desktop installs, launch it, then upgrade, roll back, and "
+            "uninstall; confirm only Omega paths change (the automated row "
+            "already proves a staged run leaves neighbouring app data "
+            "untouched)."
+        ),
+    },
+    {
+        "id": "distribution",
+        "title": "Download page, version, digest, signature state, notes, binary agree",
+        "issues": [],
+        "owner_instruction": (
+            "When the public download page exists, confirm page identity, "
+            "version, platform, artifact digest, signature/notarization "
+            "state, release notes, and the installed binary agree with this "
+            "receipt's candidate binding."
+        ),
+    },
+    {
+        "id": "independent-review",
+        "title": "A reviewer other than the producer repeats the held-out journey",
+        "issues": [],
+        "owner_instruction": (
+            "Have a reviewer who did not produce the candidate repeat the "
+            "held-out journey and record the verdict against this receipt's "
+            "candidate digest."
+        ),
+    },
+    {
+        "id": "menu-honesty",
+        "title": "Menus advertise only actions the sealed surface admits",
+        "issues": [],
+        "owner_instruction": (
+            "Open every menu in the running candidate and confirm each item "
+            "either performs its action or is disabled; no item may dispatch "
+            "a zero-base refusal (the automated log sweep would have caught a "
+            "refusal fired during the scripted journey, but only a person can "
+            "exhaustively pull every menu item)."
+        ),
+    },
+]
+
+
+def portable_path(path: Path) -> str:
+    """Repo-relative rendering so a preserved receipt never leaks the
+    invoking user's home directory."""
+    try:
+        return str(path.resolve().relative_to(ROOT))
+    except ValueError:
+        return str(path)
+
+
+def sha256_file(path: Path) -> str:
+    digest = hashlib.sha256()
+    with path.open("rb") as handle:
+        for chunk in iter(lambda: handle.read(1 << 20), b""):
+            digest.update(chunk)
+    return digest.hexdigest()
+
+
+def canonical_digest(payload: dict) -> str:
+    encoded = json.dumps(payload, sort_keys=True, separators=(",", ":")).encode()
+    return hashlib.sha256(encoded).hexdigest()
+
+
+def now_utc() -> str:
+    return (
+        datetime.datetime.now(datetime.timezone.utc)
+        .replace(microsecond=0)
+        .isoformat()
+    )
+
+
+def tree_digest(root: Path) -> str:
+    """Order-stable digest of every path, size, and mtime under `root`.
+
+    The same purpose as the installed-observation collector's untouched
+    check: a rename is as loud as an edit. Size + nanosecond mtime stand in
+    for content so a multi-gigabyte neighbouring profile (Zed extensions,
+    language servers) does not take minutes to hash twice; any write updates
+    the mtime and flips the digest. Unreadable entries feed a marker instead
+    of aborting the whole row.
+    """
+    digest = hashlib.sha256()
+    if not root.exists():
+        digest.update(b"absent")
+        return digest.hexdigest()
+    entries = sorted(
+        p for p in root.rglob("*") if p.is_file() and not p.is_symlink()
+    )
+    for entry in entries:
+        digest.update(str(entry.relative_to(root)).encode())
+        try:
+            stat = entry.stat()
+            digest.update(f"{stat.st_size}:{stat.st_mtime_ns}".encode())
+        except OSError:
+            digest.update(b"unreadable")
+    return digest.hexdigest()
+
+
+class Evidence:
+    def __init__(self, root: Path) -> None:
+        self.root = root
+        root.mkdir(parents=True, exist_ok=True)
+
+    def ref(self, path: Path) -> dict:
+        return {"path": portable_path(path), "sha256": sha256_file(path)}
+
+    def write_json(self, name: str, payload: dict) -> dict:
+        path = self.root / name
+        path.write_text(json.dumps(payload, indent=2, sort_keys=True) + "\n")
+        return self.ref(path)
+
+    def write_text(self, name: str, text: str) -> dict:
+        path = self.root / name
+        path.write_text(text)
+        return self.ref(path)
+
+
+def run(command: list[str], **kwargs) -> subprocess.CompletedProcess:
+    return subprocess.run(command, capture_output=True, text=True, **kwargs)
+
+
+def compile_swift_tool(source: Path, output_dir: Path) -> Path | None:
+    binary = output_dir / source.stem
+    if binary.exists():
+        return binary
+    result = run(["swiftc", "-O", "-o", str(binary), str(source)])
+    if result.returncode != 0:
+        return None
+    return binary
+
+
+def window_for_pid(window_list_tool: Path, pid: int) -> dict | None:
+    result = run([str(window_list_tool)])
+    if result.returncode != 0:
+        return None
+    try:
+        windows = json.loads(result.stdout)
+    except json.JSONDecodeError:
+        return None
+    def area(window: dict) -> float:
+        bounds = window.get("bounds") or {}
+        return float(bounds.get("Width", 0)) * float(bounds.get("Height", 0))
+
+    candidates = [
+        w
+        for w in windows
+        if w.get("pid") == pid and w.get("layer") == 0 and area(w) >= 10_000
+    ]
+    named = [w for w in candidates if w.get("name")]
+    pool = named or candidates
+    return max(pool, key=area) if pool else None
+
+
+def ocr_lines(ocr_tool: Path, image: Path) -> list[dict] | None:
+    result = run([str(ocr_tool), str(image)])
+    if result.returncode != 0:
+        return None
+    try:
+        return json.loads(result.stdout)["lines"]
+    except (json.JSONDecodeError, KeyError):
+        return None
+
+
+def ocr_contains(lines: list[dict], phrase: str) -> bool:
+    lowered = phrase.lower()
+    return any(lowered in line.get("text", "").lower() for line in lines)
+
+
+def sweep_refusals(log_text: str) -> int:
+    return sum(
+        1
+        for line in log_text.splitlines()
+        if all(marker in line for marker in REFUSAL_MARKERS)
+    )
+
+
+def self_test() -> int:
+    """Prove the sweep can fire and the receipt binding refuses tampering."""
+    fired = sweep_refusals(
+        "2026-07-30T00:00:00Z INFO some::module: workspace::NewFile is off in "
+        "zero base, which shows one Exo thread and nothing else. Start Omega "
+        "with --full-editor for the editor.\n"
+    )
+    if fired != 1:
+        print("self-test: the refusal sweep cannot fire", file=sys.stderr)
+        return 3
+    if sweep_refusals("ordinary log line about the editor\n") != 0:
+        print("self-test: the refusal sweep fires on ordinary text", file=sys.stderr)
+        return 3
+    receipt = {"schema": SCHEMA, "rows": [{"id": "x", "status": "automated-pass"}]}
+    bound = dict(receipt, evidence_sha256=canonical_digest(receipt))
+    tampered = json.loads(json.dumps(bound))
+    tampered["rows"][0]["status"] = "automated-fail"
+    unbound = {k: v for k, v in tampered.items() if k != "evidence_sha256"}
+    if canonical_digest(unbound) == tampered["evidence_sha256"]:
+        print("self-test: tampering was not detected", file=sys.stderr)
+        return 3
+    print("release-gate self-test passed: sweep fires, tampering is refused.")
+    return 0
+
+
+def main() -> int:
+    parser = argparse.ArgumentParser(description=__doc__.splitlines()[0])
+    parser.add_argument(
+        "--dmg",
+        type=Path,
+        default=ROOT / "target/omega-rc/Omega-v0.2.0-rc27-macos-arm64.dmg",
+    )
+    parser.add_argument(
+        "--release-record",
+        type=Path,
+        default=ROOT / "target/omega-rc/omega-v0.2.0-rc27-macos-arm64.release.json",
+    )
+    parser.add_argument(
+        "--output-dir", type=Path, default=ROOT / "target/omega-release-gate"
+    )
+    parser.add_argument("--skip-launch", action="store_true")
+    parser.add_argument("--launch-settle", type=float, default=20.0)
+    parser.add_argument("--report", type=Path, default=None)
+    parser.add_argument("--receipt-copy", type=Path, default=None)
+    parser.add_argument("--self-test", action="store_true")
+    args = parser.parse_args()
+
+    if args.self_test:
+        return self_test()
+
+    output_dir: Path = args.output_dir
+    output_dir.mkdir(parents=True, exist_ok=True)
+    evidence = Evidence(output_dir / "evidence")
+    rows: list[dict] = []
+
+    def add_row(
+        row_id: str,
+        title: str,
+        status: str,
+        facts: dict,
+        refs: list[dict],
+        issues: list[str] | None = None,
+        owner_instruction: str | None = None,
+    ) -> None:
+        record = {
+            "id": row_id,
+            "title": title,
+            "status": status,
+            "observed_at": now_utc(),
+            "facts": facts,
+            "evidence_refs": refs,
+            "issues": issues or [],
+        }
+        if owner_instruction:
+            record["owner_instruction"] = owner_instruction
+        rows.append(record)
+
+    # --- Row: package integrity -------------------------------------------
+    if not args.dmg.is_file() or not args.release_record.is_file():
+        print(
+            f"error: candidate artifacts missing: {args.dmg} / {args.release_record}",
+            file=sys.stderr,
+        )
+        return 2
+    record = json.loads(args.release_record.read_text())
+    package_digest = sha256_file(args.dmg)
+    recorded_digest = record.get("digests", {}).get("package_sha256")
+    commit = record.get("source", {}).get("commit", "")
+    integrity_facts = {
+        "artifact": args.dmg.name,
+        "package_sha256": package_digest,
+        "release_record_package_sha256": recorded_digest,
+        "digest_match": package_digest == recorded_digest,
+        "release_record_version": record.get("version"),
+        "release_record_channel": record.get("channel"),
+        "source_commit": commit,
+        "notarization": record.get("notarization"),
+    }
+
+    staged_root = output_dir / "installed"
+    if staged_root.exists():
+        shutil.rmtree(staged_root)
+    staged_root.mkdir(parents=True)
+    mount_point = Path(tempfile.mkdtemp(prefix="omega-gate-mnt-"))
+    attach = run(
+        [
+            "hdiutil",
+            "attach",
+            str(args.dmg),
+            "-readonly",
+            "-nobrowse",
+            "-noautoopen",
+            "-mountpoint",
+            str(mount_point),
+        ]
+    )
+    if attach.returncode != 0:
+        print(f"error: cannot mount the DMG: {attach.stderr}", file=sys.stderr)
+        return 2
+    app_path = staged_root / "Omega.app"
+    try:
+        source_app = mount_point / "Omega.app"
+        if not source_app.exists():
+            print("error: the DMG does not contain Omega.app", file=sys.stderr)
+            return 2
+        copy = run(["ditto", str(source_app), str(app_path)])
+        if copy.returncode != 0:
+            print(f"error: cannot stage Omega.app: {copy.stderr}", file=sys.stderr)
+            return 2
+    finally:
+        run(["hdiutil", "detach", str(mount_point), "-force"])
+        shutil.rmtree(mount_point, ignore_errors=True)
+
+    codesign = run(
+        ["codesign", "--verify", "--deep", "--strict", "--verbose=2", str(app_path)]
+    )
+    integrity_facts["codesign_verify"] = codesign.returncode == 0
+    integrity_facts["codesign_output"] = (
+        (codesign.stderr or codesign.stdout).strip().replace(str(ROOT) + "/", "")
+    )
+    binary_path = app_path / "Contents/MacOS/omega"
+    binary_digest = sha256_file(binary_path)
+    recorded_binary = record.get("digests", {}).get("omega_binary_sha256")
+    integrity_facts["omega_binary_sha256"] = binary_digest
+    integrity_facts["binary_digest_match"] = binary_digest == recorded_binary
+    integrity_ok = (
+        integrity_facts["digest_match"]
+        and integrity_facts["codesign_verify"]
+        and integrity_facts["binary_digest_match"]
+    )
+    refs = [evidence.write_json("package-integrity.json", integrity_facts)]
+    add_row(
+        "package-integrity",
+        "Packaged candidate matches its release record and signature verifies",
+        "automated-pass" if integrity_ok else "automated-fail",
+        integrity_facts,
+        refs,
+    )
+
+    # --- Row: version truth ------------------------------------------------
+    with (app_path / "Contents/Info.plist").open("rb") as handle:
+        info = plistlib.load(handle)
+    short_sha = commit[:7] if commit else ""
+    version_facts = {
+        "bundle_identifier": info.get("CFBundleIdentifier"),
+        "bundle_short_version": info.get("CFBundleShortVersionString"),
+        "expected_bundle_identifier": record.get("bundle_identifier"),
+        "expected_bundle_version": record.get("bundle_version"),
+        "source_commit_short": short_sha,
+    }
+    version_ok = version_facts["bundle_identifier"] == record.get(
+        "bundle_identifier"
+    ) and version_facts["bundle_short_version"] == record.get("bundle_version")
+    version_facts["static_agreement"] = version_ok
+    version_refs = [evidence.write_json("version-truth.json", version_facts)]
+
+    # --- Launch rows --------------------------------------------------------
+    launch_status = "blocked"
+    launch_facts: dict = {}
+    launch_refs: list[dict] = []
+    sweep_status = "blocked"
+    sweep_facts: dict = {}
+    sweep_refs: list[dict] = []
+    tester_status = "blocked"
+    tester_facts: dict = {}
+    tester_refs: list[dict] = []
+    footer_seen = None
+    menu_facts: dict = {}
+    menu_refs: list[dict] = []
+    safety_status = "blocked"
+    safety_facts: dict = {}
+    safety_refs: list[dict] = []
+
+    if args.skip_launch:
+        reason = "launch rows skipped by --skip-launch"
+        launch_facts = sweep_facts = tester_facts = safety_facts = {
+            "blocked_reason": reason
+        }
+        menu_facts = {"blocked_reason": reason}
+    else:
+        neighbour_before = {
+            root: tree_digest(Path(root).expanduser()) for root in NEIGHBOUR_DATA_ROOTS
+        }
+        profile = output_dir / "profile"
+        if profile.exists():
+            shutil.rmtree(profile)
+        profile.mkdir(parents=True)
+        window_tool = compile_swift_tool(
+            ROOT / "script/omega-window-list.swift", output_dir
+        )
+        ocr_tool = compile_swift_tool(ROOT / "script/omega-window-ocr.swift", output_dir)
+
+        # Launch from a neutral empty working directory OUTSIDE the
+        # repository: a fresh install's first window must not inherit the
+        # harness's repository (or any parent git repo) as its thread folder.
+        launch_cwd = Path(tempfile.mkdtemp(prefix="omega-gate-cwd-"))
+        process = subprocess.Popen(
+            [str(binary_path), "--user-data-dir", str(profile)],
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+            start_new_session=True,
+            cwd=str(launch_cwd),
+        )
+        window = None
+        deadline = time.monotonic() + args.launch_settle + 40.0
+        try:
+            while time.monotonic() < deadline:
+                if process.poll() is not None:
+                    break
+                if window_tool is not None:
+                    window = window_for_pid(window_tool, process.pid)
+                    if window is not None:
+                        break
+                time.sleep(1.0)
+            if process.poll() is not None:
+                launch_facts = {
+                    "blocked_reason": (
+                        f"the candidate exited during launch (code {process.returncode})"
+                    )
+                }
+                launch_status = "automated-fail"
+            else:
+                time.sleep(args.launch_settle)
+                launch_facts = {
+                    "pid": process.pid,
+                    "window": window,
+                    "window_tool_available": window_tool is not None,
+                }
+                screenshot = evidence.root / "flag-free-launch.png"
+                captured = False
+                if window is not None:
+                    capture = run(
+                        [
+                            "screencapture",
+                            "-x",
+                            "-o",
+                            "-l",
+                            str(window["id"]),
+                            str(screenshot),
+                        ]
+                    )
+                    captured = capture.returncode == 0 and screenshot.is_file()
+                launch_facts["screenshot_captured"] = captured
+                lines = None
+                if captured and ocr_tool is not None:
+                    lines = ocr_lines(ocr_tool, screenshot)
+                if captured:
+                    launch_refs.append(evidence.ref(screenshot))
+                if lines is not None:
+                    launch_refs.append(
+                        evidence.write_json("flag-free-launch-ocr.json", {"lines": lines})
+                    )
+                    positives = {
+                        phrase: ocr_contains(lines, phrase)
+                        for phrase in FRONT_DOOR_POSITIVE
+                    }
+                    negatives = {
+                        phrase: ocr_contains(lines, phrase)
+                        for phrase in FRONT_DOOR_NEGATIVE
+                    }
+                    launch_facts["front_door_markers_seen"] = positives
+                    launch_facts["forbidden_markers_seen"] = negatives
+                    front_door_ok = all(positives.values()) and not any(
+                        negatives.values()
+                    )
+                    launch_status = (
+                        "automated-pass" if front_door_ok else "automated-fail"
+                    )
+                    tester_seen = ocr_contains(lines, TESTER_CHANNEL_LABEL)
+                    tester_facts = {"tester_channel_label_seen": tester_seen}
+                    tester_status = "automated-pass" if tester_seen else "automated-fail"
+                    tester_refs = list(launch_refs)
+                    # Vision reads the digit 0 as the letter O in this font;
+                    # normalise before matching so the footer version row does
+                    # not fail on an OCR confusion. The commit fragment must
+                    # match too, so the footer proves WHICH build rendered.
+                    normalised = [
+                        line.get("text", "").replace("O", "0") for line in lines
+                    ]
+                    footer_needle = f"{VERSION_FOOTER_PREFIX}+preview."
+                    footer_seen = any(
+                        footer_needle in text and (not short_sha or short_sha in text)
+                        for text in normalised
+                    )
+                elif captured:
+                    launch_facts["blocked_reason"] = (
+                        "the window was captured but OCR is unavailable "
+                        "(swiftc or Vision failed)"
+                    )
+                    tester_facts = dict(launch_facts)
+                else:
+                    launch_facts["blocked_reason"] = (
+                        "no window could be captured; grant the invoking "
+                        "terminal Screen Recording permission and rerun"
+                    )
+                    tester_facts = dict(launch_facts)
+
+                # Menu capture is evidence-only; the judgment stays with the
+                # owner row. GPUI publishes no accessibility tree, so a
+                # failure here is expected on hosts without the permission.
+                menu_dump = run(
+                    [
+                        "osascript",
+                        "-e",
+                        'tell application "System Events" to get name of every '
+                        f"menu bar item of menu bar 1 of (first process whose "
+                        f"unix id is {process.pid})",
+                    ]
+                )
+                if menu_dump.returncode == 0:
+                    menu_facts = {"menu_bar_items": menu_dump.stdout.strip()}
+                    menu_refs = [
+                        evidence.write_text("menu-bar-items.txt", menu_dump.stdout)
+                    ]
+                else:
+                    menu_facts = {
+                        "blocked_reason": (
+                            "the menu bar could not be read: "
+                            + (menu_dump.stderr or "").strip()
+                        )
+                    }
+        finally:
+            if process.poll() is None:
+                process.send_signal(signal.SIGTERM)
+                try:
+                    process.wait(timeout=15)
+                except subprocess.TimeoutExpired:
+                    process.kill()
+                    process.wait(timeout=15)
+
+        # Zero-refusal sweep over the drawn surface.
+        log_path = profile / "logs/omega-rc.log"
+        if log_path.is_file():
+            log_text = log_path.read_text(errors="replace")
+            refusals = sweep_refusals(log_text)
+            sweep_facts = {
+                "log_path": portable_path(log_path),
+                "log_bytes": log_path.stat().st_size,
+                "refusal_sentences": refusals,
+                "markers": list(REFUSAL_MARKERS),
+            }
+            sweep_refs = [evidence.write_text("launch-log.log", log_text)]
+            sweep_status = "automated-pass" if refusals == 0 else "automated-fail"
+        else:
+            sweep_facts = {
+                "blocked_reason": f"the candidate wrote no log at {portable_path(log_path)}"
+            }
+            sweep_status = "automated-fail" if launch_status != "blocked" else "blocked"
+
+        neighbour_after = {
+            root: tree_digest(Path(root).expanduser()) for root in NEIGHBOUR_DATA_ROOTS
+        }
+        untouched = {
+            root: neighbour_before[root] == neighbour_after[root]
+            for root in NEIGHBOUR_DATA_ROOTS
+        }
+        safety_facts = {
+            "neighbour_roots_untouched": untouched,
+            "before": neighbour_before,
+            "after": neighbour_after,
+            "profile_dir": portable_path(profile),
+        }
+        safety_refs = [evidence.write_json("update-safety.json", safety_facts)]
+        safety_status = (
+            "automated-pass" if all(untouched.values()) else "automated-fail"
+        )
+
+    add_row(
+        "flag-free-launch",
+        "Flag-free clean-profile launch reaches the composer front door",
+        launch_status,
+        launch_facts,
+        launch_refs,
+        issues=["omega#151"],
+    )
+    version_facts["footer_version_seen_in_ocr"] = footer_seen
+    version_status = (
+        "automated-pass"
+        if version_ok and footer_seen
+        else ("automated-fail" if not version_ok else "owner-assisted-pending")
+    )
+    add_row(
+        "version-truth",
+        "Installed identity and rendered footer agree with the release record",
+        version_status,
+        version_facts,
+        version_refs,
+        owner_instruction=(
+            None
+            if version_status != "owner-assisted-pending"
+            else (
+                "Static identity agrees but the footer version was not "
+                "OCR-visible; open Settings in the sidebar footer and confirm "
+                f"it reads {VERSION_FOOTER_PREFIX}+preview.{short_sha or '<sha>'}."
+            )
+        ),
+    )
+    add_row(
+        "zero-refusal-log-sweep",
+        "The flag-free journey logs zero zero-base refusal sentences",
+        sweep_status,
+        sweep_facts,
+        sweep_refs,
+    )
+    add_row(
+        "tester-channel-destination",
+        "The tester-channel destination is visible on first launch",
+        tester_status,
+        tester_facts,
+        tester_refs,
+        issues=["omega#156"],
+    )
+    add_row(
+        "update-safety-staged",
+        "A staged clean-profile run leaves Zed and OpenAgents Desktop data untouched",
+        safety_status,
+        safety_facts,
+        safety_refs,
+    )
+    menu_owner = next(r for r in OWNER_ASSISTED_ROWS if r["id"] == "menu-honesty")
+    add_row(
+        "menu-honesty",
+        menu_owner["title"],
+        "owner-assisted-pending",
+        menu_facts,
+        menu_refs,
+        issues=menu_owner["issues"],
+        owner_instruction=menu_owner["owner_instruction"],
+    )
+
+    for spec in OWNER_ASSISTED_ROWS:
+        if spec["id"] == "menu-honesty":
+            continue
+        add_row(
+            spec["id"],
+            spec["title"],
+            "owner-assisted-pending",
+            {},
+            [],
+            issues=spec["issues"],
+            owner_instruction=spec["owner_instruction"],
+        )
+
+    automated_failures = [r["id"] for r in rows if r["status"] == "automated-fail"]
+    pending = [r["id"] for r in rows if r["status"] == "owner-assisted-pending"]
+    blocked = [r["id"] for r in rows if r["status"] == "blocked"]
+    status = (
+        "failed"
+        if automated_failures
+        else ("automated_green_pending_owner" if pending or blocked else "passed")
+    )
+    receipt = {
+        "schema": SCHEMA,
+        "generated_at": now_utc(),
+        "candidate": {
+            "artifact_name": args.dmg.name,
+            "package_sha256": package_digest,
+            "source_commit": commit,
+            "version": record.get("version"),
+            "channel": record.get("channel"),
+        },
+        "harness_commit": run(
+            ["git", "-C", str(ROOT), "rev-parse", "HEAD"]
+        ).stdout.strip(),
+        "status": status,
+        "automated_failures": automated_failures,
+        "owner_assisted_pending": pending,
+        "blocked": blocked,
+        "rows": rows,
+    }
+    receipt["evidence_sha256"] = canonical_digest(receipt)
+    receipt_path = output_dir / "release-gate.json"
+    receipt_path.write_text(json.dumps(receipt, indent=2, sort_keys=True) + "\n")
+    if args.receipt_copy is not None:
+        args.receipt_copy.parent.mkdir(parents=True, exist_ok=True)
+        shutil.copyfile(receipt_path, args.receipt_copy)
+
+    if args.report is not None:
+        write_report(args.report, receipt)
+
+    print(f"release gate: {status}")
+    for row in rows:
+        print(f"  {row['status']:<24} {row['id']}")
+    print(f"receipt: {receipt_path}")
+    return 1 if automated_failures else 0
+
+
+def write_report(path: Path, receipt: dict) -> None:
+    lines = [
+        "# Omega installed-candidate release gate",
+        "",
+        "This report is generated by `script/omega-release-gate` "
+        "(OMEGA-DELTA-0185) from a packaged candidate produced by "
+        "`script/bundle-omega-rc` and launched from a clean profile. Row "
+        "meanings: `automated-pass`/`automated-fail` were observed end-to-end "
+        "by the harness; `owner-assisted-pending` rows require a human "
+        "account, interactive provider auth, a second person, or a judgment "
+        "call, and carry the exact instruction; `blocked` rows name the host "
+        "condition that refused observation. No row is ever fabricated.",
+        "",
+        f"- Generated: {receipt['generated_at']}",
+        f"- Candidate: `{receipt['candidate']['artifact_name']}` "
+        f"(version {receipt['candidate']['version']}, "
+        f"channel {receipt['candidate']['channel']})",
+        f"- Package SHA-256: `{receipt['candidate']['package_sha256']}`",
+        f"- Source commit: `{receipt['candidate']['source_commit']}`",
+        f"- Harness commit: `{receipt['harness_commit']}`",
+        f"- Overall status: **{receipt['status']}**",
+        f"- Receipt digest: `{receipt['evidence_sha256']}`",
+        "",
+        "| Row | Status | Issues | Evidence / owner instruction |",
+        "| --- | --- | --- | --- |",
+    ]
+    for row in receipt["rows"]:
+        issues = ", ".join(row.get("issues", [])) or "—"
+        if row["status"] == "owner-assisted-pending":
+            detail = row.get("owner_instruction", "")
+        elif row["status"] == "blocked":
+            detail = row["facts"].get("blocked_reason", "")
+        else:
+            detail = "; ".join(
+                Path(ref["path"]).name for ref in row.get("evidence_refs", [])
+            )
+        detail = detail.replace("|", "\\|")
+        lines.append(f"| `{row['id']}` | {row['status']} | {issues} | {detail} |")
+    lines.append("")
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text("\n".join(lines) + "\n")
+
+
+if __name__ == "__main__":
+    sys.exit(main())
