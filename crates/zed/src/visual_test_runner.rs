@@ -10927,13 +10927,47 @@ fn run_omega_agent_visual_tests_inner(
         );
 
         cx.set_debug_accessibility_active(workspace_window, true)?;
+        // omega#172 only reproduced with the sealed workbench's real renderer:
+        // open through the same action as the key binding, before the first
+        // send, and prove the deferred popup stayed with its trigger.
+        cx.update_window(workspace_window, |_root, window, cx| {
+            window.dispatch_action(Box::new(agent_ui::ToggleComposerExecutorMenu), cx);
+        })
+        .context("Failed to open the pre-first-send executor menu")?;
+        cx.run_until_parked();
+
         let snapshot = cx.debug_render_snapshot(workspace_window)?;
         let mut probe = SemanticProbe::new(&snapshot);
         // omega#165: the interstitial chooser is gone. The landing is the
         // focused composer with the executor dropdown as composer chrome.
         probe.require_absent("omega.new-conversation.front-door")?;
         probe.require_visible("omega.composer.executor-menu")?;
+        probe.require_visible("omega.composer.executor-menu.popup")?;
         probe.require_absent("welcome-content")?;
+
+        let trigger = snapshot
+            .bounds("omega.composer.executor-menu")
+            .context("the pre-first-send executor menu trigger has no bounds")?;
+        let popup = snapshot
+            .bounds("omega.composer.executor-menu.popup")
+            .context("the pre-first-send executor menu popup has no bounds")?;
+        let horizontal_gap = (popup.right() - trigger.right())
+            .abs()
+            .min((popup.left() - trigger.left()).abs());
+        let vertical_gap = (popup.bottom() - trigger.top())
+            .abs()
+            .min((popup.top() - trigger.bottom()).abs());
+        anyhow::ensure!(
+            horizontal_gap <= px(64.) && vertical_gap <= px(64.),
+            "the pre-first-send executor menu is not anchored to its trigger: \
+             trigger {trigger:?}, popup {popup:?}"
+        );
+
+        cx.update_window(workspace_window, |_root, window, cx| {
+            window.dispatch_action(Box::new(agent_ui::ToggleComposerExecutorMenu), cx);
+        })
+        .context("Failed to close the pre-first-send executor menu")?;
+        cx.run_until_parked();
     }
 
     // The panel must actually be the focused, visible dock surface. A capture
