@@ -347,6 +347,18 @@
       "script/omega-brand-gate.json": "This policy file."
     },
     "classified": {
+      "// Controls whether Omega may collect training data when using Zed's Edit Predictions.": {
+        "class": "zed_service",
+        "reason": "Edit Predictions is Zed's hosted service. The collector is Omega and says so; the service keeps its own name."
+      },
+      "Controls whether Omega may collect training data when using Zed's Edit Predictions.": {
+        "class": "zed_service",
+        "reason": "Edit Predictions is Zed's hosted service; the collector is Omega and says so."
+      },
+      "Controls whether Omega collects training data when using Zed's Edit Predictions.": {
+        "class": "zed_service",
+        "reason": "Companion of the line above."
+      },
       "// For information on binding keys, see the Zed": {
         "class": "zed_product",
         "reason": "Points the user at Zed's own key-bindings documentation, alongside the zed.dev link on the next line. The keymap file format is inherited and Zed documents it."
@@ -366,10 +378,6 @@
       "// Local and registry ACP agents remain enabled. Hosted Zed services are": {
         "class": "omega_contrast",
         "reason": "Omega-authored comment naming Zed's hosted services as the thing Omega does not use."
-      },
-      "// Controls whether Omega may collect training data when using Zed's Edit Predictions.": {
-        "class": "zed_service",
-        "reason": "Edit Predictions is Zed's hosted service. The collector is Omega and says so; the service keeps its own name."
       },
       "// Omega defaults this to true. Upstream Zed defaults it to false and shows": {
         "class": "omega_contrast",
@@ -402,14 +410,6 @@
       "Signs out of Zed account.": {
         "class": "zed_service",
         "reason": "Companion of client::SignIn, same reason."
-      },
-      "Zed's Edit Predictions": {
-        "class": "zed_service",
-        "reason": "Display name of Zed's hosted edit-prediction provider, the way ai_zed.svg labels Zed's model provider."
-      },
-      "This Omega build does not use Zed billing or hosted prediction plans.": {
-        "class": "omega_contrast",
-        "reason": "Omega-authored statement naming the billing Omega is not on."
       },
       "<?xml version=\"1.0\" encoding=\"utf-8\"?> <WindowsPerformanceRecorder Version=\"1.0\" Author=\"Zed Industries\"> <Profiles> {heap_provider} <Profile Id=\"ZedHeap.Verbose.Memory\" Base=\"Heap.Verbose.Memory\" Name=\"ZedHeap\" DetailLevel=\"Verbose\" LoggingMode=\"Memory\" Description=\"Heap tracing\"> {heap_collector} </Profile> </Profiles> <TraceMergeProperties> <TraceMergeProperty Id=\"TraceMerge_Default\" Name=\"TraceMerge_Default\"> <FileCompression Value=\"true\"/> </TraceMergeProperty> </TraceMergeProperties> </WindowsPerformanceRecorder>": {
         "class": "zed_authorship",
@@ -486,14 +486,6 @@
       "documentation](https://zed.dev/docs/key-bindings#contexts) for more details.": {
         "class": "zed_product",
         "reason": "Links Zed's own key-bindings documentation from the keymap schema."
-      },
-      "Controls whether Omega may collect training data when using Zed's Edit Predictions.": {
-        "class": "zed_service",
-        "reason": "Edit Predictions is Zed's hosted service; the collector is Omega and says so."
-      },
-      "Controls whether Omega collects training data when using Zed's Edit Predictions.": {
-        "class": "zed_service",
-        "reason": "Companion of the line above."
       },
       "Omega defaults this to true; upstream Zed defaults it to false.": {
         "class": "omega_contrast",
@@ -590,30 +582,6 @@
       "Note: This setting is still experimental. See [this tracking issue](https://github.com/zed-industries/zed/issues/18078)": {
         "class": "zed_product",
         "reason": "Settings-schema note linking Zed's own tracking issue for an upstream experiment Omega inherited. The issue really is on Zed's tracker."
-      },
-      "SELECT ep_request_id AS request_id, device_id AS device_id, requested_at::string AS continuation_time, requested_at::string AS time, input_payload AS input, prompt AS prompt, requested_output AS output, settled_editable_region AS settled_editable_region, is_ep_shown_before_rejected AS was_shown, ep_rejected_reason AS reason, zed_version AS zed_version FROM ZED_DBT.DBT_PROD.fct_edit_prediction_examples WHERE ep_outcome LIKE ? AND is_ep_shown_before_rejected = true AND requested_at > TRY_TO_TIMESTAMP_NTZ(?) AND (? IS NULL OR ( COALESCE(TRY_CAST(SPLIT_PART(zed_version, '.', 1) AS INTEGER), 0) * 1000000 + COALESCE(TRY_CAST(SPLIT_PART(zed_version, '.', 2) AS INTEGER), 0) * 1000 + COALESCE(TRY_CAST(SPLIT_PART(SPLIT_PART(zed_version, '.', 3), '+', 1) AS INTEGER), 0) ) >= ?) ORDER BY requested_at ASC LIMIT ? OFFSET ?": {
-        "class": "zed_service",
-        "reason": "Analytics query against Zed's own Snowflake warehouse (ZED_DBT.DBT_PROD) for the edit-prediction dataset, selecting that warehouse's zed_version column. The table, the column and the data are Zed's; substituting Omega would name a warehouse Omega does not have. Reached only by the edit-prediction developer CLI, never by the shipped editor."
-      },
-      "SELECT ep_request_id AS request_id, device_id AS device_id, requested_at::string AS continuation_time, requested_at::string AS time, input_payload AS input, prompt AS prompt, requested_output AS output, settled_editable_region AS settled_editable_region, zed_version AS zed_version FROM ZED_DBT.DBT_PROD.fct_edit_prediction_examples WHERE ep_outcome = 'Accepted' AND requested_at > TRY_TO_TIMESTAMP_NTZ(?) AND (? IS NULL OR ( COALESCE(TRY_CAST(SPLIT_PART(zed_version, '.', 1) AS INTEGER), 0) * 1000000 + COALESCE(TRY_CAST(SPLIT_PART(zed_version, '.', 2) AS INTEGER), 0) * 1000 + COALESCE(TRY_CAST(SPLIT_PART(SPLIT_PART(zed_version, '.', 3), '+', 1) AS INTEGER), 0) ) >= ?) ORDER BY requested_at ASC LIMIT ? OFFSET ?": {
-        "class": "zed_service",
-        "reason": "Analytics query against Zed's own Snowflake warehouse (ZED_DBT.DBT_PROD) for the edit-prediction dataset, selecting that warehouse's zed_version column. The table, the column and the data are Zed's; substituting Omega would name a warehouse Omega does not have. Reached only by the edit-prediction developer CLI, never by the shipped editor."
-      },
-      "SELECT ep_request_id AS request_id, device_id AS device_id, requested_at::string AS continuation_time, requested_at::string AS time, input_payload AS input, requested_output AS requested_output, settled_editable_region AS settled_editable_region, requested_format AS requested_format, zed_version AS zed_version FROM ZED_DBT.DBT_PROD.fct_edit_prediction_examples WHERE settled_editable_region IS NOT NULL AND requested_at > TRY_TO_TIMESTAMP_NTZ(?) ORDER BY requested_at ASC LIMIT ? OFFSET ?": {
-        "class": "zed_service",
-        "reason": "Analytics query against Zed's own Snowflake warehouse (ZED_DBT.DBT_PROD) for the edit-prediction dataset, selecting that warehouse's zed_version column. The table, the column and the data are Zed's; substituting Omega would name a warehouse Omega does not have. Reached only by the edit-prediction developer CLI, never by the shipped editor."
-      },
-      "SELECT ep_request_id AS request_id, device_id AS device_id, requested_at::string AS continuation_time, requested_at::string AS time, input_payload AS input, settled_editable_region AS settled_editable_region, example_payload AS example, zed_version AS zed_version FROM ZED_DBT.DBT_PROD.fct_edit_prediction_examples WHERE settled_editable_region IS NOT NULL AND example_payload IS NOT NULL AND requested_at > TRY_TO_TIMESTAMP_NTZ(?) AND (? IS NULL OR ( COALESCE(TRY_CAST(SPLIT_PART(zed_version, '.', 1) AS INTEGER), 0) * 1000000 + COALESCE(TRY_CAST(SPLIT_PART(zed_version, '.', 2) AS INTEGER), 0) * 1000 + COALESCE(TRY_CAST(SPLIT_PART(SPLIT_PART(zed_version, '.', 3), '+', 1) AS INTEGER), 0) ) >= ?) ORDER BY requested_at ASC LIMIT ? OFFSET ?": {
-        "class": "zed_service",
-        "reason": "Analytics query against Zed's own Snowflake warehouse (ZED_DBT.DBT_PROD) for the edit-prediction dataset, selecting that warehouse's zed_version column. The table, the column and the data are Zed's; substituting Omega would name a warehouse Omega does not have. Reached only by the edit-prediction developer CLI, never by the shipped editor."
-      },
-      "SELECT ep_request_id AS request_id, device_id AS device_id, requested_at::string AS continuation_time, requested_at::string AS time, input_payload AS input, zed_version AS zed_version FROM ZED_DBT.DBT_PROD.fct_edit_prediction_examples WHERE requested_at > TRY_TO_TIMESTAMP_NTZ(?) AND (? IS NULL OR ( COALESCE(TRY_CAST(SPLIT_PART(zed_version, '.', 1) AS INTEGER), 0) * 1000000 + COALESCE(TRY_CAST(SPLIT_PART(zed_version, '.', 2) AS INTEGER), 0) * 1000 + COALESCE(TRY_CAST(SPLIT_PART(SPLIT_PART(zed_version, '.', 3), '+', 1) AS INTEGER), 0) ) >= ?) ORDER BY requested_at ASC LIMIT ? OFFSET ?": {
-        "class": "zed_service",
-        "reason": "Analytics query against Zed's own Snowflake warehouse (ZED_DBT.DBT_PROD) for the edit-prediction dataset, selecting that warehouse's zed_version column. The table, the column and the data are Zed's; substituting Omega would name a warehouse Omega does not have. Reached only by the edit-prediction developer CLI, never by the shipped editor."
-      },
-      "SELECT ep_request_id AS request_id, rated_inputs AS inputs, rated_output AS output, settled_editable_region AS settled_editable_region, rating AS rating, feedback AS feedback, device_id AS device_id, requested_at::string AS continuation_time, requested_at::string AS time, NULL AS experiment_name, NULL AS environment, zed_version AS zed_version FROM ZED_DBT.DBT_PROD.fct_edit_prediction_examples WHERE rating IS NOT NULL AND (? IS NULL OR rating = ?) AND requested_at > TRY_TO_TIMESTAMP_NTZ(?) AND rated_inputs IS NOT NULL AND rated_inputs:cursor_excerpt IS NOT NULL AND rated_output IS NOT NULL ORDER BY requested_at ASC LIMIT ? OFFSET ?": {
-        "class": "zed_service",
-        "reason": "Analytics query against Zed's own Snowflake warehouse (ZED_DBT.DBT_PROD) for the edit-prediction dataset, selecting that warehouse's zed_version column. The table, the column and the data are Zed's; substituting Omega would name a warehouse Omega does not have. Reached only by the edit-prediction developer CLI, never by the shipped editor."
       },
       "SettingsObserver observers changes to .zed/{settings, task}.json files in local worktrees": {
         "class": "fork_seam",

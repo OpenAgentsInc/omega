@@ -1,5 +1,4 @@
 mod app_menus;
-pub mod edit_prediction_registry;
 #[cfg(target_os = "macos")]
 pub(crate) mod mac_only_instance;
 mod migrate;
@@ -2403,14 +2402,7 @@ pub fn load_default_keymap(cx: &mut App) {
 /// that lower-precedence editor defaults (e.g. `editor::NewlineBelow` for
 /// `ctrl-enter`) can fire instead of being shadowed by an action whose handler
 /// silently no-ops.
-const AI_ACTION_NAMESPACES: &[&str] = &[
-    "acp::",
-    "agent::",
-    "assistant::",
-    "edit_prediction::",
-    "inline_assistant::",
-    "zeta::",
-];
+const AI_ACTION_NAMESPACES: &[&str] = &["acp::", "agent::", "assistant::", "inline_assistant::"];
 
 fn is_ai_keybinding(binding: &KeyBinding) -> bool {
     let name = binding.action().name();
@@ -5759,7 +5751,6 @@ mod tests {
                 "debugger",
                 "dev",
                 "diagnostics",
-                "edit_prediction",
                 "editor",
                 "encoding_selector",
                 "feedback",
@@ -5786,9 +5777,9 @@ mod tests {
                 "multi_workspace",
                 "notebook",
                 "omega",
-                "omega_predict_onboarding",
                 "omega_thread_outline",
                 "omega_workbench",
+                "omega_predict_onboarding",
                 "onboarding",
                 "outline",
                 "outline_panel",
@@ -5828,7 +5819,6 @@ mod tests {
                 "zed",
                 "zed_actions",
                 "zed_predict_onboarding",
-                "zeta",
             ];
             assert_eq!(
                 all_namespaces,

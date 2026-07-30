@@ -1278,10 +1278,17 @@ pub const REMOVED_FILES: &[&str] = &[
     // OMEGA-DELTA-0186. The editor crate set deleted by omega#162. One entry
     // per crate root: a rebase that revives any file inside one of these
     // crates has to bring the manifest back with it.
+    "crates/codestral/Cargo.toml",
     "crates/dap_adapters/Cargo.toml",
     "crates/debugger_tools/Cargo.toml",
     "crates/debugger_ui/Cargo.toml",
+    "crates/edit_prediction/Cargo.toml",
+    "crates/edit_prediction_cli/Cargo.toml",
+    "crates/edit_prediction_context/Cargo.toml",
+    "crates/edit_prediction_metrics/Cargo.toml",
+    "crates/edit_prediction_ui/Cargo.toml",
     "crates/tasks_ui/Cargo.toml",
+    "crates/zeta_prompt/Cargo.toml",
 ];
 
 /// Strings that must not appear anywhere under `crates/`.
@@ -1306,6 +1313,8 @@ pub const FORBIDDEN_KEYMAP_NAMESPACES: &[(&str, &str)] = &[
     ("OMEGA-DELTA-0186", "console::"),
     ("OMEGA-DELTA-0186", "variable_list::"),
     ("OMEGA-DELTA-0186", "new_process_modal::"),
+    ("OMEGA-DELTA-0186", "edit_prediction::"),
+    ("OMEGA-DELTA-0186", "zeta::"),
 ];
 
 /// OMEGA-DELTA-0186. The editor crates omega#162 deleted from the build graph.
@@ -1316,8 +1325,19 @@ pub const FORBIDDEN_KEYMAP_NAMESPACES: &[(&str, &str)] = &[
 /// that must not be declared. The list grows batch by batch as the removal
 /// lands; an entry is never removed without an owner decision to revive the
 /// surface.
-pub const REMOVED_EDITOR_CRATES: &[&str] =
-    &["dap_adapters", "debugger_tools", "debugger_ui", "tasks_ui"];
+pub const REMOVED_EDITOR_CRATES: &[&str] = &[
+    "codestral",
+    "dap_adapters",
+    "debugger_tools",
+    "debugger_ui",
+    "edit_prediction",
+    "edit_prediction_cli",
+    "edit_prediction_context",
+    "edit_prediction_metrics",
+    "edit_prediction_ui",
+    "tasks_ui",
+    "zeta_prompt",
+];
 
 /// A keybinding Omega adds, checked by presence, scope, and resolvability.
 ///

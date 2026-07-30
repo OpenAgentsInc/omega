@@ -74,6 +74,10 @@ fn compatibility_allowlist_has_required_fields() {
 #[test]
 fn high_risk_public_files_forbid_zed_product_phrases() {
     let workspace_root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
+    // Files deleted outright by the omega#162 editor-crate removal
+    // (`title_bar/src/collab.rs`, the `edit_prediction` family, …) leave this
+    // list in the commit that deletes them: a missing file is a panic here,
+    // and `OMEGA-DELTA-0186` owns proving deleted crates stay deleted.
     let paths = [
         "crates/onboarding/src/basics_page.rs",
         "crates/onboarding/src/multibuffer_hint.rs",
@@ -83,11 +87,8 @@ fn high_risk_public_files_forbid_zed_product_phrases() {
         "crates/workspace/src/notifications.rs",
         "crates/workspace/src/workspace_error.rs",
         "crates/title_bar/src/title_bar.rs",
-        "crates/title_bar/src/collab.rs",
         "crates/extensions_ui/src/extensions_ui.rs",
         "crates/auto_update_helper/src/dialog.rs",
-        "crates/edit_prediction/src/edit_prediction.rs",
-        "crates/edit_prediction/src/zeta.rs",
         "crates/agent/src/agent.rs",
         "crates/agent_ui/src/agent_ui.rs",
         "crates/agent_ui/src/agent_panel.rs",
