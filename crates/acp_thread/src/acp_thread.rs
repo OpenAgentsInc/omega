@@ -5280,6 +5280,25 @@ impl AcpThread {
     }
 
     pub fn emit_load_error(&mut self, error: LoadError, cx: &mut Context<Self>) {
+        // A load error means the agent server behind this thread is gone. A
+        // turn still in flight can never complete, and its prompt request may
+        // never resolve either, because a killed adapter drops the connection
+        // without answering pending requests. Fail the turn here so the thread
+        // reports `Failed` instead of `Generating` forever: an adapter killed
+        // mid-turn used to leave the sidebar claiming the thread was Running
+        // with no error in the transcript and nothing in the log.
+        if let Some(turn) = self.running_turn.take() {
+            Self::flush_streaming_text(&mut self.streaming_text_buffer, cx);
+            self.cancel_outstanding_elicitations(cx);
+            self.terminal_status = ThreadTerminalStatus::Failed;
+            self.mark_pending_entries_as_canceled(RequestPermissionOutcome::Cancelled, cx);
+            // The server is dead: drop the send task instead of awaiting a
+            // response that will never arrive. Dropping cancels its future,
+            // which resolves the caller's request through the existing
+            // dropped-sender path.
+            drop(turn);
+            cx.emit(AcpThreadEvent::StatusChanged);
+        }
         self.push_projection_marker(
             ThreadEventKind::Error,
             ThreadEventOwner::System,
@@ -11710,6 +11729,76 @@ mod tests {
             thread.read_with(cx, |t, _| t.status()),
             ThreadStatus::Idle,
             "running_turn must be cleared even when tx was dropped without send"
+        );
+    }
+
+    /// Regression test for the installed-candidate pass on omega#157: an ACP
+    /// adapter killed mid-turn (SIGKILL) emits `LoadError::Exited` through
+    /// `emit_load_error`, and the thread must fail the in-flight turn. Before
+    /// the fix, `running_turn` stayed occupied forever: the sidebar showed the
+    /// thread as Running, its transcript never gained an error, and the prompt
+    /// request never resolved.
+    #[gpui::test]
+    async fn test_load_error_fails_running_turn(cx: &mut TestAppContext) {
+        init_test(cx);
+
+        let fs = FakeFs::new(cx.executor());
+        let project = Project::test(fs, [], cx).await;
+
+        // Handler hangs forever, like a killed adapter whose pending prompt
+        // request is never answered.
+        let connection = Rc::new(FakeAgentConnection::new().on_user_message(
+            |_params, _thread, _cx| {
+                async move { futures::future::pending::<Result<acp::PromptResponse>>().await }
+                    .boxed_local()
+            },
+        ));
+
+        let thread = cx
+            .update(|cx| {
+                connection.new_session(project, PathList::new(&[Path::new(path!("/test"))]), cx)
+            })
+            .await
+            .unwrap();
+
+        let request = thread.update(cx, |thread, cx| thread.send_raw("hello", cx));
+        cx.run_until_parked();
+
+        assert_eq!(
+            thread.read_with(cx, |t, _| t.status()),
+            ThreadStatus::Generating,
+            "thread should be generating while the adapter is unresponsive"
+        );
+
+        #[cfg(unix)]
+        let load_error = {
+            use std::os::unix::process::ExitStatusExt as _;
+            LoadError::Exited {
+                status: std::process::ExitStatus::from_raw(9),
+                stderr: None,
+            }
+        };
+        #[cfg(not(unix))]
+        let load_error = LoadError::Other("agent server process died".into());
+
+        thread.update(cx, |thread, cx| thread.emit_load_error(load_error, cx));
+        cx.run_until_parked();
+
+        assert_eq!(
+            thread.read_with(cx, |t, _| t.status()),
+            ThreadStatus::Idle,
+            "a load error must clear the running turn"
+        );
+        assert_eq!(
+            thread.read_with(cx, |t, _| t.terminal_status()),
+            ThreadTerminalStatus::Failed,
+            "a load error that interrupts a turn must record the thread as Failed"
+        );
+
+        let result = request.await;
+        assert!(
+            matches!(result, Ok(None)),
+            "the interrupted prompt request must resolve instead of hanging, got {result:?}"
         );
     }
 
