@@ -1,5 +1,4 @@
 mod application_menu;
-pub mod collab;
 mod onboarding_banner;
 mod plan_chip;
 mod title_bar_settings;
@@ -22,14 +21,13 @@ use crate::application_menu::{
 };
 
 use auto_update::AutoUpdateStatus;
-use call::ActiveCall;
 use client::{Client, UserStore, zed_urls};
 use command_palette_hooks::CommandPaletteFilter;
 
 use gpui::{
-    Action, Anchor, Animation, AnimationExt, AnyElement, App, Context, Element, Entity, Focusable,
+    Action, Anchor, Animation, AnimationExt, AnyElement, App, Context, Element, Entity,
     InteractiveElement, IntoElement, MouseButton, ParentElement, Render,
-    StatefulInteractiveElement, Styled, Subscription, TaskExt, WeakEntity, Window, actions, div,
+    StatefulInteractiveElement, Styled, Subscription, WeakEntity, Window, actions, div,
     pulsating_between,
 };
 use onboarding_banner::OnboardingBanner;
@@ -47,13 +45,13 @@ use theme::ActiveTheme;
 use title_bar_settings::TitleBarSettings;
 use ui::{
     Avatar, ButtonLike, ContextMenu, ContextMenuEntry, IconWithIndicator, Indicator, PopoverMenu,
-    PopoverMenuHandle, TintColor, Tooltip, prelude::*, utils::platform_title_bar_height,
+    TintColor, Tooltip, prelude::*, utils::platform_title_bar_height,
 };
 use update_version::UpdateVersion;
 use util::ResultExt;
 use workspace::{AccessibleMode, MultiWorkspace, Workspace, notifications::NotifyTaskExt as _};
 
-use zed_actions::{OpenOnboarding, OpenRemote};
+use zed_actions::OpenOnboarding;
 
 pub use onboarding_banner::restore_banner;
 
@@ -212,8 +210,6 @@ pub struct TitleBar {
     _subscriptions: Vec<Subscription>,
     banner: Option<Entity<OnboardingBanner>>,
     update_version: Entity<UpdateVersion>,
-    screen_share_popover_handle: PopoverMenuHandle<ContextMenu>,
-    _diagnostics_subscription: Option<gpui::Subscription>,
 }
 
 impl Render for TitleBar {
@@ -344,8 +340,6 @@ impl Render for TitleBar {
                 .into_any_element(),
         );
 
-        children.push(self.render_collaborator_list(window, cx).into_any_element());
-
         if title_bar_settings.show_onboarding_banner {
             if let Some(banner) = &self.banner {
                 children.push(banner.clone().into_any_element())
@@ -373,7 +367,6 @@ impl Render for TitleBar {
                 .pr_1()
                 .gap_1()
                 .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
-                .child(self.render_call_controls(window, cx))
                 .children(self.render_connection_status(status, cx))
                 .child(self.update_version.clone())
                 .when(
@@ -452,7 +445,6 @@ impl TitleBar {
         let git_store = project.read(cx).git_store().clone();
         let user_store = workspace.app_state().user_store.clone();
         let client = workspace.app_state().client.clone();
-        let active_call = ActiveCall::global(cx);
 
         let platform_style = PlatformStyle::platform();
         let application_menu = match platform_style {
@@ -475,7 +467,6 @@ impl TitleBar {
             }),
         );
 
-        subscriptions.push(cx.observe(&active_call, |this, _, cx| this.active_call_changed(cx)));
         subscriptions.push(
             cx.subscribe(&git_store, move |_, _, event, cx| match event {
                 GitStoreEvent::ActiveRepositoryChanged(_)
@@ -508,7 +499,7 @@ impl TitleBar {
 
         let banner = None;
 
-        let mut this = Self {
+        Self {
             platform_titlebar,
             application_menu,
             workspace: workspace.weak_handle(),
@@ -519,13 +510,7 @@ impl TitleBar {
             _subscriptions: subscriptions,
             banner,
             update_version,
-            screen_share_popover_handle: PopoverMenuHandle::default(),
-            _diagnostics_subscription: None,
-        };
-
-        this.observe_diagnostics(cx);
-
-        this
+        }
     }
 
     fn worktree_count(&self, cx: &App) -> usize {
@@ -596,8 +581,6 @@ impl TitleBar {
     }
 
     fn render_remote_project_connection(&self, cx: &mut Context<Self>) -> Option<AnyElement> {
-        let workspace = self.workspace.clone();
-
         let options = self.project.read(cx).remote_connection_options(cx)?;
         let host: SharedString = options.display_name().into();
 
@@ -643,48 +626,29 @@ impl TitleBar {
 
         let meta = SharedString::from(meta);
 
+        // The recent-projects popover that used to hang off this indicator was
+        // deleted with the `recent_projects` crate (omega#162); the connection
+        // state itself is still worth a glance.
         Some(
-            PopoverMenu::new("remote-project-menu")
-                .menu(move |window, cx| {
-                    let workspace_entity = workspace.upgrade()?;
-                    let fs = workspace_entity.read(cx).project().read(cx).fs().clone();
-                    Some(recent_projects::RemoteServerProjects::popover(
-                        fs,
-                        workspace.clone(),
-                        None,
-                        window,
-                        cx,
-                    ))
-                })
-                .trigger_with_tooltip(
-                    ButtonLike::new("remote_project")
-                        .selected_style(ButtonStyle::Tinted(TintColor::Accent))
+            ButtonLike::new("remote_project")
+                .selected_style(ButtonStyle::Tinted(TintColor::Accent))
+                .child(
+                    h_flex()
+                        .gap_2()
+                        .max_w_32()
                         .child(
-                            h_flex()
-                                .gap_2()
-                                .max_w_32()
-                                .child(
-                                    IconWithIndicator::new(
-                                        Icon::new(icon).size(IconSize::Small).color(icon_color),
-                                        Some(Indicator::dot().color(indicator_color)),
-                                    )
-                                    .indicator_border_color(Some(
-                                        cx.theme().colors().title_bar_background,
-                                    ))
-                                    .into_any_element(),
-                                )
-                                .child(Label::new(nickname).size(LabelSize::Small).truncate()),
-                        ),
-                    move |_window, cx| {
-                        Tooltip::with_meta(
-                            tooltip_title,
-                            Some(&OpenRemote::default()),
-                            meta.clone(),
-                            cx,
+                            IconWithIndicator::new(
+                                Icon::new(icon).size(IconSize::Small).color(icon_color),
+                                Some(Indicator::dot().color(indicator_color)),
+                            )
+                            .indicator_border_color(Some(cx.theme().colors().title_bar_background))
+                            .into_any_element(),
                         )
-                    },
+                        .child(Label::new(nickname).size(LabelSize::Small).truncate()),
                 )
-                .anchor(gpui::Anchor::TopLeft)
+                .tooltip(move |_window, cx| {
+                    Tooltip::with_meta(tooltip_title, None, meta.clone(), cx)
+                })
                 .into_any_element(),
         )
     }
@@ -745,130 +709,29 @@ impl TitleBar {
         _: &mut Window,
         cx: &mut Context<Self>,
     ) -> impl IntoElement {
-        let workspace = self.workspace.clone();
-
         let is_project_selected = name.is_some();
 
         let display_name = if let Some(ref name) = name {
             util::truncate_and_trailoff(name, MAX_PROJECT_NAME_LENGTH)
         } else {
-            "Open Recent Project".to_string()
+            "No Project Open".to_string()
         };
 
-        let is_sidebar_open = self
-            .multi_workspace
-            .as_ref()
-            .and_then(|mw| mw.upgrade())
-            .map(|mw| mw.read(cx).sidebar_open())
-            .unwrap_or(false)
-            && PlatformTitleBar::is_multi_workspace_enabled(cx);
-
-        let is_threads_list_view_active = self
-            .multi_workspace
-            .as_ref()
-            .and_then(|mw| mw.upgrade())
-            .map(|mw| mw.read(cx).is_threads_list_view_active(cx))
-            .unwrap_or(false);
-
-        if is_sidebar_open && is_threads_list_view_active {
-            return self
-                .render_recent_projects_popover(display_name, is_project_selected, cx)
-                .into_any_element();
-        }
-
-        let focus_handle = workspace
-            .upgrade()
-            .map(|w| w.read(cx).focus_handle(cx))
-            .unwrap_or_else(|| cx.focus_handle());
-
-        let window_project_groups: Vec<_> = self
-            .multi_workspace
-            .as_ref()
-            .and_then(|mw| mw.upgrade())
-            .map(|mw| mw.read(cx).project_group_keys())
-            .unwrap_or_default();
-
-        PopoverMenu::new("recent-projects-menu")
-            .menu(move |window, cx| {
-                Some(recent_projects::RecentProjects::popover(
-                    workspace.clone(),
-                    window_project_groups.clone(),
-                    None,
-                    focus_handle.clone(),
-                    window,
-                    cx,
-                ))
+        // This label used to trigger the recent-projects popover; that picker
+        // was deleted with the `recent_projects` crate (omega#162). The threads
+        // sidebar is the surface that reopens past work.
+        Button::new("project_name_trigger", display_name)
+            .label_size(LabelSize::Small)
+            .tab_index(0isize)
+            .when(self.worktree_count(cx) > 1, |this| {
+                this.end_icon(
+                    Icon::new(IconName::ChevronDown)
+                        .size(IconSize::XSmall)
+                        .color(Color::Muted),
+                )
             })
-            .trigger_with_tooltip(
-                Button::new("project_name_trigger", display_name)
-                    .label_size(LabelSize::Small)
-                    .tab_index(0isize)
-                    .when(self.worktree_count(cx) > 1, |this| {
-                        this.end_icon(
-                            Icon::new(IconName::ChevronDown)
-                                .size(IconSize::XSmall)
-                                .color(Color::Muted),
-                        )
-                    })
-                    .selected_style(ButtonStyle::Tinted(TintColor::Accent))
-                    .when(!is_project_selected, |s| s.color(Color::Muted)),
-                move |_window, cx| {
-                    Tooltip::for_action("Recent Projects", &zed_actions::OpenRecent::default(), cx)
-                },
-            )
-            .anchor(gpui::Anchor::TopLeft)
+            .when(!is_project_selected, |s| s.color(Color::Muted))
             .into_any_element()
-    }
-
-    fn render_recent_projects_popover(
-        &self,
-        display_name: String,
-        is_project_selected: bool,
-        cx: &mut Context<Self>,
-    ) -> impl IntoElement {
-        let workspace = self.workspace.clone();
-
-        let focus_handle = workspace
-            .upgrade()
-            .map(|w| w.read(cx).focus_handle(cx))
-            .unwrap_or_else(|| cx.focus_handle());
-
-        let window_project_groups: Vec<_> = self
-            .multi_workspace
-            .as_ref()
-            .and_then(|mw| mw.upgrade())
-            .map(|mw| mw.read(cx).project_group_keys())
-            .unwrap_or_default();
-
-        PopoverMenu::new("sidebar-title-recent-projects-menu")
-            .menu(move |window, cx| {
-                Some(recent_projects::RecentProjects::popover(
-                    workspace.clone(),
-                    window_project_groups.clone(),
-                    None,
-                    focus_handle.clone(),
-                    window,
-                    cx,
-                ))
-            })
-            .trigger_with_tooltip(
-                Button::new("project_name_trigger", display_name)
-                    .label_size(LabelSize::Small)
-                    .tab_index(0isize)
-                    .when(self.worktree_count(cx) > 1, |this| {
-                        this.end_icon(
-                            Icon::new(IconName::ChevronDown)
-                                .size(IconSize::XSmall)
-                                .color(Color::Muted),
-                        )
-                    })
-                    .selected_style(ButtonStyle::Tinted(TintColor::Accent))
-                    .when(!is_project_selected, |s| s.color(Color::Muted)),
-                move |_window, cx| {
-                    Tooltip::for_action("Recent Projects", &zed_actions::OpenRecent::default(), cx)
-                },
-            )
-            .anchor(gpui::Anchor::TopLeft)
     }
 
     fn render_worktree_and_branch(
@@ -1058,40 +921,6 @@ impl TitleBar {
                 .children(branch_picker)
                 .into_any_element(),
         )
-    }
-
-    fn active_call_changed(&mut self, cx: &mut Context<Self>) {
-        self.observe_diagnostics(cx);
-        cx.notify();
-    }
-
-    fn observe_diagnostics(&mut self, cx: &mut Context<Self>) {
-        let diagnostics = ActiveCall::global(cx)
-            .read(cx)
-            .room()
-            .and_then(|room| room.read(cx).diagnostics().cloned());
-
-        if let Some(diagnostics) = diagnostics {
-            self._diagnostics_subscription = Some(cx.observe(&diagnostics, |_, _, cx| cx.notify()));
-        } else {
-            self._diagnostics_subscription = None;
-        }
-    }
-
-    fn share_project(&mut self, cx: &mut Context<Self>) {
-        let active_call = ActiveCall::global(cx);
-        let project = self.project.clone();
-        active_call
-            .update(cx, |call, cx| call.share_project(project, cx))
-            .detach_and_log_err(cx);
-    }
-
-    fn unshare_project(&mut self, _: &mut Window, cx: &mut Context<Self>) {
-        let active_call = ActiveCall::global(cx);
-        let project = self.project.clone();
-        active_call
-            .update(cx, |call, cx| call.unshare_project(project, cx))
-            .log_err();
     }
 
     fn render_connection_status(
