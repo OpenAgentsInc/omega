@@ -834,33 +834,10 @@ pub(crate) fn initialize_panels(
     // layout from the rendered surface.
     if omega_zero_base::is_active() {
         return cx.spawn_in(window, async move |workspace_handle, cx| {
-            // omega#99. Read the app state inside the task, not outside it.
-            //
-            // `initialize_panels` is called from `initialize_workspace`'s
-            // `observe_new` closure, which is already updating the workspace —
-            // so the entity is leased out of the entity map, and reading it
-            // here panicked with `cannot read workspace::Workspace while it is
-            // already being updated`. That killed `omega --zero-base` before
-            // any window opened, on every profile, in debug and release alike:
-            // `double_lease_panic` is not a debug assertion. Inside the task
-            // the lease is long since over, so the same value is simply asked
-            // for a moment later.
-            //
-            // Worth naming: `cargo check`, `cargo test -p omega_deltas` and
-            // `./script/clippy` were all green across this, exactly like the
-            // unresolvable-key-binding failure that `keymaps_name_no_deleted_action`
-            // exists for. A mode entered only by a command-line flag is not
-            // covered by any test that does not launch the binary with it.
-            let Some(app_state) = workspace_handle
-                .read_with(cx, |workspace, _| workspace.app_state().clone())
-                .log_err()
-            else {
-                return anyhow::Ok(());
-            };
-
-            // Keep startup readiness ahead of the front door so the optional
-            // onboarding journey can be restored without racing this panel.
-            await_identity_ready(app_state, cx).await.log_err();
+            // Keep startup readiness ahead of the front door: the silent
+            // background identity provisioning (omega#164) completes or
+            // refuses by name before this panel opens and zooms.
+            await_identity_ready(cx).await.log_err();
 
             agent_ui::initialize_workbench_panels(workspace_handle.clone(), cx.clone())
                 .await
@@ -1219,7 +1196,7 @@ fn register_actions(
             let app_state = workspace.app_state().clone();
             let create_new_window = action.create_new_window;
             cx.spawn_in(window, async move |this, cx| {
-                await_identity_ready(app_state.clone(), cx).await?;
+                await_identity_ready(cx).await?;
                 this.update_in(cx, |workspace, window, cx| {
                     telemetry::event!("Project Opened");
                     workspace::prompt_for_open_path_and_open(
@@ -1248,7 +1225,7 @@ fn register_actions(
         .register_action(|workspace, _: &workspace::OpenFiles, window, cx| {
             let app_state = workspace.app_state().clone();
             cx.spawn_in(window, async move |this, cx| {
-                await_identity_ready(app_state.clone(), cx).await?;
+                await_identity_ready(cx).await?;
                 this.update_in(cx, |workspace, window, cx| {
                     let directories = cx.can_select_mixed_files_and_dirs();
                     workspace::prompt_for_open_path_and_open(
@@ -1278,9 +1255,8 @@ fn register_actions(
             if workspace.project().read(cx).is_local() {
                 return;
             }
-            let app_state = workspace.app_state().clone();
             cx.spawn_in(window, async move |this, cx| {
-                await_identity_ready(app_state, cx).await?;
+                await_identity_ready(cx).await?;
                 let paths = this.update_in(cx, |workspace, window, cx| {
                     telemetry::event!("Project Opened");
                     workspace.prompt_for_open_path(
@@ -1479,7 +1455,7 @@ fn register_actions(
                 cx.spawn({
                     let app_state = app_state.clone();
                     async move |_, cx| {
-                        await_identity_ready(app_state.clone(), cx).await?;
+                        await_identity_ready(cx).await?;
                         cx.update(|cx| {
                             open_new(
                                 Default::default(),
@@ -1534,7 +1510,7 @@ fn register_actions(
                 cx.spawn({
                     let app_state = app_state.clone();
                     async move |_, cx| {
-                        await_identity_ready(app_state.clone(), cx).await?;
+                        await_identity_ready(cx).await?;
                         cx.update(|cx| {
                             open_new(
                                 Default::default(),
@@ -6082,6 +6058,10 @@ mod tests {
 
             gpui_tokio::init(cx);
             AppState::set_global(app_state.clone(), cx);
+            // omega#164. The silent identity gate provisions real custody at
+            // startup; tests must resolve it without touching the profile of
+            // whoever runs them.
+            onboarding::install_test_identity_startup(cx);
             theme_settings::init(theme::LoadThemes::JustBase, cx);
             audio::init(cx);
             channel::init(&app_state.client, app_state.user_store.clone(), cx);

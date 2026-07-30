@@ -43,6 +43,55 @@ use crate::{
 
 const IDENTITY_TRANSACTION_SCHEMA: &str = "openagents.omega.identity-transaction.v1";
 const RESET_MARKER_SCHEMA: &str = "openagents.omega.identity-reset.v1";
+const BACKUP_VALUE_SCHEMA: &str = "openagents.omega.identity-backup-value.v1";
+const BACKUP_NUDGE_DISMISSED_SCHEMA: &str = "openagents.omega.identity-backup-nudge-dismissed.v1";
+
+/// The first event that gave a background-created identity something to lose.
+#[derive(Debug, Copy, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum BackupValueKind {
+    ChannelPost,
+    DeviceGrant,
+    SarahSession,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct BackupValueRecord {
+    schema: String,
+    kind: BackupValueKind,
+    recorded_at: u64,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct BackupNudgeDismissal {
+    schema: String,
+    dismissed_at: u64,
+}
+
+/// The durable facts behind the sidebar backup nudge, and nothing else.
+#[derive(Debug, Copy, Clone, PartialEq, Eq, Default)]
+pub struct BackupNudgeStatus {
+    pub value_accrued: bool,
+    pub dismissed: bool,
+    pub protected: bool,
+}
+
+impl BackupNudgeStatus {
+    /// The nudge renders only when the identity has something to lose, the
+    /// person has not dismissed it, and no recovery artifact already protects
+    /// the key. Every component defaults to the quiet side.
+    pub fn should_offer_backup(&self) -> bool {
+        self.value_accrued && !self.dismissed && !self.protected
+    }
+}
+
+fn unix_time_now() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_or(0, |duration| duration.as_secs())
+}
 const NIP49_LOG_N: u8 = 16;
 static RECOVERY_KDF_LOCK: Mutex<()> = Mutex::new(());
 
@@ -225,10 +274,10 @@ impl IdentityService {
     /// front of it, or refuse and name the state it refused in.
     ///
     /// A signed proof is the only way an install reaches hosted OpenAgents
-    /// compute, and nothing else provisions custody: the startup onboarding
-    /// gate is dormant (`OPEN_ONBOARDING_DURING_STARTUP`), so a brand-new
-    /// install sits at `Absent` forever and every hosted request fails. This
-    /// closes that gap for the two states where the answer is not a guess:
+    /// compute. This path predates the silent startup provisioning
+    /// (omega#164, [`Self::provision_for_process_start`]) and stays: it lets
+    /// a hosted request self-heal a profile whose launch-time provisioning
+    /// was interrupted, for the two states where the answer is not a guess:
     /// `Absent` has nothing to lose, and `Unadopted` names the identity in
     /// this data root's own secret file.
     ///
@@ -247,6 +296,111 @@ impl IdentityService {
             CustodyState::Absent => self.create(receipt_ref),
             CustodyState::Unadopted => self.adopt_custodied(receipt_ref),
             state => Err(CustodyError::CustodyDenied(state)),
+        }
+    }
+
+    /// Bring custody to `Ready` on the startup path, with nobody in front of
+    /// the window and no ceremony behind it.
+    ///
+    /// omega#164, owner direction 2026-07-29: there is no onboarding flow. A
+    /// Nostr identity is the one identity type that permits full background
+    /// creation — a keypair, generated in milliseconds, with zero user input —
+    /// so a fresh profile generates and stores it silently before the front
+    /// door opens, and a profile beside an identity already in custody adopts
+    /// it, exactly as `provision_unattended` taught the hosted lane to.
+    ///
+    /// Two deliberate differences from [`Self::provision_unattended`]:
+    ///
+    /// - the inspection is [`Self::inspect_for_process_start`], so a completed
+    ///   identity reset is acknowledged on the launch that follows it rather
+    ///   than parking the profile on `RelaunchRequired` forever;
+    /// - the refusal set is the same, and that is the point worth stating:
+    ///   `Lost`, `Conflict`, `Incomplete`, and the reset states each mean an
+    ///   identity exists that this profile cannot sign for, and replacing one
+    ///   unattended is the silent pick omega#110 forbids. Startup logs the
+    ///   named state and opens the front door anyway — a launch must never
+    ///   become the dead end the removed onboarding gate once was.
+    pub fn provision_for_process_start(
+        &self,
+        receipt_ref: ReceiptRef,
+    ) -> Result<CustodyResult, CustodyError> {
+        let inspected = self.inspect_for_process_start()?;
+        match inspected.custody.state {
+            CustodyState::Ready => Ok(inspected.custody),
+            CustodyState::Absent => self.create(receipt_ref),
+            CustodyState::Unadopted => self.adopt_custodied(receipt_ref),
+            state => Err(CustodyError::CustodyDenied(state)),
+        }
+    }
+
+    /// Record that the identity now has something to lose.
+    ///
+    /// omega#164: a background-created key silently accrues value — channel
+    /// reputation, device grants, Sarah entitlements — and the person was
+    /// never shown a backup step, because there was never a screen to show it
+    /// on. The first accrual event arms the quiet backup nudge; the record is
+    /// idempotent and keeps the first kind, because "when did this key start
+    /// mattering" is a fact about the first event, not the latest.
+    pub fn record_backup_value_accrued(&self, kind: BackupValueKind) -> Result<(), CustodyError> {
+        let _mutation_guard = IdentityMutationGuard::acquire(&self.locator)?;
+        if read_json_document::<BackupValueRecord>(&self.paths.backup_value_path)?.is_some() {
+            return Ok(());
+        }
+        write_json_document(
+            &self.paths.backup_value_path,
+            &BackupValueRecord {
+                schema: BACKUP_VALUE_SCHEMA.to_string(),
+                kind,
+                recorded_at: unix_time_now(),
+            },
+        )?;
+        Ok(())
+    }
+
+    /// Dismiss the backup nudge for this profile, durably.
+    ///
+    /// Dismissal is a fact the person stated, so it survives restarts: a nudge
+    /// that reappears after every launch is a prompt wearing a nudge's
+    /// clothes.
+    pub fn dismiss_backup_nudge(&self) -> Result<(), CustodyError> {
+        let _mutation_guard = IdentityMutationGuard::acquire(&self.locator)?;
+        write_json_document(
+            &self.paths.backup_nudge_dismissed_path,
+            &BackupNudgeDismissal {
+                schema: BACKUP_NUDGE_DISMISSED_SCHEMA.to_string(),
+                dismissed_at: unix_time_now(),
+            },
+        )?;
+        Ok(())
+    }
+
+    /// What the sidebar may say about backing up the key.
+    ///
+    /// Quiet by construction: every read failure resolves to "do not nudge",
+    /// because a nudge is the one surface that must never become a blocker or
+    /// an error report. A fresh profile has no value record, so a first launch
+    /// can never show it; a profile whose identity is already protected by a
+    /// recovery artifact has nothing left to nudge about.
+    pub fn backup_nudge_status(&self) -> BackupNudgeStatus {
+        let value_accrued = read_json_document::<BackupValueRecord>(&self.paths.backup_value_path)
+            .ok()
+            .flatten()
+            .is_some();
+        let dismissed =
+            read_json_document::<BackupNudgeDismissal>(&self.paths.backup_nudge_dismissed_path)
+                .ok()
+                .flatten()
+                .is_some();
+        let protected = self
+            .inspect_details()
+            .map(|inspection| {
+                inspection.recovery_protection.state == crate::RecoveryProtectionState::Protected
+            })
+            .unwrap_or(false);
+        BackupNudgeStatus {
+            value_accrued,
+            dismissed,
+            protected,
         }
     }
 
@@ -1616,6 +1770,8 @@ struct CustodyPaths {
     transaction_path: PathBuf,
     reset_path: PathBuf,
     recovery_protection_path: PathBuf,
+    backup_value_path: PathBuf,
+    backup_nudge_dismissed_path: PathBuf,
 }
 
 impl CustodyPaths {
@@ -1626,6 +1782,8 @@ impl CustodyPaths {
             transaction_path: root.join("identity.transaction.json"),
             reset_path: root.join("identity.reset.json"),
             recovery_protection_path: root.join("identity.recovery-protection.json"),
+            backup_value_path: root.join("identity.backup-value.json"),
+            backup_nudge_dismissed_path: root.join("identity.backup-nudge-dismissed.json"),
         }
     }
 }
@@ -2033,6 +2191,98 @@ mod tests {
             Err(CustodyError::CustodyDenied(CustodyState::Lost))
         ));
         assert_eq!(store.state.lock().expect("lock fake store").writes, 1);
+    }
+
+    /// omega#164. First launch creates the identity silently in the
+    /// background: a fresh profile reaches `Ready` custody with nobody in
+    /// front of the window, a profile beside an identity already in custody
+    /// adopts that identity rather than generating a second one, and repeating
+    /// the launch is idempotent.
+    #[test]
+    fn process_start_provisioning_creates_adopts_and_is_idempotent() {
+        let temporary_directory = tempfile::tempdir().expect("create temporary directory");
+        let store = FakeStore::empty();
+
+        let fresh = service(store.clone(), temporary_directory.path().to_path_buf());
+        let created = fresh
+            .provision_for_process_start(receipt())
+            .expect("provision a first launch");
+        assert_eq!(created.state, CustodyState::Ready);
+        assert!(created.identity.is_some());
+        let repeated = fresh
+            .provision_for_process_start(receipt())
+            .expect("repeat the launch");
+        assert_eq!(created, repeated);
+        assert_eq!(store.state.lock().expect("lock fake store").writes, 1);
+
+        let adopting_root = tempfile::tempdir().expect("create adopting directory");
+        let adopting = service(store, adopting_root.path().to_path_buf());
+        let adopted = adopting
+            .provision_for_process_start(receipt())
+            .expect("adopt the custodied identity at launch");
+        assert_eq!(adopted.state, CustodyState::Ready);
+        assert_eq!(adopted.identity, created.identity);
+    }
+
+    /// Keep the process-start mapping exhaustive: every custody state either
+    /// resolves silently (`Ready`), provisions (`Absent`, `Unadopted`), or
+    /// refuses by name. A new state that silently generated over an existing
+    /// identity would be the omega#110 silent pick at startup, which is the
+    /// worst possible place for it.
+    #[test]
+    fn process_start_provisioning_refuses_every_state_it_cannot_answer() {
+        let temporary_directory = tempfile::tempdir().expect("create temporary directory");
+        let store = FakeStore::empty();
+        let service = service(store.clone(), temporary_directory.path().to_path_buf());
+        service.create(receipt()).expect("create identity");
+
+        store.lose_secret();
+        assert!(matches!(
+            service.provision_for_process_start(second_receipt()),
+            Err(CustodyError::CustodyDenied(CustodyState::Lost))
+        ));
+        assert_eq!(store.state.lock().expect("lock fake store").writes, 1);
+    }
+
+    /// omega#164. The backup nudge is quiet by construction: a fresh profile
+    /// offers nothing, the first value event arms it durably and idempotently,
+    /// and dismissal is a durable fact that survives re-inspection.
+    #[test]
+    fn backup_nudge_arms_on_first_value_and_stays_dismissed() {
+        let temporary_directory = tempfile::tempdir().expect("create temporary directory");
+        let store = FakeStore::empty();
+        let service = service(store, temporary_directory.path().to_path_buf());
+
+        // A first launch has nothing to lose, so there is nothing to offer.
+        assert!(!service.backup_nudge_status().should_offer_backup());
+
+        service.create(receipt()).expect("create identity");
+        assert!(
+            !service.backup_nudge_status().should_offer_backup(),
+            "an identity with no accrued value must not nudge"
+        );
+
+        service
+            .record_backup_value_accrued(BackupValueKind::ChannelPost)
+            .expect("record the first value event");
+        let status = service.backup_nudge_status();
+        assert!(status.value_accrued);
+        assert!(status.should_offer_backup());
+
+        // Idempotent: a later kind does not replace the first record.
+        service
+            .record_backup_value_accrued(BackupValueKind::SarahSession)
+            .expect("repeat value accrual");
+        let record: BackupValueRecord = read_json_document(&service.paths.backup_value_path)
+            .expect("read value record")
+            .expect("value record exists");
+        assert_eq!(record.kind, BackupValueKind::ChannelPost);
+
+        service.dismiss_backup_nudge().expect("dismiss the nudge");
+        let dismissed = service.backup_nudge_status();
+        assert!(dismissed.value_accrued);
+        assert!(dismissed.dismissed);
+        assert!(!dismissed.should_offer_backup());
     }
 
     #[test]
@@ -3223,8 +3473,9 @@ mod tests {
         }
     }
 
-    /// The onboarding gate is `custody.state != CustodyState::Ready`
-    /// (`crates/onboarding/src/identity_startup.rs`). This pins both sides of
+    /// The startup gate provisions until `custody.state == CustodyState::Ready`
+    /// (`provision_for_process_start`, awaited by
+    /// `crates/onboarding/src/identity_startup.rs`). This pins both sides of
     /// that predicate against a temporary root and a fake keyring, so first-run
     /// behaviour is provable without a GUI, a human, or the login Keychain.
     ///
@@ -3288,10 +3539,9 @@ mod tests {
         assert!(inspection.pending_transaction.is_none());
         assert!(inspection.conflict.is_none());
 
-        // The onboarding gate is `custody.state != CustodyState::Ready`
-        // (`crates/onboarding/src/identity_startup.rs`). Unadopted is not Ready,
-        // so the fresh profile still waits on onboarding — this fix changes
-        // what onboarding concludes, not whether OMEGA-DELTA-0040 waits.
+        // Unadopted is not Ready, so the silent startup gate (omega#164)
+        // still has work to do here — and what it does is adopt through
+        // `adopt_custodied`, never silently count the state as ready.
         assert_ne!(inspection.custody.state, CustodyState::Ready);
 
         let adopted = second

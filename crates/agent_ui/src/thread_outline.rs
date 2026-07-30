@@ -1,6 +1,8 @@
 //! Retained, typed event and artifact outline for the active agent thread.
 
-use std::{collections::BTreeMap, ops::Range, path::PathBuf, rc::Rc, sync::Arc};
+#[cfg(any(test, feature = "test-support"))]
+use std::path::PathBuf;
+use std::{collections::BTreeMap, ops::Range, rc::Rc, sync::Arc};
 
 use acp_thread::{
     AcpThread, AcpThreadEvent, ThreadActionTarget, ThreadArtifact, ThreadArtifactId, ThreadEntryId,
@@ -190,6 +192,8 @@ pub struct ThreadOutline {
     replay_update_count: u64,
     foreign_update_count: u64,
     frozen_update_count: u64,
+    // Read only by the test-support snapshot; production paths only write it.
+    #[cfg_attr(not(any(test, feature = "test-support")), allow(dead_code))]
     conflicting_update_count: u64,
     last_action_succeeded: Option<bool>,
     last_action_message: Option<SharedString>,

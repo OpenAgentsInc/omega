@@ -449,6 +449,17 @@ fn post(thread_id: ThreadId, text: &str, cx: &mut App) -> String {
     let mut outbox = outbox(cx);
     let outcome = Rc::make_mut(&mut outbox).queue(&signed, now());
     cx.default_global::<OmegaCommunity>().outbox = Some(outbox.clone());
+    // omega#164. A signed community post is the first kind of value a
+    // background-created identity accrues, so it arms the quiet backup nudge.
+    // Fail-soft: the durable record is a nudge input, never a send blocker.
+    cx.background_spawn(async {
+        if let Err(error) = IdentityService::system(*app_identity::CHANNEL)
+            .record_backup_value_accrued(omega_identity::BackupValueKind::ChannelPost)
+        {
+            log::warn!("could not record identity backup value accrual: {error}");
+        }
+    })
+    .detach();
     cache_verified_record(&joined.repository, signed.event().clone(), cx);
     start_delivery(
         signed.id(),

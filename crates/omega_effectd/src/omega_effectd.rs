@@ -90,6 +90,18 @@ pub type SharedIssue31HostController = Arc<RwLock<Issue31HostController>>;
 struct Issue31DeviceBridgeAuthority {
     controller: SharedIssue31HostController,
     pairing_offers: Arc<Mutex<BTreeMap<String, DevicePairingOffer>>>,
+    /// omega#164. Called once per freshly minted pairing grant so the quiet
+    /// identity backup nudge learns the key now has something to lose. `None`
+    /// outside the production servers, so state-machine tests never touch a
+    /// real profile.
+    grant_recorder: Option<Arc<dyn Fn() + Send + Sync>>,
+}
+
+impl Issue31DeviceBridgeAuthority {
+    fn with_grant_recorder(mut self, recorder: Arc<dyn Fn() + Send + Sync>) -> Self {
+        self.grant_recorder = Some(recorder);
+        self
+    }
 }
 
 #[derive(Clone)]
@@ -171,6 +183,7 @@ impl DevicePairingEngine {
         Issue31DeviceBridgeAuthority {
             controller: self.controller.clone(),
             pairing_offers: self.pairing_offers.clone(),
+            grant_recorder: None,
         }
     }
 }
@@ -267,6 +280,9 @@ impl omega_device_bridge::GrantAuthority for Issue31DeviceBridgeAuthority {
             else {
                 return Err(GrantRefusalReason::PairingRefused);
             };
+            if let Some(recorder) = &self.grant_recorder {
+                recorder();
+            }
             return Ok(DeviceBridgeGrantAdmission {
                 grant_ref,
                 host_public_key_hex,
@@ -321,7 +337,10 @@ pub fn start_device_bridge_server(
     journal: ProjectionJournal,
 ) -> Result<DeviceBridgeServerHandle, DeviceBridgeError> {
     let engine = DevicePairingEngine::new(controller);
-    DeviceBridgeServerHandle::spawn(config, Arc::new(engine.authority()), journal)
+    let authority = engine
+        .authority()
+        .with_grant_recorder(device_grant_backup_value_recorder());
+    DeviceBridgeServerHandle::spawn(config, Arc::new(authority), journal)
 }
 
 pub fn start_pairable_device_bridge_server(
@@ -329,7 +348,23 @@ pub fn start_pairable_device_bridge_server(
     engine: DevicePairingEngine,
     journal: ProjectionJournal,
 ) -> Result<DeviceBridgeServerHandle, DeviceBridgeError> {
-    DeviceBridgeServerHandle::spawn(config, Arc::new(engine.authority()), journal)
+    let authority = engine
+        .authority()
+        .with_grant_recorder(device_grant_backup_value_recorder());
+    DeviceBridgeServerHandle::spawn(config, Arc::new(authority), journal)
+}
+
+/// omega#164. A freshly minted device grant gives the background-created
+/// identity something to lose, so it arms the quiet backup nudge. The record
+/// is durable, idempotent, and fail-soft — never a pairing blocker.
+fn device_grant_backup_value_recorder() -> Arc<dyn Fn() + Send + Sync> {
+    Arc::new(|| {
+        if let Err(error) = omega_identity::IdentityService::system(*app_identity::CHANNEL)
+            .record_backup_value_accrued(omega_identity::BackupValueKind::DeviceGrant)
+        {
+            log::warn!("could not record identity backup value accrual: {error}");
+        }
+    })
 }
 
 enum OmegaEffectdRuntime {
@@ -483,6 +518,7 @@ mod tests {
         let authority = Issue31DeviceBridgeAuthority {
             controller: Arc::new(RwLock::new(controller.clone())),
             pairing_offers: Arc::new(Mutex::new(BTreeMap::new())),
+            grant_recorder: None,
         };
         let admission = omega_device_bridge::GrantAuthority::authorize(
             &authority,
@@ -508,6 +544,7 @@ mod tests {
         let authority = Issue31DeviceBridgeAuthority {
             controller: Arc::new(RwLock::new(controller)),
             pairing_offers: Arc::new(Mutex::new(BTreeMap::new())),
+            grant_recorder: None,
         };
         assert_eq!(
             omega_device_bridge::GrantAuthority::authorize(

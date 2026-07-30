@@ -853,7 +853,7 @@ async fn open_workspaces(
     cwd: Option<PathBuf>,
     cx: &mut AsyncApp,
 ) -> Result<()> {
-    await_identity_ready(app_state.clone(), cx).await?;
+    await_identity_ready(cx).await?;
 
     if paths.is_empty()
         && diff_paths.is_empty()

@@ -27,9 +27,9 @@ use anyhow::{Context as _, Result};
 use audio::AudioSettings;
 use editor::{Editor, SelectionEffects, actions as editor_actions, scroll::Autoscroll};
 use gpui::{
-    App, AsyncWindowContext, Context, Entity, EntityId, EventEmitter, FocusHandle, Focusable,
-    Global, InteractiveElement, IntoElement, ParentElement, Render, SharedString, Styled, Task,
-    WeakEntity, Window, div, px,
+    App, AppContext as _, AsyncWindowContext, Context, Entity, EntityId, EventEmitter, FocusHandle,
+    Focusable, Global, InteractiveElement, IntoElement, ParentElement, Render, SharedString,
+    Styled, Task, WeakEntity, Window, div, px,
 };
 use omega_effectd::{
     BindingProjection, BindingState, Issue31GrantProjection, OpenAgentsBinding,
@@ -1742,8 +1742,7 @@ impl SarahWorkroomPanel {
         }
         let admission_is_ready = self.workspace.upgrade().is_some_and(|workspace| {
             matches!(
-                &*agent_ui::composer_voice::sarah_voice_admission(workspace.entity_id(), cx)
-                    .read(cx),
+                agent_ui::composer_voice::sarah_voice_admission(workspace.entity_id(), cx).read(cx),
                 agent_ui::composer_voice::SarahVoiceAdmissionProjection::Ready { .. }
             )
         });
@@ -2311,6 +2310,20 @@ impl SarahWorkroomPanel {
                 self.voice_state = SarahVoiceState::Listening;
                 self.voice_status =
                     "Connected through the managed OpenAgents Sarah voice service.".into();
+                // omega#164. A live Sarah session is one of the events that
+                // gives a background-created identity something to lose, so it
+                // arms the quiet backup nudge. Fail-soft by design.
+                cx.background_spawn(async {
+                    if let Err(error) =
+                        omega_identity::IdentityService::system(*app_identity::CHANNEL)
+                            .record_backup_value_accrued(
+                                omega_identity::BackupValueKind::SarahSession,
+                            )
+                    {
+                        log::warn!("could not record identity backup value accrual: {error}");
+                    }
+                })
+                .detach();
                 if let Some(terms) = self.voice_admission_terms.clone() {
                     self.publish_voice_admission(
                         agent_ui::composer_voice::SarahVoiceAdmissionProjection::Active {

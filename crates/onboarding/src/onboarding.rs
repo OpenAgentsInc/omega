@@ -4,9 +4,9 @@ use cloud_api_types::Plan;
 use db::kvp::KeyValueStore;
 use fs::Fs;
 use gpui::{
-    Action, AnyElement, AnyWindowHandle, App, AppContext, AsyncWindowContext, Context, Entity,
-    EventEmitter, FocusHandle, Focusable, Global, IntoElement, KeyContext, Render, ScrollHandle,
-    SharedString, Subscription, Task, WeakEntity, Window, actions,
+    Action, AnyElement, App, AppContext, AsyncWindowContext, Context, Entity, EventEmitter,
+    FocusHandle, Focusable, Global, IntoElement, KeyContext, Render, ScrollHandle, SharedString,
+    Subscription, Task, WeakEntity, Window, actions,
 };
 use notifications::status_toast::StatusToast;
 use project::{AgentRegistryStore, agent_server_store::AllAgentServersSettings};
@@ -24,11 +24,10 @@ use ui::{
 pub use workspace::welcome::ShowWelcome;
 use workspace::welcome::WelcomePage;
 use workspace::{
-    AppState, Workspace, WorkspaceId,
-    dock::DockPosition,
+    Workspace, WorkspaceId,
     item::{Item, ItemEvent},
     notifications::NotifyResultExt as _,
-    open_new, register_serializable_item, with_active_or_new_workspace,
+    register_serializable_item, with_active_or_new_workspace,
 };
 use zed_actions::{OpenEditorOnboarding, OpenOnboarding, dev::ResetOnboarding};
 
@@ -61,10 +60,14 @@ pub struct ImportCursorSettings {
 }
 
 pub use identity_startup::await_identity_ready;
+#[cfg(any(test, feature = "test-support"))]
+pub use identity_startup::install_test_identity_startup;
 
+/// The retired first-run journey's completion key. omega#164 removed that
+/// journey — startup provisions the identity silently in the background — so
+/// the key is written by nothing and retained only so a debug reset still
+/// clears records older profiles may hold.
 const IDENTITY_ONBOARDING_COMPLETION_KEY: &str = "omega_identity_onboarding_completion_v1";
-const IDENTITY_ONBOARDING_COMPLETION_SCHEMA: &str =
-    "openagents.omega.identity-onboarding-completion.v1";
 const EDITOR_ONBOARDING_COMPLETION_KEY: &str = "omega_editor_onboarding_completion_v1";
 const EDITOR_ONBOARDING_COMPLETION_SCHEMA: &str =
     "openagents.omega.editor-onboarding-completion.v1";
@@ -264,28 +267,14 @@ fn reset_onboarding_completion_records(cx: &mut App) {
     .detach();
 }
 
-pub fn show_onboarding_view(app_state: Arc<AppState>, cx: &mut App) -> Task<anyhow::Result<()>> {
-    telemetry::event!("Onboarding Page Opened");
-    open_new(
-        Default::default(),
-        app_state,
-        cx,
-        |workspace, window, cx| {
-            {
-                workspace.toggle_dock(DockPosition::Left, window, cx);
-                let onboarding_page = Onboarding::new_first_run(workspace, window, cx);
-                workspace.add_item_to_center(Box::new(onboarding_page.clone()), window, cx);
-
-                window.focus(&onboarding_page.focus_handle(cx), cx);
-
-                cx.notify();
-            };
-        },
-    )
-}
+// omega#164, owner direction 2026-07-29: the first-run identity onboarding
+// journey is removed, not hidden. `show_onboarding_view`, the first-run window
+// mode, and the startup completion handoff are gone; a fresh profile gets its
+// Nostr identity from the silent background provisioning in
+// `identity_startup`, and this page remains only as the explicit editor-setup
+// journey (Help → Editor Onboarding).
 
 struct Onboarding {
-    mode: OnboardingMode,
     workspace: WeakEntity<Workspace>,
     focus_handle: FocusHandle,
     user_store: Entity<UserStore>,
@@ -298,81 +287,19 @@ struct Onboarding {
     _agent_registry_subscription: Option<Subscription>,
 }
 
-#[derive(Copy, Clone)]
-enum OnboardingMode {
-    FirstRun(AnyWindowHandle),
-    EditorSetup,
-}
-
-#[derive(Copy, Clone, Debug, PartialEq, Eq)]
-enum OnboardingJourney {
-    FirstRun,
-    EditorSetup,
-}
-
-impl OnboardingJourney {
-    fn completion_key(self) -> &'static str {
-        match self {
-            Self::FirstRun => IDENTITY_ONBOARDING_COMPLETION_KEY,
-            Self::EditorSetup => EDITOR_ONBOARDING_COMPLETION_KEY,
-        }
-    }
-
-    fn completion_schema(self) -> &'static str {
-        match self {
-            Self::FirstRun => IDENTITY_ONBOARDING_COMPLETION_SCHEMA,
-            Self::EditorSetup => EDITOR_ONBOARDING_COMPLETION_SCHEMA,
-        }
-    }
-
-    fn is_serializable(self) -> bool {
-        self == Self::EditorSetup
-    }
-
-    fn completion<'a>(self, identity_ref: &'a str) -> OnboardingCompletion<'a> {
-        OnboardingCompletion {
-            schema: self.completion_schema(),
-            identity_ref,
-        }
-    }
-
-    fn basics_page_mode(self) -> basics_page::BasicsPageMode {
-        match self {
-            Self::FirstRun => basics_page::BasicsPageMode::FirstRun,
-            Self::EditorSetup => basics_page::BasicsPageMode::EditorSetup,
-        }
-    }
-}
-
-impl OnboardingMode {
-    fn journey(self) -> OnboardingJourney {
-        match self {
-            Self::FirstRun(_) => OnboardingJourney::FirstRun,
-            Self::EditorSetup => OnboardingJourney::EditorSetup,
-        }
+fn editor_setup_completion(identity_ref: &str) -> OnboardingCompletion<'_> {
+    OnboardingCompletion {
+        schema: EDITOR_ONBOARDING_COMPLETION_SCHEMA,
+        identity_ref,
     }
 }
 
 impl Onboarding {
-    fn new_first_run(workspace: &Workspace, window: &mut Window, cx: &mut App) -> Entity<Self> {
-        Self::new(
-            workspace,
-            OnboardingMode::FirstRun(window.window_handle()),
-            window,
-            cx,
-        )
-    }
-
     fn new_editor_setup(workspace: &Workspace, window: &mut Window, cx: &mut App) -> Entity<Self> {
-        Self::new(workspace, OnboardingMode::EditorSetup, window, cx)
+        Self::new(workspace, window, cx)
     }
 
-    fn new(
-        workspace: &Workspace,
-        mode: OnboardingMode,
-        window: &mut Window,
-        cx: &mut App,
-    ) -> Entity<Self> {
+    fn new(workspace: &Workspace, window: &mut Window, cx: &mut App) -> Entity<Self> {
         let font_family_cache = theme::FontFamilyCache::global(cx);
 
         let installed_agents = cx
@@ -423,7 +350,6 @@ impl Onboarding {
             .detach();
 
             Self {
-                mode,
                 workspace: workspace.weak_handle(),
                 focus_handle: cx.focus_handle(),
                 scroll_handle: ScrollHandle::new(),
@@ -439,7 +365,6 @@ impl Onboarding {
                     .map(|registry| cx.observe(registry, |_, _, cx| cx.notify())),
             }
         });
-        identity_startup::onboarding_opened(cx);
         onboarding
     }
 
@@ -451,17 +376,18 @@ impl Onboarding {
             cx.notify();
             return;
         };
-        let completion = self.mode.journey().completion(identity_ref.as_str());
+        let completion = editor_setup_completion(identity_ref.as_str());
         let Ok(completion) = serde_json::to_string(&completion) else {
             self.finish_error = Some("Could not record identity setup completion.".into());
             cx.notify();
             return;
         };
         let kvp = KeyValueStore::global(cx);
-        let completion_key = self.mode.journey().completion_key();
         self.finish_error = None;
         self.finish_task = Some(cx.spawn(async move |this, cx| {
-            let result = kvp.write_kvp(completion_key.to_string(), completion).await;
+            let result = kvp
+                .write_kvp(EDITOR_ONBOARDING_COMPLETION_KEY.to_string(), completion)
+                .await;
             if let Err(error) = result {
                 zlog::error!("failed to record onboarding completion: {error:#}");
                 this.update(cx, |this, cx| {
@@ -473,37 +399,12 @@ impl Onboarding {
                 return;
             }
 
-            let Ok(mode) = this.read_with(cx, |this, _| this.mode) else {
-                return;
-            };
-            match mode {
-                OnboardingMode::FirstRun(window_handle) => {
-                    if let Err(error) = window_handle.update(cx, |_, window, cx| {
-                        window.remove_window();
-                        telemetry::event!("Finish Setup");
-                        identity_startup::release_identity_waiters(cx);
-                    }) {
-                        zlog::error!("failed to close identity onboarding window: {error:#}");
-                        this.update(cx, |this, cx| {
-                            this.finish_task = None;
-                            this.finish_error =
-                                Some("Could not finish setup. Please try again.".into());
-                            cx.notify();
-                        })
-                        .ok();
-                        return;
-                    }
-                }
-                OnboardingMode::EditorSetup => {
-                    this.update(cx, |this, cx| {
-                        this.finish_task = None;
-                        telemetry::event!("Finish Setup");
-                        identity_startup::release_identity_waiters(cx);
-                        go_to_welcome_page(cx);
-                    })
-                    .ok();
-                }
-            }
+            this.update(cx, |this, cx| {
+                this.finish_task = None;
+                telemetry::event!("Finish Setup");
+                go_to_welcome_page(cx);
+            })
+            .ok();
         }));
     }
 
@@ -529,7 +430,6 @@ impl Onboarding {
         crate::basics_page::render_basics_page(
             &self.user_store,
             &self.identity_section,
-            self.mode.journey().basics_page_mode(),
             compact,
             cx,
         )
@@ -707,7 +607,6 @@ impl Item for Onboarding {
     }
 
     fn on_removed(&self, cx: &mut Context<Self>) {
-        identity_startup::onboarding_closed(cx);
         self.identity_section
             .update(cx, |section, cx| section.clear_transient_state(cx));
     }
@@ -920,9 +819,6 @@ impl workspace::SerializableItem for Onboarding {
         _window: &mut Window,
         cx: &mut ui::Context<Self>,
     ) -> Option<gpui::Task<gpui::Result<()>>> {
-        if !self.mode.journey().is_serializable() {
-            return None;
-        }
         let workspace_id = workspace.database_id()?;
 
         let db = persistence::OnboardingPagesDb::global(cx);
@@ -934,7 +830,7 @@ impl workspace::SerializableItem for Onboarding {
     }
 
     fn should_serialize(&self, event: &Self::Event) -> bool {
-        self.mode.journey().is_serializable() && event == &ItemEvent::UpdateTab
+        event == &ItemEvent::UpdateTab
     }
 }
 
@@ -1010,48 +906,25 @@ mod tests {
     use super::*;
 
     #[test]
-    fn first_run_and_editor_setup_have_independent_completion_versions() {
-        let first_run = OnboardingJourney::FirstRun;
-        let editor_setup = OnboardingJourney::EditorSetup;
-
+    fn the_editor_setup_completion_names_its_schema_and_identity() {
         assert_eq!(
-            first_run.completion_key(),
-            "omega_identity_onboarding_completion_v1"
-        );
-        assert_eq!(
-            editor_setup.completion_key(),
+            EDITOR_ONBOARDING_COMPLETION_KEY,
             "omega_editor_onboarding_completion_v1"
-        );
-        assert_ne!(first_run.completion_key(), editor_setup.completion_key());
-        assert_ne!(
-            first_run.completion_schema(),
-            editor_setup.completion_schema()
         );
 
         let identity_ref = "identity:test";
-        let first_run_record =
-            serde_json::to_value(first_run.completion(identity_ref)).expect("first-run completion");
         let editor_record =
-            serde_json::to_value(editor_setup.completion(identity_ref)).expect("editor completion");
-        assert_eq!(first_run_record["identity_ref"], identity_ref);
+            serde_json::to_value(editor_setup_completion(identity_ref)).expect("editor completion");
         assert_eq!(editor_record["identity_ref"], identity_ref);
-        assert_ne!(first_run_record["schema"], editor_record["schema"]);
-    }
-
-    #[test]
-    fn only_editor_setup_is_serializable() {
-        assert!(!OnboardingJourney::FirstRun.is_serializable());
-        assert!(OnboardingJourney::EditorSetup.is_serializable());
         assert_eq!(
-            OnboardingJourney::FirstRun.basics_page_mode(),
-            basics_page::BasicsPageMode::FirstRun
-        );
-        assert_eq!(
-            OnboardingJourney::EditorSetup.basics_page_mode(),
-            basics_page::BasicsPageMode::EditorSetup
+            editor_record["schema"],
+            "openagents.omega.editor-onboarding-completion.v1"
         );
     }
 
+    /// The retired first-run journey's key stays in the reset list even though
+    /// nothing writes it anymore, so a debug reset on an older profile clears
+    /// the record that profile still holds.
     #[test]
     fn reset_onboarding_clears_both_completion_keys() {
         let keys = onboarding_completion_keys();

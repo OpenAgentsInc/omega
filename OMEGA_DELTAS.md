@@ -1921,26 +1921,62 @@ than it sounds, because the harness omega#81's acceptance sentence names —
   — each failed the self-test. Every falsification was probed against a pristine
   copy before its test ran.
 
-### OMEGA-DELTA-0040 — Startup skips onboarding and opens the front door
+### OMEGA-DELTA-0040 — First launch provisions the Nostr identity in the background and opens the front door
 
-- **Upstream Zed:** first-run onboarding is a page you may open, skip, or close;
-  nothing in the startup path waits for it, and the window opens regardless.
-- **Omega:** startup goes directly to the new-thread surface. Identity
-  onboarding remains available through its explicit actions for later optional
-  use, but `await_identity_ready` returns before inspecting custody or opening
-  the onboarding page. This also prevents a startup inspection from prompting
-  for keychain access before the user asks to manage identity.
-- **Reversible seam:** startup and zero base still call
-  `await_identity_ready` before opening the front door. Reintroducing an
-  optional startup journey is therefore one explicit policy change, not a
-  reconstruction of the launch sequence. The dormant completion handoff
-  remains tested so it does not silently decay.
-- **Enforced by:** `startup_skips_onboarding_and_opens_the_front_door`
+- **Superseded twice, deliberately.** The original record put a first-ever
+  launch on identity onboarding and released the startup wait from the
+  first-run `on_finish`. A 2026-07-27 amendment removed the ceremony from the
+  startup path but provisioned nothing, so a fresh profile sat at `Absent`
+  forever and every identity-consuming surface (tester channels, device
+  pairing, Sarah voice) failed for exactly the users being onboarded. This
+  amendment (omega#164, owner direction 2026-07-29: *no onboarding flow; the
+  Nostr identity work happens in the background*) closes that gap: the
+  ceremony stays gone and the identity actually exists.
+- **Upstream Zed:** first-run onboarding is a page you may open, skip, or
+  close; nothing in the startup path waits for it, and the window opens
+  regardless. Upstream has no identity to create, so it has nothing to
+  provision either.
+- **Omega:** startup awaits one shared background provisioning task before the
+  front door opens. Custody's `provision_for_process_start` creates the
+  keypair on `Absent` — a Nostr identity is the one identity type that permits
+  full background creation: no email, no signup, no verification, a keypair in
+  milliseconds with zero user input — adopts on `Unadopted` exactly as
+  `OMEGA-DELTA-0110`'s path always did, resolves silently on `Ready`, and
+  refuses every other state **by name**, because replacing a `Lost` or
+  `Conflict` identity unattended is the omega#110 silent pick in the worst
+  possible place. The process-start inspection also acknowledges a completed
+  identity reset, which the dormant gate had silently stopped doing.
+- **A refusal is logged, never a park.** `await_identity_ready` returns `Ok`
+  either way and the thread opens; the surfaces that need the identity refuse
+  with the same named state when touched. A launch that waits forever behind
+  an unattended custody problem with no screen to repair it on is the dead end
+  this delta family exists to delete.
+- **The `onboarding::Finish` dead-end class is structurally impossible.** No
+  completion channel exists for a UI action to forget to complete: the wait
+  resolves when provisioning resolves, full stop. The first-run onboarding
+  journey — `show_onboarding_view`, the first-run window mode, the
+  release-waiters handoff — is removed rather than unrendered, and zero base's
+  `onboarding::Finish` admission (omega#99) retired with the gate it existed
+  to release (`OMEGA-DELTA-0051`).
+- **The gate's purpose survives the ceremony.** Startup and zero base still
+  call `await_identity_ready` before opening the front door, so no surface
+  acts before custody has answered, and the seam for any future owner-decided
+  startup journey is still that one call.
+- **Enforced by:**
+  `startup_provisions_identity_in_the_background_and_opens_the_front_door`
   in `crates/omega_deltas`, alongside `a_fresh_window_opens_on_the_agent`
   (`OMEGA-DELTA-0019`) and `the_front_door_does_not_require_an_open_project`
-  (`OMEGA-DELTA-0034`).
-- **What this does not cover:** the contents of onboarding, or the later UX for
-  offering it as an optional journey.
+  (`OMEGA-DELTA-0034`); plus
+  `process_start_provisioning_creates_adopts_and_is_idempotent` and
+  `process_start_provisioning_refuses_every_state_it_cannot_answer` in
+  `crates/omega_identity`, and
+  `startup_provisioning_is_shared_by_concurrent_callers` and
+  `a_provisioning_refusal_never_blocks_the_front_door` in
+  `crates/onboarding`.
+- **What this does not cover:** mode-scoped disclosure of the identity
+  (channel handle defaults, Sarah truth at Sarah-selection, pairing at
+  pairing), which each belong to their consuming surface; and the backup
+  nudge, which is `OMEGA-DELTA-0183`.
 
 ### OMEGA-DELTA-0041 — Omega Agent is attachable over ACP, on a loopback socket that is off by default and read-only
 
@@ -2559,6 +2595,16 @@ than it sounds, because the harness omega#81's acceptance sentence names —
 
 ### OMEGA-DELTA-0051 — Zero base derives its setup, and can finish the one step it still asks for
 
+- **Amended by omega#164 (owner direction 2026-07-29): the identity step is
+  silent.** `OMEGA-DELTA-0040` now provisions the Nostr identity in the
+  background, so no startup path opens the onboarding page in zero base and no
+  UI action releases any startup wait. The `onboarding::Finish` admission this
+  record added is therefore retired — the dead end it repaired can no longer
+  exist, and an admitted action whose only job is gone is a door frame
+  standing where the room was demolished. The identity-only page branch stays
+  as defence in depth for any future admission that reaches the page. The
+  amended check asserts the whole `onboarding` namespace is refused in zero
+  base. Everything below is the historical record of the ceremony era.
 - **Upstream Zed:** first-run onboarding is one page that asks for a theme, a
   base keymap, editor imports, vim mode, and telemetry, then hands off to the
   editor. Every question is a preference with a shipped default behind it.
@@ -4449,6 +4495,18 @@ than merely stated.
 
 ### OMEGA-DELTA-0110 — A profile with no identity files adopts the identity already in custody, and says so
 
+- **Amended by omega#164:** the startup gate is silent background provisioning
+  (`OMEGA-DELTA-0040`), so an `Unadopted` profile is adopted at launch through
+  `adopt_custodied` — the same one-way adoption this record demands, now
+  unattended, matching the precedent `provision_unattended` set for the hosted
+  lane (`OMEGA-DELTA-0159`). The invariants keep their teeth in the amended
+  checks: `Unadopted` is never counted ready without an adoption transaction,
+  never routed to `create` (whose empty-store fallback generates), and a
+  planted transaction still resolves to `Incomplete` and refuses. The
+  `onboarding_required` startup predicate this record cited is replaced by the
+  exhaustive state mapping in `provision_for_process_start`. The identity
+  section's unadopted screen and its disclosure sentence survive for explicit
+  visits.
 - **Upstream Zed:** first-run onboarding asks for nothing that outlives the
   profile directory. `--user-data-dir` is a complete reset of who you are to
   the app, because there is nothing about you outside it.
@@ -7992,3 +8050,45 @@ current image build does not decode it inline.
   outage. omega#164 must first land background Nostr identity and relay
   admission, and omega#158 owns the installed two-account and outage run. Issue
   #156 must remain open until those receipts exist.
+
+### OMEGA-DELTA-0183 — The identity backup nudge appears only after the identity has something to lose
+
+- **Upstream Zed:** has no local signing identity and therefore no backup
+  problem. There is nothing this diverges *from* except the obvious
+  alternative designs, which is why they are named here.
+- **The problem this answers.** omega#164 made identity creation silent
+  (`OMEGA-DELTA-0040`), so a key nobody was shown silently accrues value —
+  channel reputation, device grants, Sarah entitlements — and its loss becomes
+  expensive before its existence was ever mentioned. The rejected answers: a
+  backup step at first launch is the onboarding ceremony the owner deleted,
+  and a modal at any time is a prompt. What ships is a quiet, dismissible
+  sidebar row — "Back up your Omega identity key" — that blocks nothing.
+- **Armed by value, never by time.** The nudge renders only when a durable
+  record says value accrued. Three events write that record, each through the
+  one custody seam, each fail-soft so the nudge input can never block the act
+  that armed it: a signed public channel write — both the tester-channel
+  writer (`omega_public_channel_publish`, `OMEGA-DELTA-0182`) and the legacy
+  community control path record it — a freshly minted device pairing grant (the production bridge servers inject
+  the recorder; the pairing state machine's constructor keeps `None`, so its
+  tests never write into a real profile), and a live Sarah voice session (the
+  `Ready` event). A fresh profile has no record, so a first launch can never
+  show the nudge; an identity already protected by a recovery artifact has
+  nothing to nudge about and is likewise quiet.
+- **Dismissal is durable.** One click writes the dismissal beside the identity
+  files and the nudge stays gone across restarts. A nudge that reappears every
+  launch is a prompt wearing a nudge's clothes. The record is idempotent and
+  keeps the first value kind, because "when did this key start mattering" is a
+  fact about the first event, not the latest.
+- **Quiet by construction.** Every read failure in `backup_nudge_status`
+  resolves to "do not nudge". The sidebar polls the durable status on a slow
+  cadence instead of holding channels into the three subsystems where value
+  accrues, and the poll dies with the panel.
+- **Enforced by:** `the_backup_nudge_arms_on_value_and_stays_quiet` in
+  `crates/omega_deltas`, and
+  `backup_nudge_arms_on_first_value_and_stays_dismissed` in
+  `crates/omega_identity`.
+- **What this does not cover.** The backup *surface* itself: the recovery
+  artifact export lives in the identity section, which zero base does not
+  reach, so the nudge currently informs without a one-click route to the
+  export control. Making that control reachable in the product surface is its
+  own bounded decision, not a reason to grow this row into a screen.

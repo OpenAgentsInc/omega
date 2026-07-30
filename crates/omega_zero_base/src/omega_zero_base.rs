@@ -83,11 +83,11 @@ static ENTERED: AtomicBool = AtomicBool::new(false);
 /// Has zero base's own surface taken the window over yet?
 ///
 /// `OMEGA-DELTA-0053`. Written once, by the workspace initialiser, after the
-/// identity gate has been answered and the thread is open. Before that the
-/// ordinary workspace has to render, because `OMEGA-DELTA-0040`'s identity
-/// onboarding is a centre-pane item and a window with no centre pane could
-/// never show it — which would be a worse dead end than the one
-/// `OMEGA-DELTA-0051` just repaired.
+/// identity gate has been answered and the thread is open. The gate is silent
+/// now — omega#164 provisions the Nostr identity in the background — but the
+/// order is unchanged: the seal happens only after the readiness wait resolves
+/// and the thread renders, so nothing is sealed over a window that has not
+/// finished becoming the product.
 static SEALED: AtomicBool = AtomicBool::new(false);
 
 /// The namespaces zero base admits.
@@ -126,30 +126,26 @@ pub const ADMITTED_NAMESPACES: &[&str] = &[
 
 /// The individually admitted actions, by full name.
 ///
-/// Window management, font size, settings navigation, and the one control that
-/// finishes identity onboarding. The settings actions are admitted
-/// individually so provider errors can open the real settings window without
-/// admitting the extensions surface or the rest of the `omega` namespace.
-/// Sarah voice controls are likewise admitted individually: the composer owns
-/// those five controls in zero base, while opening or focusing the unrendered
-/// workroom remains refused.
+/// Window management, font size, and settings navigation. The settings actions
+/// are admitted individually so provider errors can open the real settings
+/// window without admitting the extensions surface or the rest of the `omega`
+/// namespace. Sarah voice controls are likewise admitted individually: the
+/// composer owns those five controls in zero base, while opening or focusing
+/// the unrendered workroom remains refused.
 ///
-/// # Why `onboarding::Finish` is here
+/// # Why `onboarding::Finish` is no longer here
 ///
-/// omega#99. Without it, zero base is a **dead end on a fresh profile**.
-/// `OMEGA-DELTA-0040` puts a first-ever launch on identity onboarding and parks
-/// startup on `await_identity_ready`; the only thing that releases that wait is
-/// the first-run branch of `on_finish`, which runs from `onboarding::Finish`.
-/// The gate refused that action, so a new user reached the identity page,
-/// created an identity, pressed "Finish Setup", and nothing happened —
-/// forever, across restarts, because identity never became ready. Observed
-/// directly: the log line reads `onboarding::Finish is off in zero base`.
-///
-/// This admits *completing* the identity gate, which is the opposite of
-/// bypassing it. `SignIn` and `OpenAccount` stay refused — they are the hosted
-/// account path `OMEGA-DELTA-0010` and `OMEGA-DELTA-0011` removed — and
-/// `ResetHints` stays refused because it belongs to the welcome-screen journey
-/// zero base does not render.
+/// omega#99 admitted it because zero base was a **dead end on a fresh
+/// profile**: `OMEGA-DELTA-0040` parked startup on `await_identity_ready`, and
+/// only the first-run branch of `on_finish` released that wait. omega#164
+/// (owner direction 2026-07-29) removed the ceremony the admission completed:
+/// startup now provisions the Nostr identity silently in the background and no
+/// UI action releases any startup wait, so the dead-end class the admission
+/// repaired is structurally impossible and the admission retires with the
+/// gate. The whole `onboarding` namespace stays refused — `SignIn` and
+/// `OpenAccount` are the hosted account path `OMEGA-DELTA-0010` and
+/// `OMEGA-DELTA-0011` removed, and `ResetHints` belongs to the welcome-screen
+/// journey zero base does not render.
 pub const ADMITTED_ACTIONS: &[&str] = &[
     // OMEGA-DELTA-0175. Clean-profile Vim editor actions, mechanically checked
     // against the shipped keymap. Helix and workspace-management actions stay refused.
@@ -369,7 +365,6 @@ pub const ADMITTED_ACTIONS: &[&str] = &[
     "omega::ResetBufferFontSize",
     "omega::ResetUiFontSize",
     "omega::ToggleFullScreen",
-    "onboarding::Finish",
     "search::SelectNextMatch",
     "search::SelectPreviousMatch",
     "terminal::Clear",
@@ -593,10 +588,6 @@ mod tests {
             "omega::OpenLegacySettings",
             "omega::OpenSettingsAt",
             "omega::OpenSettingsPage",
-            // omega#99. The action that releases `await_identity_ready`.
-            // Without it a fresh profile can reach identity onboarding and
-            // never leave it, which is a dead end rather than a subtraction.
-            "onboarding::Finish",
             "workroom::PrepareVoiceAdmission",
             "workroom::PrepareVoiceAdmission",
             "workroom::StartVoice",
@@ -643,9 +634,14 @@ mod tests {
             "workspace::NewTerminal",
             "workspace::OpenTerminal",
             "workspace::ToggleHelixMode",
-            // The hosted-account path OMEGA-DELTA-0010 and OMEGA-DELTA-0011
-            // removed. Admitting `onboarding::Finish` must not drag the rest of
-            // its namespace in with it.
+            // omega#164, owner direction 2026-07-29. The identity gate is
+            // silent: startup provisions the Nostr identity in the background
+            // and no UI action releases any startup wait, so the omega#99
+            // `onboarding::Finish` admission retired with the ceremony it
+            // completed. The whole namespace is refused — `SignIn` and
+            // `OpenAccount` are the hosted account path OMEGA-DELTA-0010 and
+            // OMEGA-DELTA-0011 removed.
+            "onboarding::Finish",
             "onboarding::SignIn",
             "onboarding::OpenAccount",
             "onboarding::ResetHints",

@@ -36,20 +36,10 @@ const FAMILY_NAMES: [SharedString; 3] = [
     SharedString::new_static("Gruvbox"),
 ];
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub(crate) enum BasicsPageMode {
-    FirstRun,
-    EditorSetup,
-}
-
-impl BasicsPageMode {
-    fn identity_presentation(self) -> IdentitySectionPresentation {
-        match self {
-            Self::FirstRun => IdentitySectionPresentation::Full,
-            Self::EditorSetup => IdentitySectionPresentation::Compact,
-        }
-    }
-}
+// omega#164: the first-run identity journey is removed, so this page has one
+// mode — the explicit editor-setup journey — and its identity section renders
+// the compact presentation that journey always used.
+const IDENTITY_PRESENTATION: IdentitySectionPresentation = IdentitySectionPresentation::Compact;
 
 fn get_theme_family_themes(theme_name: &str) -> Option<(&'static str, &'static str)> {
     for i in 0..LIGHT_THEMES.len() {
@@ -725,7 +715,6 @@ fn render_ai_section(tab_index: &mut isize, compact: bool, cx: &mut App) -> impl
 pub(crate) fn render_basics_page(
     _user_store: &Entity<UserStore>,
     identity_section: &Entity<IdentitySection>,
-    mode: BasicsPageMode,
     compact: bool,
     cx: &mut App,
 ) -> impl IntoElement {
@@ -740,19 +729,12 @@ pub(crate) fn render_basics_page(
     // and two toggles — a wall of setup between a person and the one thread the
     // mode exists to show. Every one of those has a shipped default or is
     // already detectable, so zero base takes the default instead of asking.
-    // The Codex entry in the agent grid was even showing a green check while
-    // asking to install it, which is the same "asking about something the app
-    // can already see" the banner was doing.
     //
-    // **The identity section stays, and that is deliberate.**
-    // `OMEGA-DELTA-0040` puts a first-ever launch on identity onboarding, and
-    // the previous lane's own bug here was a zoomed panel *covering* that page
-    // — "a bypass of an identity gate wearing a layout's clothes". Rendering
-    // zero without the identity step would be that same bypass with better
-    // manners. The delta's scope note is what makes the rest of this cut legal:
-    // it binds the identity gate and its handoff and says in as many words that
-    // it "does not cover *what* onboarding asks for". So the gate stays, one
-    // click, and the preference chrome around it goes.
+    // Since omega#164 removed the first-run journey, no startup path opens this
+    // page in zero base at all — a fresh profile gets its identity from the
+    // silent background provisioning. The branch stays as defence in depth: if
+    // a future admission lets zero base reach this page, it must still show
+    // the identity section and nothing else.
     if omega_zero_base::is_active() {
         return v_flex()
             .id("basics-page")
@@ -760,7 +742,7 @@ pub(crate) fn render_basics_page(
             .child(render_identity_section(
                 &mut tab_index,
                 identity_section,
-                mode.identity_presentation(),
+                IDENTITY_PRESENTATION,
                 cx,
             ))
             .into_any_element();
@@ -772,7 +754,7 @@ pub(crate) fn render_basics_page(
         .child(render_identity_section(
             &mut tab_index,
             identity_section,
-            mode.identity_presentation(),
+            IDENTITY_PRESENTATION,
             cx,
         ))
         .child(render_theme_section(&mut tab_index, compact, cx))
@@ -791,15 +773,8 @@ mod tests {
     use super::*;
 
     #[test]
-    fn onboarding_mode_selects_only_the_identity_presentation() {
-        assert_eq!(
-            BasicsPageMode::FirstRun.identity_presentation(),
-            IdentitySectionPresentation::Full
-        );
-        assert_eq!(
-            BasicsPageMode::EditorSetup.identity_presentation(),
-            IdentitySectionPresentation::Compact
-        );
+    fn the_editor_setup_page_uses_the_compact_identity_presentation() {
+        assert_eq!(IDENTITY_PRESENTATION, IdentitySectionPresentation::Compact);
     }
 
     #[test]

@@ -1,19 +1,21 @@
 use std::sync::Arc;
 
-use futures::{FutureExt as _, channel::oneshot, future::Shared};
+use futures::{FutureExt as _, future::Shared};
 use gpui::{App, AppContext as _, AsyncApp, Global, Task};
-use omega_identity::{CustodyError, CustodyState, IdentityInspection, IdentityService};
-use workspace::AppState;
+use omega_identity::{CustodyError, CustodyResult, CustodyState, IdentityService, ReceiptRef};
 
-use crate::show_onboarding_view;
+/// The receipt the silent first-launch provisioning writes into custody.
+///
+/// omega#164, owner direction 2026-07-29: there is no onboarding flow. The
+/// receipt names the startup path so a custody audit can tell a background
+/// launch keygen from an owner-clicked create, a hosted-lane provision
+/// (`omega-device-pairing-provision-v1`), or a recovery.
+const STARTUP_PROVISION_RECEIPT: &str = "omega-first-launch-background-keygen-v1";
 
-const OPEN_ONBOARDING_DURING_STARTUP: bool = false;
-
-type StartupInspection = Result<IdentityInspection, Arc<CustodyError>>;
-type StartupCompletion = Result<(), Arc<anyhow::Error>>;
+type StartupProvision = Result<CustodyResult, Arc<CustodyError>>;
 
 trait IdentityStartupBackend: Send + Sync {
-    fn inspect_for_process_start(&self) -> Result<IdentityInspection, CustodyError>;
+    fn provision_for_process_start(&self) -> Result<CustodyResult, CustodyError>;
 }
 
 struct SystemIdentityStartupBackend {
@@ -29,17 +31,24 @@ impl SystemIdentityStartupBackend {
 }
 
 impl IdentityStartupBackend for SystemIdentityStartupBackend {
-    fn inspect_for_process_start(&self) -> Result<IdentityInspection, CustodyError> {
-        self.service.inspect_for_process_start()
+    fn provision_for_process_start(&self) -> Result<CustodyResult, CustodyError> {
+        let receipt_ref = ReceiptRef::new(STARTUP_PROVISION_RECEIPT)
+            .map_err(|_| CustodyError::CustodyDenied(CustodyState::Absent))?;
+        self.service.provision_for_process_start(receipt_ref)
     }
 }
 
+/// One shared background provisioning task for the whole process.
+///
+/// `OMEGA-DELTA-0040` (amended by omega#164): startup provisions the Nostr
+/// identity silently in the background and then opens the front door. Every
+/// window path awaits the same shared task, so custody is inspected and
+/// provisioned exactly once per launch no matter how many windows race, and no
+/// user gesture is ever part of releasing the wait — the `onboarding::Finish`
+/// dead-end class is structurally impossible because there is no completion
+/// channel for a UI action to forget to complete.
 struct IdentityStartupCoordinator {
-    inspection: Shared<Task<StartupInspection>>,
-    completion: Shared<Task<StartupCompletion>>,
-    completion_sender: Option<oneshot::Sender<StartupCompletion>>,
-    onboarding_open: bool,
-    terminal: Option<StartupCompletion>,
+    provision: Shared<Task<StartupProvision>>,
 }
 
 impl Global for IdentityStartupCoordinator {}
@@ -57,148 +66,61 @@ impl IdentityStartupCoordinator {
             return;
         }
 
-        let inspection = cx
-            .background_spawn(async move { backend.inspect_for_process_start().map_err(Arc::new) })
+        let provision = cx
+            .background_spawn(
+                async move { backend.provision_for_process_start().map_err(Arc::new) },
+            )
             .shared();
-        let (completion_sender, completion_receiver) = oneshot::channel();
-        let completion = cx
-            .spawn(async move |_| match completion_receiver.await {
-                Ok(completion) => completion,
-                Err(_) => Err(Arc::new(anyhow::anyhow!(
-                    "identity startup completion channel closed before release"
-                ))),
-            })
-            .shared();
-
-        cx.set_global(Self {
-            inspection,
-            completion,
-            completion_sender: Some(completion_sender),
-            onboarding_open: false,
-            terminal: None,
-        });
-    }
-
-    fn claim_onboarding(&mut self) -> bool {
-        if self.terminal.is_some() || self.onboarding_open {
-            return false;
-        }
-        self.onboarding_open = true;
-        true
-    }
-
-    fn onboarding_opened(cx: &mut App) {
-        if cx.has_global::<Self>() {
-            cx.global_mut::<Self>().onboarding_open = true;
-        }
-    }
-
-    fn onboarding_closed(cx: &mut App) {
-        if cx.has_global::<Self>() {
-            cx.global_mut::<Self>().onboarding_open = false;
-        }
-    }
-
-    fn finish(completion: StartupCompletion, cx: &mut App) {
-        if !cx.has_global::<Self>() {
-            return;
-        }
-        let coordinator = cx.global_mut::<Self>();
-        if coordinator.terminal.is_some() {
-            return;
-        }
-
-        coordinator.terminal = Some(completion.clone());
-        if let Some(sender) = coordinator.completion_sender.take() {
-            if sender.send(completion).is_err() {
-                zlog::error!("identity startup waiters disappeared before release");
-            }
-        }
+        cx.set_global(Self { provision });
     }
 }
 
-pub async fn await_identity_ready(
-    app_state: Arc<AppState>,
-    cx: &mut AsyncApp,
-) -> anyhow::Result<()> {
-    if !OPEN_ONBOARDING_DURING_STARTUP {
-        return Ok(());
-    }
-
-    let (inspection, completion, terminal) = cx.update(|cx| {
-        IdentityStartupCoordinator::install(cx);
-        let coordinator = cx.global::<IdentityStartupCoordinator>();
-        (
-            coordinator.inspection.clone(),
-            coordinator.completion.clone(),
-            coordinator.terminal.is_some(),
-        )
-    });
-    if terminal {
-        return completion
-            .await
-            .map_err(|error| anyhow::anyhow!("{error:#}"));
-    };
-
-    let needs_onboarding = match inspection.await {
-        Ok(inspection) => onboarding_required(&inspection),
-        Err(error) => {
-            zlog::error!("identity startup inspection failed: {error}");
-            true
-        }
-    };
-
-    if !needs_onboarding {
-        cx.update(|cx| IdentityStartupCoordinator::finish(Ok(()), cx));
-        return Ok(());
-    }
-
-    let should_open = cx.update(|cx| {
-        let coordinator = cx.global_mut::<IdentityStartupCoordinator>();
-        coordinator.claim_onboarding()
-    });
-    if should_open {
-        let open_task = cx.update(|cx| show_onboarding_view(app_state, cx));
-        cx.spawn(async move |cx| {
-            if let Err(error) = open_task.await {
-                zlog::error!("failed to open identity onboarding: {error:#}");
-                cx.update(|cx| {
-                    IdentityStartupCoordinator::onboarding_closed(cx);
-                    IdentityStartupCoordinator::finish(Err(Arc::new(error)), cx);
-                });
-            }
-        })
-        .detach();
-    }
-
-    completion
-        .await
-        .map_err(|error| anyhow::anyhow!("{error:#}"))
-}
-
-/// The startup gate `OMEGA-DELTA-0040` parks on: onboarding is required until
-/// custody is `Ready`.
+/// Install a coordinator whose provisioning succeeds without touching any
+/// real profile.
 ///
-/// Named rather than inlined so the predicate has one place it can be weakened
-/// and one place a test can hold. omega#110 changed what onboarding *concludes*
-/// about an identity this profile did not create — it must not change whether
-/// the wait happens. `Unadopted` counting as ready would open a composer having
-/// silently adopted an identity nobody was shown, which is the same defect as
-/// omega#110 with the opposite sign.
-fn onboarding_required(inspection: &IdentityInspection) -> bool {
-    inspection.custody.state != CustodyState::Ready
+/// Dependent crates' tests drive the real startup path
+/// (`restore_or_create_workspace`, open requests), and the production backend
+/// would inspect — and on `Absent`, create — identity files under the real
+/// data root of whoever runs the tests. omega#110's rule holds for the silent
+/// gate too: tests fabricate custody state; they never probe or write the
+/// owner's. First install wins, so call this before anything awaits the gate.
+#[cfg(any(test, feature = "test-support"))]
+pub fn install_test_identity_startup(cx: &mut App) {
+    struct ReadyWithoutCustody;
+
+    impl IdentityStartupBackend for ReadyWithoutCustody {
+        fn provision_for_process_start(&self) -> Result<CustodyResult, CustodyError> {
+            Ok(CustodyResult {
+                state: CustodyState::Ready,
+                identity: None,
+                receipt_ref: None,
+            })
+        }
+    }
+
+    IdentityStartupCoordinator::install_with_backend(Arc::new(ReadyWithoutCustody), cx);
 }
 
-pub(crate) fn onboarding_opened(cx: &mut App) {
-    IdentityStartupCoordinator::onboarding_opened(cx);
-}
+/// Provision the Nostr identity in the background, then let startup proceed.
+///
+/// The gate's purpose survives the removed onboarding ceremony: no surface
+/// opens before custody has been provisioned or has refused by name. The
+/// refusal states (`Lost`, `Conflict`, `Incomplete`, reset) are logged rather
+/// than blocking, because a launch that parks forever behind an unattended
+/// custody problem is a worse product than a thread whose identity-consuming
+/// surfaces refuse with the same named state when touched.
+pub async fn await_identity_ready(cx: &mut AsyncApp) -> anyhow::Result<()> {
+    let provision = cx.update(|cx| {
+        IdentityStartupCoordinator::install(cx);
+        cx.global::<IdentityStartupCoordinator>().provision.clone()
+    });
 
-pub(crate) fn onboarding_closed(cx: &mut App) {
-    IdentityStartupCoordinator::onboarding_closed(cx);
-}
-
-pub(crate) fn release_identity_waiters(cx: &mut App) {
-    IdentityStartupCoordinator::finish(Ok(()), cx);
+    if let Err(error) = provision.await {
+        zlog::error!(
+            "first-launch identity provisioning refused; opening the front door without a ready identity: {error}"
+        );
+    }
+    Ok(())
 }
 
 #[cfg(test)]
@@ -206,109 +128,97 @@ mod tests {
     use std::sync::atomic::{AtomicUsize, Ordering};
 
     use gpui::TestAppContext;
-    use omega_identity::{CustodyResult, RecoveryProtectionState, RecoveryProtectionStatus};
+    use omega_identity::{IdentityRef, PublicIdentity};
 
     use super::*;
 
     struct FakeBackend {
         calls: Arc<AtomicUsize>,
-        state: CustodyState,
+        outcome: Result<CustodyState, CustodyState>,
     }
 
     impl IdentityStartupBackend for FakeBackend {
-        fn inspect_for_process_start(&self) -> Result<IdentityInspection, CustodyError> {
+        fn provision_for_process_start(&self) -> Result<CustodyResult, CustodyError> {
             self.calls.fetch_add(1, Ordering::SeqCst);
-            Ok(IdentityInspection {
-                custody: CustodyResult {
-                    state: self.state,
-                    identity: None,
+            match self.outcome {
+                Ok(state) => Ok(CustodyResult {
+                    state,
+                    identity: Some(test_identity()),
                     receipt_ref: None,
-                },
-                pending_transaction: None,
-                conflict: None,
-                recovery_protection: RecoveryProtectionStatus {
-                    state: RecoveryProtectionState::NotApplicable,
-                    record: None,
-                },
-            })
-        }
-    }
-
-    fn inspection_with(state: CustodyState) -> IdentityInspection {
-        IdentityInspection {
-            custody: CustodyResult {
-                state,
-                identity: None,
-                receipt_ref: None,
-            },
-            pending_transaction: None,
-            conflict: None,
-            recovery_protection: RecoveryProtectionStatus {
-                state: RecoveryProtectionState::NotApplicable,
-                record: None,
-            },
-        }
-    }
-
-    #[test]
-    fn startup_does_not_open_onboarding() {
-        assert!(!OPEN_ONBOARDING_DURING_STARTUP);
-    }
-
-    /// Keep the dormant gate exhaustive so manually restoring the startup
-    /// journey cannot accidentally treat a new custody state as ready.
-    #[test]
-    fn every_custody_state_but_ready_holds_the_startup_wait() {
-        fn expected(state: CustodyState) -> bool {
-            match state {
-                CustodyState::Ready => false,
-                CustodyState::Absent
-                | CustodyState::Unadopted
-                | CustodyState::Locked
-                | CustodyState::Incomplete
-                | CustodyState::Lost
-                | CustodyState::Conflict
-                | CustodyState::ResetFailed
-                | CustodyState::RelaunchRequired => true,
+                }),
+                Err(state) => Err(CustodyError::CustodyDenied(state)),
             }
         }
-
-        for state in [
-            CustodyState::Ready,
-            CustodyState::Absent,
-            CustodyState::Unadopted,
-            CustodyState::Locked,
-            CustodyState::Incomplete,
-            CustodyState::Lost,
-            CustodyState::Conflict,
-            CustodyState::ResetFailed,
-            CustodyState::RelaunchRequired,
-        ] {
-            assert_eq!(
-                onboarding_required(&inspection_with(state)),
-                expected(state),
-                "{state:?} changed sides of the OMEGA-DELTA-0040 startup wait"
-            );
-        }
     }
 
+    fn test_identity() -> PublicIdentity {
+        // The secp256k1 generator point's x-coordinate: a well-known valid
+        // x-only public key that never corresponds to any profile's secret.
+        let public_key_hex =
+            "79be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798".to_string();
+        PublicIdentity::from_public_key_hex(
+            IdentityRef::new(format!("omega-nostr-{public_key_hex}")).expect("valid identity ref"),
+            public_key_hex,
+        )
+        .expect("valid test identity")
+    }
+
+    #[test]
+    fn the_startup_receipt_is_a_valid_receipt_ref() {
+        ReceiptRef::new(STARTUP_PROVISION_RECEIPT).expect("the startup receipt ref is valid");
+    }
+
+    /// One provisioning per process, no matter how many startup paths race.
     #[gpui::test]
-    fn startup_inspection_is_shared_by_concurrent_callers(cx: &mut TestAppContext) {
+    fn startup_provisioning_is_shared_by_concurrent_callers(cx: &mut TestAppContext) {
         let calls = Arc::new(AtomicUsize::new(0));
         let backend = Arc::new(FakeBackend {
             calls: calls.clone(),
-            state: CustodyState::Ready,
+            outcome: Ok(CustodyState::Ready),
         });
         let completed = Arc::new(AtomicUsize::new(0));
 
         cx.update(|cx| {
             IdentityStartupCoordinator::install_with_backend(backend, cx);
-            let inspection = cx.global::<IdentityStartupCoordinator>().inspection.clone();
-            for _ in 0..2 {
-                let inspection = inspection.clone();
+            let provision = cx.global::<IdentityStartupCoordinator>().provision.clone();
+            for _ in 0..3 {
+                let provision = provision.clone();
                 let completed = completed.clone();
                 cx.spawn(async move |_| {
-                    inspection.await.expect("startup inspection");
+                    let custody = provision.await.expect("startup provisioning");
+                    assert_eq!(custody.state, CustodyState::Ready);
+                    completed.fetch_add(1, Ordering::SeqCst);
+                })
+                .detach();
+            }
+        });
+        cx.run_until_parked();
+
+        assert_eq!(calls.load(Ordering::SeqCst), 1);
+        assert_eq!(completed.load(Ordering::SeqCst), 3);
+    }
+
+    /// A custody refusal is logged, not a dead end: `await_identity_ready`
+    /// still returns `Ok` so startup opens the front door. This is the
+    /// structural replacement for the removed `onboarding::Finish` release —
+    /// no state of custody leaves a launch parked forever.
+    #[gpui::test]
+    fn a_provisioning_refusal_never_blocks_the_front_door(cx: &mut TestAppContext) {
+        let calls = Arc::new(AtomicUsize::new(0));
+        let backend = Arc::new(FakeBackend {
+            calls: calls.clone(),
+            outcome: Err(CustodyState::Lost),
+        });
+        let completed = Arc::new(AtomicUsize::new(0));
+
+        cx.update(|cx| {
+            IdentityStartupCoordinator::install_with_backend(backend, cx);
+            for _ in 0..2 {
+                let completed = completed.clone();
+                cx.spawn(async move |cx| {
+                    await_identity_ready(cx)
+                        .await
+                        .expect("a refusal must not become a startup error");
                     completed.fetch_add(1, Ordering::SeqCst);
                 })
                 .detach();
@@ -318,118 +228,5 @@ mod tests {
 
         assert_eq!(calls.load(Ordering::SeqCst), 1);
         assert_eq!(completed.load(Ordering::SeqCst), 2);
-    }
-
-    #[gpui::test]
-    fn release_wakes_every_waiter_and_is_idempotent(cx: &mut TestAppContext) {
-        let calls = Arc::new(AtomicUsize::new(0));
-        let backend = Arc::new(FakeBackend {
-            calls,
-            state: CustodyState::Absent,
-        });
-        let completed = Arc::new(AtomicUsize::new(0));
-
-        cx.update(|cx| {
-            IdentityStartupCoordinator::install_with_backend(backend, cx);
-            let completion = cx.global::<IdentityStartupCoordinator>().completion.clone();
-            for _ in 0..3 {
-                let completion = completion.clone();
-                let completed = completed.clone();
-                cx.spawn(async move |_| {
-                    completion.await.expect("startup release");
-                    completed.fetch_add(1, Ordering::SeqCst);
-                })
-                .detach();
-            }
-            IdentityStartupCoordinator::finish(Ok(()), cx);
-            IdentityStartupCoordinator::finish(Ok(()), cx);
-        });
-        cx.run_until_parked();
-
-        assert_eq!(completed.load(Ordering::SeqCst), 3);
-        cx.update(|cx| {
-            assert_eq!(
-                cx.global::<IdentityStartupCoordinator>()
-                    .terminal
-                    .as_ref()
-                    .map(Result::is_ok),
-                Some(true)
-            );
-        });
-    }
-
-    #[gpui::test]
-    fn failure_wakes_current_and_future_waiters(cx: &mut TestAppContext) {
-        let calls = Arc::new(AtomicUsize::new(0));
-        let backend = Arc::new(FakeBackend {
-            calls,
-            state: CustodyState::Absent,
-        });
-        let failures = Arc::new(AtomicUsize::new(0));
-
-        cx.update(|cx| {
-            IdentityStartupCoordinator::install_with_backend(backend, cx);
-            let completion = cx.global::<IdentityStartupCoordinator>().completion.clone();
-            for _ in 0..2 {
-                let completion = completion.clone();
-                let failures = failures.clone();
-                cx.spawn(async move |_| {
-                    if completion.await.is_err() {
-                        failures.fetch_add(1, Ordering::SeqCst);
-                    }
-                })
-                .detach();
-            }
-            IdentityStartupCoordinator::finish(
-                Err(Arc::new(anyhow::anyhow!("failed to open onboarding"))),
-                cx,
-            );
-        });
-        cx.run_until_parked();
-
-        cx.update(|cx| {
-            let completion = cx.global::<IdentityStartupCoordinator>().completion.clone();
-            let failures = failures.clone();
-            cx.spawn(async move |_| {
-                if completion.await.is_err() {
-                    failures.fetch_add(1, Ordering::SeqCst);
-                }
-            })
-            .detach();
-        });
-        cx.run_until_parked();
-
-        assert_eq!(failures.load(Ordering::SeqCst), 3);
-        cx.update(|cx| {
-            assert_eq!(
-                cx.global::<IdentityStartupCoordinator>()
-                    .terminal
-                    .as_ref()
-                    .map(Result::is_err),
-                Some(true)
-            );
-        });
-    }
-
-    #[gpui::test]
-    fn closing_onboarding_allows_one_reopen_without_releasing(cx: &mut TestAppContext) {
-        let calls = Arc::new(AtomicUsize::new(0));
-        let backend = Arc::new(FakeBackend {
-            calls,
-            state: CustodyState::Absent,
-        });
-
-        cx.update(|cx| {
-            IdentityStartupCoordinator::install_with_backend(backend, cx);
-            let coordinator = cx.global_mut::<IdentityStartupCoordinator>();
-            assert!(coordinator.claim_onboarding());
-            assert!(!coordinator.claim_onboarding());
-            IdentityStartupCoordinator::onboarding_closed(cx);
-            assert!(
-                cx.global_mut::<IdentityStartupCoordinator>()
-                    .claim_onboarding()
-            );
-            assert!(cx.global::<IdentityStartupCoordinator>().terminal.is_none());
-        });
     }
 }

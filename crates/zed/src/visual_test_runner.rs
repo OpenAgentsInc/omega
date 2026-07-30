@@ -10823,8 +10823,8 @@ fn run_omega_agent_visual_tests_inner(
             "the sealed front-door proof rendered the editor center beside the agent surface"
         );
 
-        cx.set_debug_accessibility_active(workspace_window.into(), true)?;
-        let snapshot = cx.debug_render_snapshot(workspace_window.into())?;
+        cx.set_debug_accessibility_active(workspace_window, true)?;
+        let snapshot = cx.debug_render_snapshot(workspace_window)?;
         let mut probe = SemanticProbe::new(&snapshot);
         probe.require_visible("omega.new-conversation.front-door")?;
         probe.require_absent("welcome-content")?;
@@ -10861,7 +10861,7 @@ fn run_omega_agent_visual_tests_inner(
         );
         run_visual_test(
             "omega_front_door_no_project",
-            workspace_window.into(),
+            workspace_window,
             cx,
             update_baseline,
         )?
@@ -10909,7 +10909,7 @@ fn run_omega_agent_visual_tests_inner(
     }
 
     let activated = cx
-        .update_window(workspace_window.into(), |_, window, cx| {
+        .update_window(workspace_window, |_, window, cx| {
             panel.update(cx, |panel, cx| {
                 panel.activate_prepared_omega_for_tests(window, cx)
             })
@@ -10929,7 +10929,7 @@ fn run_omega_agent_visual_tests_inner(
 
     // The keystrokes go into this window through GPUI's own dispatch, so
     // nothing depends on which application macOS thinks is frontmost.
-    cx.simulate_input(workspace_window.into(), "route this thread on purpose");
+    cx.simulate_input(workspace_window, "route this thread on purpose");
     cx.run_until_parked();
 
     let typed = cx.read(|cx| {
@@ -10945,7 +10945,7 @@ fn run_omega_agent_visual_tests_inner(
         "typing on the front door did not reach the logical router composer"
     );
     if capture_sealed_front_door {
-        let snapshot = cx.debug_render_snapshot(workspace_window.into())?;
+        let snapshot = cx.debug_render_snapshot(workspace_window)?;
         let mut probe = SemanticProbe::new(&snapshot);
         probe.require_accessible(
             "omega-new-conversation-route-override-trigger",
@@ -10962,7 +10962,7 @@ fn run_omega_agent_visual_tests_inner(
         );
         run_visual_test(
             "omega_front_door_typing",
-            workspace_window.into(),
+            workspace_window,
             cx,
             update_baseline,
         )?
@@ -10981,7 +10981,7 @@ fn run_omega_agent_visual_tests_inner(
         return finish_omega_agent_visual_tests(workspace_window, cx, &[front_door, typing]);
     }
 
-    cx.update_window(workspace_window.into(), |_, window, cx| {
+    cx.update_window(workspace_window, |_, window, cx| {
         window.dispatch_action(Box::new(zed_actions::agent::Chat), cx);
     })
     .context("Failed to dispatch the projectless conversation's first turn")?;
@@ -10998,8 +10998,8 @@ fn run_omega_agent_visual_tests_inner(
     let route_receipt_line = cx
         .read(|cx| omega_route_receipt_line(&panel, cx))
         .ok_or_else(|| anyhow::anyhow!("the routed thread has no durable route receipt"))?;
-    cx.set_debug_accessibility_active(workspace_window.into(), true)?;
-    let snapshot = cx.debug_render_snapshot(workspace_window.into())?;
+    cx.set_debug_accessibility_active(workspace_window, true)?;
+    let snapshot = cx.debug_render_snapshot(workspace_window)?;
     let mut probe = SemanticProbe::new(&snapshot);
     probe.require_accessible("omega-route-receipt", "Status", &route_receipt_line)?;
     probe.require_absent("omega-new-conversation-route-override-trigger")?;
@@ -11009,7 +11009,7 @@ fn run_omega_agent_visual_tests_inner(
     // design — class, agent, model, run, and route reason — and a dock-width
     // capture truncates it with an ellipsis, which would make a picture of a
     // *truncated* line the evidence that the line renders.
-    cx.update_window(workspace_window.into(), |_, window, cx| {
+    cx.update_window(workspace_window, |_, window, cx| {
         panel.update(cx, |panel, cx| {
             use workspace::dock::Panel as _;
             panel.set_zoomed(true, window, cx);
@@ -11041,7 +11041,7 @@ fn run_omega_agent_visual_tests_inner(
 
         native_disclosure = run_visual_test(
             "omega_executor_disclosure_native",
-            workspace_window.into(),
+            workspace_window,
             cx,
             update_baseline,
         )?;
@@ -11091,7 +11091,7 @@ fn run_omega_agent_visual_tests_inner(
             "a pin to the fail-closed target must be honoured, not {:?}",
             honoured.reason
         );
-        cx.update_window(workspace_window.into(), |_, window, _cx| {
+        cx.update_window(workspace_window, |_, window, _cx| {
             window.refresh();
         })?;
         cx.run_until_parked();
@@ -11112,7 +11112,7 @@ fn run_omega_agent_visual_tests_inner(
 
         pin_honoured = run_visual_test(
             "omega_route_pin_honoured",
-            workspace_window.into(),
+            workspace_window,
             cx,
             update_baseline,
         )?;
@@ -11162,7 +11162,7 @@ fn run_omega_agent_visual_tests_inner(
             decision.reason
         );
 
-        cx.update_window(workspace_window.into(), |_, window, _cx| {
+        cx.update_window(workspace_window, |_, window, _cx| {
             window.refresh();
         })?;
         cx.run_until_parked();
@@ -11178,7 +11178,7 @@ fn run_omega_agent_visual_tests_inner(
 
         pin_fallback = run_visual_test(
             "omega_route_pin_not_honoured",
-            workspace_window.into(),
+            workspace_window,
             cx,
             update_baseline,
         )?;
@@ -11204,7 +11204,7 @@ fn run_omega_agent_visual_tests_inner(
 
     // omega#77: the external-ACP kind, on a second thread in the same panel.
     let stub: Rc<dyn AgentServer> = Rc::new(StubAgentServer::new(StubAgentConnection::new()));
-    cx.update_window(workspace_window.into(), |_, window, cx| {
+    cx.update_window(workspace_window, |_, window, cx| {
         panel.update(cx, |panel, cx| {
             panel.open_external_thread_with_server(stub.clone(), window, cx);
         });
@@ -11228,7 +11228,7 @@ fn run_omega_agent_visual_tests_inner(
 
     let external_disclosure = run_visual_test(
         "omega_executor_disclosure_external_acp",
-        workspace_window.into(),
+        workspace_window,
         cx,
         update_baseline,
     )?;
@@ -11272,7 +11272,7 @@ fn run_omega_agent_visual_tests_inner(
         external_thread_id,
         "operation.full-auto.visual".to_string(),
     );
-    cx.update_window(workspace_window.into(), |_, window, _cx| {
+    cx.update_window(workspace_window, |_, window, _cx| {
         window.refresh();
     })?;
     cx.run_until_parked();
@@ -11293,7 +11293,7 @@ fn run_omega_agent_visual_tests_inner(
 
     let lane_disclosure = run_visual_test(
         "omega_executor_disclosure_engine_lane",
-        workspace_window.into(),
+        workspace_window,
         cx,
         update_baseline,
     )?;
@@ -11326,7 +11326,7 @@ fn run_omega_agent_visual_tests_inner(
     // on a thread that never had one — a failure a single-thread shape could
     // not see.
     let plain_stub: Rc<dyn AgentServer> = Rc::new(StubAgentServer::new(StubAgentConnection::new()));
-    cx.update_window(workspace_window.into(), |_, window, cx| {
+    cx.update_window(workspace_window, |_, window, cx| {
         panel.update(cx, |panel, cx| {
             panel.open_external_thread_with_server(plain_stub, window, cx);
         });
@@ -12325,7 +12325,7 @@ fn run_omega_concurrent_agent_visual_tests(
                     workspace_window,
                     &workspace,
                     &panel,
-                    &[codex_thread.clone(), claude_thread.clone()],
+                    &[codex_thread.clone(), claude_thread],
                     cx,
                     &[],
                 )
@@ -12450,8 +12450,8 @@ fn run_omega_concurrent_agent_visual_tests(
                 cx.simulate_click_selector(workspace_window, "prompt.action.0")
                     .log_err();
                 cx.run_until_parked();
-                let mut threads = vec![codex_thread.clone(), claude_thread.clone()];
-                threads.extend(collision_thread.clone());
+                let mut threads = vec![codex_thread.clone(), claude_thread];
+                threads.extend(collision_thread);
                 finish_concurrent_agent_visual_tests(
                     workspace_window,
                     &workspace,

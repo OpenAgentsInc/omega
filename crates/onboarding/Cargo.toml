@@ -13,6 +13,7 @@ path = "src/onboarding.rs"
 
 [features]
 default = []
+test-support = []
 
 [dependencies]
 anyhow.workspace = true

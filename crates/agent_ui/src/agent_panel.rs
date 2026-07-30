@@ -2019,6 +2019,18 @@ pub struct AgentPanel {
     /// to be where somebody is looking.
     threads_sidebar_refusal: Option<SharedString>,
     device_pairing_surface: Option<DevicePairingSurface>,
+    /// omega#164. Whether the sidebar offers the quiet identity backup nudge.
+    ///
+    /// True only when the durable status says the background-created identity
+    /// has accrued value (a channel post, a device grant, a Sarah session),
+    /// the person has not dismissed the nudge, and no recovery artifact
+    /// already protects the key. A first launch can therefore never show it.
+    offers_identity_backup_nudge: bool,
+    /// The slow poll behind [`Self::offers_identity_backup_nudge`]. Held so it
+    /// dies with the panel. Value accrual happens in other subsystems (posts,
+    /// pairing, Sarah voice), so the panel reads the durable record rather
+    /// than requiring a channel back from each of them.
+    _identity_backup_nudge_poll: Option<Task<()>>,
     /// `OMEGA-DELTA-0035`. The poll that feeds the router the engine's framed
     /// `get_capacity` answer.
     ///
@@ -2684,6 +2696,8 @@ impl AgentPanel {
             _public_channel_view_subscriptions: HashMap::default(),
             threads_sidebar_refusal: None,
             device_pairing_surface: None,
+            offers_identity_backup_nudge: false,
+            _identity_backup_nudge_poll: None,
             _engine_capacity_poll: None,
             thread_outline,
             #[cfg(any(test, feature = "test-support"))]
@@ -2726,8 +2740,99 @@ impl AgentPanel {
         let mut panel = panel;
         panel.ensure_native_agent_connection(cx);
         panel.observe_engine_capacity(cx);
+        panel.observe_identity_backup_nudge(cx);
         panel.load_public_channels(cx);
         panel
+    }
+
+    /// omega#164. Keep the sidebar's view of the backup nudge current.
+    ///
+    /// The status is durable state under the identity data root, written by
+    /// the subsystems where value actually accrues, so the panel polls it on a
+    /// slow cadence instead of holding a channel into each of them. The read
+    /// happens on the background executor — custody inspection is file I/O —
+    /// and the loop ends with the panel.
+    fn observe_identity_backup_nudge(&mut self, cx: &mut Context<Self>) {
+        // omega#110's rule holds for the nudge too: tests never probe the real
+        // identity root. The nudge stays hidden in test builds unless a test
+        // drives `offers_identity_backup_nudge` directly.
+        if cfg!(any(test, feature = "test-support")) {
+            return;
+        }
+        let executor = cx.background_executor().clone();
+        self._identity_backup_nudge_poll = Some(cx.spawn(async move |this, cx| {
+            loop {
+                let should_offer = cx
+                    .background_spawn(async {
+                        omega_identity::IdentityService::system(*app_identity::CHANNEL)
+                            .backup_nudge_status()
+                            .should_offer_backup()
+                    })
+                    .await;
+                let alive = this
+                    .update(cx, |panel, cx| {
+                        if panel.offers_identity_backup_nudge != should_offer {
+                            panel.offers_identity_backup_nudge = should_offer;
+                            cx.notify();
+                        }
+                    })
+                    .is_ok();
+                if !alive {
+                    break;
+                }
+                executor.timer(std::time::Duration::from_secs(60)).await;
+            }
+        }));
+    }
+
+    /// omega#164. Dismiss the backup nudge, durably, without blocking anything.
+    fn dismiss_identity_backup_nudge(&mut self, cx: &mut Context<Self>) {
+        self.offers_identity_backup_nudge = false;
+        cx.background_spawn(async {
+            if let Err(error) = omega_identity::IdentityService::system(*app_identity::CHANNEL)
+                .dismiss_backup_nudge()
+            {
+                log::warn!("could not persist the backup nudge dismissal: {error}");
+            }
+        })
+        .detach();
+        cx.notify();
+    }
+
+    /// The quiet backup nudge row, or nothing.
+    ///
+    /// A nudge, not a prompt: it blocks no action, opens no modal, and its
+    /// dismissal is one click and durable. It renders only after the identity
+    /// has something to lose, never at first launch.
+    fn render_identity_backup_nudge(&self, cx: &mut Context<Self>) -> Option<AnyElement> {
+        if !self.offers_identity_backup_nudge {
+            return None;
+        }
+        Some(
+            ListItem::new("identity-backup-nudge")
+                .inset(true)
+                .spacing(ListItemSpacing::Sparse)
+                .start_slot(
+                    Icon::new(IconName::Lock)
+                        .size(IconSize::Small)
+                        .color(Color::Muted),
+                )
+                .child(
+                    Label::new("Back up your Omega identity key")
+                        .size(LabelSize::Small)
+                        .color(Color::Muted),
+                )
+                .end_slot(
+                    IconButton::new("dismiss-identity-backup-nudge", IconName::Close)
+                        .icon_size(IconSize::XSmall)
+                        .icon_color(Color::Muted)
+                        .tooltip(Tooltip::text("Dismiss"))
+                        .on_click(cx.listener(|this, _, _, cx| {
+                            this.dismiss_identity_backup_nudge(cx);
+                        })),
+                )
+                .into_any_element(),
+        )
     }
 
     /// `OMEGA-DELTA-0035`. Keep the router's view of the engine current.
@@ -5148,6 +5253,7 @@ impl AgentPanel {
                         .border_t_1()
                         .border_color(border)
                         .p_1()
+                        .children(self.render_identity_backup_nudge(cx))
                         .child(
                             ListItem::new("open-omega-phone-pairing")
                                 .aria_role(gpui::Role::Button)

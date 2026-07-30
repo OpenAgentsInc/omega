@@ -225,6 +225,17 @@ pub fn sign_write(
         "the projected tester-channel event is invalid"
     );
 
+    // omega#164. A signed tester-channel write is the first kind of value a
+    // background-created identity accrues, so it arms the quiet backup nudge
+    // (OMEGA-DELTA-0183). Recorded through the same service that signed —
+    // tests pass a temporary data root — and fail-soft: never a publish
+    // blocker.
+    if let Err(error) =
+        identity_service.record_backup_value_accrued(omega_identity::BackupValueKind::ChannelPost)
+    {
+        log::warn!("could not record identity backup value accrual: {error}");
+    }
+
     Ok(SignedPublicChannelWrite {
         event,
         record,

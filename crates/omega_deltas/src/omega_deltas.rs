@@ -171,6 +171,7 @@ pub const ENFORCED_DELTAS: &[&str] = &[
     "OMEGA-DELTA-0180",
     "OMEGA-DELTA-0181",
     "OMEGA-DELTA-0182",
+    "OMEGA-DELTA-0183",
 ];
 
 /// The concise product contract adjacent to the delta registry.
@@ -1179,10 +1180,13 @@ pub const NATIVE_AGENT_IDENTITY_PATH: &str = "crates/agent/src/agent.rs";
 /// OMEGA-DELTA-0040. The startup path that opens Omega's first window.
 pub const STARTUP_PATH: &str = "crates/zed/src/main.rs";
 
-/// OMEGA-DELTA-0040. First-run onboarding, which that startup path waits on.
+/// OMEGA-DELTA-0040. The explicit editor-setup onboarding page. The first-run
+/// journey was removed by omega#164; this file must never regrow a startup
+/// window mode.
 pub const ONBOARDING_PATH: &str = "crates/onboarding/src/onboarding.rs";
 
-/// OMEGA-DELTA-0040. The coordinator that releases the startup path.
+/// OMEGA-DELTA-0040. The silent background provisioning the startup path
+/// awaits.
 pub const IDENTITY_STARTUP_PATH: &str = "crates/onboarding/src/identity_startup.rs";
 
 /// OMEGA-DELTA-0110. Where custody decides what a data root with no identity
@@ -6657,14 +6661,23 @@ mod tests {
         }
     }
 
-    /// OMEGA-DELTA-0040. Startup skips onboarding and opens the front door.
+    /// OMEGA-DELTA-0040 (amended by omega#164). Startup provisions the Nostr
+    /// identity silently in the background, then opens the front door.
     ///
-    /// The onboarding implementation remains available from its explicit
-    /// actions, but it must not intercept startup. The readiness call stays
-    /// ahead of the front door as a single reversible seam for restoring an
-    /// optional startup journey later.
+    /// Three facts, each of which fails silently on its own:
+    ///
+    /// - the startup path still **waits** on `await_identity_ready` before it
+    ///   opens anything, so no surface acts before custody has answered;
+    /// - the wait resolves by **background provisioning** — custody's
+    ///   process-start path creates on `Absent`, adopts on `Unadopted`, and
+    ///   refuses every state that would be a silent identity replacement —
+    ///   never by a UI action, so the `onboarding::Finish` dead-end class is
+    ///   structurally impossible;
+    /// - a **refusal is logged, not a park**: the gate returns `Ok` either
+    ///   way, because a launch that waits forever behind an unattended custody
+    ///   problem is the dead end this amendment exists to delete.
     #[test]
-    fn startup_skips_onboarding_and_opens_the_front_door() {
+    fn startup_provisions_identity_in_the_background_and_opens_the_front_door() {
         let startup_path = repository_path(STARTUP_PATH);
         let startup = std::fs::read_to_string(&startup_path)
             .unwrap_or_else(|error| panic!("cannot read {}: {error}", startup_path.display()));
@@ -6679,7 +6692,8 @@ mod tests {
         let waits_at = restore.find("await_identity_ready(").unwrap_or_else(|| {
             panic!(
                 "OMEGA-DELTA-0040: `restore_or_create_workspace` in {} lost the \
-                 readiness seam that keeps optional onboarding reversible.",
+                 readiness seam, so a surface can open before identity \
+                 provisioning has answered.",
                 startup_path.display()
             )
         });
@@ -6694,8 +6708,8 @@ mod tests {
             });
         assert!(
             waits_at < opens_at,
-            "OMEGA-DELTA-0040: {} opens the front door before the optional \
-             readiness seam, which would make restoring onboarding a race.",
+            "OMEGA-DELTA-0040: {} opens the front door before the readiness \
+             seam, so a first launch could race its own identity creation.",
             startup_path.display()
         );
 
@@ -6703,67 +6717,89 @@ mod tests {
         let coordinator = std::fs::read_to_string(&coordinator_path)
             .unwrap_or_else(|error| panic!("cannot read {}: {error}", coordinator_path.display()));
         assert!(
-            coordinator.contains("const OPEN_ONBOARDING_DURING_STARTUP: bool = false;"),
-            "OMEGA-DELTA-0040: {} can open onboarding during startup again. \
-             Startup must go directly to the new-thread surface.",
+            coordinator.contains("provision_for_process_start"),
+            "OMEGA-DELTA-0040: {} no longer provisions custody at startup, so \
+             a fresh profile sits at `Absent` and every identity-consuming \
+             surface (channels, pairing, Sarah) fails for exactly the users \
+             being onboarded.",
+            coordinator_path.display()
+        );
+        let gate = function_body(&coordinator, "await_identity_ready").unwrap_or_else(|| {
+            panic!(
+                "OMEGA-DELTA-0040: {} no longer has an `await_identity_ready`.",
+                coordinator_path.display()
+            )
+        });
+        assert!(
+            gate.contains("if let Err(error) = provision.await")
+                && gate.contains("zlog::error!")
+                && gate.contains("Ok(())"),
+            "OMEGA-DELTA-0040: `await_identity_ready` in {} no longer logs a \
+             provisioning refusal and proceeds. Blocking startup on an \
+             unattended custody problem is a dead end with no screen to repair \
+             it on.",
             coordinator_path.display()
         );
 
-        // Keep the dormant handoff intact so reintroducing optional onboarding
-        // is one deliberate switch rather than a reconstruction.
+        // The ceremony is removed, not hidden. No startup window mode, no
+        // startup-opened onboarding view, no completion channel a UI action
+        // has to remember to complete.
+        for removed in [
+            "show_onboarding_view",
+            "release_identity_waiters",
+            "OPEN_ONBOARDING_DURING_STARTUP",
+        ] {
+            assert!(
+                !coordinator.contains(removed),
+                "OMEGA-DELTA-0040: {} regrew `{removed}`. The startup identity \
+                 gate is silent (omega#164, owner direction 2026-07-29); \
+                 reintroducing a startup ceremony is an owner decision, not a \
+                 refactor.",
+                coordinator_path.display()
+            );
+        }
         let onboarding_path = repository_path(ONBOARDING_PATH);
         let onboarding = std::fs::read_to_string(&onboarding_path)
             .unwrap_or_else(|error| panic!("cannot read {}: {error}", onboarding_path.display()));
-        let finish = function_body(&onboarding, "on_finish").unwrap_or_else(|| {
-            panic!(
-                "OMEGA-DELTA-0040: {} no longer has an `on_finish` to check.",
+        for removed in ["show_onboarding_view", "OnboardingMode", "new_first_run"] {
+            assert!(
+                !onboarding.contains(&format!("fn {removed}"))
+                    && !onboarding.contains(&format!("enum {removed}")),
+                "OMEGA-DELTA-0040: {} regrew `{removed}`. The first-run \
+                 onboarding journey is removed, not unrendered — a page that \
+                 can still open at startup is the gate's ceremony waiting to \
+                 come back.",
                 onboarding_path.display()
-            )
-        });
-        // The **first-run** arm specifically. `on_finish` releases the waiters
-        // on both journeys, and the editor-setup journey is not the one the
-        // startup path is parked on — asserting against the whole function
-        // would let the first-run release be deleted while the check stayed
-        // green on the other arm's copy of the same call.
-        let first_run_arm = finish
-            .split_once("OnboardingMode::FirstRun(window_handle) => {")
-            .and_then(|(_, rest)| rest.split_once("OnboardingMode::EditorSetup"))
-            .map(|(arm, _)| arm)
-            .unwrap_or_else(|| {
-                panic!(
-                    "OMEGA-DELTA-0040: `on_finish` in {} no longer has a \
-                     first-run arm to check.",
-                    onboarding_path.display()
-                )
-            });
-        assert!(
-            first_run_arm.contains("release_identity_waiters(cx)"),
-            "OMEGA-DELTA-0040: finishing first-run onboarding in {} no longer \
-             releases the startup path. Setup would complete and nothing would \
-             open: the user is left on the launchpad, the agent dock closed, \
-             and the only way forward is relaunching the app.",
-            onboarding_path.display()
-        );
-        assert!(
-            first_run_arm.contains("window.remove_window()"),
-            "OMEGA-DELTA-0040: the first-run branch of `on_finish` in {} no \
-             longer closes its own window, so the front door would open beside \
-             a finished onboarding screen rather than instead of it.",
-            onboarding_path.display()
-        );
+            );
+        }
 
-        let release =
-            function_body(&coordinator, "release_identity_waiters").unwrap_or_else(|| {
+        // The provisioning custody answers with is the narrow one: create only
+        // from nothing, adopt only what this data root already holds, refuse
+        // everything else by name. Same shape OMEGA-DELTA-0159 pins for the
+        // hosted lane, held here for the startup lane.
+        let custody_path = repository_path(IDENTITY_CUSTODY_PATH);
+        let custody = std::fs::read_to_string(&custody_path)
+            .unwrap_or_else(|error| panic!("cannot read {}: {error}", custody_path.display()));
+        let provision =
+            function_body(&custody, "provision_for_process_start").unwrap_or_else(|| {
                 panic!(
-                    "OMEGA-DELTA-0040: {} no longer has a `release_identity_waiters`.",
-                    coordinator_path.display()
+                    "OMEGA-DELTA-0040: {} no longer has a \
+                     `provision_for_process_start`.",
+                    custody_path.display()
                 )
             });
         assert!(
-            release.contains("finish(Ok(()), cx)"),
-            "OMEGA-DELTA-0040: `release_identity_waiters` in {} no longer \
-             completes the startup channel, so it releases nobody.",
-            coordinator_path.display()
+            provision.contains("inspect_for_process_start")
+                && provision.contains("CustodyState::Absent => self.create(receipt_ref)")
+                && provision
+                    .contains("CustodyState::Unadopted => self.adopt_custodied(receipt_ref)")
+                && provision.contains("state => Err(CustodyError::CustodyDenied(state))"),
+            "OMEGA-DELTA-0040: `provision_for_process_start` in {} no longer \
+             creates only from `Absent`, adopts only from `Unadopted`, and \
+             refuses the rest by name. Replacing a `Lost` or `Conflict` \
+             identity at startup is the omega#110 silent pick in the worst \
+             possible place.",
+            custody_path.display()
         );
     }
 
@@ -6899,31 +6935,29 @@ mod tests {
             section_path.display()
         );
 
-        let startup_path = repository_path(IDENTITY_STARTUP_PATH);
-        let startup = uncommented(
-            &std::fs::read_to_string(&startup_path)
-                .unwrap_or_else(|error| panic!("cannot read {}: {error}", startup_path.display())),
-        );
-        // A free function at column zero, which `function_body`'s " fn <name>("
-        // needle cannot reach.
-        let gate = startup
-            .split_once("fn onboarding_required(")
-            .and_then(|(_, rest)| rest.split_once("\n}"))
-            .map(|(body, _)| body)
-            .unwrap_or_else(|| {
+        // Amended by omega#164: the startup gate is silent background
+        // provisioning, and what it does with `Unadopted` is *adopt through
+        // the adoption path* — never treat it as already ready, and never
+        // route it to `create`, whose empty-store fallback generates. The
+        // custody transaction is still what separates adoption from a repair.
+        let provision =
+            function_body(&custody, "provision_for_process_start").unwrap_or_else(|| {
                 panic!(
-                    "OMEGA-DELTA-0110: {} no longer has an `onboarding_required` \
-                     gate to hold.",
-                    startup_path.display()
+                    "OMEGA-DELTA-0110: {} no longer has the startup \
+                     provisioning gate to hold.",
+                    custody_path.display()
                 )
             });
         assert!(
-            !gate.contains("Unadopted"),
-            "OMEGA-DELTA-0110: the startup gate in {} treats an unadopted \
-             identity as ready. That opens a composer having silently taken an \
-             identity nobody was shown, and weakens OMEGA-DELTA-0040 in the \
-             course of fixing what onboarding concludes.",
-            startup_path.display()
+            provision.contains("CustodyState::Unadopted => self.adopt_custodied(receipt_ref)")
+                && !provision.contains("CustodyState::Unadopted => Ok(")
+                && !provision.contains("Unadopted => self.create"),
+            "OMEGA-DELTA-0110: startup provisioning in {} no longer routes an \
+             unadopted identity through adoption. Counting `Unadopted` as \
+             ready opens a composer having silently taken an identity nobody \
+             was shown; routing it to `create` generates a different identity \
+             behind it. Both are the omega#110 silent pick.",
+            custody_path.display()
         );
     }
 
@@ -8855,18 +8889,18 @@ mod tests {
             full_auto_path.display()
         );
 
-        // `OMEGA-DELTA-0040` keeps its order. The zero-base branch waits on the
-        // identity gate before it opens and zooms its panel. Without the wait
-        // the mode still *works* on a first-ever launch — it simply covers
-        // onboarding with a zoomed panel, which is a bypass of an identity gate
-        // wearing a layout's clothes. That is the failure this line catches.
+        // `OMEGA-DELTA-0050` keeps `OMEGA-DELTA-0040`'s order. The zero-base
+        // branch waits on the identity gate before it opens and zooms its
+        // panel. The gate is silent now (omega#164) — background provisioning
+        // rather than an onboarding page — but the ordering still holds: a
+        // panel that opened before the wait resolved could race the launch's
+        // own identity creation.
         let panels = std::fs::read_to_string(repository_path(WORKSPACE_INITIALIZATION_PATH))
             .expect("the workspace initialization is readable");
         assert!(
-            panels.contains("await_identity_ready(app_state, cx).await.log_err();"),
+            panels.contains("await_identity_ready(cx).await.log_err();"),
             "OMEGA-DELTA-0050: the zero-base panel branch no longer waits for \
-             identity onboarding, so a first-ever launch in zero base would \
-             never see the identity gate `OMEGA-DELTA-0040` puts in front of it."
+             the silent identity gate `OMEGA-DELTA-0040` puts in front of it."
         );
 
         // No change to the Exo lane: zero base writes no configuration, opens
@@ -8896,15 +8930,17 @@ mod tests {
     // OMEGA-DELTA-0051 — Zero base derives its setup and can finish identity
     // ---------------------------------------------------------------------
 
-    /// OMEGA-DELTA-0051. Zero base asks for the identity and derives the rest,
-    /// and the one thing it asks for can actually be finished.
+    /// OMEGA-DELTA-0051 (amended by omega#164). Zero base derives its setup,
+    /// and the identity step it used to ask for is silent.
     ///
-    /// Two halves, and the second is the one that was broken in the shipped
-    /// mode. A page that asks fewer questions is a preference; a page whose
-    /// only remaining question cannot be answered is a dead end that no amount
-    /// of `cargo check` can see, because the mode is entered by a command-line
-    /// flag and no test that does not launch the binary with it runs any of
-    /// this code.
+    /// Two halves, amended together. The defensive half survives: if any
+    /// future admission lets zero base reach the onboarding page, that page
+    /// must still reduce to the identity section and nothing else. The
+    /// admission half inverts: `onboarding::Finish` was admitted (omega#99)
+    /// only because it was the one release of the startup wait, and with the
+    /// wait provisioned in the background (owner direction 2026-07-29) the
+    /// admission retires with the gate — an admitted action whose only job no
+    /// longer exists is a door frame standing where the room was demolished.
     #[test]
     fn zero_base_derives_setup_and_can_finish_identity_onboarding() {
         let page_path = repository_path(ONBOARDING_BASICS_PAGE_PATH);
@@ -8958,11 +8994,12 @@ mod tests {
             );
         }
 
-        // The half that was actually broken. `OMEGA-DELTA-0040` parks startup
-        // on `await_identity_ready`, and only the first-run branch of
-        // `on_finish` releases it. With `onboarding::Finish` refused, a fresh
-        // profile in zero base reached the identity page, created an identity,
-        // pressed "Finish Setup", and stayed there permanently.
+        // The amended half. omega#164 made the identity gate silent, so
+        // nothing in the `onboarding` namespace has a job in zero base and the
+        // whole namespace stays refused. Readmitting `Finish` would be the
+        // first brick of a rebuilt ceremony; readmitting the rest would be the
+        // hosted account path `OMEGA-DELTA-0010` and `OMEGA-DELTA-0011`
+        // removed.
         let mode_path = repository_path(ZERO_BASE_MODE_PATH);
         let mode = std::fs::read_to_string(&mode_path)
             .unwrap_or_else(|error| panic!("cannot read {}: {error}", mode_path.display()));
@@ -8980,26 +9017,18 @@ mod tests {
              below would be vacuous, so it fails instead.",
             mode_path.display()
         );
-        assert!(
-            admitted.contains("\"onboarding::Finish\","),
-            "OMEGA-DELTA-0051: {} no longer admits `onboarding::Finish`. That \
-             action is the only thing that releases `await_identity_ready`, so \
-             refusing it makes a fresh profile in zero base a dead end: \
-             identity never becomes ready and the mode never reaches a thread, \
-             across restarts.",
-            mode_path.display()
-        );
-        for hosted in [
+        for retired in [
+            "\"onboarding::Finish\"",
             "\"onboarding::SignIn\"",
             "\"onboarding::OpenAccount\"",
             "\"onboarding::ResetHints\"",
         ] {
             assert!(
-                !admitted.contains(hosted),
-                "OMEGA-DELTA-0051: {} admits {hosted}. Admitting the action \
-                 that finishes the identity gate must not drag the hosted \
-                 account path `OMEGA-DELTA-0010` and `OMEGA-DELTA-0011` \
-                 removed in with it.",
+                !admitted.contains(retired),
+                "OMEGA-DELTA-0051: {} admits {retired}. The identity gate is \
+                 silent (omega#164): startup provisions the Nostr identity in \
+                 the background and no onboarding action releases any wait, so \
+                 the whole namespace stays refused in zero base.",
                 mode_path.display()
             );
         }
@@ -9302,11 +9331,12 @@ mod tests {
             .map(|(before, _)| before)
             .unwrap_or_default();
         assert!(
-            before_seal.contains("await_identity_ready(app_state, cx).await.log_err();"),
-            "OMEGA-DELTA-0053: {} seals the window before waiting for identity \
-             onboarding. Identity onboarding is a centre-pane item and a sealed \
-             workspace renders no centre pane, so a fresh profile would have \
-             nowhere to answer the gate `OMEGA-DELTA-0040` puts in front of it.",
+            before_seal.contains("await_identity_ready(cx).await.log_err();"),
+            "OMEGA-DELTA-0053: {} seals the window before the identity gate \
+             resolves. The gate is silent now (omega#164), but the order still \
+             matters: sealing is the last structural act of becoming the \
+             product, and it must not happen while startup readiness is still \
+             being answered.",
             panels_path.display()
         );
     }
@@ -22495,5 +22525,104 @@ mod tests {
                 "OMEGA-DELTA-0182: visual acceptance lost `{required}`"
             );
         }
+    }
+
+    /// OMEGA-DELTA-0183. The identity backup nudge appears only after the
+    /// identity has something to lose, and is quiet, dismissible, and durable.
+    ///
+    /// Four facts:
+    ///
+    /// - the sidebar row renders only behind the durable
+    ///   `should_offer_backup` status, so a fresh profile — which has no value
+    ///   record — can never see it at first launch;
+    /// - each named value event (a signed channel post, a freshly minted
+    ///   device grant, a live Sarah session) records accrual through the one
+    ///   custody seam, fail-soft, so the nudge input can never block the act
+    ///   that armed it;
+    /// - dismissal is durable, so the nudge does not reappear every launch —
+    ///   a nudge on a timer is a prompt wearing a nudge's clothes;
+    /// - the device-grant recorder is injected only by the production bridge
+    ///   servers, so the pairing state machine's tests never write into a
+    ///   real profile.
+    #[test]
+    fn the_backup_nudge_arms_on_value_and_stays_quiet() {
+        let custody = read_repository_file(IDENTITY_CUSTODY_PATH);
+        for required in [
+            "pub fn record_backup_value_accrued(",
+            "pub fn dismiss_backup_nudge(",
+            "pub fn backup_nudge_status(",
+            "pub fn should_offer_backup(",
+            "self.value_accrued && !self.dismissed && !self.protected",
+        ] {
+            assert!(
+                custody.contains(required),
+                "OMEGA-DELTA-0183: custody lost `{required}`, so the nudge \
+                 either cannot arm, cannot stay dismissed, or renders for an \
+                 identity that has nothing to lose."
+            );
+        }
+
+        let panel = read_repository_file("crates/agent_ui/src/agent_panel.rs");
+        let nudge = function_body(&panel, "render_identity_backup_nudge")
+            .expect("OMEGA-DELTA-0183: the sidebar nudge renderer is gone");
+        assert!(
+            nudge.contains("if !self.offers_identity_backup_nudge {")
+                && nudge.contains("return None;"),
+            "OMEGA-DELTA-0183: the sidebar nudge no longer hides behind the \
+             durable status, so a first launch could show it."
+        );
+        assert!(
+            nudge.contains("dismiss_identity_backup_nudge"),
+            "OMEGA-DELTA-0183: the sidebar nudge lost its dismiss control."
+        );
+        let dismiss = function_body(&panel, "dismiss_identity_backup_nudge")
+            .expect("OMEGA-DELTA-0183: the dismiss handler is gone");
+        assert!(
+            dismiss.contains("dismiss_backup_nudge()"),
+            "OMEGA-DELTA-0183: dismissing the nudge no longer persists, so it \
+             reappears every launch."
+        );
+        let poll = function_body(&panel, "observe_identity_backup_nudge")
+            .expect("OMEGA-DELTA-0183: the nudge status poll is gone");
+        assert!(
+            poll.contains("backup_nudge_status()") && poll.contains("should_offer_backup()"),
+            "OMEGA-DELTA-0183: the sidebar no longer reads the durable status."
+        );
+
+        // The three value events, each recording through the custody seam.
+        // Channel posts have two writers: the tester-channel publish boundary
+        // (OMEGA-DELTA-0182) and the legacy community control path.
+        for channel_writer in [
+            "crates/agent_ui/src/omega_public_channel_publish.rs",
+            "crates/agent_ui/src/omega_community_control.rs",
+        ] {
+            let writer = read_repository_file(channel_writer);
+            assert!(
+                writer.contains("BackupValueKind::ChannelPost"),
+                "OMEGA-DELTA-0183: a signed channel post in {channel_writer} \
+                 no longer arms the nudge."
+            );
+        }
+        let effectd = read_repository_file("crates/omega_effectd/src/omega_effectd.rs");
+        assert!(
+            effectd.contains("BackupValueKind::DeviceGrant"),
+            "OMEGA-DELTA-0183: a minted device grant no longer arms the nudge."
+        );
+        let workroom = read_repository_file("crates/workroom_ui/src/panel.rs");
+        assert!(
+            workroom.contains("BackupValueKind::SarahSession"),
+            "OMEGA-DELTA-0183: a live Sarah session no longer arms the nudge."
+        );
+
+        // The grant recorder is production-injected, never a default: the
+        // state-machine constructor keeps `None` so pairing tests cannot
+        // write into a real profile.
+        let authority = function_body(&effectd, "authority")
+            .expect("OMEGA-DELTA-0183: the pairing authority constructor is gone");
+        assert!(
+            authority.contains("grant_recorder: None"),
+            "OMEGA-DELTA-0183: the pairing authority records by default, so \
+             every state-machine test writes into the real identity root."
+        );
     }
 }

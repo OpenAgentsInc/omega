@@ -1050,7 +1050,7 @@ fn main() {
 
 fn handle_open_request(request: OpenRequest, app_state: Arc<AppState>, cx: &mut App) {
     cx.spawn(async move |cx| {
-        if let Err(error) = await_identity_ready(app_state.clone(), cx).await {
+        if let Err(error) = await_identity_ready(cx).await {
             fail_to_open_window_async(error, cx);
             return;
         }
@@ -1466,7 +1466,7 @@ pub(crate) async fn restore_or_create_workspace(
     app_state: Arc<AppState>,
     cx: &mut AsyncApp,
 ) -> Result<()> {
-    await_identity_ready(app_state.clone(), cx).await?;
+    await_identity_ready(cx).await?;
     if let Some(multi_workspaces) = restorable_workspaces(cx, &app_state).await {
         let mut error_count = 0;
         for multi_workspace in multi_workspaces {
