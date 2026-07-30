@@ -524,27 +524,32 @@ impl ManagedSarahVoiceClient {
         })
     }
 
-    pub fn connect(self) -> SarahVoiceConnection {
+    pub fn connect(self, executor: gpui::BackgroundExecutor) -> SarahVoiceConnection {
         let (control_sender, control_receiver) = async_channel::bounded(32);
         let (event_sender, event_receiver) = async_channel::bounded(128);
-        smol::spawn(async move {
-            if let Err(error) = self.run(control_receiver, event_sender.clone()).await {
-                log::error!("Sarah voice session failed: {error:#}");
-                let (message, action) = actionable_error(&error);
-                if event_sender
-                    .send(SarahVoiceEvent::Error {
-                        message,
-                        retryable: true,
-                        action,
-                    })
+        let timer_executor = executor.clone();
+        executor
+            .spawn(async move {
+                if let Err(error) = self
+                    .run(timer_executor, control_receiver, event_sender.clone())
                     .await
-                    .is_err()
                 {
-                    log::debug!("Sarah voice event receiver closed while reporting an error");
+                    log::error!("Sarah voice session failed: {error:#}");
+                    let (message, action) = actionable_error(&error);
+                    if event_sender
+                        .send(SarahVoiceEvent::Error {
+                            message,
+                            retryable: true,
+                            action,
+                        })
+                        .await
+                        .is_err()
+                    {
+                        log::debug!("Sarah voice event receiver closed while reporting an error");
+                    }
                 }
-            }
-        })
-        .detach();
+            })
+            .detach();
         SarahVoiceConnection {
             controls: control_sender,
             events: event_receiver,
@@ -553,6 +558,7 @@ impl ManagedSarahVoiceClient {
 
     async fn run(
         self,
+        executor: gpui::BackgroundExecutor,
         controls: async_channel::Receiver<SarahVoiceControl>,
         events: async_channel::Sender<SarahVoiceEvent>,
     ) -> Result<()> {
@@ -619,13 +625,18 @@ impl ManagedSarahVoiceClient {
         .await?;
         let mut next_heartbeat_at = Instant::now() + VOICE_HEARTBEAT_INTERVAL;
 
-        loop {
+        // A session failure must still close the WebSocket with a close
+        // frame. Dropping the socket on an error path made the gateway record
+        // an abnormal 1006 disconnect with no reason, which left session
+        // drops undiagnosable from the server side.
+        let session_result: Result<()> = async {
+            loop {
             let incoming = socket.next().fuse();
             let control = controls.recv().fuse();
             let audio = microphone.receiver.recv().fuse();
-            let heartbeat = futures::FutureExt::fuse(smol::Timer::after(
-                next_heartbeat_at.saturating_duration_since(Instant::now()),
-            ));
+            let heartbeat = futures::FutureExt::fuse(
+                executor.timer(next_heartbeat_at.saturating_duration_since(Instant::now())),
+            );
             pin_mut!(incoming, control, audio, heartbeat);
             select_biased! {
                 control = control => {
@@ -634,7 +645,7 @@ impl ManagedSarahVoiceClient {
                             microphone.muted.store(muted, Ordering::Release);
                         }
                         Ok(SarahVoiceControl::Interrupt) => {
-                            playback = playback.reopen()?;
+                            playback.stop_queued_audio();
                             send_gateway_control(
                                 &mut socket,
                                 &identity,
@@ -707,7 +718,7 @@ impl ManagedSarahVoiceClient {
                             ).await? {
                                 GatewayServerAction::Continue => {}
                                 GatewayServerAction::StopPlayback => {
-                                    playback = playback.reopen()?;
+                                    playback.stop_queued_audio();
                                 }
                                 GatewayServerAction::End => return Ok(()),
                             }
@@ -753,7 +764,15 @@ impl ManagedSarahVoiceClient {
                         .context("sending microphone audio")?;
                 }
             }
+            }
         }
+        .await;
+        if session_result.is_err()
+            && let Err(close_error) = socket.close(None).await
+        {
+            log::debug!("Sarah voice socket close after a session failure failed: {close_error}");
+        }
+        session_result
     }
 }
 
@@ -1531,8 +1550,7 @@ impl Drop for MicrophoneCapture {
 }
 
 struct VoicePlayback {
-    output_device_id: Option<DeviceId>,
-    echo_canceller: audio::EchoCanceller,
+    mixer: rodio::mixer::Mixer,
     player: rodio::Player,
     _output: rodio::MixerDeviceSink,
 }
@@ -1542,19 +1560,24 @@ impl VoicePlayback {
         output_device_id: Option<DeviceId>,
         echo_canceller: audio::EchoCanceller,
     ) -> Result<Self> {
-        let (output, mixer) =
-            audio::open_output_stream(output_device_id.clone(), echo_canceller.clone())?;
+        let (output, mixer) = audio::open_output_stream(output_device_id, echo_canceller)?;
         let player = rodio::Player::connect_new(&mixer);
         Ok(Self {
-            output_device_id,
-            echo_canceller,
+            mixer,
             player,
             _output: output,
         })
     }
 
-    fn reopen(self) -> Result<Self> {
-        Self::open(self.output_device_id, self.echo_canceller)
+    /// Stops queued assistant audio without touching the output device.
+    ///
+    /// Barge-in previously reopened the whole output stream, but that path is
+    /// fallible and recreates the device plus echo-canceller registration in
+    /// the middle of a live session, so a single reopen failure tore the
+    /// session down. Dropping the old player stops its queued sources while
+    /// the device stream and echo-cancelled mixer stay untouched.
+    fn stop_queued_audio(&mut self) {
+        self.player = rodio::Player::connect_new(&self.mixer);
     }
 
     fn play_pcm16(&self, bytes: &[u8]) -> Result<()> {

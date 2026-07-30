@@ -1404,7 +1404,7 @@ impl SarahWorkroomPanel {
                     }
                 };
                 let connection_started_at = Instant::now();
-                let connection = client.connect();
+                let connection = client.connect(cx.background_executor().clone());
                 let controls = connection.controls;
                 let events = connection.events;
                 this.update(cx, |panel, cx| {
