@@ -38,7 +38,7 @@ mod identity_profile;
 mod identity_section;
 mod identity_startup;
 pub mod multibuffer_hint;
-mod secure_input;
+pub mod secure_input;
 mod theme_preview;
 
 /// Imports settings from Visual Studio Code.

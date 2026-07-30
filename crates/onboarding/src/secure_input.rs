@@ -11,10 +11,10 @@ use ui::prelude::*;
 use unicode_segmentation::UnicodeSegmentation;
 use zeroize::{Zeroize, Zeroizing};
 
-const MAX_SECRET_BYTES: usize = 1024;
+const MAX_SECRET_BYTES: usize = 4096;
 const MASK_CHARACTER: char = '\u{2022}';
 
-pub(crate) struct SecureInput {
+pub struct SecureInput {
     focus_handle: FocusHandle,
     content: Zeroizing<String>,
     placeholder: SharedString,
@@ -31,7 +31,7 @@ pub(crate) struct SecureInput {
 }
 
 impl SecureInput {
-    pub(crate) fn new(
+    pub fn new(
         placeholder: impl Into<SharedString>,
         aria_label: impl Into<SharedString>,
         tab_index: isize,
@@ -54,7 +54,7 @@ impl SecureInput {
         }
     }
 
-    pub(crate) fn take(&mut self, cx: &mut Context<Self>) -> String {
+    pub fn take(&mut self, cx: &mut Context<Self>) -> String {
         let content =
             std::mem::replace(&mut *self.content, String::with_capacity(MAX_SECRET_BYTES));
         self.reset_interaction_state();
@@ -62,7 +62,7 @@ impl SecureInput {
         content
     }
 
-    pub(crate) fn clear(&mut self, cx: &mut Context<Self>) {
+    pub fn clear(&mut self, cx: &mut Context<Self>) {
         self.content.zeroize();
         self.reset_interaction_state();
         cx.notify();

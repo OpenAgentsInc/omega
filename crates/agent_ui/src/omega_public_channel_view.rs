@@ -21,7 +21,12 @@ use gpui::{
 };
 use http_client::HttpClient;
 use omega_actions::{IdentityActivationEvents, IdentityActivationOutcome, OpenOnboarding};
-use omega_identity::{DurableIdentityActionDecision, HeldIdentityAction};
+use omega_identity::{
+    AccountRegistryService, DurableIdentityActionDecision, HeldIdentityAction, SignerKind,
+};
+use omega_signer_broker::{
+    Nip46WebSocketTransport, RemoteSignerMetadata, SignerBroker, SignerRoute,
+};
 use ui::{
     Banner, Button, ButtonSize, ButtonStyle, Color, CopyButton, IconButton, IconName, IconSize,
     Label, LabelSize, ScrollAxes, Scrollbars, Severity, Tooltip, WithScrollbar, prelude::*,
@@ -36,7 +41,8 @@ use crate::{
     },
     omega_public_channel_publish::{
         PreparedPublicChannelWrite, PublicChannelWrite, SignedPublicChannelWrite,
-        authorize_prepared_write, prepare_write, publish_signed_write, sign_prepared_write,
+        authorize_prepared_write, authorize_remote_prepared_write, prepare_remote_write,
+        prepare_write, publish_signed_write, sign_prepared_write, sign_remote_prepared_write,
     },
     omega_public_channel_relay::{
         RelayAdmissionLimits, RelayCursor, RelayGapReason, RelayIntent, RelayLifecycle,
@@ -538,6 +544,37 @@ impl PublicChannelView {
         let descriptor = self.descriptor.clone();
         let events = self.relay_snapshot.events.clone();
         let work = cx.background_spawn(async move {
+            let registry = AccountRegistryService::for_channel(*app_identity::CHANNEL);
+            let selection = registry.selection_token().map_err(anyhow::Error::from)?;
+            let dashboard = registry.inspect().map_err(anyhow::Error::from)?;
+            let remote_signer_selected = dashboard
+                .accounts
+                .iter()
+                .any(|account| account.is_active && account.signer.kind == SignerKind::RemoteNip46);
+            if remote_signer_selected {
+                let capability = registry
+                    .remote_signer_capability(&selection)
+                    .map_err(anyhow::Error::from)?;
+                let prepared = prepare_remote_write(&selection, &descriptor, write, &events)?;
+                let authorization =
+                    authorize_remote_prepared_write(&registry, &selection, &prepared)?;
+                let route = SignerRoute::RemoteNip46 {
+                    metadata: RemoteSignerMetadata { capability },
+                    transport: Arc::new(Nip46WebSocketTransport::system()),
+                };
+                let signed = sign_remote_prepared_write(
+                    &SignerBroker::system(),
+                    &route,
+                    selection,
+                    &descriptor,
+                    prepared,
+                    &authorization,
+                )
+                .await?;
+                publish_signed_write(&descriptor, &signed)?;
+                return anyhow::Ok(PublicChannelWriteWork::Published(signed));
+            }
+
             let identity_service = omega_identity::IdentityService::system(*app_identity::CHANNEL);
             let prepared = prepare_write(&identity_service, &descriptor, write, &events)?;
             match authorize_prepared_write(&identity_service, &prepared)? {

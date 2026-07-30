@@ -103,9 +103,12 @@ dependencies = [
  "gpui",
  "omega_actions",
  "omega_identity",
+ "omega_signer_broker",
+ "onboarding",
  "ui",
  "util",
  "workspace",
+ "zeroize",
  "zlog",
 ]
 
@@ -579,6 +582,7 @@ dependencies = [
  "omega_front_door",
  "omega_harness",
  "omega_identity",
+ "omega_signer_broker",
  "omega_workbench_harness",
  "omega_workbench_state",
  "omega_workdir",
@@ -1284,6 +1288,19 @@ version = "4.7.1"
 source = "git+https://github.com/smol-rs/async-task.git?rev=b4486cd71e4e94fbda54ce6302444de14f4d190e#b4486cd71e4e94fbda54ce6302444de14f4d190e"
 
 [[package]]
+name = "async-tls"
+version = "0.13.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "b2ae3c9eba89d472a0e4fe1dea433df78fbbe63d2b764addaf2ba3a6bde89a5e"
+dependencies = [
+ "futures-core",
+ "futures-io",
+ "rustls 0.21.12",
+ "rustls-pemfile 1.0.4",
+ "webpki-roots 0.22.6",
+]
+
+[[package]]
 name = "async-trait"
 version = "0.1.89"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1302,6 +1319,7 @@ checksum = "ee88b4c88ac8c9ea446ad43498955750a4bbe64c4392f21ccfe5d952865e318f"
 dependencies = [
  "async-native-tls",
  "async-std",
+ "async-tls",
  "atomic-waker",
  "futures-core",
  "futures-io",
@@ -10061,6 +10079,7 @@ version = "0.44.4"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "98cf5d15d70d1f8f4059e5f79923ac15891eb691d2843d01191e0585fb064d70"
 dependencies = [
+ "aes",
  "base64 0.22.1",
  "bech32",
  "bip39",
@@ -11113,8 +11132,25 @@ dependencies = [
  "smol",
  "tempfile",
  "thiserror 2.0.17",
+ "url",
  "windows-sys 0.61.2",
  "zeroize",
+]
+
+[[package]]
+name = "omega_signer_broker"
+version = "0.1.0"
+dependencies = [
+ "app_identity",
+ "async-io",
+ "async-tungstenite",
+ "futures 0.3.32",
+ "log",
+ "nostr",
+ "omega_identity",
+ "serde_json",
+ "smol",
+ "thiserror 2.0.17",
 ]
 
 [[package]]
@@ -14329,6 +14365,15 @@ dependencies = [
  "rustls-pki-types",
  "schannel",
  "security-framework",
+]
+
+[[package]]
+name = "rustls-pemfile"
+version = "1.0.4"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "1c74cae0a4cf6ccbbf5f359f08efdf8ee7e1dc532573bf0db71968cb56b1448c"
+dependencies = [
+ "base64 0.21.7",
 ]
 
 [[package]]
@@ -18807,12 +18852,31 @@ dependencies = [
 ]
 
 [[package]]
+name = "webpki"
+version = "0.22.4"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "ed63aea5ce73d0ff405984102c42de94fc55a6b75765d621c65262469b3c9b53"
+dependencies = [
+ "ring",
+ "untrusted 0.9.0",
+]
+
+[[package]]
 name = "webpki-root-certs"
 version = "0.26.8"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "09aed61f5e8d2c18344b3faa33a4c837855fe56642757754775548fee21386c4"
 dependencies = [
  "rustls-pki-types",
+]
+
+[[package]]
+name = "webpki-roots"
+version = "0.22.6"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "b6c71e40d7d2c34a5106301fb632274ca37242cd0c9d3e64dbece371a40a2d87"
+dependencies = [
+ "webpki",
 ]
 
 [[package]]
@@ -20656,7 +20720,7 @@ dependencies = [
  "wasm-bindgen",
  "wasm-bindgen-futures",
  "web-sys",
- "webpki-roots",
+ "webpki-roots 1.0.8",
 ]
 
 [[package]]
@@ -20849,7 +20913,7 @@ dependencies = [
  "quinn",
  "rustls 0.23.40",
  "rustls-native-certs",
- "rustls-pemfile",
+ "rustls-pemfile 2.2.0",
  "rustls-pki-types",
  "serde",
  "serde_json",

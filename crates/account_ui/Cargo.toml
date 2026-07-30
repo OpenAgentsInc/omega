@@ -20,10 +20,13 @@ chrono.workspace = true
 gpui.workspace = true
 omega_actions.workspace = true
 omega_identity.workspace = true
+omega_signer_broker.workspace = true
+onboarding.workspace = true
 ui.workspace = true
 util.workspace = true
 workspace.workspace = true
 zlog.workspace = true
+zeroize.workspace = true
 
 [dev-dependencies]
 gpui = { workspace = true, features = ["test-support"] }

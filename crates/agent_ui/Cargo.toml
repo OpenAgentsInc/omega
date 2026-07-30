@@ -109,6 +109,7 @@ omega_community.workspace = true
 omega_workdir.workspace = true
 omega_zero_base.workspace = true
 omega_identity.workspace = true
+omega_signer_broker.workspace = true
 nostr.workspace = true
 ordered-float.workspace = true
 parking_lot.workspace = true

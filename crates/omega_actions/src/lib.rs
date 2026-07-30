@@ -272,6 +272,8 @@ actions!(
         OpenEditorOnboarding,
         /// Opens the local Nostr account dashboard.
         OpenIdentityDashboard,
+        /// Opens NIP-46 remote signer setup in the account dashboard.
+        OpenRemoteSignerSetup,
     ]
 );
 

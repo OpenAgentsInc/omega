@@ -5,24 +5,41 @@ use std::{
 
 use chrono::{DateTime, Local};
 use gpui::{
-    Action, AnyElement, App, Context, Entity, EventEmitter, FocusHandle, Focusable, IntoElement,
-    PromptLevel, Render, SharedString, Task, Window,
+    Action, AnyElement, App, ClipboardItem, Context, Entity, EventEmitter, FocusHandle, Focusable,
+    IntoElement, PromptLevel, Render, SharedString, Task, Window,
 };
-use omega_actions::{OpenIdentityDashboard, OpenOnboarding};
+use omega_actions::{OpenIdentityDashboard, OpenOnboarding, OpenRemoteSignerSetup};
 use omega_identity::{
     AccountDashboardEntry, AccountDashboardProjection, AccountLifecycleState, AccountPurgeReport,
     AccountPurgeTarget, AccountPurgeVerification, AccountRef, AccountRegistryService,
-    PublicIdentity, ReceiptRef, RecoveryProtectionState, SignerAvailability, SignerKind,
+    Nip46CapabilityMethod, Nip46ConnectionInput, Nip46InboundEvent, Nip46PairingFence,
+    Nip46PairingSession, Nip46PairingUri, Nip46PermissionPreview, Nip46ReportedSigner,
+    Nip46Service, PublicIdentity, ReceiptRef, RecoveryProtectionState, SignerAvailability,
+    SignerKind,
 };
-use ui::{Divider, ListItem, ListItemSpacing, SpinnerLabel, Tooltip, prelude::*};
+use omega_signer_broker::{Nip46RelayCoordinator, Nip46RelayError};
+use onboarding::secure_input::SecureInput;
+use ui::{Divider, ListItem, ListItemSpacing, SpinnerLabel, TintColor, Tooltip, prelude::*};
 use util::ResultExt as _;
 use workspace::{
     WorkspaceId,
     item::{Item, ItemEvent},
     with_active_or_new_workspace,
 };
+use zeroize::Zeroizing;
 
 const COMPACT_WIDTH: f32 = 720.;
+const NIP46_PAIRING_RELAY: &str = "wss://relay.openagents.com";
+const NIP46_FIRST_WAVE_LIFETIME_SECONDS: u64 = 60 * 60 * 24 * 7;
+const NIP46_EXCHANGE_TIMEOUT_SECONDS: u64 = 30;
+const SIGN_OUT_LABEL: &str = "Sign out";
+const DISCONNECT_SIGNER_LABEL: &str = "Disconnect signer";
+
+fn unix_time_seconds() -> u64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map_or(0, |duration| duration.as_secs())
+}
 
 trait AccountDashboardBackend: Send + Sync {
     fn inspect(&self) -> Result<AccountDashboardProjection, String>;
@@ -49,6 +66,12 @@ trait AccountDashboardBackend: Send + Sync {
         account_ref: &AccountRef,
         operation_ref: &str,
     ) -> Result<AccountPurgeReport, String>;
+    fn preview_bunker(
+        &self,
+        connection_uri: Zeroizing<String>,
+        now: u64,
+    ) -> Result<RemoteSignerProposal, String>;
+    fn preview_nostrconnect(&self, now: u64) -> Result<RemoteSignerProposal, String>;
 }
 
 struct SystemAccountDashboardBackend {
@@ -104,6 +127,12 @@ impl AccountDashboardBackend for SystemAccountDashboardBackend {
                     .map_err(|error| error.to_string())?,
                 None,
             ),
+            AccountOperation::DisconnectRemote(account_ref) => (
+                self.service
+                    .disconnect_remote_signer(&account_ref, expected_generation)
+                    .map_err(|error| error.to_string())?,
+                None,
+            ),
         };
         Ok(AccountOperationResult {
             projection,
@@ -143,6 +172,245 @@ impl AccountDashboardBackend for SystemAccountDashboardBackend {
             .retry_purge(account_ref, operation_ref)
             .map_err(|error| error.to_string())
     }
+
+    fn preview_bunker(
+        &self,
+        connection_uri: Zeroizing<String>,
+        now: u64,
+    ) -> Result<RemoteSignerProposal, String> {
+        let input = Nip46ConnectionInput::parse(connection_uri.as_str())
+            .map_err(|error| error.to_string())?;
+        let generation = self
+            .service
+            .inspect()
+            .map_err(|error| error.to_string())?
+            .active
+            .generation;
+        let preview = Nip46PermissionPreview::omega_first_profile(
+            Some(input.public_key().clone()),
+            input.relays().to_vec(),
+            now,
+            now.saturating_add(NIP46_FIRST_WAVE_LIFETIME_SECONDS),
+        )
+        .map_err(|error| error.to_string())?;
+        Ok(RemoteSignerProposal::Bunker {
+            input,
+            preview,
+            fence: Nip46PairingFence::new(generation).map_err(|error| error.to_string())?,
+        })
+    }
+
+    fn preview_nostrconnect(&self, now: u64) -> Result<RemoteSignerProposal, String> {
+        let generation = self
+            .service
+            .inspect()
+            .map_err(|error| error.to_string())?
+            .active
+            .generation;
+        let preview = Nip46PermissionPreview::omega_first_profile(
+            None,
+            vec![NIP46_PAIRING_RELAY.to_string()],
+            now,
+            now.saturating_add(NIP46_FIRST_WAVE_LIFETIME_SECONDS),
+        )
+        .map_err(|error| error.to_string())?;
+        Ok(RemoteSignerProposal::NostrConnect {
+            preview,
+            fence: Nip46PairingFence::new(generation).map_err(|error| error.to_string())?,
+        })
+    }
+}
+
+enum RemoteSignerProposal {
+    Bunker {
+        input: Nip46ConnectionInput,
+        preview: Nip46PermissionPreview,
+        fence: Nip46PairingFence,
+    },
+    NostrConnect {
+        preview: Nip46PermissionPreview,
+        fence: Nip46PairingFence,
+    },
+}
+
+impl RemoteSignerProposal {
+    fn preview(&self) -> &Nip46PermissionPreview {
+        match self {
+            Self::Bunker { preview, .. } | Self::NostrConnect { preview, .. } => preview,
+        }
+    }
+}
+
+struct RemotePairingProgress {
+    capability_ref: String,
+    pairing_uri: Option<Nip46PairingUri>,
+}
+
+struct RemoteFinalApproval {
+    capability_ref: String,
+    reported_signer: Nip46ReportedSigner,
+    registry_generation: u64,
+}
+
+async fn exchange_bunker_pairing(
+    mut session: Nip46PairingSession,
+    registry_generation: u64,
+) -> Result<Nip46ReportedSigner, Nip46RelayError> {
+    let coordinator = Nip46RelayCoordinator::default();
+    let client_public_key = session.client_public_key().clone();
+    let expected_signer = session.remote_signer_public_key().cloned();
+    let connect = session
+        .approve(unix_time_seconds(), NIP46_EXCHANGE_TIMEOUT_SECONDS)
+        .map_err(Nip46RelayError::Protocol)?;
+    let get_public_key = coordinator
+        .exchange(
+            &connect,
+            expected_signer.as_ref(),
+            &client_public_key,
+            |relay_url, event_json, received_at| {
+                session
+                    .receive_acknowledgement(
+                        registry_generation,
+                        Nip46InboundEvent {
+                            relay_url,
+                            event_json,
+                            received_at,
+                        },
+                        NIP46_EXCHANGE_TIMEOUT_SECONDS,
+                    )
+                    .map(Some)
+            },
+        )
+        .await?;
+    let expected_signer = session.remote_signer_public_key().cloned();
+    coordinator
+        .exchange(
+            &get_public_key,
+            expected_signer.as_ref(),
+            &client_public_key,
+            |relay_url, event_json, received_at| {
+                session
+                    .receive_user_public_key(
+                        registry_generation,
+                        Nip46InboundEvent {
+                            relay_url,
+                            event_json,
+                            received_at,
+                        },
+                        NIP46_EXCHANGE_TIMEOUT_SECONDS,
+                    )
+                    .map(Some)
+            },
+        )
+        .await
+}
+
+async fn exchange_nostrconnect_pairing(
+    mut session: Nip46PairingSession,
+    registry_generation: u64,
+) -> Result<Nip46ReportedSigner, Nip46RelayError> {
+    let coordinator = Nip46RelayCoordinator::default();
+    let client_public_key = session.client_public_key().clone();
+    let relay_urls = session.preview().relays.clone();
+    let capability_ref = session.capability_ref().to_string();
+    let get_public_key = coordinator
+        .listen(
+            &relay_urls,
+            &capability_ref,
+            None,
+            &client_public_key,
+            |relay_url, event_json, received_at| {
+                session
+                    .receive_nostrconnect_acknowledgement(
+                        registry_generation,
+                        Nip46InboundEvent {
+                            relay_url,
+                            event_json,
+                            received_at,
+                        },
+                        NIP46_EXCHANGE_TIMEOUT_SECONDS,
+                    )
+                    .map(Some)
+            },
+        )
+        .await?;
+    let expected_signer = session.remote_signer_public_key().cloned();
+    coordinator
+        .exchange(
+            &get_public_key,
+            expected_signer.as_ref(),
+            &client_public_key,
+            |relay_url, event_json, received_at| {
+                session
+                    .receive_user_public_key(
+                        registry_generation,
+                        Nip46InboundEvent {
+                            relay_url,
+                            event_json,
+                            received_at,
+                        },
+                        NIP46_EXCHANGE_TIMEOUT_SECONDS,
+                    )
+                    .map(Some)
+            },
+        )
+        .await
+}
+
+async fn exchange_final_approval(
+    capability_ref: String,
+    registry_generation: u64,
+) -> Result<AccountDashboardProjection, String> {
+    let service = Nip46Service::system(*app_identity::CHANNEL);
+    let mut session = service
+        .resume(&capability_ref)
+        .map_err(|error| error.to_string())?;
+    let challenge = session
+        .approve_reported_signer(unix_time_seconds(), NIP46_EXCHANGE_TIMEOUT_SECONDS)
+        .map_err(|error| error.to_string())?;
+    let client_public_key = session.client_public_key().clone();
+    let expected_signer = session.remote_signer_public_key().cloned();
+    Nip46RelayCoordinator::default()
+        .exchange(
+            &challenge,
+            expected_signer.as_ref(),
+            &client_public_key,
+            |relay_url, event_json, received_at| {
+                session
+                    .receive_signed_challenge(
+                        registry_generation,
+                        Nip46InboundEvent {
+                            relay_url,
+                            event_json,
+                            received_at,
+                        },
+                    )
+                    .map(Some)
+            },
+        )
+        .await
+        .map_err(|error| error.to_string())?;
+    AccountRegistryService::system(*app_identity::CHANNEL)
+        .register_remote_account(&capability_ref, registry_generation)
+        .map_err(|error| error.to_string())
+}
+
+fn remote_pairing_failure_message(error: &Nip46RelayError) -> &'static str {
+    match error {
+        Nip46RelayError::Offline | Nip46RelayError::Silence => {
+            "The signer is offline or did not respond. Start the connection again when it is available."
+        }
+        Nip46RelayError::Timeout => {
+            "The signer did not finish in time. Start the connection again to retry."
+        }
+        Nip46RelayError::Protocol(omega_identity::Nip46Error::Rejected) => {
+            "The signer rejected this connection."
+        }
+        Nip46RelayError::Protocol(omega_identity::Nip46Error::Revoked) => {
+            "This remote signer capability was revoked."
+        }
+        _ => "The signer response could not be verified. No account was connected.",
+    }
 }
 
 #[derive(Clone)]
@@ -152,6 +420,7 @@ enum AccountOperation {
     Lock,
     Unlock,
     SignOut,
+    DisconnectRemote(AccountRef),
 }
 
 struct AccountOperationResult {
@@ -160,22 +429,29 @@ struct AccountOperationResult {
 }
 
 pub fn init(cx: &mut App) {
-    cx.on_action(|_: &OpenIdentityDashboard, cx| open_identity_dashboard(cx));
+    cx.on_action(|_: &OpenIdentityDashboard, cx| open_identity_dashboard(false, cx));
+    cx.on_action(|_: &OpenRemoteSignerSetup, cx| open_identity_dashboard(true, cx));
 }
 
-fn open_identity_dashboard(cx: &mut App) {
-    with_active_or_new_workspace(cx, |workspace, window, cx| {
+fn open_identity_dashboard(open_remote_setup: bool, cx: &mut App) {
+    with_active_or_new_workspace(cx, move |workspace, window, cx| {
         workspace
-            .with_local_workspace(window, cx, |workspace, window, cx| {
+            .with_local_workspace(window, cx, move |workspace, window, cx| {
                 let existing = workspace
                     .active_pane()
                     .read(cx)
                     .items()
                     .find_map(|item| item.downcast::<IdentityDashboard>());
                 if let Some(existing) = existing {
+                    if open_remote_setup {
+                        existing.update(cx, |dashboard, cx| {
+                            dashboard.remote_setup_open = true;
+                            cx.notify();
+                        });
+                    }
                     workspace.activate_item(&existing, true, true, window, cx);
                 } else {
-                    let dashboard = IdentityDashboard::new(window, cx);
+                    let dashboard = IdentityDashboard::new(open_remote_setup, window, cx);
                     workspace.add_item_to_active_pane(Box::new(dashboard), None, true, window, cx);
                 }
             })
@@ -192,18 +468,31 @@ pub struct IdentityDashboard {
     message: Option<SharedString>,
     purge_report: Option<AccountPurgeReport>,
     busy: bool,
+    remote_setup_open: bool,
+    remote_uri_input: Entity<SecureInput>,
+    remote_proposal: Option<RemoteSignerProposal>,
+    remote_pairing: Option<RemotePairingProgress>,
+    remote_final_approval: Option<RemoteFinalApproval>,
 }
 
 impl IdentityDashboard {
-    fn new(window: &mut Window, cx: &mut App) -> Entity<Self> {
-        Self::new_with_backend(Arc::new(SystemAccountDashboardBackend::new()), window, cx)
+    fn new(open_remote_setup: bool, window: &mut Window, cx: &mut App) -> Entity<Self> {
+        Self::new_with_backend(
+            Arc::new(SystemAccountDashboardBackend::new()),
+            open_remote_setup,
+            window,
+            cx,
+        )
     }
 
     fn new_with_backend(
         backend: Arc<dyn AccountDashboardBackend>,
+        open_remote_setup: bool,
         _window: &mut Window,
         cx: &mut App,
     ) -> Entity<Self> {
+        let remote_uri_input =
+            cx.new(|cx| SecureInput::new("Paste bunker:// connection", "Bunker connection", 1, cx));
         let dashboard = cx.new(|cx| Self {
             backend,
             projection: None,
@@ -213,6 +502,11 @@ impl IdentityDashboard {
             message: None,
             purge_report: None,
             busy: false,
+            remote_setup_open: open_remote_setup,
+            remote_uri_input,
+            remote_proposal: None,
+            remote_pairing: None,
+            remote_final_approval: None,
         });
         dashboard.update(cx, |dashboard, cx| dashboard.reload(cx));
         dashboard
@@ -317,6 +611,233 @@ impl IdentityDashboard {
                 cx.notify();
             }
         }
+    }
+
+    fn review_bunker_permissions(&mut self, cx: &mut Context<Self>) {
+        if self.busy {
+            return;
+        }
+        let connection_uri = Zeroizing::new(self.remote_uri_input.update(cx, SecureInput::take));
+        let backend = self.backend.clone();
+        self.busy = true;
+        self.message = None;
+        self.task = Some(cx.spawn(async move |this, cx| {
+            let result = cx
+                .background_spawn(async move {
+                    backend.preview_bunker(connection_uri, unix_time_seconds())
+                })
+                .await;
+            this.update(cx, |this, cx| {
+                match result {
+                    Ok(proposal) => this.remote_proposal = Some(proposal),
+                    Err(error) => {
+                        zlog::error!("NIP-46 bunker preview failed: {error}");
+                        this.message = Some("That bunker connection could not be verified.".into());
+                    }
+                }
+                this.busy = false;
+                cx.notify();
+            })
+            .log_err();
+        }));
+        cx.notify();
+    }
+
+    fn review_nostrconnect_permissions(&mut self, cx: &mut Context<Self>) {
+        if self.busy {
+            return;
+        }
+        let backend = self.backend.clone();
+        self.busy = true;
+        self.message = None;
+        self.task = Some(cx.spawn(async move |this, cx| {
+            let result = cx
+                .background_spawn(async move { backend.preview_nostrconnect(unix_time_seconds()) })
+                .await;
+            this.update(cx, |this, cx| {
+                match result {
+                    Ok(proposal) => this.remote_proposal = Some(proposal),
+                    Err(error) => {
+                        zlog::error!("NIP-46 pairing preview failed: {error}");
+                        this.message =
+                            Some("Remote signer permissions could not be prepared.".into());
+                    }
+                }
+                this.busy = false;
+                cx.notify();
+            })
+            .log_err();
+        }));
+        cx.notify();
+    }
+
+    fn approve_remote_proposal(&mut self, cx: &mut Context<Self>) {
+        if self.busy {
+            return;
+        }
+        let Some(proposal) = self.remote_proposal.take() else {
+            return;
+        };
+        let service = Nip46Service::system(*app_identity::CHANNEL);
+        let (session, pairing_uri, registry_generation, is_nostrconnect) = match proposal {
+            RemoteSignerProposal::Bunker {
+                input,
+                preview,
+                fence,
+            } => {
+                let registry_generation = fence.registry_generation;
+                match service.begin_bunker_pairing(input, preview, fence) {
+                    Ok(session) => (session, None, registry_generation, false),
+                    Err(error) => {
+                        zlog::error!("NIP-46 bunker pairing could not start: {error}");
+                        self.message = Some("The remote connection could not be started.".into());
+                        cx.notify();
+                        return;
+                    }
+                }
+            }
+            RemoteSignerProposal::NostrConnect { preview, fence } => {
+                let registry_generation = fence.registry_generation;
+                match service.create_nostrconnect_pairing(preview, fence, "Omega") {
+                    Ok((session, uri)) => (session, Some(uri), registry_generation, true),
+                    Err(error) => {
+                        zlog::error!("NIP-46 pairing link could not be created: {error}");
+                        self.message = Some("The pairing link could not be created.".into());
+                        cx.notify();
+                        return;
+                    }
+                }
+            }
+        };
+        let capability_ref = session.capability_ref().to_string();
+        self.remote_pairing = Some(RemotePairingProgress {
+            capability_ref: capability_ref.clone(),
+            pairing_uri,
+        });
+        self.busy = true;
+        self.message = None;
+        self.task = Some(cx.spawn(async move |this, cx| {
+            let result = cx
+                .background_spawn(async move {
+                    if is_nostrconnect {
+                        exchange_nostrconnect_pairing(session, registry_generation).await
+                    } else {
+                        exchange_bunker_pairing(session, registry_generation).await
+                    }
+                })
+                .await;
+            this.update(cx, |this, cx| {
+                match result {
+                    Ok(reported_signer) => {
+                        this.remote_pairing = None;
+                        this.remote_final_approval = Some(RemoteFinalApproval {
+                            capability_ref,
+                            reported_signer,
+                            registry_generation,
+                        });
+                        this.message = None;
+                    }
+                    Err(error) => {
+                        zlog::error!("NIP-46 pairing exchange failed: {error}");
+                        this.remote_pairing = None;
+                        this.message = Some(remote_pairing_failure_message(&error).into());
+                    }
+                }
+                this.busy = false;
+                cx.notify();
+            })
+            .log_err();
+        }));
+        cx.notify();
+    }
+
+    fn copy_pairing_link(&self, cx: &mut Context<Self>) {
+        let Some(uri) = self
+            .remote_pairing
+            .as_ref()
+            .and_then(|progress| progress.pairing_uri.as_ref())
+        else {
+            return;
+        };
+        cx.write_to_clipboard(ClipboardItem::new_string(uri.expose().to_string()));
+    }
+
+    fn open_pairing_link(&self, cx: &mut Context<Self>) {
+        let Some(uri) = self
+            .remote_pairing
+            .as_ref()
+            .and_then(|progress| progress.pairing_uri.as_ref())
+        else {
+            return;
+        };
+        cx.open_url(uri.expose());
+    }
+
+    fn reject_reported_signer(&mut self, cx: &mut Context<Self>) {
+        let Some(approval) = self.remote_final_approval.take() else {
+            return;
+        };
+        let service = Nip46Service::system(*app_identity::CHANNEL);
+        match service
+            .resume(&approval.capability_ref)
+            .and_then(|mut session| session.reject())
+        {
+            Ok(()) => self.message = Some("Remote signer connection rejected.".into()),
+            Err(error) => {
+                zlog::error!("NIP-46 final approval rejection failed: {error}");
+                self.message = Some("The connection could not be rejected cleanly.".into());
+            }
+        }
+        cx.notify();
+    }
+
+    fn approve_reported_signer(&mut self, cx: &mut Context<Self>) {
+        if self.busy {
+            return;
+        }
+        let Some(approval) = self.remote_final_approval.take() else {
+            return;
+        };
+        self.busy = true;
+        self.message = None;
+        self.task = Some(cx.spawn(async move |this, cx| {
+            let result = cx
+                .background_spawn(exchange_final_approval(
+                    approval.capability_ref,
+                    approval.registry_generation,
+                ))
+                .await;
+            this.update(cx, |this, cx| {
+                match result {
+                    Ok(projection) => {
+                        this.apply_projection(projection);
+                        this.remote_setup_open = false;
+                        this.message = Some("Remote signer connected.".into());
+                    }
+                    Err(error) => {
+                        zlog::error!("NIP-46 final approval failed: {error}");
+                        this.message = Some(
+                            "The signer proof could not be verified. No account was connected."
+                                .into(),
+                        );
+                    }
+                }
+                this.busy = false;
+                cx.notify();
+            })
+            .log_err();
+        }));
+        cx.notify();
+    }
+
+    fn close_remote_setup(&mut self, cx: &mut Context<Self>) {
+        self.remote_uri_input.update(cx, SecureInput::clear);
+        self.remote_proposal = None;
+        self.remote_pairing = None;
+        self.remote_final_approval = None;
+        self.remote_setup_open = false;
+        self.message = None;
+        cx.notify();
     }
 
     fn run_purge(
@@ -597,9 +1118,10 @@ impl IdentityDashboard {
                     | AccountLifecycleState::Locked
                     | AccountLifecycleState::SignedOut
             )
-            && account.recovery == RecoveryProtectionState::Protected;
+            && account_switch_recovery_available(account.signer.kind, account.recovery);
         let is_active = account.is_active;
         let is_locked = is_active && account.lifecycle == AccountLifecycleState::Locked;
+        let is_remote = account.signer.kind == SignerKind::RemoteNip46;
         let needs_setup = account_needs_setup(account.lifecycle, account.recovery);
         let fingerprint = account.fingerprint.clone();
         let busy = self.busy;
@@ -624,7 +1146,11 @@ impl IdentityDashboard {
             )
             .child(detail_row(
                 "Signer",
-                signer_kind_label(account.signer.kind),
+                format!(
+                    "{} · {}",
+                    signer_kind_label(account.signer.kind),
+                    signer_availability_label(account.signer.availability)
+                ),
                 signer_availability_icon(account.signer.availability),
             ))
             .child(detail_row(
@@ -695,14 +1221,33 @@ impl IdentityDashboard {
                         })),
                     )
                     .child(
-                        Button::new("omega-account-sign-out", "Sign out")
+                        Button::new("omega-account-sign-out", SIGN_OUT_LABEL)
                             .style(ButtonStyle::OutlinedGhost)
                             .disabled(!is_active || busy)
                             .tooltip(Tooltip::text("Sign out"))
                             .on_click(cx.listener(|this, _, _, cx| {
                                 this.run_operation(AccountOperation::SignOut, cx)
                             })),
-                    ),
+                    )
+                    .when(is_remote, |this| {
+                        this.child(
+                            Button::new("omega-account-disconnect-signer", DISCONNECT_SIGNER_LABEL)
+                                .style(ButtonStyle::Tinted(TintColor::Error))
+                                .disabled(busy)
+                                .tooltip(Tooltip::text(
+                                    "Revoke this capability and delete its local client key",
+                                ))
+                                .on_click(cx.listener({
+                                    let account_ref = account_ref.clone();
+                                    move |this, _, _, cx| {
+                                        this.run_operation(
+                                            AccountOperation::DisconnectRemote(account_ref.clone()),
+                                            cx,
+                                        )
+                                    }
+                                })),
+                        )
+                    }),
             )
             .child(Divider::horizontal())
             .child(
@@ -773,6 +1318,249 @@ impl IdentityDashboard {
                 .into_any_element(),
         )
     }
+
+    fn render_remote_setup(&self, cx: &mut Context<Self>) -> AnyElement {
+        let content = if let Some(approval) = self.remote_final_approval.as_ref() {
+            let preview = &approval.reported_signer.preview;
+            let methods = preview
+                .methods
+                .iter()
+                .map(|method| nip46_method_label(*method))
+                .collect::<Vec<_>>()
+                .join(", ");
+            let event_kinds = preview
+                .event_kinds
+                .iter()
+                .map(u16::to_string)
+                .collect::<Vec<_>>()
+                .join(", ");
+            v_flex()
+                .gap_3()
+                .child(Label::new("Confirm the signer identity"))
+                .child(detail_row(
+                    "Nostr account",
+                    approval.reported_signer.user_identity.npub().as_str(),
+                    None,
+                ))
+                .child(detail_row(
+                    "Signer device",
+                    approval
+                        .reported_signer
+                        .remote_signer_public_key
+                        .as_str(),
+                    None,
+                ))
+                .child(detail_row("Methods", methods, None))
+                .child(detail_row("Event kinds", event_kinds, None))
+                .child(detail_row("Exact relays", preview.relays.join("\n"), None))
+                .child(
+                    Label::new(
+                        "Approve only if these identities match the signer app. Omega will ask it to sign a one-time login proof before activating the account.",
+                    )
+                    .color(Color::Muted)
+                    .size(LabelSize::Small),
+                )
+                .child(
+                    h_flex()
+                        .gap_2()
+                        .child(
+                            Button::new("omega-remote-final-approve", "Approve signer")
+                                .style(ButtonStyle::Filled)
+                                .disabled(self.busy)
+                                .on_click(cx.listener(|this, _, _, cx| {
+                                    this.approve_reported_signer(cx)
+                                })),
+                        )
+                        .child(
+                            Button::new("omega-remote-final-reject", "Reject")
+                                .style(ButtonStyle::OutlinedGhost)
+                                .disabled(self.busy)
+                                .on_click(cx.listener(|this, _, _, cx| {
+                                    this.reject_reported_signer(cx)
+                                })),
+                        ),
+                )
+                .into_any_element()
+        } else if let Some(progress) = self.remote_pairing.as_ref() {
+            v_flex()
+                .gap_3()
+                .child(Label::new("Waiting for the signer"))
+                .when(progress.pairing_uri.is_some(), |this| {
+                    this.child(
+                        Label::new(
+                            "Open or copy the temporary pairing link in your signer app. Treat the link like a password until pairing finishes.",
+                        )
+                        .color(Color::Muted)
+                        .size(LabelSize::Small),
+                    )
+                    .child(
+                        h_flex()
+                            .gap_2()
+                            .child(
+                                Button::new("omega-remote-open-link", "Open pairing link")
+                                    .style(ButtonStyle::Filled)
+                                    .on_click(cx.listener(|this, _, _, cx| {
+                                        this.open_pairing_link(cx)
+                                    })),
+                            )
+                            .child(
+                                Button::new("omega-remote-copy-link", "Copy pairing link")
+                                    .style(ButtonStyle::OutlinedGhost)
+                                    .on_click(cx.listener(|this, _, _, cx| {
+                                        this.copy_pairing_link(cx)
+                                    })),
+                            ),
+                    )
+                })
+                .child(
+                    h_flex()
+                        .gap_2()
+                        .child(SpinnerLabel::new())
+                        .child(Label::new("Waiting for a verified signer response…")),
+                )
+                .child(
+                    Label::new(format!(
+                        "Connection {} is pending. Omega will show the reported account and signer identity before final approval.",
+                        progress.capability_ref
+                    ))
+                    .color(Color::Muted)
+                    .size(LabelSize::XSmall),
+                )
+                .into_any_element()
+        } else if let Some(proposal) = self.remote_proposal.as_ref() {
+            let preview = proposal.preview();
+            let expected_signer = preview.expected_signer.as_ref().map_or_else(
+                || "Reported by the signer before final approval".to_string(),
+                |signer| signer.as_str().to_string(),
+            );
+            let methods = preview
+                .methods
+                .iter()
+                .map(|method| nip46_method_label(*method))
+                .collect::<Vec<_>>()
+                .join(", ");
+            let event_kinds = preview
+                .event_kinds
+                .iter()
+                .map(u16::to_string)
+                .collect::<Vec<_>>()
+                .join(", ");
+            let relays = preview.relays.join("\n");
+            let expires = last_signer_use(Some(preview.expires_at));
+
+            v_flex()
+                .gap_3()
+                .child(Label::new("Review remote signer permissions"))
+                .child(detail_row("Signer identity", expected_signer, None))
+                .child(detail_row("Methods", methods, None))
+                .child(detail_row("Event kinds", event_kinds, None))
+                .child(detail_row("Exact relays", relays, None))
+                .child(detail_row("Capability expires", expires, None))
+                .child(detail_row(
+                    "Recovery dependency",
+                    "Remote signer access is required",
+                    Some(
+                        Icon::new(IconName::Warning)
+                            .size(IconSize::Small)
+                            .color(Color::Warning),
+                    ),
+                ))
+                .child(
+                    Label::new(
+                        "Omega stores only the disposable client capability in an owner-only local file. Bulk decrypt is not included in this permission.",
+                    )
+                    .color(Color::Muted)
+                    .size(LabelSize::Small),
+                )
+                .child(
+                    h_flex()
+                        .gap_2()
+                        .child(
+                            Button::new("omega-remote-approve", "Approve connection")
+                                .style(ButtonStyle::Filled)
+                                .disabled(self.busy)
+                                .on_click(cx.listener(|this, _, _, cx| {
+                                    this.approve_remote_proposal(cx)
+                                })),
+                        )
+                        .child(
+                            Button::new("omega-remote-review-back", "Back")
+                                .style(ButtonStyle::OutlinedGhost)
+                                .disabled(self.busy)
+                                .on_click(cx.listener(|this, _, _, cx| {
+                                    this.remote_proposal = None;
+                                    cx.notify();
+                                })),
+                        ),
+                )
+                .into_any_element()
+        } else {
+            v_flex()
+                .gap_4()
+                .child(
+                    v_flex()
+                        .gap_1()
+                        .child(Label::new("Connect a remote signer"))
+                        .child(
+                            Label::new(
+                                "Your root Nostr secret stays in the signer. Omega requests a bounded disposable client capability.",
+                            )
+                            .color(Color::Muted)
+                            .size(LabelSize::Small),
+                        ),
+                )
+                .child(
+                    v_flex()
+                        .gap_2()
+                        .child(Label::new("Connect to a bunker"))
+                        .child(self.remote_uri_input.clone())
+                        .child(
+                            Button::new("omega-remote-review-bunker", "Review permissions")
+                                .style(ButtonStyle::Filled)
+                                .disabled(self.busy)
+                                .on_click(cx.listener(|this, _, _, cx| {
+                                    this.review_bunker_permissions(cx)
+                                })),
+                        ),
+                )
+                .child(Divider::horizontal())
+                .child(
+                    v_flex()
+                        .gap_2()
+                        .child(Label::new("Pair with a signer app"))
+                        .child(
+                            Label::new(
+                                "Review the permission profile before Omega creates a one-time nostrconnect pairing link.",
+                            )
+                            .color(Color::Muted)
+                            .size(LabelSize::Small),
+                        )
+                        .child(
+                            Button::new(
+                                "omega-remote-review-pairing",
+                                "Review pairing permissions",
+                            )
+                            .style(ButtonStyle::OutlinedGhost)
+                            .disabled(self.busy)
+                            .on_click(cx.listener(|this, _, _, cx| {
+                                this.review_nostrconnect_permissions(cx)
+                            })),
+                        ),
+                )
+                .into_any_element()
+        };
+
+        v_flex()
+            .gap_4()
+            .child(content)
+            .child(
+                Button::new("omega-remote-close", "Cancel")
+                    .style(ButtonStyle::OutlinedGhost)
+                    .disabled(self.busy)
+                    .on_click(cx.listener(|this, _, _, cx| this.close_remote_setup(cx))),
+            )
+            .into_any_element()
+    }
 }
 
 impl Render for IdentityDashboard {
@@ -802,12 +1590,15 @@ impl Render for IdentityDashboard {
                             ),
                     ),
             )
-            .when(compact, |this| {
+            .when(self.remote_setup_open, |this| {
+                this.child(self.render_remote_setup(cx))
+            })
+            .when(!self.remote_setup_open && compact, |this| {
                 this.child(self.render_account_list(cx))
                     .child(Divider::horizontal())
                     .child(self.render_detail(cx))
             })
-            .when(!compact, |this| {
+            .when(!self.remote_setup_open && !compact, |this| {
                 this.child(
                     h_flex()
                         .items_start()
@@ -911,6 +1702,16 @@ fn account_needs_setup(
         || recovery == RecoveryProtectionState::Needed
 }
 
+fn account_switch_recovery_available(
+    signer_kind: SignerKind,
+    recovery: RecoveryProtectionState,
+) -> bool {
+    match signer_kind {
+        SignerKind::RemoteNip46 => recovery == RecoveryProtectionState::NotApplicable,
+        _ => recovery == RecoveryProtectionState::Protected,
+    }
+}
+
 fn signer_kind_label(kind: SignerKind) -> &'static str {
     match kind {
         SignerKind::LocalNative => "Local file",
@@ -919,6 +1720,27 @@ fn signer_kind_label(kind: SignerKind) -> &'static str {
         SignerKind::AndroidNip55 => "NIP-55",
         SignerKind::DeviceGrant => "Device grant",
         SignerKind::AgentGrant => "Agent grant",
+    }
+}
+
+fn signer_availability_label(availability: SignerAvailability) -> &'static str {
+    match availability {
+        SignerAvailability::Ready => "Ready",
+        SignerAvailability::UserApprovalRequired => "Approval required",
+        SignerAvailability::Offline => "Offline",
+        SignerAvailability::Rejected => "Rejected",
+        SignerAvailability::Revoked => "Revoked",
+        SignerAvailability::Lost => "Lost",
+    }
+}
+
+fn nip46_method_label(method: Nip46CapabilityMethod) -> &'static str {
+    match method {
+        Nip46CapabilityMethod::LoginProof => "Login proof",
+        Nip46CapabilityMethod::SignEvent => "Event signing",
+        Nip46CapabilityMethod::Nip44Encrypt => "NIP-44 encrypt",
+        Nip46CapabilityMethod::Nip44Decrypt => "NIP-44 decrypt",
+        Nip46CapabilityMethod::BulkDecrypt => "Bulk decrypt",
     }
 }
 
@@ -1006,6 +1828,18 @@ mod tests {
         assert_eq!(signer_kind_label(SignerKind::RemoteNip46), "NIP-46");
         assert_eq!(last_signer_use(None), "Never");
         assert_ne!(last_signer_use(Some(42)), "Never");
+        assert_eq!(
+            signer_availability_label(SignerAvailability::Rejected),
+            "Rejected"
+        );
+        assert_eq!(
+            signer_availability_label(SignerAvailability::Offline),
+            "Offline"
+        );
+        assert_eq!(
+            signer_availability_label(SignerAvailability::Revoked),
+            "Revoked"
+        );
     }
 
     #[test]
@@ -1045,6 +1879,60 @@ mod tests {
         assert!(!account_needs_setup(
             AccountLifecycleState::Active,
             RecoveryProtectionState::Protected
+        ));
+    }
+
+    #[test]
+    fn remote_signer_consent_keeps_operations_distinct() {
+        assert_eq!(
+            nip46_method_label(Nip46CapabilityMethod::LoginProof),
+            "Login proof"
+        );
+        assert_eq!(
+            nip46_method_label(Nip46CapabilityMethod::SignEvent),
+            "Event signing"
+        );
+        assert_eq!(
+            nip46_method_label(Nip46CapabilityMethod::Nip44Encrypt),
+            "NIP-44 encrypt"
+        );
+        assert_eq!(
+            nip46_method_label(Nip46CapabilityMethod::Nip44Decrypt),
+            "NIP-44 decrypt"
+        );
+        assert_eq!(
+            nip46_method_label(Nip46CapabilityMethod::BulkDecrypt),
+            "Bulk decrypt"
+        );
+    }
+
+    #[test]
+    fn remote_accounts_can_switch_without_local_recovery_artifacts() {
+        assert!(account_switch_recovery_available(
+            SignerKind::RemoteNip46,
+            RecoveryProtectionState::NotApplicable
+        ));
+        assert!(!account_switch_recovery_available(
+            SignerKind::RemoteNip46,
+            RecoveryProtectionState::Protected
+        ));
+        assert!(account_switch_recovery_available(
+            SignerKind::LocalNative,
+            RecoveryProtectionState::Protected
+        ));
+    }
+
+    #[test]
+    fn remote_sign_out_and_disconnect_are_distinct_actions() {
+        assert_ne!(SIGN_OUT_LABEL, DISCONNECT_SIGNER_LABEL);
+        assert!(matches!(
+            AccountOperation::SignOut,
+            AccountOperation::SignOut
+        ));
+        let account_ref = AccountRef::new("remote-account").expect("account ref");
+        assert!(matches!(
+            AccountOperation::DisconnectRemote(account_ref),
+            AccountOperation::DisconnectRemote(_)
         ));
     }
 }

@@ -9,9 +9,10 @@ use sha2::{Digest as _, Sha256};
 use thiserror::Error;
 
 use crate::{
-    AccountLifecycleState, AccountRef, CustodyError, IdentityAccountRecord, IdentityService,
-    KeyringLocator, PublicIdentity, ReceiptRef, RecoveryProtectionState, SignerAvailability,
-    SignerKind,
+    AccountLifecycleState, AccountRef, CustodyError, DurableIdentityActionDescriptor,
+    HeldIdentityAction, IdentityAccountRecord, IdentityActionAuthorization, IdentityService,
+    KeyringLocator, Nip46Capability, Nip46CapabilityState, Nip46Service, PublicIdentity,
+    ReceiptRef, RecoveryProtectionState, SignerAvailability, SignerKind,
     mutation_lock::IdentityMutationGuard,
     public_store::{read_json_document, remove_public_document, write_json_document},
     secret::{FileSecretStore, SecretStore, StoreError},
@@ -93,11 +94,20 @@ pub struct AccountDashboardProjection {
     pub pending_purges: Vec<AccountPurgeReport>,
 }
 
+#[derive(Debug, Copy, Clone, PartialEq, Eq)]
+pub enum RemoteSignerRuntimeOutcome {
+    Ready { used_at: u64 },
+    Offline,
+    Rejected,
+    Revoked,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 enum AccountStorageLocator {
     LegacyRoot,
     Partitioned { directory_name: String },
+    RemoteNip46 { capability_ref: String },
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -267,6 +277,8 @@ pub enum AccountRegistryError {
     MutationLock,
     #[error("account custody setup failed")]
     Custody(#[from] CustodyError),
+    #[error("remote signer capability is unavailable")]
+    RemoteSigner,
 }
 
 pub struct AccountRegistryService {
@@ -380,6 +392,69 @@ impl AccountRegistryService {
         self.dashboard_locked(&registry)
     }
 
+    pub fn register_remote_account(
+        &self,
+        capability_ref: &str,
+        expected_generation: u64,
+    ) -> Result<AccountDashboardProjection, AccountRegistryError> {
+        let _guard = IdentityMutationGuard::acquire(&self.locator)
+            .map_err(|_| AccountRegistryError::MutationLock)?;
+        let mut registry = self.load_or_migrate_registry_locked()?;
+        self.resume_switch_locked(&mut registry)?;
+        if registry.active.generation != expected_generation {
+            return Err(AccountRegistryError::StaleSelection);
+        }
+        let service = Nip46Service::for_data_root(self.data_root.clone());
+        let capability = service
+            .load_capability(capability_ref)
+            .map_err(|_| AccountRegistryError::RemoteSigner)?;
+        if capability.state != Nip46CapabilityState::AwaitingRegistration {
+            return Err(AccountRegistryError::AccountUnavailable);
+        }
+        if registry
+            .accounts
+            .iter()
+            .any(|entry| entry.account_ref == capability.account_ref)
+        {
+            return Err(AccountRegistryError::InvalidState);
+        }
+        let next_generation = next_generation(registry.active.generation)?;
+        let capability = service
+            .bind_registered_account(capability_ref, &capability.account_ref, next_generation)
+            .map_err(|_| AccountRegistryError::RemoteSigner)?;
+        let now = unix_time_now();
+        if let Some(previous) = registry.active.account_ref.take()
+            && let Some(entry) = find_account_mut(&mut registry, &previous)
+        {
+            entry.lifecycle = AccountLifecycleState::SignedOut;
+            entry.signer.availability = SignerAvailability::UserApprovalRequired;
+            entry.updated_at = now;
+        }
+        registry.accounts.push(DurableAccountEntry {
+            account_ref: capability.account_ref.clone(),
+            identity: capability.user_identity.clone(),
+            storage: AccountStorageLocator::RemoteNip46 {
+                capability_ref: capability.capability_ref.clone(),
+            },
+            lifecycle: AccountLifecycleState::Active,
+            signer: AccountSignerSummary {
+                kind: SignerKind::RemoteNip46,
+                availability: SignerAvailability::Ready,
+                last_successful_use: capability.last_successful_use,
+            },
+            recovery: RecoveryProtectionState::NotApplicable,
+            retirement: AccountRetirementState::NotRetired,
+            profile: None,
+            updated_at: now,
+        });
+        registry.active = ActiveAccountSelection {
+            account_ref: Some(capability.account_ref),
+            generation: next_generation,
+        };
+        self.write_registry_locked(&registry)?;
+        self.dashboard_locked(&registry)
+    }
+
     pub fn refresh_account(
         &self,
         account: &IdentityAccountRecord,
@@ -421,12 +496,18 @@ impl AccountRegistryService {
             .iter()
             .find(|entry| &entry.account_ref == target)
             .ok_or(AccountRegistryError::AccountNotFound)?;
+        let recovery_available = match target_entry.storage {
+            AccountStorageLocator::RemoteNip46 { .. } => {
+                target_entry.recovery == RecoveryProtectionState::NotApplicable
+            }
+            _ => target_entry.recovery == RecoveryProtectionState::Protected,
+        };
         if !matches!(
             target_entry.lifecycle,
             AccountLifecycleState::Active
                 | AccountLifecycleState::Locked
                 | AccountLifecycleState::SignedOut
-        ) || target_entry.recovery != RecoveryProtectionState::Protected
+        ) || !recovery_available
         {
             return Err(AccountRegistryError::AccountUnavailable);
         }
@@ -475,9 +556,13 @@ impl AccountRegistryService {
             .iter()
             .find(|entry| entry.account_ref == active)
             .ok_or(AccountRegistryError::AccountNotFound)?;
-        if entry.lifecycle != AccountLifecycleState::Locked
-            || entry.recovery != RecoveryProtectionState::Protected
-        {
+        let recovery_available = match entry.storage {
+            AccountStorageLocator::RemoteNip46 { .. } => {
+                entry.recovery == RecoveryProtectionState::NotApplicable
+            }
+            _ => entry.recovery == RecoveryProtectionState::Protected,
+        };
+        if entry.lifecycle != AccountLifecycleState::Locked || !recovery_available {
             return Err(AccountRegistryError::AccountUnavailable);
         }
         self.verify_account_storage_locked(&entry.storage, &entry.identity)?;
@@ -510,9 +595,45 @@ impl AccountRegistryService {
         let now = unix_time_now();
         let entry = find_account_mut(&mut registry, &active)
             .ok_or(AccountRegistryError::AccountNotFound)?;
-        entry.lifecycle = AccountLifecycleState::SignedOut;
         entry.signer.availability = SignerAvailability::UserApprovalRequired;
+        entry.lifecycle = AccountLifecycleState::SignedOut;
         entry.updated_at = now;
+        registry.active.generation = next_generation(registry.active.generation)?;
+        self.write_registry_locked(&registry)?;
+        self.dashboard_locked(&registry)
+    }
+
+    pub fn disconnect_remote_signer(
+        &self,
+        account_ref: &AccountRef,
+        expected_generation: u64,
+    ) -> Result<AccountDashboardProjection, AccountRegistryError> {
+        let _guard = IdentityMutationGuard::acquire(&self.locator)
+            .map_err(|_| AccountRegistryError::MutationLock)?;
+        let mut registry = self.load_or_migrate_registry_locked()?;
+        self.resume_switch_locked(&mut registry)?;
+        if registry.active.generation != expected_generation {
+            return Err(AccountRegistryError::StaleSelection);
+        }
+        let entry = registry
+            .accounts
+            .iter()
+            .find(|entry| &entry.account_ref == account_ref)
+            .ok_or(AccountRegistryError::AccountNotFound)?;
+        let AccountStorageLocator::RemoteNip46 { capability_ref } = &entry.storage else {
+            return Err(AccountRegistryError::RemoteSigner);
+        };
+        Nip46Service::for_data_root(self.data_root.clone())
+            .revoke(capability_ref)
+            .map_err(|_| AccountRegistryError::RemoteSigner)?;
+        let entry = find_account_mut(&mut registry, account_ref)
+            .ok_or(AccountRegistryError::AccountNotFound)?;
+        entry.lifecycle = AccountLifecycleState::SignedOut;
+        entry.signer.availability = SignerAvailability::Revoked;
+        entry.updated_at = unix_time_now();
+        if registry.active.account_ref.as_ref() == Some(account_ref) {
+            registry.active.account_ref = None;
+        }
         registry.active.generation = next_generation(registry.active.generation)?;
         self.write_registry_locked(&registry)?;
         self.dashboard_locked(&registry)
@@ -532,9 +653,15 @@ impl AccountRegistryService {
         self.require_selection_locked(&registry, token)?;
         let entry = find_account_mut(&mut registry, &token.account_ref)
             .ok_or(AccountRegistryError::AccountNotFound)?;
+        let recovery_available = match entry.storage {
+            AccountStorageLocator::RemoteNip46 { .. } => {
+                entry.recovery == RecoveryProtectionState::NotApplicable
+            }
+            _ => entry.recovery == RecoveryProtectionState::Protected,
+        };
         if entry.lifecycle != AccountLifecycleState::Active
             || entry.signer.availability != SignerAvailability::Ready
-            || entry.recovery != RecoveryProtectionState::Protected
+            || !recovery_available
         {
             return Err(AccountRegistryError::AccountUnavailable);
         }
@@ -747,13 +874,218 @@ impl AccountRegistryService {
             .iter()
             .find(|entry| entry.account_ref == token.account_ref)
             .ok_or(AccountRegistryError::AccountNotFound)?;
+        let recovery_available = match entry.storage {
+            AccountStorageLocator::RemoteNip46 { .. } => {
+                entry.recovery == RecoveryProtectionState::NotApplicable
+            }
+            _ => entry.recovery == RecoveryProtectionState::Protected,
+        };
+        let signer_available = entry.signer.availability == SignerAvailability::Ready
+            || (entry.signer.kind == SignerKind::RemoteNip46
+                && entry.signer.availability == SignerAvailability::Offline);
         if entry.lifecycle != AccountLifecycleState::Active
-            || entry.signer.availability != SignerAvailability::Ready
-            || entry.recovery != RecoveryProtectionState::Protected
+            || !signer_available
+            || !recovery_available
         {
             return Err(AccountRegistryError::AccountUnavailable);
         }
         Ok(())
+    }
+
+    pub fn remote_signer_capability(
+        &self,
+        token: &AccountSelectionToken,
+    ) -> Result<Nip46Capability, AccountRegistryError> {
+        let _guard = IdentityMutationGuard::acquire(&self.locator)
+            .map_err(|_| AccountRegistryError::MutationLock)?;
+        let registry = self.load_or_migrate_registry_locked()?;
+        self.require_selection_locked(&registry, token)?;
+        let entry = registry
+            .accounts
+            .iter()
+            .find(|entry| entry.account_ref == token.account_ref)
+            .ok_or(AccountRegistryError::AccountNotFound)?;
+        if entry.lifecycle != AccountLifecycleState::Active
+            || entry.signer.kind != SignerKind::RemoteNip46
+            || !matches!(
+                entry.signer.availability,
+                SignerAvailability::Ready | SignerAvailability::Offline
+            )
+        {
+            return Err(AccountRegistryError::AccountUnavailable);
+        }
+        let AccountStorageLocator::RemoteNip46 { capability_ref } = &entry.storage else {
+            return Err(AccountRegistryError::RemoteSigner);
+        };
+        let capability = Nip46Service::for_data_root(self.data_root.clone())
+            .load_capability(capability_ref)
+            .map_err(|_| AccountRegistryError::RemoteSigner)?;
+        capability
+            .authorize(token, crate::Nip46Operation::LoginProof, unix_time_now())
+            .map_err(|_| AccountRegistryError::RemoteSigner)?;
+        Ok(capability)
+    }
+
+    pub fn authorize_remote_identity_action(
+        &self,
+        token: &AccountSelectionToken,
+        descriptor: DurableIdentityActionDescriptor,
+        now: u64,
+    ) -> Result<IdentityActionAuthorization, AccountRegistryError> {
+        descriptor
+            .validate(now)
+            .map_err(|_| AccountRegistryError::InvalidState)?;
+        let _guard = IdentityMutationGuard::acquire(&self.locator)
+            .map_err(|_| AccountRegistryError::MutationLock)?;
+        let mut registry = self.load_or_migrate_registry_locked()?;
+        self.resume_switch_locked(&mut registry)?;
+        self.require_selection_locked(&registry, token)?;
+        let entry = registry
+            .accounts
+            .iter()
+            .find(|entry| entry.account_ref == token.account_ref)
+            .ok_or(AccountRegistryError::AccountNotFound)?;
+        let AccountStorageLocator::RemoteNip46 { capability_ref } = &entry.storage else {
+            return Err(AccountRegistryError::RemoteSigner);
+        };
+        if entry.lifecycle != AccountLifecycleState::Active
+            || entry.signer.kind != SignerKind::RemoteNip46
+            || !matches!(
+                entry.signer.availability,
+                SignerAvailability::Ready | SignerAvailability::Offline
+            )
+            || entry.recovery != RecoveryProtectionState::NotApplicable
+        {
+            return Err(AccountRegistryError::AccountUnavailable);
+        }
+        let capability = Nip46Service::for_data_root(self.data_root.clone())
+            .load_capability(capability_ref)
+            .map_err(|_| AccountRegistryError::RemoteSigner)?;
+        if capability.state != Nip46CapabilityState::Active
+            || capability.account_ref != token.account_ref
+            || capability.account_generation != token.generation
+            || capability.user_identity != token.identity
+        {
+            return Err(AccountRegistryError::StaleSelection);
+        }
+        let intent = HeldIdentityAction {
+            intent_ref: descriptor.intent_ref,
+            account_ref: token.account_ref.clone(),
+            account_generation: token.generation,
+            identity_ref: token.identity.identity_ref().clone(),
+            kind: descriptor.kind,
+            destination_ref: descriptor.destination_ref,
+            authorization_ref: descriptor.authorization_ref,
+            payload_digest: descriptor.payload_digest,
+            issued_at: now,
+            expires_at: descriptor.expires_at,
+        };
+        if !intent.validate(now) {
+            return Err(AccountRegistryError::InvalidState);
+        }
+        Ok(IdentityActionAuthorization::new(intent))
+    }
+
+    pub fn validate_remote_identity_action_authorization(
+        &self,
+        authorization: &IdentityActionAuthorization,
+        now: u64,
+    ) -> Result<(), AccountRegistryError> {
+        let intent = authorization.intent();
+        if !intent.validate(now) {
+            return Err(AccountRegistryError::InvalidState);
+        }
+        let _guard = IdentityMutationGuard::acquire(&self.locator)
+            .map_err(|_| AccountRegistryError::MutationLock)?;
+        let mut registry = self.load_or_migrate_registry_locked()?;
+        self.resume_switch_locked(&mut registry)?;
+        if registry.active.account_ref.as_ref() != Some(&intent.account_ref)
+            || registry.active.generation != intent.account_generation
+        {
+            return Err(AccountRegistryError::StaleSelection);
+        }
+        let entry = registry
+            .accounts
+            .iter()
+            .find(|entry| entry.account_ref == intent.account_ref)
+            .ok_or(AccountRegistryError::AccountNotFound)?;
+        let AccountStorageLocator::RemoteNip46 { capability_ref } = &entry.storage else {
+            return Err(AccountRegistryError::RemoteSigner);
+        };
+        if entry.lifecycle != AccountLifecycleState::Active
+            || entry.signer.kind != SignerKind::RemoteNip46
+            || entry.signer.availability != SignerAvailability::Ready
+            || entry.recovery != RecoveryProtectionState::NotApplicable
+            || entry.identity.identity_ref() != &intent.identity_ref
+        {
+            return Err(AccountRegistryError::AccountUnavailable);
+        }
+        let capability = Nip46Service::for_data_root(self.data_root.clone())
+            .load_capability(capability_ref)
+            .map_err(|_| AccountRegistryError::RemoteSigner)?;
+        if capability.state != Nip46CapabilityState::Active
+            || capability.account_ref != intent.account_ref
+            || capability.account_generation != intent.account_generation
+            || capability.user_identity != entry.identity
+        {
+            return Err(AccountRegistryError::StaleSelection);
+        }
+        Ok(())
+    }
+
+    pub fn record_remote_signer_outcome(
+        &self,
+        token: &AccountSelectionToken,
+        outcome: RemoteSignerRuntimeOutcome,
+        observed_at: u64,
+    ) -> Result<AccountDashboardProjection, AccountRegistryError> {
+        if observed_at == 0 || matches!(outcome, RemoteSignerRuntimeOutcome::Ready { used_at: 0 }) {
+            return Err(AccountRegistryError::InvalidState);
+        }
+        let _guard = IdentityMutationGuard::acquire(&self.locator)
+            .map_err(|_| AccountRegistryError::MutationLock)?;
+        let mut registry = self.load_or_migrate_registry_locked()?;
+        self.resume_switch_locked(&mut registry)?;
+        self.require_selection_locked(&registry, token)?;
+        let entry = registry
+            .accounts
+            .iter()
+            .find(|entry| entry.account_ref == token.account_ref)
+            .ok_or(AccountRegistryError::AccountNotFound)?;
+        if entry.lifecycle != AccountLifecycleState::Active
+            || entry.signer.kind != SignerKind::RemoteNip46
+            || entry.identity != token.identity
+            || entry.recovery != RecoveryProtectionState::NotApplicable
+            || !matches!(
+                entry.signer.availability,
+                SignerAvailability::Ready | SignerAvailability::Offline
+            )
+        {
+            return Err(AccountRegistryError::AccountUnavailable);
+        }
+        let AccountStorageLocator::RemoteNip46 { capability_ref } = &entry.storage else {
+            return Err(AccountRegistryError::RemoteSigner);
+        };
+        let capability_ref = capability_ref.clone();
+        if outcome == RemoteSignerRuntimeOutcome::Revoked {
+            Nip46Service::for_data_root(self.data_root.clone())
+                .revoke(&capability_ref)
+                .map_err(|_| AccountRegistryError::RemoteSigner)?;
+        }
+        let entry = find_account_mut(&mut registry, &token.account_ref)
+            .ok_or(AccountRegistryError::AccountNotFound)?;
+        entry.signer.availability = match outcome {
+            RemoteSignerRuntimeOutcome::Ready { used_at } => {
+                entry.signer.last_successful_use = Some(used_at);
+                SignerAvailability::Ready
+            }
+            RemoteSignerRuntimeOutcome::Offline => SignerAvailability::Offline,
+            RemoteSignerRuntimeOutcome::Rejected => SignerAvailability::Rejected,
+            RemoteSignerRuntimeOutcome::Revoked => SignerAvailability::Revoked,
+        };
+        entry.updated_at = observed_at;
+        self.write_registry_locked(&registry)?;
+        self.dashboard_locked(&registry)
     }
 
     pub(crate) fn active_storage(
@@ -783,6 +1115,9 @@ impl AccountRegistryService {
             AccountLifecycleState::ForgetPending | AccountLifecycleState::Forgotten
         ) {
             return Err(AccountRegistryError::AccountUnavailable);
+        }
+        if matches!(entry.storage, AccountStorageLocator::RemoteNip46 { .. }) {
+            return Err(AccountRegistryError::RemoteSigner);
         }
         Ok((self.root_for_storage(&entry.storage)?, token))
     }
@@ -1047,6 +1382,21 @@ impl AccountRegistryService {
         mut journal: AccountSwitchJournal,
     ) -> Result<AccountDashboardProjection, AccountRegistryError> {
         let now = unix_time_now();
+        let target_storage = registry
+            .accounts
+            .iter()
+            .find(|entry| entry.account_ref == journal.to_account_ref)
+            .map(|entry| entry.storage.clone())
+            .ok_or(AccountRegistryError::AccountNotFound)?;
+        if let AccountStorageLocator::RemoteNip46 { capability_ref } = &target_storage {
+            Nip46Service::for_data_root(self.data_root.clone())
+                .rebind_generation(
+                    capability_ref,
+                    &journal.to_account_ref,
+                    journal.next_generation,
+                )
+                .map_err(|_| AccountRegistryError::RemoteSigner)?;
+        }
         if let Some(previous) = journal.from_account_ref.as_ref()
             && let Some(entry) = find_account_mut(registry, previous)
         {
@@ -1112,7 +1462,22 @@ impl AccountRegistryService {
         storage: &AccountStorageLocator,
         identity: &PublicIdentity,
     ) -> Result<(), AccountRegistryError> {
-        verify_account_root(&self.root_for_storage(storage)?, &self.locator, identity)
+        match storage {
+            AccountStorageLocator::LegacyRoot | AccountStorageLocator::Partitioned { .. } => {
+                verify_account_root(&self.root_for_storage(storage)?, &self.locator, identity)
+            }
+            AccountStorageLocator::RemoteNip46 { capability_ref } => {
+                let capability = Nip46Service::for_data_root(self.data_root.clone())
+                    .load_capability(capability_ref)
+                    .map_err(|_| AccountRegistryError::RemoteSigner)?;
+                if capability.user_identity != *identity
+                    || capability.state != Nip46CapabilityState::Active
+                {
+                    return Err(AccountRegistryError::IdentityMismatch);
+                }
+                Ok(())
+            }
+        }
     }
 
     fn root_for_storage(
@@ -1127,6 +1492,11 @@ impl AccountRegistryService {
                 Ok(self.accounts_root().join(directory_name))
             }
             AccountStorageLocator::Partitioned { .. } => Err(AccountRegistryError::InvalidState),
+            AccountStorageLocator::RemoteNip46 { capability_ref } => {
+                Nip46Service::for_data_root(self.data_root.clone())
+                    .capability_directory(capability_ref)
+                    .map_err(|_| AccountRegistryError::RemoteSigner)
+            }
         }
     }
 
@@ -1273,6 +1643,9 @@ fn validate_registry(registry: &AccountRegistry) -> Result<(), AccountRegistryEr
                 is_lower_hex_64(directory_name)
                     && directory_name == &partition_directory_name(&entry.account_ref)
             }
+            AccountStorageLocator::RemoteNip46 { capability_ref } => {
+                valid_capability_ref(capability_ref)
+            }
         };
         if !references.insert(entry.account_ref.as_str())
             || entry.identity.validate().is_err()
@@ -1319,6 +1692,14 @@ fn next_generation(generation: u64) -> Result<u64, AccountRegistryError> {
 
 fn partition_directory_name(account_ref: &AccountRef) -> String {
     hex::encode(Sha256::digest(account_ref.as_str().as_bytes()))
+}
+
+fn valid_capability_ref(capability_ref: &str) -> bool {
+    !capability_ref.is_empty()
+        && capability_ref.len() <= 128
+        && capability_ref
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || byte == b'-')
 }
 
 fn validate_add_journal(journal: &AccountAddJournal) -> Result<(), AccountRegistryError> {
@@ -1429,7 +1810,7 @@ fn is_registry_owned_purge_target(target: AccountPurgeTarget) -> bool {
 
 fn delete_and_verify_target(root: &Path, target: AccountPurgeTarget) -> io::Result<()> {
     let relative_paths: &[&str] = match target {
-        AccountPurgeTarget::Secret => &["identity.secret"],
+        AccountPurgeTarget::Secret => &["identity.secret", "client.secret", "pairing.secret"],
         AccountPurgeTarget::CustodyDocuments => &[
             "identity.json",
             "identity.complete.json",
@@ -1438,6 +1819,9 @@ fn delete_and_verify_target(root: &Path, target: AccountPurgeTarget) -> io::Resu
             "identity.account.json",
             "identity.backup-value.json",
             "identity.backup-nudge-dismissed.json",
+            "capability.json",
+            "pairing.json",
+            "runtime-request.json",
         ],
         AccountPurgeTarget::HeldIntents => &["identity.action-intent.json"],
         AccountPurgeTarget::RecoveryMetadata => &["identity.recovery-protection.json"],
@@ -2070,5 +2454,115 @@ mod tests {
                 .last_successful_use
                 .is_some()
         );
+    }
+
+    #[test]
+    fn remote_runtime_outcomes_are_generation_fenced_and_offline_is_retryable() {
+        let temporary_directory = tempfile::tempdir().expect("temporary directory");
+        let secret =
+            SecretKeyMaterial::from_bytes(Zeroizing::new([19; 32])).expect("valid fixture secret");
+        let identity = secret.public_identity().expect("fixture identity");
+        let account_ref = AccountRef::new(format!(
+            "omega-account-{}",
+            identity.public_key_hex().as_str()
+        ))
+        .expect("account ref");
+        let token = AccountSelectionToken {
+            account_ref: account_ref.clone(),
+            identity: identity.clone(),
+            generation: 7,
+        };
+        let registry = AccountRegistry {
+            schema: ACCOUNT_REGISTRY_SCHEMA.to_string(),
+            schema_version: ACCOUNT_REGISTRY_VERSION,
+            active: ActiveAccountSelection {
+                account_ref: Some(account_ref.clone()),
+                generation: token.generation,
+            },
+            accounts: vec![DurableAccountEntry {
+                account_ref,
+                identity,
+                storage: AccountStorageLocator::RemoteNip46 {
+                    capability_ref: "runtime-outcome-capability".to_string(),
+                },
+                lifecycle: AccountLifecycleState::Active,
+                signer: AccountSignerSummary {
+                    kind: SignerKind::RemoteNip46,
+                    availability: SignerAvailability::Ready,
+                    last_successful_use: None,
+                },
+                recovery: RecoveryProtectionState::NotApplicable,
+                retirement: AccountRetirementState::NotRetired,
+                profile: None,
+                updated_at: 1,
+            }],
+        };
+        let service = AccountRegistryService::for_channel_data_root(
+            AppChannel::Dev,
+            temporary_directory.path().to_path_buf(),
+        );
+        service
+            .write_registry_locked(&registry)
+            .expect("write remote registry");
+
+        let offline = service
+            .record_remote_signer_outcome(
+                &token,
+                RemoteSignerRuntimeOutcome::Offline,
+                1_700_000_001,
+            )
+            .expect("record offline");
+        assert_eq!(
+            offline.accounts[0].signer.availability,
+            SignerAvailability::Offline
+        );
+        service
+            .validate_signing_selection(&token)
+            .expect("explicit offline retry is allowed");
+
+        let ready = service
+            .record_remote_signer_outcome(
+                &token,
+                RemoteSignerRuntimeOutcome::Ready {
+                    used_at: 1_700_000_002,
+                },
+                1_700_000_002,
+            )
+            .expect("record success");
+        assert_eq!(
+            ready.accounts[0].signer.availability,
+            SignerAvailability::Ready
+        );
+        assert_eq!(
+            ready.accounts[0].signer.last_successful_use,
+            Some(1_700_000_002)
+        );
+
+        let mut stale = token.clone();
+        stale.generation += 1;
+        assert!(matches!(
+            service.record_remote_signer_outcome(
+                &stale,
+                RemoteSignerRuntimeOutcome::Offline,
+                1_700_000_003,
+            ),
+            Err(AccountRegistryError::StaleSelection)
+        ));
+
+        let rejected = service
+            .record_remote_signer_outcome(
+                &token,
+                RemoteSignerRuntimeOutcome::Rejected,
+                1_700_000_004,
+            )
+            .expect("record rejection");
+        assert_eq!(
+            rejected.accounts[0].signer.availability,
+            SignerAvailability::Rejected
+        );
+        assert!(matches!(
+            service.validate_signing_selection(&token),
+            Err(AccountRegistryError::AccountUnavailable)
+        ));
     }
 }

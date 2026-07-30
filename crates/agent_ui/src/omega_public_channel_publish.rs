@@ -13,11 +13,13 @@ use std::{
 use anyhow::{Context as _, Result, anyhow, ensure};
 use nostr::{Event, JsonUtil as _};
 use omega_identity::{
-    AdmittedSigningRequest, DurableIdentityActionDecision, DurableIdentityActionDescriptor,
-    DurableIdentityActionKind, IdentityActionAuthorization, IdentityActivationRequired,
-    IdentityRef, IdentityService, ProofRef, ReceiptRef, ResourceRef, SigningPurpose,
+    AccountRegistryService, AccountSelectionToken, AdmittedSigningRequest,
+    DurableIdentityActionDecision, DurableIdentityActionDescriptor, DurableIdentityActionKind,
+    IdentityActionAuthorization, IdentityActivationRequired, IdentityRef, IdentityService,
+    ProofRef, PublicIdentity, ReceiptRef, ResourceRef, SigningPurpose, SigningResult,
     UnsignedEventTemplate,
 };
+use omega_signer_broker::{SignerBroker, SignerRoute};
 use sha2::{Digest as _, Sha256};
 
 use crate::{
@@ -231,6 +233,31 @@ fn prepare_write_at(
     let identity = custody
         .identity
         .ok_or_else(|| anyhow!("the Omega identity is not ready"))?;
+    prepare_write_for_identity_at(&identity, descriptor, write, events, created_at)
+}
+
+pub fn prepare_remote_write(
+    selection: &AccountSelectionToken,
+    descriptor: &ChannelDescriptor,
+    write: PublicChannelWrite,
+    events: &[NostrEventRecord],
+) -> Result<PreparedPublicChannelWrite> {
+    prepare_write_for_identity_at(
+        &selection.identity,
+        descriptor,
+        write,
+        events,
+        unix_time_seconds()?,
+    )
+}
+
+fn prepare_write_for_identity_at(
+    identity: &PublicIdentity,
+    descriptor: &ChannelDescriptor,
+    write: PublicChannelWrite,
+    events: &[NostrEventRecord],
+    created_at: u64,
+) -> Result<PreparedPublicChannelWrite> {
     if let PublicChannelWrite::Report {
         event_id,
         author_public_key,
@@ -275,6 +302,129 @@ fn prepare_write_at(
         },
         event,
         is_report: matches!(write, PublicChannelWrite::Report { .. }),
+    })
+}
+
+pub async fn sign_remote_prepared_write(
+    broker: &SignerBroker,
+    route: &SignerRoute,
+    selection: AccountSelectionToken,
+    live_descriptor: &ChannelDescriptor,
+    prepared: PreparedPublicChannelWrite,
+    authorization: &IdentityActionAuthorization,
+) -> Result<SignedPublicChannelWrite> {
+    validate_prepared_write(live_descriptor, &prepared)?;
+    let now = unix_time_seconds()?;
+    AccountRegistryService::for_channel(*app_identity::CHANNEL)
+        .validate_remote_identity_action_authorization(authorization, now)
+        .context("revalidating the remote public-write authorization")?;
+    ensure!(
+        authorization.intent().identity_ref == prepared.identity_ref
+            && authorization.intent().intent_ref == prepared.request_ref
+            && authorization.intent().payload_digest == prepared.activation.payload_digest
+            && authorization.intent().destination_ref == prepared.activation.destination_ref,
+        "the remote public-write authorization does not match the prepared event"
+    );
+    ensure!(
+        prepared.identity_ref == *selection.identity.identity_ref(),
+        "the selected remote identity changed before signing"
+    );
+    ensure!(
+        signing_receipt(&selection.identity, &prepared.event)? == prepared.request_ref,
+        "the prepared public-write receipt no longer matches its exact event"
+    );
+    let signed = broker
+        .sign(
+            route,
+            selection.clone(),
+            AdmittedSigningRequest {
+                request_ref: prepared.request_ref,
+                identity_ref: prepared.identity_ref,
+                purpose: SigningPurpose::NostrEvent,
+                event: prepared.event,
+            },
+        )
+        .await
+        .context("signing the public channel event with the selected signer")?;
+    AccountRegistryService::for_channel(*app_identity::CHANNEL)
+        .validate_remote_identity_action_authorization(authorization, unix_time_seconds()?)
+        .context("revalidating the remote public-write authorization after signing")?;
+    project_signed_write(&selection.identity, signed, prepared.is_report)
+}
+
+pub fn authorize_remote_prepared_write(
+    registry: &AccountRegistryService,
+    selection: &AccountSelectionToken,
+    prepared: &PreparedPublicChannelWrite,
+) -> Result<IdentityActionAuthorization> {
+    registry
+        .authorize_remote_identity_action(
+            selection,
+            prepared.activation.clone(),
+            unix_time_seconds()?,
+        )
+        .context("authorizing the prepared remote public tester-channel event")
+}
+
+fn validate_prepared_write(
+    live_descriptor: &ChannelDescriptor,
+    prepared: &PreparedPublicChannelWrite,
+) -> Result<()> {
+    live_descriptor.validate()?;
+    let prepared_payload_digest =
+        format!("{:x}", Sha256::digest(serde_json::to_vec(&prepared.event)?));
+    ensure!(
+        prepared_payload_digest == prepared.activation.payload_digest,
+        "the prepared public-write payload changed before signing"
+    );
+    let destination_digest = format!(
+        "{:x}",
+        Sha256::digest(format!(
+            "{}\0{}",
+            live_descriptor.relay_url, live_descriptor.group_id
+        ))
+    );
+    ensure!(
+        prepared.activation.destination_ref
+            == ResourceRef::new(format!("nip29-{destination_digest}"))?,
+        "the public channel destination changed before signing"
+    );
+    ensure!(
+        live_descriptor
+            .accepted_kinds
+            .contains(&prepared.event.kind),
+        "the public channel no longer accepts the prepared event kind"
+    );
+    Ok(())
+}
+
+fn project_signed_write(
+    identity: &PublicIdentity,
+    signed: SigningResult,
+    is_report: bool,
+) -> Result<SignedPublicChannelWrite> {
+    let event = Event::from_json(&signed.signed_event_json)
+        .context("decoding the signed public channel event")?;
+    event
+        .verify()
+        .context("verifying the signed public channel event")?;
+    ensure!(
+        event.id.to_hex() == signed.event_id
+            && event.sig.to_string() == signed.signature
+            && event.pubkey.to_hex() == identity.public_key_hex().as_str(),
+        "the signer returned a different public channel event"
+    );
+    let record = serde_json::from_str::<NostrEventRecord>(&signed.signed_event_json)
+        .context("projecting the signed public channel event")?;
+    ensure!(
+        record.is_verified(),
+        "the projected public channel event is invalid"
+    );
+    Ok(SignedPublicChannelWrite {
+        event,
+        record,
+        author_public_key: identity.public_key_hex().as_str().to_string(),
+        is_report,
     })
 }
 

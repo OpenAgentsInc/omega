@@ -62,16 +62,23 @@ These files are intentionally not encrypted at rest. This removes unstable
 binary-identity prompts from development and release builds, but it makes the
 security boundary the user's operating-system account and application data
 directory. Omega must never log or render their contents. Unix ownership and
-mode checks ship today; equivalent Windows ACL assurance remains an explicit
-platform-verification requirement.
+mode are set to owner-only values when directories and files are written;
+equivalent Windows ACL assurance and validation of permissions on every read
+remain explicit platform-verification requirements.
 
-AUTH-01 through AUTH-03 deliberately keep this file-backed design. AUTH-02 writes
-the NIP-49 `ncryptsec` artifact to the directory explicitly selected by the
-person and keeps passwords only in zeroizing memory for the operation. It does
-not introduce an encrypted application vault or an account-reset password.
-AUTH-03 does not move either the migrated or partitioned `identity.secret`
-files into native storage. Remote signer custody remains deferred to
-OMEGA-AUTH-04 (omega#179).
+AUTH-01 through AUTH-04 deliberately keep this file-backed design. AUTH-02
+writes the NIP-49 `ncryptsec` artifact to the directory explicitly selected by
+the person and keeps passwords only in zeroizing memory for the operation. It
+does not introduce an encrypted application vault or an account-reset
+password. AUTH-03 does not move either the migrated or partitioned
+`identity.secret` files into native storage.
+
+Remote signer custody in AUTH-04 stores NIP-46 pairing state below
+`identity/nip46/<capability-ref>/`. Public-safe pairing and capability JSON sit
+beside owner-only `client.secret` and short-lived `pairing.secret` files. The
+pairing secret is deleted after acknowledgement. Rejection, revocation, and
+**Disconnect signer** delete and read back the disposable client secret. The
+person's root `nsec` remains in the external signer and never enters Omega.
 
 These packets do not enable or
 probe the macOS Keychain, Secure Enclave, Windows credential vault, Linux

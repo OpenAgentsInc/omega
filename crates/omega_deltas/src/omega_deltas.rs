@@ -183,6 +183,7 @@ pub const ENFORCED_DELTAS: &[&str] = &[
     "OMEGA-DELTA-0192",
     "OMEGA-DELTA-0193",
     "OMEGA-DELTA-0194",
+    "OMEGA-DELTA-0195",
 ];
 
 /// The concise product contract adjacent to the delta registry.
@@ -1235,6 +1236,8 @@ pub const TITLE_BAR_PATH: &str = "crates/title_bar/src/title_bar.rs";
 /// OMEGA-DELTA-0194. The durable multi-account registry and its desktop home.
 pub const IDENTITY_ACCOUNT_REGISTRY_PATH: &str = "crates/omega_identity/src/accounts.rs";
 pub const ACCOUNT_UI_PATH: &str = "crates/account_ui/account_ui.rs";
+pub const NIP46_IDENTITY_PATH: &str = "crates/omega_identity/src/nip46.rs";
+pub const NIP46_BROKER_PATH: &str = "crates/omega_signer_broker/omega_signer_broker.rs";
 pub const ACCOUNT_SCOPE_PATH: &str = "crates/agent_ui/src/account_scope.rs";
 pub const DRAFT_PROMPT_STORE_PATH: &str = "crates/agent_ui/src/draft_prompt_store.rs";
 
@@ -24116,7 +24119,7 @@ mod tests {
             "IdentityActivationEvents::complete",
             "IdentityActivationEvents::cancel",
             "lost its in-memory owner after restart",
-            "Remote signing is not available in this build",
+            "OpenRemoteSignerSetup",
             "Safe account switching and preservation of the previous identity arrive with multi-account support",
         ] {
             assert!(
@@ -24133,9 +24136,9 @@ mod tests {
         assert!(
             normalized_authentication.contains("NIP-49")
                 && normalized_authentication.contains("Raw `nsec` remains an explicitly advanced")
-                && normalized_authentication.contains("waits for multi-account switching")
-                && normalized_authentication.contains("remote signing waits for the signer packet"),
-            "OMEGA-DELTA-0193: auth contract no longer distinguishes implemented recovery from deferred signers"
+                && normalized_authentication.contains("account-management decision")
+                && normalized_authentication.contains("Use a signer on another device"),
+            "OMEGA-DELTA-0193: auth contract no longer distinguishes local recovery from remote signer routing"
         );
         assert!(
             normalized_application_identity.contains("Activation and recovery ceremony")
@@ -24245,6 +24248,104 @@ mod tests {
                 assert!(
                     normalized.contains(required),
                     "OMEGA-DELTA-0194: {path} lost `{required}`"
+                );
+            }
+        }
+    }
+
+    /// OMEGA-DELTA-0195. Remote identities use verified, bounded NIP-46
+    /// capabilities and keep their disposable secrets in owner-only files.
+    #[test]
+    fn remote_signers_are_bounded_verified_and_file_backed() {
+        let nip46 = read_repository_file(NIP46_IDENTITY_PATH);
+        for required in [
+            "pub fn begin_bunker_pairing",
+            "pub fn create_nostrconnect_pairing",
+            "pub fn receive_nostrconnect_acknowledgement",
+            "pub fn receive_user_public_key",
+            "pub fn approve_reported_signer",
+            "pub fn receive_signed_challenge",
+            "Nip46CapabilityMethod::LoginProof",
+            "Nip46CapabilityMethod::SignEvent",
+            "delete_client_key_verified",
+            "directory.join(\"client.secret\")",
+            "directory.join(\"pairing.secret\")",
+            "set_permissions(fs::Permissions::from_mode(0o600))",
+            "Nip46Error::WrongAuthor",
+            "Nip46Error::WrongRequestId",
+            "Nip46Error::WrongRelay",
+            "Nip46Error::DuplicateResponse",
+            "Nip46Error::StaleGeneration",
+        ] {
+            assert!(
+                nip46.contains(required),
+                "OMEGA-DELTA-0195: NIP-46 identity boundary lost `{required}`"
+            );
+        }
+
+        let broker = read_repository_file(NIP46_BROKER_PATH);
+        for required in [
+            "pub struct Nip46RelayCoordinator",
+            "pub async fn exchange",
+            "pub async fn listen",
+            "SignerBrokerError::ExplicitRejection",
+            "SignerBrokerError::Offline",
+            "SignerBrokerError::Timeout",
+            "record_remote_signer_outcome",
+        ] {
+            assert!(
+                broker.contains(required),
+                "OMEGA-DELTA-0195: NIP-46 broker lost `{required}`"
+            );
+        }
+
+        let dashboard = read_repository_file(ACCOUNT_UI_PATH);
+        for required in [
+            "Connect to a bunker",
+            "Pair with a signer app",
+            "Review remote signer permissions",
+            "Approve connection",
+            "Open pairing link",
+            "Copy pairing link",
+            "Confirm the signer identity",
+            "Approve signer",
+            "Disconnect signer",
+            "exchange_bunker_pairing",
+            "exchange_nostrconnect_pairing",
+            "exchange_final_approval",
+        ] {
+            assert!(
+                dashboard.contains(required),
+                "OMEGA-DELTA-0195: remote signer desktop flow lost `{required}`"
+            );
+        }
+
+        let section = read_repository_file(IDENTITY_SECTION_PATH);
+        assert!(
+            section.contains("Use a signer on another device")
+                && section.contains("OpenRemoteSignerSetup"),
+            "OMEGA-DELTA-0195: onboarding no longer reaches remote signer setup"
+        );
+
+        for path in [
+            IDENTITY_AUTHENTICATION_DOCUMENT_PATH,
+            RUNTIME_CREDENTIAL_STORAGE_DOCUMENT_PATH,
+            APPLICATION_IDENTITY_DOCUMENT_PATH,
+        ] {
+            let documentation = read_repository_file(path);
+            let normalized = normalize_prose(&documentation);
+            for required in [
+                "identity/nip46/<capability-ref>/",
+                "client.secret",
+                "pairing.secret",
+                "root `nsec`",
+                "Secure Enclave",
+                "Windows credential vault",
+                "Linux secret service",
+            ] {
+                assert!(
+                    normalized.contains(required),
+                    "OMEGA-DELTA-0195: {path} lost `{required}`"
                 );
             }
         }

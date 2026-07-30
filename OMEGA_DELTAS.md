@@ -8522,8 +8522,9 @@ startup recheck — survives unchanged behind that dropdown.
   an advanced recovery escape hatch using the zeroizing secure input.
 - **Deferred paths are honest.** **Use an existing identity** does not
   overwrite a healthy local candidate; safe replacement waits for
-  multi-account switching. **Use a signer on another device** states that
-  remote signing is unavailable and performs no activation or secret move.
+  multi-account switching. **Use a signer on another device** originally
+  refused activation without moving a secret; OMEGA-DELTA-0195 now routes it
+  into bounded NIP-46 enrollment.
 - **Completion is not replay.** The durable action file contains only typed
   references, a payload digest, and expiry. The initiating surface owns the
   actual payload through a process-local one-shot callback. After recovery and
@@ -8557,7 +8558,7 @@ startup recheck — survives unchanged behind that dropdown.
   identity is a file-backed `CandidateLocal` with recovery needed; **Complete
   setup** returns to the existing NIP-49 activation ceremony. Retirement stays
   unavailable until its signed policy is implemented and is never presented as
-  local deletion. Remote signers remain deferred to OMEGA-AUTH-04, omega#179.
+  local deletion. Remote signers are added by OMEGA-DELTA-0195.
 - **Selection is generation-fenced.** The durable registry is
   `identity/accounts/index.json`. It preserves the legacy root account and
   stores added accounts below deterministic per-account directories under
@@ -8581,3 +8582,39 @@ startup recheck — survives unchanged behind that dropdown.
   and purge tests in `omega_identity`; per-public-key draft and room-state
   tests in `agent_ui`; dashboard action and purge-result tests in `account_ui`;
   and the `OMEGA-DELTA-0194` source assertions in `crates/omega_deltas`.
+
+### OMEGA-DELTA-0195 — Remote signers use bounded, file-backed NIP-46 capabilities
+
+- **Origin:** OMEGA-AUTH-04, omega#179. Extends the account registry from
+  OMEGA-DELTA-0194 without importing the person's root `nsec`.
+- **Two explicit pairing directions.** Omega accepts a bounded `bunker://`
+  connection or creates a transient `nostrconnect://` link backed by a
+  disposable client key and exact rendezvous relay set. The generated link can
+  be opened or copied while the verified listener is running; it does not
+  enter logs, action payloads, errors, or public account records.
+- **Consent precedes authority.** The desktop dashboard shows the expected
+  signer when known, methods, exact event kinds, exact relays, expiry, and
+  remote recovery dependency before the first approval. Its initial profile
+  grants login proof and bounded event signing only. Encryption and bulk
+  decrypt remain separate profiles. A verified acknowledgement leads to a
+  second approval showing both the reported person account and signer-device
+  key. Account activation additionally requires an exact signed login
+  challenge under the reported account key.
+- **Responses are fenced.** Pairing and runtime requests bind the selected
+  account generation, capability, correlation id, author, relay, event kind,
+  tags, signature, and content. Explicit rejection and revocation are terminal;
+  offline, silence, and timeout remain visible outcomes. Sign out clears
+  selection, while **Disconnect signer** separately revokes the capability and
+  verifies disposable-key deletion.
+- **File custody only.** Remote state lives below
+  `identity/nip46/<capability-ref>/`. Public-safe `pairing.json` and
+  `capability.json` sit beside atomic owner-only `client.secret` and
+  short-lived `pairing.secret` files on Unix. The root `nsec` remains in the
+  external signer. This delta enables no macOS Keychain, Secure Enclave,
+  Windows credential vault, Linux secret service, Android keystore, encrypted
+  application vault, or native enclave path.
+- **Enforced by:** NIP-46 parsing, state-machine, correlation, signature,
+  generation, permission, revocation, and file-mode tests in `omega_identity`;
+  relay coordinator and remote signing tests in `omega_signer_broker`; account
+  enrollment and lifecycle presentation tests in `account_ui`; and the
+  `OMEGA-DELTA-0195` source assertions in `crates/omega_deltas`.

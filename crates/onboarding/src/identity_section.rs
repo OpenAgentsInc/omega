@@ -7,10 +7,10 @@ use std::{
 
 use db::kvp::KeyValueStore;
 use gpui::{
-    AnyElement, App, AppContext, Context, Entity, IntoElement, PathPromptOptions, Render,
+    Action, AnyElement, App, AppContext, Context, Entity, IntoElement, PathPromptOptions, Render,
     SharedString, Task, Window,
 };
-use omega_actions::IdentityActivationEvents;
+use omega_actions::{IdentityActivationEvents, OpenRemoteSignerSetup};
 use omega_identity::{
     CandidateRef, CustodyConflictReason, CustodyError, CustodyResult, CustodyState,
     DurableIdentityActionKind, HeldIdentityAction, IdentityActivationInspection,
@@ -336,7 +336,6 @@ enum ActivationMode {
     Choose,
     KeepLocal,
     ExistingIdentityUnavailable,
-    RemoteSignerUnavailable,
 }
 
 struct RecoverySession {
@@ -1690,11 +1689,9 @@ impl IdentitySection {
                             )
                             .style(ButtonStyle::OutlinedGhost)
                             .tab_index(self.first_tab_index + 4)
-                            .on_click(cx.listener(|this, _, _, cx| {
-                                this.activation_mode =
-                                    Some(ActivationMode::RemoteSignerUnavailable);
-                                cx.notify();
-                            })),
+                            .on_click(|_, window, cx| {
+                                window.dispatch_action(OpenRemoteSignerSetup.boxed_clone(), cx);
+                            }),
                         ),
                 )
                 .when(!can_complete, |this| {
@@ -1734,18 +1731,6 @@ impl IdentitySection {
                 .child(
                     Label::new(
                         "Omega will not delete or overwrite this healthy local candidate. Safe account switching and preservation of the previous identity arrive with multi-account support. Recovery import remains available for missing or damaged custody.",
-                    )
-                    .color(Color::Muted)
-                    .size(LabelSize::Small),
-                )
-                .child(back)
-                .into_any_element(),
-            ActivationMode::RemoteSignerUnavailable => v_flex()
-                .gap_2()
-                .child(Label::new("Use a signer on another device"))
-                .child(
-                    Label::new(
-                        "Remote signing is not available in this build. Omega does not activate the account or move the local secret when this path is unavailable.",
                     )
                     .color(Color::Muted)
                     .size(LabelSize::Small),

@@ -283,13 +283,38 @@ Unlock revalidates custody. Sign out clears the active selection without
 deleting the account. Forget this device is a journaled local purge and states
 that relay or peer events and an external NIP-49 file remain. Retirement is a
 separate signed-policy operation and stays unavailable until that policy
-ships. Remote signer enrollment remains deferred to OMEGA-AUTH-04, omega#179.
+ships.
 
 Draft prompts and audience/community room state are partitioned by public
 identity. Their owning stores delete and verify those partitions during
 forget-device. Decrypted cache, wallet state, relay state, signer sessions, and
 device grants do not yet have owner purge hooks; they remain visible,
 retryable partial failures rather than being treated as deleted.
+
+### NIP-46 remote signer enrollment
+
+Remote signer enrollment in AUTH-04 adds a Rust NIP-46 path to the same desktop
+account dashboard.
+**Use a signer on another device** opens it directly. A person may paste a
+`bunker://` URI or review a bounded permission profile before Omega creates a
+temporary `nostrconnect://` link. The generated link remains transient and is
+offered only through explicit open and copy controls while Omega listens on the
+declared rendezvous relay.
+
+The first approval covers login proof and exact allowed `sign_event` kinds; it
+does not include encryption or bulk decrypt. After the signer reports the
+person's public key, the dashboard shows that account key and the signer-device
+key for a second approval. Activation then requires a verified signed
+challenge under the reported account key. Remote accounts use the same
+generation-fenced selection registry as local accounts, while **Disconnect
+signer** remains distinct from sign out.
+
+Omega persists only the disposable NIP-46 client capability and public signer
+metadata below `identity/nip46/<capability-ref>/`. Its `client.secret` and
+short-lived `pairing.secret` are atomic owner-only local files on Unix. The
+person's root `nsec` stays in the signer. AUTH-04 does not enable the macOS
+Keychain, Secure Enclave, Windows credential vault, Linux secret service,
+Android keystore, encrypted application vault, or any other native key enclave.
 
 ### Activation and recovery ceremony
 

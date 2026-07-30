@@ -1,7 +1,7 @@
 # Omega Nostr authentication contract
 
-- Status: AUTH-00 contract frozen; AUTH-01 through AUTH-03 implemented
-- Packets: `OMEGA-AUTH-00`, `OMEGA-AUTH-01`, `OMEGA-AUTH-02`, `OMEGA-AUTH-03`
+- Status: AUTH-00 contract frozen; AUTH-01 through AUTH-04 implemented
+- Packets: `OMEGA-AUTH-00`, `OMEGA-AUTH-01`, `OMEGA-AUTH-02`, `OMEGA-AUTH-03`, `OMEGA-AUTH-04`
 - Source baseline: Omega `0136fca2d11900ddc7982665482ed8cd035391c7`
 - Product plan:
   [Omega Nostr authentication and onboarding](https://github.com/OpenAgentsInc/openagents/blob/7010561549ebb46a37257292a9100f990a4a3356/docs/omega/2026-07-30-omega-nostr-authentication-and-onboarding.md)
@@ -44,8 +44,9 @@ retirement entry points.
 Adding a local identity produces a `CandidateLocal` with NIP-49 protection
 needed. **Complete setup** opens the existing recovery-gated activation
 ceremony; the dashboard does not silently promote the candidate. Retirement
-remains unavailable until a signed retirement policy is implemented. Remote
-signer enrollment is deferred to OMEGA-AUTH-04 (omega#179).
+remains unavailable until a signed retirement policy is implemented. AUTH-04
+adds remote signer enrollment through NIP-46 without receiving the person's
+root `nsec`.
 
 Omega gates the five durable identity-bearing actions before signing or
 mutation. Generic admitted signing remains available for bounded protocol work
@@ -65,9 +66,9 @@ Recovery uses NIP-49 `ncryptsec` artifacts, bounded password work, public-key
 preview, opaque prepared candidates, journaled mutation, and custody read-back.
 AUTH-02 makes a verified NIP-49 artifact the normal local-candidate activation
 path. Raw `nsec` remains an explicitly advanced recovery path. The activation
-screen names existing-identity and remote-signer choices, but does not pretend
-they work in this wave: replacing a healthy candidate waits for multi-account
-switching, and remote signing waits for the signer packet.
+screen routes **Use a signer on another device** into the account dashboard's
+NIP-46 setup. Replacing a healthy local candidate is still an account-management
+decision rather than an in-place key overwrite.
 
 The recovery password encrypts the exported file. It is not an Omega login or
 password-reset mechanism. A previously verified recovery artifact satisfies
@@ -229,3 +230,46 @@ Forget this device is local lifecycle, not Nostr event retraction. Its
 confirmation states that events held by relays or peers remain and that an
 external NIP-49 recovery file is not deleted. Identity retirement is a
 different future signed-policy operation and is unavailable in this wave.
+
+## NIP-46 remote signers
+
+AUTH-04 supports both NIP-46 pairing directions. A person may paste a bounded
+`bunker://` connection from an existing signer, or ask Omega to create a
+`nostrconnect://` pairing link. Omega generates a disposable client key and
+secret for the latter. The secret-bearing URI is transient UI state and is
+available only through explicit open and copy controls while the listener is
+running. It is never included in logs, errors, action payloads, or public
+account records.
+
+Before network exchange, the desktop UI shows the expected signer when known,
+the requested methods, exact event kinds, exact relay set, seven-day lifetime,
+and dependence on the remote signer for recovery. The first profile is limited
+to login proof plus `sign_event` for kinds `9`, `1111`, `1984`, `22242`, and
+`27235`. NIP-44 encrypt/decrypt and bulk decrypt use separate consent profiles;
+they are not silently folded into connection consent.
+
+Pairing is generation-fenced and correlation-bound. Omega accepts only NIP-46
+events addressed to the disposable client key from a declared relay, verifies
+the event signature, author, request id, kind, tags, ciphertext, and response
+shape, and rejects duplicate or stale responses. A signer acknowledgement is
+not activation. Omega first asks for the person's public key, then presents
+both the reported Nostr account and signer-device public key for a second
+explicit approval. Only after that approval does Omega request and verify an
+exact one-time signed login challenge under the reported account key and
+register the account.
+
+Offline, silence, timeout, explicit rejection, revocation, and protocol
+verification failures remain distinct. Rejection and revocation are terminal
+and never trigger another approval prompt. Sign out only clears account
+selection. **Disconnect signer** is the separate remote lifecycle action that
+revokes the client capability, verifies deletion of its disposable client key,
+and marks the signer unavailable.
+
+Remote signer state is stored below `identity/nip46/<capability-ref>/`.
+`pairing.json`, `capability.json`, and public account metadata are public-safe;
+`client.secret` and the short-lived `pairing.secret` are atomic owner-only
+local files on Unix. The pairing secret is deleted after acknowledgement, and
+the disposable client secret is deleted on rejection, revocation, or
+disconnect. This wave does not use the macOS Keychain, Secure Enclave, Windows
+credential vault, Linux secret service, Android keystore, encrypted
+application vault, or any other native enclave integration.
