@@ -265,7 +265,8 @@ struct SourcePanelInitialization {
 
 /// Reads the most recently used agent across all workspaces. Used as a fallback
 /// when opening a workspace that has no per-workspace agent preference yet.
-/// Read the published Agent Chat manifest and adapt it to the channel registry.
+/// Read the published Agent Chat manifest and verify it against the bundled
+/// tester-channel contract.
 ///
 /// The current web API publishes one deployment manifest, not a registry.
 /// `omega_public_channels` owns the compatibility adapter, so the generic
@@ -299,7 +300,7 @@ async fn fetch_public_channel_registry(
         body.len() as u64 <= MAX_REGISTRY_BYTES,
         "the public chat manifest exceeded the size limit"
     );
-    crate::omega_public_channels::ChannelRegistry::from_agent_chat_manifest(
+    crate::omega_public_channels::ChannelRegistry::from_compatible_tester_manifest(
         &String::from_utf8_lossy(&body),
     )
 }
@@ -2600,6 +2601,20 @@ impl AgentPanel {
                 ));
             });
         }
+        let (public_channels, public_channels_error) =
+            match crate::omega_public_channels::bundled_tester_registry() {
+                Ok(registry) => (
+                    crate::omega_public_channels::PublicChannelController::new(registry),
+                    None,
+                ),
+                Err(error) => {
+                    log::error!("bundled tester-channel registry is invalid: {error:#}");
+                    (
+                        crate::omega_public_channels::PublicChannelController::empty(),
+                        Some("Tester channels are unavailable in this build.".into()),
+                    )
+                }
+            };
         let panel = Self {
             workspace_id,
             base_view,
@@ -2662,8 +2677,8 @@ impl AgentPanel {
                     .flatten()
                     .as_deref(),
             ),
-            public_channels: crate::omega_public_channels::PublicChannelController::empty(),
-            public_channels_error: None,
+            public_channels,
+            public_channels_error,
             _public_channels_load: None,
             public_channel_views: HashMap::default(),
             _public_channel_view_subscriptions: HashMap::default(),
@@ -4810,7 +4825,8 @@ impl AgentPanel {
         .detach();
     }
 
-    /// Load the one-channel deployment manifest into the versioned registry.
+    /// Refresh the bundled channel's operational fields only when the live
+    /// deployment manifest still matches every pinned value.
     fn load_public_channels(&mut self, cx: &mut Context<Self>) {
         if !omega_zero_base::is_active() {
             return;
@@ -4822,29 +4838,24 @@ impl AgentPanel {
             this.update(cx, |this, cx| {
                 match read {
                     Ok(registry) => {
-                        this.stop_all_public_channel_views(cx);
-                        this.public_channels =
-                            crate::omega_public_channels::PublicChannelController::new(registry);
+                        if this.public_channels.destinations().is_empty() {
+                            this.public_channels =
+                                crate::omega_public_channels::PublicChannelController::new(registry);
+                        }
                         this.public_channels_error = None;
                     }
                     Err(error) => {
                         log::info!("public channel registry could not load: {error:#}");
-                        this.public_channels_error =
-                            Some("Could not load public channels just now.".into());
+                        this.public_channels_error = Some(
+                            "Using the bundled Alpha feedback destination; live details could not be refreshed."
+                                .into(),
+                        );
                     }
                 }
                 cx.notify();
             })
             .ok();
         }));
-    }
-
-    fn stop_all_public_channel_views(&mut self, cx: &mut Context<Self>) {
-        for view in self.public_channel_views.values() {
-            view.update(cx, |view, cx| view.pause(cx));
-        }
-        self.public_channel_views.clear();
-        self._public_channel_view_subscriptions.clear();
     }
 
     /// The rows the threads sidebar draws, newest first.
@@ -5258,6 +5269,10 @@ impl AgentPanel {
             .py_1()
             .gap_1()
             .cursor_pointer()
+            .role(gpui::Role::Button)
+            .tab_index(0)
+            .aria_label(format!("{} section", section.title()))
+            .aria_expanded(!collapsed)
             .hover(|style| style.bg(hover_background))
             .child(
                 Icon::new(if collapsed {
@@ -5275,6 +5290,15 @@ impl AgentPanel {
             )
             .on_click(cx.listener(move |this, _, _, cx| {
                 this.toggle_sidebar_section(section, cx);
+            }))
+            .on_key_down(cx.listener(move |this, event: &gpui::KeyDownEvent, _, cx| {
+                if crate::omega_public_channels::is_channel_activation_key(
+                    event.keystroke.key.as_str(),
+                    event.keystroke.modifiers.modified(),
+                ) {
+                    this.toggle_sidebar_section(section, cx);
+                    cx.stop_propagation();
+                }
             }));
 
         let mut column = v_flex().w_full().child(header);
@@ -5323,6 +5347,7 @@ impl AgentPanel {
                     crate::omega_public_channel_view::PublicChannelView::new(
                         channel,
                         http_client,
+                        window,
                         cx,
                     )
                 });
@@ -5387,73 +5412,104 @@ impl AgentPanel {
                 .into_any_element();
         }
 
-        destinations
-            .into_iter()
-            .enumerate()
-            .fold(
-                v_flex().w_full().pb_1().gap_0p5(),
-                |list, (index, destination)| {
-                    let channel_id = destination.channel_id.clone();
-                    let channel_id_for_key = channel_id.clone();
-                    let lifecycle = if destination.cached {
-                        format!("{} · cached", destination.lifecycle.label())
-                    } else {
-                        destination.lifecycle.label().to_string()
-                    };
-                    let unread = (destination.unread > 0)
-                        .then(|| format!(" · {} unread", destination.unread));
-                    let accessible_description = format!(
-                        "{} on {} for group {}{}",
-                        lifecycle,
-                        destination.relay_url,
-                        destination.group_id,
-                        unread.clone().unwrap_or_default()
-                    );
-                    let accessible_label = destination.accessible_label();
-                    list.child(
-                        v_flex()
-                            .w_full()
-                            .px_1()
-                            .on_key_down(cx.listener(
-                                move |this, event: &gpui::KeyDownEvent, window, cx| {
-                                    if crate::omega_public_channels::is_channel_activation_key(
-                                        event.keystroke.key.as_str(),
-                                        event.keystroke.modifiers.modified(),
-                                    ) {
-                                        this.select_public_channel(&channel_id_for_key, window, cx);
-                                        cx.stop_propagation();
-                                    }
-                                },
-                            ))
+        let mut list = v_flex().w_full().pb_1().gap_0p5();
+        if let Some(note) = self.public_channels_error.clone() {
+            list = list.child(
+                v_flex()
+                    .id("omega-tester-channel-manifest-fallback")
+                    .debug_selector(|| "omega-tester-channel-manifest-fallback".to_string())
+                    .px_2()
+                    .gap_1()
+                    .child(Label::new(note).size(LabelSize::XSmall).color(Color::Muted))
+                    .child(
+                        h_flex()
+                            .gap_1()
+                            .child(
+                                Button::new("omega-tester-channel-retry-manifest", "Retry details")
+                                    .style(ButtonStyle::Subtle)
+                                    .size(ButtonSize::Compact)
+                                    .on_click(
+                                        cx.listener(|this, _, _, cx| this.load_public_channels(cx)),
+                                    ),
+                            )
                             .child(
                                 Button::new(
-                                    ElementId::Name(
-                                        format!("omega-public-channel-{}", destination.channel_id)
-                                            .into(),
-                                    ),
-                                    destination.label,
+                                    "omega-tester-channel-open-manifest-support",
+                                    "Open support",
                                 )
                                 .style(ButtonStyle::Subtle)
                                 .size(ButtonSize::Compact)
-                                .full_width()
-                                .tab_index(index as isize)
-                                .toggle_state(destination.selected)
-                                .aria_label(accessible_label)
-                                .aria_description(accessible_description)
-                                .on_click(cx.listener(
-                                    move |this, _, window, cx| {
-                                        this.select_public_channel(&channel_id, window, cx);
-                                    },
-                                )),
-                            )
-                            .child(
-                                Label::new(format!("{}{}", lifecycle, unread.unwrap_or_default()))
-                                    .size(LabelSize::XSmall)
-                                    .color(Color::Muted),
+                                .on_click(|_, _, cx| {
+                                    cx.open_url(app_identity::PRODUCT_BUG_REPORT_URL)
+                                }),
                             ),
-                    )
-                },
-            )
+                    ),
+            );
+        }
+        destinations
+            .into_iter()
+            .enumerate()
+            .fold(list, |list, (index, destination)| {
+                let channel_id = destination.channel_id.clone();
+                let channel_id_for_key = channel_id.clone();
+                let lifecycle = if destination.cached {
+                    format!("{} · cached", destination.lifecycle.label())
+                } else {
+                    destination.lifecycle.label().to_string()
+                };
+                let unread =
+                    (destination.unread > 0).then(|| format!(" · {} unread", destination.unread));
+                let accessible_description = format!(
+                    "{} on {} for group {}{}",
+                    lifecycle,
+                    destination.relay_url,
+                    destination.group_id,
+                    unread.clone().unwrap_or_default()
+                );
+                let accessible_label = destination.accessible_label();
+                list.child(
+                    v_flex()
+                        .w_full()
+                        .px_1()
+                        .on_key_down(cx.listener(
+                            move |this, event: &gpui::KeyDownEvent, window, cx| {
+                                if crate::omega_public_channels::is_channel_activation_key(
+                                    event.keystroke.key.as_str(),
+                                    event.keystroke.modifiers.modified(),
+                                ) {
+                                    this.select_public_channel(&channel_id_for_key, window, cx);
+                                    cx.stop_propagation();
+                                }
+                            },
+                        ))
+                        .child(
+                            Button::new(
+                                ElementId::Name(
+                                    format!("omega-public-channel-{}", destination.channel_id)
+                                        .into(),
+                                ),
+                                destination.label,
+                            )
+                            .style(ButtonStyle::Subtle)
+                            .size(ButtonSize::Compact)
+                            .full_width()
+                            .tab_index(index as isize)
+                            .toggle_state(destination.selected)
+                            .aria_label(accessible_label)
+                            .aria_description(accessible_description)
+                            .on_click(cx.listener(
+                                move |this, _, window, cx| {
+                                    this.select_public_channel(&channel_id, window, cx);
+                                },
+                            )),
+                        )
+                        .child(
+                            Label::new(format!("{}{}", lifecycle, unread.unwrap_or_default()))
+                                .size(LabelSize::XSmall)
+                                .color(Color::Muted),
+                        ),
+                )
+            })
             .into_any_element()
     }
 
@@ -5493,9 +5549,9 @@ impl AgentPanel {
                     .child(
                         v_flex()
                             .gap_0p5()
-                            .child(Label::new(channel.destination_label()).size(LabelSize::Large))
+                            .child(Label::new(channel.display_name.clone()).size(LabelSize::Large))
                             .child(
-                                Label::new(channel.display_name.clone())
+                                Label::new(channel.destination_label())
                                     .size(LabelSize::XSmall)
                                     .color(Color::Muted),
                             )
@@ -14238,6 +14294,39 @@ impl AgentPanel {
 
     pub fn threads_sidebar_open_for_tests(&self) -> bool {
         self.sidebar.open
+    }
+
+    pub fn select_public_channel_for_tests(
+        &mut self,
+        channel_id: &str,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> bool {
+        self.select_public_channel(channel_id, window, cx);
+        self.public_channels.selected_channel_id() == Some(channel_id)
+    }
+
+    pub fn set_selected_public_channel_snapshot_for_tests(
+        &mut self,
+        snapshot: crate::omega_public_channels::ChannelSnapshot,
+        cx: &mut Context<Self>,
+    ) -> bool {
+        let Some(view) = self
+            .public_channels
+            .selected_channel_id()
+            .and_then(|channel_id| self.public_channel_views.get(channel_id))
+            .cloned()
+        else {
+            return false;
+        };
+        view.update(cx, |view, cx| {
+            view.set_channel_snapshot_for_tests(snapshot, cx)
+        });
+        true
+    }
+
+    pub fn close_selected_public_channel_for_tests(&mut self, cx: &mut Context<Self>) {
+        self.close_selected_public_channel(cx);
     }
 
     pub fn workbench_last_error_for_tests(&self) -> Option<&SharedString> {

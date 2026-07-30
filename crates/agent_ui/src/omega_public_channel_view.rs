@@ -1,9 +1,10 @@
-//! The read-only selected-channel timeline for Omega.
+//! The selected tester-channel timeline for Omega.
 //!
 //! This view owns one relay-qualified channel cache. A channel selection can
 //! start its relay session, and leaving the channel stops that session without
-//! deleting verified rows. The view has no composer, signer, authentication
-//! response, join, or moderation action.
+//! deleting verified rows. Public writes are signed through `omega_identity`
+//! and published through the existing authenticated relay edge; the view never
+//! receives secret key material.
 
 use std::{
     collections::{BTreeMap, BTreeSet, VecDeque},
@@ -11,10 +12,11 @@ use std::{
     sync::Arc,
 };
 
+use editor::{Editor, EditorEvent};
 use gpui::{
-    AnyElement, Context, EventEmitter, FollowMode, ImageSource, ListAlignment, ListSizingBehavior,
-    ListState, ObjectFit, ParentElement as _, Render, SharedString, Styled as _, Task, Window, img,
-    list, px,
+    AnyElement, Context, Entity, EventEmitter, FollowMode, ImageSource, ListAlignment,
+    ListSizingBehavior, ListState, ObjectFit, ParentElement as _, PromptLevel, Render, Role,
+    SharedString, Styled as _, Task, Window, img, list, px,
 };
 use http_client::HttpClient;
 use ui::{
@@ -28,6 +30,9 @@ use crate::{
         PublicChannelAttachment, PublicChannelMediaFact, PublicChannelMediaIntent,
         PublicChannelMediaKey, PublicChannelMediaLifecycle, PublicChannelMediaState,
         PublicChannelMediaUnavailableReason, fetch_public_channel_media,
+    },
+    omega_public_channel_publish::{
+        PublicChannelWrite, SignedPublicChannelWrite, publish_signed_write, sign_write,
     },
     omega_public_channel_relay::{
         RelayAdmissionLimits, RelayCursor, RelayGapReason, RelayIntent, RelayLifecycle,
@@ -43,6 +48,37 @@ use crate::{
 const RETIRED_SESSION_LIMIT: usize = 2;
 const FACTS_PANE_WIDTH: gpui::Pixels = px(336.);
 const COMPACT_FACTS_THRESHOLD: gpui::Pixels = px(960.);
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+enum WriteStatus {
+    Ready,
+    SendingMessage,
+    MessageSent(String),
+    SendingReport,
+    ReportSent,
+    Failed(String),
+}
+
+impl WriteStatus {
+    fn is_sending(&self) -> bool {
+        matches!(self, Self::SendingMessage | Self::SendingReport)
+    }
+
+    fn label(&self) -> String {
+        match self {
+            Self::Ready => "Ready to post public feedback.".to_string(),
+            Self::SendingMessage => "Signing and sending public feedback…".to_string(),
+            Self::MessageSent(event_id) => {
+                format!("Sent public feedback as event {event_id}.")
+            }
+            Self::SendingReport => "Signing and sending a public report…".to_string(),
+            Self::ReportSent => {
+                "Report sent. Moderators decide whether to remove the message.".to_string()
+            }
+            Self::Failed(reason) => format!("Not sent. {reason}"),
+        }
+    }
+}
 
 impl PublicChannelMediaFact for MediaFact {
     fn url(&self) -> &str {
@@ -94,6 +130,10 @@ pub enum PublicChannelViewEvent {
 pub struct PublicChannelView {
     descriptor: ChannelDescriptor,
     http_client: Arc<dyn HttpClient>,
+    composer: Entity<Editor>,
+    write_status: WriteStatus,
+    write_task: Option<Task<()>>,
+    relay_outage_observed: bool,
     relay_snapshot: RelaySnapshot,
     projection: TimelineProjection,
     list_state: ListState,
@@ -118,13 +158,29 @@ impl PublicChannelView {
     pub fn new(
         descriptor: ChannelDescriptor,
         http_client: Arc<dyn HttpClient>,
-        _cx: &mut Context<Self>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
     ) -> Self {
         let list_state = ListState::new(0, ListAlignment::Top, px(2048.));
         list_state.set_follow_mode(FollowMode::Tail);
+        let composer = cx.new(|cx| {
+            let mut editor = Editor::auto_height(1, 4, window, cx);
+            editor.set_placeholder_text("Share public alpha feedback…", window, cx);
+            editor
+        });
+        cx.subscribe(&composer, |_, _, event, cx| {
+            if matches!(event, EditorEvent::BufferEdited) {
+                cx.notify();
+            }
+        })
+        .detach();
         Self {
             descriptor,
             http_client,
+            composer,
+            write_status: WriteStatus::Ready,
+            write_task: None,
+            relay_outage_observed: false,
             relay_snapshot: RelaySnapshot::default(),
             projection: TimelineProjection::default(),
             list_state,
@@ -150,6 +206,37 @@ impl PublicChannelView {
 
     pub fn last_current_at(&self) -> Option<u64> {
         self.relay_snapshot.last_current_at
+    }
+
+    #[cfg(any(test, feature = "test-support"))]
+    pub fn set_channel_snapshot_for_tests(
+        &mut self,
+        snapshot: ChannelSnapshot,
+        cx: &mut Context<Self>,
+    ) {
+        self.pause(cx);
+        let lifecycle = match snapshot.lifecycle {
+            ChannelLifecycle::Disconnected => RelayLifecycle::Disconnected,
+            ChannelLifecycle::Connecting => RelayLifecycle::Connecting,
+            ChannelLifecycle::Replaying => RelayLifecycle::Replaying,
+            ChannelLifecycle::Current => RelayLifecycle::Current,
+            ChannelLifecycle::Reconnecting => RelayLifecycle::Reconnecting,
+            ChannelLifecycle::Stale => RelayLifecycle::Stale,
+        };
+        self.apply_relay_snapshot(
+            RelaySnapshot {
+                lifecycle,
+                gap_reason: (lifecycle == RelayLifecycle::Stale)
+                    .then_some(RelayGapReason::RelayUnavailable),
+                cursor: snapshot.cursor.map(|cursor| RelayCursor {
+                    created_at: cursor.created_at,
+                    event_ids_at_created_at: cursor.event_ids_at_created_at,
+                }),
+                metadata_trusted: self.descriptor.expected_relay_self_pubkey.is_some(),
+                ..Default::default()
+            },
+            cx,
+        );
     }
 
     pub fn resume(&mut self, cx: &mut Context<Self>) {
@@ -281,6 +368,13 @@ impl PublicChannelView {
 
     fn apply_relay_snapshot(&mut self, mut snapshot: RelaySnapshot, cx: &mut Context<Self>) {
         merge_retained_snapshot(&self.relay_snapshot, &mut snapshot);
+        if snapshot.lifecycle == RelayLifecycle::Current {
+            self.relay_outage_observed = false;
+        } else if snapshot.gap_reason == Some(RelayGapReason::RelayUnavailable)
+            || snapshot.lifecycle == RelayLifecycle::Stale
+        {
+            self.relay_outage_observed = true;
+        }
         let old_event_ids = self
             .projection
             .rows
@@ -404,6 +498,236 @@ impl PublicChannelView {
     fn close_event_facts(&mut self, cx: &mut Context<Self>) {
         self.selected_event_id = None;
         cx.notify();
+    }
+
+    fn send_composer(&mut self, cx: &mut Context<Self>) {
+        let content = self.composer.read(cx).text(cx).trim().to_string();
+        if content.is_empty() {
+            self.write_status = WriteStatus::Failed("Write a message before sending.".to_string());
+            cx.notify();
+            return;
+        }
+        self.start_write(PublicChannelWrite::Message { content }, cx);
+    }
+
+    fn start_write(&mut self, write: PublicChannelWrite, cx: &mut Context<Self>) {
+        if self.write_status.is_sending() {
+            return;
+        }
+        let is_report = matches!(write, PublicChannelWrite::Report { .. });
+        self.write_status = if is_report {
+            WriteStatus::SendingReport
+        } else {
+            WriteStatus::SendingMessage
+        };
+        cx.notify();
+
+        let descriptor = self.descriptor.clone();
+        let events = self.relay_snapshot.events.clone();
+        let work = cx.background_spawn(async move {
+            let identity_service = omega_identity::IdentityService::system(*app_identity::CHANNEL);
+            let signed = sign_write(&identity_service, &descriptor, write, &events)?;
+            publish_signed_write(&descriptor, &signed)?;
+            anyhow::Ok(signed)
+        });
+        self.write_task = Some(cx.spawn(async move |this, cx| {
+            let result = work.await;
+            if let Err(error) = this.update_in(cx, move |this, window, cx| match result {
+                Ok(signed) => this.finish_write(signed, window, cx),
+                Err(error) => {
+                    this.write_status = WriteStatus::Failed(error.to_string());
+                    cx.notify();
+                }
+            }) {
+                log::debug!("tester-channel write finished after its view closed: {error:#}");
+            }
+        }));
+    }
+
+    fn finish_write(
+        &mut self,
+        signed: SignedPublicChannelWrite,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if signed.is_report() {
+            self.write_status = WriteStatus::ReportSent;
+        } else {
+            let event_id = signed.record().id.clone();
+            let mut snapshot = self.relay_snapshot.clone();
+            snapshot.events.push(signed.record().clone());
+            self.write_status =
+                WriteStatus::MessageSent(event_id.get(..12).unwrap_or(&event_id).to_string());
+            self.composer.update(cx, |editor, cx| {
+                editor.set_text("", window, cx);
+            });
+            self.apply_relay_snapshot(snapshot, cx);
+        }
+        cx.notify();
+    }
+
+    fn confirm_report(
+        &mut self,
+        event_id: String,
+        author_public_key: String,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if self.write_status.is_sending() {
+            return;
+        }
+        let prompt = window.prompt(
+            PromptLevel::Warning,
+            "Report this public message?",
+            Some(
+                "The report is a public signed signal containing the message and author IDs. It does not copy the message body or remove the message; moderators decide what happens next.",
+            ),
+            &["Cancel", "Report"],
+            cx,
+        );
+        cx.spawn(async move |this, cx| match prompt.await {
+            Ok(1) => {
+                if let Err(error) = this.update_in(cx, |this, _window, cx| {
+                    this.start_write(
+                        PublicChannelWrite::Report {
+                            event_id,
+                            author_public_key,
+                        },
+                        cx,
+                    );
+                }) {
+                    log::debug!(
+                        "tester-channel report was confirmed after the view closed: {error:#}"
+                    );
+                }
+            }
+            Ok(_) => {}
+            Err(error) => log::debug!("tester-channel report prompt closed: {error:#}"),
+        })
+        .detach();
+    }
+
+    fn retry_relay(&mut self, cx: &mut Context<Self>) {
+        self.pause(cx);
+        self.resume(cx);
+    }
+
+    fn render_relay_fallback(&self, cx: &mut Context<Self>) -> Option<AnyElement> {
+        self.relay_outage_observed.then(|| {
+            v_flex()
+                .id("omega-tester-channel-relay-fallback")
+                .debug_selector(|| "omega-tester-channel-relay-fallback".to_string())
+                .mx_3()
+                .mt_2()
+                .p_3()
+                .gap_2()
+                .rounded_md()
+                .border_1()
+                .border_color(cx.theme().colors().border)
+                .child(
+                    Label::new(
+                        "The public relay is unavailable. Verified messages remain visible. Retry here, or use GitHub for support without relying on this relay.",
+                    )
+                    .size(LabelSize::Small)
+                    .line_clamp(3),
+                )
+                .child(
+                    h_flex()
+                        .gap_2()
+                        .child(
+                            Button::new("omega-tester-channel-retry-relay", "Retry relay")
+                                .style(ButtonStyle::Subtle)
+                                .size(ButtonSize::Compact)
+                                .on_click(cx.listener(|this, _, _, cx| this.retry_relay(cx))),
+                        )
+                        .child(
+                            Button::new("omega-tester-channel-open-support", "Open support")
+                                .style(ButtonStyle::Subtle)
+                                .size(ButtonSize::Compact)
+                                .on_click(|_, _, cx| {
+                                    cx.open_url(app_identity::PRODUCT_BUG_REPORT_URL)
+                                }),
+                        ),
+                )
+                .into_any_element()
+        })
+    }
+
+    fn render_composer(&self, cx: &mut Context<Self>) -> AnyElement {
+        let content_bytes = self.composer.read(cx).text(cx).trim().len();
+        let disabled = content_bytes == 0
+            || content_bytes > self.descriptor.limits.content_bytes
+            || self.write_status.is_sending();
+        v_flex()
+            .id("omega-tester-channel-composer")
+            .debug_selector(|| "omega-tester-channel-composer".to_string())
+            .flex_none()
+            .w_full()
+            .px_3()
+            .py_2()
+            .gap_2()
+            .border_t_1()
+            .border_color(cx.theme().colors().border)
+            .child(
+                Label::new(
+                    "Public channel. Messages and reports are signed with your Omega identity and may be retained. Don’t post secrets, credentials, private code, customer data, prompts, local paths, or unredacted logs. Moderators may remove messages, but deletion cannot guarantee erasure.",
+                )
+                .size(LabelSize::XSmall)
+                .color(Color::Muted)
+                .line_clamp(5),
+            )
+            .child(
+                div()
+                    .w_full()
+                    .p_2()
+                    .rounded_md()
+                    .border_1()
+                    .border_color(cx.theme().colors().border)
+                    .child(self.composer.clone()),
+            )
+            .child(
+                h_flex()
+                    .w_full()
+                    .justify_between()
+                    .gap_2()
+                    .child(
+                        v_flex()
+                            .id("omega-tester-channel-write-status")
+                            .debug_selector(|| "omega-tester-channel-write-status".to_string())
+                            .role(Role::Status)
+                            .gap_0p5()
+                            .child(
+                                Label::new(self.write_status.label())
+                                    .size(LabelSize::XSmall)
+                                    .line_clamp(3)
+                                    .color(if matches!(self.write_status, WriteStatus::Failed(_)) {
+                                        Color::Error
+                                    } else {
+                                        Color::Muted
+                                    }),
+                            )
+                            .child(
+                                Label::new(format!(
+                                    "{content_bytes} / {} bytes",
+                                    self.descriptor.limits.content_bytes
+                                ))
+                                .size(LabelSize::XSmall)
+                                .color(if content_bytes > self.descriptor.limits.content_bytes {
+                                    Color::Error
+                                } else {
+                                    Color::Muted
+                                }),
+                            ),
+                    )
+                    .child(
+                        Button::new("omega-tester-channel-send", "Send public feedback")
+                            .style(ButtonStyle::Filled)
+                            .size(ButtonSize::Compact)
+                            .disabled(disabled)
+                            .on_click(cx.listener(|this, _, _, cx| this.send_composer(cx))),
+                    ),
+            )
+            .into_any_element()
     }
 
     fn begin_media_load(
@@ -865,6 +1189,8 @@ impl PublicChannelView {
 
     fn render_event_facts(&self, facts: EventFacts, cx: &mut Context<Self>) -> AnyElement {
         let event_id = facts.event_id.clone();
+        let report_event_id = facts.event_id.clone();
+        let report_author_public_key = facts.public_key.clone();
         let media = facts.media;
         let deletion = facts
             .deletion
@@ -996,6 +1322,24 @@ impl PublicChannelView {
                     )),
             );
         }
+        pane = pane.child(
+            h_flex()
+                .debug_selector(|| "omega-tester-channel-report".to_string())
+                .child(
+                    Button::new("omega-tester-channel-report", "Report message")
+                        .style(ButtonStyle::Subtle)
+                        .size(ButtonSize::Compact)
+                        .disabled(self.write_status.is_sending())
+                        .on_click(cx.listener(move |this, _, window, cx| {
+                            this.confirm_report(
+                                report_event_id.clone(),
+                                report_author_public_key.clone(),
+                                window,
+                                cx,
+                            );
+                        })),
+                ),
+        );
         pane.into_any_element()
     }
 
@@ -1155,8 +1499,19 @@ impl Render for PublicChannelView {
                     .child(banner),
             );
         }
+        if let Some(fallback) = self.render_relay_fallback(cx) {
+            view = view.child(fallback);
+        }
         if compact && let Some(facts) = facts {
-            return view.child(self.render_event_facts(facts, cx));
+            return view
+                .child(
+                    div()
+                        .min_h_0()
+                        .flex_1()
+                        .overflow_hidden()
+                        .child(self.render_event_facts(facts, cx)),
+                )
+                .child(self.render_composer(cx));
         }
         let timeline = self.render_empty_or_list(window, cx);
         view.child(
@@ -1175,6 +1530,7 @@ impl Render for PublicChannelView {
                     )
                 }),
         )
+        .child(self.render_composer(cx))
     }
 }
 
@@ -1331,11 +1687,12 @@ mod tests {
         cx: &mut TestAppContext,
     ) {
         init_test(cx);
-        let window_handle = cx.add_window(|_, cx| {
+        let window_handle = cx.add_window(|window, cx| {
             let http_client: Arc<dyn HttpClient> = FakeHttpClient::with_404_response();
             PublicChannelView::new(
                 descriptor("agent-chat", "wss://relay.example"),
                 http_client,
+                window,
                 cx,
             )
         });
@@ -1391,6 +1748,16 @@ mod tests {
                 lifecycle != RelayLifecycle::Current,
                 "the lifecycle banner must match {lifecycle:?}"
             );
+            assert!(
+                cx.debug_bounds("omega-tester-channel-composer").is_some(),
+                "the public privacy notice and composer must stay visible for {lifecycle:?}"
+            );
+            assert_eq!(
+                cx.debug_bounds("omega-tester-channel-relay-fallback")
+                    .is_some(),
+                lifecycle == RelayLifecycle::Stale,
+                "only a confirmed stale relay shows the independent support fallback"
+            );
         }
 
         window_handle
@@ -1421,11 +1788,12 @@ mod tests {
     #[gpui::test]
     fn rendered_timeline_interactions_keep_rows_bounded_and_media_gated(cx: &mut TestAppContext) {
         init_test(cx);
-        let window_handle = cx.add_window(|_, cx| {
+        let window_handle = cx.add_window(|window, cx| {
             let http_client: Arc<dyn HttpClient> = FakeHttpClient::with_404_response();
             PublicChannelView::new(
                 descriptor("agent-chat", "wss://relay.example"),
                 http_client,
+                window,
                 cx,
             )
         });
@@ -1501,6 +1869,10 @@ mod tests {
         assert!(
             cx.debug_bounds("omega-public-channel-media-facts-0")
                 .is_some()
+        );
+        assert!(
+            cx.debug_bounds("omega-tester-channel-report").is_some(),
+            "event facts must expose the signed report action"
         );
 
         assert!(

@@ -98,7 +98,7 @@ impl ChannelDescriptor {
         format!("#{}", self.channel_id)
     }
 
-    fn validate(&self) -> Result<()> {
+    pub(crate) fn validate(&self) -> Result<()> {
         ensure!(
             self.schema_version == DESCRIPTOR_SCHEMA,
             "unsupported channel descriptor schema"
@@ -195,6 +195,8 @@ pub enum RelayTrust {
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct ChannelRegistry {
     pub schema_version: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub content_revision: Option<String>,
     pub channels: Vec<ChannelDescriptor>,
 }
 
@@ -205,6 +207,15 @@ impl ChannelRegistry {
             registry.schema_version == REGISTRY_SCHEMA,
             "unsupported channel registry schema"
         );
+        if let Some(content_revision) = &registry.content_revision {
+            ensure!(
+                (1..=120).contains(&content_revision.len())
+                    && content_revision.chars().all(|character| {
+                        character.is_ascii_alphanumeric() || matches!(character, '.' | '-' | '_')
+                    }),
+                "invalid channel registry content revision"
+            );
+        }
         ensure!(
             !registry.channels.is_empty() && registry.channels.len() <= 64,
             "a registry must contain between 1 and 64 channels"
@@ -240,6 +251,7 @@ impl ChannelRegistry {
         };
         let registry = Self {
             schema_version: REGISTRY_SCHEMA.to_string(),
+            content_revision: None,
             channels: vec![ChannelDescriptor {
                 schema_version: DESCRIPTOR_SCHEMA.to_string(),
                 channel_id: "agent-chat".to_string(),
@@ -258,6 +270,34 @@ impl ChannelRegistry {
         };
         Self::decode(&serde_json::to_string(&registry)?)
     }
+
+    pub fn from_compatible_tester_manifest(json: &str) -> Result<Self> {
+        let bundled = bundled_tester_registry()?;
+        let bundled_channel = bundled
+            .channels
+            .first()
+            .ok_or_else(|| anyhow!("the bundled tester registry did not describe a channel"))?;
+        let mut adapted = Self::from_agent_chat_manifest(json)?;
+        adapted.content_revision = bundled.content_revision.clone();
+        let channel = adapted
+            .channels
+            .first_mut()
+            .ok_or_else(|| anyhow!("the tester manifest did not describe a channel"))?;
+        // The deployment manifest has no product-facing destination fields.
+        // Only those two fields come from the bundle; every operational field
+        // must still agree before remote bytes can replace the launch contract.
+        channel.channel_id = bundled_channel.channel_id.clone();
+        channel.display_name = bundled_channel.display_name.clone();
+        ensure!(
+            adapted == bundled,
+            "the tester manifest does not match the bundled alpha feedback contract"
+        );
+        Ok(adapted)
+    }
+}
+
+pub fn bundled_tester_registry() -> Result<ChannelRegistry> {
+    ChannelRegistry::decode(include_str!("../fixtures/tester-channel-registry.v1.json"))
 }
 
 fn is_safe_id(value: &str) -> bool {
@@ -384,6 +424,7 @@ impl PublicChannelController {
         Self {
             registry: ChannelRegistry {
                 schema_version: REGISTRY_SCHEMA.to_string(),
+                content_revision: None,
                 channels: Vec::new(),
             },
             snapshots: BTreeMap::new(),
@@ -482,7 +523,7 @@ impl PublicChannelController {
                     .unwrap_or_default();
                 ChannelDestination {
                     channel_id: channel.channel_id.clone(),
-                    label: channel.destination_label(),
+                    label: format!("{} · {}", channel.display_name, channel.destination_label()),
                     relay_url: channel.relay_url.clone(),
                     group_id: channel.group_id.clone(),
                     lifecycle: snapshot.lifecycle,
@@ -506,6 +547,31 @@ impl ChannelSnapshot {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    const COMPATIBLE_TESTER_MANIFEST: &str = r#"{
+      "acceptedKinds": [5, 7, 9, 1337, 1984],
+      "group": {
+        "id": "openagents-public",
+        "stateKinds": [39000, 39001, 39003, 39005]
+      },
+      "limits": {
+        "attachmentCount": 4,
+        "attachmentBytes": 26214400,
+        "contentBytes": 8192,
+        "eventBytes": 32768,
+        "futureSkewSeconds": 60,
+        "historyPageSize": 50,
+        "maxAgeSeconds": 604800,
+        "tags": 64
+      },
+      "profileVersion": "openagents.public_chat.v1",
+      "relay": {
+        "selfPubkey": "e841147f262799821bbaa2930fcca982a575458f0e043e064a26ed8aba2046ed",
+        "websocketUrl": "wss://relay.openagents.com"
+      },
+      "richContentProfileVersion": "openagents.public_chat.rich_content.v1",
+      "schemaVersion": "openagents.public_nostr_chat_manifest.v1"
+    }"#;
 
     fn two_channels() -> ChannelRegistry {
         ChannelRegistry::decode(include_str!("../fixtures/public-channel-registry.v1.json"))
@@ -560,6 +626,7 @@ mod tests {
         let registry =
             ChannelRegistry::from_agent_chat_manifest(manifest).expect("current manifest");
         assert_eq!(registry.channels.len(), 1);
+        assert_eq!(registry.content_revision, None);
         let channel = &registry.channels[0];
         assert_eq!(channel.channel_id, "agent-chat");
         assert_eq!(channel.relay_url, "wss://relay.openagents.com");
@@ -574,6 +641,64 @@ mod tests {
             OPENAGENTS_FIXTURE_SHA256,
             "86f18dc884eb38b35404b8698b350b64aae4c36100965ff9415eef82d72a0195"
         );
+    }
+
+    #[test]
+    fn bundled_tester_registry_pins_the_exact_alpha_feedback_destination() {
+        let registry = bundled_tester_registry().expect("bundled tester registry");
+        assert_eq!(registry.channels.len(), 1);
+        assert_eq!(
+            registry.content_revision.as_deref(),
+            Some("omega.alpha-feedback.1")
+        );
+        let channel = &registry.channels[0];
+        assert_eq!(channel.channel_id, "alpha-feedback");
+        assert_eq!(channel.display_name, "Alpha feedback");
+        assert_eq!(channel.relay_url, "wss://relay.openagents.com");
+        assert_eq!(channel.group_id, "openagents-public");
+        assert_eq!(channel.relay_trust, RelayTrust::Pinned);
+        assert_eq!(
+            channel.expected_relay_self_pubkey.as_deref(),
+            Some("e841147f262799821bbaa2930fcca982a575458f0e043e064a26ed8aba2046ed")
+        );
+    }
+
+    #[test]
+    fn compatible_manifest_adapts_to_the_bundled_tester_identity() {
+        let registry = ChannelRegistry::from_compatible_tester_manifest(COMPATIBLE_TESTER_MANIFEST)
+            .expect("compatible tester manifest");
+        assert_eq!(
+            registry,
+            bundled_tester_registry().expect("bundled tester registry")
+        );
+    }
+
+    #[test]
+    fn tester_manifest_drift_fails_closed() {
+        for incompatible in [
+            COMPATIBLE_TESTER_MANIFEST
+                .replace("wss://relay.openagents.com", "wss://relay.example.com"),
+            COMPATIBLE_TESTER_MANIFEST.replace("openagents-public", "another-group"),
+            COMPATIBLE_TESTER_MANIFEST.replace(
+                "e841147f262799821bbaa2930fcca982a575458f0e043e064a26ed8aba2046ed",
+                "0841147f262799821bbaa2930fcca982a575458f0e043e064a26ed8aba2046ede",
+            ),
+            COMPATIBLE_TESTER_MANIFEST
+                .replace("\"historyPageSize\": 50", "\"historyPageSize\": 51"),
+            COMPATIBLE_TESTER_MANIFEST
+                .replace("openagents.public_chat.v1", "openagents.public_chat.v2"),
+        ] {
+            assert!(
+                ChannelRegistry::from_compatible_tester_manifest(&incompatible).is_err(),
+                "remote deployment drift must not replace the bundled alpha contract"
+            );
+        }
+
+        let unpinned = COMPATIBLE_TESTER_MANIFEST.replace(
+            "\"selfPubkey\": \"e841147f262799821bbaa2930fcca982a575458f0e043e064a26ed8aba2046ed\"",
+            "\"selfPubkey\": null",
+        );
+        assert!(ChannelRegistry::from_compatible_tester_manifest(&unpinned).is_err());
     }
 
     #[test]
@@ -796,7 +921,7 @@ mod tests {
         assert!(controller.apply_snapshot("agent-lab", snapshot));
         assert_eq!(
             controller.destinations()[1].accessible_label(),
-            "Open #agent-lab channel, Stale, cached, 2 unread"
+            "Open Agent Lab · #agent-lab channel, Stale, cached, 2 unread"
         );
     }
 

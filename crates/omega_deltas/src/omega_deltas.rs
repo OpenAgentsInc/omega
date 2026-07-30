@@ -170,6 +170,7 @@ pub const ENFORCED_DELTAS: &[&str] = &[
     "OMEGA-DELTA-0179",
     "OMEGA-DELTA-0180",
     "OMEGA-DELTA-0181",
+    "OMEGA-DELTA-0182",
 ];
 
 /// The concise product contract adjacent to the delta registry.
@@ -2813,6 +2814,9 @@ pub const PUBLIC_CHANNEL_TIMELINE_PATH: &str =
     "crates/agent_ui/src/omega_public_channel_timeline.rs";
 pub const PUBLIC_CHANNEL_MEDIA_PATH: &str = "crates/agent_ui/src/omega_public_channel_media.rs";
 pub const PUBLIC_CHANNEL_VIEW_PATH: &str = "crates/agent_ui/src/omega_public_channel_view.rs";
+pub const PUBLIC_CHANNEL_PUBLISH_PATH: &str = "crates/agent_ui/src/omega_public_channel_publish.rs";
+pub const PUBLIC_CHANNEL_REGISTRY_FIXTURE_PATH: &str =
+    "crates/agent_ui/fixtures/tester-channel-registry.v1.json";
 
 /// OMEGA-DELTA-0048, 0053. Where panels are added, where zero base skips them,
 /// and where the mode seals the window after the identity gate.
@@ -16996,17 +17000,17 @@ mod tests {
         );
     }
 
-    /// OMEGA-DELTA-0130. The public-chat section reads, and cannot write.
+    /// OMEGA-DELTA-0130. The legacy activity preview stays read-only, while
+    /// the tester destination is pinned before its compatible refresh.
     ///
     /// This is the first socket Omega opens to a relay from the UI.
     /// `omega_community` says of itself that it "does not open a socket or
     /// touch a key", and `omega_community_control` still tells a person that
-    /// nothing in this build signs or reaches a relay. This does not change
-    /// either claim about *writing*, and that has to stay true by construction
-    /// rather than by intention — a read-only viewer that grows a publish path
-    /// is a key handling question nobody asked for.
+    /// nothing in that older boundary signs or reaches a relay. Delta 0182 adds
+    /// a separate writer for the selected tester channel; it does not turn this
+    /// preview or the registry refresh into a key-handling path.
     #[test]
-    fn the_public_chat_section_reads_and_cannot_write() {
+    fn the_legacy_activity_preview_remains_read_only_and_the_tester_registry_is_pinned() {
         let path = repository_path(NOSTR_ACTIVITY_PATH);
         let source = read_repository_file(NOSTR_ACTIVITY_PATH);
         let production = outside_the_tests(&source);
@@ -17064,45 +17068,29 @@ mod tests {
             path.display()
         );
 
-        // 3. The relay and the group are configuration, not constants.
-        //
-        // The built-in `public-nostr-chat` skill states this rule in as many
-        // words: "Do not put an OpenAgents host name or group identifier in the
-        // protocol code. The same client must work with another compatible
-        // Nostr relay and NIP-29 group." The manifest URL is the one piece of
-        // configuration that has to exist somewhere, and it is the only one.
-        //
-        // Comments are stripped first, deliberately. Naming the relay and the
-        // group in prose is how somebody reading this finds out what it talks
-        // to; naming them in an expression is how the next NIP-29 group stops
-        // working. Only the second is the defect.
+        // 3. The release destination exists before the network refresh. The
+        // manifest has deployment fields but no product-facing destination,
+        // so it may replace the bundle only through the exact compatibility
+        // adapter. This deliberately supersedes the earlier generic-registry
+        // rule for this one release-candidate channel.
         let panel_path = repository_path(AGENT_PANEL_PATH);
         let panel = read_repository_file(AGENT_PANEL_PATH);
-        let panel_production = outside_the_tests(&panel);
-        for (path, source) in [(&path, production), (&panel_path, panel_production)] {
-            let code: String = source
-                .lines()
-                .filter(|line| !line.trim_start().starts_with("//"))
-                .collect::<Vec<_>>()
-                .join("\n");
-            for hard_coded in ["wss://relay.openagents.com", "openagents-public"] {
-                assert!(
-                    !code.contains(hard_coded),
-                    "OMEGA-DELTA-0130: {} compiles in `{hard_coded}`. The relay \
-                     and the group come from the published manifest, so the same \
-                     reader works against another NIP-29 group — which is the \
-                     rule the built-in `public-nostr-chat` skill states in as \
-                     many words.",
-                    path.display()
-                );
-            }
-        }
+        let fetch = body_of(&panel, "fetch_public_channel_registry");
         assert!(
-            body_of(&panel, "fetch_public_channel_registry")
-                .contains("omega_nostr_activity::MANIFEST_URL"),
-            "OMEGA-DELTA-0130: `fetch_public_channel_registry` in {} no longer reads the \
-             published manifest before it creates the channel registry.",
+            fetch.contains("omega_nostr_activity::MANIFEST_URL")
+                && fetch.contains("from_compatible_tester_manifest"),
+            "OMEGA-DELTA-0130: `fetch_public_channel_registry` in {} no longer \
+             treats the published manifest as an exact-compatible refresh.",
             panel_path.display()
+        );
+        let registry = read_repository_file(PUBLIC_CHANNELS_PATH);
+        assert!(
+            registry.contains("pub fn bundled_tester_registry")
+                && registry
+                    .contains("include_str!(\"../fixtures/tester-channel-registry.v1.json\")")
+                && registry.contains("adapted == bundled"),
+            "OMEGA-DELTA-0130: the bundled tester registry or its fail-closed \
+             compatibility comparison is gone."
         );
     }
     // ------ OMEGA-DELTA-0124 — the header says the thought, and says it once
@@ -20374,10 +20362,11 @@ mod tests {
         );
     }
 
-    /// OMEGA-DELTA-0163. A selected public channel has one read-only,
-    /// generation-fenced relay session and a gated verified-media boundary.
+    /// OMEGA-DELTA-0163. A selected public channel has one generation-fenced
+    /// reader session and a gated verified-media boundary. Delta 0182 adds a
+    /// separate bounded writer without widening this relay reader.
     #[test]
-    fn public_channel_timeline_is_live_verified_and_read_only() {
+    fn public_channel_timeline_is_live_verified_and_bounded() {
         let relay_path = repository_path(PUBLIC_CHANNEL_RELAY_PATH);
         let relay_source = read_repository_file(PUBLIC_CHANNEL_RELAY_PATH);
         let relay = outside_the_tests(&relay_source);
@@ -20402,7 +20391,7 @@ mod tests {
         for forbidden in ["SecretKey", "sign_event", "nsec", "Nip42"] {
             assert!(
                 !relay.contains(forbidden),
-                "OMEGA-DELTA-0163: the read-only relay lane in {} gained \
+                "OMEGA-DELTA-0163: the relay reader in {} gained \
                  signing or secret-key capability `{forbidden}`.",
                 relay_path.display()
             );
@@ -20502,15 +20491,6 @@ mod tests {
                  proof `{required_test}`."
             );
         }
-        for forbidden in ["Message::Text", "SecretKey", "sign_event", "Composer"] {
-            assert!(
-                !view.contains(forbidden),
-                "OMEGA-DELTA-0163: the selected-channel view in {} gained \
-                 publish or signing capability `{forbidden}`.",
-                view_path.display()
-            );
-        }
-
         let panel_source = read_repository_file(AGENT_PANEL_PATH);
         let panel = outside_the_tests(&panel_source);
         for required in [
@@ -22380,5 +22360,140 @@ mod tests {
         let docs = read_repository_file("docs/src/ai/parallel-agents.md");
         assert!(docs.contains("Run here anyway"));
         assert!(docs.contains("Waiting for you"));
+    }
+
+    /// OMEGA-DELTA-0182. The alpha destination is available from a clean
+    /// profile, and its writer is bounded, identity-owned, and honest about
+    /// public retention and ambiguous delivery.
+    #[test]
+    fn tester_channels_are_pinned_bounded_and_honest() {
+        let registry = read_repository_file(PUBLIC_CHANNELS_PATH);
+        for required in [
+            "pub fn bundled_tester_registry",
+            "from_compatible_tester_manifest",
+            "adapted == bundled",
+            "omega.alpha-feedback.1",
+            "include_str!(\"../fixtures/tester-channel-registry.v1.json\")",
+        ] {
+            assert!(
+                registry.contains(required),
+                "OMEGA-DELTA-0182: tester registry lost `{required}`"
+            );
+        }
+
+        let fixture = read_repository_file(PUBLIC_CHANNEL_REGISTRY_FIXTURE_PATH);
+        for pinned in [
+            "openagents.public_channel_registry.v1",
+            "omega.alpha-feedback.1",
+            "alpha-feedback",
+            "Alpha feedback",
+            "wss://relay.openagents.com",
+            "openagents-public",
+            "e841147f262799821bbaa2930fcca982a575458f0e043e064a26ed8aba2046ed",
+            "1984",
+            "8192",
+            "32768",
+        ] {
+            assert!(
+                fixture.contains(pinned),
+                "OMEGA-DELTA-0182: bundled alpha destination lost pin `{pinned}`"
+            );
+        }
+        assert_eq!(
+            fixture.matches("\"channelId\"").count(),
+            1,
+            "OMEGA-DELTA-0182: the launch contract currently promises exactly one real tester destination"
+        );
+
+        let sidebar = read_repository_file(SIDEBAR_PATH);
+        for required in [
+            "SectionId::PublicChannels => \"Tester channels\"",
+            "collapsed: Vec::new()",
+            "tester channels expanded",
+        ] {
+            assert!(
+                sidebar.contains(required),
+                "OMEGA-DELTA-0182: clean-profile tester-channel disclosure lost `{required}`"
+            );
+        }
+
+        let panel = read_repository_file(AGENT_PANEL_PATH);
+        for required in [
+            "bundled_tester_registry()",
+            "from_compatible_tester_manifest",
+            "Using the bundled Alpha feedback destination; live details could not be refreshed.",
+        ] {
+            assert!(
+                panel.contains(required),
+                "OMEGA-DELTA-0182: Agent Panel lost bundled-first behavior `{required}`"
+            );
+        }
+
+        let publisher_source = read_repository_file(PUBLIC_CHANNEL_PUBLISH_PATH);
+        let publisher = outside_the_tests(&publisher_source);
+        for required in [
+            "IdentityService",
+            "provision_unattended",
+            "AdmittedSigningRequest",
+            "SigningPurpose::NostrEvent",
+            "CHAT_MESSAGE_KIND | REPORT_KIND",
+            "MAX_PUBLISH_ATTEMPTS",
+            "publish_community_event",
+            "the identical signed event may already be present",
+            "check the timeline before retrying",
+            "record.has_tag(\"h\", &descriptor.group_id)",
+        ] {
+            assert!(
+                publisher.contains(required),
+                "OMEGA-DELTA-0182: sealed writer lost `{required}`"
+            );
+        }
+        for forbidden in ["SecretKey", "Keys::", "nsec"] {
+            assert!(
+                !publisher.contains(forbidden),
+                "OMEGA-DELTA-0182: agent UI writer gained secret-key capability `{forbidden}`"
+            );
+        }
+        let report_template = body_of(&publisher, "event_template");
+        for required in ["\"h\"", "\"e\"", "\"p\"", "author_public_key"] {
+            assert!(
+                report_template.contains(required),
+                "OMEGA-DELTA-0182: report event lost exact tag input `{required}`"
+            );
+        }
+
+        let view = read_repository_file(PUBLIC_CHANNEL_VIEW_PATH);
+        for required in [
+            "omega-tester-channel-composer",
+            "omega-tester-channel-send",
+            "omega-tester-channel-report",
+            "omega-tester-channel-relay-fallback",
+            "omega-tester-channel-retry-relay",
+            "omega-tester-channel-open-support",
+            "Messages and reports are signed with your Omega identity and may be retained",
+            "Don’t post secrets, credentials, private code, customer data, prompts, local paths, or unredacted logs",
+            "deletion cannot guarantee erasure",
+            "It does not copy the message body or remove the message",
+            "PRODUCT_BUG_REPORT_URL",
+        ] {
+            assert!(
+                view.contains(required),
+                "OMEGA-DELTA-0182: tester-channel UI lost `{required}`"
+            );
+        }
+
+        let visual = read_repository_file(VISUAL_TEST_RUNNER_PATH);
+        for required in [
+            "omega_tester_channel_first_launch",
+            "omega_tester_channel_relay_unavailable",
+            "omega-tester-channel-composer",
+            "omega-tester-channel-relay-fallback",
+            "omega-tester-channel-open-support",
+        ] {
+            assert!(
+                visual.contains(required),
+                "OMEGA-DELTA-0182: visual acceptance lost `{required}`"
+            );
+        }
     }
 }

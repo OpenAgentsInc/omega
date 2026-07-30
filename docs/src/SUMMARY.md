@@ -52,6 +52,7 @@
   - [External Agents](./ai/external-agents.md)
   - [Terminal Threads](./ai/terminal-threads.md)
 - [Agent Panel](./ai/agent-panel.md)
+  - [Tester Channels](./ai/tester-channels.md)
   - [Agent Settings](./ai/agent-settings.md)
   - [Agent Profiles](./ai/agent-profiles.md)
   - [Tools](./ai/tools.md)

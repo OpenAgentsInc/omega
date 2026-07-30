@@ -181,7 +181,7 @@ impl SectionId {
     pub fn title(self) -> &'static str {
         match self {
             SectionId::RecentThreads => "Recent threads",
-            SectionId::PublicChannels => "Channels",
+            SectionId::PublicChannels => "Tester channels",
         }
     }
 }
@@ -203,15 +203,14 @@ pub struct SidebarState {
 impl SidebarState {
     /// The state a machine that has never stored one gets.
     ///
-    /// Open, with recent threads expanded and public chat collapsed. The
-    /// thread list is the sidebar's primary navigation and should be visible
-    /// immediately; public chat remains one click away without competing for
-    /// the initial vertical space.
+    /// Open, with recent threads and tester channels expanded. A clean profile
+    /// must expose the alpha feedback destination without requiring a person
+    /// to discover a collapsed section first.
     #[must_use]
     pub fn default_open() -> Self {
         Self {
             open: true,
-            collapsed: vec![SectionId::PublicChannels.key().to_string()],
+            collapsed: Vec::new(),
         }
     }
 
@@ -369,11 +368,12 @@ mod tests {
     }
 
     #[test]
-    fn a_machine_that_has_never_stored_a_state_opens_threads_and_collapses_public_chat() {
+    fn a_machine_that_has_never_stored_a_state_opens_threads_and_tester_channels() {
         let state = SidebarState::from_stored(None);
         assert!(state.open, "the owner asked for default open on zero base");
         assert!(!state.is_collapsed(SectionId::RecentThreads));
-        assert!(state.is_collapsed(SectionId::PublicChannels));
+        assert!(!state.is_collapsed(SectionId::PublicChannels));
+        assert_eq!(SectionId::PublicChannels.title(), "Tester channels");
     }
 
     #[test]
@@ -400,8 +400,8 @@ mod tests {
              before a restart must come back collapsed."
         );
         assert!(
-            !restored.is_collapsed(SectionId::PublicChannels),
-            "an explicitly expanded section must not be reset to its default"
+            restored.is_collapsed(SectionId::PublicChannels),
+            "an explicitly collapsed tester-channel section must remain collapsed"
         );
         assert!(restored.open);
     }
@@ -410,9 +410,9 @@ mod tests {
     fn toggling_a_section_twice_leaves_it_as_it_was() {
         let mut state = SidebarState::default_open();
         state.toggle_section(SectionId::PublicChannels);
-        assert!(!state.is_collapsed(SectionId::PublicChannels));
-        state.toggle_section(SectionId::PublicChannels);
         assert!(state.is_collapsed(SectionId::PublicChannels));
+        state.toggle_section(SectionId::PublicChannels);
+        assert!(!state.is_collapsed(SectionId::PublicChannels));
         assert_eq!(state, SidebarState::default_open());
     }
 

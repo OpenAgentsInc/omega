@@ -26,6 +26,10 @@ Expand the editor with {#kb agent::ExpandMessageEditor} if you need more room.
 Responses stream in with indicators showing [which tools](./tools.md) the model is using.
 The sections below cover what you can do from here.
 
+The persistent sidebar also contains [Tester channels](./tester-channels.md).
+On a clean profile, its public alpha feedback destination starts expanded so
+you can find support and feedback without leaving the Agent Panel.
+
 > Note that some Agent Panel features may not be available for every External Agent. Restoring threads from history, checkpoints, token usage display, and similar features depend on the agent integration.
 > Their availability varies depending on the agent.
 

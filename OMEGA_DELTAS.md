@@ -6184,21 +6184,27 @@ question rather than leaving it to whoever next reads the menu.
     under the executor that recorded it, and a row whose executor cannot run
     here still refuses in the composer's own words rather than dispatching a
     load that fails in somebody else's error text.
-  - *Channels* is **real**. It reads the Agent Chat manifest at
-    `openagents.com`, adapts it to the versioned public-channel registry, and
-    draws one stable `#agent-chat` destination. It does not draw messages in
-    navigation. Selecting the destination opens the channel shell in the main
-    view. `OMEGA-DELTA-0160` owns this superseding interaction.
+  - *Tester channels* is **real**. A versioned registry bundled with Omega pins
+    the exact **Alpha feedback · #alpha-feedback** destination, including its
+    relay identity, group, accepted kinds, and limits, so a clean launch does
+    not lose the support destination when its HTTPS refresh is unavailable.
+    The published Agent Chat manifest may refresh that record only when every
+    operational field still matches the bundle. Navigation draws the
+    destination rather than messages. Selecting it opens the channel shell in
+    the main view. `OMEGA-DELTA-0160` owns the channel-navigation interaction;
+    `OMEGA-DELTA-0182` owns the bounded writer in the selected view.
 
 - **The initial disclosure follows the task hierarchy.** On a profile with no
-  stored sidebar state, *Recent threads* starts expanded and *Channels*
-  starts collapsed. Once a person changes either section, the stored choice
-  remains authoritative across launches.
+  stored sidebar state, *Recent threads* and *Tester channels* start expanded,
+  making the release-candidate support destination unmistakable. Once a person
+  changes either section, the stored choice remains authoritative across
+  launches.
 
-- **The registry load is a read.** It performs one HTTPS manifest read. It
-  opens no relay socket and has no signer, key, NIP-42 exchange, or publish
-  path. The relay URL and group ID come from that manifest rather than from the
-  generic controller.
+- **Registry refresh is still a read.** Startup first decodes the bundled
+  registry, then performs one HTTPS manifest read and accepts it only as an
+  exact compatible refresh. That refresh opens no relay socket and handles no
+  signer or key. Relay subscription and the writer begin only after a person
+  selects the destination; `OMEGA-DELTA-0182` records that separate boundary.
 
 - **Adding a fourth section.** A variant on `omega_sidebar::SectionId` and its
   entry in `ALL`, its frozen `key` and its `title`, and one arm in the panel's
@@ -6214,8 +6220,8 @@ question rather than leaving it to whoever next reads the menu.
   rest of the editor-facing `omega` namespace. The Settings window is a separate
   visible window, so the sealed centre pane cannot hide it.
 
-- **Enforced by:** `zero_bases_sidebar_is_persistent_sectioned_and_silent_when_it_fails`
-  `the_public_chat_section_reads_and_cannot_write`, and
+- **Enforced by:** `zero_bases_sidebar_is_persistent_sectioned_and_silent_when_it_fails`,
+  `the_legacy_activity_preview_remains_read_only_and_the_tester_registry_is_pinned`, and
   `public_chat_navigation_is_channel_first_and_read_only` in
   `crates/omega_deltas`,
   for the wiring; `zero_bases_threads_sidebar_is_its_own_and_reopens_by_executor`
@@ -7283,14 +7289,17 @@ render from memory. Verified audio and video use a second native-open action;
 other verified files use a save action. The signed message stays visible for
 all mismatch and unavailable states.
 
-This slice adds no composer, signer, NIP-42 response, publish event, join,
-leave, identity change, or moderation control. The global HTTP client can
-resolve a validated DNS name again after the media host check, so a DNS
-rebinding time-of-check/time-of-use gap remains until Omega has a pin-aware
+This slice originally added no composer, signer, NIP-42 response, publish
+event, join, leave, identity change, or moderation control. The read-only
+restriction is superseded by `OMEGA-DELTA-0182` for the one pinned alpha tester
+destination; the relay reader, timeline verification, media gate, and
+selected-channel isolation described here remain in force. The global HTTP
+client can resolve a validated DNS name again after the media host check, so a
+DNS rebinding time-of-check/time-of-use gap remains until Omega has a pin-aware
 HTTP transport. AVIF is verified and offered to the native viewer because the
 current image build does not decode it inline.
 
-- **Enforced by:** `public_channel_timeline_is_live_verified_and_read_only` in
+- **Enforced by:** `public_channel_timeline_is_live_verified_and_bounded` in
   `crates/omega_deltas`; the exact fixture projection, lifecycle, reconnect,
   pagination, invalid-input, AUTH-inert, and close tests in
   `omega_public_channel_relay` and `omega_public_channel_timeline`; a loopback
@@ -7939,3 +7948,47 @@ current image build does not decode it inline.
   in `crates/omega_deltas`; lifecycle, collision, metadata migration, and queue
   journal unit tests; Agent Panel GPUI coverage; and the concurrent-agent visual
   workbench sequence.
+
+### OMEGA-DELTA-0182 — Alpha feedback is a pinned, bounded public writer
+
+- **Supersedes the read-only channel restrictions in OMEGA-DELTA-0130 and
+  OMEGA-DELTA-0163.** The selected **Alpha feedback · #alpha-feedback** tester
+  destination has a composer and report action. The legacy activity preview
+  and relay subscription remain readers; signing and publication live in a
+  separate sealed writer boundary.
+- **A clean launch retains one exact destination.** Omega decodes a bundled,
+  versioned registry before it attempts the published-manifest refresh. The
+  bundle pins the canonical WSS relay, `openagents-public` group, relay-self
+  public key, accepted and moderation kinds, and all size limits. A remote
+  manifest may refresh it only when every operational field matches. Drift or
+  an unavailable HTTPS endpoint leaves the bundled destination visible.
+- **The identity service owns the secret.** The writer provisions and signs
+  through `omega_identity::IdentityService`; agent UI receives only the signed
+  event. It verifies the event and its exact `h` binding before publication.
+  Kind 9 messages and kind 1984 reports are the only authored forms. Reports
+  carry exact `h`, `e`, and `p` tags and no copied message content.
+- **Retry never changes authorship.** One signed event is retained across the
+  bounded publish attempt, including NIP-42 handling. A relay duplicate is an
+  ambiguous delivery result, not fabricated success: Omega tells the person to
+  check the timeline before retrying.
+- **Public means public before typing.** Persistent copy says messages and
+  reports are signed, may be retained, and must not contain secrets,
+  credentials, private code, customer data, prompts, local paths, or
+  unredacted logs. It also states that moderation cannot guarantee erasure.
+  The report confirmation discloses the public event and author identifiers
+  and does not promise automatic removal.
+- **Relay failure has a different path out.** Verified cached rows remain
+  visible while the selected channel offers both **Retry relay** and **Open
+  support**. The support target is the product's HTTPS GitHub issue path, so it
+  does not depend on the failed Nostr relay.
+- **Enforced by:** `tester_channels_are_pinned_bounded_and_honest` in
+  `crates/omega_deltas`; registry drift, signing, exact-event retry, reports,
+  rendered privacy/composer, and outage-fallback tests in `agent_ui`; and the
+  deterministic tester-channel visual scenes for the first-launch destination
+  and relay-unavailable fallback.
+- **Installed acceptance is deliberately still open.** Source and hermetic
+  rendering cannot prove that account A in an installed candidate publishes
+  and account B receives, or that the installed fallback survives a real relay
+  outage. omega#164 must first land background Nostr identity and relay
+  admission, and omega#158 owns the installed two-account and outage run. Issue
+  #156 must remain open until those receipts exist.

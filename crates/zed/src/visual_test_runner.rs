@@ -4003,6 +4003,8 @@ const OMEGA_AGENT_PROOF_SCENES: &[&str] = &[
     "omega_front_door_typing",
     "omega_sarah_admission_ready",
     "omega_sarah_session_settled",
+    "omega_tester_channel_first_launch",
+    "omega_tester_channel_relay_unavailable",
     "omega_executor_disclosure_native",
     "omega_route_pin_honoured",
     "omega_route_pin_not_honoured",
@@ -10483,6 +10485,131 @@ fn run_omega_sarah_admission_visual_tests(
 }
 
 #[cfg(all(target_os = "macos", feature = "visual-tests"))]
+fn run_omega_tester_channel_visual_tests(
+    panel: &Entity<agent_ui::AgentPanel>,
+    workspace: &Entity<Workspace>,
+    workspace_window: AnyWindowHandle,
+    cx: &mut VisualTestAppContext,
+    update_baseline: bool,
+) -> Result<Vec<TestResult>> {
+    use agent_ui::omega_public_channels::{ChannelLifecycle, ChannelSnapshot};
+
+    const FIRST_LAUNCH_SCENE: &str = "omega_tester_channel_first_launch";
+    const RELAY_UNAVAILABLE_SCENE: &str = "omega_tester_channel_relay_unavailable";
+    if !workbench_any_selected(&[FIRST_LAUNCH_SCENE, RELAY_UNAVAILABLE_SCENE]) {
+        return Ok(Vec::new());
+    }
+
+    anyhow::ensure!(
+        omega_zero_base::is_sealed(),
+        "tester-channel visual proof must run in the shipped sealed zero-base surface"
+    );
+    cx.set_debug_accessibility_active(workspace_window, true)?;
+
+    let selected = cx.update_window(workspace_window, |_root, window, cx| {
+        panel.update(cx, |panel, cx| {
+            panel.select_public_channel_for_tests("alpha-feedback", window, cx)
+        })
+    })?;
+    anyhow::ensure!(
+        selected,
+        "the bundled alpha feedback destination was not selectable"
+    );
+    record_workbench_semantic_check(
+        FIRST_LAUNCH_SCENE,
+        "clean-profile-bundled-alpha-destination-selectable",
+    );
+    cx.run_until_parked();
+
+    let set_snapshot = panel.update(cx, |panel, cx| {
+        panel.set_selected_public_channel_snapshot_for_tests(
+            ChannelSnapshot {
+                relay_url: "wss://relay.openagents.com".to_string(),
+                group_id: "openagents-public".to_string(),
+                lifecycle: ChannelLifecycle::Current,
+                cached: true,
+                ..Default::default()
+            },
+            cx,
+        )
+    });
+    anyhow::ensure!(set_snapshot, "the selected tester channel had no live view");
+    cx.run_until_parked();
+
+    let mut results = Vec::new();
+    if workbench_any_selected(&[FIRST_LAUNCH_SCENE]) {
+        let selected_snapshot = cx.debug_render_snapshot(workspace_window)?;
+        let mut selected_probe = SemanticProbe::new(&selected_snapshot);
+        selected_probe.require_visible("omega.public.channel.dock")?;
+        selected_probe.require_visible("omega-tester-channel-composer")?;
+        selected_probe.require_absent("omega-tester-channel-relay-fallback")?;
+        record_workbench_semantic_checks(FIRST_LAUNCH_SCENE, selected_probe.into_checks());
+        record_workbench_semantic_check(FIRST_LAUNCH_SCENE, "public-privacy-composer-visible");
+        results.push(run_visual_test(
+            FIRST_LAUNCH_SCENE,
+            workspace_window,
+            cx,
+            update_baseline,
+        )?);
+    }
+
+    if workbench_any_selected(&[RELAY_UNAVAILABLE_SCENE]) {
+        let set_snapshot = panel.update(cx, |panel, cx| {
+            panel.set_selected_public_channel_snapshot_for_tests(
+                ChannelSnapshot {
+                    relay_url: "wss://relay.openagents.com".to_string(),
+                    group_id: "openagents-public".to_string(),
+                    lifecycle: ChannelLifecycle::Stale,
+                    cached: true,
+                    ..Default::default()
+                },
+                cx,
+            )
+        });
+        anyhow::ensure!(set_snapshot, "the outage fixture lost its selected channel");
+        cx.run_until_parked();
+
+        let outage_snapshot = cx.debug_render_snapshot(workspace_window)?;
+        let mut outage_probe = SemanticProbe::new(&outage_snapshot);
+        outage_probe.require_visible("omega-tester-channel-relay-fallback")?;
+        outage_probe.require_visible("omega-tester-channel-composer")?;
+        outage_probe.require_accessible(
+            "omega-tester-channel-retry-relay",
+            "Button",
+            "Retry relay",
+        )?;
+        outage_probe.require_accessible(
+            "omega-tester-channel-open-support",
+            "Button",
+            "Open support",
+        )?;
+        record_workbench_semantic_checks(RELAY_UNAVAILABLE_SCENE, outage_probe.into_checks());
+        record_workbench_semantic_check(
+            RELAY_UNAVAILABLE_SCENE,
+            "relay-independent-support-path-visible",
+        );
+        results.push(run_visual_test(
+            RELAY_UNAVAILABLE_SCENE,
+            workspace_window,
+            cx,
+            update_baseline,
+        )?);
+    }
+
+    panel.update(cx, |panel, cx| {
+        panel.close_selected_public_channel_for_tests(cx);
+    });
+    cx.run_until_parked();
+    cx.update_window(workspace_window, |_root, window, cx| {
+        workspace.update(cx, |_workspace, cx| {
+            AgentPanel::open_front_door(window, cx);
+        });
+    })?;
+    cx.run_until_parked();
+    Ok(results)
+}
+
+#[cfg(all(target_os = "macos", feature = "visual-tests"))]
 fn run_omega_agent_visual_tests_inner(
     app_state: Arc<AppState>,
     cx: &mut VisualTestAppContext,
@@ -10496,6 +10623,8 @@ fn run_omega_agent_visual_tests_inner(
             "omega_front_door_typing",
             "omega_sarah_admission_ready",
             "omega_sarah_session_settled",
+            "omega_tester_channel_first_launch",
+            "omega_tester_channel_relay_unavailable",
         ]);
     if capture_sealed_front_door {
         // The desktop's flag-free launch enters this one-way mode before
@@ -10541,7 +10670,14 @@ fn run_omega_agent_visual_tests_inner(
         )
     });
 
-    let window_size = size(px(900.0), px(720.0));
+    let window_size = if workbench_any_selected(&[
+        "omega_tester_channel_first_launch",
+        "omega_tester_channel_relay_unavailable",
+    ]) {
+        size(px(1000.0), px(760.0))
+    } else {
+        size(px(900.0), px(720.0))
+    };
     let bounds = Bounds {
         origin: point(px(0.0), px(0.0)),
         size: window_size,
@@ -10739,6 +10875,13 @@ fn run_omega_agent_visual_tests_inner(
         cx,
         update_baseline,
     )?;
+    let tester_channel_results = run_omega_tester_channel_visual_tests(
+        &panel,
+        &workspace,
+        workspace_window,
+        cx,
+        update_baseline,
+    )?;
     if !workbench_any_selected(&[
         "omega_front_door_typing",
         "omega_executor_disclosure_native",
@@ -10751,10 +10894,11 @@ fn run_omega_agent_visual_tests_inner(
     ]) {
         let mut results = vec![front_door];
         results.extend(sarah_results);
+        results.extend(tester_channel_results);
         return finish_omega_agent_visual_tests(workspace_window, cx, &results);
     }
 
-    if !sarah_results.is_empty() {
+    if !sarah_results.is_empty() || !tester_channel_results.is_empty() {
         cx.update_window(workspace_window, |_root, window, cx| {
             workspace.update(cx, |_workspace, cx| {
                 AgentPanel::open_front_door(window, cx);

@@ -4332,6 +4332,22 @@ pub const HERMETIC_SCENES: &[SceneSpec] = &[
         regions: &[],
     },
     SceneSpec {
+        name: "omega_tester_channel_first_launch",
+        phase: ScenePhase::Recording,
+        viewport: ViewportFixture::new(1000, 760, 2000),
+        fixture_version: 1,
+        pixel_policy: APPLE_SILICON_METAL_POLICY,
+        regions: &[],
+    },
+    SceneSpec {
+        name: "omega_tester_channel_relay_unavailable",
+        phase: ScenePhase::Recording,
+        viewport: ViewportFixture::new(1000, 760, 2000),
+        fixture_version: 1,
+        pixel_policy: APPLE_SILICON_METAL_POLICY,
+        regions: &[],
+    },
+    SceneSpec {
         name: "omega_concurrent_agents_codex_waiting",
         phase: ScenePhase::Recording,
         viewport: ViewportFixture::new(1180, 760, 2000),
