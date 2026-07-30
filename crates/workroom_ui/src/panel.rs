@@ -48,7 +48,8 @@ use workspace::{
 use zed_actions::{
     OpenSettingsPage,
     workroom::{
-        EndVoice, FocusComposer, InterruptTurn, InterruptVoice, OpenPanel, RetryVoice, SendMessage,
+        ApproveSarahVoiceCommand, EndVoice, FocusComposer, InterruptTurn, InterruptVoice,
+        OpenPanel, PrepareVoiceAdmission, RejectSarahVoiceCommand, RetryVoice, SendMessage,
         StartVoice, ToggleVoiceMute,
     },
 };
@@ -66,14 +67,91 @@ use crate::projections::{
     TranscriptProjection, TranscriptRow, WorkroomProjection, sources,
 };
 use crate::voice::{
-    AgentThreadPresentation, ApprovedEditorAction, CommandConfirmation, ManagedSarahVoiceClient,
-    SarahEditorCommand, SarahVoiceControl, SarahVoiceEvent, SarahVoiceState, VoiceCommandRequest,
-    VoiceCommandResult, VoiceParticipant, VoiceTranscriptItem,
+    AgentThreadPresentation, ApprovedEditorAction, ManagedSarahVoiceClient,
+    SARAH_VOICE_WORKSPACE_REF, SarahEditorCommand, SarahVoiceControl, SarahVoiceEvent,
+    SarahVoiceState, VoiceCommandRequest, VoiceCommandResult, VoiceEditorTarget, VoiceParticipant,
+    VoiceSelectionEffectBinding, VoiceTextPoint, VoiceTranscriptItem, VoiceTranscriptRecoveryGap,
 };
 
 const PANEL_KEY: &str = "SarahWorkroomPanel";
 const MAX_NOSTR_RECORD_ROWS: usize = 64;
 const MAX_VOICE_TRANSCRIPT_CHARS: usize = 16 * 1024;
+const MAX_VOICE_SELECTION_SNAPSHOT_BYTES: usize = 64 * 1024;
+
+#[derive(Debug)]
+struct VoiceCommandRefusal(String);
+
+impl std::fmt::Display for VoiceCommandRefusal {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str(&self.0)
+    }
+}
+
+impl std::error::Error for VoiceCommandRefusal {}
+
+fn refuse_voice_command(message: impl Into<String>) -> anyhow::Error {
+    anyhow::Error::new(VoiceCommandRefusal(message.into()))
+}
+
+fn voice_text_point(point: Point) -> VoiceTextPoint {
+    VoiceTextPoint {
+        line: point.row,
+        column: point.column,
+    }
+}
+
+fn voice_document_version(snapshot: &text::BufferSnapshot) -> String {
+    let entries = snapshot
+        .version()
+        .iter()
+        .map(|timestamp| format!("{}={}", timestamp.replica_id.as_u16(), timestamp.value))
+        .collect::<Vec<_>>()
+        .join(",");
+    format!("omega-buffer-v1:{entries}")
+}
+
+fn validate_voice_selection_effect(
+    binding: &VoiceSelectionEffectBinding,
+    target: &VoiceEditorTarget,
+    current_path: &str,
+    current_document_version: &str,
+    current_selection_start: VoiceTextPoint,
+    current_selection_end: VoiceTextPoint,
+    current_selected_text: &str,
+    replacement_text: &str,
+) -> std::result::Result<(), String> {
+    if target.workspace_ref != SARAH_VOICE_WORKSPACE_REF
+        || binding.workspace_ref != target.workspace_ref
+    {
+        return Err("The target workspace no longer matches this Omega workspace.".into());
+    }
+    if binding.target_path != target.path || binding.target_path != current_path {
+        return Err("The active file changed after Sarah proposed the replacement.".into());
+    }
+    if target.document_version.as_deref() != Some(binding.document_version.as_str())
+        || binding.document_version != current_document_version
+    {
+        return Err("The document changed after Sarah proposed the replacement.".into());
+    }
+    if binding.selection_start != current_selection_start
+        || binding.selection_end != current_selection_end
+        || binding.selected_text != current_selected_text
+    {
+        return Err("The editor selection changed after Sarah proposed the replacement.".into());
+    }
+    if binding.replacement_text != replacement_text {
+        return Err("The replacement text changed after confirmation.".into());
+    }
+    Ok(())
+}
+
+struct CurrentVoiceSelection {
+    path: String,
+    document_version: String,
+    start: VoiceTextPoint,
+    end: VoiceTextPoint,
+    selected_text: String,
+}
 
 #[derive(Default)]
 struct SarahVoicePanels(HashMap<EntityId, Entity<SarahWorkroomPanel>>);
@@ -122,8 +200,101 @@ struct SarahCreatedAgentThread {
     status: SharedString,
 }
 
+#[derive(Clone, Debug, Eq, PartialEq)]
+struct PendingSarahVoiceSettlement {
+    thread_ref: String,
+    session_ref: String,
+}
+
 const MAX_CONSECUTIVE_VOICE_RECONNECTS: usize = 3;
 const STABLE_VOICE_CONNECTION_DURATION: Duration = Duration::from_secs(30);
+const VOICE_RECONNECT_DELAYS: [Duration; MAX_CONSECUTIVE_VOICE_RECONNECTS] = [
+    Duration::from_secs(1),
+    Duration::from_secs(2),
+    Duration::from_secs(4),
+];
+
+fn voice_reconnect_delay(attempt: usize) -> Duration {
+    VOICE_RECONNECT_DELAYS
+        .get(attempt.saturating_sub(1))
+        .copied()
+        .unwrap_or(Duration::from_secs(4))
+}
+
+fn voice_settlement_retry_delay(
+    attempts_completed: usize,
+    pending_or_retryable_error: bool,
+) -> Option<Duration> {
+    (pending_or_retryable_error && attempts_completed < MAX_CONSECUTIVE_VOICE_RECONNECTS)
+        .then(|| voice_reconnect_delay(attempts_completed.saturating_add(1)))
+}
+
+fn voice_settlement_is_recovered(
+    state: omega_effectd::SarahVoiceSettlementState,
+    final_charge_msat: Option<u64>,
+) -> bool {
+    matches!(
+        state,
+        omega_effectd::SarahVoiceSettlementState::Settled
+            | omega_effectd::SarahVoiceSettlementState::Released
+    ) && final_charge_msat.is_some()
+}
+
+fn voice_admission_terms(
+    admission: &omega_effectd::SarahVoiceAdmissionProjection,
+) -> Option<agent_ui::composer_voice::SarahVoiceAdmissionTerms> {
+    use agent_ui::composer_voice::{
+        SarahVoiceAdmissionTerms, SarahVoiceCapability, SarahVoiceCapabilityId as UiCapabilityId,
+        SarahVoiceConfirmation, SarahVoiceCreditMode as UiCreditMode, SarahVoiceExcludedAuthority,
+    };
+    use omega_effectd::{SarahVoiceCapabilityId, SarahVoiceCreditMode};
+
+    let capability = |capability| match capability {
+        SarahVoiceCapabilityId::ContextRead => UiCapabilityId::ContextRead,
+        SarahVoiceCapabilityId::OpenPath => UiCapabilityId::OpenPath,
+        SarahVoiceCapabilityId::RevealRange => UiCapabilityId::RevealRange,
+        SarahVoiceCapabilityId::ReplaceSelection => UiCapabilityId::ReplaceSelection,
+        SarahVoiceCapabilityId::SaveDocument => UiCapabilityId::SaveDocument,
+        SarahVoiceCapabilityId::StartAgentThread => UiCapabilityId::StartAgentThread,
+    };
+    Some(SarahVoiceAdmissionTerms {
+        client_profile: admission.client_profile.clone().into(),
+        cohort_ref: admission.admission_cohort_ref.clone().into(),
+        credit_mode: match admission.credit_mode {
+            SarahVoiceCreditMode::Metered => UiCreditMode::Metered,
+            SarahVoiceCreditMode::StagingOwnerEntitlement => {
+                UiCreditMode::StagingOwnerEntitlement
+            }
+        },
+        rate_msat_per_million_tokens: admission.credit_msat_per_million_tokens?,
+        credit_hold_msat: admission.reserved_credit_msat,
+        remaining_credit_msat: admission.remaining_credit_msat,
+        max_duration_seconds: u32::try_from(admission.max_duration_seconds).ok()?,
+        transcript_policy:
+            "Final transcripts are stored locally, bounded to the current Sarah thread, and recovered with explicit gap state."
+                .into(),
+        capabilities: admission
+            .commands
+            .iter()
+            .copied()
+            .map(|command| SarahVoiceCapability {
+                capability: capability(command),
+                confirmation: if admission.confirmation_required.contains(&command) {
+                    SarahVoiceConfirmation::ConfirmEachAction
+                } else {
+                    SarahVoiceConfirmation::NoExtraConfirmation
+                },
+            })
+            .collect(),
+        excluded_authorities: vec![
+            SarahVoiceExcludedAuthority::DirectShell,
+            SarahVoiceExcludedAuthority::DirectGit,
+            SarahVoiceExcludedAuthority::Payment,
+            SarahVoiceExcludedAuthority::CredentialAccess,
+            SarahVoiceExcludedAuthority::DeviceControl,
+        ],
+    })
+}
 
 fn next_voice_reconnect_attempt(
     state: SarahVoiceState,
@@ -176,7 +347,12 @@ pub struct SarahWorkroomPanel {
     voice_retryable: bool,
     voice_access_required: bool,
     voice_session_id: Option<String>,
+    voice_admission_terms: Option<agent_ui::composer_voice::SarahVoiceAdmissionTerms>,
+    prepared_voice_admission: Option<omega_effectd::PreparedSarahVoiceAdmission>,
+    pending_voice_settlement: Option<PendingSarahVoiceSettlement>,
+    settlement_retrying: bool,
     voice_transcript: Vec<VoiceTranscriptItem>,
+    voice_transcript_recovery: SharedString,
     pending_voice_command: Option<VoiceCommandRequest>,
     created_agent_thread: Option<SarahCreatedAgentThread>,
     voice_controls: Option<async_channel::Sender<SarahVoiceControl>>,
@@ -192,6 +368,7 @@ pub fn init(cx: &mut App) {
                 .0
                 .remove(&workspace_id);
             agent_ui::composer_voice::remove_composer_voice_status(workspace_id, cx);
+            agent_ui::composer_voice::remove_sarah_voice_admission(workspace_id, cx);
         })
         .detach();
         workspace
@@ -225,6 +402,11 @@ pub fn init(cx: &mut App) {
                     panel.update(cx, |panel, cx| panel.start_voice(window, cx));
                 }
             })
+            .register_action(|_workspace, _: &PrepareVoiceAdmission, _window, cx| {
+                if let Some(panel) = voice_panel(cx.entity_id(), cx) {
+                    panel.update(cx, |panel, cx| panel.prepare_voice_admission(cx));
+                }
+            })
             .register_action(|_workspace, _: &ToggleVoiceMute, _window, cx| {
                 if let Some(panel) = voice_panel(cx.entity_id(), cx) {
                     panel.update(cx, |panel, cx| panel.toggle_voice_mute(cx));
@@ -233,6 +415,16 @@ pub fn init(cx: &mut App) {
             .register_action(|_workspace, _: &InterruptVoice, _window, cx| {
                 if let Some(panel) = voice_panel(cx.entity_id(), cx) {
                     panel.update(cx, |panel, cx| panel.interrupt_voice(cx));
+                }
+            })
+            .register_action(|_workspace, _: &ApproveSarahVoiceCommand, window, cx| {
+                if let Some(panel) = voice_panel(cx.entity_id(), cx) {
+                    panel.update(cx, |panel, cx| panel.approve_voice_command(window, cx));
+                }
+            })
+            .register_action(|_workspace, _: &RejectSarahVoiceCommand, _window, cx| {
+                if let Some(panel) = voice_panel(cx.entity_id(), cx) {
+                    panel.update(cx, |panel, cx| panel.reject_voice_command(cx));
                 }
             })
             .register_action(|_workspace, _: &EndVoice, _window, cx| {
@@ -307,6 +499,104 @@ impl SarahWorkroomPanel {
         }
     }
 
+    fn publish_voice_admission(
+        &self,
+        projection: agent_ui::composer_voice::SarahVoiceAdmissionProjection,
+        cx: &mut App,
+    ) {
+        if let Some(workspace) = self.workspace.upgrade() {
+            agent_ui::composer_voice::set_sarah_voice_admission(
+                workspace.entity_id(),
+                projection,
+                cx,
+            );
+        }
+    }
+
+    fn voice_session_artifacts(&self) -> agent_ui::composer_voice::SarahVoiceSessionArtifacts {
+        use agent_ui::composer_voice::{
+            SarahAgentThreadPresentation, SarahVoiceAgentThreadReceipt, SarahVoiceParticipant,
+            SarahVoicePendingConfirmation, SarahVoiceSelectionEffectPreview,
+            SarahVoiceSessionArtifacts, SarahVoiceTranscriptRow,
+        };
+
+        SarahVoiceSessionArtifacts {
+            transcript: self
+                .voice_transcript
+                .iter()
+                .map(|item| SarahVoiceTranscriptRow {
+                    thread_ref: item.thread_ref.clone().into(),
+                    session_ref: item.session_ref.clone().into(),
+                    item_id: item.item_id.clone().into(),
+                    participant: match item.participant {
+                        VoiceParticipant::User => SarahVoiceParticipant::User,
+                        VoiceParticipant::Sarah => SarahVoiceParticipant::Sarah,
+                    },
+                    text: item.text.clone().into(),
+                    complete: item.complete,
+                })
+                .collect(),
+            pending_confirmation: self.pending_voice_command.as_ref().map(|request| {
+                SarahVoicePendingConfirmation {
+                    request_id: request.request_id.clone().into(),
+                    copy: request.command.confirmation_copy().into(),
+                    detail: request.command.confirmation_detail().map(Into::into),
+                    selection_effect: request.effect_binding.as_ref().map(|binding| {
+                        SarahVoiceSelectionEffectPreview {
+                            workspace_ref: binding.workspace_ref.clone().into(),
+                            document_version: binding.document_version.clone().into(),
+                            target_path: binding.target_path.clone().into(),
+                            selection_start_line: binding.selection_start.line,
+                            selection_start_column: binding.selection_start.column,
+                            selection_end_line: binding.selection_end.line,
+                            selection_end_column: binding.selection_end.column,
+                            selected_text: binding.selected_text.clone().into(),
+                            replacement_text: binding.replacement_text.clone().into(),
+                        }
+                    }),
+                }
+            }),
+            created_agent_thread: self.created_agent_thread.as_ref().map(|created| {
+                SarahVoiceAgentThreadReceipt {
+                    thread_id: created.thread_id.to_key_string().into(),
+                    presentation: match created.presentation {
+                        AgentThreadPresentation::Foreground => {
+                            SarahAgentThreadPresentation::Foreground
+                        }
+                        AgentThreadPresentation::Background => {
+                            SarahAgentThreadPresentation::Background
+                        }
+                    },
+                    status: created.status.clone(),
+                }
+            }),
+        }
+    }
+
+    fn publish_active_voice_artifacts(&self, cx: &mut App) {
+        let Some(workspace) = self.workspace.upgrade() else {
+            return;
+        };
+        let projection = agent_ui::composer_voice::sarah_voice_admission(workspace.entity_id(), cx)
+            .read(cx)
+            .clone();
+        if let agent_ui::composer_voice::SarahVoiceAdmissionProjection::Active {
+            terms,
+            session_id,
+            ..
+        } = projection
+        {
+            self.publish_voice_admission(
+                agent_ui::composer_voice::SarahVoiceAdmissionProjection::Active {
+                    terms,
+                    session_id,
+                    artifacts: self.voice_session_artifacts(),
+                },
+                cx,
+            );
+        }
+    }
+
     fn new(workspace: WeakEntity<Workspace>, window: &mut Window, cx: &mut Context<Self>) -> Self {
         let public_demo = crate::public_demo_mode();
         let composer = cx.new(|cx| {
@@ -362,7 +652,12 @@ impl SarahWorkroomPanel {
             voice_retryable: false,
             voice_access_required: false,
             voice_session_id: None,
+            voice_admission_terms: None,
+            prepared_voice_admission: None,
+            pending_voice_settlement: None,
+            settlement_retrying: false,
             voice_transcript: Vec::new(),
+            voice_transcript_recovery: "No prior transcript rows were recovered.".into(),
             pending_voice_command: None,
             created_agent_thread: None,
             voice_controls: None,
@@ -1347,19 +1642,137 @@ impl SarahWorkroomPanel {
         .detach();
     }
 
+    fn prepare_voice_admission(&mut self, cx: &mut Context<Self>) {
+        if self.public_demo || self.active_room.is_community() || self.voice_state.is_active() {
+            return;
+        }
+        if self.pending_voice_settlement.is_some() {
+            self.publish_voice_admission(
+                agent_ui::composer_voice::SarahVoiceAdmissionProjection::Unavailable {
+                    reason: "The previous Sarah voice session still needs final-charge recovery. Retry settlement before loading admission for another session."
+                        .into(),
+                    retryable: true,
+                    cohort_ref: None,
+                    refusal_reason: Some("settlement_retry_required".into()),
+                },
+                cx,
+            );
+            self.voice_status = "Previous-session settlement is still pending. Choose Retry settlement; its original thread and session references are retained.".into();
+            cx.notify();
+            return;
+        }
+        self.prepared_voice_admission = None;
+        self.voice_admission_terms = None;
+        self.publish_voice_admission(
+            agent_ui::composer_voice::SarahVoiceAdmissionProjection::Loading {
+                detail: "Checking cohort membership, spendable credit, price, and the exact command boundary without opening the microphone or reserving credit."
+                    .into(),
+            },
+            cx,
+        );
+        let openagents_session = omega_effectd::openagents_session(cx);
+        cx.spawn(async move |this, cx| {
+            let result = openagents_session
+                .prepare_sarah_voice_admission("sarah-owner-private", cx)
+                .await;
+            this.update(cx, |panel, cx| {
+                match result {
+                    Ok(admission) => {
+                        let terms = voice_admission_terms(&admission.projection);
+                        if let Some(terms) = terms {
+                            panel.prepared_voice_admission = Some(admission);
+                            panel.voice_admission_terms = Some(terms.clone());
+                            panel.publish_voice_admission(
+                                agent_ui::composer_voice::SarahVoiceAdmissionProjection::Ready {
+                                    terms,
+                                },
+                                cx,
+                            );
+                        } else {
+                            panel.publish_voice_admission(
+                                agent_ui::composer_voice::SarahVoiceAdmissionProjection::Unavailable {
+                                    reason: "OpenAgents returned malformed or incomplete Sarah voice admission terms."
+                                        .into(),
+                                    retryable: true,
+                                    cohort_ref: Some(admission.projection.admission_cohort_ref.into()),
+                                    refusal_reason: Some("response_invalid".into()),
+                                },
+                                cx,
+                            );
+                        }
+                    }
+                    Err(blocker) => {
+                        let (cohort_ref, refusal_reason) = match &blocker {
+                            omega_effectd::HostedSessionBlocker::VoiceCohortInactive {
+                                cohort_ref,
+                            } => (Some(cohort_ref.clone().into()), Some("cohort_inactive".into())),
+                            omega_effectd::HostedSessionBlocker::VoiceAdmissionInsufficientCredit {
+                                cohort_ref,
+                            } => (
+                                Some(cohort_ref.clone().into()),
+                                Some("insufficient_credit".into()),
+                            ),
+                            _ => (None, None),
+                        };
+                        panel.publish_voice_admission(
+                            agent_ui::composer_voice::SarahVoiceAdmissionProjection::Unavailable {
+                                reason: blocker.summary().into(),
+                                retryable: blocker.is_retryable(),
+                                cohort_ref,
+                                refusal_reason,
+                            },
+                            cx,
+                        );
+                    }
+                }
+                cx.notify();
+            })
+            .log_err();
+        })
+        .detach();
+    }
+
     fn start_voice(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         if self.public_demo || self.active_room.is_community() || self.voice_state.is_active() {
             return;
         }
+        if self.pending_voice_settlement.is_some() {
+            self.prepare_voice_admission(cx);
+            return;
+        }
+        let admission_is_ready = self.workspace.upgrade().is_some_and(|workspace| {
+            matches!(
+                &*agent_ui::composer_voice::sarah_voice_admission(workspace.entity_id(), cx)
+                    .read(cx),
+                agent_ui::composer_voice::SarahVoiceAdmissionProjection::Ready { .. }
+            )
+        });
+        if !admission_is_ready {
+            self.prepared_voice_admission = None;
+        }
+        let Some(prepared_admission) = self.prepared_voice_admission.take() else {
+            self.publish_voice_admission(
+                agent_ui::composer_voice::SarahVoiceAdmissionProjection::Unavailable {
+                    reason: "Load and review current Sarah voice admission terms before opening the microphone."
+                        .into(),
+                    retryable: true,
+                    cohort_ref: None,
+                    refusal_reason: Some("preflight_required".into()),
+                },
+                cx,
+            );
+            return;
+        };
+        let reviewed_admission = prepared_admission.projection.clone();
 
         self.voice_task.take();
         self.voice_controls.take();
         self.pending_voice_command = None;
         self.voice_retryable = false;
         self.voice_access_required = false;
-        self.voice_state = SarahVoiceState::Authenticating;
+        self.voice_state = SarahVoiceState::RequestingMicrophone;
         self.voice_status =
-            "Checking the existing OpenAgents session. No OpenAI API key is used.".into();
+            "Opening the selected microphone before requesting a one-use gateway ticket.".into();
         let openagents_session = omega_effectd::openagents_session(cx);
         let audio_settings = AudioSettings::get_global(cx);
         let input_device_id = audio_settings.input_audio_device.clone();
@@ -1368,13 +1781,139 @@ impl SarahWorkroomPanel {
 
         let voice_task = cx.spawn_in(window, async move |this, cx| {
             let mut reconnect_attempts = 0;
+            let mut prepared_admission = Some(prepared_admission);
             loop {
+                if reconnect_attempts > 0 {
+                    cx.background_executor()
+                        .timer(voice_reconnect_delay(reconnect_attempts))
+                        .await;
+                }
+                let admission = match prepared_admission.take() {
+                    Some(admission) => admission,
+                    None => match openagents_session
+                        .prepare_sarah_voice_admission("sarah-owner-private", cx)
+                        .await
+                    {
+                        Ok(admission) => {
+                            if !reviewed_admission
+                                .has_same_reviewed_terms(&admission.projection)
+                            {
+                                this.update(cx, |panel, cx| {
+                                    let terms = voice_admission_terms(&admission.projection);
+                                    panel.voice_state = SarahVoiceState::Idle;
+                                    panel.voice_retryable = false;
+                                    panel.voice_access_required = false;
+                                    panel.voice_status = "OpenAgents changed one or more Sarah voice admission terms. Review the new terms and choose Start voice again; the microphone stayed off and no ticket was requested.".into();
+                                    if let Some(terms) = terms {
+                                        panel.prepared_voice_admission = Some(admission);
+                                        panel.voice_admission_terms = Some(terms.clone());
+                                        panel.publish_voice_admission(
+                                            agent_ui::composer_voice::SarahVoiceAdmissionProjection::Ready { terms },
+                                            cx,
+                                        );
+                                    } else {
+                                        panel.publish_voice_admission(
+                                            agent_ui::composer_voice::SarahVoiceAdmissionProjection::Unavailable {
+                                                reason: "OpenAgents changed Sarah voice terms, but the replacement terms were incomplete. The microphone stayed off and no ticket was requested.".into(),
+                                                retryable: true,
+                                                cohort_ref: Some(admission.projection.admission_cohort_ref.into()),
+                                                refusal_reason: Some("admission_terms_changed".into()),
+                                            },
+                                            cx,
+                                        );
+                                    }
+                                    cx.notify();
+                                })?;
+                                return anyhow::Ok(());
+                            }
+                            admission
+                        }
+                        Err(blocker) => {
+                            this.update(cx, |panel, cx| {
+                                panel.voice_state = SarahVoiceState::Error;
+                                panel.voice_retryable = blocker.is_retryable();
+                                panel.voice_access_required = blocker.requires_voice_access();
+                                panel.voice_status = blocker.summary().into();
+                                cx.notify();
+                            })?;
+                            return anyhow::Ok(());
+                        }
+                    },
+                };
+                this.update(cx, |panel, cx| {
+                    panel.voice_state = SarahVoiceState::RequestingMicrophone;
+                    panel.voice_status = if reconnect_attempts == 0 {
+                        panel.voice_state.label().into()
+                    } else {
+                        "Admission terms are unchanged. Reopening audio before requesting a fresh one-use ticket…".into()
+                    };
+                    cx.notify();
+                })?;
+                let prepared_devices = cx
+                    .background_executor()
+                    .spawn({
+                        let input_device_id = input_device_id.clone();
+                        let output_device_id = output_device_id.clone();
+                        async move {
+                            ManagedSarahVoiceClient::prepare_devices(
+                                input_device_id,
+                                output_device_id,
+                            )
+                        }
+                    })
+                    .await;
+                let prepared_devices = match prepared_devices {
+                    Ok(prepared_devices) => prepared_devices,
+                    Err(error) => {
+                        this.update(cx, |panel, cx| {
+                            panel.voice_state = SarahVoiceState::Error;
+                            panel.voice_retryable = true;
+                            panel.voice_access_required = false;
+                            panel.voice_status =
+                                format!("Sarah voice could not open audio devices: {error:#}")
+                                    .into();
+                            cx.notify();
+                        })?;
+                        return anyhow::Ok(());
+                    }
+                };
+                this.update(cx, |panel, cx| {
+                    panel.voice_state = SarahVoiceState::Authenticating;
+                    panel.voice_status = "Audio devices are ready. Requesting a one-use Sarah voice ticket…".into();
+                    cx.notify();
+                })?;
                 let managed_session = match openagents_session
-                    .create_sarah_voice_session("sarah-owner-private", cx)
+                    .create_sarah_voice_session_from_admission(&admission, cx)
                     .await
                 {
                     Ok(session) => session,
                     Err(blocker) => {
+                        if blocker.is_retryable()
+                            && reconnect_attempts < MAX_CONSECUTIVE_VOICE_RECONNECTS
+                        {
+                            reconnect_attempts = reconnect_attempts.saturating_add(1);
+                            this.update(cx, |panel, cx| {
+                                panel.voice_state = SarahVoiceState::Reconnecting;
+                                panel.voice_retryable = false;
+                                panel.voice_access_required = blocker.requires_voice_access();
+                                panel.voice_status = if matches!(
+                                    &blocker,
+                                    omega_effectd::HostedSessionBlocker::VoiceSessionRejected {
+                                        status: 409
+                                    }
+                                ) {
+                                    "The previous Sarah session is settling. Waiting before requesting a fresh one-use ticket…".into()
+                                } else {
+                                    format!(
+                                        "Sarah voice admission is temporarily unavailable ({}). Retrying with bounded backoff…",
+                                        blocker.summary()
+                                    )
+                                    .into()
+                                };
+                                cx.notify();
+                            })?;
+                            continue;
+                        }
                         this.update(cx, |panel, cx| {
                             panel.voice_state = SarahVoiceState::Error;
                             panel.voice_retryable = blocker.is_retryable();
@@ -1385,10 +1924,17 @@ impl SarahWorkroomPanel {
                         return anyhow::Ok(());
                     }
                 };
-                let client = match ManagedSarahVoiceClient::from_managed_session(
+                let settlement_thread_ref = managed_session.thread_ref.clone();
+                let settlement_session_ref = managed_session.session_ref.clone();
+                this.update(cx, |panel, _cx| {
+                    panel.pending_voice_settlement = Some(PendingSarahVoiceSettlement {
+                        thread_ref: settlement_thread_ref.clone(),
+                        session_ref: settlement_session_ref.clone(),
+                    });
+                })?;
+                let client = match ManagedSarahVoiceClient::from_managed_session_with_devices(
                     managed_session,
-                    input_device_id.clone(),
-                    output_device_id.clone(),
+                    prepared_devices,
                 ) {
                     Ok(client) => client,
                     Err(error) => {
@@ -1412,14 +1958,13 @@ impl SarahWorkroomPanel {
                     if panel.voice_muted {
                         panel.send_voice_control(SarahVoiceControl::SetMuted(true));
                     }
-                    panel.voice_state = SarahVoiceState::RequestingMicrophone;
+                    panel.voice_state = SarahVoiceState::Connecting;
                     panel.voice_status = panel.voice_state.label().into();
                     cx.notify();
                 })?;
 
                 let mut retryable_failure = false;
                 while let Ok(event) = events.recv().await {
-                    let ended = matches!(event, SarahVoiceEvent::Ended { .. });
                     retryable_failure = matches!(
                         event,
                         SarahVoiceEvent::Error {
@@ -1430,9 +1975,90 @@ impl SarahWorkroomPanel {
                     this.update_in(cx, |panel, window, cx| {
                         panel.handle_voice_event(event, window, cx);
                     })?;
-                    if ended || retryable_failure {
+                    if retryable_failure {
                         break;
                     }
+                }
+                let mut settlement_attempt = 0_usize;
+                let mut settlement_recovered = false;
+                loop {
+                    let settlement = openagents_session
+                        .read_sarah_voice_settlement(
+                            &settlement_thread_ref,
+                            &settlement_session_ref,
+                            cx,
+                        )
+                        .await;
+                    match settlement {
+                        Ok(settlement)
+                            if settlement.state
+                                == omega_effectd::SarahVoiceSettlementState::Pending
+                                && voice_settlement_retry_delay(settlement_attempt, true).is_some() =>
+                        {
+                            let Some(delay) =
+                                voice_settlement_retry_delay(settlement_attempt, true)
+                            else {
+                                break;
+                            };
+                            settlement_attempt = settlement_attempt.saturating_add(1);
+                            cx.background_executor().timer(delay).await;
+                        }
+                        Ok(settlement) => {
+                            settlement_recovered = voice_settlement_is_recovered(
+                                settlement.state,
+                                settlement.final_charge_msat,
+                            );
+                            this.update_in(cx, |panel, window, cx| {
+                                panel.handle_voice_event(
+                                    SarahVoiceEvent::Settlement(settlement),
+                                    window,
+                                    cx,
+                                );
+                            })?;
+                            break;
+                        }
+                        Err(blocker)
+                            if blocker.is_retryable()
+                                && voice_settlement_retry_delay(settlement_attempt, true).is_some() =>
+                        {
+                            let Some(delay) =
+                                voice_settlement_retry_delay(settlement_attempt, true)
+                            else {
+                                break;
+                            };
+                            settlement_attempt = settlement_attempt.saturating_add(1);
+                            cx.background_executor().timer(delay).await;
+                        }
+                        Err(blocker) => {
+                            this.update(cx, |panel, cx| {
+                                panel.publish_voice_admission(
+                                    agent_ui::composer_voice::SarahVoiceAdmissionProjection::Unavailable {
+                                        reason: format!(
+                                            "Sarah voice ended, but final-charge recovery for session {} is still unavailable: {}. The original settlement target is retained; choose Retry settlement to try again.",
+                                            settlement_session_ref,
+                                            blocker.summary(),
+                                        )
+                                        .into(),
+                                        retryable: blocker.is_retryable(),
+                                        cohort_ref: None,
+                                        refusal_reason: Some("settlement_unavailable".into()),
+                                    },
+                                    cx,
+                                );
+                            })?;
+                            break;
+                        }
+                    }
+                }
+                if !settlement_recovered {
+                    this.update(cx, |panel, cx| {
+                        panel.voice_controls = None;
+                        panel.voice_state = SarahVoiceState::Error;
+                        panel.voice_retryable = true;
+                        panel.voice_status = "Sarah voice will not open a new session until the previous final charge is recovered. Choose Retry settlement; the original target is retained.".into();
+                        cx.notify();
+                    })?;
+                    break;
                 }
                 let reconnect_attempt = this.update(cx, |panel, cx| {
                     panel.voice_controls = None;
@@ -1515,8 +2141,100 @@ impl SarahWorkroomPanel {
     }
 
     fn retry_voice(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if self.pending_voice_settlement.is_some() {
+            self.retry_voice_settlement(cx);
+            return;
+        }
         self.cleanup_voice();
         self.start_voice(window, cx);
+    }
+
+    fn retry_voice_settlement(&mut self, cx: &mut Context<Self>) {
+        if self.settlement_retrying {
+            return;
+        }
+        let Some(target) = self.pending_voice_settlement.clone() else {
+            return;
+        };
+        self.settlement_retrying = true;
+        self.voice_retryable = false;
+        self.voice_status = format!(
+            "Retrying final-charge recovery for Sarah session {}…",
+            target.session_ref
+        )
+        .into();
+        let openagents_session = omega_effectd::openagents_session(cx);
+        cx.notify();
+        cx.spawn(async move |this, cx| {
+            let mut attempt = 0_usize;
+            loop {
+                let result = openagents_session
+                    .read_sarah_voice_settlement(&target.thread_ref, &target.session_ref, cx)
+                    .await;
+                match result {
+                    Ok(settlement)
+                        if settlement.state
+                            == omega_effectd::SarahVoiceSettlementState::Pending
+                            && voice_settlement_retry_delay(attempt, true).is_some() =>
+                    {
+                        let Some(delay) = voice_settlement_retry_delay(attempt, true) else {
+                            break;
+                        };
+                        attempt = attempt.saturating_add(1);
+                        cx.background_executor().timer(delay).await;
+                    }
+                    Err(blocker)
+                        if blocker.is_retryable()
+                            && voice_settlement_retry_delay(attempt, true).is_some() =>
+                    {
+                        let Some(delay) = voice_settlement_retry_delay(attempt, true) else {
+                            break;
+                        };
+                        attempt = attempt.saturating_add(1);
+                        cx.background_executor().timer(delay).await;
+                    }
+                    Ok(settlement) => {
+                        this.update(cx, |panel, cx| {
+                            panel.settlement_retrying = false;
+                            panel.handle_voice_settlement(settlement, cx);
+                            cx.notify();
+                        })?;
+                        break;
+                    }
+                    Err(blocker) => {
+                        this.update(cx, |panel, cx| {
+                            panel.settlement_retrying = false;
+                            let retryable = blocker.is_retryable();
+                            panel.voice_retryable = retryable;
+                            panel.voice_status = format!(
+                                "Final-charge recovery for Sarah session {} is still unavailable: {}. The original settlement target is retained{}.",
+                                target.session_ref,
+                                blocker.summary(),
+                                if retryable {
+                                    "; choose Retry settlement to try again"
+                                } else {
+                                    ""
+                                },
+                            )
+                            .into();
+                            panel.publish_voice_admission(
+                                agent_ui::composer_voice::SarahVoiceAdmissionProjection::Unavailable {
+                                    reason: panel.voice_status.clone(),
+                                    retryable,
+                                    cohort_ref: None,
+                                    refusal_reason: Some("settlement_unavailable".into()),
+                                },
+                                cx,
+                            );
+                            cx.notify();
+                        })?;
+                        break;
+                    }
+                }
+            }
+            anyhow::Ok(())
+        })
+        .detach_and_log_err(cx);
     }
 
     fn cleanup_voice(&mut self) {
@@ -1558,43 +2276,139 @@ impl SarahWorkroomPanel {
                 self.voice_state = state;
                 self.voice_status = state.label().into();
             }
+            SarahVoiceEvent::Admission(admission) => {
+                self.voice_admission_terms = voice_admission_terms(&admission);
+                if let Some(terms) = self.voice_admission_terms.clone() {
+                    self.publish_voice_admission(
+                        agent_ui::composer_voice::SarahVoiceAdmissionProjection::Ready { terms },
+                        cx,
+                    );
+                } else {
+                    self.voice_state = SarahVoiceState::Error;
+                    self.voice_retryable = true;
+                    self.voice_status = admission
+                        .detail
+                        .clone()
+                        .unwrap_or_else(|| {
+                            "OpenAgents did not return complete Sarah voice admission terms."
+                                .to_string()
+                        })
+                        .into();
+                    self.publish_voice_admission(
+                        agent_ui::composer_voice::SarahVoiceAdmissionProjection::Unavailable {
+                            reason: self.voice_status.clone(),
+                            retryable: true,
+                            cohort_ref: Some(admission.admission_cohort_ref.into()),
+                            refusal_reason: Some("response_invalid".into()),
+                        },
+                        cx,
+                    );
+                    self.send_voice_control(SarahVoiceControl::Close);
+                }
+            }
             SarahVoiceEvent::Ready { session_id } => {
-                self.voice_session_id = Some(session_id);
+                self.voice_session_id = Some(session_id.clone());
                 self.voice_state = SarahVoiceState::Listening;
                 self.voice_status =
                     "Connected through the managed OpenAgents Sarah voice service.".into();
+                if let Some(terms) = self.voice_admission_terms.clone() {
+                    self.publish_voice_admission(
+                        agent_ui::composer_voice::SarahVoiceAdmissionProjection::Active {
+                            terms,
+                            session_id: session_id.into(),
+                            artifacts: self.voice_session_artifacts(),
+                        },
+                        cx,
+                    );
+                }
+            }
+            SarahVoiceEvent::TranscriptRecovered(recovery) => {
+                let recovery_gap = recovery.gap;
+                let recovery_detail = recovery.detail.clone();
+                for item in recovery.items {
+                    if !self.voice_transcript.iter().any(|existing| {
+                        existing.thread_ref == item.thread_ref
+                            && existing.session_ref == item.session_ref
+                            && existing.item_id == item.item_id
+                    }) {
+                        self.voice_transcript.push(item);
+                    }
+                }
+                if self.voice_transcript.len() > 100 {
+                    let overflow = self.voice_transcript.len() - 100;
+                    self.voice_transcript.drain(..overflow);
+                }
+                if recovery_gap != VoiceTranscriptRecoveryGap::Complete {
+                    self.voice_status = recovery_detail
+                        .clone()
+                        .unwrap_or_else(|| "Recovered Sarah transcript has a declared gap.".into())
+                        .into();
+                }
+                self.voice_transcript_recovery = match recovery_gap {
+                    VoiceTranscriptRecoveryGap::Complete => {
+                        "Recovered local transcript rows with no detected gap.".into()
+                    }
+                    VoiceTranscriptRecoveryGap::Truncated => recovery_detail
+                        .unwrap_or_else(|| "Recovered transcript was bounded and truncated.".into())
+                        .into(),
+                    VoiceTranscriptRecoveryGap::Malformed => recovery_detail
+                        .unwrap_or_else(|| {
+                            "Malformed transcript rows were skipped and not presented as recovered."
+                                .into()
+                        })
+                        .into(),
+                };
             }
             SarahVoiceEvent::TranscriptDelta {
+                thread_ref,
+                session_ref,
                 item_id,
                 participant,
                 delta,
             } => {
-                self.append_voice_transcript_delta(item_id, participant, delta);
+                self.append_voice_transcript_delta(
+                    thread_ref,
+                    session_ref,
+                    item_id,
+                    participant,
+                    delta,
+                );
             }
             SarahVoiceEvent::TranscriptCompleted {
+                thread_ref,
+                session_ref,
                 item_id,
                 participant,
                 text,
             } => {
-                self.complete_voice_transcript(item_id, participant, text);
+                self.complete_voice_transcript(thread_ref, session_ref, item_id, participant, text);
             }
             SarahVoiceEvent::CommandProposal(request) => {
-                if request.command.confirmation() == CommandConfirmation::None {
+                if self.pending_voice_command.is_some() {
                     self.send_voice_control(SarahVoiceControl::CommandDecision {
                         request_id: request.request_id,
                         approved: false,
-                    });
-                    self.voice_status =
-                        "Sarah sent an invalid confirmation request. The command was declined."
-                            .into();
-                } else if self.pending_voice_command.is_some() {
-                    self.send_voice_control(SarahVoiceControl::CommandDecision {
-                        request_id: request.request_id,
-                        approved: false,
+                        effect_binding: None,
                     });
                 } else {
-                    self.voice_status = request.command.confirmation_copy().into();
-                    self.pending_voice_command = Some(request);
+                    let request_id = request.request_id.clone();
+                    match self.bind_voice_command_proposal(request, cx) {
+                        Ok(request) => {
+                            self.voice_status = request.command.confirmation_copy().into();
+                            self.pending_voice_command = Some(request);
+                        }
+                        Err(error) => {
+                            self.send_voice_control(SarahVoiceControl::CommandDecision {
+                                request_id,
+                                approved: false,
+                                effect_binding: None,
+                            });
+                            self.voice_status = format!(
+                                "Sarah's replacement was refused because its editor context was not exact: {error:#}"
+                            )
+                            .into();
+                        }
+                    }
                 }
             }
             SarahVoiceEvent::CommandRequest(request) => {
@@ -1634,27 +2448,84 @@ impl SarahWorkroomPanel {
                     .into();
                 }
             }
+            SarahVoiceEvent::Settlement(settlement) => {
+                self.handle_voice_settlement(settlement, cx);
+            }
         }
+        self.publish_active_voice_artifacts(cx);
         cx.notify();
+    }
+
+    fn handle_voice_settlement(
+        &mut self,
+        settlement: omega_effectd::SarahVoiceSettlementProjection,
+        cx: &mut App,
+    ) {
+        if voice_settlement_is_recovered(settlement.state, settlement.final_charge_msat) {
+            if let Some(final_charge_msat) = settlement.final_charge_msat {
+                self.pending_voice_settlement = None;
+                self.publish_voice_admission(
+                    agent_ui::composer_voice::SarahVoiceAdmissionProjection::Settled {
+                        final_charge_msat,
+                        remaining_credit_msat: settlement.remaining_credit_msat,
+                        receipt_ref: settlement.receipt_ref.map(Into::into),
+                        transcript_recovery: self.voice_transcript_recovery.clone(),
+                        artifacts: self.voice_session_artifacts(),
+                    },
+                    cx,
+                );
+            } else {
+                self.publish_voice_admission(
+                    agent_ui::composer_voice::SarahVoiceAdmissionProjection::Unavailable {
+                        reason: "OpenAgents returned a terminal Sarah settlement without its final charge. The original session target is retained; choose Retry settlement to try again."
+                            .into(),
+                        retryable: true,
+                        cohort_ref: None,
+                        refusal_reason: Some("settlement_malformed".into()),
+                    },
+                    cx,
+                );
+            }
+        } else {
+            self.publish_voice_admission(
+                agent_ui::composer_voice::SarahVoiceAdmissionProjection::Unavailable {
+                    reason: settlement
+                        .detail
+                        .unwrap_or_else(|| {
+                            "Sarah settlement readback is not available yet. The original session target is retained; choose Retry settlement to try again."
+                                .into()
+                        })
+                        .into(),
+                    retryable: true,
+                    cohort_ref: None,
+                    refusal_reason: Some("settlement_pending".into()),
+                },
+                cx,
+            );
+        }
     }
 
     fn append_voice_transcript_delta(
         &mut self,
+        thread_ref: String,
+        session_ref: String,
         item_id: String,
         participant: VoiceParticipant,
         delta: String,
     ) {
-        if let Some(item) = self
-            .voice_transcript
-            .iter_mut()
-            .find(|item| item.item_id == item_id)
-        {
+        if let Some(item) = self.voice_transcript.iter_mut().find(|item| {
+            item.thread_ref == thread_ref
+                && item.session_ref == session_ref
+                && item.item_id == item_id
+        }) {
             item.text.push_str(&delta);
             item.text = truncate_chars(std::mem::take(&mut item.text), MAX_VOICE_TRANSCRIPT_CHARS);
             item.complete = false;
             return;
         }
         self.voice_transcript.push(VoiceTranscriptItem {
+            thread_ref,
+            session_ref,
             item_id,
             participant,
             text: truncate_chars(delta, MAX_VOICE_TRANSCRIPT_CHARS),
@@ -1667,21 +2538,25 @@ impl SarahWorkroomPanel {
 
     fn complete_voice_transcript(
         &mut self,
+        thread_ref: String,
+        session_ref: String,
         item_id: String,
         participant: VoiceParticipant,
         text: String,
     ) {
-        if let Some(item) = self
-            .voice_transcript
-            .iter_mut()
-            .find(|item| item.item_id == item_id)
-        {
+        if let Some(item) = self.voice_transcript.iter_mut().find(|item| {
+            item.thread_ref == thread_ref
+                && item.session_ref == session_ref
+                && item.item_id == item_id
+        }) {
             item.participant = participant;
             item.text = truncate_chars(text, MAX_VOICE_TRANSCRIPT_CHARS);
             item.complete = true;
             return;
         }
         self.voice_transcript.push(VoiceTranscriptItem {
+            thread_ref,
+            session_ref,
             item_id,
             participant,
             text: truncate_chars(text, MAX_VOICE_TRANSCRIPT_CHARS),
@@ -1692,15 +2567,152 @@ impl SarahWorkroomPanel {
         }
     }
 
+    fn current_voice_selection(&self, cx: &mut Context<Self>) -> Result<CurrentVoiceSelection> {
+        let workspace = self
+            .workspace
+            .upgrade()
+            .context("the workspace is no longer available")?;
+        let (editor, path) = {
+            let workspace = workspace.read(cx);
+            let editor = workspace
+                .active_item_as::<Editor>(cx)
+                .context("open an editor before asking Sarah to replace a selection")?;
+            let path = workspace
+                .active_item(cx)
+                .and_then(|item| item.project_path(cx))
+                .context("save the active file before asking Sarah to replace a selection")?
+                .path
+                .as_ref()
+                .as_unix_str()
+                .to_string();
+            (editor, path)
+        };
+        editor.update(cx, |editor, cx| {
+            let display_snapshot = editor.display_snapshot(cx);
+            let selection = editor.selections.newest::<Point>(&display_snapshot);
+            let range = selection.range();
+            let buffer_snapshot = editor.buffer().read(cx).snapshot(cx);
+            let selected_text = buffer_snapshot
+                .text_for_range(range.clone())
+                .collect::<String>();
+            if range.start == range.end {
+                anyhow::bail!("select text before asking Sarah to replace it");
+            }
+            if selected_text.len() > MAX_VOICE_SELECTION_SNAPSHOT_BYTES {
+                anyhow::bail!(
+                    "the selected text exceeds the {MAX_VOICE_SELECTION_SNAPSHOT_BYTES}-byte confirmation limit"
+                );
+            }
+            let document_version = buffer_snapshot
+                .as_singleton()
+                .map(|snapshot| voice_document_version(snapshot))
+                .context("the active editor is not a single document")?;
+            Ok(CurrentVoiceSelection {
+                path,
+                document_version,
+                start: voice_text_point(range.start),
+                end: voice_text_point(range.end),
+                selected_text,
+            })
+        })
+    }
+
+    fn bind_voice_command_proposal(
+        &self,
+        mut request: VoiceCommandRequest,
+        cx: &mut Context<Self>,
+    ) -> Result<VoiceCommandRequest> {
+        let SarahEditorCommand::ReplaceSelection { text } = &request.command else {
+            return Ok(request);
+        };
+        let target = request
+            .target
+            .as_ref()
+            .context("Sarah's replacement proposal omitted its editor target")?;
+        let document_version = target
+            .document_version
+            .clone()
+            .context("Sarah's replacement proposal omitted its document version")?;
+        let current = self.current_voice_selection(cx)?;
+        let binding = VoiceSelectionEffectBinding {
+            workspace_ref: target.workspace_ref.clone(),
+            document_version,
+            target_path: target.path.clone(),
+            selection_start: current.start,
+            selection_end: current.end,
+            selected_text: current.selected_text.clone(),
+            replacement_text: text.clone(),
+        };
+        validate_voice_selection_effect(
+            &binding,
+            target,
+            &current.path,
+            &current.document_version,
+            current.start,
+            current.end,
+            &current.selected_text,
+            text,
+        )
+        .map_err(anyhow::Error::msg)?;
+        request.effect_binding = Some(binding);
+        Ok(request)
+    }
+
+    fn validate_pending_voice_effect(
+        &self,
+        request: &VoiceCommandRequest,
+        cx: &mut Context<Self>,
+    ) -> Result<()> {
+        let SarahEditorCommand::ReplaceSelection { text } = &request.command else {
+            return Ok(());
+        };
+        let target = request
+            .target
+            .as_ref()
+            .context("Sarah's replacement proposal omitted its editor target")?;
+        let binding = request
+            .effect_binding
+            .as_ref()
+            .context("Sarah's replacement proposal omitted its editor-state binding")?;
+        let current = self.current_voice_selection(cx)?;
+        validate_voice_selection_effect(
+            binding,
+            target,
+            &current.path,
+            &current.document_version,
+            current.start,
+            current.end,
+            &current.selected_text,
+            text,
+        )
+        .map_err(anyhow::Error::msg)
+    }
+
     fn approve_voice_command(&mut self, _window: &mut Window, cx: &mut Context<Self>) {
         let Some(request) = self.pending_voice_command.take() else {
             return;
         };
+        if let Err(error) = self.validate_pending_voice_effect(&request, cx) {
+            self.send_voice_control(SarahVoiceControl::CommandDecision {
+                request_id: request.request_id,
+                approved: false,
+                effect_binding: None,
+            });
+            self.voice_status = format!(
+                "Sarah's command was not approved because its editor context changed: {error:#}"
+            )
+            .into();
+            self.publish_active_voice_artifacts(cx);
+            cx.notify();
+            return;
+        }
         self.send_voice_control(SarahVoiceControl::CommandDecision {
             request_id: request.request_id,
             approved: true,
+            effect_binding: request.effect_binding,
         });
         self.voice_status = "Command approved once. Waiting for secure execution…".into();
+        self.publish_active_voice_artifacts(cx);
         cx.notify();
     }
 
@@ -1711,8 +2723,10 @@ impl SarahWorkroomPanel {
         self.send_voice_control(SarahVoiceControl::CommandDecision {
             request_id: request.request_id,
             approved: false,
+            effect_binding: None,
         });
         self.voice_status = "Sarah's command was declined.".into();
+        self.publish_active_voice_artifacts(cx);
         cx.notify();
     }
 
@@ -1723,7 +2737,8 @@ impl SarahWorkroomPanel {
         cx: &mut Context<Self>,
     ) -> VoiceCommandResult {
         let request_id = request.request_id;
-        let expected_path = request.expected_path;
+        let target = request.target;
+        let effect_binding = request.effect_binding;
         if request.expires_at_ms.is_some_and(|expires_at_ms| {
             SystemTime::now()
                 .duration_since(UNIX_EPOCH)
@@ -1747,9 +2762,14 @@ impl SarahWorkroomPanel {
                     message,
                     presentation,
                 } => self.start_agent_thread(workspace, message, presentation, window, cx),
-                command => {
-                    Self::execute_editor_command(workspace, command, expected_path, window, cx)
-                }
+                command => Self::execute_editor_command(
+                    workspace,
+                    command,
+                    target,
+                    effect_binding,
+                    window,
+                    cx,
+                ),
             },
             None => Err(anyhow::anyhow!("the workspace is no longer available")),
         };
@@ -1762,8 +2782,13 @@ impl SarahWorkroomPanel {
                 VoiceCommandResult::completed(request_id, Some(output))
             }
             Err(error) => {
-                self.voice_status = format!("Sarah's command failed: {error:#}").into();
-                VoiceCommandResult::failed(request_id, format!("{error:#}"))
+                if error.downcast_ref::<VoiceCommandRefusal>().is_some() {
+                    self.voice_status = format!("Sarah's command was refused: {error:#}").into();
+                    VoiceCommandResult::rejected(request_id, format!("{error:#}"))
+                } else {
+                    self.voice_status = format!("Sarah's command failed: {error:#}").into();
+                    VoiceCommandResult::failed(request_id, format!("{error:#}"))
+                }
             }
         }
     }
@@ -1771,7 +2796,8 @@ impl SarahWorkroomPanel {
     fn execute_editor_command(
         workspace: Entity<Workspace>,
         command: SarahEditorCommand,
-        expected_path: Option<String>,
+        target: Option<VoiceEditorTarget>,
+        effect_binding: Option<VoiceSelectionEffectBinding>,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> Result<Value> {
@@ -1784,14 +2810,20 @@ impl SarahWorkroomPanel {
                     .and_then(|item| item.project_path(cx)),
             )
         };
-        if let Some(expected_path) = expected_path {
+        if let Some(target) = &target {
+            if target.workspace_ref != SARAH_VOICE_WORKSPACE_REF {
+                return Err(refuse_voice_command(
+                    "The command targeted a different Omega workspace.",
+                ));
+            }
             let active_path = project_path
                 .as_ref()
                 .map(|path| path.path.as_ref().as_unix_str().to_string());
-            if active_path.as_deref() != Some(expected_path.as_str()) {
-                anyhow::bail!(
-                    "Sarah's command targeted {expected_path}, but that file is not the active editor"
-                );
+            if active_path.as_deref() != Some(target.path.as_str()) {
+                return Err(refuse_voice_command(format!(
+                    "Sarah's command targeted {}, but that file is not the active editor.",
+                    target.path
+                )));
             }
         }
         let editor = editor.context("open an editor before asking Sarah to edit")?;
@@ -1801,6 +2833,9 @@ impl SarahWorkroomPanel {
                 let selection = editor.selections.newest::<Point>(&display_snapshot);
                 let cursor = selection.head();
                 let buffer_snapshot = editor.buffer().read(cx).snapshot(cx);
+                let document_version = buffer_snapshot
+                    .as_singleton()
+                    .map(|snapshot| voice_document_version(snapshot));
                 let selected_text = buffer_snapshot
                     .text_for_range(selection.range())
                     .collect::<String>();
@@ -1818,6 +2853,8 @@ impl SarahWorkroomPanel {
                     max_chars,
                 );
                 Ok(json!({
+                    "workspaceRef": SARAH_VOICE_WORKSPACE_REF,
+                    "documentVersion": document_version,
                     "file": project_path
                         .as_ref()
                         .map(|path| path.path.as_ref().as_unix_str()),
@@ -1858,7 +2895,48 @@ impl SarahWorkroomPanel {
             }
             SarahEditorCommand::ReplaceSelection { text } => {
                 let replacement_chars = text.chars().count();
-                editor.update(cx, |editor, cx| editor.insert(&text, window, cx));
+                let target = target
+                    .as_ref()
+                    .ok_or_else(|| refuse_voice_command("The replacement omitted its target."))?;
+                let binding = effect_binding.as_ref().ok_or_else(|| {
+                    refuse_voice_command("The replacement omitted its confirmed editor state.")
+                })?;
+                editor.update(cx, |editor, cx| {
+                    let display_snapshot = editor.display_snapshot(cx);
+                    let selection = editor.selections.newest::<Point>(&display_snapshot);
+                    let range = selection.range();
+                    let buffer_snapshot = editor.buffer().read(cx).snapshot(cx);
+                    let document_version = buffer_snapshot
+                        .as_singleton()
+                        .map(|snapshot| voice_document_version(snapshot))
+                        .ok_or_else(|| {
+                            refuse_voice_command(
+                                "The active editor is no longer a single document.",
+                            )
+                        })?;
+                    let current_path = project_path
+                        .as_ref()
+                        .map(|path| path.path.as_ref().as_unix_str().to_string())
+                        .ok_or_else(|| {
+                            refuse_voice_command("The active editor no longer has a saved path.")
+                        })?;
+                    let selected_text = buffer_snapshot
+                        .text_for_range(range.clone())
+                        .collect::<String>();
+                    validate_voice_selection_effect(
+                        binding,
+                        target,
+                        &current_path,
+                        &document_version,
+                        voice_text_point(range.start),
+                        voice_text_point(range.end),
+                        &selected_text,
+                        &text,
+                    )
+                    .map_err(refuse_voice_command)?;
+                    editor.insert(&text, window, cx);
+                    Ok::<(), anyhow::Error>(())
+                })?;
                 Ok(json!({ "replacementChars": replacement_chars }))
             }
             SarahEditorCommand::Action { action } => {
@@ -1924,6 +3002,7 @@ impl SarahWorkroomPanel {
             presentation,
             status,
         });
+        self.publish_active_voice_artifacts(cx);
         Ok(json!({
             "threadId": thread_id.to_key_string(),
             "presentation": presentation,
@@ -1960,6 +3039,7 @@ impl SarahWorkroomPanel {
                 if let Some(created) = &mut self.created_agent_thread {
                     created.status = status;
                 }
+                self.publish_active_voice_artifacts(cx);
                 cx.notify();
             }
             Err(error) => {
@@ -2365,6 +3445,56 @@ impl Render for SarahWorkroomPanel {
                                 )
                             },
                         )
+                        .when_some(request.effect_binding, |this, binding| {
+                            let selection = format!(
+                                "{}:{}–{}:{} (1-based)",
+                                binding.selection_start.line.saturating_add(1),
+                                binding.selection_start.column.saturating_add(1),
+                                binding.selection_end.line.saturating_add(1),
+                                binding.selection_end.column.saturating_add(1),
+                            );
+                            this.child(
+                                v_flex()
+                                    .id("sarah-voice-selection-effect")
+                                    .gap_1()
+                                    .child(Label::new(format!(
+                                        "Target: {} · Selection: {}",
+                                        binding.target_path, selection
+                                    )))
+                                    .child(
+                                        Label::new(format!(
+                                            "Workspace: {} · Document version: {}",
+                                            binding.workspace_ref, binding.document_version
+                                        ))
+                                        .color(Color::Muted)
+                                        .size(LabelSize::XSmall),
+                                    )
+                                    .child(
+                                        Label::new("Selected text")
+                                            .color(Color::Muted)
+                                            .size(LabelSize::Small),
+                                    )
+                                    .child(
+                                        v_flex()
+                                            .id("sarah-voice-selection-before")
+                                            .max_h(px(160.))
+                                            .overflow_y_scroll()
+                                            .child(Label::new(binding.selected_text)),
+                                    )
+                                    .child(
+                                        Label::new("Replacement")
+                                            .color(Color::Muted)
+                                            .size(LabelSize::Small),
+                                    )
+                                    .child(
+                                        v_flex()
+                                            .id("sarah-voice-selection-after")
+                                            .max_h(px(160.))
+                                            .overflow_y_scroll()
+                                            .child(Label::new(binding.replacement_text)),
+                                    ),
+                            )
+                        })
                         .child(
                             h_flex()
                                 .gap_1()
@@ -3309,6 +4439,147 @@ mod panel_logic_tests {
     use crate::projections::WorkroomProjection;
     use serde_json::json;
 
+    fn selection_effect_fixture() -> (VoiceSelectionEffectBinding, VoiceEditorTarget) {
+        (
+            VoiceSelectionEffectBinding {
+                workspace_ref: SARAH_VOICE_WORKSPACE_REF.into(),
+                document_version: "omega-buffer-v1:0=7".into(),
+                target_path: "src/main.rs".into(),
+                selection_start: VoiceTextPoint { line: 2, column: 4 },
+                selection_end: VoiceTextPoint {
+                    line: 2,
+                    column: 10,
+                },
+                selected_text: "before".into(),
+                replacement_text: "after".into(),
+            },
+            VoiceEditorTarget {
+                workspace_ref: SARAH_VOICE_WORKSPACE_REF.into(),
+                path: "src/main.rs".into(),
+                document_version: Some("omega-buffer-v1:0=7".into()),
+            },
+        )
+    }
+
+    #[test]
+    fn replacement_effect_requires_the_exact_confirmed_editor_state() {
+        let (binding, target) = selection_effect_fixture();
+        let validate = |binding: &VoiceSelectionEffectBinding,
+                        target: &VoiceEditorTarget,
+                        path: &str,
+                        version: &str,
+                        start: VoiceTextPoint,
+                        end: VoiceTextPoint,
+                        selected_text: &str,
+                        replacement_text: &str| {
+            validate_voice_selection_effect(
+                binding,
+                target,
+                path,
+                version,
+                start,
+                end,
+                selected_text,
+                replacement_text,
+            )
+        };
+
+        assert!(
+            validate(
+                &binding,
+                &target,
+                "src/main.rs",
+                "omega-buffer-v1:0=7",
+                binding.selection_start,
+                binding.selection_end,
+                "before",
+                "after",
+            )
+            .is_ok()
+        );
+
+        let mut other_workspace = target.clone();
+        other_workspace.workspace_ref = "workspace.other".into();
+        assert!(
+            validate(
+                &binding,
+                &other_workspace,
+                "src/main.rs",
+                "omega-buffer-v1:0=7",
+                binding.selection_start,
+                binding.selection_end,
+                "before",
+                "after",
+            )
+            .is_err()
+        );
+        assert!(
+            validate(
+                &binding,
+                &target,
+                "src/other.rs",
+                "omega-buffer-v1:0=7",
+                binding.selection_start,
+                binding.selection_end,
+                "before",
+                "after",
+            )
+            .is_err()
+        );
+        assert!(
+            validate(
+                &binding,
+                &target,
+                "src/main.rs",
+                "omega-buffer-v1:0=8",
+                binding.selection_start,
+                binding.selection_end,
+                "before",
+                "after",
+            )
+            .is_err()
+        );
+        assert!(
+            validate(
+                &binding,
+                &target,
+                "src/main.rs",
+                "omega-buffer-v1:0=7",
+                VoiceTextPoint { line: 2, column: 5 },
+                binding.selection_end,
+                "before",
+                "after",
+            )
+            .is_err()
+        );
+        assert!(
+            validate(
+                &binding,
+                &target,
+                "src/main.rs",
+                "omega-buffer-v1:0=7",
+                binding.selection_start,
+                binding.selection_end,
+                "changed",
+                "after",
+            )
+            .is_err()
+        );
+        assert!(
+            validate(
+                &binding,
+                &target,
+                "src/main.rs",
+                "omega-buffer-v1:0=7",
+                binding.selection_start,
+                binding.selection_end,
+                "before",
+                "changed",
+            )
+            .is_err()
+        );
+    }
+
     #[test]
     fn apply_bootstrap_maps_room_fields() {
         let mut projection = WorkroomProjection::honest_unsubscribed();
@@ -3356,9 +4627,12 @@ mod panel_logic_tests {
         let _focus = FocusComposer;
         let _send = SendMessage;
         let _interrupt = InterruptTurn;
+        let _prepare_voice = PrepareVoiceAdmission;
         let _start_voice = StartVoice;
         let _toggle_voice_mute = ToggleVoiceMute;
         let _interrupt_voice = InterruptVoice;
+        let _approve_voice = ApproveSarahVoiceCommand;
+        let _reject_voice = RejectSarahVoiceCommand;
         let _end_voice = EndVoice;
         let _retry_voice = RetryVoice;
         assert_eq!(WorkroomProjection::header(), "Sarah");
@@ -3367,6 +4641,56 @@ mod panel_logic_tests {
 
     #[test]
     fn transient_voice_disconnects_reconnect_but_terminal_states_do_not() {
+        assert_eq!(voice_reconnect_delay(1), Duration::from_secs(1));
+        assert_eq!(voice_reconnect_delay(2), Duration::from_secs(2));
+        assert_eq!(voice_reconnect_delay(3), Duration::from_secs(4));
+        assert_eq!(voice_reconnect_delay(20), Duration::from_secs(4));
+        assert_eq!(
+            voice_settlement_retry_delay(0, true),
+            Some(Duration::from_secs(1))
+        );
+        assert_eq!(
+            voice_settlement_retry_delay(1, true),
+            Some(Duration::from_secs(2))
+        );
+        assert_eq!(
+            voice_settlement_retry_delay(2, true),
+            Some(Duration::from_secs(4))
+        );
+        assert_eq!(voice_settlement_retry_delay(3, true), None);
+        assert_eq!(voice_settlement_retry_delay(0, false), None);
+        for blocker in [
+            omega_effectd::HostedSessionBlocker::ServiceUnreachable,
+            omega_effectd::HostedSessionBlocker::ServiceUnavailable { status: 503 },
+        ] {
+            assert_eq!(
+                voice_settlement_retry_delay(0, blocker.is_retryable()),
+                Some(Duration::from_secs(1))
+            );
+        }
+        assert_eq!(
+            voice_settlement_retry_delay(
+                0,
+                omega_effectd::HostedSessionBlocker::ProofRejected { status: 403 }.is_retryable(),
+            ),
+            None
+        );
+        assert!(!voice_settlement_is_recovered(
+            omega_effectd::SarahVoiceSettlementState::Pending,
+            None,
+        ));
+        assert!(!voice_settlement_is_recovered(
+            omega_effectd::SarahVoiceSettlementState::Settled,
+            None,
+        ));
+        assert!(voice_settlement_is_recovered(
+            omega_effectd::SarahVoiceSettlementState::Settled,
+            Some(0),
+        ));
+        assert!(voice_settlement_is_recovered(
+            omega_effectd::SarahVoiceSettlementState::Released,
+            Some(0),
+        ));
         assert_eq!(
             next_voice_reconnect_attempt(
                 SarahVoiceState::Reconnecting,

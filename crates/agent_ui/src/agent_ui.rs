@@ -423,6 +423,8 @@ actions!(
         ImportThreadsFromOtherChannels,
         /// Starts a new terminal thread.
         NewTerminalThread,
+        /// Opens Sarah's voice admission terms inside the Agent Panel.
+        OpenSarahAdmission,
     ]
 );
 

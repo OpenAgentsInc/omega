@@ -49,8 +49,12 @@ pub use omega_device_bridge::{
 };
 pub use openagents_nostr_auth::HostedSessionBlocker;
 pub use openagents_sarah_voice::{
-    ManagedSarahVoiceSession, SARAH_VOICE_DEVICE_HEADER, SARAH_VOICE_SESSION_HEADER,
-    SARAH_VOICE_TICKET_HEADER,
+    ManagedSarahVoiceSession, PreparedSarahVoiceAdmission, SARAH_VOICE_ADMISSION_SCHEMA,
+    SARAH_VOICE_ADMISSION_URL, SARAH_VOICE_CHALLENGE_PROTOCOL, SARAH_VOICE_DEVICE_HEADER,
+    SARAH_VOICE_NOSTR_CHALLENGE_URL, SARAH_VOICE_SESSION_HEADER, SARAH_VOICE_SETTLEMENT_SCHEMA,
+    SARAH_VOICE_SETTLEMENT_URL, SARAH_VOICE_TICKET_HEADER, SarahVoiceAdmissionProjection,
+    SarahVoiceCapabilityId, SarahVoiceCreditMode, SarahVoiceExcludedAuthorities,
+    SarahVoiceProjectionGap, SarahVoiceSettlementProjection, SarahVoiceSettlementState,
 };
 pub use openagents_session::{
     OpenAgentsSession, OpenAgentsSessionPhase, VerifiedOpenAgentsSession, init_openagents_session,

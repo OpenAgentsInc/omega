@@ -1,6 +1,6 @@
 use app_identity::PRODUCT_NAME;
 use gpui::{App, Menu, MenuItem, OsAction};
-use zed_actions::{Quit, workroom};
+use zed_actions::Quit;
 
 pub fn app_menus(_cx: &mut App) -> Vec<Menu> {
     vec![
@@ -67,11 +67,7 @@ pub fn app_menus(_cx: &mut App) -> Vec<Menu> {
             MenuItem::action("New Thread", agent_ui::NewThread),
             MenuItem::action("Choose Folder…", workspace::Open::default()),
             MenuItem::separator(),
-            MenuItem::action(
-                "Sarah Voice — Voice access is not available yet",
-                workroom::StartVoice,
-            )
-            .disabled(true),
+            MenuItem::action("Sarah voice…", agent_ui::OpenSarahAdmission),
         ]),
         Menu::new("Window").items([
             MenuItem::action("Minimize", super::Minimize),
@@ -178,7 +174,7 @@ mod tests {
             "action:Thread/New Thread=agent::NewThread:enabled",
             "action:Thread/Choose Folder…=workspace::Open:enabled",
             "separator:Thread",
-            "action:Thread/Sarah Voice — Voice access is not available yet=workroom::StartVoice:disabled",
+            "action:Thread/Sarah voice…=agent::OpenSarahAdmission:enabled",
             "menu:Window",
             "action:Window/Minimize=omega::Minimize:enabled",
             "separator:Window",
@@ -224,7 +220,7 @@ mod tests {
             "action:Thread/New Thread=agent::NewThread:enabled",
             "action:Thread/Choose Folder…=workspace::Open:enabled",
             "separator:Thread",
-            "action:Thread/Sarah Voice — Voice access is not available yet=workroom::StartVoice:disabled",
+            "action:Thread/Sarah voice…=agent::OpenSarahAdmission:enabled",
             "menu:Window",
             "action:Window/Minimize=omega::Minimize:enabled",
             "menu:Help",
@@ -264,6 +260,7 @@ mod tests {
             ("Plan", "omega_workbench::SelectPlan"),
             ("New Thread", "agent::NewThread"),
             ("Choose Folder…", "workspace::Open"),
+            ("Sarah voice…", "agent::OpenSarahAdmission"),
             ("Documentation", "omega::OpenDocs"),
             ("Open Source Licenses", "omega::OpenLicenses"),
         ];
@@ -278,8 +275,5 @@ mod tests {
                 "enabled menu action {action} is refused"
             );
         }
-        assert!(joined.contains(
-            "/Sarah Voice — Voice access is not available yet=workroom::StartVoice:disabled"
-        ));
     }
 }

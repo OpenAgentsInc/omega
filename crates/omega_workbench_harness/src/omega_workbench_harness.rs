@@ -4306,6 +4306,22 @@ pub const HERMETIC_SCENES: &[SceneSpec] = &[
         regions: &[],
     },
     SceneSpec {
+        name: "omega_sarah_admission_ready",
+        phase: ScenePhase::Recording,
+        viewport: ViewportFixture::new(900, 720, 2000),
+        fixture_version: 1,
+        pixel_policy: APPLE_SILICON_METAL_POLICY,
+        regions: &[],
+    },
+    SceneSpec {
+        name: "omega_sarah_session_settled",
+        phase: ScenePhase::Recording,
+        viewport: ViewportFixture::new(900, 720, 2000),
+        fixture_version: 1,
+        pixel_policy: APPLE_SILICON_METAL_POLICY,
+        regions: &[],
+    },
+    SceneSpec {
         name: "omega_executor_disclosure_native",
         phase: ScenePhase::Recording,
         viewport: ViewportFixture::new(900, 720, 2000),

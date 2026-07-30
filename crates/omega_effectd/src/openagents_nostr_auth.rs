@@ -82,6 +82,14 @@ pub enum HostedSessionBlocker {
          Add credits or enable voice access in your OpenAgents account, then try again."
     )]
     InsufficientVoiceCredits { status: u16 },
+    #[error(
+        "This OpenAgents account is not active in Sarah voice cohort {cohort_ref}. Voice credit alone does not grant admission."
+    )]
+    VoiceCohortInactive { cohort_ref: String },
+    #[error(
+        "Sarah voice cohort {cohort_ref} admitted this account, but its spendable credit is below the required hold."
+    )]
+    VoiceAdmissionInsufficientCredit { cohort_ref: String },
     #[error("OpenAgents returned a sign-in response Omega could not use.")]
     ResponseInvalid,
     #[error("OpenAgents did not accept the session it had just issued.")]
@@ -116,7 +124,10 @@ impl HostedSessionBlocker {
     }
 
     pub fn requires_voice_access(&self) -> bool {
-        matches!(self, Self::InsufficientVoiceCredits { .. })
+        matches!(
+            self,
+            Self::InsufficientVoiceCredits { .. } | Self::VoiceAdmissionInsufficientCredit { .. }
+        )
     }
 }
 

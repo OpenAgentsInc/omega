@@ -63,9 +63,10 @@ pub use projections::{
 };
 pub use voice::{
     AgentThreadPresentation, ApprovedEditorAction, CommandConfirmation, CommandResultStatus,
-    ManagedSarahVoiceClient, SARAH_AUDIO_SAMPLE_RATE, SARAH_VOICE_MODEL, SarahEditorCommand,
-    SarahVoiceConnection, SarahVoiceControl, SarahVoiceEvent, SarahVoiceState, VoiceCommandRequest,
-    VoiceCommandResult, VoiceParticipant, VoiceTranscriptItem,
+    ManagedSarahVoiceClient, PreparedSarahVoiceDevices, SARAH_AUDIO_SAMPLE_RATE, SARAH_VOICE_MODEL,
+    SarahEditorCommand, SarahVoiceConnection, SarahVoiceControl, SarahVoiceEvent, SarahVoiceState,
+    VoiceCommandRequest, VoiceCommandResult, VoiceParticipant, VoiceTranscriptItem,
+    VoiceTranscriptRecovery, VoiceTranscriptRecoveryGap,
 };
 
 #[cfg(test)]

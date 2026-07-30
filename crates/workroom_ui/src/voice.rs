@@ -1,7 +1,7 @@
 use std::{
     collections::HashMap,
-    fs::OpenOptions,
-    io::Write as _,
+    fs::{File, OpenOptions},
+    io::{Read as _, Seek as _, SeekFrom, Write as _},
     path::{Path, PathBuf},
     sync::{
         Arc,
@@ -26,10 +26,12 @@ use url::Url;
 use audio::RodioExt as _;
 use omega_effectd::{
     ManagedSarahVoiceSession, SARAH_VOICE_SESSION_HEADER, SARAH_VOICE_TICKET_HEADER,
+    SarahVoiceAdmissionProjection, SarahVoiceCapabilityId, SarahVoiceSettlementProjection,
 };
 
 pub const SARAH_VOICE_MODEL: &str = "gpt-realtime-2.1";
 pub const SARAH_AUDIO_SAMPLE_RATE: u32 = 24_000;
+pub const SARAH_VOICE_WORKSPACE_REF: &str = "workspace.omega.supervised";
 const MANAGED_SARAH_PROTOCOL: &str = "openagents.sarah.voice.v1";
 const AUDIO_PROTOCOL: &str = "openagents.audio.v1";
 const AUDIO_MEDIA_MAGIC: &[u8; 4] = b"OAA1";
@@ -40,6 +42,8 @@ const MAX_CONTEXT_CHARS: u32 = 16 * 1024;
 const MAX_GATEWAY_FRAME_BYTES: usize = 256 * 1024;
 const MAX_PROTOCOL_ID_BYTES: usize = 256;
 const MAX_TRANSCRIPT_TEXT_BYTES: usize = 64 * 1024;
+const MAX_RECOVERED_TRANSCRIPT_ROWS: usize = 100;
+const MAX_TRANSCRIPT_RECOVERY_BYTES: usize = 1024 * 1024;
 const MAX_ERROR_TEXT_BYTES: usize = 4 * 1024;
 const VOICE_HEARTBEAT_INTERVAL: Duration = Duration::from_secs(15);
 const VOICE_TRANSCRIPT_SCHEMA: &str = "openagents.sarah.voice.transcript.v1";
@@ -106,10 +110,26 @@ impl VoiceParticipant {
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct VoiceTranscriptItem {
+    pub thread_ref: String,
+    pub session_ref: String,
     pub item_id: String,
     pub participant: VoiceParticipant,
     pub text: String,
     pub complete: bool,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum VoiceTranscriptRecoveryGap {
+    Complete,
+    Truncated,
+    Malformed,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct VoiceTranscriptRecovery {
+    pub items: Vec<VoiceTranscriptItem>,
+    pub gap: VoiceTranscriptRecoveryGap,
+    pub detail: Option<String>,
 }
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
@@ -167,6 +187,22 @@ pub enum CommandConfirmation {
 }
 
 impl SarahEditorCommand {
+    fn capability(&self) -> SarahVoiceCapabilityId {
+        match self {
+            Self::ReadContext { .. } => SarahVoiceCapabilityId::ContextRead,
+            Self::Navigate { .. } => SarahVoiceCapabilityId::RevealRange,
+            Self::Insert { .. }
+            | Self::ReplaceSelection { .. }
+            | Self::Action {
+                action: ApprovedEditorAction::Undo | ApprovedEditorAction::Redo,
+            } => SarahVoiceCapabilityId::ReplaceSelection,
+            Self::Action {
+                action: ApprovedEditorAction::SaveActiveFile,
+            } => SarahVoiceCapabilityId::SaveDocument,
+            Self::StartAgentThread { .. } => SarahVoiceCapabilityId::StartAgentThread,
+        }
+    }
+
     pub fn confirmation(&self) -> CommandConfirmation {
         match self {
             Self::ReadContext { .. } | Self::Navigate { .. } | Self::Insert { .. } => {
@@ -252,11 +288,54 @@ impl SarahEditorCommand {
     }
 }
 
+fn validate_admitted_command(
+    admission: &SarahVoiceAdmissionProjection,
+    command: &SarahEditorCommand,
+    confirmation_required: bool,
+) -> Result<()> {
+    let capability = command.capability();
+    if !admission.commands.contains(&capability) {
+        bail!("Sarah gateway proposed a command outside the admitted boundary");
+    }
+    let admitted_confirmation = admission.confirmation_required.contains(&capability);
+    if confirmation_required != admitted_confirmation
+        || (command.confirmation() != CommandConfirmation::None && !confirmation_required)
+    {
+        bail!("Sarah gateway confirmation policy did not match the admitted boundary");
+    }
+    Ok(())
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct VoiceEditorTarget {
+    pub workspace_ref: String,
+    pub path: String,
+    pub document_version: Option<String>,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct VoiceTextPoint {
+    pub line: u32,
+    pub column: u32,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct VoiceSelectionEffectBinding {
+    pub workspace_ref: String,
+    pub document_version: String,
+    pub target_path: String,
+    pub selection_start: VoiceTextPoint,
+    pub selection_end: VoiceTextPoint,
+    pub selected_text: String,
+    pub replacement_text: String,
+}
+
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct VoiceCommandRequest {
     pub request_id: String,
     pub command: SarahEditorCommand,
-    pub expected_path: Option<String>,
+    pub target: Option<VoiceEditorTarget>,
+    pub effect_binding: Option<VoiceSelectionEffectBinding>,
     pub expires_at_ms: Option<u64>,
 }
 
@@ -311,15 +390,21 @@ impl VoiceCommandResult {
 #[derive(Clone, Debug)]
 pub enum SarahVoiceEvent {
     State(SarahVoiceState),
+    Admission(SarahVoiceAdmissionProjection),
     Ready {
         session_id: String,
     },
+    TranscriptRecovered(VoiceTranscriptRecovery),
     TranscriptDelta {
+        thread_ref: String,
+        session_ref: String,
         item_id: String,
         participant: VoiceParticipant,
         delta: String,
     },
     TranscriptCompleted {
+        thread_ref: String,
+        session_ref: String,
         item_id: String,
         participant: VoiceParticipant,
         text: String,
@@ -334,13 +419,18 @@ pub enum SarahVoiceEvent {
     Ended {
         reason: Option<String>,
     },
+    Settlement(SarahVoiceSettlementProjection),
 }
 
 #[derive(Clone, Debug)]
 pub enum SarahVoiceControl {
     SetMuted(bool),
     Interrupt,
-    CommandDecision { request_id: String, approved: bool },
+    CommandDecision {
+        request_id: String,
+        approved: bool,
+        effect_binding: Option<VoiceSelectionEffectBinding>,
+    },
     CommandResult(VoiceCommandResult),
     Close,
 }
@@ -488,6 +578,7 @@ struct PendingGatewayTool {
     command: Value,
     confirmation_required: bool,
     confirmation_granted: bool,
+    effect_binding: Option<VoiceSelectionEffectBinding>,
     outcome_sent: bool,
     expires_at_ms: u64,
 }
@@ -497,6 +588,12 @@ pub struct ManagedSarahVoiceClient {
     managed_session: ManagedSarahVoiceSession,
     input_device_id: Option<DeviceId>,
     output_device_id: Option<DeviceId>,
+    prepared_devices: Option<PreparedSarahVoiceDevices>,
+}
+
+pub struct PreparedSarahVoiceDevices {
+    microphone: MicrophoneCapture,
+    playback: VoicePlayback,
 }
 
 impl ManagedSarahVoiceClient {
@@ -521,7 +618,32 @@ impl ManagedSarahVoiceClient {
             managed_session,
             input_device_id,
             output_device_id,
+            prepared_devices: None,
         })
+    }
+
+    pub fn prepare_devices(
+        input_device_id: Option<DeviceId>,
+        output_device_id: Option<DeviceId>,
+    ) -> Result<PreparedSarahVoiceDevices> {
+        let echo_canceller = audio::EchoCanceller::default();
+        let microphone = MicrophoneCapture::start(input_device_id, echo_canceller.clone())
+            .context("opening the selected microphone")?;
+        let playback = VoicePlayback::open(output_device_id, echo_canceller)
+            .context("opening the selected speaker")?;
+        Ok(PreparedSarahVoiceDevices {
+            microphone,
+            playback,
+        })
+    }
+
+    pub fn from_managed_session_with_devices(
+        managed_session: ManagedSarahVoiceSession,
+        prepared_devices: PreparedSarahVoiceDevices,
+    ) -> Result<Self> {
+        let mut client = Self::from_managed_session(managed_session, None, None)?;
+        client.prepared_devices = Some(prepared_devices);
+        Ok(client)
     }
 
     pub fn connect(self, executor: gpui::BackgroundExecutor) -> SarahVoiceConnection {
@@ -557,7 +679,7 @@ impl ManagedSarahVoiceClient {
     }
 
     async fn run(
-        self,
+        mut self,
         executor: gpui::BackgroundExecutor,
         controls: async_channel::Receiver<SarahVoiceControl>,
         events: async_channel::Sender<SarahVoiceEvent>,
@@ -568,16 +690,35 @@ impl ManagedSarahVoiceClient {
             ))
             .await
             .context("reporting microphone state")?;
-        let echo_canceller = audio::EchoCanceller::default();
-        let microphone = MicrophoneCapture::start(self.input_device_id, echo_canceller.clone())
-            .context("opening the selected microphone")?;
-        let mut playback = VoicePlayback::open(self.output_device_id, echo_canceller)
-            .context("opening the selected speaker")?;
+        let PreparedSarahVoiceDevices {
+            microphone,
+            mut playback,
+        } = match self.prepared_devices.take() {
+            Some(prepared_devices) => prepared_devices,
+            None => Self::prepare_devices(self.input_device_id, self.output_device_id)?,
+        };
+
+        let admission = self
+            .managed_session
+            .admission
+            .clone()
+            .context("Sarah voice session omitted its preflight admission")?;
+        events
+            .send(SarahVoiceEvent::Admission(admission.clone()))
+            .await
+            .context("reporting Sarah voice admission")?;
 
         events
             .send(SarahVoiceEvent::State(SarahVoiceState::Connecting))
             .await
             .context("reporting connecting state")?;
+        let now_ms = u64::try_from(chrono::Utc::now().timestamp_millis())
+            .context("reading the current time before connecting Sarah voice")?;
+        if self.managed_session.ticket_expires_at_ms <= now_ms
+            || self.managed_session.session_expires_at_ms <= now_ms
+        {
+            bail!("Sarah voice one-use ticket expired before the gateway connection started");
+        }
         let mut request = self
             .endpoint
             .as_str()
@@ -606,8 +747,15 @@ impl ManagedSarahVoiceClient {
         let identity = GatewayVoiceIdentity::from(&self.managed_session);
         let transcript_log = LocalVoiceTranscriptLog::new(
             paths::data_dir().join("voice").join("transcripts.jsonl"),
+            identity.thread_ref.clone(),
             identity.session_ref.clone(),
         );
+        events
+            .send(SarahVoiceEvent::TranscriptRecovered(
+                transcript_log.recover()?,
+            ))
+            .await
+            .context("reporting recovered Sarah transcript")?;
         let mut control_sequence = 0_u64;
         let mut audio_sequence = 0_u64;
         let mut expected_server_sequence = 0_u64;
@@ -656,6 +804,7 @@ impl ManagedSarahVoiceClient {
                         Ok(SarahVoiceControl::CommandDecision {
                             request_id,
                             approved,
+                            effect_binding,
                         }) => {
                             send_gateway_tool_decision(
                                 &mut socket,
@@ -664,6 +813,7 @@ impl ManagedSarahVoiceClient {
                                 &mut pending_tools,
                                 &request_id,
                                 approved,
+                                effect_binding,
                             ).await?;
                         }
                         Ok(SarahVoiceControl::CommandResult(result)) => {
@@ -715,6 +865,9 @@ impl ManagedSarahVoiceClient {
                                 &mut expected_server_sequence,
                                 &mut pending_tools,
                                 &transcript_log,
+                                &admission,
+                                self.managed_session.reserved_credit_msat,
+                                self.managed_session.session_expires_at_ms,
                             ).await? {
                                 GatewayServerAction::Continue => {}
                                 GatewayServerAction::StopPlayback => {
@@ -856,12 +1009,38 @@ async fn send_gateway_tool_decision(
     pending_tools: &mut HashMap<String, PendingGatewayTool>,
     request_id: &str,
     approved: bool,
+    effect_binding: Option<VoiceSelectionEffectBinding>,
 ) -> Result<()> {
     let Some(tool) = pending_tools.get_mut(request_id) else {
         bail!("Sarah voice decision did not match a pending proposal");
     };
     if !tool.confirmation_required || tool.confirmation_granted || tool.outcome_sent {
         bail!("Sarah voice proposal was not awaiting confirmation");
+    }
+    if approved {
+        let (command, target) = decode_gateway_command(tool.command.clone())?;
+        match command {
+            SarahEditorCommand::ReplaceSelection { text } => {
+                let target =
+                    target.context("Sarah replace-selection proposal omitted its target")?;
+                let binding = effect_binding
+                    .as_ref()
+                    .context("Sarah replace-selection approval omitted its editor-state binding")?;
+                if binding.workspace_ref != target.workspace_ref
+                    || binding.target_path != target.path
+                    || Some(binding.document_version.as_str()) != target.document_version.as_deref()
+                    || binding.replacement_text != text
+                {
+                    bail!("Sarah replace-selection approval did not match its proposal");
+                }
+            }
+            _ if effect_binding.is_some() => {
+                bail!("Sarah voice approval carried an unexpected editor-state binding");
+            }
+            _ => {}
+        }
+    } else if effect_binding.is_some() {
+        bail!("Sarah voice decline carried an editor-state binding");
     }
     send_gateway_control(
         socket,
@@ -877,6 +1056,7 @@ async fn send_gateway_tool_decision(
     .await?;
     if approved {
         tool.confirmation_granted = true;
+        tool.effect_binding = effect_binding;
     } else {
         pending_tools.remove(request_id);
     }
@@ -897,6 +1077,9 @@ async fn handle_server_message(
     expected_sequence: &mut u64,
     pending_tools: &mut HashMap<String, PendingGatewayTool>,
     transcript_log: &LocalVoiceTranscriptLog,
+    admission: &SarahVoiceAdmissionProjection,
+    expected_reserved_credit_msat: u64,
+    expected_session_expires_at_ms: u64,
 ) -> Result<GatewayServerAction> {
     let envelope = decode_gateway_server_envelope(text)?;
     if envelope.schema != MANAGED_SARAH_PROTOCOL
@@ -912,7 +1095,10 @@ async fn handle_server_message(
             expires_at_ms,
             reserved_credit_msat,
         } => {
-            if model != SARAH_VOICE_MODEL || expires_at_ms == 0 || reserved_credit_msat == 0 {
+            if model != SARAH_VOICE_MODEL
+                || expires_at_ms != expected_session_expires_at_ms
+                || reserved_credit_msat != expected_reserved_credit_msat
+            {
                 bail!("Sarah voice gateway returned invalid session readiness");
             }
             events
@@ -946,6 +1132,8 @@ async fn handle_server_message(
             validate_gateway_text("transcript delta", &text, MAX_TRANSCRIPT_TEXT_BYTES)?;
             events
                 .send(SarahVoiceEvent::TranscriptDelta {
+                    thread_ref: identity.thread_ref.clone(),
+                    session_ref: identity.session_ref.clone(),
                     item_id: utterance_ref,
                     participant: gateway_participant(source),
                     delta: text,
@@ -971,6 +1159,8 @@ async fn handle_server_message(
             transcript_log.append(&utterance_ref, participant, &text)?;
             events
                 .send(SarahVoiceEvent::TranscriptCompleted {
+                    thread_ref: identity.thread_ref.clone(),
+                    session_ref: identity.session_ref.clone(),
                     item_id: utterance_ref,
                     participant,
                     text,
@@ -990,10 +1180,8 @@ async fn handle_server_message(
                 bail!("Sarah gateway tool proposal expiry was invalid");
             }
             let gateway_command = command;
-            let (command, expected_path) = decode_gateway_command(gateway_command.clone())?;
-            if confirmation_required != (command.confirmation() != CommandConfirmation::None) {
-                bail!("Sarah gateway confirmation policy did not match Omega's policy");
-            }
+            let (command, target) = decode_gateway_command(gateway_command.clone())?;
+            validate_admitted_command(admission, &command, confirmation_required)?;
             let previous = pending_tools.insert(
                 proposal_ref.clone(),
                 PendingGatewayTool {
@@ -1001,6 +1189,7 @@ async fn handle_server_message(
                     command: gateway_command,
                     confirmation_required,
                     confirmation_granted: false,
+                    effect_binding: None,
                     outcome_sent: false,
                     expires_at_ms,
                 },
@@ -1013,7 +1202,8 @@ async fn handle_server_message(
                     .send(SarahVoiceEvent::CommandProposal(VoiceCommandRequest {
                         request_id: proposal_ref,
                         command,
-                        expected_path,
+                        target,
+                        effect_binding: None,
                         expires_at_ms: Some(expires_at_ms),
                     }))
                     .await
@@ -1039,12 +1229,13 @@ async fn handle_server_message(
                 bail!("Sarah gateway executed a tool before confirmation");
             }
             if !tool.outcome_sent {
-                let (command, expected_path) = decode_gateway_command(command)?;
+                let (command, target) = decode_gateway_command(command)?;
                 events
                     .send(SarahVoiceEvent::CommandRequest(VoiceCommandRequest {
                         request_id: proposal_ref,
                         command,
-                        expected_path,
+                        target,
+                        effect_binding: tool.effect_binding.clone(),
                         expires_at_ms: Some(tool.expires_at_ms),
                     }))
                     .await
@@ -1092,43 +1283,54 @@ async fn handle_server_message(
     Ok(GatewayServerAction::Continue)
 }
 
-#[derive(Serialize)]
+#[derive(Deserialize, Serialize)]
 #[serde(rename_all = "camelCase")]
-struct LocalVoiceTranscriptEntry<'a> {
-    schema: &'static str,
+struct LocalVoiceTranscriptEntry {
+    schema: String,
     recorded_at: String,
-    session_ref: &'a str,
-    utterance_ref: &'a str,
+    thread_ref: String,
+    session_ref: String,
+    utterance_ref: String,
     participant: VoiceParticipant,
-    text: &'a str,
+    text: String,
 }
 
 struct LocalVoiceTranscriptLog {
     path: PathBuf,
+    thread_ref: String,
     session_ref: String,
 }
 
 impl LocalVoiceTranscriptLog {
-    fn new(path: PathBuf, session_ref: String) -> Self {
-        Self { path, session_ref }
+    fn new(path: PathBuf, thread_ref: String, session_ref: String) -> Self {
+        Self {
+            path,
+            thread_ref,
+            session_ref,
+        }
     }
 
     fn append(&self, utterance_ref: &str, participant: VoiceParticipant, text: &str) -> Result<()> {
         append_local_voice_transcript(
             &self.path,
             &LocalVoiceTranscriptEntry {
-                schema: VOICE_TRANSCRIPT_SCHEMA,
+                schema: VOICE_TRANSCRIPT_SCHEMA.to_string(),
                 recorded_at: chrono::Utc::now().to_rfc3339(),
-                session_ref: &self.session_ref,
-                utterance_ref,
+                thread_ref: self.thread_ref.clone(),
+                session_ref: self.session_ref.clone(),
+                utterance_ref: utterance_ref.to_string(),
                 participant,
-                text,
+                text: text.to_string(),
             },
         )
     }
+
+    fn recover(&self) -> Result<VoiceTranscriptRecovery> {
+        recover_local_voice_transcript(&self.path, &self.thread_ref)
+    }
 }
 
-fn append_local_voice_transcript(path: &Path, entry: &LocalVoiceTranscriptEntry<'_>) -> Result<()> {
+fn append_local_voice_transcript(path: &Path, entry: &LocalVoiceTranscriptEntry) -> Result<()> {
     let parent = path
         .parent()
         .context("Sarah voice transcript path had no parent directory")?;
@@ -1144,6 +1346,101 @@ fn append_local_voice_transcript(path: &Path, entry: &LocalVoiceTranscriptEntry<
     file.sync_data()
         .context("persisting a local Sarah transcript entry")?;
     Ok(())
+}
+
+fn recover_local_voice_transcript(
+    path: &Path,
+    thread_ref: &str,
+) -> Result<VoiceTranscriptRecovery> {
+    let mut file = match File::open(path) {
+        Ok(file) => file,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+            return Ok(VoiceTranscriptRecovery {
+                items: Vec::new(),
+                gap: VoiceTranscriptRecoveryGap::Complete,
+                detail: None,
+            });
+        }
+        Err(error) => return Err(error).context("opening the local Sarah transcript log"),
+    };
+    let file_length = file
+        .metadata()
+        .context("reading the local Sarah transcript metadata")?
+        .len();
+    let start = file_length.saturating_sub(MAX_TRANSCRIPT_RECOVERY_BYTES as u64);
+    file.seek(SeekFrom::Start(start))
+        .context("seeking the local Sarah transcript log")?;
+    let mut bytes = Vec::with_capacity(MAX_TRANSCRIPT_RECOVERY_BYTES);
+    file.take(MAX_TRANSCRIPT_RECOVERY_BYTES as u64)
+        .read_to_end(&mut bytes)
+        .context("reading the local Sarah transcript log")?;
+
+    let mut truncated = start > 0;
+    if start > 0 {
+        if let Some(first_newline) = bytes.iter().position(|byte| *byte == b'\n') {
+            bytes.drain(..=first_newline);
+        } else {
+            bytes.clear();
+        }
+    }
+    let mut malformed_rows = 0_usize;
+    let mut items = Vec::new();
+    for line in bytes.split(|byte| *byte == b'\n') {
+        if line.is_empty() {
+            continue;
+        }
+        let entry = match serde_json::from_slice::<LocalVoiceTranscriptEntry>(line) {
+            Ok(entry) => entry,
+            Err(_) => {
+                malformed_rows = malformed_rows.saturating_add(1);
+                continue;
+            }
+        };
+        if entry.schema != VOICE_TRANSCRIPT_SCHEMA
+            || entry.thread_ref.trim().is_empty()
+            || entry.session_ref.trim().is_empty()
+            || entry.utterance_ref.trim().is_empty()
+            || entry.text.len() > MAX_TRANSCRIPT_TEXT_BYTES
+        {
+            malformed_rows = malformed_rows.saturating_add(1);
+            continue;
+        }
+        if entry.thread_ref != thread_ref {
+            continue;
+        }
+        items.push(VoiceTranscriptItem {
+            thread_ref: entry.thread_ref,
+            session_ref: entry.session_ref,
+            item_id: entry.utterance_ref,
+            participant: entry.participant,
+            text: entry.text,
+            complete: true,
+        });
+        if items.len() > MAX_RECOVERED_TRANSCRIPT_ROWS {
+            items.remove(0);
+            truncated = true;
+        }
+    }
+
+    let (gap, detail) = if malformed_rows > 0 {
+        (
+            VoiceTranscriptRecoveryGap::Malformed,
+            Some(format!(
+                "Skipped {malformed_rows} malformed or unattributable transcript row{}. Anything skipped is not shown as recovered.",
+                if malformed_rows == 1 { "" } else { "s" }
+            )),
+        )
+    } else if truncated {
+        (
+            VoiceTranscriptRecoveryGap::Truncated,
+            Some(format!(
+                "Recovered only the newest {MAX_RECOVERED_TRANSCRIPT_ROWS} bounded transcript rows."
+            )),
+        )
+    } else {
+        (VoiceTranscriptRecoveryGap::Complete, None)
+    };
+    Ok(VoiceTranscriptRecovery { items, gap, detail })
 }
 
 fn decode_gateway_server_envelope(text: &str) -> Result<GatewayServerEnvelope> {
@@ -1246,10 +1543,20 @@ struct GatewayEditorTarget {
     document_version: Option<String>,
 }
 
-fn decode_gateway_command(value: Value) -> Result<(SarahEditorCommand, Option<String>)> {
+impl From<GatewayEditorTarget> for VoiceEditorTarget {
+    fn from(target: GatewayEditorTarget) -> Self {
+        Self {
+            workspace_ref: target.workspace_ref,
+            path: target.path,
+            document_version: target.document_version,
+        }
+    }
+}
+
+fn decode_gateway_command(value: Value) -> Result<(SarahEditorCommand, Option<VoiceEditorTarget>)> {
     let command: GatewayEditorCommand =
         serde_json::from_value(value).context("decoding Sarah gateway editor command")?;
-    let (command, expected_path) = match command {
+    let (command, target) = match command {
         GatewayEditorCommand::ContextRead {
             target,
             start_line,
@@ -1263,7 +1570,7 @@ fn decode_gateway_command(value: Value) -> Result<(SarahEditorCommand, Option<St
                 SarahEditorCommand::ReadContext {
                     max_chars: Some(MAX_CONTEXT_CHARS),
                 },
-                Some(target.path),
+                Some(target.into()),
             )
         }
         GatewayEditorCommand::OpenPath { target } => {
@@ -1284,7 +1591,7 @@ fn decode_gateway_command(value: Value) -> Result<(SarahEditorCommand, Option<St
                     line: start_line - 1,
                     column: 0,
                 },
-                Some(target.path),
+                Some(target.into()),
             )
         }
         GatewayEditorCommand::ReplaceSelection {
@@ -1294,7 +1601,7 @@ fn decode_gateway_command(value: Value) -> Result<(SarahEditorCommand, Option<St
             validate_gateway_target(&target)?;
             (
                 SarahEditorCommand::ReplaceSelection { text: replacement },
-                Some(target.path),
+                Some(target.into()),
             )
         }
         GatewayEditorCommand::SaveDocument { target } => {
@@ -1303,7 +1610,7 @@ fn decode_gateway_command(value: Value) -> Result<(SarahEditorCommand, Option<St
                 SarahEditorCommand::Action {
                     action: ApprovedEditorAction::SaveActiveFile,
                 },
-                Some(target.path),
+                Some(target.into()),
             )
         }
         GatewayEditorCommand::StartAgentThread {
@@ -1318,7 +1625,7 @@ fn decode_gateway_command(value: Value) -> Result<(SarahEditorCommand, Option<St
         ),
     };
     command.validate()?;
-    Ok((command, expected_path))
+    Ok((command, target))
 }
 
 fn validate_gateway_target(target: &GatewayEditorTarget) -> Result<()> {
@@ -1643,11 +1950,39 @@ mod tests {
     use super::*;
     use serde_json::json;
 
+    fn test_admission() -> SarahVoiceAdmissionProjection {
+        SarahVoiceAdmissionProjection {
+            schema: omega_effectd::SARAH_VOICE_ADMISSION_SCHEMA.into(),
+            admission_ref: format!("sarah_voice_admission:{}", "a".repeat(43)),
+            admission_expires_at_ms: 1_900_000_000_000,
+            client_profile: "omega_editor".into(),
+            thread_ref: "thread-1".into(),
+            session_ref: "session-1".into(),
+            reserved_credit_msat: 1,
+            max_duration_seconds: 60,
+            credit_msat_per_million_tokens: Some(1),
+            remaining_credit_msat: Some(1),
+            admission_cohort_ref: "sarah_voice_cohort:alpha_v1".into(),
+            credit_mode: omega_effectd::SarahVoiceCreditMode::Metered,
+            commands: vec![SarahVoiceCapabilityId::ContextRead],
+            confirmation_required: Vec::new(),
+            excluded_authorities: omega_effectd::SarahVoiceExcludedAuthorities {
+                direct_shell: false,
+                direct_git: false,
+                payment: false,
+                credential_access: false,
+                device_control: false,
+            },
+            gap: omega_effectd::SarahVoiceProjectionGap::Complete,
+            detail: None,
+        }
+    }
+
     #[test]
     fn local_transcript_log_appends_durable_json_lines() {
         let directory = tempfile::tempdir().expect("create transcript test directory");
         let path = directory.path().join("voice/transcripts.jsonl");
-        let log = LocalVoiceTranscriptLog::new(path.clone(), "session-1".into());
+        let log = LocalVoiceTranscriptLog::new(path.clone(), "thread-1".into(), "session-1".into());
 
         log.append("user-1", VoiceParticipant::User, "Hello")
             .expect("append user transcript");
@@ -1661,12 +1996,56 @@ mod tests {
             .collect::<Vec<_>>();
         assert_eq!(entries.len(), 2);
         assert_eq!(entries[0]["schema"], VOICE_TRANSCRIPT_SCHEMA);
+        assert_eq!(entries[0]["threadRef"], "thread-1");
         assert_eq!(entries[0]["sessionRef"], "session-1");
         assert_eq!(entries[0]["utteranceRef"], "user-1");
         assert_eq!(entries[0]["participant"], "user");
         assert_eq!(entries[0]["text"], "Hello");
         assert_eq!(entries[1]["participant"], "sarah");
         assert_eq!(entries[1]["text"], "Hi there");
+
+        let recovery = log.recover().expect("recover transcript");
+        assert_eq!(recovery.gap, VoiceTranscriptRecoveryGap::Complete);
+        assert_eq!(recovery.items.len(), 2);
+        assert!(
+            recovery
+                .items
+                .iter()
+                .all(|item| item.thread_ref == "thread-1" && item.session_ref == "session-1")
+        );
+    }
+
+    #[test]
+    fn transcript_recovery_skips_other_threads_and_declares_malformed_rows() {
+        let directory = tempfile::tempdir().expect("create transcript test directory");
+        let path = directory.path().join("voice/transcripts.jsonl");
+        let first =
+            LocalVoiceTranscriptLog::new(path.clone(), "thread-1".into(), "session-1".into());
+        let second =
+            LocalVoiceTranscriptLog::new(path.clone(), "thread-2".into(), "session-2".into());
+        first
+            .append("user-1", VoiceParticipant::User, "first")
+            .expect("append first thread");
+        second
+            .append("user-2", VoiceParticipant::User, "second")
+            .expect("append second thread");
+        let mut file = OpenOptions::new()
+            .append(true)
+            .open(&path)
+            .expect("open transcript log");
+        file.write_all(b"not-json\n")
+            .expect("append malformed transcript row");
+
+        let recovery = first.recover().expect("recover first thread");
+        assert_eq!(recovery.gap, VoiceTranscriptRecoveryGap::Malformed);
+        assert_eq!(recovery.items.len(), 1);
+        assert_eq!(recovery.items[0].thread_ref, "thread-1");
+        assert!(
+            recovery
+                .detail
+                .as_deref()
+                .is_some_and(|detail| detail.contains("Skipped 1"))
+        );
     }
 
     #[test]
@@ -1682,6 +2061,7 @@ mod tests {
             };
             let transcript_log = LocalVoiceTranscriptLog::new(
                 directory.path().join("voice/transcripts.jsonl"),
+                identity.thread_ref.clone(),
                 identity.session_ref.clone(),
             );
             let (events, received_events) = async_channel::bounded(1);
@@ -1704,6 +2084,9 @@ mod tests {
                 &mut expected_sequence,
                 &mut pending_tools,
                 &transcript_log,
+                &test_admission(),
+                1,
+                60_000,
             )
             .await
             .expect("accept empty final transcript");
@@ -1721,6 +2104,7 @@ mod tests {
             let directory = tempfile::tempdir().expect("create transcript directory");
             let transcript_log = LocalVoiceTranscriptLog::new(
                 directory.path().join("voice/transcripts.jsonl"),
+                "thread-1".into(),
                 "session-1".into(),
             );
             let identity = GatewayVoiceIdentity {
@@ -1747,11 +2131,65 @@ mod tests {
                 &mut expected_sequence,
                 &mut pending_tools,
                 &transcript_log,
+                &test_admission(),
+                1,
+                60_000,
             )
             .await
             .expect("accept interrupt acknowledgement");
 
             assert_eq!(action, GatewayServerAction::StopPlayback);
+        });
+    }
+
+    #[test]
+    fn session_ready_accepts_the_exact_zero_hold_owner_entitlement() {
+        smol::block_on(async {
+            let directory = tempfile::tempdir().expect("create transcript directory");
+            let transcript_log = LocalVoiceTranscriptLog::new(
+                directory.path().join("voice/transcripts.jsonl"),
+                "thread-1".into(),
+                "session-1".into(),
+            );
+            let identity = GatewayVoiceIdentity {
+                owner_ref: "owner-1".into(),
+                device_ref: "device-1".into(),
+                thread_ref: "thread-1".into(),
+                session_ref: "session-1".into(),
+                generation: 1,
+            };
+            let (events, received_events) = async_channel::bounded(1);
+            let mut expected_sequence = 0;
+            let mut pending_tools = HashMap::new();
+            let envelope = json!({
+                "schema": MANAGED_SARAH_PROTOCOL,
+                "identity": identity,
+                "sequence": 0,
+                "_tag": "session_ready",
+                "model": SARAH_VOICE_MODEL,
+                "expiresAtMs": 60_000,
+                "reservedCreditMsat": 0,
+            });
+
+            let action = handle_server_message(
+                &envelope.to_string(),
+                &events,
+                &identity,
+                &mut expected_sequence,
+                &mut pending_tools,
+                &transcript_log,
+                &test_admission(),
+                0,
+                60_000,
+            )
+            .await
+            .expect("accept exact entitlement readiness");
+
+            assert_eq!(action, GatewayServerAction::Continue);
+            assert!(matches!(
+                received_events.recv().await,
+                Ok(SarahVoiceEvent::Ready { session_id }) if session_id == "session-1"
+            ));
         });
     }
 
@@ -1794,6 +2232,28 @@ mod tests {
             .confirmation(),
             CommandConfirmation::ExternalEffect
         );
+    }
+
+    #[test]
+    fn admitted_command_boundary_is_enforced_at_execution() {
+        let mut admission = test_admission();
+        let context_read = SarahEditorCommand::ReadContext { max_chars: None };
+        assert!(validate_admitted_command(&admission, &context_read, false).is_ok());
+
+        admission.confirmation_required = vec![SarahVoiceCapabilityId::ContextRead];
+        assert!(validate_admitted_command(&admission, &context_read, true).is_ok());
+        assert!(validate_admitted_command(&admission, &context_read, false).is_err());
+
+        let replacement = SarahEditorCommand::ReplaceSelection { text: "new".into() };
+        assert!(validate_admitted_command(&admission, &replacement, true).is_err());
+        admission
+            .commands
+            .push(SarahVoiceCapabilityId::ReplaceSelection);
+        assert!(validate_admitted_command(&admission, &replacement, false).is_err());
+        admission
+            .confirmation_required
+            .push(SarahVoiceCapabilityId::ReplaceSelection);
+        assert!(validate_admitted_command(&admission, &replacement, true).is_ok());
     }
 
     #[test]
@@ -1938,7 +2398,7 @@ mod tests {
         unknown_field["untrusted"] = json!("value");
         assert!(decode_gateway_server_envelope(&unknown_field.to_string()).is_err());
 
-        let (command, expected_path) = decode_gateway_command(json!({
+        let (command, target) = decode_gateway_command(json!({
             "_tag": "start_agent_thread",
             "message": "Investigate the failing test",
             "presentation": "background"
@@ -1951,7 +2411,7 @@ mod tests {
                 ..
             }
         ));
-        assert_eq!(expected_path, None);
+        assert_eq!(target, None);
         assert!(
             decode_gateway_command(json!({
                 "_tag": "start_agent_thread",
@@ -1960,6 +2420,35 @@ mod tests {
                 "model": "arbitrary"
             }))
             .is_err()
+        );
+    }
+
+    #[test]
+    fn replace_selection_preserves_its_complete_editor_target() {
+        let (command, target) = decode_gateway_command(json!({
+            "_tag": "replace_selection",
+            "target": {
+                "workspaceRef": SARAH_VOICE_WORKSPACE_REF,
+                "path": "src/main.rs",
+                "documentVersion": "omega-buffer-v1:0=7"
+            },
+            "replacement": "replacement"
+        }))
+        .expect("decode replace-selection command");
+
+        assert_eq!(
+            command,
+            SarahEditorCommand::ReplaceSelection {
+                text: "replacement".into()
+            }
+        );
+        assert_eq!(
+            target,
+            Some(VoiceEditorTarget {
+                workspace_ref: SARAH_VOICE_WORKSPACE_REF.into(),
+                path: "src/main.rs".into(),
+                document_version: Some("omega-buffer-v1:0=7".into()),
+            })
         );
     }
 }

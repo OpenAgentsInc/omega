@@ -168,6 +168,7 @@ pub const ENFORCED_DELTAS: &[&str] = &[
     "OMEGA-DELTA-0177",
     "OMEGA-DELTA-0178",
     "OMEGA-DELTA-0179",
+    "OMEGA-DELTA-0180",
 ];
 
 /// The concise product contract adjacent to the delta registry.
@@ -20074,11 +20075,13 @@ mod tests {
              with the status that explains them."
         );
         let session = read_repository_file("crates/omega_effectd/src/openagents_session.rs");
-        let sarah_session = function_body(&session, "create_sarah_voice_session")
-            .expect("OMEGA-DELTA-0159: the Sarah session boundary is gone");
+        let sarah_session = function_body(&session, "prepare_sarah_voice_admission")
+            .expect("OMEGA-DELTA-0159: the Sarah admission boundary is gone");
         assert!(
             sarah_session.contains("owner_user_id: None")
-                && !sarah_session.contains("owner_user_id: issued.voice.owner_ref"),
+                && sarah_session.contains("prepare_nostr_sarah_voice_admission")
+                && !sarah_session.contains("self.connect(")
+                && !sarah_session.contains("owner_user_id: issued.admission.owner_ref"),
             "OMEGA-DELTA-0159: Sarah persisted the server-returned account mapping \
              in its Nostr-issued bearer credential."
         );
@@ -21751,9 +21754,8 @@ mod tests {
             "Menu::new(\"Help\")",
             "MenuItem::action(\"Find\", agent_ui::ToggleSearch)",
             "MenuItem::action(\"Toggle Threads Sidebar\", agent_ui::ToggleThreadsSidebar)",
-            "Sarah Voice — Voice access is not available yet",
-            "workroom::StartVoice",
-            ".disabled(true)",
+            "Sarah voice…",
+            "agent_ui::OpenSarahAdmission",
             "MenuItem::os_submenu(\"Services\", gpui::SystemMenuType::Services)",
         ] {
             assert!(
@@ -21788,6 +21790,7 @@ mod tests {
             "omega_workbench::SelectTerminal",
             "omega_workbench::SelectPlan",
             "agent::NewThread",
+            "agent::OpenSarahAdmission",
             "workspace::Open",
             "omega::OpenDocs",
             "omega::OpenLicenses",
@@ -21818,8 +21821,8 @@ mod tests {
 
         let panel = without_comments(&read_repository_file("crates/agent_ui/src/agent_panel.rs"));
         for required in [
-            "Sarah — Voice access is not available yet",
-            ".action(Box::new(zed_actions::workroom::StartVoice))",
+            "Sarah voice…",
+            ".action(Box::new(OpenSarahAdmission))",
             ".disabled(unavailable_reason.is_some())",
             "Box::new(zed_actions::AcpRegistry)",
             "_: &ToggleThreadsSidebar",
@@ -22167,5 +22170,133 @@ mod tests {
             read_repository_file("docs/src/ai/external-agents.md")
                 .contains("Codex, Claude Code, Grok, and configured generic ACP agents")
         );
+    }
+
+    /// OMEGA-DELTA-0180. Sarah navigation opens a visible admission contract;
+    /// only a complete Ready projection can expose the voice-start action.
+    #[test]
+    fn sarah_voice_admission_is_visible_bounded_and_fail_closed() {
+        let projection = read_repository_file("crates/agent_ui/src/composer_voice.rs");
+        for required in [
+            "pub enum SarahVoiceAdmissionProjection",
+            "Loading",
+            "Ready",
+            "Active",
+            "Unavailable",
+            "Settled",
+            "cohort_ref",
+            "refusal_reason",
+            "rate_msat_per_million_tokens",
+            "credit_hold_msat",
+            "remaining_credit_msat",
+            "max_duration_seconds",
+            "transcript_policy",
+            "pub struct SarahVoiceCapability",
+            "pub enum SarahVoiceCapabilityId",
+            "pub enum SarahVoiceConfirmation",
+            "pub enum SarahVoiceExcludedAuthority",
+            "pub struct SarahVoiceSessionArtifacts",
+            "pub struct SarahVoiceTranscriptRow",
+            "pub struct SarahVoicePendingConfirmation",
+            "pub struct SarahVoiceAgentThreadReceipt",
+            "DirectShell",
+            "DirectGit",
+            "Payment",
+            "CredentialAccess",
+            "DeviceControl",
+        ] {
+            assert!(
+                projection.contains(required),
+                "OMEGA-DELTA-0180: admission projection lost `{required}`"
+            );
+        }
+
+        let panel = read_repository_file(AGENT_PANEL_PATH);
+        for required in [
+            "fn open_sarah_admission",
+            "omega.sarah.admission",
+            "omega.sarah.admission.loading",
+            "omega.sarah.admission.ready",
+            "omega.sarah.admission.active",
+            "omega.sarah.admission.unavailable",
+            "omega.sarah.admission.settled",
+            "omega.sarah.transcript",
+            "omega.sarah.command-confirmation.allow-once",
+            "omega.sarah.command-confirmation.decline",
+            "omega.sarah.agent-thread-receipt",
+            "A bounded voice editor and delegation assistant",
+            "Not metered · staging owner entitlement",
+            "PrepareVoiceAdmission.boxed_clone()",
+            "window.dispatch_action(StartVoice.boxed_clone(), cx)",
+            "sarah_admission_action_renders_fail_closed_and_exact_terms",
+        ] {
+            assert!(
+                panel.contains(required),
+                "OMEGA-DELTA-0180: visible admission surface lost `{required}`"
+            );
+        }
+        assert!(
+            !panel.contains("OpenSarahWorkroomPanel") && !panel.contains("workroom::OpenPanel"),
+            "OMEGA-DELTA-0180: Sarah navigation restored a legacy dock-panel path"
+        );
+
+        let menus = read_repository_file("crates/zed/src/zed/app_menus.rs");
+        assert!(menus.contains("Sarah voice…"));
+        assert!(menus.contains("agent_ui::OpenSarahAdmission"));
+        assert!(!menus.contains("Sarah Voice — Voice access is not available yet"));
+        for action in [
+            "agent::OpenSarahAdmission",
+            "workroom::PrepareVoiceAdmission",
+            "workroom::StartVoice",
+            "workroom::ApproveSarahVoiceCommand",
+            "workroom::RejectSarahVoiceCommand",
+        ] {
+            assert!(
+                omega_zero_base::admits_action(action),
+                "OMEGA-DELTA-0180: admitted Sarah action `{action}` is refused"
+            );
+        }
+
+        let thread_view =
+            read_repository_file("crates/agent_ui/src/conversation_view/thread_view.rs");
+        let voice_controls = function_body(&thread_view, "render_voice_controls")
+            .expect("OMEGA-DELTA-0180: composer voice controls were removed");
+        assert!(voice_controls.contains("OpenSarahAdmission"));
+        assert!(!voice_controls.contains("StartVoice"));
+        assert!(!voice_controls.contains("RetryVoice"));
+
+        let workroom = read_repository_file("crates/workroom_ui/src/panel.rs");
+        for required in [
+            "set_sarah_voice_admission",
+            "SarahVoiceAdmissionProjection::Loading",
+            "SarahVoiceAdmissionProjection::Ready",
+            "SarahVoiceAdmissionProjection::Active",
+            "SarahVoiceAdmissionProjection::Unavailable",
+            "SarahVoiceAdmissionProjection::Settled",
+            "SarahVoiceSessionArtifacts",
+            "ApproveSarahVoiceCommand",
+            "RejectSarahVoiceCommand",
+        ] {
+            assert!(
+                workroom.contains(required),
+                "OMEGA-DELTA-0180: runtime projection bridge lost `{required}`"
+            );
+        }
+
+        for (path, required) in [
+            (
+                "docs/src/ai/agent-panel.md",
+                "Sarah is a bounded voice editor and delegation assistant",
+            ),
+            (
+                "docs/omega/sarah-realtime-voice.md",
+                "only opens admission. The composer microphone control follows the same route",
+            ),
+        ] {
+            assert!(
+                read_repository_file(path).contains(required),
+                "OMEGA-DELTA-0180: {path} lost `{required}`"
+            );
+        }
     }
 }

@@ -3998,6 +3998,8 @@ import { AiPaneTabContext } from 'context';
 const OMEGA_AGENT_PROOF_SCENES: &[&str] = &[
     "omega_front_door_no_project",
     "omega_front_door_typing",
+    "omega_sarah_admission_ready",
+    "omega_sarah_session_settled",
     "omega_executor_disclosure_native",
     "omega_route_pin_honoured",
     "omega_route_pin_not_honoured",
@@ -10200,6 +10202,269 @@ fn finish_omega_agent_visual_tests(
 }
 
 #[cfg(all(target_os = "macos", feature = "visual-tests"))]
+fn omega_sarah_visual_terms() -> agent_ui::composer_voice::SarahVoiceAdmissionTerms {
+    use agent_ui::composer_voice::{
+        SarahVoiceAdmissionTerms, SarahVoiceCapability, SarahVoiceCapabilityId,
+        SarahVoiceConfirmation, SarahVoiceCreditMode, SarahVoiceExcludedAuthority,
+    };
+
+    SarahVoiceAdmissionTerms {
+        client_profile: "omega_editor".into(),
+        cohort_ref: "alpha_v1".into(),
+        credit_mode: SarahVoiceCreditMode::Metered,
+        rate_msat_per_million_tokens: 64_000_000,
+        credit_hold_msat: 256_000,
+        remaining_credit_msat: Some(8_000_000),
+        max_duration_seconds: 300,
+        transcript_policy: "Stored locally and recoverable after reconnect.".into(),
+        capabilities: vec![
+            SarahVoiceCapability {
+                capability: SarahVoiceCapabilityId::ContextRead,
+                confirmation: SarahVoiceConfirmation::NoExtraConfirmation,
+            },
+            SarahVoiceCapability {
+                capability: SarahVoiceCapabilityId::SaveDocument,
+                confirmation: SarahVoiceConfirmation::ConfirmEachAction,
+            },
+        ],
+        excluded_authorities: vec![
+            SarahVoiceExcludedAuthority::DirectShell,
+            SarahVoiceExcludedAuthority::DirectGit,
+            SarahVoiceExcludedAuthority::Payment,
+            SarahVoiceExcludedAuthority::CredentialAccess,
+            SarahVoiceExcludedAuthority::DeviceControl,
+        ],
+    }
+}
+
+#[cfg(all(target_os = "macos", feature = "visual-tests"))]
+fn omega_sarah_visual_artifacts() -> agent_ui::composer_voice::SarahVoiceSessionArtifacts {
+    use agent_ui::composer_voice::{
+        SarahVoiceParticipant, SarahVoicePendingConfirmation, SarahVoiceSelectionEffectPreview,
+        SarahVoiceSessionArtifacts, SarahVoiceTranscriptRow,
+    };
+
+    SarahVoiceSessionArtifacts {
+        transcript: (1_u32..=102)
+            .map(|number| SarahVoiceTranscriptRow {
+                thread_ref: "thread.sarah.visual".into(),
+                session_ref: "session.sarah.visual".into(),
+                item_id: format!("utterance.{number}").into(),
+                participant: if number.is_multiple_of(2) {
+                    SarahVoiceParticipant::Sarah
+                } else {
+                    SarahVoiceParticipant::User
+                },
+                text: format!("Fixture transcript row {number}.").into(),
+                complete: true,
+            })
+            .collect(),
+        pending_confirmation: Some(SarahVoicePendingConfirmation {
+            request_id: "request.save.visual".into(),
+            copy: "Replace the current editor selection with 5 characters?".into(),
+            detail: None,
+            selection_effect: Some(SarahVoiceSelectionEffectPreview {
+                workspace_ref: "workspace.omega.visual".into(),
+                document_version: "omega-buffer-v1:0=7".into(),
+                target_path: "src/main.rs".into(),
+                selection_start_line: 2,
+                selection_start_column: 4,
+                selection_end_line: 2,
+                selection_end_column: 10,
+                selected_text: "before".into(),
+                replacement_text: "after".into(),
+            }),
+        }),
+        created_agent_thread: None,
+    }
+}
+
+#[cfg(all(target_os = "macos", feature = "visual-tests"))]
+fn run_omega_sarah_admission_visual_tests(
+    panel: &Entity<agent_ui::AgentPanel>,
+    workspace: &Entity<Workspace>,
+    workspace_window: AnyWindowHandle,
+    cx: &mut VisualTestAppContext,
+    update_baseline: bool,
+) -> Result<Vec<TestResult>> {
+    use agent_ui::composer_voice::SarahVoiceAdmissionProjection;
+
+    const READY_SCENE: &str = "omega_sarah_admission_ready";
+    const SETTLED_SCENE: &str = "omega_sarah_session_settled";
+    if !workbench_any_selected(&[READY_SCENE, SETTLED_SCENE]) {
+        return Ok(Vec::new());
+    }
+
+    cx.update_window(workspace_window, |_root, window, cx| {
+        panel.update(cx, |panel, cx| {
+            use workspace::dock::Panel as _;
+            panel.set_zoomed(true, window, cx);
+        });
+        window.dispatch_action(Box::new(agent_ui::OpenSarahAdmission), cx);
+    })
+    .context("Failed to open Sarah admission from its shipped action")?;
+    cx.run_until_parked();
+
+    let terms = omega_sarah_visual_terms();
+    cx.update(|cx| {
+        agent_ui::composer_voice::set_sarah_voice_admission(
+            workspace.entity_id(),
+            SarahVoiceAdmissionProjection::Ready {
+                terms: terms.clone(),
+            },
+            cx,
+        );
+    });
+    cx.run_until_parked();
+
+    let mut results = Vec::new();
+    if workbench_any_selected(&[READY_SCENE]) {
+        cx.set_debug_accessibility_active(workspace_window, true)?;
+        let snapshot = cx.debug_render_snapshot(workspace_window)?;
+        let mut probe = SemanticProbe::new(&snapshot);
+        probe.require_visible("omega.sarah.admission")?;
+        probe.require_visible("omega.sarah.admission.ready")?;
+        probe.require_visible("omega.sarah.admission.terms")?;
+        probe.require_visible("omega.sarah.admission.capabilities")?;
+        probe.require_accessible(
+            "omega-sarah-admission-terms",
+            "Group",
+            "Client profile omega_editor. Credit mode Metered credit. Admission cohort alpha_v1. Effective rate 64,000,000 msat per 1,000,000 tokens. Credit hold 256,000 msat. Remaining credit 8,000,000 msat. Maximum session 300 seconds. Transcript policy Stored locally and recoverable after reconnect.",
+        )?;
+        probe.require_accessible(
+            "omega-sarah-admission-capabilities",
+            "Group",
+            "Available voice actions. Read active editor context: No extra confirmation. Save the active document: Confirm each action. Not available: direct shell, direct Git, payments, credential access, device control.",
+        )?;
+        probe.require_accessible(
+            "omega-sarah-start-voice",
+            "Button",
+            "Start Sarah voice with the terms shown above",
+        )?;
+        record_workbench_semantic_checks(READY_SCENE, probe.into_checks());
+        record_workbench_semantic_check(READY_SCENE, "sarah-ready-exact-terms-accessible");
+        results.push(run_visual_test(
+            READY_SCENE,
+            workspace_window,
+            cx,
+            update_baseline,
+        )?);
+    }
+
+    if workbench_any_selected(&[SETTLED_SCENE]) {
+        let artifacts = omega_sarah_visual_artifacts();
+        cx.update(|cx| {
+            agent_ui::composer_voice::set_sarah_voice_admission(
+                workspace.entity_id(),
+                SarahVoiceAdmissionProjection::Active {
+                    terms,
+                    session_id: "session.sarah.visual".into(),
+                    artifacts: artifacts.clone(),
+                },
+                cx,
+            );
+        });
+        cx.run_until_parked();
+
+        cx.set_debug_accessibility_active(workspace_window, true)?;
+        let active_snapshot = cx.debug_render_snapshot(workspace_window)?;
+        let mut active_probe = SemanticProbe::new(&active_snapshot);
+        active_probe.require_visible("omega.sarah.admission.active")?;
+        active_probe.require_visible("omega.sarah.transcript")?;
+        active_probe.require_unique("omega.sarah.command-confirmation")?;
+        active_probe.require_unique("omega.sarah.command-confirmation.selection-before")?;
+        active_probe.require_unique("omega.sarah.command-confirmation.selection-after")?;
+        active_probe.require_accessible(
+            "omega-sarah-transcript",
+            "Group",
+            "Transcript. Showing the newest 100 of 102 rows.",
+        )?;
+        active_probe.require_accessible(
+            "omega-sarah-command-confirmation",
+            "Group",
+            "Sarah requests confirmation. Replace the current editor selection with 5 characters? Replacement target src/main.rs from line 3, column 5 through line 3, column 11. Selected text before. Replacement text after. Request request.save.visual.",
+        )?;
+        active_probe.require_accessible(
+            "omega-sarah-selection-effect",
+            "Group",
+            "Replacement effect. Workspace workspace.omega.visual. Target src/main.rs. Document version omega-buffer-v1:0=7. Selection 3:5–3:11 (1-based). Selected text: before. Replacement text: after.",
+        )?;
+        active_probe.require_accessible("omega-sarah-command-approve", "Button", "Allow once")?;
+        active_probe.require_accessible("omega-sarah-command-reject", "Button", "Decline")?;
+        record_workbench_semantic_checks(SETTLED_SCENE, active_probe.into_checks());
+        record_workbench_semantic_check(SETTLED_SCENE, "sarah-active-transcript-bounded-to-100");
+        record_workbench_semantic_check(
+            SETTLED_SCENE,
+            "sarah-active-replacement-before-after-exact",
+        );
+
+        cx.update(|cx| {
+            agent_ui::composer_voice::set_sarah_voice_admission(
+                workspace.entity_id(),
+                SarahVoiceAdmissionProjection::Unavailable {
+                    reason: "Final charge recovery is temporarily unavailable.".into(),
+                    retryable: true,
+                    cohort_ref: Some("alpha_v1".into()),
+                    refusal_reason: Some("settlement_retry_required".into()),
+                },
+                cx,
+            );
+        });
+        cx.run_until_parked();
+        let retry_snapshot = cx.debug_render_snapshot(workspace_window)?;
+        let mut retry_probe = SemanticProbe::new(&retry_snapshot);
+        retry_probe.require_visible("omega.sarah.admission.unavailable")?;
+        retry_probe.require_visible("omega.sarah.settlement.retry")?;
+        retry_probe.require_accessible(
+            "omega-sarah-retry-settlement",
+            "Button",
+            "Retry settlement",
+        )?;
+        retry_probe.require_absent("omega.sarah.admission.start")?;
+        record_workbench_semantic_checks(SETTLED_SCENE, retry_probe.into_checks());
+        record_workbench_semantic_check(SETTLED_SCENE, "sarah-settlement-retry-state-visible");
+
+        cx.update(|cx| {
+            agent_ui::composer_voice::set_sarah_voice_admission(
+                workspace.entity_id(),
+                SarahVoiceAdmissionProjection::Settled {
+                    final_charge_msat: 128_000,
+                    remaining_credit_msat: Some(7_872_000),
+                    receipt_ref: Some("settlement.receipt.visual".into()),
+                    transcript_recovery:
+                        "Recovered 100 bounded transcript rows from local storage.".into(),
+                    artifacts,
+                },
+                cx,
+            );
+        });
+        cx.run_until_parked();
+
+        let settled_snapshot = cx.debug_render_snapshot(workspace_window)?;
+        let mut settled_probe = SemanticProbe::new(&settled_snapshot);
+        settled_probe.require_visible("omega.sarah.admission.settled")?;
+        settled_probe.require_visible("omega.sarah.transcript")?;
+        settled_probe.require_unique("omega.sarah.command-confirmation")?;
+        settled_probe.require_absent("omega.sarah.admission.start")?;
+        settled_probe.require_accessible(
+            "omega-sarah-admission-settled",
+            "Group",
+            "Sarah voice settled. Final charge 128,000 msat. Remaining credit 7,872,000 msat. Settlement receipt settlement.receipt.visual. Transcript recovery Recovered 100 bounded transcript rows from local storage.",
+        )?;
+        record_workbench_semantic_checks(SETTLED_SCENE, settled_probe.into_checks());
+        record_workbench_semantic_check(SETTLED_SCENE, "sarah-settlement-exact-receipt-accessible");
+        results.push(run_visual_test(
+            SETTLED_SCENE,
+            workspace_window,
+            cx,
+            update_baseline,
+        )?);
+    }
+
+    Ok(results)
+}
+
+#[cfg(all(target_os = "macos", feature = "visual-tests"))]
 fn run_omega_agent_visual_tests_inner(
     app_state: Arc<AppState>,
     cx: &mut VisualTestAppContext,
@@ -10208,7 +10473,12 @@ fn run_omega_agent_visual_tests_inner(
     use agent_ui::AgentPanel;
 
     let capture_sealed_front_door = workbench_proof_active()
-        && workbench_any_selected(&["omega_front_door_no_project", "omega_front_door_typing"]);
+        && workbench_any_selected(&[
+            "omega_front_door_no_project",
+            "omega_front_door_typing",
+            "omega_sarah_admission_ready",
+            "omega_sarah_session_settled",
+        ]);
     if capture_sealed_front_door {
         // The desktop's flag-free launch enters this one-way mode before
         // opening a workspace. The proof command runs one selected scene in
@@ -10444,6 +10714,13 @@ fn run_omega_agent_visual_tests_inner(
     } else {
         TestResult::Passed
     };
+    let sarah_results = run_omega_sarah_admission_visual_tests(
+        &panel,
+        &workspace,
+        workspace_window,
+        cx,
+        update_baseline,
+    )?;
     if !workbench_any_selected(&[
         "omega_front_door_typing",
         "omega_executor_disclosure_native",
@@ -10454,7 +10731,19 @@ fn run_omega_agent_visual_tests_inner(
         "omega_executor_disclosure_external_acp_after_restart",
         "omega_executor_disclosure_engine_lane_after_restart",
     ]) {
-        return finish_omega_agent_visual_tests(workspace_window, cx, &[front_door]);
+        let mut results = vec![front_door];
+        results.extend(sarah_results);
+        return finish_omega_agent_visual_tests(workspace_window, cx, &results);
+    }
+
+    if !sarah_results.is_empty() {
+        cx.update_window(workspace_window, |_root, window, cx| {
+            workspace.update(cx, |_workspace, cx| {
+                AgentPanel::open_front_door(window, cx);
+            });
+        })
+        .context("Failed to restore the front door after Sarah admission proof")?;
+        cx.run_until_parked();
     }
 
     let activated = cx

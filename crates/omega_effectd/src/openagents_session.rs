@@ -264,13 +264,26 @@ impl OpenAgentsSession {
         super::openagents_sarah_voice::ManagedSarahVoiceSession,
         HostedSessionBlocker,
     > {
+        let admission = self.prepare_sarah_voice_admission(thread_ref, cx).await?;
+        self.create_sarah_voice_session_from_admission(&admission, cx)
+            .await
+    }
+
+    pub async fn prepare_sarah_voice_admission(
+        &self,
+        thread_ref: &str,
+        cx: &mut AsyncApp,
+    ) -> std::result::Result<
+        super::openagents_sarah_voice::PreparedSarahVoiceAdmission,
+        HostedSessionBlocker,
+    > {
         let session_ref = format!("omega-voice-{}", random_device_component());
         let device_ref = self.load_or_create_device_ref(cx).await.map_err(|error| {
             log::error!("OpenAgents device binding could not be stored: {error:#}");
             HostedSessionBlocker::CredentialStorageFailed
         })?;
-        if let Some(verified) = self.resolve_verified(cx).await {
-            match super::openagents_sarah_voice::issue_bearer_sarah_voice_session(
+        let admission = if let Some(verified) = self.resolve_verified(cx).await {
+            super::openagents_sarah_voice::prepare_bearer_sarah_voice_admission(
                 &self.http_client,
                 &verified.access_token,
                 &verified.owner_user_id,
@@ -279,24 +292,69 @@ impl OpenAgentsSession {
                 &session_ref,
             )
             .await
-            {
+        } else {
+            let issued = super::openagents_sarah_voice::prepare_nostr_sarah_voice_admission(
+                &self.http_client,
+                &device_ref,
+                thread_ref,
+                &session_ref,
+            )
+            .await;
+            match issued {
                 Ok(issued) => {
-                    self.record_blocker(None);
-                    return Ok(issued.voice);
+                    let credential = StoredCredential {
+                        schema_version: 1,
+                        owner_user_id: None,
+                        access_token: issued.access_token,
+                        refresh_token: None,
+                    };
+                    match self.save_credential(&credential, cx).await {
+                        Ok(()) => {
+                            self.set_phase(OpenAgentsSessionPhase::Ready);
+                            Ok(issued.admission)
+                        }
+                        Err(error) => {
+                            log::error!(
+                                "Nostr-issued Sarah voice credential could not be stored: {error:#}"
+                            );
+                            Err(HostedSessionBlocker::CredentialStorageFailed)
+                        }
+                    }
                 }
-                Err(HostedSessionBlocker::VoiceSessionRejected { status: 401 }) => {}
-                Err(blocker) => {
-                    self.record_blocker(Some(blocker.clone()));
-                    return Err(blocker);
-                }
+                Err(blocker) => Err(blocker),
+            }
+        };
+        match admission {
+            Ok(admission) => {
+                self.record_blocker(None);
+                Ok(admission)
+            }
+            Err(blocker) => {
+                self.record_blocker(Some(blocker.clone()));
+                Err(blocker)
             }
         }
+    }
 
-        let issued = match super::openagents_sarah_voice::issue_nostr_sarah_voice_session(
+    pub async fn create_sarah_voice_session_from_admission(
+        &self,
+        admission: &super::openagents_sarah_voice::PreparedSarahVoiceAdmission,
+        cx: &mut AsyncApp,
+    ) -> std::result::Result<
+        super::openagents_sarah_voice::ManagedSarahVoiceSession,
+        HostedSessionBlocker,
+    > {
+        let verified = self
+            .resolve_verified(cx)
+            .await
+            .ok_or(HostedSessionBlocker::SessionNotVerified)?;
+        if verified.owner_user_id != admission.owner_ref {
+            return Err(HostedSessionBlocker::ResponseInvalid);
+        }
+        let issued = match super::openagents_sarah_voice::issue_bearer_sarah_voice_session(
             &self.http_client,
-            &device_ref,
-            thread_ref,
-            &session_ref,
+            &verified.access_token,
+            admission,
         )
         .await
         {
@@ -306,24 +364,49 @@ impl OpenAgentsSession {
                 return Err(blocker);
             }
         };
-        let access_token = issued
-            .access_token
-            .ok_or(HostedSessionBlocker::ResponseInvalid)?;
-        let credential = StoredCredential {
-            schema_version: 1,
-            owner_user_id: None,
-            access_token,
-            refresh_token: None,
+        let voice = issued.voice;
+        if voice.session_ref != admission.session_ref
+            || voice.thread_ref != admission.thread_ref
+            || voice.reserved_credit_msat != admission.projection.reserved_credit_msat
+            || voice.max_duration_seconds != admission.projection.max_duration_seconds
+        {
+            return Err(HostedSessionBlocker::ResponseInvalid);
+        }
+        let Some(echoed_admission) = voice.admission.as_ref() else {
+            return Err(HostedSessionBlocker::ResponseInvalid);
         };
-        self.save_credential(&credential, cx)
-            .await
-            .map_err(|error| {
-                log::error!("Nostr-issued OpenAgents session could not be stored: {error:#}");
-                HostedSessionBlocker::CredentialStorageFailed
-            })?;
+        if echoed_admission.admission_ref != admission.projection.admission_ref
+            || echoed_admission.admission_expires_at_ms
+                != admission.projection.admission_expires_at_ms
+            || !echoed_admission.has_same_reviewed_terms(&admission.projection)
+        {
+            return Err(HostedSessionBlocker::ResponseInvalid);
+        }
         self.record_blocker(None);
         self.set_phase(OpenAgentsSessionPhase::Ready);
-        Ok(issued.voice)
+        Ok(voice)
+    }
+
+    pub async fn read_sarah_voice_settlement(
+        &self,
+        thread_ref: &str,
+        session_ref: &str,
+        cx: &mut AsyncApp,
+    ) -> std::result::Result<
+        super::openagents_sarah_voice::SarahVoiceSettlementProjection,
+        HostedSessionBlocker,
+    > {
+        let verified = self
+            .resolve_verified(cx)
+            .await
+            .ok_or(HostedSessionBlocker::SessionNotVerified)?;
+        super::openagents_sarah_voice::read_bearer_sarah_voice_settlement(
+            &self.http_client,
+            &verified.access_token,
+            thread_ref,
+            session_ref,
+        )
+        .await
     }
 
     async fn connect_inner(&self) -> Result<StoredCredential, HostedSessionBlocker> {

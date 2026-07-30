@@ -417,7 +417,11 @@ pub const ADMITTED_ACTIONS: &[&str] = &[
     // the ordinary editable centre pane. Admit its standard save action
     // without admitting the rest of the workspace namespace.
     "workspace::Save",
+    "workroom::PrepareVoiceAdmission",
+    "workroom::PrepareVoiceAdmission",
     "workroom::StartVoice",
+    "workroom::ApproveSarahVoiceCommand",
+    "workroom::RejectSarahVoiceCommand",
     "workroom::ToggleVoiceMute",
     "workroom::InterruptVoice",
     "workroom::EndVoice",
@@ -593,7 +597,11 @@ mod tests {
             // Without it a fresh profile can reach identity onboarding and
             // never leave it, which is a dead end rather than a subtraction.
             "onboarding::Finish",
+            "workroom::PrepareVoiceAdmission",
+            "workroom::PrepareVoiceAdmission",
             "workroom::StartVoice",
+            "workroom::ApproveSarahVoiceCommand",
+            "workroom::RejectSarahVoiceCommand",
             "workroom::ToggleVoiceMute",
             "workroom::InterruptVoice",
             "workroom::EndVoice",

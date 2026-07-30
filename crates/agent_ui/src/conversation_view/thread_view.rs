@@ -5830,8 +5830,9 @@ impl ThreadView {
     }
 
     fn render_voice_controls(&self, cx: &mut Context<Self>) -> AnyElement {
+        use crate::OpenSarahAdmission;
         use crate::composer_voice::{ComposerVoicePhase, composer_voice_status};
-        use zed_actions::workroom::{EndVoice, RetryVoice, StartVoice, ToggleVoiceMute};
+        use zed_actions::workroom::{EndVoice, ToggleVoiceMute};
 
         let status = composer_voice_status(self.workspace.entity_id(), cx)
             .read(cx)
@@ -5882,32 +5883,20 @@ impl ThreadView {
                         ButtonStyle::Subtle
                     })
                     .toggle_state(phase.is_active() && !status.muted)
-                    .disabled(
-                        matches!(
-                            phase,
-                            ComposerVoicePhase::Unavailable
-                                | ComposerVoicePhase::Authenticating
-                                | ComposerVoicePhase::Ending
-                        ) || (matches!(
-                            phase,
-                            ComposerVoicePhase::AccessRequired
-                                | ComposerVoicePhase::Error
-                                | ComposerVoicePhase::Reconnecting
-                        ) && !status.retryable),
-                    )
+                    .disabled(matches!(
+                        phase,
+                        ComposerVoicePhase::Authenticating | ComposerVoicePhase::Ending
+                    ))
                     .aria_label(label)
                     .aria_description(detail.clone())
                     .tooltip(move |_, cx| Tooltip::with_meta(label, None, detail.clone(), cx))
                     .on_click(move |_, window, cx| match phase {
-                        ComposerVoicePhase::Idle => {
-                            window.dispatch_action(StartVoice.boxed_clone(), cx)
-                        }
-                        ComposerVoicePhase::AccessRequired
+                        ComposerVoicePhase::Idle
+                        | ComposerVoicePhase::Unavailable
+                        | ComposerVoicePhase::AccessRequired
                         | ComposerVoicePhase::Error
-                        | ComposerVoicePhase::Reconnecting
-                            if status.retryable =>
-                        {
-                            window.dispatch_action(RetryVoice.boxed_clone(), cx)
+                        | ComposerVoicePhase::Reconnecting => {
+                            window.dispatch_action(OpenSarahAdmission.boxed_clone(), cx)
                         }
                         phase if phase.is_active() => {
                             window.dispatch_action(ToggleVoiceMute.boxed_clone(), cx)

@@ -6833,8 +6833,10 @@ browser or starts a loopback callback server. Omega signs a fresh NIP-98 event
 with its built-in Nostr identity and sends the proof directly to the exact
 OpenAgents session endpoint. The shared signer binds the HTTPS URL, POST method,
 exact payload hash, and current timestamp. The ordinary hosted-session request
-signs an empty payload; managed Sarah voice signs the exact serialized session
-JSON. The server resolves the configured owner and consumes each proof once.
+signs an empty payload; managed Sarah admission signs the exact serialized
+admission JSON, then uses the returned short-lived bearer for the separately
+requested voice session. The server resolves the configured owner and consumes
+each proof once.
 
 The resulting access token is short-lived and remains in Omega's isolated
 credential store. Existing OAuth credentials remain readable for migration,
@@ -6981,7 +6983,7 @@ an actionable blocker that directs the owner to the existing identity setup.
 
 Sarah's challenge response can carry a server-side account mapping that Omega
 does not know in advance. Omega copies that `ownerRef` into the exact signed
-voice-session body but does not persist it in the Nostr-issued bearer
+voice-admission body but does not persist it in the Nostr-issued bearer
 credential. Normal bearer verification resolves the owner in memory. Existing
 legacy credentials retain their stored owner binding for compatibility.
 
@@ -7852,3 +7854,56 @@ current image build does not decode it inline.
   disappearance tests in `agent_ui`; source contracts in `omega_deltas`; and
   the installed positive and negative routing receipts owned by the strict
   installed gate.
+
+### OMEGA-DELTA-0180 — Sarah voice starts behind one visible admission boundary
+
+- **Supersedes Sarah's disabled state in OMEGA-DELTA-0176 and
+  OMEGA-DELTA-0177.** The permanent Sarah row, the Thread menu, and the
+  toolbar `+` menu now open one Sarah admission surface inside Agent Panel.
+  They do not open the legacy Sarah dock panel and do not start the microphone.
+- **Admission truth precedes audio.** A dependency-neutral workspace
+  projection carries the effective rate in msat per million tokens, credit
+  hold, remaining credit, maximum duration, cohort reference, transcript
+  policy, exact bounded capabilities, and the confirmation class for each
+  capability. A cohort refusal remains a refusal even when the account has
+  credit. The staging-owner entitlement renders as not metered rather than a
+  fabricated zero balance. Only a Ready projection renders **Start voice**;
+  loading and unavailable states keep the microphone off.
+- **Reviewed terms bind the reservation.** Ready admission carries a random,
+  one-use reference with a maximum 120-second lifetime. Omega sends that
+  reference only after **Start voice**, and accepts the resulting ticket only
+  when the service echoes the same reference, expiry, profile, cohort, credit
+  mode, rate, pre-hold balance, hold, duration, and capability boundary. An
+  expired, replayed, missing, or changed admission fails closed and requires a
+  fresh review.
+- **The persona is deliberately bounded.** Public copy calls Sarah a voice
+  editor and delegation assistant. The surface renders the server's exact
+  exposed subset of context read, reveal range, replace selection, save
+  document, and start agent thread. It also renders the hard-false direct shell,
+  direct Git, payment, credential-access, and device-control authorities.
+  Confirmed actions do not inherit authority from Sarah's identity.
+- **Completion remains visible.** Active admission retains the exact terms and
+  session reference, a bounded transcript, any pending command confirmation,
+  and the receipt for a Sarah-created Omega Agent thread. **Allow once** and
+  **Decline** act on the hidden runtime owner's exact pending request. Settled
+  admission retains those artifacts and replaces estimates with the final
+  charge, optional remaining credit, receipt reference, and transcript recovery
+  result. Missing settlement fields remain unavailable rather than being
+  inferred by the desktop.
+- **Replacement consent binds one exact editor effect.** A replacement proposal
+  retains its workspace reference, active path, document version, selection
+  range, selected text, and replacement text. The visible confirmation shows
+  the exact path, range, before text, and after text. Omega validates the binding
+  both when **Allow once** is pressed and atomically with the edit; workspace,
+  document, active-file, or selection drift refuses the command without editing.
+- **Compatibility:** the hidden `SarahWorkroomPanel` remains the voice runtime
+  owner during the alpha transition. `workroom::StartVoice` remains the runtime
+  action, but only the Ready admission button dispatches it. Menu choices and
+  idle, unavailable, and retryable composer controls use
+  `agent::OpenSarahAdmission`, so no visible entry can bypass the contract.
+  `workroom::OpenPanel` is not restored.
+- **Enforced by:** `sarah_voice_admission_is_visible_bounded_and_fail_closed`
+  in `crates/omega_deltas`; Agent Panel GPUI coverage for Ready and Settled;
+  the application-menu contract test; and managed-session projection,
+  settlement, reconnect, transcript-recovery, and revocation tests at their
+  source boundaries.

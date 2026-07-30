@@ -55,9 +55,9 @@ use crate::{
 };
 use crate::{
     AgentDiffPane, ConversationView, CopyThreadToClipboard, Follow, LoadThreadFromClipboard,
-    NewTerminalThread, NewThread, OpenActiveThreadAsMarkdown, OpenAgentDiff, ResetFastModeWarnings,
-    ResetTrialEndUpsell, ResetTrialUpsell, ShowAllSidebarThreadMetadata, ShowThreadMetadata,
-    ToggleNewThreadMenu, ToggleOptionsMenu, ToggleThreadsSidebar,
+    NewTerminalThread, NewThread, OpenActiveThreadAsMarkdown, OpenAgentDiff, OpenSarahAdmission,
+    ResetFastModeWarnings, ResetTrialEndUpsell, ResetTrialUpsell, ShowAllSidebarThreadMetadata,
+    ShowThreadMetadata, ToggleNewThreadMenu, ToggleOptionsMenu, ToggleThreadsSidebar,
     conversation_view::{
         AcpThreadViewEvent, ConversationPreparation, RootThreadUpdated, ThreadView,
         reset_fast_mode_warnings,
@@ -493,6 +493,12 @@ pub fn init(cx: &mut App) {
                                 cx,
                             )
                         });
+                        workspace.focus_panel::<AgentPanel>(window, cx);
+                    }
+                })
+                .register_action(|workspace, _: &OpenSarahAdmission, window, cx| {
+                    if let Some(panel) = workspace.panel::<AgentPanel>(cx) {
+                        panel.update(cx, |panel, cx| panel.open_sarah_admission(window, cx));
                         workspace.focus_panel::<AgentPanel>(window, cx);
                     }
                 })
@@ -1451,6 +1457,404 @@ fn render_ready_device_pairing_content(
         .into_any_element()
 }
 
+fn format_msat(value: u64) -> SharedString {
+    let digits = value.to_string();
+    let mut formatted = String::with_capacity(digits.len() + digits.len() / 3 + 5);
+    for (index, character) in digits.chars().enumerate() {
+        if index > 0 && (digits.len() - index).is_multiple_of(3) {
+            formatted.push(',');
+        }
+        formatted.push(character);
+    }
+    formatted.push_str(" msat");
+    formatted.into()
+}
+
+fn sarah_admission_value_row(
+    label: impl Into<SharedString>,
+    value: impl Into<SharedString>,
+) -> AnyElement {
+    h_flex()
+        .w_full()
+        .gap_3()
+        .justify_between()
+        .items_start()
+        .child(
+            Label::new(label.into())
+                .size(LabelSize::Small)
+                .color(Color::Muted),
+        )
+        .child(Label::new(value.into()).size(LabelSize::Small))
+        .into_any_element()
+}
+
+fn render_sarah_selection_effect_preview(
+    effect: crate::composer_voice::SarahVoiceSelectionEffectPreview,
+) -> AnyElement {
+    let selection = format!(
+        "{}:{}–{}:{} (1-based)",
+        effect.selection_start_line.saturating_add(1),
+        effect.selection_start_column.saturating_add(1),
+        effect.selection_end_line.saturating_add(1),
+        effect.selection_end_column.saturating_add(1),
+    );
+    let accessible_label = format!(
+        "Replacement effect. Workspace {}. Target {}. Document version {}. Selection {}. Selected text: {}. Replacement text: {}.",
+        effect.workspace_ref,
+        effect.target_path,
+        effect.document_version,
+        selection,
+        effect.selected_text,
+        effect.replacement_text,
+    );
+
+    v_flex()
+        .id("omega-sarah-selection-effect")
+        .debug_selector(|| "omega.sarah.command-confirmation.effect".into())
+        .role(gpui::Role::Group)
+        .aria_label(accessible_label)
+        .gap_2()
+        .child(sarah_admission_value_row("Target", effect.target_path))
+        .child(sarah_admission_value_row("Selection", selection))
+        .child(sarah_admission_value_row("Workspace", effect.workspace_ref))
+        .child(sarah_admission_value_row(
+            "Document version",
+            effect.document_version,
+        ))
+        .child(
+            Label::new("Selected text")
+                .size(LabelSize::XSmall)
+                .color(Color::Muted),
+        )
+        .child(
+            v_flex()
+                .id("omega-sarah-selection-before")
+                .debug_selector(|| "omega.sarah.command-confirmation.selection-before".into())
+                .max_h(px(160.))
+                .overflow_y_scroll()
+                .child(Label::new(effect.selected_text).size(LabelSize::Small)),
+        )
+        .child(
+            Label::new("Replacement")
+                .size(LabelSize::XSmall)
+                .color(Color::Muted),
+        )
+        .child(
+            v_flex()
+                .id("omega-sarah-selection-after")
+                .debug_selector(|| "omega.sarah.command-confirmation.selection-after".into())
+                .max_h(px(160.))
+                .overflow_y_scroll()
+                .child(Label::new(effect.replacement_text).size(LabelSize::Small)),
+        )
+        .into_any_element()
+}
+
+fn sarah_remaining_credit_label(
+    terms: &crate::composer_voice::SarahVoiceAdmissionTerms,
+) -> SharedString {
+    terms.remaining_credit_msat.map_or_else(
+        || {
+            if terms.cohort_ref.as_ref() == "sarah_voice_cohort:staging_owner_v1" {
+                "Not metered · staging owner entitlement".into()
+            } else {
+                "Unavailable from admission".into()
+            }
+        },
+        format_msat,
+    )
+}
+
+fn render_sarah_admission_terms(
+    terms: &crate::composer_voice::SarahVoiceAdmissionTerms,
+) -> AnyElement {
+    let rate = format!(
+        "{} / 1,000,000 tokens",
+        format_msat(terms.rate_msat_per_million_tokens)
+    );
+    let capabilities = terms.capabilities.iter().map(|capability| {
+        h_flex()
+            .w_full()
+            .gap_3()
+            .justify_between()
+            .items_start()
+            .child(Label::new(capability.capability.label()).size(LabelSize::Small))
+            .child(
+                Label::new(capability.confirmation.label())
+                    .size(LabelSize::XSmall)
+                    .color(Color::Muted),
+            )
+    });
+    let remaining_credit = sarah_remaining_credit_label(terms);
+    let terms_accessible_label = format!(
+        "Client profile {}. Credit mode {}. Admission cohort {}. Effective rate {} per 1,000,000 tokens. Credit hold {}. Remaining credit {}. Maximum session {} seconds. Transcript policy {}",
+        terms.client_profile,
+        terms.credit_mode.label(),
+        terms.cohort_ref,
+        format_msat(terms.rate_msat_per_million_tokens),
+        format_msat(terms.credit_hold_msat),
+        remaining_credit,
+        terms.max_duration_seconds,
+        terms.transcript_policy,
+    );
+    let capabilities_accessible_label = format!(
+        "Available voice actions. {}. Not available: {}.",
+        terms
+            .capabilities
+            .iter()
+            .map(|capability| format!(
+                "{}: {}",
+                capability.capability.label(),
+                capability.confirmation.label()
+            ))
+            .join(". "),
+        terms
+            .excluded_authorities
+            .iter()
+            .map(|authority| authority.label())
+            .join(", "),
+    );
+
+    v_flex()
+        .gap_3()
+        .child(
+            v_flex()
+                .id("omega-sarah-admission-terms")
+                .debug_selector(|| "omega.sarah.admission.terms".into())
+                .role(gpui::Role::Group)
+                .aria_label(terms_accessible_label)
+                .gap_1()
+                .child(sarah_admission_value_row(
+                    "Client profile",
+                    terms.client_profile.clone(),
+                ))
+                .child(sarah_admission_value_row(
+                    "Credit mode",
+                    terms.credit_mode.label(),
+                ))
+                .child(sarah_admission_value_row(
+                    "Admission cohort",
+                    terms.cohort_ref.clone(),
+                ))
+                .child(sarah_admission_value_row("Effective rate", rate))
+                .child(sarah_admission_value_row(
+                    "Credit hold",
+                    format_msat(terms.credit_hold_msat),
+                ))
+                .child(sarah_admission_value_row(
+                    "Remaining credit",
+                    remaining_credit,
+                ))
+                .child(sarah_admission_value_row(
+                    "Maximum session",
+                    format!("{} seconds", terms.max_duration_seconds),
+                ))
+                .child(sarah_admission_value_row(
+                    "Transcript policy",
+                    terms.transcript_policy.clone(),
+                )),
+        )
+        .child(
+            v_flex()
+                .id("omega-sarah-admission-capabilities")
+                .debug_selector(|| "omega.sarah.admission.capabilities".into())
+                .role(gpui::Role::Group)
+                .aria_label(capabilities_accessible_label)
+                .gap_1()
+                .child(Label::new("Available voice actions").size(LabelSize::Small))
+                .children(capabilities),
+        )
+        .when(!terms.excluded_authorities.is_empty(), |this| {
+            let excluded = terms
+                .excluded_authorities
+                .iter()
+                .map(|authority| authority.label())
+                .join(", ");
+            this.child(
+                Label::new(format!("Not available: {excluded}."))
+                    .size(LabelSize::Small)
+                    .color(Color::Muted),
+            )
+        })
+        .into_any_element()
+}
+
+const MAX_VISIBLE_SARAH_TRANSCRIPT_ROWS: usize = 100;
+
+fn render_sarah_voice_artifacts(
+    artifacts: &crate::composer_voice::SarahVoiceSessionArtifacts,
+) -> AnyElement {
+    use zed_actions::workroom::{ApproveSarahVoiceCommand, RejectSarahVoiceCommand};
+
+    let hidden_transcript_rows = artifacts
+        .transcript
+        .len()
+        .saturating_sub(MAX_VISIBLE_SARAH_TRANSCRIPT_ROWS);
+    let transcript_rows = artifacts
+        .transcript
+        .iter()
+        .skip(hidden_transcript_rows)
+        .enumerate()
+        .map(|(index, row)| {
+            v_flex()
+                .id(("omega-sarah-transcript-row", index))
+                .gap_0p5()
+                .child(
+                    Label::new(if row.complete {
+                        row.participant.label().to_string()
+                    } else {
+                        format!("{} · live", row.participant.label())
+                    })
+                    .size(LabelSize::XSmall)
+                    .color(Color::Muted),
+                )
+                .child(Label::new(row.text.clone()).size(LabelSize::Small))
+        });
+    let visible_transcript_rows = artifacts.transcript.len() - hidden_transcript_rows;
+
+    v_flex()
+        .id("omega-sarah-session-artifacts")
+        .debug_selector(|| "omega.sarah.session-artifacts".into())
+        .gap_3()
+        .when(!artifacts.transcript.is_empty(), |this| {
+            this.child(
+                v_flex()
+                    .id("omega-sarah-transcript")
+                    .debug_selector(|| "omega.sarah.transcript".into())
+                    .role(gpui::Role::Group)
+                    .aria_label(format!(
+                        "Transcript. Showing the newest {visible_transcript_rows} of {} rows.",
+                        artifacts.transcript.len()
+                    ))
+                    .gap_2()
+                    .child(Label::new("Transcript").size(LabelSize::Small))
+                    .when(hidden_transcript_rows > 0, |this| {
+                        this.child(
+                            Label::new(format!(
+                                "Showing the newest {MAX_VISIBLE_SARAH_TRANSCRIPT_ROWS} rows"
+                            ))
+                            .size(LabelSize::XSmall)
+                            .color(Color::Muted),
+                        )
+                    })
+                    .child(
+                        v_flex()
+                            .id("omega-sarah-transcript-scroll")
+                            .max_h(px(240.))
+                            .overflow_y_scroll()
+                            .gap_2()
+                            .children(transcript_rows),
+                    ),
+            )
+        })
+        .when_some(
+            artifacts.pending_confirmation.clone(),
+            |this, confirmation| {
+                let selection_context = confirmation.selection_effect.as_ref().map_or_else(
+                    String::new,
+                    |effect| {
+                        format!(
+                            "Replacement target {} from line {}, column {} through line {}, column {}. Selected text {}. Replacement text {}.",
+                            effect.target_path,
+                            effect.selection_start_line.saturating_add(1),
+                            effect.selection_start_column.saturating_add(1),
+                            effect.selection_end_line.saturating_add(1),
+                            effect.selection_end_column.saturating_add(1),
+                            effect.selected_text,
+                            effect.replacement_text,
+                        )
+                    },
+                );
+                let confirmation_accessible_label = format!(
+                    "Sarah requests confirmation. {}{}{} Request {}.",
+                    confirmation.copy,
+                    confirmation
+                        .detail
+                        .as_deref()
+                        .map(|detail| format!(" {detail}"))
+                        .unwrap_or_default(),
+                    (!selection_context.is_empty())
+                        .then(|| format!(" {selection_context}"))
+                        .unwrap_or_default(),
+                    confirmation.request_id
+                );
+                this.child(
+                    v_flex()
+                        .id("omega-sarah-command-confirmation")
+                        .debug_selector(|| "omega.sarah.command-confirmation".into())
+                        .role(gpui::Role::Group)
+                        .aria_label(confirmation_accessible_label)
+                        .gap_2()
+                        .child(Label::new("Sarah requests confirmation").color(Color::Warning))
+                        .child(Label::new(confirmation.copy).size(LabelSize::Small))
+                        .when_some(confirmation.detail, |this, detail| {
+                            this.child(
+                                v_flex()
+                                    .id("omega-sarah-confirmation-detail")
+                                    .max_h(px(160.))
+                                    .overflow_y_scroll()
+                                    .child(Label::new(detail).size(LabelSize::Small)),
+                            )
+                        })
+                        .when_some(confirmation.selection_effect, |this, effect| {
+                            this.child(render_sarah_selection_effect_preview(effect))
+                        })
+                        .child(
+                            Label::new(format!("Request: {}", confirmation.request_id))
+                                .size(LabelSize::XSmall)
+                                .color(Color::Muted),
+                        )
+                        .child(
+                            h_flex()
+                                .gap_1()
+                                .child(
+                                    Button::new("omega-sarah-command-approve", "Allow once")
+                                        .debug_selector(|| {
+                                            "omega.sarah.command-confirmation.allow-once".into()
+                                        })
+                                        .style(ButtonStyle::Filled)
+                                        .on_click(|_, window, cx| {
+                                            window.dispatch_action(
+                                                ApproveSarahVoiceCommand.boxed_clone(),
+                                                cx,
+                                            );
+                                        }),
+                                )
+                                .child(
+                                    Button::new("omega-sarah-command-reject", "Decline")
+                                        .debug_selector(|| {
+                                            "omega.sarah.command-confirmation.decline".into()
+                                        })
+                                        .style(ButtonStyle::Subtle)
+                                        .on_click(|_, window, cx| {
+                                            window.dispatch_action(
+                                                RejectSarahVoiceCommand.boxed_clone(),
+                                                cx,
+                                            );
+                                        }),
+                                ),
+                        ),
+                )
+            },
+        )
+        .when_some(artifacts.created_agent_thread.clone(), |this, receipt| {
+            this.child(
+                v_flex()
+                    .id("omega-sarah-agent-thread-receipt")
+                    .debug_selector(|| "omega.sarah.agent-thread-receipt".into())
+                    .gap_1()
+                    .child(Label::new("Omega Agent thread created").color(Color::Accent))
+                    .child(sarah_admission_value_row("Thread", receipt.thread_id))
+                    .child(sarah_admission_value_row(
+                        "Presentation",
+                        receipt.presentation.label(),
+                    ))
+                    .child(Label::new(receipt.status).size(LabelSize::Small)),
+            )
+        })
+        .into_any_element()
+}
+
 #[derive(Clone)]
 struct ThreadIdentityOperationError {
     source_binding: Option<omega_workbench_state::RepositoryBinding>,
@@ -1500,7 +1904,10 @@ pub struct AgentPanel {
     focus_handle: FocusHandle,
     base_view: BaseView,
     showing_new_conversation_front_door: bool,
+    showing_sarah_admission: bool,
     selected_front_door_mode: ConversationMode,
+    sarah_voice_admission: Entity<crate::composer_voice::SarahVoiceAdmissionProjection>,
+    _sarah_voice_admission_observation: Subscription,
     last_created_entry_kind: AgentPanelEntryKind,
     draft_thread: Option<Entity<ConversationView>>,
     retained_threads: HashMap<ThreadId, Entity<ConversationView>>,
@@ -1980,6 +2387,11 @@ impl AgentPanel {
         let project = workspace.project();
         let language_registry = project.read(cx).languages().clone();
         let workspace_id = workspace.database_id();
+        let workspace_entity_id = workspace.weak_handle().entity_id();
+        let sarah_voice_admission =
+            crate::composer_voice::sarah_voice_admission(workspace_entity_id, cx);
+        let sarah_voice_admission_observation =
+            cx.observe(&sarah_voice_admission, |_this, _projection, cx| cx.notify());
         let workbench_files_panel = workspace.panel::<ProjectPanel>(cx);
         let workbench_files_panel_observation = workbench_files_panel
             .as_ref()
@@ -2171,7 +2583,10 @@ impl AgentPanel {
             focus_handle: cx.focus_handle(),
             context_server_registry,
             showing_new_conversation_front_door: false,
+            showing_sarah_admission: false,
             selected_front_door_mode: ConversationMode::OmegaAgent,
+            sarah_voice_admission,
+            _sarah_voice_admission_observation: sarah_voice_admission_observation,
             draft_thread: None,
             retained_threads: HashMap::default(),
             terminals: HashMap::default(),
@@ -2508,6 +2923,7 @@ impl AgentPanel {
         cx: &mut Context<Self>,
     ) {
         self.showing_full_auto = false;
+        self.showing_sarah_admission = false;
         self.showing_new_conversation_front_door = true;
         self.selected_front_door_mode = mode;
 
@@ -2530,6 +2946,23 @@ impl AgentPanel {
             ConversationMode::Sarah => {}
         }
         self.focus_handle.focus(window, cx);
+        cx.emit(AgentPanelEvent::ActiveViewChanged);
+        cx.notify();
+    }
+
+    fn open_sarah_admission(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.set_last_created_entry_kind_from_user_action(AgentPanelEntryKind::Thread, cx);
+        self.showing_full_auto = false;
+        self.showing_new_conversation_front_door = false;
+        self.showing_sarah_admission = true;
+        self.selected_front_door_mode = ConversationMode::Sarah;
+        self.focus_handle.focus(window, cx);
+        window.defer(cx, |window, cx| {
+            window.dispatch_action(
+                zed_actions::workroom::PrepareVoiceAdmission.boxed_clone(),
+                cx,
+            );
+        });
         cx.emit(AgentPanelEvent::ActiveViewChanged);
         cx.notify();
     }
@@ -2770,8 +3203,9 @@ impl AgentPanel {
             },
         );
 
-        let sarah_readiness = ModeReadiness::NotSupportedInBuild {
-            reason: "Sarah conversations are not supported in this build".into(),
+        let sarah_readiness = ModeReadiness::SetupRequired {
+            reason: "Review Sarah's exact admission terms before microphone access".into(),
+            action: ModeSetupAction::RevealPreparedConversation,
         };
 
         [
@@ -2806,6 +3240,10 @@ impl AgentPanel {
         cx: &mut Context<Self>,
     ) {
         self.selected_front_door_mode = mode;
+        if mode == ConversationMode::Sarah {
+            self.open_sarah_admission(window, cx);
+            return;
+        }
         let Some(row) = self
             .new_conversation_mode_rows(cx)
             .into_iter()
@@ -4262,6 +4700,8 @@ impl AgentPanel {
             let workspace = self.workspace.clone();
             self.full_auto = Some(cx.new(|cx| FullAutoPanel::new(workspace, window, cx)));
         }
+        self.showing_sarah_admission = false;
+        self.showing_new_conversation_front_door = false;
         self.showing_full_auto = true;
         if focus {
             self.focus_handle(cx).focus(window, cx);
@@ -4878,6 +5318,8 @@ impl AgentPanel {
             };
             view.update(cx, |view, cx| view.resume(cx));
             self.showing_full_auto = false;
+            self.showing_sarah_admission = false;
+            self.showing_new_conversation_front_door = false;
             self.threads_sidebar_refusal = None;
             self.focus_handle.focus(window, cx);
             cx.emit(AgentPanelEvent::ActiveViewChanged);
@@ -6646,6 +7088,7 @@ impl AgentPanel {
         // the surface is retained, so returning to it restores the draft and
         // the selected run.
         self.showing_full_auto = false;
+        self.showing_sarah_admission = false;
         self.showing_new_conversation_front_door = false;
         if let Some(view) = self
             .public_channels
@@ -8202,19 +8645,29 @@ impl AgentPanel {
                             .readiness
                             .setup_action()
                             .map(ModeSetupAction::label);
-                        let actionable = matches!(row.readiness, ModeReadiness::Ready { .. })
+                        let actionable = mode == ConversationMode::Sarah
+                            || matches!(row.readiness, ModeReadiness::Ready { .. })
                             || action_label.is_some();
-                        let readiness_label = action_label.unwrap_or_else(|| row.readiness.label());
-                        let accessible_description = format!(
-                            "Executor: {}. Folder: {}. {}{}",
-                            row.executor,
-                            row.project,
-                            row.readiness.label(),
-                            reason
-                                .as_deref()
-                                .map(|reason| format!(": {reason}"))
-                                .unwrap_or_default()
-                        );
+                        let readiness_label = if mode == ConversationMode::Sarah {
+                            "Review admission"
+                        } else {
+                            action_label.unwrap_or_else(|| row.readiness.label())
+                        };
+                        let accessible_description = if mode == ConversationMode::Sarah {
+                            "Open Sarah admission to review exact price, credit hold, session limit, transcript policy, capabilities, and confirmations before microphone access."
+                                .to_string()
+                        } else {
+                            format!(
+                                "Executor: {}. Folder: {}. {}{}",
+                                row.executor,
+                                row.project,
+                                row.readiness.label(),
+                                reason
+                                    .as_deref()
+                                    .map(|reason| format!(": {reason}"))
+                                    .unwrap_or_default()
+                            )
+                        };
                         let button = Button::new(
                             ElementId::Name(
                                 format!("omega-new-conversation-{}", mode.token()).into(),
@@ -8294,6 +8747,229 @@ impl AgentPanel {
             .into_any_element()
     }
 
+    fn render_sarah_admission(&self, cx: &mut Context<Self>) -> AnyElement {
+        use crate::composer_voice::SarahVoiceAdmissionProjection;
+        use zed_actions::workroom::{EndVoice, RetryVoice, StartVoice, ToggleVoiceMute};
+
+        let projection = self.sarah_voice_admission.read(cx).clone();
+        let state_label = match &projection {
+            SarahVoiceAdmissionProjection::Loading { .. } => "Checking admission",
+            SarahVoiceAdmissionProjection::Ready { .. } => "Ready to start",
+            SarahVoiceAdmissionProjection::Active { .. } => "Session active",
+            SarahVoiceAdmissionProjection::Unavailable { .. } => "Unavailable",
+            SarahVoiceAdmissionProjection::Settled { .. } => "Session settled",
+        };
+        let state_color = match &projection {
+            SarahVoiceAdmissionProjection::Ready { .. }
+            | SarahVoiceAdmissionProjection::Active { .. }
+            | SarahVoiceAdmissionProjection::Settled { .. } => Color::Accent,
+            SarahVoiceAdmissionProjection::Unavailable { .. } => Color::Error,
+            SarahVoiceAdmissionProjection::Loading { .. } => Color::Muted,
+        };
+
+        let body = match projection {
+            SarahVoiceAdmissionProjection::Loading { detail } => v_flex()
+                .id("omega-sarah-admission-loading")
+                .debug_selector(|| "omega.sarah.admission.loading".into())
+                .gap_2()
+                .child(Label::new(detail).color(Color::Muted))
+                .child(
+                    Label::new(
+                        "The microphone stays off until account eligibility and exact session terms are available.",
+                    )
+                    .size(LabelSize::Small)
+                    .color(Color::Muted),
+                )
+                .into_any_element(),
+            SarahVoiceAdmissionProjection::Ready { terms } => v_flex()
+                .id("omega-sarah-admission-ready")
+                .debug_selector(|| "omega.sarah.admission.ready".into())
+                .gap_3()
+                .child(render_sarah_admission_terms(&terms))
+                .child(
+                    Button::new("omega-sarah-start-voice", "Start voice")
+                        .debug_selector(|| "omega.sarah.admission.start".into())
+                        .style(ButtonStyle::Filled)
+                        .aria_label("Start Sarah voice with the terms shown above")
+                        .on_click(|_, window, cx| {
+                            window.dispatch_action(StartVoice.boxed_clone(), cx);
+                        }),
+                )
+                .into_any_element(),
+            SarahVoiceAdmissionProjection::Active {
+                terms,
+                session_id,
+                artifacts,
+            } => v_flex()
+                .id("omega-sarah-admission-active")
+                .debug_selector(|| "omega.sarah.admission.active".into())
+                .gap_3()
+                .child(render_sarah_admission_terms(&terms))
+                .child(
+                    Label::new(format!("Session: {session_id}"))
+                        .size(LabelSize::XSmall)
+                        .color(Color::Muted),
+                )
+                .child(
+                    h_flex()
+                        .gap_1()
+                        .child(
+                            Button::new("omega-sarah-toggle-mute", "Mute or unmute")
+                                .style(ButtonStyle::Subtle)
+                                .on_click(|_, window, cx| {
+                                    window.dispatch_action(ToggleVoiceMute.boxed_clone(), cx);
+                                }),
+                        )
+                        .child(
+                            Button::new("omega-sarah-end-voice", "End voice")
+                                .style(ButtonStyle::Subtle)
+                                .on_click(|_, window, cx| {
+                                    window.dispatch_action(EndVoice.boxed_clone(), cx);
+                                }),
+                        ),
+                )
+                .child(render_sarah_voice_artifacts(&artifacts))
+                .into_any_element(),
+            SarahVoiceAdmissionProjection::Unavailable {
+                reason,
+                retryable,
+                cohort_ref,
+                refusal_reason,
+            } => {
+                let settlement_retry = refusal_reason
+                    .as_deref()
+                    .is_some_and(|reason| reason.starts_with("settlement_"));
+                v_flex()
+                    .id("omega-sarah-admission-unavailable")
+                    .debug_selector(|| "omega.sarah.admission.unavailable".into())
+                    .gap_2()
+                    .child(Label::new(reason).color(Color::Error))
+                    .when_some(cohort_ref, |this, cohort_ref| {
+                        this.child(sarah_admission_value_row("Admission cohort", cohort_ref))
+                    })
+                    .when_some(refusal_reason, |this, refusal_reason| {
+                        this.child(sarah_admission_value_row("Refusal reason", refusal_reason))
+                    })
+                    .child(
+                        Label::new(if settlement_retry {
+                            "The microphone is off. The original session target is retained until its final charge is recovered."
+                        } else if retryable {
+                            "The microphone is off. Reopen Sarah after the account, cohort, or network condition is resolved."
+                        } else {
+                            "The microphone is off. Credits do not override cohort admission."
+                        })
+                        .size(LabelSize::Small)
+                        .color(Color::Muted),
+                    )
+                    .when(settlement_retry && retryable, |this| {
+                        this.child(
+                            Button::new("omega-sarah-retry-settlement", "Retry settlement")
+                                .debug_selector(|| "omega.sarah.settlement.retry".into())
+                                .style(ButtonStyle::Filled)
+                                .on_click(|_, window, cx| {
+                                    window.dispatch_action(RetryVoice.boxed_clone(), cx);
+                                }),
+                        )
+                    })
+                    .into_any_element()
+            }
+            SarahVoiceAdmissionProjection::Settled {
+                final_charge_msat,
+                remaining_credit_msat,
+                receipt_ref,
+                transcript_recovery,
+                artifacts,
+            } => {
+                let remaining_credit_label = remaining_credit_msat.map_or_else(
+                    || SharedString::from("Unavailable from settlement"),
+                    format_msat,
+                );
+                let receipt_label = receipt_ref.unwrap_or_else(|| "Not returned".into());
+                let settlement_accessible_label = format!(
+                    "Sarah voice settled. Final charge {}. Remaining credit {}. Settlement receipt {}. Transcript recovery {}",
+                    format_msat(final_charge_msat),
+                    remaining_credit_label,
+                    receipt_label,
+                    transcript_recovery,
+                );
+                v_flex()
+                .id("omega-sarah-admission-settled")
+                .debug_selector(|| "omega.sarah.admission.settled".into())
+                .role(gpui::Role::Group)
+                .aria_label(settlement_accessible_label)
+                .gap_2()
+                .child(sarah_admission_value_row(
+                    "Final charge",
+                    format_msat(final_charge_msat),
+                ))
+                .child(sarah_admission_value_row(
+                    "Remaining credit",
+                    remaining_credit_label,
+                ))
+                .child(sarah_admission_value_row(
+                    "Settlement receipt",
+                    receipt_label,
+                ))
+                .child(sarah_admission_value_row(
+                    "Transcript recovery",
+                    transcript_recovery,
+                ))
+                .child(render_sarah_voice_artifacts(&artifacts))
+                .into_any_element()
+            }
+        };
+
+        v_flex()
+            .id("omega-sarah-admission")
+            .debug_selector(|| "omega.sarah.admission".into())
+            .size_full()
+            .overflow_y_scroll()
+            .items_center()
+            .px_6()
+            .py_4()
+            .child(
+                v_flex()
+                    .w_full()
+                    .max_w(px(720.))
+                    .gap_3()
+                    .child(
+                        Button::new("omega-sarah-admission-back", "Back to conversation modes")
+                            .style(ButtonStyle::Subtle)
+                            .on_click(cx.listener(|this, _, window, cx| {
+                                this.showing_sarah_admission = false;
+                                this.showing_new_conversation_front_door = true;
+                                this.focus_handle.focus(window, cx);
+                                cx.notify();
+                            })),
+                    )
+                    .child(
+                        h_flex()
+                            .justify_between()
+                            .gap_3()
+                            .child(Label::new("Sarah voice").size(LabelSize::Large))
+                            .child(
+                                Label::new(state_label)
+                                    .size(LabelSize::Small)
+                                    .color(state_color),
+                            ),
+                    )
+                    .child(
+                        Label::new("A bounded voice editor and delegation assistant")
+                            .size(LabelSize::Small)
+                            .color(Color::Default),
+                    )
+                    .child(
+                        Label::new(
+                            "Sarah can help with the active editor and can propose a new Omega Agent thread. Voice identity alone grants no durable or sensitive action authority.",
+                        )
+                        .size(LabelSize::Small)
+                        .color(Color::Muted),
+                    )
+                    .child(body),
+            )
+            .into_any_element()
+    }
+
     fn render_no_project_state(&self, cx: &mut Context<Self>) -> impl IntoElement {
         let focus_handle = self.focus_handle(cx);
 
@@ -8323,35 +8999,37 @@ impl AgentPanel {
         // beside it disabled.
         let can_create_entries = true;
         let supports_terminal = self.supports_terminal(cx);
-        let toolbar_state = if self.showing_new_conversation_front_door {
-            toolbar_surface_state(true, false, false)
-        } else {
-            toolbar_surface_state(
-                false,
-                matches!(self.base_view, BaseView::Terminal { .. }),
-                self.active_thread_has_messages(cx),
-            )
-        };
+        let toolbar_state =
+            if self.showing_new_conversation_front_door || self.showing_sarah_admission {
+                toolbar_surface_state(true, false, false)
+            } else {
+                toolbar_surface_state(
+                    false,
+                    matches!(self.base_view, BaseView::Terminal { .. }),
+                    self.active_thread_has_messages(cx),
+                )
+            };
         let showing_terminal = matches!(toolbar_state.mode, ToolbarMode::Terminal);
         let direct_without_target = self.showing_new_conversation_front_door
             && self.selected_front_door_mode == ConversationMode::DirectAgent
             && !matches!(self.selected_agent, Agent::Custom { .. });
 
-        let agent_for_new_threads = if self.showing_new_conversation_front_door {
-            match self.selected_front_door_mode {
-                ConversationMode::OmegaAgent | ConversationMode::Sarah => Agent::NativeAgent,
-                ConversationMode::DirectAgent => self.selected_agent.clone(),
-            }
-        } else {
-            self.active_conversation_view()
-                .map(|conversation| conversation.read(cx).agent_key().clone())
-                .unwrap_or_else(|| self.selected_agent.clone())
-        };
+        let agent_for_new_threads =
+            if self.showing_new_conversation_front_door || self.showing_sarah_admission {
+                match self.selected_front_door_mode {
+                    ConversationMode::OmegaAgent | ConversationMode::Sarah => Agent::NativeAgent,
+                    ConversationMode::DirectAgent => self.selected_agent.clone(),
+                }
+            } else {
+                self.active_conversation_view()
+                    .map(|conversation| conversation.read(cx).agent_key().clone())
+                    .unwrap_or_else(|| self.selected_agent.clone())
+            };
         let (selected_agent_custom_icon, selected_agent_label) = if showing_terminal {
             (None, SharedString::from("Terminal"))
         } else if direct_without_target {
             (None, SharedString::from("Direct Agent"))
-        } else if self.showing_new_conversation_front_door
+        } else if (self.showing_new_conversation_front_door || self.showing_sarah_admission)
             && self.selected_front_door_mode == ConversationMode::Sarah
         {
             (None, SharedString::from("Sarah"))
@@ -8421,11 +9099,10 @@ impl AgentPanel {
                                 }),
                         )
                         .item(
-                            ContextMenuEntry::new("Sarah — Voice access is not available yet")
-                                .action(Box::new(zed_actions::workroom::StartVoice))
+                            ContextMenuEntry::new("Sarah voice…")
+                                .action(Box::new(OpenSarahAdmission))
                                 .icon(IconName::OmegaAgent)
-                                .icon_color(Color::Accent)
-                                .disabled(true),
+                                .icon_color(Color::Accent),
                         )
                         .when(!omega_zero_base::is_active(), |menu| {
                             menu.item(
@@ -12978,6 +13655,9 @@ impl Render for AgentPanel {
             .child(self.render_toolbar(window, cx))
             .children(self.render_new_user_onboarding(window, cx))
             .map(|parent| {
+                if self.showing_sarah_admission {
+                    return parent.child(self.render_sarah_admission(cx));
+                }
                 if self.showing_new_conversation_front_door {
                     return parent.child(self.render_new_conversation_front_door(cx));
                 }
@@ -16881,7 +17561,7 @@ mod tests {
             assert!(matches!(rows[1].readiness, ModeReadiness::Ready { .. }));
             assert!(matches!(
                 rows[2].readiness,
-                ModeReadiness::NotSupportedInBuild { .. }
+                ModeReadiness::SetupRequired { .. }
             ));
             let draft = panel
                 .draft_thread
@@ -16966,7 +17646,7 @@ mod tests {
     }
 
     #[gpui::test]
-    async fn unavailable_modes_do_not_claim_or_fallback_to_prepared_omega(cx: &mut TestAppContext) {
+    async fn non_omega_modes_do_not_claim_or_fallback_to_prepared_omega(cx: &mut TestAppContext) {
         let (panel, mut cx) = setup_visible_panel(cx).await;
         panel.update_in(&mut cx, |panel, window, cx| {
             panel.new_thread(&NewThread, window, cx);
@@ -16982,21 +17662,274 @@ mod tests {
             (draft.entity_id(), draft.read(cx).thread_id)
         });
 
-        for mode in [ConversationMode::DirectAgent, ConversationMode::Sarah] {
-            panel.update_in(&mut cx, |panel, window, cx| {
-                panel.activate_new_conversation_mode(mode, window, cx);
-            });
-            panel.read_with(&cx, |panel, cx| {
-                assert!(panel.showing_new_conversation_front_door);
-                assert!(panel.active_conversation_view().is_none());
-                let draft = panel
-                    .draft_thread
-                    .as_ref()
-                    .expect("refusal must retain the prepared Omega conversation");
-                assert_eq!(draft.entity_id(), prepared_entity);
-                assert_eq!(draft.read(cx).thread_id, prepared_thread_id);
-            });
-        }
+        panel.update_in(&mut cx, |panel, window, cx| {
+            panel.activate_new_conversation_mode(ConversationMode::DirectAgent, window, cx);
+        });
+        panel.read_with(&cx, |panel, cx| {
+            assert!(panel.showing_new_conversation_front_door);
+            assert!(panel.active_conversation_view().is_none());
+            let draft = panel
+                .draft_thread
+                .as_ref()
+                .expect("Direct setup must retain the prepared Omega conversation");
+            assert_eq!(draft.entity_id(), prepared_entity);
+            assert_eq!(draft.read(cx).thread_id, prepared_thread_id);
+        });
+
+        panel.update_in(&mut cx, |panel, window, cx| {
+            panel.activate_new_conversation_mode(ConversationMode::Sarah, window, cx);
+        });
+        panel.read_with(&cx, |panel, cx| {
+            assert!(panel.showing_sarah_admission);
+            assert!(!panel.showing_new_conversation_front_door);
+            assert!(panel.active_conversation_view().is_none());
+            let draft = panel
+                .draft_thread
+                .as_ref()
+                .expect("Sarah admission must retain the prepared Omega conversation");
+            assert_eq!(draft.entity_id(), prepared_entity);
+            assert_eq!(draft.read(cx).thread_id, prepared_thread_id);
+        });
+    }
+
+    #[gpui::test]
+    async fn sarah_admission_action_renders_fail_closed_and_exact_terms(cx: &mut TestAppContext) {
+        use crate::composer_voice::{
+            SarahAgentThreadPresentation, SarahVoiceAdmissionProjection, SarahVoiceAdmissionTerms,
+            SarahVoiceAgentThreadReceipt, SarahVoiceCapability, SarahVoiceCapabilityId,
+            SarahVoiceConfirmation, SarahVoiceCreditMode, SarahVoiceExcludedAuthority,
+            SarahVoiceParticipant, SarahVoicePendingConfirmation, SarahVoiceSelectionEffectPreview,
+            SarahVoiceSessionArtifacts, SarahVoiceTranscriptRow,
+        };
+
+        let (panel, mut cx) = setup_visible_panel(cx).await;
+        let admission = panel.read_with(&cx, |panel, _cx| panel.sarah_voice_admission.clone());
+        let terms = SarahVoiceAdmissionTerms {
+            client_profile: "omega_editor".into(),
+            cohort_ref: "sarah_voice_cohort:staging_owner_v1".into(),
+            credit_mode: SarahVoiceCreditMode::StagingOwnerEntitlement,
+            rate_msat_per_million_tokens: 64_000_000,
+            credit_hold_msat: 256_000,
+            remaining_credit_msat: None,
+            max_duration_seconds: 300,
+            transcript_policy: "Stored locally and recoverable after reconnect.".into(),
+            capabilities: vec![
+                SarahVoiceCapability {
+                    capability: SarahVoiceCapabilityId::ContextRead,
+                    confirmation: SarahVoiceConfirmation::NoExtraConfirmation,
+                },
+                SarahVoiceCapability {
+                    capability: SarahVoiceCapabilityId::SaveDocument,
+                    confirmation: SarahVoiceConfirmation::ConfirmEachAction,
+                },
+            ],
+            excluded_authorities: vec![
+                SarahVoiceExcludedAuthority::DirectShell,
+                SarahVoiceExcludedAuthority::DirectGit,
+                SarahVoiceExcludedAuthority::Payment,
+                SarahVoiceExcludedAuthority::CredentialAccess,
+                SarahVoiceExcludedAuthority::DeviceControl,
+            ],
+        };
+        assert_eq!(
+            sarah_remaining_credit_label(&terms).as_ref(),
+            "Not metered · staging owner entitlement"
+        );
+        let mut legacy_short_cohort = terms.clone();
+        legacy_short_cohort.cohort_ref = "staging_owner_v1".into();
+        assert_eq!(
+            sarah_remaining_credit_label(&legacy_short_cohort).as_ref(),
+            "Unavailable from admission"
+        );
+        admission.update(&mut cx, |projection, cx| {
+            *projection = SarahVoiceAdmissionProjection::Loading {
+                detail: "Checking alpha cohort and exact terms.".into(),
+            };
+            cx.notify();
+        });
+
+        cx.dispatch_action(OpenSarahAdmission);
+        cx.run_until_parked();
+
+        panel.read_with(&cx, |panel, _cx| {
+            assert!(panel.showing_sarah_admission);
+            assert!(!panel.showing_new_conversation_front_door);
+        });
+        let loading = cx.debug_render_snapshot();
+        assert_eq!(
+            loading.occurrences("omega.sarah.admission.loading").len(),
+            1
+        );
+        assert!(
+            loading
+                .occurrences("omega.sarah.admission.start")
+                .is_empty()
+        );
+
+        admission.update(&mut cx, |projection, cx| {
+            *projection = SarahVoiceAdmissionProjection::Unavailable {
+                reason: "This account is outside the active Sarah cohort.".into(),
+                retryable: false,
+                cohort_ref: Some("alpha_v1".into()),
+                refusal_reason: Some("cohort_inactive".into()),
+            };
+            cx.notify();
+        });
+        cx.run_until_parked();
+        let unavailable = cx.debug_render_snapshot();
+        assert_eq!(
+            unavailable
+                .occurrences("omega.sarah.admission.unavailable")
+                .len(),
+            1
+        );
+        assert!(
+            unavailable
+                .occurrences("omega.sarah.admission.start")
+                .is_empty()
+        );
+
+        admission.update(&mut cx, |projection, cx| {
+            *projection = SarahVoiceAdmissionProjection::Unavailable {
+                reason: "Final-charge recovery is temporarily unavailable.".into(),
+                retryable: true,
+                cohort_ref: None,
+                refusal_reason: Some("settlement_unavailable".into()),
+            };
+            cx.notify();
+        });
+        cx.run_until_parked();
+        let settlement_unavailable = cx.debug_render_snapshot();
+        assert_eq!(
+            settlement_unavailable
+                .occurrences("omega.sarah.settlement.retry")
+                .len(),
+            1
+        );
+
+        admission.update(&mut cx, |projection, cx| {
+            *projection = SarahVoiceAdmissionProjection::Ready { terms };
+            cx.notify();
+        });
+        cx.run_until_parked();
+        let ready = cx.debug_render_snapshot();
+        assert_eq!(ready.occurrences("omega.sarah.admission").len(), 1);
+        assert_eq!(ready.occurrences("omega.sarah.admission.ready").len(), 1);
+        assert_eq!(ready.occurrences("omega.sarah.admission.terms").len(), 1);
+        assert_eq!(ready.occurrences("omega.sarah.admission.start").len(), 1);
+
+        let artifacts = SarahVoiceSessionArtifacts {
+            transcript: vec![
+                SarahVoiceTranscriptRow {
+                    thread_ref: "thread.1".into(),
+                    session_ref: "session.1".into(),
+                    item_id: "utterance.1".into(),
+                    participant: SarahVoiceParticipant::User,
+                    text: "Open the current file.".into(),
+                    complete: true,
+                },
+                SarahVoiceTranscriptRow {
+                    thread_ref: "thread.1".into(),
+                    session_ref: "session.1".into(),
+                    item_id: "utterance.2".into(),
+                    participant: SarahVoiceParticipant::Sarah,
+                    text: "I can do that after confirmation.".into(),
+                    complete: true,
+                },
+            ],
+            pending_confirmation: Some(SarahVoicePendingConfirmation {
+                request_id: "request.1".into(),
+                copy: "Replace the current editor selection with 5 characters?".into(),
+                detail: None,
+                selection_effect: Some(SarahVoiceSelectionEffectPreview {
+                    workspace_ref: "workspace.omega.supervised".into(),
+                    document_version: "omega-buffer-v1:0=7".into(),
+                    target_path: "src/main.rs".into(),
+                    selection_start_line: 2,
+                    selection_start_column: 4,
+                    selection_end_line: 2,
+                    selection_end_column: 10,
+                    selected_text: "before".into(),
+                    replacement_text: "after".into(),
+                }),
+            }),
+            created_agent_thread: Some(SarahVoiceAgentThreadReceipt {
+                thread_id: "thread.agent.1".into(),
+                presentation: SarahAgentThreadPresentation::Background,
+                status: "Running in the background".into(),
+            }),
+        };
+        admission.update(&mut cx, |projection, cx| {
+            *projection = SarahVoiceAdmissionProjection::Active {
+                terms: match projection {
+                    SarahVoiceAdmissionProjection::Ready { terms } => terms.clone(),
+                    _ => panic!("expected ready admission"),
+                },
+                session_id: "session.1".into(),
+                artifacts: artifacts.clone(),
+            };
+            cx.notify();
+        });
+        cx.run_until_parked();
+        let active = cx.debug_render_snapshot();
+        assert_eq!(active.occurrences("omega.sarah.transcript").len(), 1);
+        assert_eq!(
+            active
+                .occurrences("omega.sarah.command-confirmation.allow-once")
+                .len(),
+            1
+        );
+        assert_eq!(
+            active
+                .occurrences("omega.sarah.command-confirmation.decline")
+                .len(),
+            1
+        );
+        assert_eq!(
+            active
+                .occurrences("omega.sarah.command-confirmation.effect")
+                .len(),
+            1
+        );
+        assert_eq!(
+            active
+                .occurrences("omega.sarah.command-confirmation.selection-before")
+                .len(),
+            1
+        );
+        assert_eq!(
+            active
+                .occurrences("omega.sarah.command-confirmation.selection-after")
+                .len(),
+            1
+        );
+        assert_eq!(
+            active.occurrences("omega.sarah.agent-thread-receipt").len(),
+            1
+        );
+
+        admission.update(&mut cx, |projection, cx| {
+            *projection = SarahVoiceAdmissionProjection::Settled {
+                final_charge_msat: 128_000,
+                remaining_credit_msat: Some(7_872_000),
+                receipt_ref: Some("settlement.receipt.1".into()),
+                transcript_recovery: "Recovered 4 transcript turns from local storage.".into(),
+                artifacts,
+            };
+            cx.notify();
+        });
+        cx.run_until_parked();
+
+        let settled = cx.debug_render_snapshot();
+        assert_eq!(
+            settled.occurrences("omega.sarah.admission.settled").len(),
+            1
+        );
+        assert!(
+            settled
+                .occurrences("omega.sarah.admission.start")
+                .is_empty()
+        );
     }
 
     #[gpui::test]

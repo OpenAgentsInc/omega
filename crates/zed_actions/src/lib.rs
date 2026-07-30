@@ -889,12 +889,18 @@ pub mod workroom {
             SendMessage,
             /// Sends a typed interrupt intent for the active Sarah turn.
             InterruptTurn,
+            /// Loads Sarah voice admission terms without opening audio or reserving credit.
+            PrepareVoiceAdmission,
             /// Starts Sarah's managed Realtime voice session.
             StartVoice,
             /// Mutes or unmutes Sarah's microphone capture.
             ToggleVoiceMute,
             /// Interrupts Sarah's current spoken response.
             InterruptVoice,
+            /// Approves the currently projected Sarah command exactly once.
+            ApproveSarahVoiceCommand,
+            /// Declines the currently projected Sarah command.
+            RejectSarahVoiceCommand,
             /// Ends Sarah's managed Realtime voice session.
             EndVoice,
             /// Retries Sarah's managed Realtime voice session after a failure.
