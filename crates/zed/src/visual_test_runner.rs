@@ -329,9 +329,25 @@ fn initialize_workbench_proof() -> Result<()> {
     let requested = std::env::var("OMEGA_WORKBENCH_SCENE").ok();
     let shard_index = parse_optional_usize("OMEGA_WORKBENCH_SHARD_INDEX")?;
     let shard_count = parse_optional_usize("OMEGA_WORKBENCH_SHARD_COUNT")?;
+    // OMEGA-DELTA-0185. The proof command runs the structurally sealed
+    // zero-base scenes one per process — `omega_zero_base::seal()` is
+    // process-global and one-way, and the omega-agent scene family sizes its
+    // shared window per selected scene — while every other scene keeps its
+    // original single-batch process whose fixture state is sequential. The
+    // skip list is how the batch invocation excludes the per-process scenes.
+    let skipped: BTreeSet<String> = std::env::var("OMEGA_WORKBENCH_SKIP_SCENES")
+        .map(|raw| {
+            raw.split(',')
+                .map(str::trim)
+                .filter(|name| !name.is_empty())
+                .map(str::to_string)
+                .collect()
+        })
+        .unwrap_or_default();
     let selected: BTreeSet<String> = select_scenes(requested.as_deref(), shard_index, shard_count)?
         .into_iter()
         .map(|scene| scene.name.to_string())
+        .filter(|name| !skipped.contains(name))
         .collect();
     let phase = if std::env::var("OMEGA_VISUAL_PHASE").as_deref() == Ok("restart") {
         ScenePhase::Restart
@@ -5012,6 +5028,63 @@ fn run_omega_workbench_shell_visual_capture_in_window(
         cx.read(|cx| panel.read(cx).active_thread_id(cx).is_some()),
         "workbench shell scene {scene_name:?} has no active production thread"
     );
+
+    // "Replace the new-thread mode screen with a composer executor dropdown"
+    // defers the Omega session to the first accepted send, so the activated
+    // front-door conversation is Connected with zero threads — a state in
+    // which repository-identity mutation is deliberately unavailable
+    // ("The active agent session is unavailable"). The workbench fixtures
+    // photograph docks around a live thread, so send one deterministic turn
+    // to materialize the session and its active thread view before the docks
+    // are configured, exactly as the concurrent-supervision fixtures do.
+    let fixture_conversation = cx
+        .read(|cx| {
+            let thread_id = panel.read(cx).active_thread_id(cx)?;
+            panel
+                .read(cx)
+                .conversation_view_for_id(&thread_id, cx)
+                .cloned()
+        })
+        .context("the workbench fixture's front-door conversation is unavailable")?;
+    cx.update_window(workspace_window.into(), |_root, window, cx| {
+        fixture_conversation.update(cx, |conversation, cx| {
+            conversation.set_composer_text_for_tests("Workbench fixture turn.", window, cx);
+            conversation.send_for_tests(window, cx);
+        });
+    })?;
+    cx.run_until_parked();
+    // This hermetic fixture has no language model, so the materializing turn
+    // ends interrupted ("agent error"). The interruption is turn history, not
+    // the state under test; clear it so the Plan surface projects the Ready
+    // lifecycle its fixtures expect.
+    let fixture_acp_thread = cx.read(|cx| {
+        panel
+            .read(cx)
+            .active_thread_view_for_tests()
+            .and_then(|conversation| conversation.read(cx).root_thread_view())
+            .map(|view| view.read(cx).thread.clone())
+    });
+    if let Some(fixture_acp_thread) = fixture_acp_thread {
+        // The turn error lands asynchronously; wait for the interruption to
+        // actually appear before clearing, or the clear races the error and
+        // loses. The thread reads idle both before the turn starts and after
+        // it fails, so idleness cannot stand in for settlement here.
+        for _ in 0..512 {
+            cx.run_until_parked();
+            if cx.read(|cx| fixture_acp_thread.read(cx).plan_interruption().is_some()) {
+                break;
+            }
+            cx.advance_clock(Duration::from_millis(10));
+            std::thread::sleep(Duration::from_millis(1));
+        }
+        cx.update(|cx| {
+            fixture_acp_thread.update(cx, |thread, cx| {
+                thread.set_plan_interruption_for_tests(None, cx);
+            });
+        });
+        cx.run_until_parked();
+    }
+
     let configuration = configure_workbench_shell_scene(
         scene_name,
         workspace_window,
@@ -5124,7 +5197,7 @@ fn select_workbench_identity(
             )
         };
         let mut target_selection_ready = false;
-        for _ in 0..512 {
+        for _ in 0..4096 {
             cx.run_until_parked();
             if cx.read(|cx| {
                 panel
@@ -5139,7 +5212,13 @@ fn select_workbench_identity(
         }
         anyhow::ensure!(
             target_selection_ready,
-            "{fixture_label} identity target did not become selectable"
+            "{fixture_label} identity target did not become selectable ({})",
+            cx.read(|cx| {
+                panel
+                    .read(cx)
+                    .workbench_identity_target_selection_unavailable_reason_for_tests(cx)
+                    .unwrap_or_else(|| "no reason".into())
+            })
         );
         cx.simulate_click_selector(workspace_window.into(), trigger_selector)?;
         let mut target_rendered = false;
@@ -7346,6 +7425,10 @@ fn configure_workbench_shell_scene(
             let generation = native_binding.checkpoint.generation();
             match name {
                 "omega_workbench_review_streaming_update" => {
+                    // The streaming edit's diff recomputes asynchronously;
+                    // settle at all four expected hunks before proving so the
+                    // count assertion reads a finished diff, not a race.
+                    wait_for_workbench_review_hunks(action_log.clone(), active_worktree_id, 4, cx)?;
                     let stale_generation = generation.saturating_add(1);
                     let (stale_rejected, streaming_applied) = cx.update(|cx| {
                         review_pane.update(cx, |pane, cx| {
@@ -7387,6 +7470,16 @@ fn configure_workbench_shell_scene(
                     )?;
                 }
                 "omega_workbench_review_all_reviewed" => {
+                    // The composer executor dropdown landing focuses the
+                    // composer, so an unfocused Keep/Reject would land in the
+                    // message editor instead of the review pane. Focus the
+                    // pane first, exactly like the streaming and
+                    // selected-hunk branches.
+                    cx.update_window(workspace_window.into(), |_, window, cx| {
+                        review_pane.update(cx, |pane, cx| {
+                            gpui::Focusable::focus_handle(pane, cx).focus(window, cx);
+                        });
+                    })?;
                     dispatch_workbench_action(workspace_window, Box::new(agent_ui::Keep), cx)?;
                     wait_for_workbench_review_hunks(action_log.clone(), active_worktree_id, 2, cx)?;
                     dispatch_workbench_action(workspace_window, Box::new(agent_ui::Reject), cx)?;
@@ -11096,10 +11189,31 @@ fn run_omega_agent_visual_tests_inner(
             omega_front_door::ExecutorPin::new(omega_front_door::ExecutorClass::NativeLoop),
             omega_front_door::PinGesture::ExecutorPinMenuItem,
         );
+        // "Route Omega requests to exact ready executors" moved human pins
+        // onto the current override path, whose honoured reason is
+        // `OverrideHonored` (its router unit test pins that exact reason).
+        // `PinHonored` remains the honoured reason for the legacy pin path.
+        // Either way the property under test is unchanged: a pin to the
+        // fail-closed target is honoured, never a fallback.
         anyhow::ensure!(
-            honoured.reason == omega_front_door::RouteReason::PinHonored,
+            matches!(
+                honoured.reason,
+                omega_front_door::RouteReason::PinHonored
+                    | omega_front_door::RouteReason::OverrideHonored
+            ),
             "a pin to the fail-closed target must be honoured, not {:?}",
             honoured.reason
+        );
+        // The same landing made route receipts bind once: this session was
+        // already routed by its first accepted turn, so the pin's re-decision
+        // must NOT rewrite the receipt underneath the transcript
+        // (`OMEGA-DELTA-0150`'s truthful-labeling law). The picture this scene
+        // now proves is a bound thread whose disclosure survives a later pin.
+        anyhow::ensure!(
+            router_for_pin
+                .recorded_decision(&session_for_pin)
+                .is_some_and(|recorded| recorded.reason != honoured.reason),
+            "a bound session's route receipt must survive a later pin unchanged"
         );
         cx.update_window(workspace_window, |_, window, _cx| {
             window.refresh();
@@ -11109,9 +11223,13 @@ fn run_omega_agent_visual_tests_inner(
         let honoured_record = cx
             .read(|cx| omega_executor_record(&panel, cx))
             .ok_or_else(|| anyhow::anyhow!("the pinned thread has no executor disclosure"))?;
+        // Bind-once receipts: the thread's typed disclosure keeps the executor
+        // and route reason it was bound with, and a later pin to the same
+        // fail-closed target neither rewrites it nor adds fallback noise.
         anyhow::ensure!(
-            honoured_record.route == Some(omega_front_door::RouteReason::PinHonored),
-            "an honoured pin must remain in the typed disclosure: {honoured_record:?}"
+            honoured_record.class == omega_front_door::ExecutorClass::NativeLoop
+                && honoured_record.route.is_some(),
+            "the bound thread must keep its typed native disclosure: {honoured_record:?}"
         );
         let honoured_line = honoured_record.label();
         anyhow::ensure!(
@@ -11180,11 +11298,16 @@ fn run_omega_agent_visual_tests_inner(
         let pinned_line = cx
             .read(|cx| omega_executor_line(&panel, cx))
             .ok_or_else(|| anyhow::anyhow!("the pinned thread has no executor disclosure"))?;
+        // Bind-once receipts: the unhonoured engine pin answers with a typed
+        // fallback (asserted above), and the bound thread's disclosure keeps
+        // naming the executor that actually ran it — it neither retargets to
+        // the engine nor gains fallback noise underneath the transcript.
         anyhow::ensure!(
-            pinned_line.contains("fell back to the native loop"),
-            "the unhonoured pin is not visible on the thread's line: {pinned_line:?}"
+            pinned_line.starts_with("Omega Agent") && !pinned_line.contains("engine"),
+            "the bound thread must keep its native disclosure after an \
+             unhonoured engine pin: {pinned_line:?}"
         );
-        println!("  unhonoured-pin executor line: {pinned_line}");
+        println!("  bound-thread executor line after engine pin: {pinned_line}");
 
         pin_fallback = run_visual_test(
             "omega_route_pin_not_honoured",

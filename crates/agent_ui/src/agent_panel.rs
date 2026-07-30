@@ -14399,6 +14399,13 @@ impl AgentPanel {
             .is_none()
     }
 
+    pub fn workbench_identity_target_selection_unavailable_reason_for_tests(
+        &self,
+        cx: &App,
+    ) -> Option<SharedString> {
+        self.thread_identity_target_selection_unavailable_reason(cx)
+    }
+
     pub fn workbench_branch_menu_for_tests(
         &self,
     ) -> Option<Entity<git_ui::branch_picker::BranchList>> {

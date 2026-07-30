@@ -923,6 +923,10 @@ def write_report(path: Path, receipt: dict) -> None:
         f"- Overall status: **{receipt['status']}**",
         f"- Receipt digest: `{receipt['evidence_sha256']}`",
         "",
+        "Regenerate: build the candidate with `script/bundle-omega-rc`, then "
+        "run `script/omega-release-gate --report docs/omega/release-gate.md "
+        "--receipt-copy docs/omega/release-gate/<date>-<candidate>.gate.json`.",
+        "",
         "| Row | Status | Issues | Evidence / owner instruction |",
         "| --- | --- | --- | --- |",
     ]

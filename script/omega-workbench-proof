@@ -151,12 +151,22 @@ if [[ "$list_scenes" -eq 1 ]]; then
   exit 0
 fi
 
-run_seed() {
+# One scene per runner process (OMEGA-DELTA-0185). The runner's own setup
+# assumes it: `omega_zero_base::seal()` is process-global and one-way, the
+# omega-agent scene family sizes its shared window per selected scene, and the
+# workbench fixture families accumulate worktrees, threads, and sidebar state
+# that make a shared-process render diverge from the recorded baseline.
+# Enumerating the selection and running every scene in its own
+# recording+restart process pair keeps each capture on exactly the surface its
+# baseline was recorded from. The runner's OMEGA_WORKBENCH_SKIP_SCENES filter
+# remains available for bounded diagnostic batches.
+run_runner_pass() {
+  # One recording+restart process pair. $1 seed, $2 output, $3 scene name or
+  # empty for the batch, $4 skip list for the batch invocation.
   local current_seed="$1"
-  local seed_output="$output_root"
-  if [[ "$iterations" -gt 1 ]]; then
-    seed_output="$output_root/seed-$current_seed"
-  fi
+  local seed_output="$2"
+  local scene_name="$3"
+  local skip_list="$4"
   local proof_data_dir
   proof_data_dir="$(mktemp -d "${TMPDIR:-/tmp}/omega-workbench-proof.XXXXXX")"
 
@@ -166,12 +176,17 @@ run_seed() {
   export OMEGA_WORKBENCH_OUTPUT_DIR="$seed_output"
   export OMEGA_VISUAL_DATA_DIR="$proof_data_dir"
   export SEED="$current_seed"
-  if [[ -n "$selected_scene" ]]; then
-    export OMEGA_WORKBENCH_SCENE="$selected_scene"
+  if [[ -n "$scene_name" ]]; then
+    export OMEGA_WORKBENCH_SCENE="$scene_name"
   else
     unset OMEGA_WORKBENCH_SCENE || true
   fi
-  if [[ -n "$shard_index" ]]; then
+  if [[ -n "$skip_list" ]]; then
+    export OMEGA_WORKBENCH_SKIP_SCENES="$skip_list"
+  else
+    unset OMEGA_WORKBENCH_SKIP_SCENES || true
+  fi
+  if [[ -n "$shard_index" && -z "$scene_name" ]]; then
     export OMEGA_WORKBENCH_SHARD_INDEX="$shard_index"
     export OMEGA_WORKBENCH_SHARD_COUNT="$shard_count"
   else
@@ -185,10 +200,8 @@ run_seed() {
 
   local recording_result=0
   local restart_result=0
-  echo "==> recording phase (seed $current_seed)"
   unset OMEGA_VISUAL_PHASE || true
   "$runner" || recording_result=$?
-  echo "==> cold restart phase (seed $current_seed)"
   if [[ "$recording_result" -eq 0 ]]; then
     OMEGA_WORKBENCH_RECORDING_SUCCEEDED=1 OMEGA_VISUAL_PHASE=restart "$runner" \
       || restart_result=$?
@@ -204,8 +217,8 @@ run_seed() {
   rm -rf "$proof_data_dir"
   if [[ "$result" -ne 0 ]]; then
     local reproduction=("$0")
-    if [[ -n "$selected_scene" ]]; then
-      reproduction+=(--scene "$selected_scene")
+    if [[ -n "$scene_name" ]]; then
+      reproduction+=(--scene "$scene_name")
     fi
     reproduction+=(--seed "$current_seed")
     if [[ "$proof_lane" == "semantic" ]]; then
@@ -213,17 +226,75 @@ run_seed() {
     else
       reproduction+=(--pixel-only)
     fi
-    if [[ -n "$shard_index" ]]; then
+    if [[ -n "$shard_index" && -z "$scene_name" ]]; then
       reproduction+=(--shard-index "$shard_index" --shard-count "$shard_count")
     fi
     reproduction+=(--output "$seed_output")
     if [[ "$update_baseline" -eq 1 ]]; then
       reproduction+=(--update)
     fi
-    echo "proof failed; reproduce with:" >&2
+    echo "proof pass failed; reproduce with:" >&2
     printf '  %q' "${reproduction[@]}" >&2
     printf '\n' >&2
     return "$result"
+  fi
+}
+
+# The shard filter must agree with `select_scenes` in
+# `crates/omega_workbench_harness`: position parity over the full catalog.
+selected_scene_names() {
+  OMEGA_WORKBENCH_LIST_SCENES=1 OMEGA_WORKBENCH_LIST_FORMAT=json "$runner" |
+    python3 -c '
+import json
+import os
+import sys
+
+scenes = [scene["name"] for scene in json.load(sys.stdin)]
+index = os.environ.get("PROOF_SHARD_INDEX")
+count = os.environ.get("PROOF_SHARD_COUNT")
+if index is not None and count is not None:
+    index, count = int(index), int(count)
+    scenes = [name for position, name in enumerate(scenes) if position % count == index]
+    if not scenes:
+        raise SystemExit(f"workbench scene shard {index}/{count} is empty")
+print("\n".join(scenes))
+'
+}
+
+run_seed() {
+  local current_seed="$1"
+  local seed_output="$output_root"
+  if [[ "$iterations" -gt 1 ]]; then
+    seed_output="$output_root/seed-$current_seed"
+  fi
+
+  local scene_names
+  if [[ -n "$selected_scene" ]]; then
+    scene_names="$selected_scene"
+  elif [[ -n "$shard_index" ]]; then
+    scene_names="$(PROOF_SHARD_INDEX="$shard_index" PROOF_SHARD_COUNT="$shard_count" \
+      selected_scene_names)"
+  else
+    scene_names="$(selected_scene_names)"
+  fi
+  if [[ -z "$scene_names" ]]; then
+    echo "no scenes selected" >&2
+    return 2
+  fi
+
+  local failed_scenes=()
+  local scene_name
+  while IFS= read -r scene_name; do
+    [[ -z "$scene_name" ]] && continue
+    echo "==> scene $scene_name (seed $current_seed)"
+    if ! run_runner_pass "$current_seed" "$seed_output" "$scene_name" ""; then
+      failed_scenes+=("$scene_name")
+    fi
+  done <<< "$scene_names"
+
+  if [[ "${#failed_scenes[@]}" -gt 0 ]]; then
+    echo "proof failed for ${#failed_scenes[@]} scene(s): ${failed_scenes[*]}" >&2
+    return 1
   fi
 }
 
