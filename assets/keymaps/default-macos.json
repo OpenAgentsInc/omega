@@ -754,10 +754,7 @@
       "cmd-shift-t": "pane::ReopenClosedItem",
       "cmd-k cmd-p": "workspace::ReopenLastPicker",
       "cmd-k cmd-s": "omega::OpenKeymap",
-      "cmd-k cmd-t": "theme_selector::Toggle",
       "cmd-k cmd-shift-t": "theme::ToggleMode",
-      "ctrl-alt-cmd-p": "settings_profile_selector::Toggle",
-      "cmd-t": "project_symbols::Toggle",
       "cmd-p": "file_finder::Toggle",
       "cmd-shift-p": "command_palette::Toggle",
       "cmd-shift-e": "project_panel::ToggleFocus",
@@ -768,9 +765,6 @@
       // not system-reserved, and sits on the same letter as `cmd-shift-a`.
       "ctrl-cmd-a": "agent::ToggleFocus",
       "cmd-alt-s": "workspace::SaveAll",
-      "cmd-k n": "encoding_selector::Toggle",
-      "cmd-k m": "language_selector::Toggle",
-      "cmd-k cmd-m": "toolchain::AddToolchain",
       "escape": "workspace::Unfollow",
       "cmd-k cmd-left": "workspace::ActivatePaneLeft",
       "cmd-k cmd-right": "workspace::ActivatePaneRight",
@@ -780,7 +774,6 @@
       "cmd-k shift-right": "workspace::SwapPaneRight",
       "cmd-k shift-up": "workspace::SwapPaneUp",
       "cmd-k shift-down": "workspace::SwapPaneDown",
-      "cmd-shift-x": "omega::Extensions",
       "cmd-w": "workspace::CloseActiveDock"
     }
   },
@@ -935,7 +928,6 @@
       "ctrl-alt-cmd-f": "workspace::FollowNextCollaborator",
       // TODO: Move this to a dock open action
       // Only available in debug builds: opens an element inspector for development.
-      "cmd-alt-i": "dev::ToggleInspector"
     }
   },
   {
@@ -1144,7 +1136,6 @@
     "context": "ToolchainSelector",
     "use_key_equivalents": true,
     "bindings": {
-      "cmd-shift-a": "toolchain::AddToolchain"
     }
   },
   {
@@ -1269,47 +1260,6 @@
     "context": "Diagnostics",
     "use_key_equivalents": true,
     "bindings": {
-    }
-  },
-  {
-    "context": "KeymapEditor",
-    "use_key_equivalents": true,
-    "bindings": {
-      "cmd-f": "search::FocusSearch",
-      "cmd-alt-f": "keymap_editor::ToggleKeystrokeSearch",
-      "cmd-alt-c": "keymap_editor::ToggleConflictFilter",
-      "enter": "keymap_editor::EditBinding",
-      "alt-enter": "keymap_editor::CreateBinding",
-      "cmd-k": "keymap_editor::OpenCreateKeybindingModal",
-      "cmd-c": "keymap_editor::CopyAction",
-      "cmd-shift-c": "keymap_editor::CopyContext",
-      "cmd-t": "keymap_editor::ShowMatchingKeybinds",
-      "cmd-e": "omega::OpenKeymapFile"
-    }
-  },
-  {
-    "context": "KeystrokeInput",
-    "use_key_equivalents": true,
-    "bindings": {
-      "enter": "keystroke_input::StartRecording",
-      "escape escape escape": "keystroke_input::StopRecording",
-      "delete": "keystroke_input::ClearKeystrokes"
-    }
-  },
-  {
-    "context": "KeybindEditorModal",
-    "use_key_equivalents": true,
-    "bindings": {
-      "cmd-enter": "menu::Confirm",
-      "escape": "menu::Cancel"
-    }
-  },
-  {
-    "context": "KeybindEditorModal > Editor",
-    "use_key_equivalents": true,
-    "bindings": {
-      "up": "menu::SelectPrevious",
-      "down": "menu::SelectNext"
     }
   },
   {

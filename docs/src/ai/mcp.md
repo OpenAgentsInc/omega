@@ -31,11 +31,8 @@ Zed also handles the `notifications/tools/list_changed` notification from MCP se
 One of the ways you can use MCP servers in Zed is by exposing them as an extension.
 Check out the [MCP Server Extensions](../extensions/mcp-extensions.md) page to learn how to create your own.
 
-Many MCP servers are available as extensions. Find them via:
-
-1. [the Zed website](https://zed.dev/extensions?filter=context-servers)
-2. in the app, open the Command Palette and run the {#action omega::Extensions} action
-3. in the app, open **Settings → AI → MCP Servers**, click `Add Server`, and choose `Install from Extensions`
+Configure MCP servers directly under **Settings → AI → MCP Servers**. Omega's
+single-experience product does not expose the inherited extensions browser.
 
 Popular servers available as an extension include:
 

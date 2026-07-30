@@ -22,10 +22,6 @@ You will need to install a Java runtime (OpenJDK).
 
 Or manually download and install [OpenJDK 23](https://jdk.java.net/23/).
 
-## Extension Install
-
-You can install by opening {#action omega::Extensions}({#kb omega::Extensions}) and searching for `java`.
-
 ## Quick start and configuration
 
 For the majority of users, Java support should work out of the box.

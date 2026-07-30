@@ -87,12 +87,10 @@ fn high_risk_public_files_forbid_zed_product_phrases() {
         "crates/workspace/src/notifications.rs",
         "crates/workspace/src/workspace_error.rs",
         "crates/title_bar/src/title_bar.rs",
-        "crates/extensions_ui/src/extensions_ui.rs",
         "crates/auto_update_helper/src/dialog.rs",
         "crates/agent/src/agent.rs",
         "crates/agent_ui/src/agent_ui.rs",
         "crates/agent_ui/src/agent_panel.rs",
-        "crates/sidebar/src/sidebar.rs",
         "crates/ui/src/components/ai/agent_setup_button.rs",
         "crates/eval_cli/src/headless.rs",
     ];

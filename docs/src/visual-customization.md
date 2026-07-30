@@ -11,9 +11,8 @@ See [All Settings](./reference/all-settings.md) for additional information and o
 
 ## Themes
 
-You can install many [themes](./themes.md) and [icon themes](./icon-themes.md) in form of extensions by running {#action omega::Extensions} from the command palette.
-
-You can preview/choose amongst your installed themes and icon themes with {#action theme_selector::Toggle} ({#kb theme_selector::Toggle}) and {#action icon_theme_selector::Toggle} which will modify the following settings:
+Choose among installed themes and icon themes with the Settings Editor or by
+editing the following settings:
 
 ```json [settings]
 {

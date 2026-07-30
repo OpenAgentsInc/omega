@@ -1154,18 +1154,6 @@ impl TitleBar {
                     })
                     .action("Settings", omega_actions::OpenSettings.boxed_clone())
                     .action("Keymap", Box::new(omega_actions::OpenKeymap))
-                    .action(
-                        "Themes…",
-                        omega_actions::theme_selector::Toggle::default().boxed_clone(),
-                    )
-                    .action(
-                        "Icon Themes…",
-                        omega_actions::icon_theme_selector::Toggle::default().boxed_clone(),
-                    )
-                    .action(
-                        "Extensions",
-                        omega_actions::Extensions::default().boxed_clone(),
-                    )
                     .when(ai_enabled, |menu| {
                         menu.separator()
                             .submenu("Panel Layout", move |menu, _window, _cx| {

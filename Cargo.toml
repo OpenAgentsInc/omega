@@ -34,7 +34,6 @@ members = [
     "crates/command_palette",
     "crates/command_palette_hooks",
     "crates/component",
-    "crates/component_preview",
     "crates/context_server",
     "crates/copilot",
     "crates/copilot_chat",
@@ -48,7 +47,6 @@ members = [
     "crates/edit_prediction_types",
     "crates/editor",
     "crates/editor_benchmarks",
-    "crates/encoding_selector",
     "crates/env_var",
     "crates/etw_tracing",
     "crates/eval_cli",
@@ -58,10 +56,8 @@ members = [
     "crates/extension_api",
     "crates/extension_cli",
     "crates/extension_host",
-    "crates/extensions_ui",
     "crates/feature_flags",
     "crates/feature_flags_macros",
-    "crates/feedback",
     "crates/file_finder",
     "crates/file_icons",
     "crates/fs",
@@ -90,12 +86,7 @@ members = [
     "crates/http_client_tls",
     "crates/http_proxy",
     "crates/icons",
-    "crates/input_latency_ui",
-    "crates/inspector_ui",
-    "crates/install_cli",
-    "crates/journal",
     "crates/json_schema_store",
-    "crates/keymap_editor",
     "crates/language",
     "crates/language_core",
     "crates/language_extension",
@@ -103,11 +94,8 @@ members = [
     "crates/language_model_core",
     "crates/language_models",
     "crates/language_models_cloud",
-    "crates/language_onboarding",
-    "crates/language_selector",
     "crates/language_tools",
     "crates/languages",
-    "crates/line_ending_selector",
     "crates/llama_cpp",
     "crates/lmstudio",
     "crates/lsp",
@@ -117,7 +105,6 @@ members = [
     "crates/media",
     "crates/menu",
     "crates/migrator",
-    "crates/miniprofiler_ui",
     "crates/mistral",
     "crates/multi_buffer",
     "crates/net",
@@ -165,7 +152,6 @@ members = [
     "crates/project",
     "crates/project_benchmarks",
     "crates/project_panel",
-    "crates/project_symbols",
     "crates/prompt_store",
     "crates/proto",
     "crates/proxy_handshake",
@@ -187,12 +173,10 @@ members = [
     "crates/settings_content",
     "crates/settings_json",
     "crates/settings_macros",
-    "crates/settings_profile_selector",
     "crates/settings_ui",
     "crates/shell_command_parser",
     "crates/snippet",
     "crates/snippet_provider",
-    "crates/snippets_ui",
     "crates/sqlez",
     "crates/sqlez_macros",
     "crates/streaming_diff",
@@ -209,10 +193,8 @@ members = [
     "crates/theme_extension",
     "crates/theme_settings",
     "crates/theme_importer",
-    "crates/theme_selector",
     "crates/time_format",
     "crates/title_bar",
-    "crates/toolchain_selector",
     "crates/ui",
     "crates/ui_input",
     "crates/ui_macros",
@@ -224,7 +206,6 @@ members = [
     "crates/watch",
     "crates/web_search",
     "crates/web_search_providers",
-    "crates/which_key",
     "crates/workspace",
     "crates/worktree",
     "crates/worktree_benchmarks",
@@ -300,7 +281,6 @@ command_palette = { path = "crates/command_palette" }
 command_palette_hooks = { path = "crates/command_palette_hooks" }
 compliance = { path = "tooling/compliance" }
 component = { path = "crates/component" }
-component_preview = { path = "crates/component_preview" }
 console = "0.16"
 context_server = { path = "crates/context_server" }
 copilot = { path = "crates/copilot" }
@@ -316,16 +296,13 @@ deepseek = { path = "crates/deepseek" }
 derive_refineable = { path = "crates/refineable/derive_refineable" }
 dialoguer = { version = "0.12", default-features = false }
 editor = { path = "crates/editor" }
-encoding_selector = { path = "crates/encoding_selector" }
 env_var = { path = "crates/env_var" }
 etw_tracing = { path = "crates/etw_tracing" }
 eval_utils = { path = "crates/eval_utils" }
 extension = { path = "crates/extension" }
 extension_host = { path = "crates/extension_host" }
-extensions_ui = { path = "crates/extensions_ui" }
 feature_flags = { path = "crates/feature_flags" }
 feature_flags_macros = { path = "crates/feature_flags_macros" }
-feedback = { path = "crates/feedback" }
 file_finder = { path = "crates/file_finder" }
 file_icons = { path = "crates/file_icons" }
 fs = { path = "crates/fs" }
@@ -354,12 +331,7 @@ http_client_tls = { path = "crates/http_client_tls" }
 http_proxy = { path = "crates/http_proxy" }
 icons = { path = "crates/icons" }
 edit_prediction_types = { path = "crates/edit_prediction_types" }
-input_latency_ui = { path = "crates/input_latency_ui" }
-inspector_ui = { path = "crates/inspector_ui" }
-install_cli = { path = "crates/install_cli" }
-journal = { path = "crates/journal" }
 json_schema_store = { path = "crates/json_schema_store" }
-keymap_editor = { path = "crates/keymap_editor" }
 language = { path = "crates/language" }
 language_core = { path = "crates/language_core" }
 language_extension = { path = "crates/language_extension" }
@@ -367,11 +339,8 @@ language_model = { path = "crates/language_model" }
 language_model_core = { path = "crates/language_model_core" }
 language_models = { path = "crates/language_models" }
 language_models_cloud = { path = "crates/language_models_cloud" }
-language_onboarding = { path = "crates/language_onboarding" }
-language_selector = { path = "crates/language_selector" }
 language_tools = { path = "crates/language_tools" }
 languages = { path = "crates/languages" }
-line_ending_selector = { path = "crates/line_ending_selector" }
 llama_cpp = { path = "crates/llama_cpp" }
 lmstudio = { path = "crates/lmstudio" }
 lsp = { path = "crates/lsp" }
@@ -384,7 +353,6 @@ mime = "0.3.17"
 migrator = { path = "crates/migrator" }
 mistral = { path = "crates/mistral" }
 multi_buffer = { path = "crates/multi_buffer" }
-miniprofiler_ui = { path = "crates/miniprofiler_ui" }
 net = { path = "crates/net" }
 node_runtime = { path = "crates/node_runtime" }
 notifications = { path = "crates/notifications" }
@@ -426,10 +394,8 @@ perf = { path = "tooling/perf" }
 picker = { path = "crates/picker" }
 picker_preview = { path = "crates/picker_preview" }
 prettier = { path = "crates/prettier" }
-settings_profile_selector = { path = "crates/settings_profile_selector" }
 project = { path = "crates/project" }
 project_panel = { path = "crates/project_panel" }
-project_symbols = { path = "crates/project_symbols" }
 prompt_store = { path = "crates/prompt_store" }
 proto = { path = "crates/proto" }
 proxy_handshake = { path = "crates/proxy_handshake" }
@@ -454,7 +420,6 @@ settings_ui = { path = "crates/settings_ui" }
 shell_command_parser = { path = "crates/shell_command_parser" }
 snippet = { path = "crates/snippet" }
 snippet_provider = { path = "crates/snippet_provider" }
-snippets_ui = { path = "crates/snippets_ui" }
 sqlez = { path = "crates/sqlez" }
 sqlez_macros = { path = "crates/sqlez_macros" }
 streaming_diff = { path = "crates/streaming_diff" }
@@ -470,11 +435,9 @@ text = { path = "crates/text" }
 theme = { path = "crates/theme" }
 theme_extension = { path = "crates/theme_extension" }
 theme_settings = { path = "crates/theme_settings" }
-theme_selector = { path = "crates/theme_selector" }
 time_format = { path = "crates/time_format" }
 platform_title_bar = { path = "crates/platform_title_bar" }
 title_bar = { path = "crates/title_bar" }
-toolchain_selector = { path = "crates/toolchain_selector" }
 ui = { path = "crates/ui" }
 ui_input = { path = "crates/ui_input" }
 ui_macros = { path = "crates/ui_macros" }
@@ -483,7 +446,6 @@ util = { path = "crates/util" }
 util_macros = { path = "crates/util_macros" }
 vim = { path = "crates/vim" }
 vim_mode_setting = { path = "crates/vim_mode_setting" }
-which_key = { path = "crates/which_key" }
 
 watch = { path = "crates/watch" }
 web_search = { path = "crates/web_search" }
@@ -1047,8 +1009,6 @@ command_palette = { codegen-units = 1 }
 command_palette_hooks = { codegen-units = 1 }
 feature_flags = { codegen-units = 1 }
 file_icons = { codegen-units = 1 }
-install_cli = { codegen-units = 1 }
-journal = { codegen-units = 1 }
 json_schema_store = { codegen-units = 1 }
 llama_cpp = { codegen-units = 1 }
 lmstudio = { codegen-units = 1 }
@@ -1057,15 +1017,12 @@ notifications = { codegen-units = 1 }
 ollama = { codegen-units = 1 }
 paths = { codegen-units = 1 }
 prettier = { codegen-units = 1 }
-project_symbols = { codegen-units = 1 }
 refineable = { codegen-units = 1 }
 release_channel = { codegen-units = 1 }
 reqwest_client = { codegen-units = 1 }
 session = { codegen-units = 1 }
 snippet = { codegen-units = 1 }
-snippets_ui = { codegen-units = 1 }
 telemetry_events = { codegen-units = 1 }
-theme_selector = { codegen-units = 1 }
 time_format = { codegen-units = 1 }
 ui_input = { codegen-units = 1 }
 omega_actions = { codegen-units = 1 }

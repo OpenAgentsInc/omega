@@ -44,7 +44,6 @@ use gpui::{
     actions, image_cache, img, point, px, retain_all,
 };
 use language::Capability;
-use language_onboarding::BasedPyrightBanner;
 use language_tools::lsp_log_view::LspLogToolbarItemView;
 use markdown::{Markdown, MarkdownElement, MarkdownFont, MarkdownStyle};
 use migrate::{MigrationBanner, MigrationEvent, MigrationNotification, MigrationType};
@@ -92,15 +91,15 @@ use omega_actions::{
     About, GetMerch, OpenAccountSettings, OpenAppUrl, OpenBrowser, OpenDocs, OpenProjectTasks,
     OpenServerSettings, OpenSettingsFile, OpenStatusPage, Quit, Restart,
 };
+use workspace::Pane;
 use workspace::{
-    AppState, MultiWorkspace, NewFile, NewWindow, OpenLog, Panel, Toast, Workspace,
-    WorkspaceSettings, create_and_open_local_file,
-    notifications::simple_message_notification::MessageNotification, open_new,
+    AppState, MultiWorkspace, NewFile, NewWindow, OpenLog, Panel, Workspace, WorkspaceSettings,
+    create_and_open_local_file, notifications::simple_message_notification::MessageNotification,
+    open_new,
 };
 use workspace::{
     CloseIntent, CloseProject, CloseWindow, RestoreBanner, with_active_or_new_workspace,
 };
-use workspace::{Pane, notifications::DetachAndPromptErr};
 
 const DOCS_URL: &str = app_identity::PRODUCT_DOCS_URL;
 const STATUS_URL: &str = "https://www.openagents.com/";
@@ -478,22 +477,6 @@ pub fn initialize_workspace(app_state: Arc<AppState>, cx: &mut App) {
             })
             .detach();
         }
-
-        cx.spawn_in(window, async move |_this, cx| {
-            const TELEMETRY_INTERVAL: std::time::Duration = std::time::Duration::from_secs(5 * 60);
-            loop {
-                cx.background_executor().timer(TELEMETRY_INTERVAL).await;
-                if cx
-                    .update(|window, cx| {
-                        input_latency_ui::report_input_latency_telemetry(window, cx);
-                    })
-                    .is_err()
-                {
-                    break;
-                }
-            }
-        })
-        .detach();
 
         let multi_workspace_handle = cx.entity().downgrade();
         window.on_window_should_close(cx, move |window, cx| {
@@ -894,52 +877,6 @@ fn register_actions(
         .register_action(|_, _: &GetMerch, _, cx| cx.open_url(MERCH_URL))
         .register_action(
             |workspace: &mut Workspace,
-             _: &input_latency_ui::DumpInputLatencyHistogram,
-             window: &mut Window,
-             cx: &mut Context<Workspace>| {
-                let project = workspace.project().clone();
-                // In a collab session the report buffer is visible to other
-                // participants, so attribute the data to this user's machine.
-                let reported_by = if project.read(cx).is_shared()
-                    || project.read(cx).is_via_collab()
-                {
-                    workspace
-                        .user_store()
-                        .read(cx)
-                        .current_user()
-                        .map(|user| user.username.to_string())
-                } else {
-                    None
-                };
-                let report_data = input_latency_ui::snapshot_input_latency_report(
-                    window,
-                    reported_by,
-                    cx,
-                );
-                cx.spawn_in(window, async move |workspace, cx| {
-                    let report = cx
-                        .background_spawn(async move {
-                            input_latency_ui::format_input_latency_report(&report_data)
-                        })
-                        .await;
-                    let buffer = project
-                        .update(cx, |project, cx| project.create_buffer(None, true, cx))
-                        .await?;
-                    buffer.update(cx, |buffer, cx| {
-                        buffer.set_text(report, cx);
-                    });
-                    workspace.update_in(cx, |workspace, window, cx| {
-                        let editor = cx
-                            .new(|cx| Editor::for_buffer(buffer, Some(project), window, cx));
-                        workspace
-                            .add_item_to_active_pane(Box::new(editor), None, true, window, cx);
-                    })
-                })
-                .detach_and_log_err(cx);
-            },
-        )
-        .register_action(
-            |workspace: &mut Workspace,
              _: &DumpAccessibilityTree,
              window: &mut Window,
              cx: &mut Context<Workspace>| {
@@ -1232,33 +1169,6 @@ fn register_actions(
                 }
             }
         })
-        .register_action(|_, _: &install_cli::RegisterAppScheme, window, cx| {
-            cx.spawn_in(window, async move |workspace, cx| {
-                install_cli::register_app_scheme(cx).await?;
-                workspace.update_in(cx, |workspace, _, cx| {
-                    struct RegisterAppScheme;
-
-                    workspace.show_toast(
-                        Toast::new(
-                            NotificationId::unique::<RegisterAppScheme>(),
-                            format!(
-                                "{}:// links will now open in {}.",
-                                ReleaseChannel::global(cx).protocol_scheme(),
-                                ReleaseChannel::global(cx).display_name()
-                            ),
-                        ),
-                        cx,
-                    )
-                })?;
-                Ok(())
-            })
-            .detach_and_prompt_err(
-                "Error registering Omega URL scheme",
-                window,
-                cx,
-                |_, _, _| None,
-            );
-        })
         .register_action(open_project_settings_file)
         .register_action(open_project_tasks_file)
         .register_action(open_worktree_setup_tasks_file)
@@ -1363,9 +1273,6 @@ fn register_actions(
                 .detach_and_log_err(cx);
             }
         });
-
-    #[cfg(not(target_os = "windows"))]
-    workspace.register_action(install_cli);
 
     if workspace.project().read(cx).is_via_remote_server() {
         workspace.register_action({
@@ -1496,8 +1403,6 @@ fn initialize_pane(
             toolbar.add_item(commit_view_toolbar, window, cx);
             let agent_diff_toolbar = cx.new(AgentDiffToolbar::new);
             toolbar.add_item(agent_diff_toolbar, window, cx);
-            let basedpyright_banner = cx.new(|cx| BasedPyrightBanner::new(workspace, cx));
-            toolbar.add_item(basedpyright_banner, window, cx);
         })
     });
 }
@@ -1714,16 +1619,6 @@ fn open_about_window(cx: &mut App) {
         },
     )
     .log_err();
-}
-
-#[cfg(not(target_os = "windows"))]
-fn install_cli(
-    _: &mut Workspace,
-    _: &install_cli::InstallCliBinary,
-    window: &mut Window,
-    cx: &mut Context<Workspace>,
-) {
-    install_cli::install_cli_binary(window, cx)
 }
 
 static WAITING_QUIT_CONFIRMATION: AtomicBool = AtomicBool::new(false);
@@ -2346,8 +2241,6 @@ fn reload_keymaps(cx: &mut App, mut user_key_bindings: Vec<KeyBinding>) {
         "New Window",
         workspace::NewWindow,
     )]);
-    // todo: nicer api here?
-    keymap_editor::KeymapEventChannel::trigger_keymap_changed(cx);
 }
 
 pub fn load_default_keymap(cx: &mut App) {
@@ -5735,7 +5628,6 @@ mod tests {
                 "branch_picker",
                 "branches",
                 "buffer_search",
-                "cli",
                 "client",
                 "collab",
                 "command_palette",
@@ -5745,8 +5637,6 @@ mod tests {
                 "debugger",
                 "dev",
                 "editor",
-                "encoding_selector",
-                "feedback",
                 "file_finder",
                 "full_auto_panel",
                 "git",
@@ -5756,13 +5646,7 @@ mod tests {
                 "git_picker",
                 "go_to_line",
                 "highlights_tree_view",
-                "icon_theme_selector",
                 "inline_assistant",
-                "journal",
-                "keymap_editor",
-                "keystroke_input",
-                "language_selector",
-                "line_ending_selector",
                 "lsp_tool",
                 "markdown",
                 "menu",
@@ -5773,19 +5657,17 @@ mod tests {
                 "omega_predict_onboarding",
                 "onboarding",
                 "outline",
+                "outline_panel",
                 "pane",
                 "panel",
                 "picker",
                 "project_panel",
                 "project_search",
-                "project_symbols",
                 "projects",
                 "remote_debug",
                 "search",
                 "settings_editor",
-                "settings_profile_selector",
                 "skill_creator",
-                "snippets",
                 "stash_picker",
                 "svg",
                 "syntax_tree_view",
@@ -5794,9 +5676,7 @@ mod tests {
                 "terminal_panel",
                 "text_finder",
                 "theme",
-                "theme_selector",
                 "toast",
-                "toolchain",
                 "vim",
                 "welcome",
                 "window",
@@ -5804,7 +5684,7 @@ mod tests {
                 "workspace",
                 "worktree_picker",
                 "zed",
-                "omega_actions",
+                "zed_actions",
                 "zed_predict_onboarding",
             ];
             assert_eq!(

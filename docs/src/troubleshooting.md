@@ -17,7 +17,6 @@ When reporting issues or seeking help, it's useful to know your Zed version and 
 
 - {#action omega::About}: Find your Zed version number
 - {#action omega::CopySystemSpecsIntoClipboard}: Populate your clipboard with Zed version number, operating system version, and hardware specs
-- {#action omega::CopyInstalledExtensionsIntoClipboard}: Populate your clipboard with a list of your installed extensions and versions
 
 ## Zed Log
 

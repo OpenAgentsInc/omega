@@ -42,18 +42,15 @@ Zed uses Metal for GPU-accelerated rendering, which is available on all supporte
 
 ## Installing the CLI
 
-Zed includes a command-line tool for opening files and projects from Terminal. To install it:
-
-1. Open Zed
-2. Open the command palette with `Cmd+Shift+P`
-3. Run {#action cli::InstallCliBinary}
-
-This creates a `zed` command in `/usr/local/bin`. You can then open files and folders:
+Omega includes a command-line tool for opening files and projects from
+Terminal. Add the bundled executable to your `PATH`, or create a symlink:
 
 ```sh
-zed .                    # Open current folder
-zed file.txt             # Open a file
-zed project/ file.txt    # Open a folder and a file
+ln -s /Applications/Omega.app/Contents/MacOS/cli /usr/local/bin/omega
+
+omega .                    # Open current folder
+omega file.txt             # Open a file
+omega project/ file.txt    # Open a folder and a file
 ```
 
 See the [CLI Reference](./reference/cli.md) for all available options.
@@ -101,24 +98,20 @@ xattr -cr /Applications/Zed.app
 If the `zed` command isn't available after installation:
 
 1. Check that `/usr/local/bin` is in your PATH
-2. Try reinstalling the CLI via {#action cli::InstallCliBinary} in the command palette
+2. Check that the `omega` symlink points to the bundled `cli` executable
 3. Open a new terminal window to reload your PATH
 
 ### Can't install CLI {#cant-install-cli}
 
-{#action cli::InstallCliBinary} writes a `zed` symlink to `/usr/local/bin`, which requires administrator privileges. If your macOS account isn't in the `admin` group, Zed can't create that symlink and will report that it can't install the CLI automatically.
-
-Instead, you can add an alias pointing to the `cli` binary bundled inside the app. The path depends on where Zed is installed:
+Creating a symlink in `/usr/local/bin` may require administrator privileges.
+Instead, add an alias pointing to the `cli` binary bundled inside the app:
 
 ```sh
-# Default install (Zed in /Applications)
-alias zed="/Applications/Zed.app/Contents/MacOS/cli"
+# Default install
+alias omega="/Applications/Omega.app/Contents/MacOS/cli"
 
-# User install (Zed in ~/Applications)
-alias zed="$HOME/Applications/Zed.app/Contents/MacOS/cli"
-
-# Preview build (Zed Preview in ~/Applications)
-alias zed="$HOME/Applications/Zed Preview.app/Contents/MacOS/cli"
+# User install
+alias omega="$HOME/Applications/Omega.app/Contents/MacOS/cli"
 ```
 
 Add the line that matches your install to your shell configuration file. Use `~/.zshrc` for Zsh (the default on modern macOS) or `~/.bashrc` for Bash.

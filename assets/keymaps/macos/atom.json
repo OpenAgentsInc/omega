@@ -18,8 +18,6 @@
   {
     "context": "Editor && mode == full",
     "bindings": {
-      "ctrl-shift-l": "language_selector::Toggle",
-      "ctrl-shift-n": "encoding_selector::Toggle",
       "cmd-|": "pane::RevealInProjectPanel",
       "cmd-b": "editor::GoToDefinition",
       "alt-cmd-b": "editor::GoToDefinitionSplit",
@@ -50,7 +48,6 @@
       "cmd-\\": "workspace::ToggleLeftDock",
       "cmd-k cmd-b": "workspace::ToggleLeftDock",
       "cmd-t": "file_finder::Toggle",
-      "cmd-shift-r": "project_symbols::Toggle"
     }
   },
   {

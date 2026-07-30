@@ -1326,6 +1326,25 @@ pub const REMOVED_FILES: &[&str] = &[
     "crates/sidebar/Cargo.toml",
     "crates/svg_preview/Cargo.toml",
     "crates/tab_switcher/Cargo.toml",
+    "crates/component_preview/Cargo.toml",
+    "crates/encoding_selector/Cargo.toml",
+    "crates/extensions_ui/Cargo.toml",
+    "crates/feedback/Cargo.toml",
+    "crates/input_latency_ui/Cargo.toml",
+    "crates/inspector_ui/Cargo.toml",
+    "crates/install_cli/Cargo.toml",
+    "crates/journal/Cargo.toml",
+    "crates/keymap_editor/Cargo.toml",
+    "crates/language_onboarding/Cargo.toml",
+    "crates/language_selector/Cargo.toml",
+    "crates/line_ending_selector/Cargo.toml",
+    "crates/miniprofiler_ui/Cargo.toml",
+    "crates/project_symbols/Cargo.toml",
+    "crates/settings_profile_selector/Cargo.toml",
+    "crates/snippets_ui/Cargo.toml",
+    "crates/theme_selector/Cargo.toml",
+    "crates/toolchain_selector/Cargo.toml",
+    "crates/which_key/Cargo.toml",
     // OMEGA-DELTA-0188. The agent-thread Outline right sidebar, deleted at
     // owner direction 2026-07-30 ("I don't want that at all, delete it from
     // the codebase entirely").
@@ -1387,6 +1406,34 @@ pub const FORBIDDEN_KEYMAP_NAMESPACES: &[(&str, &str)] = &[
     ("OMEGA-DELTA-0186", "markdown::OpenPreviewToTheSide"),
     ("OMEGA-DELTA-0186", "svg::"),
     ("OMEGA-DELTA-0186", "notebook::"),
+    // Final full-editor picker/tool batch (omega#162).
+    ("OMEGA-DELTA-0186", "cli::"),
+    ("OMEGA-DELTA-0186", "encoding_selector::"),
+    ("OMEGA-DELTA-0186", "feedback::"),
+    ("OMEGA-DELTA-0186", "icon_theme_selector::"),
+    ("OMEGA-DELTA-0186", "journal::"),
+    ("OMEGA-DELTA-0186", "keymap_editor::"),
+    ("OMEGA-DELTA-0186", "keystroke_input::"),
+    ("OMEGA-DELTA-0186", "language_selector::"),
+    ("OMEGA-DELTA-0186", "line_ending_selector::"),
+    ("OMEGA-DELTA-0186", "project_symbols::"),
+    ("OMEGA-DELTA-0186", "settings_profile_selector::"),
+    ("OMEGA-DELTA-0186", "snippets::"),
+    ("OMEGA-DELTA-0186", "theme_selector::"),
+    ("OMEGA-DELTA-0186", "toolchain::"),
+    // These actions lived in broad namespaces that remain for other product
+    // controls, so forbid only the handlers deleted with this batch.
+    ("OMEGA-DELTA-0186", "dev::DumpInputLatencyHistogram"),
+    ("OMEGA-DELTA-0186", "dev::ToggleInspector"),
+    (
+        "OMEGA-DELTA-0186",
+        "omega::CopyInstalledExtensionsIntoClipboard",
+    ),
+    ("OMEGA-DELTA-0186", "omega::InstallDevExtension"),
+    ("OMEGA-DELTA-0186", "omega::OpenRepository"),
+    ("OMEGA-DELTA-0186", "omega::RebuildDevExtension"),
+    ("OMEGA-DELTA-0186", "omega::Extensions"),
+    ("OMEGA-DELTA-0186", "workspace::OpenComponentPreview"),
     // OMEGA-DELTA-0188. The deleted thread-outline pane declared its own
     // action namespace; a surviving binding would be the same startup panic.
     ("OMEGA-DELTA-0188", "omega_thread_outline::"),
@@ -1427,6 +1474,25 @@ pub const REMOVED_EDITOR_CRATES: &[&str] = &[
     "svg_preview",
     "tab_switcher",
     "tasks_ui",
+    "component_preview",
+    "encoding_selector",
+    "extensions_ui",
+    "feedback",
+    "input_latency_ui",
+    "inspector_ui",
+    "install_cli",
+    "journal",
+    "keymap_editor",
+    "language_onboarding",
+    "language_selector",
+    "line_ending_selector",
+    "miniprofiler_ui",
+    "project_symbols",
+    "settings_profile_selector",
+    "snippets_ui",
+    "theme_selector",
+    "toolchain_selector",
+    "which_key",
     "zeta_prompt",
 ];
 
@@ -4865,33 +4931,6 @@ mod tests {
              blocked is back in the tree:\n{}",
             offenders.join("\n")
         );
-    }
-
-    /// OMEGA-DELTA-0022. The component preview is not in the release palette.
-    ///
-    /// It renders every component's developer-authored `preview` fn, which is
-    /// not reviewed as product copy or product artwork. It shipped in the
-    /// release palette of `0.2.0-rc11` with no dev gate — unlike
-    /// `dev::ToggleInspector` and `dev::ResetOnboarding`, both of which are
-    /// gated — and opening it drew the Zed `Z` through the `Vector` preview.
-    #[test]
-    fn the_component_preview_is_gated_to_dev_builds() {
-        let path = repository_path("crates/component_preview/src/component_preview.rs");
-        let source = std::fs::read_to_string(&path)
-            .unwrap_or_else(|error| panic!("cannot read {}: {error}", path.display()));
-        for required in [
-            "#[cfg(not(debug_assertions))]",
-            "hide_action_types",
-            "OpenComponentPreview",
-        ] {
-            assert!(
-                source.contains(required),
-                "OMEGA-DELTA-0022: {} no longer contains {required:?}, so a \
-                 release build would offer `workspace: open component preview` \
-                 and render unreviewed developer previews to the owner.",
-                path.display()
-            );
-        }
     }
 
     /// OMEGA-DELTA-0017 and OMEGA-DELTA-0018. The packaging path runs the gate.

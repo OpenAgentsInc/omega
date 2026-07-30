@@ -211,8 +211,8 @@ Add an extension here with `false` to pin it to its currently installed version.
 }
 ```
 
-Selecting **Install Another Version…** from an extension's `⋯` menu on the Extensions
-page ({#action omega::Extensions}) does this automatically.
+Omega's single-experience product does not expose extension version
+management.
 
 ## Autosave
 
@@ -2812,7 +2812,7 @@ Example:
 
 **Options**
 
-Run the {#action icon_theme_selector::Toggle} action in the command palette to see a current list of valid icon theme names.
+Use the Settings Editor to choose an installed icon theme.
 
 ### Light
 
@@ -2822,7 +2822,7 @@ Run the {#action icon_theme_selector::Toggle} action in the command palette to s
 
 **Options**
 
-Run the {#action icon_theme_selector::Toggle} action in the command palette to see a current list of valid icon theme names.
+Use the Settings Editor to choose an installed icon theme.
 
 ## Image Viewer
 
@@ -4966,7 +4966,7 @@ Example command to set the title: `echo -e "\e]2;New Title\007";`
 
 **Options**
 
-Run the {#action theme_selector::Toggle} action in the command palette to see a current list of valid theme names.
+Use the Settings Editor to choose an installed theme.
 
 ### Light
 
@@ -4976,7 +4976,7 @@ Run the {#action theme_selector::Toggle} action in the command palette to see a 
 
 **Options**
 
-Run the {#action theme_selector::Toggle} action in the command palette to see a current list of valid theme names.
+Use the Settings Editor to choose an installed theme.
 
 ## Title Bar
 
@@ -5783,7 +5783,7 @@ For example, to use `Nerd Font` as a fallback, add the following to your setting
 
 ## Settings Profiles
 
-- Description: Configure any number of settings profiles that are temporarily applied when selected from {#action settings_profile_selector::Toggle}.
+- Description: Named settings profiles inherited by the settings schema.
 - Setting: `profiles`
 - Default: `{}`
 
@@ -5825,7 +5825,7 @@ Example:
 }
 ```
 
-To preview and enable a settings profile, open the command palette via {#kb command_palette::Toggle} and search for {#action settings_profile_selector::Toggle}.
+Omega's single-experience product does not expose runtime profile switching.
 
 ## An example configuration:
 

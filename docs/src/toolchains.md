@@ -25,7 +25,8 @@ This also applies to [tasks](./tasks.md). Zed runs tasks as if you opened a new 
 
 ## Selecting toolchains
 
-The active toolchain (if there is one) is shown in the status bar on the right. Click it to open the toolchain selector, or run the command palette action ({#action toolchain::Select}).
+Omega's single-experience product does not expose the inherited toolchain
+selector.
 
 Zed will automatically infer a set of toolchains to choose from based on the project you're working with. A default will also be selected on your behalf on a best-effort basis when you open a project for the first time.
 

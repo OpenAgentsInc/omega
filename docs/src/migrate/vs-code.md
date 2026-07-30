@@ -366,4 +366,5 @@ Here are a few useful tweaks:
 ```
 
 **Bring over custom snippets**
-Copy your VS Code snippet JSON directly into Zed's snippets folder ({#action snippets::ConfigureSnippets}).
+Copy your VS Code snippet JSON directly into the `snippets` directory under
+Omega's configuration directory.

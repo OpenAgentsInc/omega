@@ -37,23 +37,6 @@ Results appear in a [multibuffer](./multibuffers.md), letting you edit matches i
 
 Jump to where a symbol is defined with {#kb editor::GoToDefinition} (or `Cmd+Click` / `Ctrl+Click`). If there are multiple definitions, they open in a multibuffer.
 
-## Go to Symbol
-
-- **Current file:** {#kb outline::Toggle} opens an outline of symbols in the active file
-- **Entire project:** {#kb project_symbols::Toggle} searches symbols across all files
-
-## Outline Panel
-
-The Outline Panel ({#kb outline_panel::ToggleFocus}) shows a persistent tree view of symbols in the current file. It's especially useful with [multibuffers](./multibuffers.md) for navigating search results or diagnostics.
-
-[Learn more about the Outline Panel →](./outline-panel.md)
-
-## Tab Switcher
-
-Quickly switch between open tabs with {#kb tab_switcher::Toggle}. Tabs are sorted by recent use—keep holding Ctrl and press Tab to cycle through them.
-
-[Learn more about the Tab Switcher →](./tab-switcher.md)
-
 ## Quick Reference
 
 | Task               | Keybinding                           |
@@ -64,8 +47,4 @@ Quickly switch between open tabs with {#kb tab_switcher::Toggle}. Tabs are sorte
 | Text search picker | {#kb project_search::OpenTextFinder} |
 | Go to definition   | {#kb editor::GoToDefinition}         |
 | Find references    | {#kb editor::FindAllReferences}      |
-| Symbol in file     | {#kb outline::Toggle}                |
-| Symbol in project  | {#kb project_symbols::Toggle}        |
-| Outline Panel      | {#kb outline_panel::ToggleFocus}     |
-| Tab Switcher       | {#kb tab_switcher::Toggle}           |
 | Project Panel      | {#kb project_panel::ToggleFocus}     |

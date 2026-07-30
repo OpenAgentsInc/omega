@@ -9,7 +9,9 @@ Use Zed's command-line interface (CLI) to open files and directories, integrate 
 
 ## Installation
 
-**macOS:** Run the {#action cli::InstallCliBinary} command from the command palette ({#kb command_palette::Toggle}) to install the `zed` CLI to `/usr/local/bin/zed`.
+**macOS:** The CLI is bundled at
+`/Applications/Omega.app/Contents/MacOS/cli`. Add that executable to your
+`PATH` or create an `omega` symlink to it.
 
 **Linux:** The CLI is included with Zed packages. The binary name may vary by distribution (commonly `zed` or `zeditor`).
 

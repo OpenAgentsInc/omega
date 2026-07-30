@@ -688,10 +688,7 @@
       "ctrl-shift-t": "pane::ReopenClosedItem",
       "ctrl-k ctrl-p": "workspace::ReopenLastPicker",
       "ctrl-k ctrl-s": "omega::OpenKeymap",
-      "ctrl-k ctrl-t": "theme_selector::Toggle",
       "ctrl-k ctrl-shift-t": "theme::ToggleMode",
-      "ctrl-alt-super-p": "settings_profile_selector::Toggle",
-      "ctrl-t": "project_symbols::Toggle",
       "ctrl-p": "file_finder::Toggle",
       "ctrl-e": "file_finder::Toggle",
       "f1": "command_palette::Toggle",
@@ -700,9 +697,6 @@
       "ctrl-shift-g": "git_panel::ToggleFocus",
       "ctrl-shift-/": "agent::ToggleFocus",
       "ctrl-k s": "workspace::SaveAll",
-      "ctrl-k n": "encoding_selector::Toggle",
-      "ctrl-k m": "language_selector::Toggle",
-      "ctrl-m ctrl-m": "toolchain::AddToolchain",
       "escape": "workspace::Unfollow",
       "ctrl-k ctrl-left": "workspace::ActivatePaneLeft",
       "ctrl-k ctrl-right": "workspace::ActivatePaneRight",
@@ -712,7 +706,6 @@
       "ctrl-k shift-right": "workspace::SwapPaneRight",
       "ctrl-k shift-up": "workspace::SwapPaneUp",
       "ctrl-k shift-down": "workspace::SwapPaneDown",
-      "ctrl-shift-x": "omega::Extensions",
       // All task parameters are captured and unchanged between reruns by default.
       // Use the `"reevaluate_context"` parameter to control this.
       // also possible to spawn tasks by name:
@@ -873,7 +866,6 @@
     "bindings": {
       "ctrl-shift-alt-f": "workspace::FollowNextCollaborator",
       // Only available in debug builds: opens an element inspector for development.
-      "shift-alt-i": "dev::ToggleInspector"
     }
   },
   {
@@ -1086,7 +1078,6 @@
     "context": "ToolchainSelector",
     "use_key_equivalents": true,
     "bindings": {
-      "ctrl-shift-a": "toolchain::AddToolchain"
     }
   },
   {
@@ -1210,47 +1201,6 @@
     "context": "Diagnostics",
     "use_key_equivalents": true,
     "bindings": {
-    }
-  },
-  {
-    "context": "KeymapEditor",
-    "use_key_equivalents": true,
-    "bindings": {
-      "ctrl-f": "search::FocusSearch",
-      "alt-f": "keymap_editor::ToggleKeystrokeSearch",
-      "alt-c": "keymap_editor::ToggleConflictFilter",
-      "enter": "keymap_editor::EditBinding",
-      "alt-enter": "keymap_editor::CreateBinding",
-      "ctrl-k": "keymap_editor::OpenCreateKeybindingModal",
-      "ctrl-c": "keymap_editor::CopyAction",
-      "ctrl-shift-c": "keymap_editor::CopyContext",
-      "ctrl-t": "keymap_editor::ShowMatchingKeybinds",
-      "ctrl-e": "omega::OpenKeymapFile"
-    }
-  },
-  {
-    "context": "KeystrokeInput",
-    "use_key_equivalents": true,
-    "bindings": {
-      "enter": "keystroke_input::StartRecording",
-      "escape escape escape": "keystroke_input::StopRecording",
-      "delete": "keystroke_input::ClearKeystrokes"
-    }
-  },
-  {
-    "context": "KeybindEditorModal",
-    "use_key_equivalents": true,
-    "bindings": {
-      "ctrl-enter": "menu::Confirm",
-      "escape": "menu::Cancel"
-    }
-  },
-  {
-    "context": "KeybindEditorModal > Editor",
-    "use_key_equivalents": true,
-    "bindings": {
-      "up": "menu::SelectPrevious",
-      "down": "menu::SelectNext"
     }
   },
   {

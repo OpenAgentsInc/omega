@@ -54,7 +54,6 @@
     "bindings": {
       "cmd-alt-ctrl-d": "workspace::ToggleLeftDock",
       "cmd-t": "file_finder::Toggle",
-      "cmd-shift-t": "project_symbols::Toggle"
     }
   },
   {

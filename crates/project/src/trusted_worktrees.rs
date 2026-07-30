@@ -11,7 +11,7 @@
 //! Unless `trust_all_worktrees` auto trust is enabled, does not trust anything that was not persisted before.
 //! When dealing with "restricted" and other related concepts in the API, it means all explicitly restricted, after any of the [`TrustedWorktreesStore::can_trust`] and [`TrustedWorktreesStore::can_trust_global`] calls.
 //!
-//! Zed does not consider invisible, `worktree.is_visible() == false` worktrees in Zed, as those are programmatically created inside Zed for internal needs, e.g. a tmp dir for `keymap_editor.rs` needs.
+//! Zed does not consider invisible, `worktree.is_visible() == false` worktrees in Zed, as those are programmatically created inside Zed for internal needs.
 //!
 //!
 //! Path rust hierarchy.
@@ -475,7 +475,7 @@ impl TrustedWorktreesStore {
             return false;
         };
         let worktree_path = worktree.read(cx).abs_path();
-        // Zed opened an "internal" directory: e.g. a tmp dir for `keymap_editor.rs` needs.
+        // Zed opened an internal directory that is not part of the visible project.
         if !worktree.read(cx).is_visible() {
             log::debug!("Skipping worktree trust checks for not visible {worktree_path:?}");
             return true;

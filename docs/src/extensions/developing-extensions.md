@@ -26,13 +26,9 @@ Before starting to develop an extension for Zed, be sure to [install Rust via ru
 
 Extensions that provide grammars additionally require the [wasi-sdk](https://github.com/WebAssembly/wasi-sdk) to compile Tree-sitter parsers. Zed downloads it automatically, but you can point Zed at an existing installation by setting the `WASI_SDK_PATH` environment variable to its root directory (the one containing `bin/clang`).
 
-When developing an extension, you can use it in Zed without needing to publish it by installing it as a _dev extension_.
-
-From the extensions page, click the `Install Dev Extension` button (or the {#action omega::InstallDevExtension} action) and select the directory containing your extension.
-
-If you need to troubleshoot, check Zed.log ({#action omega::OpenLog}) for additional output. For debug output, close and relaunch Zed from the command line with `zed --foreground`, which shows more verbose INFO-level logs.
-
-If you already have the published version of the extension installed, the published version will be uninstalled prior to the installation of the dev extension. After successful installation, the `Extensions` page will indicate that the upstream extension is "Overridden by dev extension".
+Omega does not ship the inherited extensions page or dev-extension installer.
+Local extension installation is therefore unavailable in the single-experience
+product.
 
 ## Directory Structure of a Zed Extension
 

@@ -192,6 +192,7 @@ fn fail_to_open_window(e: anyhow::Error, _cx: &mut App) {
         .detach();
     }
 }
+
 static STARTUP_TIME: OnceLock<Instant> = OnceLock::new();
 
 fn main() {
@@ -801,9 +802,7 @@ fn main() {
 
         go_to_line::init(cx);
         file_finder::init(cx);
-        project_symbols::init(cx);
         project_panel::init(cx);
-        snippets_ui::init(cx);
         channel::init(&app_state.client.clone(), app_state.user_store.clone(), cx);
         search::init(cx);
         lsp_locations::init(cx);
@@ -818,25 +817,12 @@ fn main() {
         });
         vim::init(cx);
         terminal_view::init(cx);
-        journal::init(app_state.clone(), cx);
-        encoding_selector::init(cx);
-        language_selector::init(cx);
-        line_ending_selector::init(cx);
-        toolchain_selector::init(cx);
-        theme_selector::init(cx);
-        settings_profile_selector::init(cx);
         language_tools::init(cx);
         notifications::init(app_state.client.clone(), app_state.user_store.clone(), cx);
         git_ui::init(cx);
-        feedback::init(cx);
         onboarding::init(cx);
         settings_ui::init(cx);
-        keymap_editor::init(cx);
-        extensions_ui::init(cx);
-        inspector_ui::init(app_state.clone(), cx);
         json_schema_store::init(cx);
-        miniprofiler_ui::init(*STARTUP_TIME.get().unwrap(), cx);
-        which_key::init(cx);
         #[cfg(target_os = "windows")]
         etw_tracing::init(cx);
 
@@ -1019,8 +1005,6 @@ fn main() {
         .detach_and_log_err(cx);
 
         let app_state = app_state.clone();
-
-        component_preview::init(app_state.clone(), cx);
 
         cx.spawn(async move |cx| {
             let _first_window_subscription = first_window_subscription;

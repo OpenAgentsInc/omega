@@ -114,7 +114,7 @@ use settings::{
     update_settings_file,
 };
 
-use omega_actions::{Spawn, feedback::FileBugReport, theme::ToggleMode};
+use omega_actions::{Spawn, theme::ToggleMode};
 use sqlez::{
     bindable::{Bind, Column, StaticColumnCount},
     statement::Statement,
@@ -279,8 +279,6 @@ actions!(
         CloseWindow,
         /// Closes the current project.
         CloseProject,
-        /// Opens the feedback dialog.
-        Feedback,
         /// Follows the next collaborator in the session.
         FollowNextCollaborator,
         /// Moves the focused panel to the next position.
@@ -299,8 +297,6 @@ actions!(
         OpenFiles,
         /// Opens the current location in terminal.
         OpenInTerminal,
-        /// Opens the component preview.
-        OpenComponentPreview,
         /// Reloads the active item.
         ReloadActiveItem,
         /// Reopens the most recently dismissed picker in the current window.
@@ -457,15 +453,6 @@ pub struct CloseItemInAllPanes {
 #[derive(Clone, Deserialize, PartialEq, JsonSchema, Action)]
 #[action(namespace = workspace)]
 pub struct SendKeystrokes(pub String);
-
-actions!(
-    project_symbols,
-    [
-        /// Toggles the project symbols search.
-        #[action(name = "Toggle")]
-        ToggleProjectSymbols
-    ]
-);
 
 /// Toggles the file finder interface.
 #[derive(Default, PartialEq, Eq, Clone, Deserialize, JsonSchema, Action)]
@@ -9091,11 +9078,6 @@ fn notify_if_database_failed(window: WindowHandle<MultiWorkspace>, cx: &mut Asyn
                         |cx| {
                             cx.new(|cx| {
                                 MessageNotification::new("Failed to load the database file.", cx)
-                                    .primary_message("File an Issue")
-                                    .primary_icon(IconName::Plus)
-                                    .primary_on_click(|window, cx| {
-                                        window.dispatch_action(Box::new(FileBugReport), cx)
-                                    })
                             })
                         },
                     );

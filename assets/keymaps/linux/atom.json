@@ -17,7 +17,6 @@
   {
     "context": "Editor && mode == full",
     "bindings": {
-      "ctrl-shift-l": "language_selector::Toggle", // grammar-selector:show
       "ctrl-|": "pane::RevealInProjectPanel", // tree-view:reveal-active-file
       "ctrl-b": "editor::GoToDefinition", // fuzzy-finder:toggle-buffer-finder
       "ctrl-alt-b": "editor::GoToDefinitionSplit", // N/A: From JetBrains
@@ -48,7 +47,6 @@
       "ctrl-\\": "workspace::ToggleLeftDock", // tree-view:toggle
       "ctrl-k ctrl-b": "workspace::ToggleLeftDock", // tree-view:toggle
       "ctrl-t": "file_finder::Toggle", // fuzzy-finder:toggle-file-finder
-      "ctrl-r": "project_symbols::Toggle", // symbols-view:toggle-project-symbols
     }
   },
   {

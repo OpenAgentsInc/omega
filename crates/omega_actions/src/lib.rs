@@ -286,8 +286,6 @@ pub mod dev {
     actions!(
         dev,
         [
-            /// Toggles the developer inspector for debugging UI elements.
-            ToggleInspector,
             /// Clears Omega onboarding completion records (debug builds).
             ///
             /// Use the command palette (`cmd-shift-p` on macOS / `ctrl-shift-p`
@@ -465,57 +463,10 @@ pub mod project_panel {
         ]
     );
 }
-pub mod feedback {
-    use gpui::actions;
-
-    actions!(
-        feedback,
-        [
-            /// Opens email client to send feedback to OpenAgents support.
-            #[action(deprecated_aliases = ["feedback::EmailZed"])]
-            EmailOpenAgents,
-            /// Opens the bug report form.
-            FileBugReport,
-            /// Opens the feature request form.
-            RequestFeature
-        ]
-    );
-}
-
 pub mod theme {
     use gpui::actions;
 
     actions!(theme, [ToggleMode]);
-}
-
-pub mod theme_selector {
-    use gpui::Action;
-    use schemars::JsonSchema;
-    use serde::Deserialize;
-
-    /// Toggles the theme selector interface.
-    #[derive(PartialEq, Clone, Default, Debug, Deserialize, JsonSchema, Action)]
-    #[action(namespace = theme_selector)]
-    #[serde(deny_unknown_fields)]
-    pub struct Toggle {
-        /// A list of theme names to filter the theme selector down to.
-        pub themes_filter: Option<Vec<String>>,
-    }
-}
-
-pub mod icon_theme_selector {
-    use gpui::Action;
-    use schemars::JsonSchema;
-    use serde::Deserialize;
-
-    /// Toggles the icon theme selector interface.
-    #[derive(PartialEq, Clone, Default, Debug, Deserialize, JsonSchema, Action)]
-    #[action(namespace = icon_theme_selector)]
-    #[serde(deny_unknown_fields)]
-    pub struct Toggle {
-        /// A list of icon theme names to filter the theme selector down to.
-        pub themes_filter: Option<Vec<String>>,
-    }
 }
 
 pub mod search {
@@ -578,16 +529,6 @@ pub mod buffer_search {
         ]
     );
 }
-pub mod settings_profile_selector {
-    use gpui::Action;
-    use schemars::JsonSchema;
-    use serde::Deserialize;
-
-    #[derive(PartialEq, Clone, Default, Debug, Deserialize, JsonSchema, Action)]
-    #[action(namespace = settings_profile_selector)]
-    pub struct Toggle;
-}
-
 pub mod agent {
     use gpui::{Action, SharedString, actions};
     use schemars::JsonSchema;

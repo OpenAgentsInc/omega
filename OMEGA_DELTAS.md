@@ -713,11 +713,10 @@ cargo test -p omega_deltas
 - **Omega now:**
   1. Both images are deleted, `VectorName::ZedLogo` and `VectorName::ZedXCopilot`
      are gone, the `Vector` preview draws `OmegaLogo`, the Copilot modal draws
-     `IconName::Copilot`, and `workspace: open component preview` is registered
-     only under `debug_assertions` — hidden from the palette and refused in a
-     release build, the way `dev::ToggleInspector` already was. Removing the
-     artwork and gating the surface are both done, because either alone leaves
-     the other half of the failure standing.
+     `IconName::Copilot`, and omega#162 subsequently deleted the
+     `component_preview` crate and its `workspace::OpenComponentPreview`
+     action outright. Removing the artwork and the surface are both done,
+     because either alone leaves the other half of the failure standing.
   2. Every presentation of the Copilot surface names Omega. The GitHub Copilot
      **integration is retained**; the *"in Zed"* framing is not. The claim is
      recorded `blocked` in the compatibility allow-list, and blocked claims are
@@ -778,8 +777,8 @@ cargo test -p omega_deltas
   `no_command_palette_label_names_a_competitor`,
   `the_retired_action_namespace_still_resolves`,
   `blocked_public_copy_appears_nowhere_in_the_tree` and
-  `the_component_preview_is_gated_to_dev_builds` in `crates/omega_deltas/`
-  (source tree), `no_vector_name_carries_a_competitor_name` in `crates/ui/`, and
+  `removed_editor_crates_stay_removed` in `crates/omega_deltas/` (source tree),
+  `no_vector_name_carries_a_competitor_name` in `crates/ui/`, and
   `script/verify-omega-brand --app` from `script/bundle-omega-rc`, which scans
   the packaged executable's embedded asset paths for the forbidden token and
   asserts the current `omega::` action labels were actually built. It rejects
@@ -8269,21 +8268,31 @@ startup recheck — survives unchanged behind that dropdown.
 - **Upstream Zed:** ships the full editor around every surface: debugger,
   task modals, repl, panels, pickers, previews, and the rest of the
   full-editor crate set.
-- **Omega:** omega#162 deletes the full-editor-only crate set from the build
+- **Omega:** omega#162 deleted the full-editor-only crate set from the build
   graph, per the single-experience plan (sections 5–6) — the product is one
   agent thread and the controls that operate it, and `omega#161` already made
-  that the only surface. Each deleted crate is recorded in
+  that the only surface. The final batch removed the remaining selector,
+  preview, onboarding, extension, feedback, journal, snippets, profiling,
+  keymap-editor, and which-key crates. Each deleted crate is recorded in
   `REMOVED_EDITOR_CRATES`; its crate directory, workspace-member entry, and
   workspace-dependency entry must all stay gone. Namespaces whose declaring
   crate died move to `FORBIDDEN_KEYMAP_NAMESPACES` in the same commit that
   deletes the crate, because the built-in keymap is unwrapped at startup and a
   binding naming a deleted action is a process-killing panic that the build
   cannot catch (`0.2.0-rc6` shipped exactly that failure).
+- **Measured result:** 46 editor-only crates are absent. The `omega` internal
+  dependency closure is 197 crates, down from the issue's measured 245 and
+  within its approximate `~191` target. The source inventory contains 1,646
+  Rust files after deletion, so the brand gate's 1,500-file anti-vacuity floor
+  remains measured and strict rather than being lowered speculatively.
 - **Keep set:** `vim` (owner decision 2026-07-29), `editor`, `workspace`,
   `project`, `project_panel`, `git_ui`, `search`, `terminal`/`terminal_view`,
   `title_bar`, `command_palette`, `settings_ui`, `onboarding`, `markdown`,
-  `buffer_search`, `notifications`, plus the owner-leaning keeps `file_finder`,
-  `go_to_line`, `language_tools`, and `acp_tools`, pending explicit owner cuts.
+  `buffer_search`, `notifications`, plus `file_finder`, `go_to_line`,
+  `language_tools`, and `acp_tools`, which the owner explicitly kept in the
+  preceding omega#162 batch. `activity_indicator` and `lsp_locations` remain
+  because they provide the paired LSP/activity visibility named by the
+  keep-if catalog.
 - **Why:** the owner's single-experience direction: the editor around the
   thread is surface Omega does not sell, roughly 18% of the build graph, and
   every hidden-but-compiled surface is one key press or one rebase away from

@@ -161,7 +161,9 @@ When you override `language_servers` in your settings, your list **replaces** th
 
 Some language servers need to be configured with a current "toolchain", which is an installation of a specific version of a programming language compiler or/and interpreter, which can possibly include a full set of dependencies of a project.
 An example of what Zed considers a toolchain is a virtual environment in Python.
-Not all languages in Zed support toolchain discovery and selection, but for those that do, you can specify the toolchain from a toolchain picker (via {#action toolchain::Select}). To learn more about toolchains in Zed, see [`toolchains`](./toolchains.md).
+Omega's single-experience product does not expose the inherited toolchain
+picker. See [`toolchains`](./toolchains.md) for background on toolchain
+discovery.
 
 ### Configuring Language Servers
 
@@ -428,7 +430,7 @@ This example makes comments italic and changes the color of strings:
 
 Change your theme:
 
-1. Use the theme selector ({#kb theme_selector::Toggle})
+1. Open the Settings Editor and set `theme`
 2. Or set it in your `settings.json`:
 
 ```json [settings]
@@ -440,12 +442,6 @@ Change your theme:
 ```
 
 Create custom themes by creating a JSON file in `~/.config/zed/themes/`. Zed will automatically detect and make available any themes in this directory.
-
-### Using Theme Extensions
-
-Zed supports theme extensions. Browse and install theme extensions from the Extensions panel ({#kb omega::Extensions}).
-
-To create your own theme extension, refer to the [Developing Theme Extensions](./extensions/themes.md) guide.
 
 ## Using Language Server Features
 
@@ -509,8 +505,6 @@ When renaming a symbol that spans multiple files, Zed will open a preview in a m
 Use the {#action editor::Hover} command to display information about the symbol under the cursor. This often includes type information, documentation, and links to relevant resources.
 
 ### Workspace Symbol Search
-
-The {#action project_symbols::Toggle} command allows you to search for symbols (functions, classes, variables) across your entire project. This is useful for quickly navigating large codebases.
 
 ### Code Completion
 

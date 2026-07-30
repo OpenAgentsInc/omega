@@ -109,7 +109,6 @@
       "g >": ["editor::SelectNext", { "replace_newest": true }],
       "g <": ["editor::SelectPrevious", { "replace_newest": true }],
       "g a": "editor::SelectAllMatches",
-      "g shift-s": "project_symbols::Toggle",
       "g .": "editor::ToggleCodeActions", // omega specific
       "g shift-a": "editor::FindAllReferences", // omega specific
       "g space": "editor::OpenExcerpts", // omega specific
@@ -537,7 +536,6 @@
       // Space mode
       "space f": "file_finder::Toggle",
       "space k": "editor::Hover",
-      "space shift-s": "project_symbols::Toggle",
       "space d": "editor::GoToDiagnostic",
       "space r": "editor::Rename",
       "space a": "editor::ToggleCodeActions",
@@ -953,7 +951,6 @@
       "[ shift-b": ["pane::ActivateItem", 0],
       "space f": "file_finder::Toggle",
       "space /": "pane::DeploySearch",
-      "space shift-s": "project_symbols::Toggle",
       "space w h": "workspace::ActivatePaneLeft",
       "space w j": "workspace::ActivatePaneDown",
       "space w k": "workspace::ActivatePaneUp",

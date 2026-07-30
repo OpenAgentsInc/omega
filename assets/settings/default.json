@@ -2729,13 +2729,6 @@
       "insert": "inherit",
     },
   },
-  // Which-key popup settings
-  "which_key": {
-    // Whether to show the which-key popup when holding down key combinations.
-    "enabled": false,
-    // Delay in milliseconds before showing the which-key popup.
-    "delay_ms": 1000,
-  },
   // The server to connect to. Omega does not use Zed production services.
   // Inherited account, collab, and cloud clients are gated unless
   // OMEGA_ALLOW_ZED_SERVICES=1. This host is intentionally non-Zed, and is
