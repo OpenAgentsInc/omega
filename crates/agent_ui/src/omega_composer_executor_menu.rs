@@ -124,7 +124,7 @@ pub fn render_composer_executor_menu(
 ) -> Option<AnyElement> {
     let (handle, panel) = menu_handle(workspace.entity_id(), cx)?;
 
-    let trigger = Button::new("omega-composer-executor-trigger", current_label.clone())
+    let trigger = Button::new("omega-composer-executor-trigger", current_label)
         .debug_selector(|| "omega.composer.executor-menu".into())
         .label_size(LabelSize::XSmall)
         .color(Color::Muted)

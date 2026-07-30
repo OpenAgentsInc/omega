@@ -179,6 +179,7 @@ pub const ENFORCED_DELTAS: &[&str] = &[
     "OMEGA-DELTA-0188",
     "OMEGA-DELTA-0189",
     "OMEGA-DELTA-0190",
+    "OMEGA-DELTA-0191",
 ];
 
 /// The concise product contract adjacent to the delta registry.
@@ -212,9 +213,29 @@ pub const SESSION_DIRECTORIES_PATH: &str = "crates/agent_servers/src/acp.rs";
 /// `omega::OpenSettingsAt`, which is now admitted. `Settings` directly
 /// dispatches `omega::OpenSettings`.
 pub const THREAD_MENU_ENTRIES: &[(&str, &str, bool)] = &[
+    (
+        "Regenerate Thread Title",
+        "agent::RegenerateThreadTitle",
+        true,
+    ),
+    (
+        "Open Thread as Markdown",
+        "agent::OpenActiveThreadAsMarkdown",
+        true,
+    ),
     ("Add Server…", "omega::OpenSettingsAt", true),
     ("Install New Servers…", "omega::Extensions", false),
     ("Skills", "omega::OpenSettingsAt", true),
+    (
+        "Open Global Rules (AGENTS.md)",
+        "agent::OpenGlobalAgentsMdRules",
+        true,
+    ),
+    (
+        "Open Project Rules (AGENTS.md)",
+        "agent::OpenProjectAgentsMdRules",
+        true,
+    ),
     ("Settings", "omega::OpenSettings", true),
     ("Profiles", "agent::ManageProfiles", true),
     // `OMEGA-DELTA-0118`. This entry names one action per mode — the workspace
@@ -226,26 +247,16 @@ pub const THREAD_MENU_ENTRIES: &[(&str, &str, bool)] = &[
         "agent::ToggleThreadsSidebar",
         true,
     ),
+    ("Reauthenticate", "agent::ReauthenticateAgent", true),
+    ("Log Out", "agent::LogoutAgent", true),
 ];
 
-/// OMEGA-DELTA-0125. Entries in the same menu that reach no action at all.
-///
-/// These call a handler directly rather than dispatching, so the action gate
-/// never sees them and `THREAD_MENU_ENTRIES` cannot describe them. Each one
-/// used to end in the centre pane — the exact `OMEGA-DELTA-0119` failure — and
-/// each is now routed to the reader first. They are listed so that the label
-/// census below can account for every entry in the menu.
-pub const THREAD_MENU_READER_ENTRIES: &[&str] = &["Open Thread as Markdown"];
+/// OMEGA-DELTA-0125. Every reader entry now dispatches a typed action and is
+/// therefore classified in [`THREAD_MENU_ENTRIES`].
+pub const THREAD_MENU_READER_ENTRIES: &[&str] = &[];
 
-/// OMEGA-DELTA-0125. Entries this delta deliberately does not decide.
-///
-/// `Regenerate Thread Title`, `Reauthenticate` and `Log Out` are agent-namespace
-/// work that never leaves the panel: nothing about them turns on whether a
-/// centre pane is drawn. They are listed rather than omitted so the census
-/// below accounts for every entry in the menu and a new one cannot arrive by
-/// resembling these.
-pub const THREAD_MENU_ENTRIES_NOT_DECIDED_HERE: &[&str] =
-    &["Regenerate Thread Title", "Reauthenticate", "Log Out"];
+/// OMEGA-DELTA-0125. Every entry is now classified by its typed action.
+pub const THREAD_MENU_ENTRIES_NOT_DECIDED_HERE: &[&str] = &[];
 
 /// OMEGA-DELTA-0125. The name of the boolean that hides an entry in zero base.
 ///
@@ -8662,7 +8673,7 @@ mod tests {
         for token in [
             "filter.restrict_to(ADMITTED_NAMESPACES, ADMITTED_ACTIONS)",
             "cx.set_action_gate(",
-            "omega_zero_base::refusal(action_name)",
+            "omega_zero_base::record_refusal(action_name)",
             // OMEGA-DELTA-0048 amended, omega#119. `workspace.show_toast(` was
             // required here so a hidden action was "a sentence a person can
             // read" rather than a silent no-op.
@@ -17061,7 +17072,7 @@ mod tests {
         let ui = read_repository_file(ZERO_BASE_UI_PATH);
         let report = body_of(&ui, "report_refusal");
         assert!(
-            report.contains("omega_zero_base::refusal(action_name)"),
+            report.contains("omega_zero_base::record_refusal(action_name)"),
             "OMEGA-DELTA-0118: `report_refusal` in {} no longer builds the \
              refusal sentence, so a refused action leaves no trace anywhere — \
              not on screen and not in the log.",
@@ -22463,7 +22474,7 @@ mod tests {
         for required in [
             ".action(Box::new(OpenSarahAdmission))",
             ".handler(",
-            "ConversationTarget::Sarah",
+            "window.dispatch_action(Box::new(OpenSarahAdmission), cx)",
         ] {
             assert!(
                 sarah_entry.contains(required),
@@ -22471,6 +22482,12 @@ mod tests {
                  without a click handler the enabled row is a silent no-op (omega#168)"
             );
         }
+        assert!(
+            stripped_panel
+                .contains(".register_action(|workspace, _: &OpenSarahAdmission, window, cx|")
+                && stripped_panel.contains("panel.open_sarah_admission(window, cx)"),
+            "OMEGA-DELTA-0180: Sarah's menu action is no longer loaded by AgentPanel init"
+        );
 
         let menus = read_repository_file("crates/omega/src/zed/app_menus.rs");
         assert!(menus.contains("Sarah voice…"));
@@ -23381,6 +23398,396 @@ mod tests {
                 ledger.contains(law),
                 "OMEGA-DELTA-0189: the owner review ledger lost standing law \
                  text `{law}`."
+            );
+        }
+    }
+
+    /// OMEGA-DELTA-0191. A refusal is a failed proof, not an accepted product
+    /// state that a later log scrape may or may not notice.
+    #[test]
+    fn proof_processes_fail_on_any_logged_refusal() {
+        assert!(omega_zero_base::proof_is_refusal_free(0));
+        assert!(!omega_zero_base::proof_is_refusal_free(1));
+
+        let zero_base = read_repository_file(ZERO_BASE_MODE_PATH);
+        for required in [
+            "static LOGGED_REFUSALS: AtomicU64",
+            "pub fn record_refusal(",
+            "pub fn logged_refusal_count()",
+            "pub const fn proof_is_refusal_free(",
+            "assert!(!proof_is_refusal_free(logged_refusals))",
+        ] {
+            assert!(
+                zero_base.contains(required),
+                "OMEGA-DELTA-0191: the refusal tripwire lost `{required}`"
+            );
+        }
+
+        for path in [
+            "crates/omega/src/omega_zero_base_ui.rs",
+            "crates/agent_ui/src/agent_panel.rs",
+        ] {
+            let source = read_repository_file(path);
+            assert!(
+                source.contains("omega_zero_base::record_refusal(action_name)"),
+                "OMEGA-DELTA-0191: {path} logs a refusal without advancing the proof tripwire"
+            );
+        }
+
+        let visual = read_repository_file(VISUAL_TEST_RUNNER_PATH);
+        for required in [
+            "let refusals_before = omega_zero_base::logged_refusal_count()",
+            "saturating_sub(refusals_before)",
+            "omega_zero_base::proof_is_refusal_free(logged_refusals)",
+            "std::process::exit(1)",
+        ] {
+            assert!(
+                visual.contains(required),
+                "OMEGA-DELTA-0191: the visual proof runner lost `{required}`"
+            );
+        }
+        assert!(
+            !visual.contains("sidebar::Sidebar"),
+            "OMEGA-DELTA-0191: the visual runner still depends on the deleted legacy sidebar"
+        );
+
+        let zed_main = read_repository_file("crates/omega/src/main.rs");
+        let omega_send = body_of(&zed_main, "drive_omega_send");
+        for required in [
+            "omega_zero_base::logged_refusal_count()",
+            "omega_zero_base::proof_is_refusal_free(logged_refusals)",
+            "\"--omega-send logged {logged_refusals} refused action(s)\"",
+        ] {
+            assert!(
+                omega_send.contains(required),
+                "OMEGA-DELTA-0191: --omega-send lost `{required}`"
+            );
+        }
+    }
+
+    /// OMEGA-DELTA-0191. The activity rail is generated from one exact
+    /// six-surface inventory, every generated action is admitted, and the
+    /// shipped startup path loads both its handlers and panel dependencies.
+    #[test]
+    fn drawn_activity_rail_controls_are_admitted_and_loaded() {
+        let panel = without_comments(&read_repository_file(AGENT_PANEL_PATH));
+        let render = body_of(&panel, "render_activity_rail");
+        for required in [
+            "WorkSurface::FALLBACK_ORDER",
+            "workbench_shell::select_action(surface)",
+            "window.dispatch_action(action.boxed_clone(), cx)",
+        ] {
+            assert!(
+                render.contains(required),
+                "OMEGA-DELTA-0191: activity rail lost `{required}`"
+            );
+        }
+
+        let state =
+            read_repository_file("crates/omega_workbench_state/src/omega_workbench_state.rs");
+        let fallback = state
+            .split_once("pub const FALLBACK_ORDER: [Self; 6] = [")
+            .and_then(|(_, rest)| rest.split_once("];"))
+            .map(|(body, _)| body)
+            .expect("OMEGA-DELTA-0191: cannot isolate WorkSurface::FALLBACK_ORDER");
+        assert_eq!(
+            fallback.matches("Self::").count(),
+            6,
+            "OMEGA-DELTA-0191: a rail control was added without updating the exact proof inventory"
+        );
+
+        let shell = read_repository_file("crates/agent_ui/src/workbench_shell.rs");
+        let selector = body_of(&shell, "select_action");
+        let init = body_of(&panel, "init");
+        for (surface, action) in [
+            ("Files", "SelectFiles"),
+            ("Search", "SelectSearch"),
+            ("Review", "SelectReview"),
+            ("Git", "SelectGit"),
+            ("Terminal", "SelectTerminal"),
+            ("Plan", "SelectPlan"),
+        ] {
+            assert!(
+                fallback.contains(&format!("Self::{surface}")),
+                "OMEGA-DELTA-0191: rail inventory lost {surface}"
+            );
+            assert!(
+                selector.contains(&format!("WorkSurface::{surface} => {action}.boxed_clone()")),
+                "OMEGA-DELTA-0191: {surface} no longer dispatches {action}"
+            );
+            let action_name = format!("omega_workbench::{action}");
+            assert!(
+                omega_zero_base::admits_action(&action_name),
+                "OMEGA-DELTA-0191: drawn rail action `{action_name}` is refused"
+            );
+            assert!(
+                init.contains(&format!("_: &workbench_shell::{action}")),
+                "OMEGA-DELTA-0191: drawn rail action `{action_name}` has no AgentPanel init handler"
+            );
+        }
+
+        let zed = read_repository_file("crates/omega/src/zed.rs");
+        let panels = body_of(&zed, "initialize_panels");
+        let dependencies = panels
+            .find("agent_ui::initialize_workbench_panels")
+            .expect("OMEGA-DELTA-0191: workbench panel dependencies are not loaded");
+        let agent_panel = panels
+            .find("initialize_agent_panel")
+            .expect("OMEGA-DELTA-0191: AgentPanel is not loaded");
+        assert!(
+            dependencies < agent_panel,
+            "OMEGA-DELTA-0191: the rail renders before its panel dependencies load"
+        );
+    }
+
+    /// OMEGA-DELTA-0191. Every default-surface row in the `+` menu names an
+    /// admitted action, dispatches that same action on pointer click, and has a
+    /// handler loaded by the shipped Agent UI initialization.
+    #[test]
+    fn drawn_new_thread_menu_controls_are_admitted_and_loaded() {
+        let panel = without_comments(&read_repository_file(AGENT_PANEL_PATH));
+        let toolbar = body_of(&panel, "render_toolbar");
+        assert_eq!(
+            toolbar.matches("ContextMenuEntry::new(").count(),
+            7,
+            "OMEGA-DELTA-0191: the + menu changed without updating its exact control inventory"
+        );
+        assert_eq!(
+            toolbar.matches(".action(Box::new(").count(),
+            5,
+            "OMEGA-DELTA-0191: a default-surface + menu row lacks an action"
+        );
+        assert!(
+            toolbar.contains(".when(!omega_zero_base::is_active(), |menu|"),
+            "OMEGA-DELTA-0191: the two legacy-only rows are no longer outside the default surface"
+        );
+
+        let init = body_of(&panel, "init");
+        for (label, action, registration) in [
+            (
+                "Omega Agent",
+                "agent::NewOmegaAgentThread",
+                "_: &NewOmegaAgentThread",
+            ),
+            (
+                "Sarah voice…",
+                "agent::OpenSarahAdmission",
+                "_: &OpenSarahAdmission",
+            ),
+            (
+                "Terminal",
+                "agent::NewTerminalThread",
+                "_: &NewTerminalThread",
+            ),
+            (
+                "External Agents",
+                "agent::NewExternalAgentThread",
+                "action: &NewExternalAgentThread",
+            ),
+        ] {
+            assert!(
+                toolbar.contains(label),
+                "OMEGA-DELTA-0191: + menu lost `{label}`"
+            );
+            assert!(
+                omega_zero_base::admits_action(action),
+                "OMEGA-DELTA-0191: drawn + menu action `{action}` is refused"
+            );
+            assert!(
+                init.contains(registration),
+                "OMEGA-DELTA-0191: drawn + menu action `{action}` has no loaded handler"
+            );
+        }
+        assert!(
+            toolbar.contains(".action(Box::new(omega_actions::AcpRegistry))")
+                && toolbar.contains("window.dispatch_action(")
+                && toolbar.matches("omega_actions::AcpRegistry").count() == 2,
+            "OMEGA-DELTA-0191: Add More Agents does not dispatch its declared action"
+        );
+        assert!(omega_zero_base::admits_action("omega::AcpRegistry"));
+
+        let agent_ui = read_repository_file("crates/agent_ui/src/agent_ui.rs");
+        assert!(
+            agent_ui.contains("_: &omega_actions::AcpRegistry"),
+            "OMEGA-DELTA-0191: Add More Agents has no Agent UI init handler"
+        );
+        let zed = read_repository_file("crates/omega/src/zed.rs");
+        assert!(
+            zed.contains("agent_ui::init("),
+            "OMEGA-DELTA-0191: shipped startup no longer loads + menu handlers"
+        );
+    }
+
+    /// OMEGA-DELTA-0191. The header-menu census is exact, every entry visible
+    /// on the one application surface is admitted, and AgentPanel init owns
+    /// every agent-specific handler.
+    #[test]
+    fn drawn_header_menu_controls_are_admitted_and_loaded() {
+        let panel = without_comments(&read_repository_file(AGENT_PANEL_PATH));
+        let menu = body_of(&panel, "render_panel_options_menu");
+        for (label, action) in [
+            ("Regenerate Thread Title", "agent::RegenerateThreadTitle"),
+            (
+                "Open Thread as Markdown",
+                "agent::OpenActiveThreadAsMarkdown",
+            ),
+            ("Add Server…", "omega::OpenSettingsAt"),
+            ("Skills", "agent::ManageSkills"),
+            (
+                "Open Global Rules (AGENTS.md)",
+                "agent::OpenGlobalAgentsMdRules",
+            ),
+            (
+                "Open Project Rules (AGENTS.md)",
+                "agent::OpenProjectAgentsMdRules",
+            ),
+            ("Profiles", "agent::ManageProfiles"),
+            ("Settings", "omega::OpenSettings"),
+            ("Toggle Threads Sidebar", "agent::ToggleThreadsSidebar"),
+            ("Reauthenticate", "agent::ReauthenticateAgent"),
+            ("Log Out", "agent::LogoutAgent"),
+        ] {
+            assert!(
+                menu.contains(label),
+                "OMEGA-DELTA-0191: header menu lost `{label}`"
+            );
+            assert!(
+                omega_zero_base::admits_action(action),
+                "OMEGA-DELTA-0191: drawn header action `{action}` is refused"
+            );
+        }
+        assert!(
+            menu.contains("if offers_editor_surfaces")
+                && !omega_zero_base::admits_action("omega::Extensions"),
+            "OMEGA-DELTA-0191: the refused Extensions action is not confined to the unsealed legacy surface"
+        );
+
+        let init = body_of(&panel, "init");
+        for registration in [
+            "_: &RegenerateThreadTitle",
+            "action: &ManageSkills",
+            "_: &OpenGlobalAgentsMdRules",
+            "_: &OpenProjectAgentsMdRules",
+            "_: &ToggleThreadsSidebar",
+        ] {
+            assert!(
+                init.contains(registration),
+                "OMEGA-DELTA-0191: header action handler `{registration}` is not loaded"
+            );
+        }
+        for loaded_at_panel_root in [
+            "Self::open_active_thread_as_markdown",
+            "_: &ReauthenticateAgent",
+            "_: &LogoutAgent",
+        ] {
+            assert!(
+                panel.contains(loaded_at_panel_root),
+                "OMEGA-DELTA-0191: header action handler `{loaded_at_panel_root}` is not loaded"
+            );
+        }
+
+        let agent_ui = read_repository_file("crates/agent_ui/src/agent_ui.rs");
+        assert!(
+            agent_ui.contains("ManageProfilesModal::register"),
+            "OMEGA-DELTA-0191: Profiles is drawn without loading its modal handler"
+        );
+        let zed_main = read_repository_file("crates/omega/src/main.rs");
+        assert!(
+            zed_main.contains("settings_ui::init(cx)"),
+            "OMEGA-DELTA-0191: Settings actions are drawn without loading settings_ui"
+        );
+    }
+
+    /// OMEGA-DELTA-0191. The recursive application-menu test owns the exact
+    /// menu-bar inventory; this check binds that inventory to the startup calls
+    /// that install its agent and workbench handlers.
+    #[test]
+    fn drawn_application_menu_controls_are_admitted_and_loaded() {
+        let menus = read_repository_file("crates/omega/src/zed/app_menus.rs");
+        for required in [
+            "fn the_application_menu_is_the_approved_six_menu_contract",
+            "collect_menu_contract",
+            "assert_eq!(\n            contract,\n            expected.map(str::to_string)",
+            "omega_zero_base::admits_action(action)",
+        ] {
+            assert!(
+                menus.contains(required),
+                "OMEGA-DELTA-0191: application menu proof lost `{required}`"
+            );
+        }
+
+        let zed_main = read_repository_file("crates/omega/src/main.rs");
+        assert!(
+            zed_main.contains("let menus = app_menus(cx);")
+                && zed_main.contains("cx.set_menus(menus);"),
+            "OMEGA-DELTA-0191: shipped startup no longer installs the proved application menu"
+        );
+
+        let zed = read_repository_file("crates/omega/src/zed.rs");
+        for required in [
+            "command_palette::init(cx)",
+            "editor::init(cx)",
+            "git_ui::init(cx)",
+            "project_panel::init(cx)",
+            "terminal_view::init(cx)",
+            "agent_ui::init(",
+        ] {
+            assert!(
+                zed.contains(required),
+                "OMEGA-DELTA-0191: application-menu dependency `{required}` is not loaded"
+            );
+        }
+
+        let registry = read_repository_file("docs/omega/control-crawl-registry.json");
+        for surface in [
+            "\"id\": \"activity-rail\"",
+            "\"id\": \"new-thread-menu\"",
+            "\"id\": \"thread-header-menu\"",
+            "\"id\": \"application-menu\"",
+        ] {
+            assert!(
+                registry.contains(surface),
+                "OMEGA-DELTA-0191: control registry lost {surface}"
+            );
+        }
+    }
+
+    /// OMEGA-DELTA-0191. Zero Base is an implementation name, not a launch
+    /// mode or an escape hatch from the one product.
+    #[test]
+    fn zero_base_is_only_a_legacy_implementation_name() {
+        let taxonomy = read_repository_file(OMEGA_TAXONOMY_PATH);
+        for required in [
+            "### Application surface (legacy implementation name: zero base)",
+            "Omega is the application: one normal, flag-free launch surface",
+            "it is not a product mode or a second product",
+            "There is no runtime switch to a second application surface",
+        ] {
+            assert!(
+                taxonomy.contains(required),
+                "OMEGA-DELTA-0191: taxonomy lost `{required}`"
+            );
+        }
+
+        let zero_base = read_repository_file(ZERO_BASE_MODE_PATH);
+        for required in [
+            "The Omega surface — one agent thread and the controls that operate it.",
+            "# Why the legacy implementation name survives",
+            "# What the tripwire does",
+        ] {
+            assert!(
+                zero_base.contains(required),
+                "OMEGA-DELTA-0191: legacy crate documentation lost `{required}`"
+            );
+        }
+        for stale in [
+            "# Why the crate survives the mode",
+            "Deletion of the editor crates behind the gate is omega#162's separate",
+            "Only called when the process started in zero base",
+        ] {
+            assert!(
+                !zero_base.contains(stale),
+                "OMEGA-DELTA-0191: legacy mode documentation returned: `{stale}`"
             );
         }
     }

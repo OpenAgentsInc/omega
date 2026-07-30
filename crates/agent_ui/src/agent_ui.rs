@@ -427,6 +427,10 @@ actions!(
         ImportThreadsFromOtherChannels,
         /// Starts a new terminal thread.
         NewTerminalThread,
+        /// Starts a new conversation owned by Omega Agent.
+        NewOmegaAgentThread,
+        /// Regenerates the active conversation's title.
+        RegenerateThreadTitle,
         /// Opens Sarah's voice admission terms inside the Agent Panel.
         OpenSarahAdmission,
     ]

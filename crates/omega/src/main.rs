@@ -1797,6 +1797,14 @@ async fn drive_omega_send(cx: &mut AsyncApp) {
     };
     let deadline = Instant::now() + send.timeout;
     let outcome = run_omega_send(send, deadline, cx).await;
+    let logged_refusals = omega_zero_base::logged_refusal_count();
+    let outcome = if omega_zero_base::proof_is_refusal_free(logged_refusals) {
+        outcome
+    } else {
+        Err(anyhow::anyhow!(
+            "--omega-send logged {logged_refusals} refused action(s)"
+        ))
+    };
     match &outcome {
         Ok(()) => log::info!("OMEGA-DELTA-0093: the driven turn completed"),
         Err(error) => log::error!("OMEGA-DELTA-0093: the driven turn did not complete: {error:#}"),

@@ -1,8 +1,8 @@
-//! The zero-base surface: the gate that refuses and the palette restriction.
+//! Omega's action tripwire and command-palette restriction.
 //!
-//! omega#99. The mode itself lives in `crates/omega_zero_base`, which reads the
-//! process command line and nothing else. This module is what a person sees and
-//! touches: what the palette lists and what a refused key binding says.
+//! The legacy `omega_zero_base` crate name dates to omega#99. Since omega#161
+//! Omega has one application surface, and this module always installs the
+//! admitted-action inventory that keeps hidden legacy actions unreachable.
 //!
 //! `OMEGA-DELTA-0052`, omega#100. This module used to own a third thing — the
 //! status-bar control that put the editor back. The owner asked for it to go:
@@ -15,11 +15,9 @@
 use gpui::App;
 use omega_zero_base::{ADMITTED_ACTIONS, ADMITTED_NAMESPACES};
 
-/// Install the refusal gate and the palette restriction, once, at app init.
+/// Install the refusal tripwire and palette restriction once at app init.
 ///
-/// Only called when the process started in zero base. Without that, nothing
-/// here runs and Omega's behaviour is byte-identical to a build that never had
-/// this module.
+/// Omega has one application surface, so every process installs this gate.
 pub fn init(cx: &mut App) {
     restrict_command_palette(cx);
     install_action_gate(cx);
@@ -92,7 +90,7 @@ fn report_refusal(action_name: &'static str, _cx: &mut App) {
     // The controls that a person *can* deliberately reach are hidden in zero
     // base (`OMEGA-DELTA-0125`), so the loud case this was meant to explain no
     // longer exists.
-    log::info!("{}", omega_zero_base::refusal(action_name));
+    log::info!("{}", omega_zero_base::record_refusal(action_name));
 }
 
 // OMEGA-DELTA-0052. The way out used to live below this line: a status-bar

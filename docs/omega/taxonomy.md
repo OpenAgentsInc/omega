@@ -206,12 +206,13 @@ happens on GitHub, and converting it is separate, unscoped work to be figured
 out through the workrooms rather than before them. Repeating the target as
 though it were the present is a mistake this document exists to stop.
 
-### Zero base
+### Application surface (legacy implementation name: zero base)
 
-The legacy implementation name for Omega's one normal, flag-free launch
-surface. It is not a one-agent product contract and it is not a second product:
-the surface contains the conversation, composer, navigation sidebar, tester
-channels, and workbench rail. New conversations begin in one of three modes:
+Omega is the application: one normal, flag-free launch surface containing the
+conversation, composer, navigation sidebar, tester channels, and workbench
+rail. “Zero base” is only the legacy implementation name used by crates and
+checks; it is not a product mode or a second product. New conversations begin
+in one of three modes:
 **Direct Agent**, **Omega Agent**, or **Sarah**.
 
 The conversation mode is chosen at creation. A direct conversation belongs to
