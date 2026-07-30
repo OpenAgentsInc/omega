@@ -539,7 +539,9 @@ mod tests {
             }));
 
         assert!(message.contains("Lost"));
-        assert!(message.contains("onboarding"));
+        // omega#164 retired the onboarding ceremony; the blocker now points
+        // at identity setup, which is where a Lost identity is resolved.
+        assert!(message.contains("identity setup"));
         assert!(!message.contains("Send the message again"));
     }
 
