@@ -5,7 +5,7 @@ use std::{
 
 use app_identity::AppChannel;
 use nostr::{
-    Event, EventBuilder, JsonUtil, Kind,
+    Event, EventBuilder, JsonUtil, Kind, ToBech32,
     nips::{
         nip44::{self, Version as Nip44Version},
         nip49::{EncryptedSecretKey, KeySecurity},
@@ -16,6 +16,7 @@ use nostr::{
 use serde::{Deserialize, Serialize};
 use sha2::{Digest as _, Sha256};
 use thiserror::Error;
+use zeroize::Zeroizing;
 
 use crate::{
     AdmittedSigningRequest, CompletionRecord, ContractError, CustodyConflict,
@@ -372,6 +373,31 @@ impl IdentityService {
             },
         )?;
         Ok(())
+    }
+
+    /// Owner-initiated reveal of the bech32 `nsec` for a ready identity.
+    ///
+    /// Only the backup surface calls this. It is not a generic renderer RPC:
+    /// the string is zeroized on drop, and a non-ready custody state refuses
+    /// without inventing material.
+    pub fn export_nsec_for_backup(&self) -> Result<Zeroizing<String>, CustodyError> {
+        let _mutation_guard = IdentityMutationGuard::acquire(&self.locator)?;
+        self.require_no_reset_locked()?;
+        let resolved = self.resolve_locked();
+        if resolved.result.state != CustodyState::Ready {
+            return Err(CustodyError::CustodyDenied(resolved.result.state));
+        }
+        let secret = resolved
+            .secret
+            .ok_or(CustodyError::CustodyDenied(CustodyState::Incomplete))?;
+        let keys = secret
+            .keys()
+            .map_err(|_| CustodyError::CustodyDenied(CustodyState::Incomplete))?;
+        let nsec = keys
+            .secret_key()
+            .to_bech32()
+            .map_err(|_| CustodyError::CustodyDenied(CustodyState::Incomplete))?;
+        Ok(Zeroizing::new(nsec))
     }
 
     /// What the sidebar may say about backing up the key.
@@ -2283,6 +2309,29 @@ mod tests {
         assert!(dismissed.value_accrued);
         assert!(dismissed.dismissed);
         assert!(!dismissed.should_offer_backup());
+    }
+
+    #[test]
+    fn export_nsec_for_backup_returns_a_bech32_nsec_for_a_ready_identity() {
+        let temporary_directory = tempfile::tempdir().expect("create temporary directory");
+        let store = FakeStore::empty();
+        let service = service(store, temporary_directory.path().to_path_buf());
+        service.create(receipt()).expect("create identity");
+        let nsec = service
+            .export_nsec_for_backup()
+            .expect("export the ready identity");
+        assert!(
+            nsec.starts_with("nsec1"),
+            "backup export must return bech32 nsec, got {}",
+            &*nsec
+        );
+        let reparsed = nostr::Keys::parse(nsec.as_str()).expect("nsec must parse");
+        let identity = service.inspect().expect("inspect ready identity").identity;
+        let public = identity.expect("ready identity has a public key");
+        assert_eq!(
+            reparsed.public_key().to_hex(),
+            public.public_key_hex().as_str()
+        );
     }
 
     #[test]

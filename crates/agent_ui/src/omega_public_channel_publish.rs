@@ -411,12 +411,10 @@ mod tests {
             .expect("alpha feedback channel")
     }
 
-    fn event(keys: &Keys, id_seed: u64, created_at: u64) -> NostrEventRecord {
+    fn event(keys: &Keys, id_seed: u64, created_at: u64, group_id: &str) -> NostrEventRecord {
         let event = EventBuilder::new(Kind::Custom(CHAT_MESSAGE_KIND), id_seed.to_string())
             .custom_created_at(Timestamp::from_secs(created_at))
-            .tags(vec![
-                Tag::parse(["h", "openagents-public"]).expect("group tag"),
-            ])
+            .tags(vec![Tag::parse(["h", group_id]).expect("group tag")])
             .sign_with_keys(keys)
             .expect("signed fixture event");
         serde_json::from_str(&event.as_json()).expect("event record")
@@ -426,14 +424,16 @@ mod tests {
     fn message_template_binds_group_limits_and_three_foreign_predecessors() {
         let own = Keys::generate();
         let other = Keys::generate();
+        let channel = descriptor();
+        let group_id = channel.group_id.clone();
         let events = (0..6)
             .map(|index| {
                 let keys = if index == 5 { &own } else { &other };
-                event(keys, index, 100 + index)
+                event(keys, index, 100 + index, &group_id)
             })
             .collect::<Vec<_>>();
         let template = event_template(
-            &descriptor(),
+            &channel,
             &PublicChannelWrite::Message {
                 content: "alpha feedback".to_string(),
             },
@@ -444,7 +444,7 @@ mod tests {
         .expect("message template");
         assert_eq!(template.kind, CHAT_MESSAGE_KIND);
         assert_eq!(template.content, "alpha feedback");
-        assert_eq!(template.tags[0], ["h", "openagents-public"]);
+        assert_eq!(template.tags[0], ["h", group_id.as_str()]);
         assert_eq!(
             template.tags[1].first().map(String::as_str),
             Some("previous")
@@ -452,7 +452,7 @@ mod tests {
         assert_eq!(template.tags[1].len(), 4);
         assert!(
             event_template(
-                &descriptor(),
+                &channel,
                 &PublicChannelWrite::Message {
                     content: "x".repeat(8_193),
                 },
@@ -466,8 +466,9 @@ mod tests {
 
     #[test]
     fn report_template_names_only_target_coordinate_and_never_copies_content() {
+        let channel = descriptor();
         let template = event_template(
-            &descriptor(),
+            &channel,
             &PublicChannelWrite::Report {
                 event_id: "a".repeat(64),
                 author_public_key: "b".repeat(64),
@@ -479,7 +480,7 @@ mod tests {
         .expect("report template");
         assert_eq!(template.kind, REPORT_KIND);
         assert!(template.content.is_empty());
-        assert_eq!(template.tags[0], ["h", "openagents-public"]);
+        assert_eq!(template.tags[0], ["h", channel.group_id.as_str()]);
         assert_eq!(template.tags[1][0], "e");
         assert_eq!(template.tags[2][0], "p");
     }
@@ -489,9 +490,10 @@ mod tests {
         let directory = tempfile::tempdir().expect("identity directory");
         let service =
             IdentityService::for_channel_data_root(AppChannel::Dev, directory.path().to_path_buf());
+        let channel = descriptor();
         let signed = sign_write(
             &service,
-            &descriptor(),
+            &channel,
             PublicChannelWrite::Message {
                 content: "signed alpha feedback".to_string(),
             },
@@ -500,7 +502,7 @@ mod tests {
         .expect("signed write");
         assert!(signed.event.verify().is_ok());
         assert_eq!(signed.record.kind, CHAT_MESSAGE_KIND);
-        assert!(signed.record.has_tag("h", "openagents-public"));
+        assert!(signed.record.has_tag("h", &channel.group_id));
         assert!(!signed.is_report);
     }
 
@@ -509,21 +511,22 @@ mod tests {
         let directory = tempfile::tempdir().expect("identity directory");
         let service =
             IdentityService::for_channel_data_root(AppChannel::Dev, directory.path().to_path_buf());
+        let channel = descriptor();
         let author = Keys::generate();
-        let target = event(&author, 7, 100);
+        let target = event(&author, 7, 100, &channel.group_id);
         let write = PublicChannelWrite::Report {
             event_id: target.id.clone(),
             author_public_key: target.public_key.clone(),
         };
         assert!(
-            sign_write(&service, &descriptor(), write.clone(), &[]).is_err(),
+            sign_write(&service, &channel, write.clone(), &[]).is_err(),
             "an arbitrary coordinate must not become a signed public report"
         );
         let signed =
-            sign_write(&service, &descriptor(), write, &[target]).expect("verified target report");
+            sign_write(&service, &channel, write, &[target]).expect("verified target report");
         assert_eq!(signed.record.kind, REPORT_KIND);
         assert!(signed.record.content.is_empty());
-        assert!(signed.record.has_tag("h", "openagents-public"));
+        assert!(signed.record.has_tag("h", &channel.group_id));
         assert!(signed.is_report);
     }
 

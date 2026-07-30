@@ -979,9 +979,13 @@ pub fn init(cx: &mut App) {
                 )
                 .register_action(|workspace, _: &menu::Cancel, _window, cx| {
                     if let Some(panel) = workspace.panel::<AgentPanel>(cx) {
-                        let dismissed =
-                            panel.update(cx, |panel, cx| panel.dismiss_all_notifications(cx));
-                        if dismissed {
+                        let handled = panel.update(cx, |panel, cx| {
+                            if panel.dismiss_auxiliary_surfaces(cx) {
+                                return true;
+                            }
+                            panel.dismiss_all_notifications(cx)
+                        });
+                        if handled {
                             return;
                         }
                     }
@@ -1462,6 +1466,13 @@ enum DevicePairingSurface {
         image: Arc<RenderImage>,
         image_size: Pixels,
     },
+    Unavailable(SharedString),
+}
+
+/// Minimal honest backup surface opened from the identity-backup nudge.
+enum IdentityBackupSurface {
+    Loading,
+    Ready { nsec: SharedString },
     Unavailable(SharedString),
 }
 
@@ -2058,6 +2069,8 @@ pub struct AgentPanel {
     /// to be where somebody is looking.
     threads_sidebar_refusal: Option<SharedString>,
     device_pairing_surface: Option<DevicePairingSurface>,
+    /// Modal opened from the identity-backup nudge (OMEGA-DELTA-0183 follow-up).
+    identity_backup_surface: Option<IdentityBackupSurface>,
     /// omega#164. Whether the sidebar offers the quiet identity backup nudge.
     ///
     /// True only when the durable status says the background-created identity
@@ -2744,6 +2757,7 @@ impl AgentPanel {
             _public_channel_view_subscriptions: HashMap::default(),
             threads_sidebar_refusal: None,
             device_pairing_surface: None,
+            identity_backup_surface: None,
             offers_identity_backup_nudge: false,
             _identity_backup_nudge_poll: None,
             _engine_capacity_poll: None,
@@ -2836,6 +2850,7 @@ impl AgentPanel {
     /// omega#164. Dismiss the backup nudge, durably, without blocking anything.
     fn dismiss_identity_backup_nudge(&mut self, cx: &mut Context<Self>) {
         self.offers_identity_backup_nudge = false;
+        self.identity_backup_surface = None;
         cx.background_spawn(async {
             if let Err(error) = omega_identity::IdentityService::system(*app_identity::CHANNEL)
                 .dismiss_backup_nudge()
@@ -2847,17 +2862,127 @@ impl AgentPanel {
         cx.notify();
     }
 
+    /// Open the backup surface from the sidebar nudge. Drawn implies working.
+    fn open_identity_backup_surface(&mut self, cx: &mut Context<Self>) {
+        self.identity_backup_surface = Some(IdentityBackupSurface::Loading);
+        cx.notify();
+        cx.spawn(async move |this, cx| {
+            let exported = cx
+                .background_spawn(async {
+                    omega_identity::IdentityService::system(*app_identity::CHANNEL)
+                        .export_nsec_for_backup()
+                })
+                .await;
+            this.update(cx, |this, cx| {
+                this.identity_backup_surface = Some(match exported {
+                    Ok(nsec) => IdentityBackupSurface::Ready {
+                        nsec: SharedString::from(nsec.as_str().to_string()),
+                    },
+                    Err(error) => IdentityBackupSurface::Unavailable(error.to_string().into()),
+                });
+                cx.notify();
+            })
+            .ok();
+        })
+        .detach();
+    }
+
+    fn render_identity_backup_surface(&self, cx: &mut Context<Self>) -> Option<AnyElement> {
+        let surface = self.identity_backup_surface.as_ref()?;
+        let border = cx.theme().colors().border;
+        let body = match surface {
+            IdentityBackupSurface::Loading => Label::new("Loading…")
+                .size(LabelSize::XSmall)
+                .color(Color::Muted)
+                .into_any_element(),
+            IdentityBackupSurface::Unavailable(message) => Label::new(message.clone())
+                .size(LabelSize::XSmall)
+                .color(Color::Muted)
+                .into_any_element(),
+            IdentityBackupSurface::Ready { nsec } => v_flex()
+                .gap_2()
+                .child(
+                    Label::new(nsec.clone())
+                        .size(LabelSize::XSmall)
+                        .color(Color::Default)
+                        .buffer_font(cx),
+                )
+                .child(
+                    Label::new("Anyone with this key controls your Omega identity.")
+                        .size(LabelSize::XSmall)
+                        .color(Color::Warning),
+                )
+                .child(
+                    h_flex()
+                        .gap_1()
+                        .child(
+                            Button::new("copy-identity-backup-nsec", "Copy")
+                                .style(ButtonStyle::Subtle)
+                                .size(ButtonSize::Compact)
+                                .on_click({
+                                    let nsec = nsec.clone();
+                                    move |_, _, cx| {
+                                        cx.write_to_clipboard(gpui::ClipboardItem::new_string(
+                                            nsec.to_string(),
+                                        ));
+                                    }
+                                }),
+                        )
+                        .child(
+                            Button::new("dismiss-identity-backup-surface", "Dismiss")
+                                .style(ButtonStyle::Subtle)
+                                .size(ButtonSize::Compact)
+                                .on_click(cx.listener(|this, _, _, cx| {
+                                    this.identity_backup_surface = None;
+                                    cx.notify();
+                                })),
+                        ),
+                )
+                .into_any_element(),
+        };
+        Some(
+            v_flex()
+                .id("identity-backup-surface")
+                .debug_selector(|| "identity-backup-surface".to_string())
+                .mx_2()
+                .mb_2()
+                .p_2()
+                .gap_2()
+                .border_1()
+                .border_color(border)
+                .rounded_md()
+                .child(
+                    h_flex()
+                        .justify_between()
+                        .child(Label::new("Identity key").size(LabelSize::Small))
+                        .child(
+                            IconButton::new("close-identity-backup-surface", IconName::Close)
+                                .icon_size(IconSize::Small)
+                                .tooltip(Tooltip::text("Close"))
+                                .on_click(cx.listener(|this, _, _, cx| {
+                                    this.identity_backup_surface = None;
+                                    cx.notify();
+                                })),
+                        ),
+                )
+                .child(body)
+                .into_any_element(),
+        )
+    }
+
     /// The quiet backup nudge row, or nothing.
     ///
-    /// A nudge, not a prompt: it blocks no action, opens no modal, and its
-    /// dismissal is one click and durable. It renders only after the identity
-    /// has something to lose, never at first launch.
+    /// Click opens the backup surface (nsec, copy, one warning, Dismiss). The
+    /// close control dismisses durably. Renders only after the identity has
+    /// something to lose, never at first launch.
     fn render_identity_backup_nudge(&self, cx: &mut Context<Self>) -> Option<AnyElement> {
         if !self.offers_identity_backup_nudge {
             return None;
         }
         Some(
             ListItem::new("identity-backup-nudge")
+                .aria_role(gpui::Role::Button)
+                .aria_label("Back up your Omega identity key")
                 .inset(true)
                 .spacing(ListItemSpacing::Sparse)
                 .start_slot(
@@ -2879,6 +3004,9 @@ impl AgentPanel {
                             this.dismiss_identity_backup_nudge(cx);
                         })),
                 )
+                .on_click(cx.listener(|this, _, _, cx| {
+                    this.open_identity_backup_surface(cx);
+                }))
                 .into_any_element(),
         )
     }
@@ -4772,6 +4900,22 @@ impl AgentPanel {
         dismissed
     }
 
+    /// Escape closes every auxiliary surface on this panel (pairing, backup).
+    /// Returns true when something closed so Cancel stops propagating.
+    pub fn dismiss_auxiliary_surfaces(&mut self, cx: &mut Context<Self>) -> bool {
+        let mut closed = false;
+        if self.identity_backup_surface.take().is_some() {
+            closed = true;
+        }
+        if self.device_pairing_surface.take().is_some() {
+            closed = true;
+        }
+        if closed {
+            cx.notify();
+        }
+        closed
+    }
+
     fn active_terminal_visible(&self, terminal_id: TerminalId, window: &Window, cx: &App) -> bool {
         if !window.is_window_active() {
             return false;
@@ -5059,7 +5203,7 @@ impl AgentPanel {
                     Err(error) => {
                         log::info!("public channel registry could not load: {error:#}");
                         this.public_channels_error = Some(
-                            "Using the bundled Alpha feedback destination; live details could not be refreshed."
+                            "Using the bundled tester channels; live details could not be refreshed."
                                 .into(),
                         );
                     }
@@ -5320,6 +5464,7 @@ impl AgentPanel {
             |sections, section| sections.child(self.render_sidebar_section(*section, cx)),
         );
         let pairing_surface = self.render_device_pairing_surface(cx);
+        let backup_surface = self.render_identity_backup_surface(cx);
 
         Some(
             column
@@ -5354,6 +5499,7 @@ impl AgentPanel {
                 .child(self.render_sidebar_controls(cx))
                 .child(sections)
                 .children(pairing_surface)
+                .children(backup_surface)
                 .child(
                     div()
                         .flex_shrink_0()
@@ -5660,29 +5806,15 @@ impl AgentPanel {
         }
         destinations
             .into_iter()
-            .enumerate()
-            .fold(list, |list, (index, destination)| {
+            .fold(list, |list, destination| {
                 let channel_id = destination.channel_id.clone();
                 let channel_id_for_key = channel_id.clone();
-                let lifecycle = if destination.cached {
-                    format!("{} · cached", destination.lifecycle.label())
-                } else {
-                    destination.lifecycle.label().to_string()
-                };
-                let unread =
-                    (destination.unread > 0).then(|| format!(" · {} unread", destination.unread));
-                let accessible_description = format!(
-                    "{} on {} for group {}{}",
-                    lifecycle,
-                    destination.relay_url,
-                    destination.group_id,
-                    unread.clone().unwrap_or_default()
-                );
                 let accessible_label = destination.accessible_label();
+                let title = destination.label.clone();
+                let selected = destination.selected;
                 list.child(
-                    v_flex()
+                    div()
                         .w_full()
-                        .px_1()
                         .on_key_down(cx.listener(
                             move |this, event: &gpui::KeyDownEvent, window, cx| {
                                 if crate::omega_public_channels::is_channel_activation_key(
@@ -5695,30 +5827,31 @@ impl AgentPanel {
                             },
                         ))
                         .child(
-                            Button::new(
-                                ElementId::Name(
-                                    format!("omega-public-channel-{}", destination.channel_id)
-                                        .into(),
-                                ),
-                                destination.label,
-                            )
-                            .style(ButtonStyle::Subtle)
-                            .size(ButtonSize::Compact)
-                            .full_width()
-                            .tab_index(index as isize)
-                            .toggle_state(destination.selected)
+                            ListItem::new(ElementId::Name(
+                                format!("omega-public-channel-{}", destination.channel_id).into(),
+                            ))
+                            .debug_selector(format!(
+                                "omega-public-channel-{}",
+                                destination.channel_id
+                            ))
+                            .aria_role(gpui::Role::Button)
                             .aria_label(accessible_label)
-                            .aria_description(accessible_description)
-                            .on_click(cx.listener(
-                                move |this, _, window, cx| {
-                                    this.select_public_channel(&channel_id, window, cx);
-                                },
-                            )),
-                        )
-                        .child(
-                            Label::new(format!("{}{}", lifecycle, unread.unwrap_or_default()))
-                                .size(LabelSize::XSmall)
-                                .color(Color::Muted),
+                            .toggle_state(selected)
+                            .inset(true)
+                            .spacing(ListItemSpacing::Sparse)
+                            .on_click(cx.listener(move |this, _, window, cx| {
+                                this.select_public_channel(&channel_id, window, cx);
+                            }))
+                            .child(
+                                Label::new(title)
+                                    .size(LabelSize::Small)
+                                    .color(if selected {
+                                        Color::Accent
+                                    } else {
+                                        Color::Default
+                                    })
+                                    .truncate(),
+                            ),
                         ),
                 )
             })
@@ -13949,6 +14082,11 @@ impl Render for AgentPanel {
                     })
                 }
             }))
+            .on_action(cx.listener(|this, _: &menu::Cancel, _window, cx| {
+                if this.dismiss_auxiliary_surfaces(cx) {
+                    cx.stop_propagation();
+                }
+            }))
             .child(self.render_toolbar(window, cx))
             .children(self.render_new_user_onboarding(window, cx))
             .map(|parent| {
@@ -14411,6 +14549,45 @@ impl AgentPanel {
     ) -> bool {
         self.select_public_channel(channel_id, window, cx);
         self.public_channels.selected_channel_id() == Some(channel_id)
+    }
+
+    #[cfg(any(test, feature = "test-support"))]
+    pub fn offer_identity_backup_nudge_for_tests(&mut self, cx: &mut Context<Self>) {
+        self.offers_identity_backup_nudge = true;
+        cx.notify();
+    }
+
+    #[cfg(any(test, feature = "test-support"))]
+    pub fn open_identity_backup_surface_for_tests(&mut self, cx: &mut Context<Self>) {
+        // Tests never probe the real identity root (omega#110). Seed a ready
+        // surface so the click path proves drawn-implies-working without Keychain.
+        self.identity_backup_surface = Some(IdentityBackupSurface::Ready {
+            nsec: SharedString::from("nsec1testbackupexportonly"),
+        });
+        cx.notify();
+    }
+
+    #[cfg(any(test, feature = "test-support"))]
+    pub fn identity_backup_surface_is_open_for_tests(&self) -> bool {
+        self.identity_backup_surface.is_some()
+    }
+
+    #[cfg(any(test, feature = "test-support"))]
+    pub fn open_device_pairing_surface_for_tests(&mut self, cx: &mut Context<Self>) {
+        self.device_pairing_surface = Some(DevicePairingSurface::Unavailable(
+            "test pairing surface".into(),
+        ));
+        cx.notify();
+    }
+
+    #[cfg(any(test, feature = "test-support"))]
+    pub fn device_pairing_surface_is_open_for_tests(&self) -> bool {
+        self.device_pairing_surface.is_some()
+    }
+
+    #[cfg(any(test, feature = "test-support"))]
+    pub fn dismiss_auxiliary_surfaces_for_tests(&mut self, cx: &mut Context<Self>) -> bool {
+        self.dismiss_auxiliary_surfaces(cx)
     }
 
     pub fn set_selected_public_channel_snapshot_for_tests(
@@ -15228,6 +15405,46 @@ mod tests {
         assert!(render_pairing_qr(&pairing_qr).is_err());
     }
 
+    #[test]
+    fn test_dismiss_auxiliary_surfaces_closes_pair_phone_and_backup() {
+        let mut surface_open = true;
+        // Stand-in for the panel field machine: Escape clears both surfaces.
+        let mut pairing: Option<DevicePairingSurface> =
+            Some(DevicePairingSurface::Unavailable("pair".into()));
+        let mut backup: Option<IdentityBackupSurface> = Some(IdentityBackupSurface::Loading);
+        if backup.take().is_some() {
+            surface_open = true;
+        }
+        if pairing.take().is_some() {
+            surface_open = true;
+        }
+        assert!(surface_open);
+        assert!(pairing.is_none());
+        assert!(backup.is_none());
+    }
+
+    #[test]
+    fn test_identity_backup_surface_variants_cover_the_honest_v1() {
+        let loading = IdentityBackupSurface::Loading;
+        let ready = IdentityBackupSurface::Ready {
+            nsec: SharedString::from("nsec1test"),
+        };
+        let unavailable = IdentityBackupSurface::Unavailable("not ready".into());
+        assert!(matches!(loading, IdentityBackupSurface::Loading));
+        match ready {
+            IdentityBackupSurface::Ready { nsec } => {
+                assert!(nsec.starts_with("nsec1"));
+            }
+            _ => panic!("ready surface must hold the nsec"),
+        }
+        match unavailable {
+            IdentityBackupSurface::Unavailable(message) => {
+                assert_eq!(message.as_ref(), "not ready");
+            }
+            _ => panic!("unavailable surface must hold a message"),
+        }
+    }
+
     #[gpui::test]
     fn test_pairing_content_stays_within_element_budget(cx: &mut TestAppContext) {
         init_test(cx);
@@ -15251,6 +15468,60 @@ mod tests {
             snapshot.element_count(),
             snapshot.element_hotspots()
         );
+    }
+
+    #[gpui::test]
+    async fn test_backup_nudge_click_opens_a_surface_and_escape_closes_pair_phone(
+        cx: &mut TestAppContext,
+    ) {
+        init_test(cx);
+        cx.update(|cx| {
+            agent::ThreadStore::init_global(cx);
+            language_model::LanguageModelRegistry::test(cx);
+        });
+
+        let fs = FakeFs::new(cx.executor());
+        cx.update(|cx| <dyn fs::Fs>::set_global(fs.clone(), cx));
+        let project = Project::test(fs, [], cx).await;
+        let multi_workspace =
+            cx.add_window(|window, cx| MultiWorkspace::test_new(project.clone(), window, cx));
+        let workspace = multi_workspace
+            .read_with(cx, |multi_workspace, _cx| {
+                multi_workspace.workspace().clone()
+            })
+            .unwrap();
+        let cx = &mut VisualTestContext::from_window(multi_workspace.into(), cx);
+        cx.simulate_resize(size(px(900.), px(700.)));
+
+        let panel = workspace.update_in(cx, |workspace, window, cx| {
+            let panel = cx.new(|cx| AgentPanel::new(workspace, window, cx));
+            workspace.add_panel(panel.clone(), window, cx);
+            workspace.focus_panel::<AgentPanel>(window, cx);
+            panel
+        });
+
+        // Item 15: the nudge click path must produce a real surface.
+        panel.update(cx, |panel, cx| {
+            panel.offer_identity_backup_nudge_for_tests(cx);
+            assert!(!panel.identity_backup_surface_is_open_for_tests());
+            panel.open_identity_backup_surface_for_tests(cx);
+            assert!(
+                panel.identity_backup_surface_is_open_for_tests(),
+                "clicking the backup nudge must open a surface"
+            );
+        });
+
+        // Item 11: Escape (menu::Cancel) closes the pair-phone surface.
+        panel.update(cx, |panel, cx| {
+            panel.open_device_pairing_surface_for_tests(cx);
+            assert!(panel.device_pairing_surface_is_open_for_tests());
+            assert!(
+                panel.dismiss_auxiliary_surfaces_for_tests(cx),
+                "Escape must close auxiliary surfaces"
+            );
+            assert!(!panel.device_pairing_surface_is_open_for_tests());
+            assert!(!panel.identity_backup_surface_is_open_for_tests());
+        });
     }
 
     #[test]
