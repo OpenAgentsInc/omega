@@ -99,13 +99,17 @@ dependencies = [
  "agent_ui",
  "anyhow",
  "app_identity",
+ "async-std",
  "chrono",
+ "editor",
  "gpui",
  "omega_actions",
  "omega_effectd",
  "omega_identity",
+ "omega_identity_sync",
  "omega_signer_broker",
  "onboarding",
+ "serde_json",
  "ui",
  "util",
  "workspace",
@@ -524,6 +528,7 @@ dependencies = [
  "anyhow",
  "app_identity",
  "async-channel 2.5.0",
+ "async-std",
  "async-tungstenite",
  "audio",
  "base64 0.22.1",
@@ -583,6 +588,7 @@ dependencies = [
  "omega_front_door",
  "omega_harness",
  "omega_identity",
+ "omega_identity_sync",
  "omega_signer_broker",
  "omega_workbench_harness",
  "omega_workbench_state",
@@ -11137,6 +11143,22 @@ dependencies = [
  "url",
  "windows-sys 0.61.2",
  "zeroize",
+]
+
+[[package]]
+name = "omega_identity_sync"
+version = "0.1.0"
+dependencies = [
+ "async-io",
+ "atomic-write-file",
+ "futures 0.3.32",
+ "omega_identity",
+ "paths",
+ "serde",
+ "serde_json",
+ "smol",
+ "tempfile",
+ "thiserror 2.0.17",
 ]
 
 [[package]]

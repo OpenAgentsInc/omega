@@ -719,6 +719,17 @@ pub(crate) fn initialize_panels(
         // background identity provisioning (omega#164) completes or
         // refuses by name before this panel opens and zooms.
         await_identity_ready(cx).await.log_err();
+        if let Some(hydration) =
+            agent_ui::omega_nostr_profile_transport::start_system_identity_hydration_on_startup()
+                .log_err()
+        {
+            cx.background_spawn(async move {
+                if let Err(error) = hydration.await {
+                    log::error!("bounded startup identity hydration failed: {error:#}");
+                }
+            })
+            .detach();
+        }
 
         agent_ui::initialize_workbench_panels(workspace_handle.clone(), cx.clone())
             .await

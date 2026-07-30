@@ -3,7 +3,11 @@ use std::{
     time::{SystemTime, UNIX_EPOCH},
 };
 
+use agent_ui::omega_nostr_profile_transport::{
+    ProfileChoice, ProfileChoiceOutcome, ProfilePublishError, apply_profile_choice,
+};
 use chrono::{DateTime, Local};
+use editor::Editor;
 use gpui::{
     Action, AnyElement, App, ClipboardItem, Context, Entity, EventEmitter, FocusHandle, Focusable,
     IntoElement, PromptLevel, Render, SharedString, Task, Window,
@@ -11,15 +15,23 @@ use gpui::{
 use omega_actions::{OpenIdentityDashboard, OpenOnboarding, OpenRemoteSignerSetup};
 use omega_effectd::{BindingProjection, BindingState, HostedSessionProjection, HostedSessionState};
 use omega_identity::{
-    AccountDashboardEntry, AccountDashboardProjection, AccountLifecycleState, AccountPurgeReport,
-    AccountPurgeTarget, AccountPurgeVerification, AccountRef, AccountRegistryService,
-    Nip46CapabilityMethod, Nip46ConnectionInput, Nip46InboundEvent, Nip46PairingFence,
-    Nip46PairingSession, Nip46PairingUri, Nip46PermissionPreview, Nip46ReportedSigner,
-    Nip46Service, PublicIdentity, ReceiptRef, RecoveryProtectionState,
-    RelayAuthenticationProjection, RelayAuthenticationReceipt, RelayAuthenticationRefusal,
-    RelayConnectionAuthenticationState, SignerAvailability, SignerKind,
+    AccountDashboardEntry, AccountDashboardProjection, AccountLifecycleState,
+    AccountProfileSummary, AccountPurgeReport, AccountPurgeTarget, AccountPurgeVerification,
+    AccountRef, AccountRegistryService, IdentityService, Nip46CapabilityMethod,
+    Nip46ConnectionInput, Nip46InboundEvent, Nip46PairingFence, Nip46PairingSession,
+    Nip46PairingUri, Nip46PermissionPreview, Nip46ReportedSigner, Nip46Service, PublicIdentity,
+    ReceiptRef, RecoveryProtectionState, RelayAuthenticationProjection, RelayAuthenticationReceipt,
+    RelayAuthenticationRefusal, RelayConnectionAuthenticationState, SignerAvailability, SignerKind,
 };
-use omega_signer_broker::{Nip46RelayCoordinator, Nip46RelayError};
+use omega_identity_sync::{
+    BulkDecryptConsentState, CacheFallbackReason, HydrationAccountFence, HydrationCache,
+    HydrationCacheArea, HydrationReceipt, HydrationSource, HydrationSourceOutcome, HydrationState,
+    HydrationTrigger, LocalProfileState, PlaintextPersistencePolicy, TimeoutScope,
+};
+use omega_signer_broker::{
+    Nip46RelayCoordinator, Nip46RelayError, Nip46WebSocketTransport, RemoteSignerMetadata,
+    SignerBroker, SignerRoute,
+};
 use onboarding::secure_input::SecureInput;
 use ui::{Divider, ListItem, ListItemSpacing, SpinnerLabel, TintColor, Tooltip, prelude::*};
 use util::ResultExt as _;
@@ -34,6 +46,7 @@ const COMPACT_WIDTH: f32 = 720.;
 const NIP46_PAIRING_RELAY: &str = "wss://relay.openagents.com";
 const NIP46_FIRST_WAVE_LIFETIME_SECONDS: u64 = 60 * 60 * 24 * 7;
 const NIP46_EXCHANGE_TIMEOUT_SECONDS: u64 = 30;
+const PROFILE_PUBLISH_RELAY: &str = "wss://relay.openagents.com";
 const SIGN_OUT_LABEL: &str = "Sign out";
 const DISCONNECT_SIGNER_LABEL: &str = "Disconnect signer";
 
@@ -74,10 +87,104 @@ trait AccountDashboardBackend: Send + Sync {
         now: u64,
     ) -> Result<RemoteSignerProposal, String>;
     fn preview_nostrconnect(&self, now: u64) -> Result<RemoteSignerProposal, String>;
+    fn inspect_identity_sync(&self) -> Result<IdentitySyncDashboardState, String>;
+    fn record_profile_skipped(&self) -> Result<IdentitySyncDashboardState, String>;
+    fn save_local_profile(
+        &self,
+        profile: serde_json::Value,
+    ) -> Result<IdentitySyncDashboardState, String>;
+    fn set_bulk_decrypt_consent(
+        &self,
+        state: BulkDecryptConsentState,
+    ) -> Result<IdentitySyncDashboardState, String>;
+    fn set_plaintext_policy(
+        &self,
+        policy: PlaintextPersistencePolicy,
+    ) -> Result<IdentitySyncDashboardState, String>;
+    fn start_identity_hydration(&self, trigger: HydrationTrigger) -> Result<(), String>;
 }
 
 struct SystemAccountDashboardBackend {
     service: AccountRegistryService,
+}
+
+#[derive(Clone, Debug, Default)]
+struct IdentitySyncDashboardState {
+    projection: Option<AccountDashboardProjection>,
+    hydration_receipt: Option<HydrationReceipt>,
+    profile_state: Option<LocalProfileState>,
+    remote_signer: bool,
+    bulk_decrypt_consent: BulkDecryptConsentState,
+    bulk_decrypt_permission_available: bool,
+    plaintext_policy: PlaintextPersistencePolicy,
+}
+
+fn active_hydration_cache(
+    service: &AccountRegistryService,
+) -> Result<(HydrationCache, Option<String>), String> {
+    let selection = service
+        .selection_token()
+        .map_err(|error| error.to_string())?;
+    let fence = HydrationAccountFence::new(
+        selection.account_ref.clone(),
+        selection.identity.public_key_hex().clone(),
+        selection.generation,
+    )
+    .map_err(|error| error.to_string())?;
+    let capability_ref = service
+        .remote_signer_capability(&selection)
+        .ok()
+        .map(|capability| capability.capability_ref);
+    let cache = HydrationCache::system(fence).map_err(|error| error.to_string())?;
+    Ok((cache, capability_ref))
+}
+
+fn inspect_identity_sync(
+    service: &AccountRegistryService,
+) -> Result<IdentitySyncDashboardState, String> {
+    let selection = match service.selection_token() {
+        Ok(selection) => selection,
+        Err(_) => return Ok(IdentitySyncDashboardState::default()),
+    };
+    let fence = HydrationAccountFence::new(
+        selection.account_ref.clone(),
+        selection.identity.public_key_hex().clone(),
+        selection.generation,
+    )
+    .map_err(|error| error.to_string())?;
+    let dashboard = service.inspect().map_err(|error| error.to_string())?;
+    let remote_signer = dashboard
+        .accounts
+        .iter()
+        .find(|account| account.is_active)
+        .is_some_and(|account| account.signer.kind == SignerKind::RemoteNip46);
+    let capability = remote_signer
+        .then(|| service.remote_signer_capability(&selection).ok())
+        .flatten();
+    let capability_ref = capability
+        .as_ref()
+        .map(|capability| capability.capability_ref.clone());
+    let permission_available = capability.as_ref().is_some_and(|capability| {
+        capability
+            .methods
+            .contains(&Nip46CapabilityMethod::BulkDecrypt)
+    });
+    let cache = HydrationCache::system(fence).map_err(|error| error.to_string())?;
+    let account_state = cache
+        .inspect_account_state(capability_ref.as_deref().unwrap_or("local-native"))
+        .map_err(|error| error.to_string())?;
+    let profile_state = cache
+        .read_local_profile_state()
+        .map_err(|error| error.to_string())?;
+    Ok(IdentitySyncDashboardState {
+        projection: None,
+        hydration_receipt: account_state.latest_receipt,
+        profile_state,
+        remote_signer,
+        bulk_decrypt_consent: account_state.bulk_decrypt_consent,
+        bulk_decrypt_permission_available: permission_available,
+        plaintext_policy: account_state.plaintext_policy,
+    })
 }
 
 impl SystemAccountDashboardBackend {
@@ -220,6 +327,81 @@ impl AccountDashboardBackend for SystemAccountDashboardBackend {
             preview,
             fence: Nip46PairingFence::new(generation).map_err(|error| error.to_string())?,
         })
+    }
+
+    fn inspect_identity_sync(&self) -> Result<IdentitySyncDashboardState, String> {
+        inspect_identity_sync(&self.service)
+    }
+
+    fn record_profile_skipped(&self) -> Result<IdentitySyncDashboardState, String> {
+        let (cache, _) = active_hydration_cache(&self.service)?;
+        cache
+            .record_profile_skipped()
+            .map_err(|error| error.to_string())?;
+        inspect_identity_sync(&self.service)
+    }
+
+    fn save_local_profile(
+        &self,
+        profile: serde_json::Value,
+    ) -> Result<IdentitySyncDashboardState, String> {
+        let selection = self
+            .service
+            .selection_token()
+            .map_err(|error| error.to_string())?;
+        let (cache, _) = active_hydration_cache(&self.service)?;
+        cache
+            .save_local_profile(profile.clone())
+            .map_err(|error| error.to_string())?;
+        let projection = self
+            .service
+            .record_hydrated_profile(&selection, Some(profile_summary(&profile)))
+            .map_err(|error| error.to_string())?;
+        let mut state = inspect_identity_sync(&self.service)?;
+        state.projection = Some(projection);
+        Ok(state)
+    }
+
+    fn set_bulk_decrypt_consent(
+        &self,
+        state: BulkDecryptConsentState,
+    ) -> Result<IdentitySyncDashboardState, String> {
+        let (cache, capability_ref) = active_hydration_cache(&self.service)?;
+        let capability_ref = capability_ref.ok_or_else(|| {
+            "bulk decrypt consent requires an active remote signer capability".to_string()
+        })?;
+        cache
+            .set_bulk_decrypt_consent(capability_ref, state)
+            .map_err(|error| error.to_string())?;
+        inspect_identity_sync(&self.service)
+    }
+
+    fn set_plaintext_policy(
+        &self,
+        policy: PlaintextPersistencePolicy,
+    ) -> Result<IdentitySyncDashboardState, String> {
+        let (cache, _) = active_hydration_cache(&self.service)?;
+        cache
+            .write_plaintext_persistence_policy(policy)
+            .map_err(|error| error.to_string())?;
+        inspect_identity_sync(&self.service)
+    }
+
+    fn start_identity_hydration(&self, trigger: HydrationTrigger) -> Result<(), String> {
+        let selection = self
+            .service
+            .selection_token()
+            .map_err(|error| error.to_string())?;
+        let hydration = agent_ui::omega_nostr_profile_transport::start_system_identity_hydration(
+            selection, trigger, false,
+        )
+        .map_err(|error| error.to_string())?;
+        async_std::task::spawn(async move {
+            if let Err(error) = hydration.await {
+                zlog::error!("bounded identity hydration failed: {error}");
+            }
+        });
+        Ok(())
     }
 }
 
@@ -425,11 +607,35 @@ enum AccountOperation {
     DisconnectRemote(AccountRef),
 }
 
+fn account_operation_hydration_trigger(operation: &AccountOperation) -> Option<HydrationTrigger> {
+    matches!(operation, AccountOperation::Switch(_)).then_some(HydrationTrigger::Switched)
+}
+
 #[derive(Clone, Copy)]
 enum HostedOperation {
     Connect,
     Verify,
     Disconnect,
+}
+
+#[derive(Clone)]
+enum IdentitySyncMutation {
+    SkipProfile,
+    SaveProfile(serde_json::Value),
+    BulkDecryptConsent(BulkDecryptConsentState),
+    PlaintextPolicy(PlaintextPersistencePolicy),
+}
+
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+enum ProfileEditorState {
+    #[default]
+    NotStarted,
+    Editing,
+    Skipped,
+    SavedLocally,
+    Publishing,
+    Published,
+    Failed,
 }
 
 struct AccountOperationResult {
@@ -485,6 +691,17 @@ pub struct IdentityDashboard {
     relay_authentication: RelayAuthenticationProjection,
     hosted_session: HostedSessionProjection,
     hosted_binding: BindingProjection,
+    profile_editor_open: bool,
+    profile_editor_state: ProfileEditorState,
+    profile_display_name_input: Entity<Editor>,
+    profile_about_input: Entity<Editor>,
+    profile_picture_input: Entity<Editor>,
+    hydration_receipt: Option<HydrationReceipt>,
+    local_profile_state: Option<LocalProfileState>,
+    remote_signer: bool,
+    bulk_decrypt_consent: BulkDecryptConsentState,
+    bulk_decrypt_permission_available: bool,
+    plaintext_policy: PlaintextPersistencePolicy,
 }
 
 impl IdentityDashboard {
@@ -500,7 +717,7 @@ impl IdentityDashboard {
     fn new_with_backend(
         backend: Arc<dyn AccountDashboardBackend>,
         open_remote_setup: bool,
-        _window: &mut Window,
+        window: &mut Window,
         cx: &mut App,
     ) -> Entity<Self> {
         let hosted_session = omega_effectd::openagents_session_if_initialized(cx)
@@ -511,6 +728,21 @@ impl IdentityDashboard {
             .map_or_else(BindingProjection::unbound, |binding| {
                 binding.load_projection()
             });
+        let profile_display_name_input = cx.new(|cx| {
+            let mut editor = Editor::single_line(window, cx);
+            editor.set_placeholder_text("Display name", window, cx);
+            editor
+        });
+        let profile_about_input = cx.new(|cx| {
+            let mut editor = Editor::multi_line(window, cx);
+            editor.set_placeholder_text("About", window, cx);
+            editor
+        });
+        let profile_picture_input = cx.new(|cx| {
+            let mut editor = Editor::single_line(window, cx);
+            editor.set_placeholder_text("Picture URL", window, cx);
+            editor
+        });
         let remote_uri_input =
             cx.new(|cx| SecureInput::new("Paste bunker:// connection", "Bunker connection", 1, cx));
         let dashboard = cx.new(|cx| Self {
@@ -530,6 +762,17 @@ impl IdentityDashboard {
             relay_authentication: RelayAuthenticationProjection::default(),
             hosted_session,
             hosted_binding,
+            profile_editor_open: false,
+            profile_editor_state: ProfileEditorState::NotStarted,
+            profile_display_name_input,
+            profile_about_input,
+            profile_picture_input,
+            hydration_receipt: None,
+            local_profile_state: None,
+            remote_signer: false,
+            bulk_decrypt_consent: BulkDecryptConsentState::Unknown,
+            bulk_decrypt_permission_available: false,
+            plaintext_policy: PlaintextPersistencePolicy::Never,
         });
         dashboard.update(cx, |dashboard, cx| dashboard.reload(cx));
         dashboard
@@ -540,7 +783,13 @@ impl IdentityDashboard {
         self.message = None;
         self.busy = true;
         self.task = Some(cx.spawn(async move |this, cx| {
-            let result = cx.background_spawn(async move { backend.inspect() }).await;
+            let (result, identity_sync) = cx
+                .background_spawn(async move {
+                    let result = backend.inspect();
+                    let identity_sync = backend.inspect_identity_sync();
+                    (result, identity_sync)
+                })
+                .await;
             this.update(cx, |this, cx| {
                 match result {
                     Ok(projection) => {
@@ -559,6 +808,12 @@ impl IdentityDashboard {
                     Err(error) => {
                         zlog::error!("account dashboard inspection failed: {error}");
                         this.message = Some("Accounts could not be loaded. Try again.".into());
+                    }
+                }
+                match identity_sync {
+                    Ok(identity_sync) => this.apply_identity_sync_state(identity_sync),
+                    Err(error) => {
+                        zlog::error!("identity hydration state inspection failed: {error}");
                     }
                 }
                 this.busy = false;
@@ -587,6 +842,25 @@ impl IdentityDashboard {
         self.projection = Some(projection);
     }
 
+    fn apply_identity_sync_state(&mut self, state: IdentitySyncDashboardState) {
+        if let Some(projection) = state.projection {
+            self.apply_projection(projection);
+        }
+        self.hydration_receipt = state.hydration_receipt;
+        self.local_profile_state = state.profile_state.clone();
+        self.remote_signer = state.remote_signer;
+        self.bulk_decrypt_consent = state.bulk_decrypt_consent;
+        self.bulk_decrypt_permission_available = state.bulk_decrypt_permission_available;
+        self.plaintext_policy = state.plaintext_policy;
+        if self.profile_editor_state != ProfileEditorState::Published {
+            self.profile_editor_state = match state.profile_state {
+                Some(LocalProfileState::Skipped { .. }) => ProfileEditorState::Skipped,
+                Some(LocalProfileState::SavedLocally { .. }) => ProfileEditorState::SavedLocally,
+                None => ProfileEditorState::NotStarted,
+            };
+        }
+    }
+
     fn selected_entry(&self) -> Option<&AccountDashboardEntry> {
         let selected = self.selected_account.as_ref()?;
         self.projection
@@ -605,15 +879,24 @@ impl IdentityDashboard {
         self.message = None;
         self.busy = true;
         self.task = Some(cx.spawn(async move |this, cx| {
+            let hydration_trigger = account_operation_hydration_trigger(&operation);
             let result = cx
-                .background_spawn(async move { backend.apply(operation, expected_generation) })
+                .background_spawn(async move {
+                    let result = backend.apply(operation, expected_generation)?;
+                    let hydration_error = hydration_trigger
+                        .and_then(|trigger| backend.start_identity_hydration(trigger).err());
+                    Ok::<_, String>((result, hydration_error))
+                })
                 .await;
             this.update(cx, |this, cx| {
                 match result {
-                    Ok(result) => {
+                    Ok((result, hydration_error)) => {
                         this.purge_report = result.purge_report;
                         this.apply_projection(result.projection);
-                        this.message = None;
+                        this.message = hydration_error.map(|error| {
+                            zlog::error!("identity hydration could not start: {error}");
+                            "The account switched, but background hydration could not start.".into()
+                        });
                     }
                     Err(error) => {
                         zlog::error!("account dashboard operation failed: {error}");
@@ -997,6 +1280,7 @@ impl IdentityDashboard {
             let backend_for_results = backend.clone();
             let account_ref_for_results = account_ref.clone();
             let operation_ref_for_results = operation_ref.clone();
+            let identity_for_results = identity.clone();
             let report = cx
                 .background_spawn(async move {
                     record_owner_purge_result(
@@ -1013,11 +1297,54 @@ impl IdentityDashboard {
                         AccountPurgeTarget::RoomState,
                         room_state,
                     )?;
+                    let hydration_cache = HydrationAccountFence::new(
+                        account_ref_for_results.clone(),
+                        identity_for_results.public_key_hex().clone(),
+                        expected_generation,
+                    )
+                    .map_err(|error| error.to_string())
+                    .and_then(|fence| {
+                        HydrationCache::system(fence).map_err(|error| error.to_string())
+                    });
+                    for (target, areas) in [
+                        (
+                            AccountPurgeTarget::DecryptedCache,
+                            &[
+                                HydrationCacheArea::Plaintext,
+                                HydrationCacheArea::Ciphertext,
+                            ][..],
+                        ),
+                        (
+                            AccountPurgeTarget::RelayState,
+                            &[
+                                HydrationCacheArea::Profiles,
+                                HydrationCacheArea::Relays,
+                                HydrationCacheArea::Groups,
+                                HydrationCacheArea::Receipts,
+                            ][..],
+                        ),
+                        (
+                            AccountPurgeTarget::SignerSessions,
+                            &[HydrationCacheArea::Consent][..],
+                        ),
+                    ] {
+                        let verification = match hydration_cache.as_ref() {
+                            Ok(cache) => {
+                                hydration_purge_verification(purge_hydration_areas(cache, areas))
+                            }
+                            Err(error) => AccountPurgeVerification::Failed {
+                                reason: error.clone(),
+                            },
+                        };
+                        backend_for_results.record_purge_target(
+                            &account_ref_for_results,
+                            &operation_ref_for_results,
+                            target,
+                            verification,
+                        )?;
+                    }
                     for target in [
-                        AccountPurgeTarget::DecryptedCache,
                         AccountPurgeTarget::WalletState,
-                        AccountPurgeTarget::RelayState,
-                        AccountPurgeTarget::SignerSessions,
                         AccountPurgeTarget::DeviceGrants,
                     ] {
                         backend_for_results.record_purge_target(
@@ -1249,6 +1576,14 @@ impl IdentityDashboard {
                 None,
             ))
             .child(Divider::horizontal())
+            .child(self.render_profile_editor(cx))
+            .child(Divider::horizontal())
+            .child(self.render_hydration_status())
+            .when(is_remote, |this| {
+                this.child(Divider::horizontal())
+                    .child(self.render_external_signer_data_controls(cx))
+            })
+            .child(Divider::horizontal())
             .child(self.render_authentication_authority(cx))
             .child(Divider::horizontal())
             .child(
@@ -1349,6 +1684,511 @@ impl IdentityDashboard {
                             .style(ButtonStyle::OutlinedGhost)
                             .disabled(true)
                             .tooltip(Tooltip::text("Signed policy required")),
+                    ),
+            )
+            .into_any_element()
+    }
+
+    fn open_profile_editor(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let (mut display_name, mut about, mut picture) = self.selected_entry().map_or_else(
+            || (String::new(), String::new(), String::new()),
+            |account| {
+                account.profile.as_ref().map_or_else(
+                    || (String::new(), String::new(), String::new()),
+                    |profile| {
+                        (
+                            profile.display_name.clone().unwrap_or_default(),
+                            String::new(),
+                            profile.avatar_ref.clone().unwrap_or_default(),
+                        )
+                    },
+                )
+            },
+        );
+        if let Some(LocalProfileState::SavedLocally { profile, .. }) =
+            self.local_profile_state.as_ref()
+        {
+            display_name = profile_string(profile, "display_name");
+            about = profile_string(profile, "about");
+            picture = profile_string(profile, "picture");
+        }
+        self.profile_display_name_input
+            .update(cx, |editor, cx| editor.set_text(display_name, window, cx));
+        self.profile_about_input
+            .update(cx, |editor, cx| editor.set_text(about, window, cx));
+        self.profile_picture_input
+            .update(cx, |editor, cx| editor.set_text(picture, window, cx));
+        self.profile_editor_open = true;
+        self.profile_editor_state = ProfileEditorState::Editing;
+        cx.notify();
+    }
+
+    fn skip_profile(&mut self, cx: &mut Context<Self>) {
+        self.profile_editor_open = false;
+        self.run_identity_sync_mutation(IdentitySyncMutation::SkipProfile, cx);
+    }
+
+    fn save_profile_locally(&mut self, cx: &mut Context<Self>) {
+        let draft = self.profile_draft(cx);
+        if let Err(message) = validate_profile_draft(&draft) {
+            self.profile_editor_state = ProfileEditorState::Failed;
+            self.message = Some(message.into());
+            cx.notify();
+            return;
+        }
+        self.run_identity_sync_mutation(
+            IdentitySyncMutation::SaveProfile(profile_draft_json(&draft)),
+            cx,
+        );
+    }
+
+    fn publish_profile(&mut self, cx: &mut Context<Self>) {
+        let draft = self.profile_draft(cx);
+        if let Err(message) = validate_profile_draft(&draft) {
+            self.profile_editor_state = ProfileEditorState::Failed;
+            self.message = Some(message.into());
+            cx.notify();
+            return;
+        }
+        let profile = profile_draft_json(&draft);
+        let timer = cx.background_executor().clone();
+        self.profile_editor_state = ProfileEditorState::Publishing;
+        self.busy = true;
+        self.message = None;
+        self.task = Some(cx.spawn(async move |this, cx| {
+            let result = cx
+                .background_spawn(async move {
+                    let registry = AccountRegistryService::system(*app_identity::CHANNEL);
+                    let selection = registry
+                        .selection_token()
+                        .map_err(|error| error.to_string())?;
+                    let dashboard = registry.inspect().map_err(|error| error.to_string())?;
+                    let active = dashboard
+                        .accounts
+                        .iter()
+                        .find(|account| account.is_active)
+                        .ok_or_else(|| "No active account can publish a profile.".to_string())?;
+                    let route = match active.signer.kind {
+                        SignerKind::LocalNative => SignerRoute::Local {
+                            identity_service: Arc::new(IdentityService::system(
+                                *app_identity::CHANNEL,
+                            )),
+                        },
+                        SignerKind::RemoteNip46 => {
+                            let capability = registry
+                                .remote_signer_capability(&selection)
+                                .map_err(|error| error.to_string())?;
+                            SignerRoute::RemoteNip46 {
+                                metadata: RemoteSignerMetadata { capability },
+                                transport: Arc::new(Nip46WebSocketTransport::system()),
+                            }
+                        }
+                        SignerKind::BrowserNip07
+                        | SignerKind::AndroidNip55
+                        | SignerKind::DeviceGrant
+                        | SignerKind::AgentGrant => {
+                            return Err(
+                                "The active signer has no kind-0 publication route.".to_string()
+                            );
+                        }
+                    };
+                    let outcome = apply_profile_choice(
+                        &SignerBroker::system(),
+                        &route,
+                        selection.clone(),
+                        ProfileChoice::Publish(profile.clone()),
+                        &[PROFILE_PUBLISH_RELAY.to_string()],
+                        unix_time_seconds(),
+                        timer,
+                        |_| Ok(()),
+                    )
+                    .await
+                    .map_err(|error| profile_publish_error_message(&error).to_string())?;
+                    let profile_summary = profile_summary(&profile);
+                    let fence = HydrationAccountFence::new(
+                        selection.account_ref.clone(),
+                        selection.identity.public_key_hex().clone(),
+                        selection.generation,
+                    )
+                    .map_err(|error| error.to_string())?;
+                    HydrationCache::system(fence)
+                        .and_then(|cache| cache.save_local_profile(profile))
+                        .map_err(|error| error.to_string())?;
+                    let projection = registry
+                        .record_hydrated_profile(&selection, Some(profile_summary))
+                        .map_err(|error| error.to_string())?;
+                    let mut identity_sync = inspect_identity_sync(&registry)?;
+                    identity_sync.projection = Some(projection);
+                    Ok::<_, String>((outcome, identity_sync))
+                })
+                .await;
+            this.update(cx, |this, cx| {
+                match result {
+                    Ok((ProfileChoiceOutcome::Published { .. }, state)) => {
+                        this.apply_identity_sync_state(state);
+                        this.profile_editor_open = false;
+                        this.profile_editor_state = ProfileEditorState::Published;
+                        this.message = Some("Profile published and acknowledged.".into());
+                    }
+                    Ok((ProfileChoiceOutcome::Skipped, _))
+                    | Ok((ProfileChoiceOutcome::SavedLocally, _)) => {
+                        this.profile_editor_state = ProfileEditorState::Failed;
+                        this.message = Some("The profile publish outcome was invalid.".into());
+                    }
+                    Err(error) => {
+                        zlog::error!("kind-0 profile publication failed: {error}");
+                        this.profile_editor_state = ProfileEditorState::Failed;
+                        this.message = Some(error.into());
+                    }
+                }
+                this.busy = false;
+                cx.notify();
+            })
+            .log_err();
+        }));
+        cx.notify();
+    }
+
+    fn profile_draft(&self, cx: &App) -> ProfileDraft {
+        ProfileDraft {
+            display_name: self.profile_display_name_input.read(cx).text(cx),
+            about: self.profile_about_input.read(cx).text(cx),
+            picture: self.profile_picture_input.read(cx).text(cx),
+        }
+    }
+
+    fn render_profile_editor(&self, cx: &mut Context<Self>) -> AnyElement {
+        let active_selected = self
+            .selected_entry()
+            .is_some_and(|account| account.is_active);
+        v_flex()
+            .gap_2()
+            .child(
+                h_flex()
+                    .justify_between()
+                    .child(Label::new("Nostr profile").size(LabelSize::Small))
+                    .child(
+                        Label::new(profile_editor_state_label(self.profile_editor_state))
+                            .color(Color::Muted)
+                            .size(LabelSize::XSmall),
+                    ),
+            )
+            .when(!self.profile_editor_open, |this| {
+                this.child(
+                    h_flex()
+                        .gap_2()
+                        .child(
+                            Button::new("omega-profile-edit", "Edit profile")
+                                .style(ButtonStyle::OutlinedGhost)
+                                .size(ButtonSize::Compact)
+                                .disabled(self.busy || !active_selected)
+                                .on_click(cx.listener(|this, _, window, cx| {
+                                    this.open_profile_editor(window, cx)
+                                })),
+                        )
+                        .child(
+                            Button::new("omega-profile-skip", "Skip")
+                                .style(ButtonStyle::OutlinedGhost)
+                                .size(ButtonSize::Compact)
+                                .disabled(self.busy || !active_selected)
+                                .tooltip(Tooltip::text("No publish"))
+                                .on_click(cx.listener(|this, _, _, cx| this.skip_profile(cx))),
+                        ),
+                )
+            })
+            .when(self.profile_editor_open, |this| {
+                this.child(profile_input(
+                    "Display name",
+                    self.profile_display_name_input.clone(),
+                    false,
+                ))
+                .child(profile_input(
+                    "About",
+                    self.profile_about_input.clone(),
+                    true,
+                ))
+                .child(profile_input(
+                    "Picture URL",
+                    self.profile_picture_input.clone(),
+                    false,
+                ))
+                .child(detail_row("Publish relay", PROFILE_PUBLISH_RELAY, None))
+                .child(
+                    h_flex()
+                        .gap_2()
+                        .flex_wrap()
+                        .child(
+                            Button::new("omega-profile-save-local", "Save locally")
+                                .style(ButtonStyle::OutlinedGhost)
+                                .size(ButtonSize::Compact)
+                                .disabled(self.busy || !active_selected)
+                                .tooltip(Tooltip::text("Local only"))
+                                .on_click(
+                                    cx.listener(|this, _, _, cx| this.save_profile_locally(cx)),
+                                ),
+                        )
+                        .child(
+                            Button::new("omega-profile-publish", "Publish profile")
+                                .style(ButtonStyle::Filled)
+                                .size(ButtonSize::Compact)
+                                .disabled(self.busy || !active_selected)
+                                .tooltip(Tooltip::text("Sign kind 0"))
+                                .on_click(cx.listener(|this, _, _, cx| this.publish_profile(cx))),
+                        )
+                        .child(
+                            Button::new("omega-profile-skip-editor", "Skip")
+                                .style(ButtonStyle::OutlinedGhost)
+                                .size(ButtonSize::Compact)
+                                .disabled(self.busy || !active_selected)
+                                .tooltip(Tooltip::text("No publish"))
+                                .on_click(cx.listener(|this, _, _, cx| this.skip_profile(cx))),
+                        ),
+                )
+            })
+            .into_any_element()
+    }
+
+    fn render_hydration_status(&self) -> AnyElement {
+        let receipt = self
+            .hydration_receipt
+            .as_ref()
+            .filter(|receipt| self.hydration_receipt_matches_selected(receipt));
+        let source_rows = receipt
+            .map(|receipt| {
+                receipt
+                    .sources
+                    .iter()
+                    .map(|source| {
+                        detail_row(
+                            hydration_source_label(source.source),
+                            hydration_source_outcome_label(&source.outcome),
+                            hydration_source_outcome_icon(&source.outcome),
+                        )
+                    })
+                    .collect::<Vec<_>>()
+            })
+            .unwrap_or_default();
+        v_flex()
+            .gap_2()
+            .child(Label::new("Account hydration").size(LabelSize::Small))
+            .child(detail_row(
+                "Hydration",
+                receipt.map_or("Not started", |receipt| {
+                    hydration_state_label(receipt.state)
+                }),
+                receipt.and_then(|receipt| hydration_state_icon(receipt.state)),
+            ))
+            .children(source_rows)
+            .when(
+                receipt.is_some_and(|receipt| receipt.background_continuation_available),
+                |this| {
+                    this.child(detail_row(
+                        "Background recovery",
+                        "Continuing",
+                        Some(
+                            Icon::new(IconName::ArrowCircle)
+                                .size(IconSize::Small)
+                                .color(Color::Warning),
+                        ),
+                    ))
+                },
+            )
+            .into_any_element()
+    }
+
+    fn hydration_receipt_matches_selected(&self, receipt: &HydrationReceipt) -> bool {
+        let Some(account) = self.selected_entry().filter(|account| account.is_active) else {
+            return false;
+        };
+        self.projection.as_ref().is_some_and(|projection| {
+            receipt.fence.account_ref == account.account_ref
+                && receipt.fence.public_key_hex == *account.identity.public_key_hex()
+                && receipt.fence.generation == projection.active.generation
+        })
+    }
+
+    fn set_bulk_decrypt_consent(
+        &mut self,
+        consent: BulkDecryptConsentState,
+        cx: &mut Context<Self>,
+    ) {
+        self.run_identity_sync_mutation(IdentitySyncMutation::BulkDecryptConsent(consent), cx);
+    }
+
+    fn set_plaintext_policy(&mut self, policy: PlaintextPersistencePolicy, cx: &mut Context<Self>) {
+        self.run_identity_sync_mutation(IdentitySyncMutation::PlaintextPolicy(policy), cx);
+    }
+
+    fn run_identity_sync_mutation(
+        &mut self,
+        mutation: IdentitySyncMutation,
+        cx: &mut Context<Self>,
+    ) {
+        if self.busy {
+            return;
+        }
+        let backend = self.backend.clone();
+        self.busy = true;
+        self.message = None;
+        self.task = Some(cx.spawn(async move |this, cx| {
+            let mutation_for_result = mutation.clone();
+            let result = cx
+                .background_spawn(async move {
+                    match mutation {
+                        IdentitySyncMutation::SkipProfile => backend.record_profile_skipped(),
+                        IdentitySyncMutation::SaveProfile(profile) => {
+                            backend.save_local_profile(profile)
+                        }
+                        IdentitySyncMutation::BulkDecryptConsent(state) => {
+                            backend.set_bulk_decrypt_consent(state)
+                        }
+                        IdentitySyncMutation::PlaintextPolicy(policy) => {
+                            backend.set_plaintext_policy(policy)
+                        }
+                    }
+                })
+                .await;
+            this.update(cx, |this, cx| {
+                match result {
+                    Ok(state) => {
+                        this.apply_identity_sync_state(state);
+                        this.message = Some(
+                            identity_sync_mutation_success_message(&mutation_for_result).into(),
+                        );
+                    }
+                    Err(error) => {
+                        zlog::error!("identity hydration state update failed: {error}");
+                        if matches!(
+                            mutation_for_result,
+                            IdentitySyncMutation::SkipProfile
+                                | IdentitySyncMutation::SaveProfile(_)
+                        ) {
+                            this.profile_editor_state = ProfileEditorState::Failed;
+                        }
+                        this.message =
+                            Some("The account setting could not be saved. Try again.".into());
+                    }
+                }
+                this.busy = false;
+                cx.notify();
+            })
+            .log_err();
+        }));
+        cx.notify();
+    }
+
+    fn render_external_signer_data_controls(&self, cx: &mut Context<Self>) -> AnyElement {
+        v_flex()
+            .gap_2()
+            .child(Label::new("External signer data").size(LabelSize::Small))
+            .child(detail_row(
+                "Bulk decrypt",
+                bulk_decrypt_consent_label(
+                    self.bulk_decrypt_consent,
+                    self.remote_signer,
+                    self.bulk_decrypt_permission_available,
+                ),
+                bulk_decrypt_consent_icon(
+                    self.bulk_decrypt_consent,
+                    self.remote_signer,
+                    self.bulk_decrypt_permission_available,
+                ),
+            ))
+            .child(
+                h_flex()
+                    .gap_2()
+                    .flex_wrap()
+                    .child(
+                        Button::new("omega-bulk-decrypt-allow", "Allow bulk decrypt")
+                            .style(ButtonStyle::OutlinedGhost)
+                            .size(ButtonSize::Compact)
+                            .disabled(
+                                self.busy
+                                    || !self.remote_signer
+                                    || !self.bulk_decrypt_permission_available
+                                    || self.bulk_decrypt_consent
+                                        == BulkDecryptConsentState::Allowed,
+                            )
+                            .on_click(cx.listener(|this, _, _, cx| {
+                                this.set_bulk_decrypt_consent(BulkDecryptConsentState::Allowed, cx)
+                            })),
+                    )
+                    .child(
+                        Button::new("omega-bulk-decrypt-decline", "Decline")
+                            .style(ButtonStyle::OutlinedGhost)
+                            .size(ButtonSize::Compact)
+                            .disabled(
+                                self.busy
+                                    || !self.remote_signer
+                                    || self.bulk_decrypt_consent
+                                        == BulkDecryptConsentState::Declined,
+                            )
+                            .tooltip(Tooltip::text("Keep locked"))
+                            .on_click(cx.listener(|this, _, _, cx| {
+                                this.set_bulk_decrypt_consent(BulkDecryptConsentState::Declined, cx)
+                            })),
+                    )
+                    .when(
+                        self.remote_signer && !self.bulk_decrypt_permission_available,
+                        |this| {
+                            this.child(
+                                Button::new("omega-bulk-decrypt-reconnect", "Reconnect signer")
+                                    .style(ButtonStyle::OutlinedGhost)
+                                    .size(ButtonSize::Compact)
+                                    .disabled(self.busy)
+                                    .tooltip(Tooltip::text("Permission missing"))
+                                    .on_click(|_, window, cx| {
+                                        window.dispatch_action(
+                                            OpenRemoteSignerSetup.boxed_clone(),
+                                            cx,
+                                        )
+                                    }),
+                            )
+                        },
+                    ),
+            )
+            .child(detail_row(
+                "Plaintext cache",
+                plaintext_policy_label(self.plaintext_policy),
+                plaintext_policy_icon(self.plaintext_policy),
+            ))
+            .child(detail_row(
+                "Plaintext storage",
+                "Ordinary unencrypted account files",
+                None,
+            ))
+            .child(
+                h_flex()
+                    .gap_2()
+                    .flex_wrap()
+                    .child(
+                        Button::new("omega-plaintext-never", "Do not persist")
+                            .style(ButtonStyle::OutlinedGhost)
+                            .size(ButtonSize::Compact)
+                            .disabled(
+                                self.busy
+                                    || self.plaintext_policy == PlaintextPersistencePolicy::Never,
+                            )
+                            .on_click(cx.listener(|this, _, _, cx| {
+                                this.set_plaintext_policy(PlaintextPersistencePolicy::Never, cx)
+                            })),
+                    )
+                    .child(
+                        Button::new("omega-plaintext-bounded", "Cache public plaintext")
+                            .style(ButtonStyle::OutlinedGhost)
+                            .size(ButtonSize::Compact)
+                            .disabled(
+                                self.busy
+                                    || self.plaintext_policy
+                                        == PlaintextPersistencePolicy::NonPrivateNonExpiring,
+                            )
+                            .tooltip(Tooltip::text("Non-private only"))
+                            .on_click(cx.listener(|this, _, _, cx| {
+                                this.set_plaintext_policy(
+                                    PlaintextPersistencePolicy::NonPrivateNonExpiring,
+                                    cx,
+                                )
+                            })),
                     ),
             )
             .into_any_element()
@@ -1957,6 +2797,23 @@ fn owner_purge_verification(result: anyhow::Result<()>) -> AccountPurgeVerificat
     }
 }
 
+fn purge_hydration_areas(
+    cache: &HydrationCache,
+    areas: &[HydrationCacheArea],
+) -> Result<(), String> {
+    for area in areas {
+        cache.purge_area(*area).map_err(|error| error.to_string())?;
+    }
+    Ok(())
+}
+
+fn hydration_purge_verification(result: Result<(), String>) -> AccountPurgeVerification {
+    match result {
+        Ok(()) => AccountPurgeVerification::VerifiedDeleted,
+        Err(reason) => AccountPurgeVerification::Failed { reason },
+    }
+}
+
 fn account_display_name(account: &AccountDashboardEntry) -> String {
     account
         .profile
@@ -1964,6 +2821,255 @@ fn account_display_name(account: &AccountDashboardEntry) -> String {
         .and_then(|profile| profile.display_name.clone())
         .filter(|name| !name.trim().is_empty())
         .unwrap_or_else(|| "Unnamed identity".to_string())
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+struct ProfileDraft {
+    display_name: String,
+    about: String,
+    picture: String,
+}
+
+fn validate_profile_draft(draft: &ProfileDraft) -> Result<(), &'static str> {
+    if draft.display_name.len() > 128 {
+        return Err("Display name must be 128 bytes or fewer.");
+    }
+    if draft.about.len() > 4_096 {
+        return Err("About must be 4096 bytes or fewer.");
+    }
+    if draft.picture.len() > 2_048 {
+        return Err("Picture URL must be 2048 bytes or fewer.");
+    }
+    if !draft.picture.trim().is_empty() && !draft.picture.trim().starts_with("https://") {
+        return Err("Picture URL must use HTTPS.");
+    }
+    Ok(())
+}
+
+fn profile_draft_json(draft: &ProfileDraft) -> serde_json::Value {
+    serde_json::json!({
+        "display_name": draft.display_name.trim(),
+        "about": draft.about.trim(),
+        "picture": draft.picture.trim(),
+    })
+}
+
+fn profile_string(profile: &serde_json::Value, field: &str) -> String {
+    profile
+        .get(field)
+        .and_then(serde_json::Value::as_str)
+        .unwrap_or_default()
+        .to_string()
+}
+
+fn profile_summary(profile: &serde_json::Value) -> AccountProfileSummary {
+    let display_name = profile_string(profile, "display_name");
+    let picture = profile_string(profile, "picture");
+    AccountProfileSummary {
+        display_name: (!display_name.is_empty()).then_some(display_name),
+        avatar_ref: (!picture.is_empty()).then_some(picture),
+    }
+}
+
+fn profile_publish_error_message(error: &ProfilePublishError) -> &'static str {
+    match error {
+        ProfilePublishError::RemotePermissionRequired => {
+            "Reconnect the signer to add kind-0 profile permission."
+        }
+        ProfilePublishError::RelayAuthenticationRequired => {
+            "The profile relay requires authentication before publication."
+        }
+        ProfilePublishError::RelayRejected(_) => "The profile relay rejected this kind-0 event.",
+        ProfilePublishError::MissingAcknowledgement => {
+            "The relay did not acknowledge this exact profile event. Try again."
+        }
+        ProfilePublishError::Other(_) => "The profile could not be signed or published.",
+    }
+}
+
+fn identity_sync_mutation_success_message(mutation: &IdentitySyncMutation) -> &'static str {
+    match mutation {
+        IdentitySyncMutation::SkipProfile => "Profile skipped. Nothing was signed or published.",
+        IdentitySyncMutation::SaveProfile(_) => {
+            "Profile draft saved locally. Nothing was published."
+        }
+        IdentitySyncMutation::BulkDecryptConsent(BulkDecryptConsentState::Unknown) => {
+            "Bulk decrypt consent reset. Omega will ask before bulk decrypt."
+        }
+        IdentitySyncMutation::BulkDecryptConsent(BulkDecryptConsentState::Allowed) => {
+            "Bulk decrypt allowed for this account and signer capability."
+        }
+        IdentitySyncMutation::BulkDecryptConsent(BulkDecryptConsentState::Declined) => {
+            "Bulk decrypt declined. Content remains locked and Omega will not ask again."
+        }
+        IdentitySyncMutation::PlaintextPolicy(PlaintextPersistencePolicy::Never) => {
+            "Persistent plaintext disabled for this account."
+        }
+        IdentitySyncMutation::PlaintextPolicy(
+            PlaintextPersistencePolicy::NonPrivateNonExpiring,
+        ) => "Only non-private, non-expiring plaintext may be cached for this account.",
+    }
+}
+
+fn profile_editor_state_label(state: ProfileEditorState) -> &'static str {
+    match state {
+        ProfileEditorState::NotStarted => "Optional",
+        ProfileEditorState::Editing => "Editing",
+        ProfileEditorState::Skipped => "Skipped",
+        ProfileEditorState::SavedLocally => "Saved locally",
+        ProfileEditorState::Publishing => "Publishing",
+        ProfileEditorState::Published => "Published",
+        ProfileEditorState::Failed => "Failed",
+    }
+}
+
+fn profile_input(label: &'static str, editor: Entity<Editor>, multiline: bool) -> AnyElement {
+    v_flex()
+        .gap_1()
+        .child(
+            Label::new(label)
+                .color(Color::Muted)
+                .size(LabelSize::XSmall),
+        )
+        .child(
+            div()
+                .w_full()
+                .when(multiline, |this| this.h_20())
+                .when(!multiline, |this| this.h_8())
+                .overflow_hidden()
+                .border_1()
+                .rounded_sm()
+                .child(editor),
+        )
+        .into_any_element()
+}
+
+fn hydration_state_label(state: HydrationState) -> &'static str {
+    match state {
+        HydrationState::Complete => "Complete",
+        HydrationState::Partial => "Partial",
+        HydrationState::Offline => "Offline",
+        HydrationState::Failed => "Failed",
+        HydrationState::SkippedFresh => "Skipped fresh",
+    }
+}
+
+fn hydration_state_icon(state: HydrationState) -> Option<Icon> {
+    let (icon, color) = match state {
+        HydrationState::Complete | HydrationState::SkippedFresh => {
+            (IconName::Check, Color::Success)
+        }
+        HydrationState::Partial | HydrationState::Offline => (IconName::Warning, Color::Warning),
+        HydrationState::Failed => (IconName::Warning, Color::Error),
+    };
+    Some(Icon::new(icon).size(IconSize::Small).color(color))
+}
+
+fn hydration_source_label(source: HydrationSource) -> &'static str {
+    match source {
+        HydrationSource::Profile => "Profile",
+        HydrationSource::RelayPreferences => "Relay preferences",
+        HydrationSource::Nip29GroupList => "NIP-29 groups",
+        HydrationSource::MembershipMetadata => "Membership metadata",
+        HydrationSource::RecentRooms => "Recent rooms",
+        HydrationSource::HostedAccount => "Hosted account",
+        HydrationSource::HostedDevice => "Hosted device",
+        HydrationSource::BuzzProfile => "Buzz profile",
+        HydrationSource::ArmadaProfile => "Armada profile",
+    }
+}
+
+fn hydration_source_outcome_label(outcome: &HydrationSourceOutcome) -> String {
+    match outcome {
+        HydrationSourceOutcome::Complete { items } => format!("Fresh · {items} items"),
+        HydrationSourceOutcome::Cached { items, reason } => {
+            let reason = match reason {
+                CacheFallbackReason::Offline => "offline",
+                CacheFallbackReason::Timeout => "timeout",
+                CacheFallbackReason::Failure => "failed",
+            };
+            format!("Cached · {items} items · {reason}")
+        }
+        HydrationSourceOutcome::Stale { cached_items } => {
+            format!("Stale · {cached_items} cached items")
+        }
+        HydrationSourceOutcome::Locked { ciphertext_items } => {
+            format!("Locked · {ciphertext_items} ciphertext items")
+        }
+        HydrationSourceOutcome::Disabled => "Disabled".to_string(),
+        HydrationSourceOutcome::Offline => "Offline".to_string(),
+        HydrationSourceOutcome::TimedOut { scope } => match scope {
+            TimeoutScope::Source => "Timeout · source".to_string(),
+            TimeoutScope::Overall => "Timeout · overall".to_string(),
+        },
+        HydrationSourceOutcome::Failed => "Failed".to_string(),
+    }
+}
+
+fn hydration_source_outcome_icon(outcome: &HydrationSourceOutcome) -> Option<Icon> {
+    let (icon, color) = match outcome {
+        HydrationSourceOutcome::Complete { .. } => (IconName::Check, Color::Success),
+        HydrationSourceOutcome::Cached { .. }
+        | HydrationSourceOutcome::Stale { .. }
+        | HydrationSourceOutcome::Locked { .. }
+        | HydrationSourceOutcome::Disabled
+        | HydrationSourceOutcome::Offline
+        | HydrationSourceOutcome::TimedOut { .. } => (IconName::Warning, Color::Warning),
+        HydrationSourceOutcome::Failed => (IconName::Warning, Color::Error),
+    };
+    Some(Icon::new(icon).size(IconSize::Small).color(color))
+}
+
+fn bulk_decrypt_consent_label(
+    consent: BulkDecryptConsentState,
+    remote_signer: bool,
+    permission_available: bool,
+) -> &'static str {
+    if !remote_signer {
+        return "Not applicable";
+    }
+    if !permission_available {
+        return "Reconnect signer";
+    }
+    match consent {
+        BulkDecryptConsentState::Unknown => "Unknown",
+        BulkDecryptConsentState::Allowed => "Allowed",
+        BulkDecryptConsentState::Declined => "Declined",
+    }
+}
+
+fn bulk_decrypt_consent_icon(
+    consent: BulkDecryptConsentState,
+    remote_signer: bool,
+    permission_available: bool,
+) -> Option<Icon> {
+    let (icon, color) = if !remote_signer {
+        (IconName::Info, Color::Muted)
+    } else if !permission_available {
+        (IconName::Warning, Color::Warning)
+    } else {
+        match consent {
+            BulkDecryptConsentState::Unknown => (IconName::Info, Color::Muted),
+            BulkDecryptConsentState::Allowed => (IconName::Check, Color::Success),
+            BulkDecryptConsentState::Declined => (IconName::Lock, Color::Warning),
+        }
+    };
+    Some(Icon::new(icon).size(IconSize::Small).color(color))
+}
+
+fn plaintext_policy_label(policy: PlaintextPersistencePolicy) -> &'static str {
+    match policy {
+        PlaintextPersistencePolicy::Never => "Do not persist",
+        PlaintextPersistencePolicy::NonPrivateNonExpiring => "Non-private, non-expiring only",
+    }
+}
+
+fn plaintext_policy_icon(policy: PlaintextPersistencePolicy) -> Option<Icon> {
+    let (icon, color) = match policy {
+        PlaintextPersistencePolicy::Never => (IconName::Lock, Color::Success),
+        PlaintextPersistencePolicy::NonPrivateNonExpiring => (IconName::Info, Color::Warning),
+    };
+    Some(Icon::new(icon).size(IconSize::Small).color(color))
 }
 
 fn account_needs_setup(
@@ -2343,6 +3449,19 @@ mod tests {
     }
 
     #[test]
+    fn only_account_switch_starts_switch_hydration() {
+        let account_ref = AccountRef::new("switch-target").expect("account ref");
+        assert_eq!(
+            account_operation_hydration_trigger(&AccountOperation::Switch(account_ref)),
+            Some(HydrationTrigger::Switched)
+        );
+        assert_eq!(
+            account_operation_hydration_trigger(&AccountOperation::Lock),
+            None
+        );
+    }
+
+    #[test]
     fn authentication_copy_does_not_collapse_authority_domains() {
         let domains = [
             "Signer ready",
@@ -2411,5 +3530,95 @@ mod tests {
                     .is_some_and(|message| !message.is_empty())
             );
         }
+    }
+
+    #[test]
+    fn optional_profile_choices_remain_distinct_and_bounded() {
+        let draft = ProfileDraft {
+            display_name: "Omega".to_string(),
+            about: "A local draft".to_string(),
+            picture: "https://example.com/avatar.png".to_string(),
+        };
+        assert!(validate_profile_draft(&draft).is_ok());
+        assert_eq!(
+            profile_draft_json(&draft)["display_name"],
+            serde_json::json!("Omega")
+        );
+        assert_eq!(
+            profile_editor_state_label(ProfileEditorState::Skipped),
+            "Skipped"
+        );
+        assert_eq!(
+            profile_editor_state_label(ProfileEditorState::SavedLocally),
+            "Saved locally"
+        );
+        assert_eq!(
+            profile_editor_state_label(ProfileEditorState::Published),
+            "Published"
+        );
+        assert!(
+            identity_sync_mutation_success_message(&IdentitySyncMutation::SkipProfile)
+                .contains("Nothing was signed or published")
+        );
+
+        let invalid_picture = ProfileDraft {
+            picture: "http://example.com/avatar.png".to_string(),
+            ..draft
+        };
+        assert!(validate_profile_draft(&invalid_picture).is_err());
+    }
+
+    #[test]
+    fn hydration_status_preserves_cache_lock_and_timeout_details() {
+        assert_eq!(
+            hydration_state_label(HydrationState::SkippedFresh),
+            "Skipped fresh"
+        );
+        assert!(
+            hydration_source_outcome_label(&HydrationSourceOutcome::Stale { cached_items: 3 })
+                .contains("3 cached items")
+        );
+        assert!(
+            hydration_source_outcome_label(&HydrationSourceOutcome::Locked {
+                ciphertext_items: 2
+            })
+            .contains("Locked")
+        );
+        assert_eq!(
+            hydration_source_outcome_label(&HydrationSourceOutcome::TimedOut {
+                scope: TimeoutScope::Overall
+            }),
+            "Timeout · overall"
+        );
+    }
+
+    #[test]
+    fn bulk_decrypt_consent_is_external_signer_only() {
+        assert_eq!(
+            bulk_decrypt_consent_label(BulkDecryptConsentState::Unknown, false, false),
+            "Not applicable"
+        );
+        assert_eq!(
+            bulk_decrypt_consent_label(BulkDecryptConsentState::Unknown, true, false),
+            "Reconnect signer"
+        );
+        assert_eq!(
+            bulk_decrypt_consent_label(BulkDecryptConsentState::Declined, true, true),
+            "Declined"
+        );
+    }
+
+    #[test]
+    fn hydration_purge_failures_are_not_rounded_up() {
+        assert_eq!(
+            hydration_purge_verification(Ok(())),
+            AccountPurgeVerification::VerifiedDeleted
+        );
+        assert_eq!(
+            hydration_purge_verification(Err("ciphertext remains".to_string())),
+            AccountPurgeVerification::Failed {
+                reason: "ciphertext remains".to_string()
+            }
+        );
     }
 }

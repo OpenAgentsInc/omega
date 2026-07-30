@@ -24,6 +24,7 @@ use serde_json::{Value, json};
 use thiserror::Error;
 
 pub const FIRST_WAVE_SIGN_EVENT_KINDS: &[u16] = &[9, 1_111, 1_984, 22_242, 27_235];
+pub const PROFILE_METADATA_KIND: u16 = 0;
 const NIP46_EVENT_KIND: u16 = 24_133;
 const MAX_INBOUND_FRAME_BYTES: usize = 2 * 1024 * 1024;
 const MAX_CONTROL_FRAMES: usize = 64;
@@ -794,6 +795,8 @@ pub enum SignerBrokerError {
     WrongIdentity,
     #[error("NIP-46 signing was not declared for event kind {kind}")]
     EventKindNotDeclared { kind: u16 },
+    #[error("kind-0 profile signing requires explicit remote signer permission")]
+    ProfilePermissionRequired,
     #[error("the NIP-46 capability has no bounded relay")]
     NoRelay,
     #[error("the remote signer explicitly rejected the request")]
@@ -849,13 +852,16 @@ fn authorize_remote_sign_event(
     kind: u16,
     now: u64,
 ) -> Result<(), SignerBrokerError> {
-    if !FIRST_WAVE_SIGN_EVENT_KINDS.contains(&kind) {
+    if kind != PROFILE_METADATA_KIND && !FIRST_WAVE_SIGN_EVENT_KINDS.contains(&kind) {
         return Err(SignerBrokerError::EventKindNotDeclared { kind });
     }
     metadata
         .capability
         .authorize(selection, Nip46Operation::SignEvent { kind }, now)
         .map_err(|error| match error {
+            Nip46Error::UndeclaredCapability if kind == PROFILE_METADATA_KIND => {
+                SignerBrokerError::ProfilePermissionRequired
+            }
             Nip46Error::UndeclaredCapability => SignerBrokerError::EventKindNotDeclared { kind },
             error => map_nip46_error(error),
         })

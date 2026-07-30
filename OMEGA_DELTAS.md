@@ -8656,3 +8656,39 @@ startup recheck — survives unchanged behind that dropdown.
   tests in `omega_effectd`; dashboard authority-language and lifecycle tests
   in `account_ui`; and the `OMEGA-DELTA-0196` source assertions in
   `crates/omega_deltas`.
+
+### OMEGA-DELTA-0197 — Profile hydration is bounded, partitioned, and optional
+
+- **Origin:** OMEGA-AUTH-06, omega#181. Recovers portable account state without
+  turning startup or account switching into an unbounded network gate.
+- **Kind 0 remains optional.** The account dashboard separates **Skip**,
+  **Save locally**, and **Publish profile**. Skip signs and publishes nothing;
+  local save writes only the selected account's draft; publish routes one exact
+  kind `0` event through the selected signer and revalidates the public key,
+  generation, event, and acknowledgement.
+- **Hydration has explicit bounds.** Imported, recovered, switched, and
+  remote-signer accounts hydrate profile, relay preferences, NIP-29 group list,
+  membership and room metadata, bounded recent room pages, linked hosted
+  state, and only enabled adapter state. Every source and the overall gate have
+  deadlines. Complete, partial, offline, failed, and skipped-fresh outcomes
+  remain distinct, as do fresh, cached, locked, disabled, timeout, stale,
+  offline, and failed source results. Cache/default fallback opens the desktop
+  while retryable recovery continues in the background under the same
+  account-generation fence.
+- **External decrypt consent is separate.** Bulk decrypt is unknown, allowed,
+  or declined independently from login and ordinary signing. Decline is
+  durable, leaves content locked, and suppresses prompt storms. A missing
+  signer method requires explicit signer reconnection. Persistent plaintext
+  cache policy is disclosed and controlled separately per account.
+- **File custody only.** Profile drafts, hydration receipts, consent,
+  ciphertext, plaintext, and signer cache metadata remain ordinary unencrypted
+  account-partitioned files with atomic owner-only `0700` directory and `0600`
+  file modes on Unix. This delta enables no macOS Keychain, Secure Enclave,
+  Windows credential vault, Linux secret service, Android keystore, encrypted
+  application vault, native enclave, or hardware-backed credential store.
+- **Enforced by:** bounded-plan, fresh-skip, per-source deadline, generation,
+  cache fallback, background retry, consent persistence, capability, plaintext
+  policy, and purge tests in `omega_identity_sync`; kind `0` exact-signing and
+  acknowledgement tests in the profile publisher; dashboard state and action
+  tests in `account_ui`; and the `OMEGA-DELTA-0197` source assertions in
+  `crates/omega_deltas`.

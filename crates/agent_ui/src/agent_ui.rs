@@ -38,6 +38,7 @@ pub mod omega_file_peek;
 pub mod omega_host_bridge;
 pub mod omega_model_tier;
 pub mod omega_nostr_activity;
+pub mod omega_nostr_profile_transport;
 pub mod omega_public_channel_media;
 pub mod omega_public_channel_publish;
 pub mod omega_public_channel_relay;

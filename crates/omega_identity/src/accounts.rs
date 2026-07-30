@@ -687,6 +687,23 @@ impl AccountRegistryService {
         self.dashboard_locked(&registry)
     }
 
+    pub fn record_hydrated_profile(
+        &self,
+        token: &AccountSelectionToken,
+        profile: Option<AccountProfileSummary>,
+    ) -> Result<AccountDashboardProjection, AccountRegistryError> {
+        let _guard = IdentityMutationGuard::acquire(&self.locator)
+            .map_err(|_| AccountRegistryError::MutationLock)?;
+        let mut registry = self.load_or_migrate_registry_locked()?;
+        self.require_selection_locked(&registry, token)?;
+        let entry = find_account_mut(&mut registry, &token.account_ref)
+            .ok_or(AccountRegistryError::AccountNotFound)?;
+        entry.profile = profile;
+        entry.updated_at = unix_time_now();
+        self.write_registry_locked(&registry)?;
+        self.dashboard_locked(&registry)
+    }
+
     pub fn retire_account(
         &self,
         account_ref: &AccountRef,
@@ -2060,6 +2077,60 @@ mod tests {
                 .join("identity.secret")
                 .exists()
         );
+    }
+
+    #[test]
+    fn hydrated_profile_write_is_generation_fenced_across_account_switches() {
+        let temporary_directory = tempfile::tempdir().expect("temporary directory");
+        let identity_root = temporary_directory.path().join("identity");
+        let first = active_account(&identity_root, 31);
+        let service = AccountRegistryService::for_channel_data_root(
+            AppChannel::Dev,
+            temporary_directory.path().to_path_buf(),
+        );
+        service.inspect().expect("migrate registry");
+        let stale_token = service.selection_token().expect("first token");
+        let second = register_second_account(&service, temporary_directory.path(), 32);
+
+        assert!(matches!(
+            service.record_hydrated_profile(
+                &stale_token,
+                Some(AccountProfileSummary {
+                    display_name: Some("Stale profile".to_string()),
+                    avatar_ref: None,
+                }),
+            ),
+            Err(AccountRegistryError::StaleSelection)
+        ));
+
+        let second_token = service.selection_token().expect("second token");
+        let dashboard = service
+            .record_hydrated_profile(
+                &second_token,
+                Some(AccountProfileSummary {
+                    display_name: Some("Current profile".to_string()),
+                    avatar_ref: None,
+                }),
+            )
+            .expect("record current profile");
+        let second_entry = dashboard
+            .accounts
+            .iter()
+            .find(|account| account.account_ref == second.account_ref)
+            .expect("second account");
+        assert_eq!(
+            second_entry
+                .profile
+                .as_ref()
+                .and_then(|profile| profile.display_name.as_deref()),
+            Some("Current profile")
+        );
+        let first_entry = dashboard
+            .accounts
+            .iter()
+            .find(|account| account.account_ref == first.account_ref)
+            .expect("first account");
+        assert!(first_entry.profile.is_none());
     }
 
     #[test]

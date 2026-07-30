@@ -347,6 +347,40 @@ Keychain, Secure Enclave, Windows credential vault, Linux secret service,
 Android keystore, encrypted application vault, native enclave, or
 hardware-backed credential store.
 
+### Optional profile and bounded hydration
+
+AUTH-06 adds an optional kind `0` editor to the account detail hierarchy.
+**Skip** records only that the optional step was skipped and signs or publishes
+nothing. **Save locally** writes an account-partitioned draft. **Publish
+profile** signs one exact kind `0` event through the selected signer and does
+not report success until the account, public key, generation, event, and relay
+acknowledgement have been revalidated.
+
+Imported, recovered, switched, and remote-signer identities run a bounded
+hydration plan after selection. The foreground gate has an overall deadline
+and each source has a smaller deadline. The dashboard exposes complete,
+partial, offline, failed, or skipped-fresh overall state and shows source-level
+fresh, cached, locked, disabled, timeout, stale, offline, or failed outcomes.
+The UI opens from cache or defaults when the gate expires, then retryable
+sources recover in the background. A generation fence prevents late results
+from a previous selection from crossing accounts.
+
+External-signer bulk decrypt uses a distinct durable consent control:
+unknown, allowed, or declined. Decline leaves content locked and suppresses
+repeated requests until the person changes the setting. A signer capability
+without bulk decrypt routes to signer reconnection rather than an implicit
+permission expansion. Plaintext-cache policy is shown separately and applies
+only to the selected account partition.
+
+Profile drafts, hydration receipts, bulk-decrypt consent, ciphertext,
+plaintext, and signer cache metadata are ordinary unencrypted local files in
+separate `identity/hydration/accounts/<public-key>/` partitions. Atomic Unix
+writes enforce directory mode `0700` and file mode `0600`; verified account
+purge owns their removal. AUTH-06
+enables no macOS Keychain, Secure Enclave, Windows credential vault, Linux
+secret service, Android keystore, encrypted application vault, native enclave,
+or hardware-backed secret store.
+
 ### Activation and recovery ceremony
 
 The desktop identity section inspects one combined activation projection:

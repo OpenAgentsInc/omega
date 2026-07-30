@@ -1,7 +1,7 @@
 # Omega Nostr authentication contract
 
-- Status: AUTH-00 contract frozen; AUTH-01 through AUTH-05 implemented
-- Packets: `OMEGA-AUTH-00`, `OMEGA-AUTH-01`, `OMEGA-AUTH-02`, `OMEGA-AUTH-03`, `OMEGA-AUTH-04`, `OMEGA-AUTH-05`
+- Status: AUTH-00 contract frozen; AUTH-01 through AUTH-06 implemented
+- Packets: `OMEGA-AUTH-00`, `OMEGA-AUTH-01`, `OMEGA-AUTH-02`, `OMEGA-AUTH-03`, `OMEGA-AUTH-04`, `OMEGA-AUTH-05`, `OMEGA-AUTH-06`
 - Source baseline: Omega `0136fca2d11900ddc7982665482ed8cd035391c7`
 - Product plan:
   [Omega Nostr authentication and onboarding](https://github.com/OpenAgentsInc/openagents/blob/7010561549ebb46a37257292a9100f990a4a3356/docs/omega/2026-07-30-omega-nostr-authentication-and-onboarding.md)
@@ -316,3 +316,46 @@ enforce directory mode `0700` and file mode `0600`. This first wave explicitly
 enables no macOS Keychain, Secure Enclave, Windows credential vault, Linux
 secret service, Android keystore, encrypted application vault, native enclave,
 or hardware-backed secret store.
+
+## Profile and bounded hydration
+
+AUTH-06 makes a Nostr kind `0` profile optional. The account dashboard offers
+three exact outcomes: **Skip**, **Save locally**, and **Publish profile**.
+Skip writes only the local skipped state and performs no signing, relay
+connection, or publication. Saving locally updates the account-partitioned
+draft without claiming a public profile. Publishing builds one exact kind `0`
+event, routes it through the selected signer, revalidates the account and
+generation after any external approval, and records the acknowledged result.
+
+Imported, recovered, switched, and remote-signer accounts start a bounded
+hydration plan. The plan covers the kind `0` profile, relay preferences,
+selected NIP-29 group list, recent membership and room metadata, bounded recent
+room pages, hosted account and device state when linked, and adapter-specific
+state only when that adapter is enabled. Every source has its own deadline and
+the whole gate has an overall deadline. A fresh unpublished candidate records
+`skipped_fresh` and opens immediately.
+
+The receipt reports complete, partial, offline, or failed overall outcomes and
+one explicit source result for fresh, cached, disabled, locked, offline,
+timeout, stale, success, or failure. Cached/default state may open the desktop
+after the foreground deadline. Retryable sources continue recovering in the
+background under the same selected-account and generation fence. Late work
+from a previous account selection cannot update the new account.
+
+Bulk decryption by a remote or external signer is a separate durable consent:
+unknown, allowed, or declined. It is never inferred from login, kind `0`
+publication, ordinary event signing, or one successful decrypt. A decline is
+persisted and suppresses repeated prompts; content remains locked behind an
+explicit later consent change. If the NIP-46 capability lacks the bulk-decrypt
+method, the UI requires signer reconnection rather than requesting it
+silently.
+
+Persistent plaintext caching has a separate, disclosed per-account policy.
+Plaintext, ciphertext, profile drafts, hydration receipts, and signer cache
+metadata use separate partitions under
+`identity/hydration/accounts/<public-key>/` and participate in verified local
+purge. They are ordinary unencrypted local files protected by the user's OS
+account and owner-only permissions on Unix. AUTH-06 enables no macOS Keychain,
+Secure Enclave, Windows credential vault, Linux secret service, Android
+keystore, encrypted application vault, native enclave, or hardware-backed
+credential store.

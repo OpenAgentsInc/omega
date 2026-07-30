@@ -40,6 +40,7 @@ action_log.workspace = true
 agent-client-protocol.workspace = true
 agent.workspace = true
 async-channel.workspace = true
+async-std.workspace = true
 # OMEGA-DELTA-0129. The sidebar's public-chat section reads one NIP-29 group
 # over one websocket. Same feature set as `omega_effectd`'s relay adapter, so
 # this adds a link and not a second TLS or runtime stack to the build.
@@ -109,6 +110,7 @@ omega_community.workspace = true
 omega_workdir.workspace = true
 omega_zero_base.workspace = true
 omega_identity.workspace = true
+omega_identity_sync.workspace = true
 omega_signer_broker.workspace = true
 nostr.workspace = true
 ordered-float.workspace = true

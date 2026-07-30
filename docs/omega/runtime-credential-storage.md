@@ -104,6 +104,28 @@ AUTH-05 also enables no encrypted application vault, native enclave,
 hardware-backed credential store, or native credential integration. File-backed
 storage is the deliberate first-wave boundary.
 
+AUTH-06 stores profile drafts, hydration receipts, bulk-decrypt consent, and
+plaintext-cache policy in ordinary unencrypted files below
+`identity/hydration/accounts/<public-key>/`. Public kind `0` drafts and receipts contain no signing
+secret. The bulk-decrypt consent contains only unknown, allowed, or declined;
+it never contains decrypted content or a signer capability. Declined consent
+is durable so reconnects and background hydration cannot create a prompt
+storm.
+
+Plaintext cache policy is separate from the cache itself. When persistent
+plaintext is disabled, background hydration may retain ciphertext and
+public-safe metadata but must not write decrypted content. When enabled, every
+plaintext entry is keyed to the exact account public key and is removed only
+through the account purge owner with verified read-back. Ciphertext, plaintext,
+profile drafts, hydration state, and signer caches remain separately named
+purge targets.
+
+These AUTH-06 records use the existing atomic owner-only file boundary:
+directories mode `0700` and files mode `0600` on Unix. They do not enable the
+macOS Keychain, Secure Enclave, Windows credential vault, Linux secret service,
+Android keystore, encrypted application vault, native enclave, or another
+native or hardware-backed key store.
+
 Apple code signing and notarization may use a build-machine signing identity.
 That packaging operation is outside the installed application's runtime and
 does not give Omega access to the build machine's credential store.

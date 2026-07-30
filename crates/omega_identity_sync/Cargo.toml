@@ -1,0 +1,27 @@
+[package]
+name = "omega_identity_sync"
+version = "0.1.0"
+edition.workspace = true
+publish.workspace = true
+license = "GPL-3.0-or-later"
+
+[lints]
+workspace = true
+
+[lib]
+path = "omega_identity_sync.rs"
+doctest = false
+
+[dependencies]
+async-io.workspace = true
+atomic-write-file.workspace = true
+futures.workspace = true
+omega_identity.workspace = true
+paths.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+thiserror.workspace = true
+
+[dev-dependencies]
+smol.workspace = true
+tempfile.workspace = true

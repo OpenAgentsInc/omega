@@ -185,6 +185,7 @@ pub const ENFORCED_DELTAS: &[&str] = &[
     "OMEGA-DELTA-0194",
     "OMEGA-DELTA-0195",
     "OMEGA-DELTA-0196",
+    "OMEGA-DELTA-0197",
 ];
 
 /// The concise product contract adjacent to the delta registry.
@@ -1245,6 +1246,9 @@ pub const OPENAGENTS_NOSTR_AUTH_PATH: &str = "crates/omega_effectd/src/openagent
 pub const OPENAGENTS_BINDING_PATH: &str = "crates/omega_effectd/src/openagents_binding.rs";
 pub const ACCOUNT_SCOPE_PATH: &str = "crates/agent_ui/src/account_scope.rs";
 pub const DRAFT_PROMPT_STORE_PATH: &str = "crates/agent_ui/src/draft_prompt_store.rs";
+pub const IDENTITY_SYNC_PATH: &str = "crates/omega_identity_sync/omega_identity_sync.rs";
+pub const NOSTR_PROFILE_TRANSPORT_PATH: &str =
+    "crates/agent_ui/src/omega_nostr_profile_transport.rs";
 
 /// OMEGA-DELTA-0192. The hosted-account link gate.
 pub const WORKROOM_PANEL_PATH: &str = "crates/workroom_ui/src/panel.rs";
@@ -24500,6 +24504,98 @@ mod tests {
                 assert!(
                     documentation.contains(required),
                     "OMEGA-DELTA-0196: {path} lost `{required}`"
+                );
+            }
+        }
+    }
+
+    /// OMEGA-DELTA-0197. Optional profile setup and account hydration remain
+    /// bounded, account-partitioned, observable, and purgeable.
+    #[test]
+    fn profile_hydration_is_bounded_partitioned_and_optional() {
+        let sync = read_repository_file(IDENTITY_SYNC_PATH);
+        for required in [
+            "pub struct HydrationPlan",
+            "overall_deadline_milliseconds",
+            "pub item_limit: u32",
+            "HydrationState::SkippedFresh",
+            "HydrationTrigger::BackgroundContinuation",
+            "HydrationSourceOutcome::Stale",
+            "pub fn record_profile_skipped",
+            "pub fn save_local_profile",
+            "pub fn write_plaintext_persistence_policy",
+            "pub fn set_bulk_decrypt_consent",
+            "pub fn suppresses_prompt",
+            "pub fn purge_area",
+            "0o700",
+            "0o600",
+        ] {
+            assert!(
+                sync.contains(required),
+                "OMEGA-DELTA-0197: identity hydration lost `{required}`"
+            );
+        }
+
+        let transport = read_repository_file(NOSTR_PROFILE_TRANSPORT_PATH);
+        for required in [
+            "ProfileChoice::Skip => Ok(ProfileChoiceOutcome::Skipped)",
+            "kind: 0",
+            "validate_signed_profile",
+            "publish_exact_profile_event",
+            "ProfilePublishError::MissingAcknowledgement",
+            "MAX_BOOTSTRAP_RELAYS",
+            "MAX_BULK_DECRYPT_ITEMS",
+        ] {
+            assert!(
+                transport.contains(required),
+                "OMEGA-DELTA-0197: Nostr profile transport lost `{required}`"
+            );
+        }
+
+        let dashboard = read_repository_file(ACCOUNT_UI_PATH);
+        for required in [
+            "Edit profile",
+            "Skip",
+            "Save locally",
+            "Publish profile",
+            "Publish relay",
+            "Account hydration",
+            "Background recovery",
+            "Bulk decrypt",
+            "Reconnect signer",
+            "Plaintext cache",
+            "Ordinary unencrypted account files",
+            "record_hydrated_profile",
+            "HydrationCacheArea::Plaintext",
+            "HydrationCacheArea::Consent",
+        ] {
+            assert!(
+                dashboard.contains(required),
+                "OMEGA-DELTA-0197: account UI lost `{required}`"
+            );
+        }
+
+        for path in [
+            IDENTITY_AUTHENTICATION_DOCUMENT_PATH,
+            RUNTIME_CREDENTIAL_STORAGE_DOCUMENT_PATH,
+            APPLICATION_IDENTITY_DOCUMENT_PATH,
+        ] {
+            let documentation = normalize_prose(&read_repository_file(path));
+            for required in [
+                "identity/hydration/accounts/<public-key>/",
+                "ordinary unencrypted",
+                "0700",
+                "0600",
+                "Secure Enclave",
+                "Windows credential vault",
+                "Linux secret service",
+                "Android keystore",
+                "encrypted application vault",
+                "native enclave",
+            ] {
+                assert!(
+                    documentation.contains(required),
+                    "OMEGA-DELTA-0197: {path} lost `{required}`"
                 );
             }
         }
