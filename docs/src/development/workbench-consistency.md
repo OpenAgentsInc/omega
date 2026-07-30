@@ -51,16 +51,9 @@ derive a work surface:
 - repository/worktree binding and generation per thread;
 - available, requested, and effective surfaces;
 - dock visibility and the single focus/action owner;
-- artifact and event outline revisions;
 - pending loads with their captured binding and generation;
 - connection and projection revision;
 - persisted selection, revision, and cold-restore status.
-
-The outline portion is not a pair of load counters. Each thread owns a typed
-`ThreadOutlineProjection`: ordered stable event IDs, authoritative global
-artifact IDs, lifecycle, selected view and filter, selected and anchored item,
-virtual window, collapse preference, and accepted projection revision. Ordinary
-surface loads do not advance that revision.
 
 `visible_projection()` is the only projection a renderer or command router
 should consume. A hidden thread retains its own requested surface, but cannot
@@ -96,9 +89,6 @@ reviewable source-to-model map:
 | `PersistSelection`, `ColdStart`, `Restore`                          | `PersistSelection`, `ColdStart`, `RestoreSelection`                  | the corresponding persistence action                                     |
 | `InvalidateCapability`                                              | `InvalidateCapability`                                               | `invalidate_capability`                                                  |
 | `RouteCommand`                                                      | `DispatchSurfaceCommand`                                             | `dispatch_surface_command`                                               |
-| receive outline projection                                          | `ReceiveOutlineProjection`                                           | `receive_outline_projection`                                             |
-| select outline view/filter/item/anchor                              | the corresponding `SetOutline*` transition                           | the corresponding outline action                                         |
-| change outline virtual window or collapse preference                | `SetOutlineVirtualWindow`, `SetOutlineCollapsed`                      | the corresponding outline action                                         |
 
 Search and Review are represented by Files in the TLA+ state space because all
 three have the same binding rules for the checked properties. The production
@@ -126,14 +116,6 @@ Effects are:
 - `deterministic_fallback`; or
 - `rejected` with a closed reason code.
 
-Outline publications are accepted only for the exact active binding
-generation. A lower revision is ignored. Replaying the identical payload at
-the accepted revision is idempotent; different content at that same revision
-is a rejected `conflicting_outline_revision`, and rejection leaves the entire
-projection unchanged. Disconnect and reconnect change the outline lifecycle
-to stale and reconnecting without discarding its last good IDs, selection,
-anchor, or virtual range.
-
 Recording rejected attempts matters. Without the effect, a checker could not
 distinguish an intentionally ignored stale completion from an implementation
 that accidentally applied it. A rejected attempt must also record the same
@@ -155,14 +137,14 @@ The harness generates six named reducer/model conformance scenarios:
 
 | Scenario                   | Required observation                                                                                                     |
 | -------------------------- | ------------------------------------------------------------------------------------------------------------------------ |
-| `thread_switch`            | Switch A/Git to B/Terminal; only B owns binding, selection, focus, artifact outline, and event outline                   |
+| `thread_switch`            | Switch A/Git to B/Terminal; only B owns binding, selection, and focus                                                    |
 | `worktree_change`          | Change A from worktree A/generation 0 to worktree B/generation 1                                                         |
-| `stale_completion`         | Ignore the old worktree-A completion, then accept a worktree-B completion and advance both outline revisions once        |
+| `stale_completion`         | Ignore the old worktree-A completion, then accept a worktree-B completion                                                |
 | `reconnect`                | Ignore an equal/older snapshot while staying non-online, then accept revision 1 and converge online                      |
 | `valid_restore`            | Persist A/Review, cold start, and restore the exact binding, surface, dock, and focus                                    |
 | `invalid_restore_fallback` | Persist A/Git on worktree A, rehydrate worktree B without Git, choose Files, and rewrite the persisted logical selection |
 
-A separate adapter test drives every one of the 22 critical action kinds
+A separate adapter test drives every critical action kind
 through the production reducer and the independent checker. Another test proves
 that a rejected production action is recorded and leaves state unchanged.
 
@@ -192,7 +174,7 @@ The model checks:
 - selection validity and deterministic fallback;
 - one visible focus/action owner;
 - stale-completion immunity;
-- thread and outline isolation;
+- thread isolation;
 - persistence/projection revision monotonicity;
 - valid and invalid restore behavior; and
 - weakly fair convergence after inputs quiesce.
@@ -201,8 +183,8 @@ Every property has an intentional mutation that must fail with its designated
 invariant or temporal-property message. Separate reachability configurations
 produce witnesses for cold restore, reconnect, invalid fallback, stale
 completion, and a current hidden-thread completion that updates only its
-owner's outlines. Disabling stale completion makes only that reachability probe
-pass, which detects a vacuous green invariant.
+owning thread's state. Disabling stale completion makes only that reachability
+probe pass, which detects a vacuous green invariant.
 
 See `docs/spec/workbench_projection/README.md` for the complete variable,
 action, property, mutation, and bound definitions.

@@ -5763,7 +5763,6 @@ mod tests {
                 "multi_workspace",
                 "notebook",
                 "omega",
-                "omega_thread_outline",
                 "omega_workbench",
                 "omega_predict_onboarding",
                 "onboarding",

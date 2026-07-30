@@ -80,9 +80,13 @@ FRONT_DOOR_NEGATIVE = ("Welcome to Omega",)
 #: The tester-channel sidebar section label (omega#156).
 TESTER_CHANNEL_LABEL = "Tester channels"
 
-#: The version the footer Settings row renders (`v{AppVersion}` in
-#: `crates/agent_ui/src/agent_panel.rs`); AppVersion for a preview-channel
-#: bundle is `0.2.0+preview.<sha>`.
+#: The version the footer Settings row renders (`footer_version_label` in
+#: `crates/agent_ui/src/agent_panel.rs`). A release-candidate bundle renders
+#: the version plus the stamped per-version build number — `v0.2.0 b28` for
+#: rc28 — with no commit sha; the sha stays in the release record, About, and
+#: `omega: copy system specs`. The build number is the RC number from
+#: `script/bundle-omega-rc`, so the footer binds to the release record's
+#: `version` field (`0.2.0-rc28`), which in turn binds to the source commit.
 VERSION_FOOTER_PREFIX = "v0.2.0"
 
 #: Neighbouring-app data roots the candidate must never touch
@@ -598,7 +602,16 @@ def main() -> int:
     with (app_path / "Contents/Info.plist").open("rb") as handle:
         info = plistlib.load(handle)
     short_sha = commit[:7] if commit else ""
+    # The footer renders version + per-version build number (`v0.2.0 b28`).
+    # The build number is the RC number inside the release record's `version`
+    # field, so matching it binds the rendered footer to the record, and the
+    # record's `source.commit` binds the pair to the exact source commit.
+    rc_match = re.search(r"-rc(\d+)$", str(record.get("version") or ""))
+    expected_footer = (
+        f"{VERSION_FOOTER_PREFIX} b{rc_match.group(1)}" if rc_match else None
+    )
     version_facts = {
+        "expected_footer": expected_footer,
         "bundle_identifier": info.get("CFBundleIdentifier"),
         "bundle_short_version": info.get("CFBundleShortVersionString"),
         "expected_bundle_identifier": record.get("bundle_identifier"),
@@ -729,16 +742,19 @@ def main() -> int:
                     tester_refs = list(launch_refs)
                     # Vision reads the digit 0 as the letter O in this font;
                     # normalise before matching so the footer version row does
-                    # not fail on an OCR confusion. The commit fragment must
-                    # match too, so the footer proves WHICH build rendered.
+                    # not fail on an OCR confusion. The build number must match
+                    # too, so the footer proves WHICH cut of the version
+                    # rendered; the release record binds that build number to
+                    # the exact source commit. OCR is also unreliable about
+                    # spaces, so the comparison is space-insensitive.
                     normalised = [
-                        line.get("text", "").replace("O", "0") for line in lines
+                        line.get("text", "").replace("O", "0").replace(" ", "")
+                        for line in lines
                     ]
-                    footer_needle = f"{VERSION_FOOTER_PREFIX}+preview."
-                    footer_seen = any(
-                        footer_needle in text and (not short_sha or short_sha in text)
-                        for text in normalised
+                    footer_needle = (expected_footer or VERSION_FOOTER_PREFIX).replace(
+                        " ", ""
                     )
+                    footer_seen = any(footer_needle in text for text in normalised)
                 elif captured:
                     launch_facts["blocked_reason"] = (
                         "the window was captured but OCR is unavailable "
@@ -848,7 +864,7 @@ def main() -> int:
             else (
                 "Static identity agrees but the footer version was not "
                 "OCR-visible; open Settings in the sidebar footer and confirm "
-                f"it reads {VERSION_FOOTER_PREFIX}+preview.{short_sha or '<sha>'}."
+                f"it reads {expected_footer or VERSION_FOOTER_PREFIX + ' b<N>'}."
             )
         ),
     )

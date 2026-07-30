@@ -2,8 +2,13 @@
 
 This directory contains a bounded TLA+ model of the state machine that decides
 which desktop work surface is visible, which repository/worktree it is bound
-to, which thread owns its outlines and actions, and what survives persistence,
-cold restore, and reconnect.
+to, which thread owns its artifact/event revisions and actions, and what
+survives persistence, cold restore, and reconnect.
+
+> Note: the thread outline UI lane and the reducer's `ThreadOutlineProjection`
+> state were removed at owner direction 2026-07-30 (delta OMEGA-DELTA-0188).
+> The modeled artifact and event owner/revision variables remain: they track
+> load-completion identity, not the removed outline surface.
 
 The model is intentionally below the GPUI layer. It does not model pixels,
 layout, message contents, paths, terminal output, or individual Files/Search/
@@ -43,7 +48,7 @@ The checked-in Rust reducer has two additional binding-required surfaces,
 - A load captures its thread, repository, worktree, surface, and generation.
   Completing a current load advances only that thread's artifact and event
   revisions. Completing a stale load removes it from the pending set without
-  changing a visible projection or either outline revision. Switching to
+  changing a visible projection or either of those revisions. Switching to
   another thread does not itself stale the hidden thread's load: currentness is
   derived from the owning thread's generation, binding, available surfaces,
   and selected surface.
@@ -56,7 +61,8 @@ The checked-in Rust reducer has two additional binding-required surfaces,
   snapshot is accepted from either reconnecting or stale state. Disconnect is
   legal from online or stale state.
 - Cold start retains known per-thread projections and durable state while
-  clearing the active thread, dock, focus, action binding, and outline owners.
+  clearing the active thread, dock, focus, action binding, and artifact/event
+  owners.
   It records the prior active thread as the only restore target. The model's
   explicit `Cold` connection phase is an abstraction boundary: production
   represents this condition with `restore_pending`, not another connection
@@ -64,8 +70,8 @@ The checked-in Rust reducer has two additional binding-required surfaces,
 - Restore uses the durable selection only when its thread, binding, generation,
   and capability remain valid. Otherwise it computes the same deterministic
   fallback as a live transition.
-- Only the visible active thread can own selection, artifact outline, event
-  outline, focus, and surface actions.
+- Only the visible active thread can own selection, artifact and event
+  ownership, focus, and surface actions.
 - Once external input quiesces, weak fairness on `Settle` requires the derived
   projection and durable selection to converge.
 
@@ -100,7 +106,7 @@ transitions: receive revision 1 and later receive revision 0.
 | `Inv_SelectionValidity`       | Safety   | The effective surface is available and is the fixed fallback                | Keep Git after worktree removal; choose the reverse fallback order |
 | `Inv_SingleOwner`             | Safety   | At most one visible surface owns focus/actions; hidden surfaces own neither | Keep focus/action ownership after dock collapse                    |
 | `Inv_StaleCompletionImmunity` | Safety   | No stale async completion is accepted                                       | Record a stale completion as accepted                              |
-| `Inv_ThreadIsolation`         | Safety   | Selection, outlines, rendering, and actions belong to the active thread     | Restore selection ownership from the previous thread               |
+| `Inv_ThreadIsolation`         | Safety   | Selection, artifact/event ownership, rendering, and actions belong to the active thread | Restore selection ownership from the previous thread               |
 | `Inv_PersistenceMonotonicity` | Safety   | Applied and maximum-seen durable revisions never move backward              | Apply revision 0 after revision 1                                  |
 | `Inv_RestoreFidelity`         | Safety   | Restore uses its recorded target and deterministic validity rules           | Restore data from the previous thread                              |
 | `EventualConvergence`         | Liveness | After quiescence, derived and durable projection state settles              | Disable `Settle`                                                   |
@@ -206,8 +212,8 @@ states.
 
 The `agent_ui` integration should own an `Entity<WorkbenchProjection>`,
 dispatch all thread, binding, surface, reconnect, and restore inputs through
-`apply`, and derive visible surface props, action routing, artifact outline,
-and event outline from one `visible_projection()` snapshot.
+`apply`, and derive visible surface props and action routing from one
+`visible_projection()` snapshot.
 
 GPUI tests should then use debug selectors only to assert that the semantic
 projection reached the expected render boundary. Rendering code must not

@@ -12,8 +12,8 @@ body:
     attributes:
       label: Omega version and commit
       description: |
-        The exact build this report binds to. Paste the version string from the sidebar footer (the Settings row), or run `omega: copy system specs into clipboard` from the command palette and paste the version line.
-      placeholder: "v0.2.0+preview.1a2b3c4d (installed candidate) or v0.2.0+dev.1a2b3c4d (source build)"
+        The exact build this report binds to. Paste the version string from the sidebar footer (the Settings row) — `v0.2.0 b28` on an installed candidate, `v0.2.0 dev` on a source build. For the full commit, run `omega: copy system specs into clipboard` from the command palette and paste the version line.
+      placeholder: "v0.2.0 b28 (installed candidate) or v0.2.0 dev (source build; add the commit from system specs)"
     validations:
       required: true
   - type: textarea

@@ -339,6 +339,7 @@ impl AssistantMessage {
             self.chunks
                 .iter()
                 .map(|chunk| chunk.to_markdown(cx))
+                .filter(|chunk_markdown| !chunk_markdown.is_empty())
                 .join("\n\n")
         )
     }
@@ -373,7 +374,16 @@ impl AssistantMessageChunk {
         match self {
             Self::Message { block, .. } => block.to_markdown(cx).to_string(),
             Self::Thought { block, .. } => {
-                format!("<thinking>\n{}\n</thinking>", block.to_markdown(cx))
+                let thought = block.to_markdown(cx);
+                // A thought block whose content never arrived (for example a
+                // provider reasoning block that carried only a signature, or a
+                // trailing empty thought on the final entry) must not export as
+                // an empty `<thinking></thinking>` pair.
+                if thought.trim().is_empty() {
+                    String::new()
+                } else {
+                    format!("<thinking>\n{thought}\n</thinking>")
+                }
             }
         }
     }
@@ -6741,6 +6751,76 @@ mod tests {
             <thinking>
             Thinking hard!
             </thinking>
+
+            "#}
+        );
+    }
+
+    /// A thought block that never received content (for example a trailing
+    /// provider reasoning block on the final entry) must not export as an
+    /// empty `<thinking></thinking>` pair in "Open Thread as Markdown".
+    #[gpui::test]
+    async fn test_empty_thinking_not_exported(cx: &mut gpui::TestAppContext) {
+        init_test(cx);
+
+        let fs = FakeFs::new(cx.executor());
+        let project = Project::test(fs, [], cx).await;
+        let connection = Rc::new(FakeAgentConnection::new().on_user_message(
+            |_, thread, mut cx| {
+                async move {
+                    thread.update(&mut cx, |thread, cx| {
+                        thread
+                            .handle_session_update(
+                                acp::SessionUpdate::AgentMessageChunk(acp::ContentChunk::new(
+                                    "Here is the answer.".into(),
+                                )),
+                                cx,
+                            )
+                            .unwrap();
+                        // A trailing thought block whose content never arrives.
+                        thread
+                            .handle_session_update(
+                                acp::SessionUpdate::AgentThoughtChunk(
+                                    acp::ContentChunk::new("".into())
+                                        .message_id("msg_trailing_thought"),
+                                ),
+                                cx,
+                            )
+                            .unwrap();
+                    })?;
+                    Ok(acp::PromptResponse::new(acp::StopReason::EndTurn))
+                }
+                .boxed_local()
+            },
+        ));
+
+        let thread = cx
+            .update(|cx| {
+                connection.new_session(project, PathList::new(&[Path::new(path!("/test"))]), cx)
+            })
+            .await
+            .unwrap();
+
+        thread
+            .update(cx, |thread, cx| thread.send_raw("Hello from Zed!", cx))
+            .await
+            .unwrap();
+
+        let output = thread.read_with(cx, |thread, cx| thread.to_markdown(cx));
+        assert!(
+            !output.contains("<thinking>"),
+            "empty thought must not export a <thinking> tag, got:\n{output}"
+        );
+        assert_eq!(
+            output,
+            indoc! {r#"
+            ## User
+
+            Hello from Zed!
+
+            ## Assistant
+
+            Here is the answer.
 
             "#}
         );

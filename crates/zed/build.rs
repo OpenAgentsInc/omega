@@ -42,6 +42,14 @@ fn main() {
     // Populate git sha environment variable if git is available
     println!("cargo:rerun-if-changed=../../.git/logs/HEAD");
     println!("cargo:rerun-if-env-changed=ZED_COMMIT_SHA");
+    // The Omega per-version build number. `script/bundle-omega-rc` exports its
+    // RC number here so the settings footer can render `v0.2.0 b28` without
+    // carrying the commit sha. Absent (dev/source builds) the footer renders
+    // `v0.2.0 dev`.
+    println!("cargo:rerun-if-env-changed=OMEGA_BUILD_NUMBER");
+    if let Ok(build_number) = std::env::var("OMEGA_BUILD_NUMBER") {
+        println!("cargo:rustc-env=OMEGA_BUILD_NUMBER={build_number}");
+    }
     println!(
         "cargo:rustc-env=TARGET={}",
         std::env::var("TARGET").unwrap()

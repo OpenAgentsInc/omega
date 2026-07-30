@@ -27,10 +27,6 @@ pub struct WorktreeId(pub String);
 #[serde(transparent)]
 pub struct RequestId(pub String);
 
-#[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
-#[serde(transparent)]
-pub struct OutlineItemId(pub String);
-
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum SurfaceId {
@@ -69,102 +65,6 @@ pub enum ConnectionPhase {
     StaleProjection,
 }
 
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum OutlineView {
-    #[default]
-    Events,
-    Artifacts,
-}
-
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum OutlineFilter {
-    #[default]
-    All,
-    Active,
-    Errors,
-}
-
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum OutlineLifecycle {
-    #[default]
-    Empty,
-    Loading,
-    Streaming,
-    Partial,
-    Ready,
-    Error,
-    Stale,
-    Reconnecting,
-}
-
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
-pub struct ThreadOutlineState {
-    pub revision: u64,
-    pub event_ids: Vec<OutlineItemId>,
-    pub artifact_ids: Vec<OutlineItemId>,
-    pub lifecycle: OutlineLifecycle,
-    pub view: OutlineView,
-    pub filter: OutlineFilter,
-    pub selected_id: Option<OutlineItemId>,
-    pub anchor_id: Option<OutlineItemId>,
-    pub virtual_start: usize,
-    pub virtual_len: usize,
-    pub collapsed: bool,
-}
-
-impl Default for ThreadOutlineState {
-    fn default() -> Self {
-        Self {
-            revision: 0,
-            event_ids: Vec::new(),
-            artifact_ids: Vec::new(),
-            lifecycle: OutlineLifecycle::Empty,
-            view: OutlineView::Events,
-            filter: OutlineFilter::All,
-            selected_id: None,
-            anchor_id: None,
-            virtual_start: 0,
-            virtual_len: 0,
-            collapsed: false,
-        }
-    }
-}
-
-impl ThreadOutlineState {
-    fn visible_ids(&self) -> &[OutlineItemId] {
-        match self.view {
-            OutlineView::Events => &self.event_ids,
-            OutlineView::Artifacts => &self.artifact_ids,
-        }
-    }
-
-    fn normalize(&mut self) {
-        let selection_is_visible = self
-            .selected_id
-            .as_ref()
-            .is_none_or(|selected| self.visible_ids().contains(selected));
-        let anchor_is_visible = self
-            .anchor_id
-            .as_ref()
-            .is_none_or(|anchor| self.visible_ids().contains(anchor));
-        let visible_len = self.visible_ids().len();
-        if !selection_is_visible {
-            self.selected_id = None;
-        }
-        if !anchor_is_visible {
-            self.anchor_id = None;
-        }
-        self.virtual_start = self.virtual_start.min(visible_len);
-        self.virtual_len = self
-            .virtual_len
-            .min(visible_len.saturating_sub(self.virtual_start));
-    }
-}
-
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Binding {
@@ -191,8 +91,6 @@ pub struct ThreadSeed {
     pub dock_visible: bool,
     pub artifact_revision: u64,
     pub event_revision: u64,
-    #[serde(default)]
-    pub outline: ThreadOutlineState,
 }
 
 impl ThreadSeed {
@@ -209,7 +107,6 @@ impl ThreadSeed {
             dock_visible: false,
             artifact_revision: 0,
             event_revision: 0,
-            outline: ThreadOutlineState::default(),
         }
     }
 
@@ -224,7 +121,6 @@ impl ThreadSeed {
             focus_owner: None,
             artifact_revision: self.artifact_revision,
             event_revision: self.event_revision,
-            outline: self.outline,
         }
     }
 }
@@ -241,8 +137,6 @@ pub struct ThreadState {
     pub focus_owner: Option<SurfaceId>,
     pub artifact_revision: u64,
     pub event_revision: u64,
-    #[serde(default)]
-    pub outline: ThreadOutlineState,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -267,15 +161,6 @@ pub struct PersistedSelection {
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
-pub struct OutlineProjection {
-    pub thread_id: ThreadId,
-    pub generation: u64,
-    pub binding: Option<Binding>,
-    pub revision: u64,
-}
-
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
 pub struct VisibleProjection {
     pub thread_id: ThreadId,
     pub generation: u64,
@@ -284,10 +169,8 @@ pub struct VisibleProjection {
     pub effective_surface: Option<SurfaceId>,
     pub dock_visible: bool,
     pub focus_owner: Option<SurfaceId>,
-    pub artifact_outline: OutlineProjection,
-    pub event_outline: OutlineProjection,
-    #[serde(default)]
-    pub outline: ThreadOutlineState,
+    pub artifact_revision: u64,
+    pub event_revision: u64,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -330,19 +213,8 @@ impl WorkbenchState {
             effective_surface: thread.effective_surface,
             dock_visible: thread.dock_visible,
             focus_owner: thread.focus_owner,
-            artifact_outline: OutlineProjection {
-                thread_id: thread_id.clone(),
-                generation: thread.generation,
-                binding: thread.binding.clone(),
-                revision: thread.artifact_revision,
-            },
-            event_outline: OutlineProjection {
-                thread_id: thread_id.clone(),
-                generation: thread.generation,
-                binding: thread.binding.clone(),
-                revision: thread.event_revision,
-            },
-            outline: thread.outline.clone(),
+            artifact_revision: thread.artifact_revision,
+            event_revision: thread.event_revision,
         })
     }
 }
@@ -382,13 +254,6 @@ pub enum ActionKind {
     BeginSurfaceLoad,
     CompleteSurfaceLoad,
     FailSurfaceLoad,
-    ReceiveOutlineProjection,
-    SetOutlineView,
-    SetOutlineFilter,
-    SelectOutlineItem,
-    SetOutlineAnchor,
-    SetOutlineVirtualWindow,
-    SetOutlineCollapsed,
     Disconnect,
     Reconnect,
     ReceiveProjectionSnapshot,
@@ -401,7 +266,7 @@ pub enum ActionKind {
 }
 
 impl ActionKind {
-    pub const ALL: [Self; 30] = [
+    pub const ALL: [Self; 23] = [
         Self::OpenThread,
         Self::CloseThread,
         Self::SwitchThread,
@@ -416,13 +281,6 @@ impl ActionKind {
         Self::BeginSurfaceLoad,
         Self::CompleteSurfaceLoad,
         Self::FailSurfaceLoad,
-        Self::ReceiveOutlineProjection,
-        Self::SetOutlineView,
-        Self::SetOutlineFilter,
-        Self::SelectOutlineItem,
-        Self::SetOutlineAnchor,
-        Self::SetOutlineVirtualWindow,
-        Self::SetOutlineCollapsed,
         Self::Disconnect,
         Self::Reconnect,
         Self::ReceiveProjectionSnapshot,
@@ -450,13 +308,6 @@ impl ActionKind {
             Self::BeginSurfaceLoad => "begin_surface_load",
             Self::CompleteSurfaceLoad => "complete_surface_load",
             Self::FailSurfaceLoad => "fail_surface_load",
-            Self::ReceiveOutlineProjection => "receive_outline_projection",
-            Self::SetOutlineView => "set_outline_view",
-            Self::SetOutlineFilter => "set_outline_filter",
-            Self::SelectOutlineItem => "select_outline_item",
-            Self::SetOutlineAnchor => "set_outline_anchor",
-            Self::SetOutlineVirtualWindow => "set_outline_virtual_window",
-            Self::SetOutlineCollapsed => "set_outline_collapsed",
             Self::Disconnect => "disconnect",
             Self::Reconnect => "reconnect",
             Self::ReceiveProjectionSnapshot => "receive_projection_snapshot",
@@ -546,40 +397,6 @@ pub enum Transition {
         generation: u64,
         binding: Option<Binding>,
     },
-    ReceiveOutlineProjection {
-        thread_id: ThreadId,
-        generation: u64,
-        binding: Option<Binding>,
-        revision: u64,
-        event_ids: Vec<OutlineItemId>,
-        artifact_ids: Vec<OutlineItemId>,
-        lifecycle: OutlineLifecycle,
-    },
-    SetOutlineView {
-        thread_id: ThreadId,
-        view: OutlineView,
-    },
-    SetOutlineFilter {
-        thread_id: ThreadId,
-        filter: OutlineFilter,
-    },
-    SelectOutlineItem {
-        thread_id: ThreadId,
-        item_id: Option<OutlineItemId>,
-    },
-    SetOutlineAnchor {
-        thread_id: ThreadId,
-        item_id: Option<OutlineItemId>,
-    },
-    SetOutlineVirtualWindow {
-        thread_id: ThreadId,
-        start: usize,
-        len: usize,
-    },
-    SetOutlineCollapsed {
-        thread_id: ThreadId,
-        collapsed: bool,
-    },
     Disconnect,
     Reconnect,
     ReceiveProjectionSnapshot {
@@ -623,13 +440,6 @@ impl Transition {
             Self::BeginSurfaceLoad { .. } => ActionKind::BeginSurfaceLoad,
             Self::CompleteSurfaceLoad { .. } => ActionKind::CompleteSurfaceLoad,
             Self::FailSurfaceLoad { .. } => ActionKind::FailSurfaceLoad,
-            Self::ReceiveOutlineProjection { .. } => ActionKind::ReceiveOutlineProjection,
-            Self::SetOutlineView { .. } => ActionKind::SetOutlineView,
-            Self::SetOutlineFilter { .. } => ActionKind::SetOutlineFilter,
-            Self::SelectOutlineItem { .. } => ActionKind::SelectOutlineItem,
-            Self::SetOutlineAnchor { .. } => ActionKind::SetOutlineAnchor,
-            Self::SetOutlineVirtualWindow { .. } => ActionKind::SetOutlineVirtualWindow,
-            Self::SetOutlineCollapsed { .. } => ActionKind::SetOutlineCollapsed,
             Self::Disconnect => ActionKind::Disconnect,
             Self::Reconnect => ActionKind::Reconnect,
             Self::ReceiveProjectionSnapshot { .. } => ActionKind::ReceiveProjectionSnapshot,
@@ -669,8 +479,6 @@ pub enum RejectCode {
     DuplicateThread,
     InactiveThread,
     UnknownRequest,
-    UnknownOutlineItem,
-    ConflictingOutlineRevision,
     DuplicateRequest,
     UnavailableSurface,
     InvalidConnectionPhase,
@@ -683,7 +491,6 @@ pub enum RejectCode {
     InvalidIdentifier,
     InvalidBinding,
     InvalidSnapshot,
-    InvalidOutlineWindow,
     AlreadyBound,
     AlreadyUnbound,
     CapabilityAlreadyUnavailable,
@@ -1256,121 +1063,6 @@ fn try_apply_transition(
             generation,
             binding,
         } => finish_surface_load(state, request_id, thread_id, *surface, *generation, binding)?,
-        Transition::ReceiveOutlineProjection {
-            thread_id,
-            generation,
-            binding,
-            revision,
-            event_ids,
-            artifact_ids,
-            lifecycle,
-        } => {
-            validate_outline_update(thread_id, *revision, event_ids, artifact_ids)?;
-            let thread = require_thread_mut(state, thread_id)?;
-            if thread.generation != *generation || thread.binding != *binding {
-                TransitionEffect::StaleCompletionIgnored
-            } else if *revision < thread.outline.revision {
-                TransitionEffect::OlderRevisionIgnored
-            } else if *revision == thread.outline.revision {
-                if thread.outline.event_ids == *event_ids
-                    && thread.outline.artifact_ids == *artifact_ids
-                    && thread.outline.lifecycle == *lifecycle
-                {
-                    TransitionEffect::OlderRevisionIgnored
-                } else {
-                    return rejected(
-                        RejectCode::ConflictingOutlineRevision,
-                        format!(
-                            "outline revision {revision} conflicts with the accepted projection"
-                        ),
-                    );
-                }
-            } else {
-                thread.outline.revision = *revision;
-                thread.outline.event_ids = event_ids.clone();
-                thread.outline.artifact_ids = artifact_ids.clone();
-                thread.outline.lifecycle = *lifecycle;
-                thread.outline.normalize();
-                thread.event_revision = *revision;
-                thread.artifact_revision = *revision;
-                TransitionEffect::Applied
-            }
-        }
-        Transition::SetOutlineView { thread_id, view } => {
-            require_active_thread(state, thread_id)?;
-            let thread = require_thread_mut(state, thread_id)?;
-            thread.outline.view = *view;
-            thread.outline.normalize();
-            TransitionEffect::Applied
-        }
-        Transition::SetOutlineFilter { thread_id, filter } => {
-            require_active_thread(state, thread_id)?;
-            require_thread_mut(state, thread_id)?.outline.filter = *filter;
-            TransitionEffect::Applied
-        }
-        Transition::SelectOutlineItem { thread_id, item_id } => {
-            require_active_thread(state, thread_id)?;
-            if let Some(item_id) = item_id {
-                validate_transition_identifier(validate_outline_item_id(item_id))?;
-            }
-            let thread = require_thread_mut(state, thread_id)?;
-            if let Some(item_id) = item_id
-                && !thread.outline.visible_ids().contains(item_id)
-            {
-                return rejected(
-                    RejectCode::UnknownOutlineItem,
-                    format!("outline item {:?} is not visible", item_id.0),
-                );
-            }
-            thread.outline.selected_id = item_id.clone();
-            TransitionEffect::Applied
-        }
-        Transition::SetOutlineAnchor { thread_id, item_id } => {
-            require_active_thread(state, thread_id)?;
-            if let Some(item_id) = item_id {
-                validate_transition_identifier(validate_outline_item_id(item_id))?;
-            }
-            let thread = require_thread_mut(state, thread_id)?;
-            if let Some(item_id) = item_id
-                && !thread.outline.visible_ids().contains(item_id)
-            {
-                return rejected(
-                    RejectCode::UnknownOutlineItem,
-                    format!(
-                        "outline item {:?} cannot anchor the selected view",
-                        item_id.0
-                    ),
-                );
-            }
-            thread.outline.anchor_id = item_id.clone();
-            TransitionEffect::Applied
-        }
-        Transition::SetOutlineVirtualWindow {
-            thread_id,
-            start,
-            len,
-        } => {
-            require_active_thread(state, thread_id)?;
-            let thread = require_thread_mut(state, thread_id)?;
-            let available = thread.outline.visible_ids().len();
-            if *start > available || *len > available.saturating_sub(*start) {
-                return rejected(
-                    RejectCode::InvalidOutlineWindow,
-                    format!("outline virtual window {start}+{len} exceeds {available}"),
-                );
-            }
-            thread.outline.virtual_start = *start;
-            thread.outline.virtual_len = *len;
-            TransitionEffect::Applied
-        }
-        Transition::SetOutlineCollapsed {
-            thread_id,
-            collapsed,
-        } => {
-            require_active_thread(state, thread_id)?;
-            require_thread_mut(state, thread_id)?.outline.collapsed = *collapsed;
-            TransitionEffect::Applied
-        }
         Transition::Disconnect => {
             if !matches!(
                 state.connection,
@@ -1385,11 +1077,6 @@ fn try_apply_transition(
                 );
             }
             state.connection = ConnectionPhase::Offline;
-            if let Some(active_thread_id) = state.active_thread.clone()
-                && let Some(thread) = state.threads.get_mut(&active_thread_id)
-            {
-                thread.outline.lifecycle = OutlineLifecycle::Stale;
-            }
             TransitionEffect::Applied
         }
         Transition::Reconnect => {
@@ -1403,11 +1090,6 @@ fn try_apply_transition(
                 );
             }
             state.connection = ConnectionPhase::Reconnecting;
-            if let Some(active_thread_id) = state.active_thread.clone()
-                && let Some(thread) = state.threads.get_mut(&active_thread_id)
-            {
-                thread.outline.lifecycle = OutlineLifecycle::Reconnecting;
-            }
             TransitionEffect::Applied
         }
         Transition::ReceiveProjectionSnapshot { snapshot } => apply_snapshot(state, snapshot)?,
@@ -1895,7 +1577,6 @@ fn validate_state(state: &WorkbenchState) -> Result<(), ConformanceError> {
             validate_binding(binding)?;
         }
         validate_binding_availability(thread.binding.as_ref(), &thread.available_surfaces)?;
-        validate_outline_state(thread_id, &thread.outline)?;
         if thread
             .effective_surface
             .is_some_and(|surface| !thread.available_surfaces.contains(&surface))
@@ -1987,11 +1668,7 @@ fn validate_state(state: &WorkbenchState) -> Result<(), ConformanceError> {
             .visible_projection
             .as_ref()
             .zip(state.active_thread.as_ref())
-            .is_some_and(|(visible, active)| {
-                &visible.thread_id != active
-                    || &visible.artifact_outline.thread_id != active
-                    || &visible.event_outline.thread_id != active
-            });
+            .is_some_and(|(visible, active)| &visible.thread_id != active);
         return Err(ConformanceError::new(
             if cross_thread {
                 ErrorCode::CrossThreadState
@@ -2027,88 +1704,6 @@ fn validate_thread_id(thread_id: &ThreadId) -> Result<(), ConformanceError> {
 
 fn validate_request_id(request_id: &RequestId) -> Result<(), ConformanceError> {
     validate_identifier("request", &request_id.0)
-}
-
-fn validate_outline_item_id(item_id: &OutlineItemId) -> Result<(), ConformanceError> {
-    validate_identifier("outline item", &item_id.0)
-}
-
-fn validate_outline_update(
-    thread_id: &ThreadId,
-    revision: u64,
-    event_ids: &[OutlineItemId],
-    artifact_ids: &[OutlineItemId],
-) -> Result<(), ConformanceError> {
-    validate_transition_identifier(validate_thread_id(thread_id))?;
-    if revision == 0 {
-        return rejected(
-            RejectCode::InvalidSnapshot,
-            "outline revision zero is reserved for an uninitialized projection",
-        );
-    }
-    for (kind, ids) in [("event", event_ids), ("artifact", artifact_ids)] {
-        let mut seen = BTreeSet::new();
-        for item_id in ids {
-            validate_transition_identifier(validate_outline_item_id(item_id))?;
-            if !seen.insert(item_id) {
-                return rejected(
-                    RejectCode::InvalidSnapshot,
-                    format!("duplicate outline {kind} ID {:?}", item_id.0),
-                );
-            }
-        }
-    }
-    Ok(())
-}
-
-fn validate_outline_state(
-    thread_id: &ThreadId,
-    outline: &ThreadOutlineState,
-) -> Result<(), ConformanceError> {
-    for (kind, ids) in [
-        ("event", outline.event_ids.as_slice()),
-        ("artifact", outline.artifact_ids.as_slice()),
-    ] {
-        let mut seen = BTreeSet::new();
-        for item_id in ids {
-            validate_outline_item_id(item_id)?;
-            if !seen.insert(item_id) {
-                return Err(ConformanceError::new(
-                    ErrorCode::InvariantViolation,
-                    format!(
-                        "thread {:?} contains duplicate outline {kind} ID {:?}",
-                        thread_id.0, item_id.0
-                    ),
-                ));
-            }
-        }
-    }
-    let visible_ids = outline.visible_ids();
-    for (kind, item_id) in [
-        ("selection", outline.selected_id.as_ref()),
-        ("anchor", outline.anchor_id.as_ref()),
-    ] {
-        if let Some(item_id) = item_id
-            && !visible_ids.contains(item_id)
-        {
-            return Err(ConformanceError::new(
-                ErrorCode::InvariantViolation,
-                format!(
-                    "thread {:?} outline {kind} {:?} is not visible",
-                    thread_id.0, item_id.0
-                ),
-            ));
-        }
-    }
-    if outline.virtual_start > visible_ids.len()
-        || outline.virtual_len > visible_ids.len().saturating_sub(outline.virtual_start)
-    {
-        return Err(ConformanceError::new(
-            ErrorCode::InvariantViolation,
-            format!("thread {:?} has an invalid outline window", thread_id.0),
-        ));
-    }
-    Ok(())
 }
 
 fn validate_binding(binding: &Binding) -> Result<(), ConformanceError> {
@@ -3009,89 +2604,6 @@ mod tests {
             }
         );
         assert_eq!(outcome.state, initial);
-    }
-
-    #[test]
-    fn outline_updates_are_independent_from_surface_load_completion() {
-        let thread_id = thread("thread-a");
-        let binding = Some(Binding::new("repository-a", "worktree-a"));
-        let mut state = one_bound_thread_state();
-        let first_request = request("load-a");
-        state = replay_ok(
-            &state,
-            &Transition::BeginSurfaceLoad {
-                request_id: first_request.clone(),
-                thread_id: thread_id.clone(),
-                surface: SurfaceId::Files,
-                generation: 0,
-                binding: binding.clone(),
-            },
-        )
-        .state;
-        let completion = replay_ok(
-            &state,
-            &Transition::CompleteSurfaceLoad {
-                request_id: first_request,
-                thread_id: thread_id.clone(),
-                surface: SurfaceId::Files,
-                generation: 0,
-                binding: binding.clone(),
-            },
-        );
-        assert_eq!(completion.effect, TransitionEffect::Applied);
-        let completed_thread = completion.state.threads.get(&thread_id);
-        assert_eq!(
-            completed_thread.map(|thread| thread.artifact_revision),
-            Some(0)
-        );
-        assert_eq!(
-            completed_thread.map(|thread| thread.event_revision),
-            Some(0)
-        );
-
-        let outline_update = replay_ok(
-            &completion.state,
-            &Transition::ReceiveOutlineProjection {
-                thread_id: thread_id.clone(),
-                generation: 0,
-                binding: binding.clone(),
-                revision: 1,
-                event_ids: vec![OutlineItemId("event-1".into())],
-                artifact_ids: vec![OutlineItemId("artifact-1".into())],
-                lifecycle: OutlineLifecycle::Ready,
-            },
-        );
-        assert_eq!(outline_update.effect, TransitionEffect::Applied);
-
-        let second_request = request("load-b");
-        state = replay_ok(
-            &outline_update.state,
-            &Transition::BeginSurfaceLoad {
-                request_id: second_request.clone(),
-                thread_id: thread_id.clone(),
-                surface: SurfaceId::Files,
-                generation: 0,
-                binding: binding.clone(),
-            },
-        )
-        .state;
-        let failure = replay_ok(
-            &state,
-            &Transition::FailSurfaceLoad {
-                request_id: second_request,
-                thread_id: thread_id.clone(),
-                surface: SurfaceId::Files,
-                generation: 0,
-                binding,
-            },
-        );
-        let failed_thread = failure.state.threads.get(&thread_id);
-        assert_eq!(
-            failed_thread.map(|thread| thread.artifact_revision),
-            Some(1)
-        );
-        assert_eq!(failed_thread.map(|thread| thread.event_revision), Some(1));
-        assert!(failure.state.pending_loads.is_empty());
     }
 
     #[test]

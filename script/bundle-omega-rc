@@ -1157,6 +1157,15 @@ PY
   export ZED_RELEASE_CHANNEL="${OMEGA_RC_CHANNEL}"
   export ZED_APP_VERSION="${OMEGA_RC_SEMVER}"
   export RELEASE_CHANNEL="${OMEGA_RC_CHANNEL}"
+  # The per-version build number the settings footer renders (`v0.2.0 b28`).
+  # It reuses the RC number, which this script already increments exactly once
+  # per cut of the version, so no second counter exists to drift.
+  local build_number="${OMEGA_RC_VERSION##*rc}"
+  if ! [[ "${build_number}" =~ ^[0-9]+$ ]]; then
+    echo "error: cannot derive OMEGA_BUILD_NUMBER from OMEGA_RC_VERSION=${OMEGA_RC_VERSION}" >&2
+    exit 1
+  fi
+  export OMEGA_BUILD_NUMBER="${build_number}"
 }
 
 maybe_import_certificate() {

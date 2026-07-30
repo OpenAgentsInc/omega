@@ -24,12 +24,14 @@ Every report must name the exact build it was observed on. A report that
 cannot be bound to a candidate cannot be triaged.
 
 - The fastest source is the **sidebar footer**: the Settings row shows the
-  running version, for example `v0.2.0+preview.1a2b3c4…` on an installed
-  candidate or `v0.2.0+dev.1a2b3c4…` on a source build. Paste that string
-  verbatim.
+  running version plus its build number, for example `v0.2.0 b28` on an
+  installed candidate or `v0.2.0 dev` on a source build. Paste that string
+  verbatim. The build number is the candidate's RC number, so `v0.2.0 b28`
+  names release `v0.2.0-rc28` exactly.
 - For GitHub reports, run `omega: copy system specs into clipboard` from the
-  command palette. It captures the version, commit, release channel, OS,
-  architecture, and memory in one paste.
+  command palette. It captures the version, full commit, release channel, OS,
+  architecture, and memory in one paste — the footer deliberately omits the
+  commit sha, so use system specs when triage needs it.
 - Also name the platform (for example macOS arm64) and the mode or surface you
   were in (which conversation mode, panel, or flow) when the defect appeared.
 

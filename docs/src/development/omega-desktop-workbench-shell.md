@@ -25,9 +25,6 @@ repository/worktree scope. Issue 137 rehomes the Workspace-owned native
 Terminal Panel and gives explicit terminal creation the active thread's exact
 worktree path. Issue 130 mounts the active thread's typed ACP plan in a retained
 native Plan surface.
-Issue 135 adds a retained event and artifact outline beside the transcript. The
-outline is a typed projection of the active `AcpThread`; it is not parsed from
-rendered message text and it is not another work-surface dock.
 
 The remaining work is deliberately split so each native adapter can prove its
 own identity, behavior, and lifecycle:
@@ -39,7 +36,6 @@ own identity, behavior, and lifecycle:
 | [Issue 131](https://github.com/OpenAgentsInc/omega/issues/131) | Persist and cold-restore each thread's selection   |
 | [Issue 132](https://github.com/OpenAgentsInc/omega/issues/132) | Mounted the existing Git Panel                     |
 | [Issue 134](https://github.com/OpenAgentsInc/omega/issues/134) | Mounted an embedded project-search entity          |
-| [Issue 135](https://github.com/OpenAgentsInc/omega/issues/135) | Present the thread's typed events and artifacts    |
 | [Issue 136](https://github.com/OpenAgentsInc/omega/issues/136) | Mounted a thread-bound native review entity        |
 | [Issue 137](https://github.com/OpenAgentsInc/omega/issues/137) | Mounted the existing Terminal Panel without implicit spawning |
 
@@ -55,8 +51,6 @@ horizontal allocation:
 2. The 40-pixel workbench activity rail.
 3. The work-surface dock when it is logically open and fits.
 4. The existing transcript column with flexible width.
-5. The retained thread outline when the desktop allocation is at least 1120
-   pixels wide and the user has not collapsed it.
 
 The transcript entity is not recreated when a surface opens, closes, or
 changes. Surface selection therefore cannot reset message state, scroll state,
@@ -82,7 +76,7 @@ User-triggered Workspace center opens share a separate presentation boundary.
 Every default-surface handler calls
 `Workspace::reveal_zero_base_center_for_user_open` before it opens or activates
 a center item. This includes Files, Git, Search, Review excerpts, transcript
-file and skill links, tool-call and outline locations, rule controls, debug JSON,
+file and skill links, tool-call locations, rule controls, debug JSON,
 the ACP registry, and file-like URL fallthrough. The low-level Workspace open
 APIs do not reveal implicitly: background restoration and preview machinery
 retain their existing presentation semantics, HTTP and HTTPS links stay in the
@@ -513,74 +507,9 @@ source navigation, lifecycle retention, collapse/reopen identity, and late
 inactive-thread isolation. Visual scenes must prove the same typed snapshot and
 accessibility contract before their pixels are captured.
 
-### Typed thread outline {#typed-thread-outline}
-
-The outline is a retained `ThreadOutline` bound to a logical thread ID, its
-exact `Entity<AcpThread>`, repository/worktree binding, and workbench binding
-generation. It consumes `AcpThread::projection()` directly. A rendered row is
-therefore backed by a typed event or artifact with a stable local ID, source,
-owner, status, action target, and revision; labels in the transcript are never
-reparsed to reconstruct authority.
-
-ACP does not currently provide stable IDs for every transcript entry or every
-artifact. Omega assigns monotonic IDs within the lifetime of the bound
-`AcpThread` and reconciles later projections against those retained IDs.
-Identity is therefore generation-local client identity, not a claim of stable
-provider identity across a replaced session entity. ACP also supplies no
-durable source identity for pathless diffs, decoded images, or individual
-thought subchunks; Omega retains those identities through updates and reorder
-inside one thread entity but cannot promise them across full entity
-reconstruction. The global artifact
-projection is authoritative: logically identical artifacts emitted by
-separate events share one `ThreadArtifactId`, accumulate their source-event
-IDs, and retain material/status history. Removed artifacts remain addressable
-as inactive history, so replay and truncation cannot silently transfer an ID
-to unrelated material.
-
-The Events view preserves execution order and uses a closed event-kind
-vocabulary with an explicit unknown case for forward compatibility. The
-Artifacts view renders the global deduplicated projection rather than
-performing presentation-side deduplication. Both views support All, Active,
-and Problems filters; stable-ID selection and scroll anchoring survive insert,
-remove, reorder, streaming updates, and virtualization. Artifact history and
-source counts are visible, and previous/next-source controls navigate through
-the existing transcript scroll path.
-
-Execution details remain typed even where ACP does not give them independent
-rows. Thought chunks appear as a reasoning facet on their containing assistant
-event, and checkpoints appear as a facet on their user event. Retained marker
-events cover live plan updates, retries, runtime errors, refusal, completion,
-cancellation, and unknown stop outcomes. Omega does not fabricate a replay
-boundary: the current connection contract has no typed reconnect/replay
-callback, and resume explicitly does not replay history. Likewise, a process
-restart cannot reconstruct prior stop, retry, error, or plan-boundary markers
-that ACP did not persist. Checkpoint navigation targets its source entry; the
-restore authority remains with the existing checkpoint operation and is not
-exposed as a generic outline action.
-
-Every publication and action revalidates the logical thread, repository and
-worktree binding, generation, exact thread entity, projection revision, item
-revision, source membership, and action target. File targets are resolved
-inside the active worktree before using native Workspace opening. URI targets
-accept only HTTP or HTTPS. When a tool, terminal, or image artifact has no
-safe native opener, activation navigates to its stable source event and
-reports that fallback instead of guessing a global target.
-
-Loading, ready, streaming, partial, error, stale, and reconnecting are explicit
-lifecycle states. Disconnect and reconnect retain the last good rows,
-selection, anchor, view, filter, and artifact history while disclosing that the
-projection is not current. Incoming projection notifications cannot mutate
-that frozen snapshot until the exact entity and binding generation return to
-ready. A thread switch restores the other thread's
-independent retained state. Older revisions are ignored; an equal revision
-with different content is rejected atomically as a consistency conflict.
-
-The outline never steals width silently. At widths below 1120 pixels it is
-responsively hidden without changing the user's retained collapse preference;
-at 1120 pixels it becomes eligible again. The transcript and composer remain
-mounted throughout. Keyboard actions cover view, filter, row movement,
-activation, source-history movement, and collapse, and all controls expose
-stable selectors, roles, labels, selected state, and lifecycle descriptions.
+> Note: the typed thread outline (issue 135, the retained `ThreadOutline`
+> sidebar beside the transcript) was removed at owner direction 2026-07-30
+> (delta OMEGA-DELTA-0188).
 
 ## State ownership {#state-ownership}
 
@@ -914,13 +843,6 @@ Stable selectors include:
 | Plan history     | `omega.workbench.plan.history`                 |
 | Plan step        | `omega.workbench.plan.step.<stable-id>`        |
 | Plan navigation  | `omega.workbench.plan.navigation-status`       |
-| Thread outline   | `omega.thread-outline`                          |
-| Outline tabs     | `omega.thread-outline.tabs`                     |
-| Outline list     | `omega.thread-outline.list`                     |
-| Outline item     | `omega.thread-outline.item.<typed-stable-id>`   |
-| Outline lifecycle| `omega.thread-outline.lifecycle.<state>`        |
-| Outline empty    | `omega.thread-outline.empty`                    |
-| Outline action   | `omega.thread-outline.action-status`            |
 
 For every interaction, assert logical state and rendered semantics:
 
@@ -967,14 +889,6 @@ revision, stable step IDs and order, status and priority mapping, active and
 selected IDs, historical source indices, no-source disclosure, lifecycle
 retention, independent per-thread host identity, and absence of cross-thread
 steps after late inactive-thread updates.
-
-Outline tests additionally assert typed event order, global artifact
-deduplication and history, stable selection and anchor IDs, exact virtual
-range, filter results, lifecycle retention, responsive behavior at 1119 and
-1120 pixels, safe action routing, source navigation, stale/equal-revision
-rejection, foreign-binding isolation, and independent state across thread
-switches. Seeded GPUI tests and the visual runner use the same typed projection
-fixtures and production render path.
 
 Identity tests additionally assert exact picker candidates, one-generation
 binding replacement, full tooltip/accessibility values under visual

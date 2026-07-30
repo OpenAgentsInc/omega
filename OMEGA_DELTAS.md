@@ -8320,3 +8320,30 @@ startup recheck — survives unchanged behind that dropdown.
 - **Enforced by:** `the_control_crawl_gate_holds` in `crates/omega_deltas`,
   the tests in `crates/omega_control_crawl`, and the `control-crawl` row of
   `script/omega-release-gate`.
+
+### OMEGA-DELTA-0188 — The agent-thread Outline sidebar is deleted
+
+- **Upstream Zed:** has no agent-thread outline pane; the surface was an
+  Omega addition (omega#135), so this delta records the removal of an Omega
+  divergence rather than a divergence from upstream.
+- **Omega:** the owner reviewed the rc28 candidate and directed 2026-07-30:
+  "I don't want that at all, delete it from the codebase entirely." Deleted in
+  the same change: `crates/agent_ui/src/thread_outline.rs` and every
+  `AgentPanel` binding/navigation/artifact-activation hook to it, the
+  `ThreadOutline` keymap context and all `omega_thread_outline::*` bindings in
+  the three default keymaps, the `omega_thread_outline` action namespace, the
+  workbench-state outline projection lane (`ThreadOutlineProjection`, its
+  seven `ProjectionTransition` variants, and both outline errors — the lane
+  had no production driver outside the pane), the conformance
+  `ThreadOutlineState`, the harness outline fixture family, and the 14
+  `omega_workbench_outline_*` visual scenes (none of which had committed
+  baselines). This is not the buffer outline (`outline::`, `outline_panel::`),
+  which stays.
+- **Why:** owner direction from the live rc28 review (omega#160). The pane
+  competed with the transcript for attention and the owner wants one reading
+  surface, not a parallel index.
+- **Also amends:** `OMEGA-DELTA-0174` (the `try_activate_outline_target`
+  reveal site no longer exists and left its pinned reveal list).
+- **Enforced by:** `removed_surfaces_stay_removed` (the deleted file) and
+  `keymaps_name_no_deleted_action` (the forbidden
+  `omega_thread_outline::` namespace) in `crates/omega_deltas`.

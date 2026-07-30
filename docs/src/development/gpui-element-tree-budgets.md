@@ -59,7 +59,7 @@ assert!(
 | --- | --- |
 | QR codes / bitmaps / heatmaps | One `RenderImage` (or SVG / canvas), not one element per pixel/module |
 | Charts | Path geometry or a pre-rasterized image |
-| Long lists (transcript, outline, files) | `uniform_list` / virtualized `List` |
+| Long lists (transcript, files) | `uniform_list` / virtualized `List` |
 | Icon grids | Shared sprite/image atlas |
 
 ### Pairing QR example

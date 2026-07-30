@@ -176,6 +176,7 @@ pub const ENFORCED_DELTAS: &[&str] = &[
     "OMEGA-DELTA-0185",
     "OMEGA-DELTA-0186",
     "OMEGA-DELTA-0187",
+    "OMEGA-DELTA-0188",
 ];
 
 /// The concise product contract adjacent to the delta registry.
@@ -1306,6 +1307,10 @@ pub const REMOVED_FILES: &[&str] = &[
     "crates/sidebar/Cargo.toml",
     "crates/svg_preview/Cargo.toml",
     "crates/tab_switcher/Cargo.toml",
+    // OMEGA-DELTA-0188. The agent-thread Outline right sidebar, deleted at
+    // owner direction 2026-07-30 ("I don't want that at all, delete it from
+    // the codebase entirely").
+    "crates/agent_ui/src/thread_outline.rs",
 ];
 
 /// Strings that must not appear anywhere under `crates/`.
@@ -1347,8 +1352,7 @@ pub const FORBIDDEN_KEYMAP_NAMESPACES: &[(&str, &str)] = &[
     // `outline::Toggle` is still declared in `zed_actions` (breadcrumbs /
     // buffer_search reference the type), but the buffer-outline picker crate
     // that handled it is gone — a binding is a dead key. Quoted so the
-    // contains-check does not also hit the kept
-    // `omega_thread_outline::ToggleOutline` binding (substring trap).
+    // contains-check does not also match other `outline::` substrings.
     ("OMEGA-DELTA-0186", "\"outline::Toggle\""),
     ("OMEGA-DELTA-0186", "tab_switcher::"),
     ("OMEGA-DELTA-0186", "image_viewer::"),
@@ -1364,6 +1368,9 @@ pub const FORBIDDEN_KEYMAP_NAMESPACES: &[(&str, &str)] = &[
     ("OMEGA-DELTA-0186", "markdown::OpenPreviewToTheSide"),
     ("OMEGA-DELTA-0186", "svg::"),
     ("OMEGA-DELTA-0186", "notebook::"),
+    // OMEGA-DELTA-0188. The deleted thread-outline pane declared its own
+    // action namespace; a surviving binding would be the same startup panic.
+    ("OMEGA-DELTA-0188", "omega_thread_outline::"),
 ];
 
 /// OMEGA-DELTA-0186. The editor crates omega#162 deleted from the build graph.
@@ -21478,11 +21485,12 @@ mod tests {
         }
 
         let agent_panel = read_repository_file("crates/agent_ui/src/agent_panel.rs");
+        // OMEGA-DELTA-0188 removed the thread outline, so the former
+        // `try_activate_outline_target` reveal site no longer exists.
         for (function, open) in [
             ("open_global_rules", ".open_abs_path("),
             ("open_project_rules", ".open_abs_path("),
             ("open_json_buffer", "workspace.add_item_to_active_pane("),
-            ("try_activate_outline_target", "workspace.open_path("),
         ] {
             let body = function_body(&agent_panel, function)
                 .unwrap_or_else(|| panic!("OMEGA-DELTA-0174: {function} is gone"));

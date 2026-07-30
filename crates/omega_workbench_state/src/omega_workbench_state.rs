@@ -67,132 +67,6 @@ pub enum ConnectionPhase {
     StaleProjection,
 }
 
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum OutlineView {
-    #[default]
-    Events,
-    Artifacts,
-}
-
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum OutlineFilter {
-    #[default]
-    All,
-    Active,
-    Errors,
-}
-
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum OutlineLifecycle {
-    #[default]
-    Empty,
-    Loading,
-    Streaming,
-    Partial,
-    Ready,
-    Error,
-    Stale,
-    Reconnecting,
-}
-
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
-pub struct ThreadOutlineProjection {
-    pub revision: u64,
-    pub event_ids: Vec<String>,
-    pub artifact_ids: Vec<String>,
-    pub lifecycle: OutlineLifecycle,
-    pub view: OutlineView,
-    pub filter: OutlineFilter,
-    pub selected_id: Option<String>,
-    pub anchor_id: Option<String>,
-    pub virtual_start: usize,
-    pub virtual_len: usize,
-    pub collapsed: bool,
-}
-
-impl Default for ThreadOutlineProjection {
-    fn default() -> Self {
-        Self {
-            revision: 0,
-            event_ids: Vec::new(),
-            artifact_ids: Vec::new(),
-            lifecycle: OutlineLifecycle::Empty,
-            view: OutlineView::Events,
-            filter: OutlineFilter::All,
-            selected_id: None,
-            anchor_id: None,
-            virtual_start: 0,
-            virtual_len: 0,
-            collapsed: false,
-        }
-    }
-}
-
-impl ThreadOutlineProjection {
-    fn visible_ids(&self) -> &[String] {
-        match self.view {
-            OutlineView::Events => &self.event_ids,
-            OutlineView::Artifacts => &self.artifact_ids,
-        }
-    }
-
-    fn normalize(&mut self) {
-        let selection_is_visible = self
-            .selected_id
-            .as_ref()
-            .is_none_or(|selected| self.visible_ids().contains(selected));
-        let anchor_is_visible = self
-            .anchor_id
-            .as_ref()
-            .is_none_or(|anchor| self.visible_ids().contains(anchor));
-        let visible_len = self.visible_ids().len();
-        if !selection_is_visible {
-            self.selected_id = None;
-        }
-        if !anchor_is_visible {
-            self.anchor_id = None;
-        }
-        self.virtual_start = self.virtual_start.min(visible_len);
-        self.virtual_len = self
-            .virtual_len
-            .min(visible_len.saturating_sub(self.virtual_start));
-    }
-
-    fn validate(&self, thread_id: &str) -> Result<(), ProjectionError> {
-        validate_unique_ids("outline event", &self.event_ids)?;
-        validate_unique_ids("outline artifact", &self.artifact_ids)?;
-        let visible_ids = self.visible_ids();
-        for (kind, value) in [
-            ("outline selection", self.selected_id.as_ref()),
-            ("outline anchor", self.anchor_id.as_ref()),
-        ] {
-            if let Some(value) = value {
-                validate_id(kind, value)?;
-                if !visible_ids.contains(value) {
-                    return Err(ProjectionError::InvalidState(format!(
-                        "thread {thread_id:?} {kind} {value:?} is not visible in {:?}",
-                        self.view
-                    )));
-                }
-            }
-        }
-        if self.virtual_start > visible_ids.len()
-            || self.virtual_len > visible_ids.len().saturating_sub(self.virtual_start)
-        {
-            return Err(ProjectionError::InvalidState(format!(
-                "thread {thread_id:?} outline virtual window {}+{} exceeds {} visible items",
-                self.virtual_start,
-                self.virtual_len,
-                visible_ids.len()
-            )));
-        }
-        Ok(())
-    }
-}
-
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ThreadProjection {
     pub binding: Option<RepositoryBinding>,
@@ -204,8 +78,6 @@ pub struct ThreadProjection {
     pub focus_owner: Option<WorkSurface>,
     pub artifact_revision: u64,
     pub event_revision: u64,
-    #[serde(default)]
-    pub outline: ThreadOutlineProjection,
 }
 
 impl ThreadProjection {
@@ -226,7 +98,6 @@ impl ThreadProjection {
             focus_owner: None,
             artifact_revision: 0,
             event_revision: 0,
-            outline: ThreadOutlineProjection::default(),
         };
         projection.normalize();
         Ok(projection)
@@ -266,7 +137,6 @@ impl ThreadProjection {
                 "unbound thread {thread_id:?} advertises a repository-bound surface"
             )));
         }
-        self.outline.validate(thread_id)?;
         Ok(())
     }
 }
@@ -359,12 +229,8 @@ pub struct VisibleProjection {
     pub effective_surface: Option<WorkSurface>,
     pub dock_open: bool,
     pub focus_owner: Option<WorkSurface>,
-    pub artifact_outline_owner: String,
     pub artifact_revision: u64,
-    pub event_outline_owner: String,
     pub event_revision: u64,
-    #[serde(default)]
-    pub outline: ThreadOutlineProjection,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -412,11 +278,8 @@ impl WorkbenchProjection {
             effective_surface: thread.effective_surface,
             dock_open: thread.dock_open,
             focus_owner: thread.focus_owner,
-            artifact_outline_owner: thread_id.clone(),
             artifact_revision: thread.artifact_revision,
-            event_outline_owner: thread_id.clone(),
             event_revision: thread.event_revision,
-            outline: thread.outline.clone(),
         })
     }
 
@@ -759,115 +622,6 @@ impl WorkbenchProjection {
                     Ok(TransitionEffect::Applied)
                 }
             }
-            ProjectionTransition::ReceiveOutlineProjection {
-                thread_id,
-                generation,
-                binding,
-                revision,
-                event_ids,
-                artifact_ids,
-                lifecycle,
-            } => {
-                validate_outline_update(&thread_id, &event_ids, &artifact_ids, revision)?;
-                let thread = self.thread_mut(&thread_id)?;
-                if thread.generation != generation || thread.binding != binding {
-                    return Ok(TransitionEffect::StaleCompletionIgnored);
-                }
-                if revision < thread.outline.revision {
-                    return Ok(TransitionEffect::OlderRevisionIgnored);
-                }
-                if revision == thread.outline.revision {
-                    if thread.outline.event_ids == event_ids
-                        && thread.outline.artifact_ids == artifact_ids
-                        && thread.outline.lifecycle == lifecycle
-                    {
-                        return Ok(TransitionEffect::OlderRevisionIgnored);
-                    }
-                    return Err(ProjectionError::ConflictingOutlineRevision(revision));
-                }
-                thread.outline.revision = revision;
-                thread.outline.event_ids = event_ids;
-                thread.outline.artifact_ids = artifact_ids;
-                thread.outline.lifecycle = lifecycle;
-                thread.outline.normalize();
-                thread.event_revision = revision;
-                thread.artifact_revision = revision;
-                Ok(TransitionEffect::Applied)
-            }
-            ProjectionTransition::SetOutlineView { thread_id, view } => {
-                self.require_active_thread(&thread_id)?;
-                let thread = self.thread_mut(&thread_id)?;
-                thread.outline.view = view;
-                thread.outline.normalize();
-                Ok(TransitionEffect::Applied)
-            }
-            ProjectionTransition::SetOutlineFilter { thread_id, filter } => {
-                self.require_active_thread(&thread_id)?;
-                self.thread_mut(&thread_id)?.outline.filter = filter;
-                Ok(TransitionEffect::Applied)
-            }
-            ProjectionTransition::SelectOutlineItem { thread_id, item_id } => {
-                self.require_active_thread(&thread_id)?;
-                if let Some(item_id) = &item_id {
-                    validate_id("outline selection", item_id)?;
-                }
-                let thread = self.thread_mut(&thread_id)?;
-                if item_id
-                    .as_ref()
-                    .is_some_and(|item_id| !thread.outline.visible_ids().contains(item_id))
-                {
-                    return Err(ProjectionError::UnknownOutlineItem(
-                        item_id.unwrap_or_default(),
-                    ));
-                }
-                thread.outline.selected_id = item_id;
-                Ok(TransitionEffect::Applied)
-            }
-            ProjectionTransition::SetOutlineAnchor { thread_id, item_id } => {
-                self.require_active_thread(&thread_id)?;
-                if let Some(item_id) = &item_id {
-                    validate_id("outline anchor", item_id)?;
-                }
-                let thread = self.thread_mut(&thread_id)?;
-                if item_id
-                    .as_ref()
-                    .is_some_and(|item_id| !thread.outline.visible_ids().contains(item_id))
-                {
-                    return Err(ProjectionError::UnknownOutlineItem(
-                        item_id.unwrap_or_default(),
-                    ));
-                }
-                thread.outline.anchor_id = item_id;
-                Ok(TransitionEffect::Applied)
-            }
-            ProjectionTransition::SetOutlineVirtualWindow {
-                thread_id,
-                start,
-                len,
-            } => {
-                self.require_active_thread(&thread_id)?;
-                let thread = self.thread_mut(&thread_id)?;
-                if start > thread.outline.visible_ids().len()
-                    || len > thread.outline.visible_ids().len().saturating_sub(start)
-                {
-                    return Err(ProjectionError::InvalidOutlineWindow {
-                        start,
-                        len,
-                        available: thread.outline.visible_ids().len(),
-                    });
-                }
-                thread.outline.virtual_start = start;
-                thread.outline.virtual_len = len;
-                Ok(TransitionEffect::Applied)
-            }
-            ProjectionTransition::SetOutlineCollapsed {
-                thread_id,
-                collapsed,
-            } => {
-                self.require_active_thread(&thread_id)?;
-                self.thread_mut(&thread_id)?.outline.collapsed = collapsed;
-                Ok(TransitionEffect::Applied)
-            }
             ProjectionTransition::Disconnect => {
                 if !matches!(
                     self.connection,
@@ -879,11 +633,6 @@ impl WorkbenchProjection {
                     });
                 }
                 self.connection = ConnectionPhase::Offline;
-                if let Some(active_thread_id) = self.active_thread_id.clone()
-                    && let Some(thread) = self.threads.get_mut(&active_thread_id)
-                {
-                    thread.outline.lifecycle = OutlineLifecycle::Stale;
-                }
                 Ok(TransitionEffect::Applied)
             }
             ProjectionTransition::Reconnect => {
@@ -894,11 +643,6 @@ impl WorkbenchProjection {
                     });
                 }
                 self.connection = ConnectionPhase::Reconnecting;
-                if let Some(active_thread_id) = self.active_thread_id.clone()
-                    && let Some(thread) = self.threads.get_mut(&active_thread_id)
-                {
-                    thread.outline.lifecycle = OutlineLifecycle::Reconnecting;
-                }
                 Ok(TransitionEffect::Applied)
             }
             ProjectionTransition::ReceiveProjectionSnapshot { snapshot } => {
@@ -1228,40 +972,6 @@ pub enum ProjectionTransition {
         generation: u64,
         binding: Option<RepositoryBinding>,
     },
-    ReceiveOutlineProjection {
-        thread_id: String,
-        generation: u64,
-        binding: Option<RepositoryBinding>,
-        revision: u64,
-        event_ids: Vec<String>,
-        artifact_ids: Vec<String>,
-        lifecycle: OutlineLifecycle,
-    },
-    SetOutlineView {
-        thread_id: String,
-        view: OutlineView,
-    },
-    SetOutlineFilter {
-        thread_id: String,
-        filter: OutlineFilter,
-    },
-    SelectOutlineItem {
-        thread_id: String,
-        item_id: Option<String>,
-    },
-    SetOutlineAnchor {
-        thread_id: String,
-        item_id: Option<String>,
-    },
-    SetOutlineVirtualWindow {
-        thread_id: String,
-        start: usize,
-        len: usize,
-    },
-    SetOutlineCollapsed {
-        thread_id: String,
-        collapsed: bool,
-    },
     Disconnect,
     Reconnect,
     ReceiveProjectionSnapshot {
@@ -1310,16 +1020,6 @@ pub enum ProjectionError {
     DuplicateRequest(String),
     #[error("request {0:?} does not exist")]
     UnknownRequest(String),
-    #[error("outline item {0:?} does not exist in the selected view")]
-    UnknownOutlineItem(String),
-    #[error("outline revision {0} conflicts with the accepted projection")]
-    ConflictingOutlineRevision(u64),
-    #[error("outline virtual window {start}+{len} exceeds {available} visible items")]
-    InvalidOutlineWindow {
-        start: usize,
-        len: usize,
-        available: usize,
-    },
     #[error("surface load completion does not match request {0:?}")]
     RequestContextMismatch(String),
     #[error("surface {surface:?} is unavailable for thread {thread_id:?}")]
@@ -1407,35 +1107,6 @@ fn validate_id(kind: &'static str, value: &str) -> Result<(), ProjectionError> {
         });
     }
     Ok(())
-}
-
-fn validate_unique_ids(kind: &'static str, values: &[String]) -> Result<(), ProjectionError> {
-    let mut seen = BTreeSet::new();
-    for value in values {
-        validate_id(kind, value)?;
-        if !seen.insert(value) {
-            return Err(ProjectionError::InvalidState(format!(
-                "duplicate {kind} ID {value:?}"
-            )));
-        }
-    }
-    Ok(())
-}
-
-fn validate_outline_update(
-    thread_id: &str,
-    event_ids: &[String],
-    artifact_ids: &[String],
-    revision: u64,
-) -> Result<(), ProjectionError> {
-    validate_id("outline thread", thread_id)?;
-    if revision == 0 {
-        return Err(ProjectionError::InvalidState(
-            "outline revision zero is reserved for an uninitialized projection".into(),
-        ));
-    }
-    validate_unique_ids("outline event", event_ids)?;
-    validate_unique_ids("outline artifact", artifact_ids)
 }
 
 fn require_generation(thread: &ThreadProjection, generation: u64) -> Result<(), ProjectionError> {
@@ -1580,151 +1251,6 @@ mod tests {
         assert_eq!(visible.thread_id, "thread-b");
         assert_eq!(visible.binding, Some(binding("worktree-b")));
         assert_eq!(visible.effective_surface, Some(WorkSurface::Terminal));
-        assert_eq!(visible.artifact_outline_owner, "thread-b");
-        assert_eq!(visible.event_outline_owner, "thread-b");
-    }
-
-    #[test]
-    fn outline_updates_are_revisioned_bound_and_preserve_stable_selection() {
-        let mut projection = WorkbenchProjection::new();
-        open_thread(&mut projection, "thread-a", "worktree-a");
-        open_thread(&mut projection, "thread-b", "worktree-b");
-
-        assert_eq!(
-            projection
-                .apply(ProjectionTransition::ReceiveOutlineProjection {
-                    thread_id: "thread-a".into(),
-                    generation: 0,
-                    binding: Some(binding("worktree-a")),
-                    revision: 1,
-                    event_ids: vec!["event-1".into(), "event-2".into()],
-                    artifact_ids: vec!["artifact-1".into()],
-                    lifecycle: OutlineLifecycle::Streaming,
-                })
-                .expect("receive first outline"),
-            TransitionEffect::Applied
-        );
-        projection
-            .apply(ProjectionTransition::SelectOutlineItem {
-                thread_id: "thread-a".into(),
-                item_id: Some("event-2".into()),
-            })
-            .expect("select stable event");
-        projection
-            .apply(ProjectionTransition::SetOutlineAnchor {
-                thread_id: "thread-a".into(),
-                item_id: Some("event-1".into()),
-            })
-            .expect("anchor stable event");
-        projection
-            .apply(ProjectionTransition::SetOutlineVirtualWindow {
-                thread_id: "thread-a".into(),
-                start: 0,
-                len: 2,
-            })
-            .expect("set bounded window");
-
-        projection
-            .apply(ProjectionTransition::ReceiveOutlineProjection {
-                thread_id: "thread-a".into(),
-                generation: 0,
-                binding: Some(binding("worktree-a")),
-                revision: 2,
-                event_ids: vec!["event-0".into(), "event-1".into(), "event-2".into()],
-                artifact_ids: vec!["artifact-1".into(), "artifact-2".into()],
-                lifecycle: OutlineLifecycle::Ready,
-            })
-            .expect("append and reorder without losing identity");
-
-        let outline = &projection
-            .thread("thread-a")
-            .expect("thread remains projected")
-            .outline;
-        assert_eq!(outline.selected_id.as_deref(), Some("event-2"));
-        assert_eq!(outline.anchor_id.as_deref(), Some("event-1"));
-        assert_eq!(outline.virtual_start, 0);
-        assert_eq!(outline.virtual_len, 2);
-        assert_eq!(outline.lifecycle, OutlineLifecycle::Ready);
-
-        assert_eq!(
-            projection
-                .apply(ProjectionTransition::ReceiveOutlineProjection {
-                    thread_id: "thread-a".into(),
-                    generation: 0,
-                    binding: Some(binding("worktree-a")),
-                    revision: 1,
-                    event_ids: vec!["stale-event".into()],
-                    artifact_ids: Vec::new(),
-                    lifecycle: OutlineLifecycle::Streaming,
-                })
-                .expect("stale replay is handled"),
-            TransitionEffect::OlderRevisionIgnored
-        );
-        let before_conflict = projection.clone();
-        assert!(matches!(
-            projection.apply(ProjectionTransition::ReceiveOutlineProjection {
-                thread_id: "thread-a".into(),
-                generation: 0,
-                binding: Some(binding("worktree-a")),
-                revision: 2,
-                event_ids: vec!["conflicting-event".into()],
-                artifact_ids: Vec::new(),
-                lifecycle: OutlineLifecycle::Ready,
-            }),
-            Err(ProjectionError::ConflictingOutlineRevision(2))
-        ));
-        assert_eq!(projection, before_conflict);
-        assert_eq!(
-            projection
-                .apply(ProjectionTransition::ReceiveOutlineProjection {
-                    thread_id: "thread-a".into(),
-                    generation: 0,
-                    binding: Some(binding("worktree-b")),
-                    revision: 3,
-                    event_ids: vec!["foreign-event".into()],
-                    artifact_ids: Vec::new(),
-                    lifecycle: OutlineLifecycle::Ready,
-                })
-                .expect("foreign binding is handled"),
-            TransitionEffect::StaleCompletionIgnored
-        );
-        assert_eq!(
-            projection
-                .thread("thread-a")
-                .expect("thread remains projected")
-                .outline
-                .event_ids,
-            ["event-0", "event-1", "event-2"]
-        );
-    }
-
-    #[test]
-    fn surface_loads_do_not_invent_outline_revisions() {
-        let mut projection = WorkbenchProjection::new();
-        open_thread(&mut projection, "thread-a", "worktree-a");
-        projection
-            .apply(ProjectionTransition::BeginSurfaceLoad {
-                request_id: "request-a".into(),
-                thread_id: "thread-a".into(),
-                surface: WorkSurface::Files,
-                generation: 0,
-                binding: Some(binding("worktree-a")),
-            })
-            .expect("begin files load");
-        projection
-            .apply(ProjectionTransition::CompleteSurfaceLoad {
-                request_id: "request-a".into(),
-                thread_id: "thread-a".into(),
-                surface: WorkSurface::Files,
-                generation: 0,
-                binding: Some(binding("worktree-a")),
-            })
-            .expect("complete files load");
-
-        let thread = projection.thread("thread-a").expect("thread exists");
-        assert_eq!(thread.artifact_revision, 0);
-        assert_eq!(thread.event_revision, 0);
-        assert_eq!(thread.outline.revision, 0);
     }
 
     #[test]

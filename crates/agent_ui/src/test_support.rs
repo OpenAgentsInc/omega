@@ -3995,9 +3995,6 @@ mod workbench_front_door_tests {
             .focus_and_select_files_path("worktree-1", "src/main.rs", cx)
             .expect("fixture file should be selectable");
         let panel_id = front_door.panel().entity_id();
-        let outline_id = front_door
-            .panel()
-            .read_with(cx, |panel, _| panel.thread_outline_for_tests().entity_id());
         let projection_before = front_door.projection(cx);
 
         front_door.dispatch_action(project_panel::OpenPermanent, cx);
@@ -4015,16 +4012,7 @@ mod workbench_front_door_tests {
 
         front_door.return_to_agent_panel_for_capture(cx);
         assert_eq!(front_door.panel().entity_id(), panel_id);
-        assert_eq!(
-            front_door.panel().read_with(cx, |panel, _| {
-                panel.thread_outline_for_tests().entity_id()
-            }),
-            outline_id
-        );
         assert_eq!(front_door.projection(cx), projection_before);
-        SemanticProbe::new(&front_door.snapshot(cx))
-            .require_visible("omega.thread-outline")
-            .expect("returning to the same AgentPanel should render its retained outline");
 
         front_door
             .teardown(cx)

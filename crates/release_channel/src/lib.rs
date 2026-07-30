@@ -87,6 +87,43 @@ impl AppCommitSha {
     }
 }
 
+/// The Omega per-version build number stamped into release-candidate bundles.
+///
+/// `script/bundle-omega-rc` increments its RC number exactly once per cut of a
+/// version and exports it as `OMEGA_BUILD_NUMBER`, so rc28 of `0.2.0` renders
+/// as `v0.2.0 b28` in the settings footer. Dev/source builds have no stamp and
+/// render as `v0.2.0 dev`. The full commit SHA stays available through
+/// [`AppCommitSha`] (About, `omega: copy system specs`, the release record);
+/// the build number exists so the footer does not have to carry it.
+#[derive(Clone, Copy, Eq, Debug, PartialEq)]
+pub struct AppBuildNumber(u32);
+
+struct GlobalAppBuildNumber(AppBuildNumber);
+
+impl Global for GlobalAppBuildNumber {}
+
+impl AppBuildNumber {
+    /// Creates a new [`AppBuildNumber`].
+    pub fn new(build_number: u32) -> Self {
+        AppBuildNumber(build_number)
+    }
+
+    /// Returns the global [`AppBuildNumber`], if one is set.
+    pub fn try_global(cx: &App) -> Option<AppBuildNumber> {
+        cx.try_global::<GlobalAppBuildNumber>().map(|build| build.0)
+    }
+
+    /// Sets the global [`AppBuildNumber`].
+    pub fn set_global(build_number: AppBuildNumber, cx: &mut App) {
+        cx.set_global(GlobalAppBuildNumber(build_number))
+    }
+
+    /// Returns the build number.
+    pub fn number(&self) -> u32 {
+        self.0
+    }
+}
+
 struct GlobalAppVersion(Version);
 
 impl Global for GlobalAppVersion {}

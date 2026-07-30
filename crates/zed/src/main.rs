@@ -546,6 +546,14 @@ fn main() {
         if let Some(app_commit_sha) = app_commit_sha {
             AppCommitSha::set_global(app_commit_sha, cx);
         }
+        if let Some(build_number) = option_env!("OMEGA_BUILD_NUMBER")
+            .and_then(|build_number| build_number.parse::<u32>().ok())
+        {
+            release_channel::AppBuildNumber::set_global(
+                release_channel::AppBuildNumber::new(build_number),
+                cx,
+            );
+        }
         settings::init(cx);
         zlog_settings::init(cx);
         zed::watch_settings_files(fs.clone(), cx);

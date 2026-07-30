@@ -114,11 +114,6 @@ The shared scene types and proof records live in
   entries, staging and conflict counts, selection, focus, pending operation,
   requested mutation results, badge agreement, and rejected stale refresh
   count; and
-- each event/artifact outline's exact thread, repository, worktree, binding
-  generation, projection revision, stable item and source identities, typed
-  action targets, lifecycle, view, filter, selection, anchor, virtual window,
-  deduplicated history, and independently counted stale, replayed, conflicting,
-  and foreign updates; and
 - the requested surface, dock state, revision, and mutations persisted across a
   cold restart.
 
@@ -609,90 +604,10 @@ The catalog and region contract do not prove that a run passed. Require the
 scene receipt, non-empty semantic checks, and a reviewed matching baseline
 before treating the pixel lane as evidence.
 
-### Native artifact and event outline scenes {#native-outline-scenes}
-
-The outline lane proves the retained `ThreadOutline` and the `AcpThread`
-projection that feeds it. The runner creates a real temporary worktree, binds
-the outline to the active thread's exact repository, worktree, generation, and
-entity, and applies typed `ThreadEventProjection` revisions. It never injects
-rendered labels as proof state.
-
-The catalog defines fourteen contracts:
-
-| Scene | Fixture and proof boundary |
-| --- | --- |
-| `omega_workbench_outline_empty` | Revision zero, loading lifecycle, accessible empty state, and no list rows. |
-| `omega_workbench_outline_combined` | A populated projection with event and artifact sources; the Events view proves exact counts and action identities. |
-| `omega_workbench_outline_artifacts` | The Artifacts tab exposes only worktree-scoped file and diff artifacts. |
-| `omega_workbench_outline_events` | The Events tab exposes ordered message/tool events and transcript targets. |
-| `omega_workbench_outline_active_filter` | The Active filter retains only pending or running events. |
-| `omega_workbench_outline_failed_filter` | The Problems filter retains only failed events. |
-| `omega_workbench_outline_selected_action` | GPUI actions select and activate a typed diff target, retain its anchor, and publish an accessible success status. |
-| `omega_workbench_outline_deduplicated_history` | Repeated projections of one file retain one artifact identity while occurrence history advances. |
-| `omega_workbench_outline_virtualized` | Forty appended events prove a bounded virtual window without changing the first revision's stable IDs. |
-| `omega_workbench_outline_stale_replay` | A lower revision and exact replay are ignored; the independent reducer rejects a conflicting equal revision. |
-| `omega_workbench_outline_offline` | The last verified projection remains visible under the stale/offline lifecycle. |
-| `omega_workbench_outline_reconnecting` | The last verified projection remains visible while reconnecting pauses updates. |
-| `omega_workbench_outline_error` | The retained projection and accessible error lifecycle coexist without losing identity. |
-| `omega_workbench_outline_narrow_foreign_binding` | At 910×720, a foreign entity update is rejected, no foreign item leaks, and the outline remains bounded away from transcript and composer. |
-
-Except for the production-front-door scene described below, every non-empty
-scene first binds revision one and then applies the final revision. The proof
-compares event and artifact IDs before and after that update so a correct-looking
-row cannot hide identity churn. It then checks the native
-snapshot's binding, entity ID, revision, lifecycle, view, filter, visible item
-statuses, source/action mapping, counts, selection and anchor, virtual range,
-and separate stale, replay, and foreign rejection counters. The harness's
-independent projection additionally checks history deduplication and rejects a
-same-revision payload that differs from the accepted replay.
-
-The selected-action scene additionally uses the production front door. It seeds
-the real active `AcpThread` through ACP session updates, asks `AgentPanel` to run
-its normal outline synchronizer, and dispatches the public GPUI outline actions.
-Its independent fixture models the exact eight-row production event order,
-including stable completion, tool-result, and error child facets alongside the
-four top-level entries, plus the two worktree artifacts.
-The receipt requires both the real transcript navigation target and a successful
-native artifact activation; it does not replace the panel's handlers with test
-closures. Artifact activation must make the exact source file the active native
-Editor at the requested line. Because that production navigation intentionally
-moves focus from the zoomed AgentPanel to the workspace center, the runner then
-reopens and rezooms the same AgentPanel solely to capture the post-action
-outline. Before and after that return it requires identical requested and
-effective work surfaces and dock state, the same retained outline entity and
-selection, and the same successful action status. The virtualized scene likewise
-drives repeated keyboard selection and records the range reported by
-`UniformList` after rendering. A test-only range setter is not accepted as
-virtualization evidence.
-
-Semantic preflight requires `omega.thread-outline` to be an accessible
-`Complementary` region with accessible view tabs and list or empty state.
-Rendered item selectors must remain inside the virtualized list. Lifecycle and
-action status selectors carry exact accessible labels. Narrow and virtualized
-scenes prove the outline is fully visible and disjoint from the transcript and
-composer. Each scene captures the full window and the named
-`artifact-event-outline` region derived from `omega.thread-outline`.
-
-Run all outline scenes semantically:
-
-```sh
-for scene in $(script/omega-workbench-proof --list --no-build | rg '^omega_workbench_outline_' | cut -f1); do
-  script/omega-workbench-proof --scene "$scene" --semantic-only --no-build
-done
-```
-
-Run one scene's Metal comparison after building the current visual runner:
-
-```sh
-script/omega-workbench-proof \
-  --scene omega_workbench_outline_stale_replay \
-  --pixel-only \
-  --no-build
-```
-
-Do not claim pixel coverage until the matching baseline has been generated,
-reviewed, and committed. The semantic receipt remains authoritative for typed
-binding and interaction claims that pixels cannot establish.
+> Note: the native artifact and event outline lane (`ThreadOutline`) and its
+> fourteen `omega_workbench_outline_*` scenes were removed at owner direction
+> 2026-07-30 (delta OMEGA-DELTA-0188). None of those scenes had committed
+> pixel baselines.
 
 ### Registering a scene {#registering-a-scene}
 
