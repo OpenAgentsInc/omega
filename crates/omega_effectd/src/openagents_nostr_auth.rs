@@ -243,8 +243,22 @@ pub struct MintedOpenAgentsUser {
 pub async fn mint_openagents_nostr_session(
     http_client: &Arc<dyn HttpClient>,
 ) -> std::result::Result<MintedOpenAgentsSession, HostedSessionBlocker> {
+    mint_openagents_nostr_session_for_identity(http_client, None).await
+}
+
+pub(crate) async fn mint_openagents_nostr_session_for_identity(
+    http_client: &Arc<dyn HttpClient>,
+    expected_public_key_hex: Option<&str>,
+) -> std::result::Result<MintedOpenAgentsSession, HostedSessionBlocker> {
     let channel_name = app_identity::CHANNEL.display_name();
     let identity = ready_local_identity()?;
+    if expected_public_key_hex
+        .is_some_and(|expected| expected != identity.public_key_hex().as_str())
+    {
+        return Err(HostedSessionBlocker::ProofSigningFailed {
+            reason: "the active Omega identity changed before hosted sign-in".to_string(),
+        });
+    }
     log::info!(
         "hosted OpenAgents sign-in: signing as {} identity {}",
         channel_name,

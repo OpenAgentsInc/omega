@@ -5285,28 +5285,94 @@ impl AgentPanel {
         // control refused every press. Start the transport on the press, then
         // issue the bootstrap, so the mode a person actually gets can pair.
         cx.spawn(async move |this, cx| {
+            let payload_digest =
+                format!("{:x}", Sha256::digest(b"omega-device-pairing-bootstrap-v1"));
+            let now = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map_or(0, |duration| duration.as_secs());
+            let activation = cx
+                .background_spawn(async move {
+                    let intent_ref =
+                        omega_identity::ReceiptRef::new("omega-device-pairing-activation-v1")?;
+                    omega_identity::IdentityService::system(*app_identity::CHANNEL)
+                        .authorize_or_hold_identity_action(
+                            omega_identity::DurableIdentityActionDescriptor {
+                                intent_ref: intent_ref.clone(),
+                                kind: omega_identity::DurableIdentityActionKind::DeviceGrant,
+                                destination_ref: omega_identity::ResourceRef::new(
+                                    "omega-device-pairing-service",
+                                )?,
+                                authorization_ref: omega_identity::ProofRef::new(format!(
+                                    "activation-{}",
+                                    intent_ref.as_str()
+                                ))?,
+                                payload_digest,
+                                expires_at: now.saturating_add(600),
+                            },
+                        )
+                        .map_err(anyhow::Error::from)
+                })
+                .await;
+            let authorization = match activation {
+                Ok(omega_identity::DurableIdentityActionDecision::Authorized(authorization)) => {
+                    authorization
+                }
+                Ok(omega_identity::DurableIdentityActionDecision::ActivationRequired {
+                    account,
+                    ..
+                }) => {
+                    this.update(cx, |this, cx| {
+                        this.device_pairing_surface = Some(DevicePairingSurface::Unavailable(
+                            format!(
+                                "Set up identity {} before pairing a device.",
+                                account.fingerprint_display()
+                            )
+                            .into(),
+                        ));
+                        cx.notify();
+                    })
+                    .log_err();
+                    return;
+                }
+                Err(error) => {
+                    this.update(cx, |this, cx| {
+                        this.device_pairing_surface = Some(DevicePairingSurface::Unavailable(
+                            format!("Omega identity setup is unavailable: {error}").into(),
+                        ));
+                        cx.notify();
+                    })
+                    .log_err();
+                    return;
+                }
+            };
             let started = crate::omega_host_bridge::ensure_device_pairing_runtime(cx).await;
             this.update(cx, |this, cx| {
                 this.device_pairing_surface = Some(match started {
                     Err(error) => DevicePairingSurface::Unavailable(error.to_string().into()),
-                    Ok(()) => match omega_effectd::issue_device_pairing_bootstrap(cx).and_then(
-                        |bootstrap| bootstrap.qr().map(|qr| (bootstrap, qr)).map_err(Into::into),
-                    ) {
-                        Ok((bootstrap, qr)) => match render_pairing_qr(&qr) {
-                            Ok((image, image_size)) => DevicePairingSurface::Ready {
-                                bootstrap,
-                                image,
-                                image_size,
+                    Ok(()) => {
+                        match omega_effectd::issue_device_pairing_bootstrap(authorization, cx)
+                            .and_then(|bootstrap| {
+                                bootstrap.qr().map(|qr| (bootstrap, qr)).map_err(Into::into)
+                            }) {
+                            Ok((bootstrap, qr)) => match render_pairing_qr(&qr) {
+                                Ok((image, image_size)) => DevicePairingSurface::Ready {
+                                    bootstrap,
+                                    image,
+                                    image_size,
+                                },
+                                Err(error) => {
+                                    DevicePairingSurface::Unavailable(error.to_string().into())
+                                }
                             },
                             Err(error) => {
                                 DevicePairingSurface::Unavailable(error.to_string().into())
                             }
-                        },
-                        Err(error) => DevicePairingSurface::Unavailable(error.to_string().into()),
-                    },
+                        }
+                    }
                 });
                 cx.notify();
             })
+            .log_err();
         })
         .detach();
     }

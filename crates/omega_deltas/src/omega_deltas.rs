@@ -180,6 +180,7 @@ pub const ENFORCED_DELTAS: &[&str] = &[
     "OMEGA-DELTA-0189",
     "OMEGA-DELTA-0190",
     "OMEGA-DELTA-0191",
+    "OMEGA-DELTA-0192",
 ];
 
 /// The concise product contract adjacent to the delta registry.
@@ -1220,6 +1221,24 @@ pub const IDENTITY_CUSTODY_PATH: &str = "crates/omega_identity/src/custody.rs";
 /// OMEGA-DELTA-0110. The screen that has to say which of adopt or create
 /// happens to that identity.
 pub const IDENTITY_SECTION_PATH: &str = "crates/onboarding/src/identity_section.rs";
+
+/// OMEGA-DELTA-0192. The durable candidate, account, and action-intent types.
+pub const IDENTITY_ACCOUNT_ACTIVATION_PATH: &str =
+    "crates/omega_identity/src/account_activation.rs";
+
+/// OMEGA-DELTA-0192. The always-reachable desktop account entry.
+pub const TITLE_BAR_PATH: &str = "crates/title_bar/src/title_bar.rs";
+
+/// OMEGA-DELTA-0192. The hosted-account link gate.
+pub const WORKROOM_PANEL_PATH: &str = "crates/workroom_ui/src/panel.rs";
+
+/// OMEGA-DELTA-0192. File-only runtime custody claims.
+pub const IDENTITY_AUTHENTICATION_DOCUMENT_PATH: &str =
+    "docs/omega/nostr-authentication-contract.md";
+pub const RUNTIME_CREDENTIAL_STORAGE_DOCUMENT_PATH: &str =
+    "docs/omega/runtime-credential-storage.md";
+pub const APPLICATION_IDENTITY_DOCUMENT_PATH: &str =
+    "docs/src/development/omega-application-identity.md";
 
 /// OMEGA-DELTA-0029. Vocabulary that would make a route irreproducible.
 ///
@@ -7036,7 +7055,7 @@ mod tests {
                 && provision.contains("CustodyState::Absent => self.create(receipt_ref)")
                 && provision
                     .contains("CustodyState::Unadopted => self.adopt_custodied(receipt_ref)")
-                && provision.contains("state => Err(CustodyError::CustodyDenied(state))"),
+                && provision.contains("state => return Err(CustodyError::CustodyDenied(state))"),
             "OMEGA-DELTA-0040: `provision_for_process_start` in {} no longer \
              creates only from `Absent`, adopts only from `Unadopted`, and \
              refuses the rest by name. Replacing a `Lost` or `Conflict` \
@@ -19450,7 +19469,7 @@ mod tests {
             "Group admitted",
             "Hosted account linked",
             "Action authorized",
-            "runtime behavior is unchanged",
+            "Ready local custody is now distinct from an active account",
         ] {
             assert!(
                 documentation.contains(required),
@@ -20152,7 +20171,7 @@ mod tests {
                 "OMEGA-DELTA-0153: the background proof lost `{required}`."
             );
         }
-        let mint = function_body(&proof, "mint_openagents_nostr_session")
+        let mint = function_body(&proof, "mint_openagents_nostr_session_for_identity")
             .expect("OMEGA-DELTA-0153: the standard hosted-session mint is gone");
         assert!(
             without_whitespace(mint).contains(&without_whitespace(
@@ -20260,7 +20279,7 @@ mod tests {
         let panel = without_comments(&read_repository_file("crates/agent_ui/src/agent_panel.rs"));
         assert!(
             panel.contains("ListItem::new(\"open-omega-phone-pairing\")")
-                && panel.contains("issue_device_pairing_bootstrap(cx)"),
+                && panel.contains("issue_device_pairing_bootstrap("),
             "OMEGA-DELTA-0155: GPUI no longer renders the engine-owned phone pairing surface."
         );
     }
@@ -20379,7 +20398,7 @@ mod tests {
     #[test]
     fn hosted_sign_in_respects_identity_consent_and_names_every_refusal() {
         let proof = read_repository_file("crates/omega_effectd/src/openagents_nostr_auth.rs");
-        let mint = function_body(&proof, "mint_openagents_nostr_session")
+        let mint = function_body(&proof, "mint_openagents_nostr_session_for_identity")
             .expect("OMEGA-DELTA-0159: the background proof is gone");
         let identity = function_body(&proof, "ready_local_identity")
             .expect("OMEGA-DELTA-0159: the consent-aware identity boundary is gone");
@@ -20395,7 +20414,7 @@ mod tests {
                 && signing.contains(".sign(&AdmittedSigningRequest")
                 && !identity.contains("provision_unattended")
                 && !identity.contains(".create(")
-                && !identity.contains(".adopt"),
+                && !identity.contains(".adopt("),
             "OMEGA-DELTA-0159: {} can create, adopt, or replace an identity \
              while performing automatic hosted sign-in.",
             repository_path("crates/omega_effectd/src/openagents_nostr_auth.rs").display()
@@ -22825,7 +22844,8 @@ mod tests {
         let publisher = outside_the_tests(&publisher_source);
         for required in [
             "IdentityService",
-            "provision_unattended",
+            "authorize_or_hold_identity_action",
+            "DurableIdentityActionKind::PublicPost",
             "AdmittedSigningRequest",
             "SigningPurpose::NostrEvent",
             "CHAT_MESSAGE_KIND | REPORT_KIND",
@@ -23915,6 +23935,120 @@ mod tests {
             assert!(
                 !zero_base.contains(stale),
                 "OMEGA-DELTA-0191: legacy mode documentation returned: `{stale}`"
+            );
+        }
+    }
+
+    /// OMEGA-DELTA-0192. Background provisioning creates a candidate account,
+    /// while durable identity-bearing work is fenced at the five owned edges.
+    ///
+    /// The full keep/import/remote-signer ceremony belongs to AUTH-02. This
+    /// check pins AUTH-01's narrower facts: file-backed custody, an honest
+    /// candidate state, one typed held intent, and an account entry that stays
+    /// reachable after hosted sign-in.
+    #[test]
+    fn background_identity_candidates_gate_every_durable_edge() {
+        let activation = read_repository_file(IDENTITY_ACCOUNT_ACTIVATION_PATH);
+        for state in [
+            "CandidateLocal",
+            "CandidateExisting",
+            "Activating",
+            "Active",
+        ] {
+            assert!(
+                activation.contains(state),
+                "OMEGA-DELTA-0192: identity activation lost the `{state}` state"
+            );
+        }
+        for action in [
+            "PublicPost",
+            "CommunityJoin",
+            "DeviceGrant",
+            "HostedAccountLink",
+            "AgentAttestation",
+        ] {
+            assert!(
+                activation.contains(action),
+                "OMEGA-DELTA-0192: durable identity actions lost the `{action}` edge"
+            );
+        }
+
+        let custody = read_repository_file(IDENTITY_CUSTODY_PATH);
+        for required in [
+            "FileSecretStore::new(identity_root.join(\"identity.secret\"))",
+            "account_path: root.join(\"identity.account.json\")",
+            "held_identity_action_path: root.join(\"identity.action-intent.json\")",
+            "authorize_or_hold_identity_action",
+        ] {
+            assert!(
+                custody.contains(required),
+                "OMEGA-DELTA-0192: file-backed candidate custody lost `{required}`"
+            );
+        }
+        assert!(
+            custody.contains("kind: crate::DurableIdentityActionKind::AgentAttestation")
+                && custody.contains("authorize_or_hold_identity_action_locked("),
+            "OMEGA-DELTA-0192: owner-to-agent attestation bypasses the activation gate"
+        );
+
+        for (path, action) in [
+            (PUBLIC_CHANNEL_PUBLISH_PATH, "PublicPost"),
+            (COMMUNITY_CONTROL_PATH, "CommunityJoin"),
+            (AGENT_PANEL_PATH, "DeviceGrant"),
+            (WORKROOM_PANEL_PATH, "HostedAccountLink"),
+        ] {
+            let source = read_repository_file(path);
+            assert!(
+                source.contains("authorize_or_hold_identity_action")
+                    && source.contains(&format!("DurableIdentityActionKind::{action}")),
+                "OMEGA-DELTA-0192: `{action}` in {path} bypasses the activation gate"
+            );
+        }
+
+        let section = read_repository_file(IDENTITY_SECTION_PATH);
+        for required in [
+            "IdentityActivationState::CandidateLocal",
+            "IdentityActivationState::CandidateExisting",
+            "IdentityActivationState::Activating",
+            "IdentityActivationState::Active",
+            "fingerprint().display()",
+        ] {
+            assert!(
+                section.contains(required),
+                "OMEGA-DELTA-0192: account presentation lost `{required}`"
+            );
+        }
+
+        let title_bar = read_repository_file(TITLE_BAR_PATH);
+        let user_menu = function_body(&title_bar, "render_user_menu_button")
+            .expect("OMEGA-DELTA-0192: title bar lost its user menu");
+        assert!(
+            user_menu.contains(".action(\"Omega Identity\", OpenOnboarding.boxed_clone())"),
+            "OMEGA-DELTA-0192: Omega Identity is not always reachable from the user menu"
+        );
+
+        for path in [
+            IDENTITY_AUTHENTICATION_DOCUMENT_PATH,
+            RUNTIME_CREDENTIAL_STORAGE_DOCUMENT_PATH,
+            APPLICATION_IDENTITY_DOCUMENT_PATH,
+        ] {
+            let documentation = read_repository_file(path);
+            let normalized_documentation = normalize_prose(&documentation);
+            assert!(
+                normalized_documentation.contains("identity/identity.secret")
+                    && normalized_documentation.contains("identity/identity.account.json")
+                    && normalized_documentation.contains("identity/identity.action-intent.json"),
+                "OMEGA-DELTA-0192: {path} does not document the exact file-backed identity records"
+            );
+            assert!(
+                normalized_documentation.contains("Secure Enclave")
+                    && normalized_documentation.contains("Windows credential vault")
+                    && normalized_documentation.contains("Linux secret service"),
+                "OMEGA-DELTA-0192: {path} no longer explicitly defers native key-vault custody"
+            );
+            assert!(
+                !documentation.contains("OMEGA_IDENTITY_FIXTURE"),
+                "OMEGA-DELTA-0192: {path} claims the nonexistent identity fixture switch"
             );
         }
     }

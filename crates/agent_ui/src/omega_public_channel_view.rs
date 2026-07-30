@@ -14,11 +14,13 @@ use std::{
 
 use editor::{Editor, EditorEvent};
 use gpui::{
-    AnyElement, Context, Entity, EventEmitter, FollowMode, ImageSource, ListAlignment,
+    Action as _, AnyElement, Context, Entity, EventEmitter, FollowMode, ImageSource, ListAlignment,
     ListSizingBehavior, ListState, ObjectFit, ParentElement as _, PromptLevel, Render, Role,
     SharedString, Styled as _, Task, Window, img, list, px,
 };
 use http_client::HttpClient;
+use omega_actions::OpenOnboarding;
+use omega_identity::IdentityActivationRequired;
 use ui::{
     Banner, Button, ButtonSize, ButtonStyle, Color, CopyButton, IconButton, IconName, IconSize,
     Label, LabelSize, ScrollAxes, Scrollbars, Severity, Tooltip, WithScrollbar, prelude::*,
@@ -535,6 +537,9 @@ impl PublicChannelView {
             if let Err(error) = this.update_in(cx, move |this, window, cx| match result {
                 Ok(signed) => this.finish_write(signed, window, cx),
                 Err(error) => {
+                    if error.downcast_ref::<IdentityActivationRequired>().is_some() {
+                        window.dispatch_action(OpenOnboarding.boxed_clone(), cx);
+                    }
                     this.write_status = WriteStatus::Failed(error.to_string());
                     cx.notify();
                 }

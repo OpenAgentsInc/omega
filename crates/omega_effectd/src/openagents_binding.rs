@@ -330,6 +330,26 @@ impl OpenAgentsBinding {
 
     /// Prove the built-in Omega identity in the background and record the relation.
     pub async fn bind(&self, omega_public_key_hex: &str, cx: &mut AsyncApp) -> BindingProjection {
+        self.bind_with_authorization(omega_public_key_hex, None, cx)
+            .await
+    }
+
+    pub async fn bind_authorized(
+        &self,
+        omega_public_key_hex: &str,
+        authorization: &omega_identity::IdentityActionAuthorization,
+        cx: &mut AsyncApp,
+    ) -> BindingProjection {
+        self.bind_with_authorization(omega_public_key_hex, Some(authorization), cx)
+            .await
+    }
+
+    async fn bind_with_authorization(
+        &self,
+        omega_public_key_hex: &str,
+        authorization: Option<&omega_identity::IdentityActionAuthorization>,
+        cx: &mut AsyncApp,
+    ) -> BindingProjection {
         let pubkey = omega_public_key_hex.trim();
         if pubkey.is_empty() {
             let projection = BindingProjection::unbound();
@@ -337,7 +357,7 @@ impl OpenAgentsBinding {
             return projection;
         }
 
-        match self.bind_inner(pubkey, cx).await {
+        match self.bind_inner(pubkey, authorization, cx).await {
             Ok(projection) => {
                 self.set_state(projection.state);
                 projection
@@ -364,14 +384,21 @@ impl OpenAgentsBinding {
     async fn bind_inner(
         &self,
         omega_public_key_hex: &str,
+        authorization: Option<&omega_identity::IdentityActionAuthorization>,
         cx: &mut AsyncApp,
     ) -> Result<BindingProjection> {
-        let session =
-            super::openagents_nostr_auth::mint_openagents_nostr_session(&self.http_client)
-                .await
-                .map_err(|blocker| {
-                    anyhow::anyhow!("OpenAgents binding sign-in failed: {}", blocker.summary())
-                })?;
+        if let Some(authorization) = authorization {
+            omega_identity::IdentityService::system(*app_identity::CHANNEL)
+                .validate_identity_action_authorization(authorization)?;
+        }
+        let session = super::openagents_nostr_auth::mint_openagents_nostr_session_for_identity(
+            &self.http_client,
+            Some(omega_public_key_hex),
+        )
+        .await
+        .map_err(|blocker| {
+            anyhow::anyhow!("OpenAgents binding sign-in failed: {}", blocker.summary())
+        })?;
         let mut credential = BindingCredential {
             schema_version: 1,
             openagents_account_id: session.user.user_id,
@@ -386,6 +413,10 @@ impl OpenAgentsBinding {
         credential = verified;
 
         let scope = self.check_owner_scope(&credential).await;
+        if let Some(authorization) = authorization {
+            omega_identity::IdentityService::system(*app_identity::CHANNEL)
+                .validate_identity_action_authorization(authorization)?;
+        }
         let bound_at = now_iso8601();
         let projection = match scope {
             OwnerScopeDecision::Admitted => {

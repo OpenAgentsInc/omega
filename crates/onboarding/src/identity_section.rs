@@ -7,9 +7,10 @@ use gpui::{
 };
 use omega_identity::{
     CandidateRef, CustodyConflictReason, CustodyError, CustodyResult, CustodyState,
-    IdentityInspection, IdentityRef, IdentityService, ImportedSecret, PendingIdentityOperation,
-    PreparedRecovery, PublicIdentity, ReceiptRef, RecoveryCandidate, RecoveryPassword,
-    RecoveryProtectionState, RecoveryResolution, RecoveryResolutionState,
+    IdentityAccountRecord, IdentityActivationState, IdentityInspection, IdentityRef,
+    IdentityService, ImportedSecret, PendingIdentityOperation, PreparedRecovery, PublicIdentity,
+    ReceiptRef, RecoveryCandidate, RecoveryPassword, RecoveryProtectionState, RecoveryResolution,
+    RecoveryResolutionState,
 };
 use ui::prelude::*;
 use ui_input::InputField;
@@ -36,6 +37,7 @@ pub(crate) enum IdentitySectionPresentation {
 
 trait IdentityBackend: Send + Sync {
     fn inspect(&self) -> Result<IdentityInspection, CustodyError>;
+    fn inspect_account(&self) -> Result<IdentityAccountRecord, CustodyError>;
     fn create(&self, receipt_ref: ReceiptRef) -> Result<IdentityInspection, CustodyError>;
     fn adopt_custodied(&self, receipt_ref: ReceiptRef) -> Result<IdentityInspection, CustodyError>;
     fn resume_incomplete_create(&self) -> Result<IdentityInspection, CustodyError>;
@@ -91,6 +93,10 @@ impl SystemIdentityBackend {
 impl IdentityBackend for SystemIdentityBackend {
     fn inspect(&self) -> Result<IdentityInspection, CustodyError> {
         self.service.inspect_details()
+    }
+
+    fn inspect_account(&self) -> Result<IdentityAccountRecord, CustodyError> {
+        self.service.inspect_account()
     }
 
     fn create(&self, receipt_ref: ReceiptRef) -> Result<IdentityInspection, CustodyError> {
@@ -292,6 +298,8 @@ pub(crate) struct IdentitySection {
     presentation: IdentitySectionPresentation,
     first_tab_index: isize,
     operation_task: Option<Task<()>>,
+    account_task: Option<Task<()>>,
+    account: Option<IdentityAccountRecord>,
     profile_task: Option<Task<()>>,
     recovery_mode: Option<RecoveryMode>,
     recovery_candidate: Option<RecoveryCandidate>,
@@ -356,6 +364,8 @@ impl IdentitySection {
             presentation: IdentitySectionPresentation::default(),
             first_tab_index,
             operation_task: None,
+            account_task: None,
+            account: None,
             profile_task: None,
             recovery_mode: None,
             recovery_candidate: None,
@@ -451,8 +461,28 @@ impl IdentitySection {
         if self.controller.apply(token, result) {
             self.clear_recovery_material(cx);
             self.load_local_profile(window, cx);
+            self.load_account_projection(cx);
             cx.notify();
         }
+    }
+
+    fn load_account_projection(&mut self, cx: &mut Context<Self>) {
+        if !self.is_ready() {
+            self.account = None;
+            self.account_task = None;
+            return;
+        }
+        let backend = self.backend.clone();
+        self.account_task = Some(cx.spawn(async move |this, cx| {
+            let result = cx
+                .background_spawn(async move { backend.inspect_account() })
+                .await;
+            this.update(cx, |this, cx| {
+                this.account = result.log_err();
+                cx.notify();
+            })
+            .log_err();
+        }));
     }
 
     fn start_inspection_operation(
@@ -1003,16 +1033,16 @@ impl IdentitySection {
         if let Some(operation) = self.controller.operation() {
             let (title, description) = match operation {
                 IdentityOperation::Inspect => (
-                    "Checking secure identity…",
-                    "Omega is reading public identity facts and secure-custody availability.",
+                    "Checking local identity…",
+                    "Omega is reading public identity facts and private-file availability.",
                 ),
                 IdentityOperation::Create { .. } => (
                     "Creating your identity…",
-                    "Omega is creating one Nostr identity, installing it in secure custody, and verifying read-back.",
+                    "Omega is creating one Nostr identity, writing it to the private local identity file, and verifying read-back.",
                 ),
                 IdentityOperation::AdoptCustodied { .. } => (
                     "Using your existing identity…",
-                    "Omega is adopting the identity already in secure custody for this profile. No new identity is created.",
+                    "Omega is adopting the identity already in the local identity file for this profile. No new identity is created.",
                 ),
                 IdentityOperation::ResumeIncomplete => (
                     "Resuming identity setup…",
@@ -1025,7 +1055,7 @@ impl IdentitySection {
                 IdentityOperation::AdoptRecovery { .. }
                 | IdentityOperation::ResolveConflict { .. } => (
                     "Recovering your identity…",
-                    "Omega is installing the explicitly selected identity in secure custody.",
+                    "Omega is installing the explicitly selected identity in the private local identity file.",
                 ),
                 IdentityOperation::ExportRecovery => (
                     "Protecting recovery…",
@@ -1047,7 +1077,7 @@ impl IdentitySection {
 
         let Some(inspection) = self.controller.durable() else {
             return IdentityPresentation {
-                title: "Checking secure identity",
+                title: "Checking local identity",
                 description: "Omega has not established a durable identity fact yet.",
                 icon: IconName::Lock,
                 color: Color::Muted,
@@ -1055,7 +1085,59 @@ impl IdentitySection {
             };
         };
 
+        if let Some(presentation) = Self::account_presentation(
+            inspection,
+            self.account.as_ref().map(|account| account.state),
+        ) {
+            return presentation;
+        }
+
         Self::durable_presentation(inspection)
+    }
+
+    fn account_presentation(
+        inspection: &IdentityInspection,
+        account_state: Option<IdentityActivationState>,
+    ) -> Option<IdentityPresentation> {
+        if inspection.custody.state != CustodyState::Ready {
+            return None;
+        }
+
+        Some(match account_state {
+            Some(IdentityActivationState::CandidateLocal) => IdentityPresentation {
+                title: "Local identity created",
+                description: "Omega created this identity in the background. Set it up before the first public post, community join, device grant, hosted-account link, or agent attestation.",
+                icon: IconName::Person,
+                color: Color::Accent,
+                actions: Vec::new(),
+            },
+            Some(IdentityActivationState::CandidateExisting) => IdentityPresentation {
+                title: "Existing identity found",
+                description: "Omega kept the exact public key already in the local identity file. Set it up before the next durable identity-bearing action.",
+                icon: IconName::Person,
+                color: Color::Accent,
+                actions: Vec::new(),
+            },
+            Some(IdentityActivationState::Activating) => IdentityPresentation {
+                title: "Identity setup required",
+                description: "A durable action is held before signing or network mutation. Complete identity setup to resume only that exact action, or cancel it.",
+                icon: IconName::Info,
+                color: Color::Warning,
+                actions: Vec::new(),
+            },
+            Some(IdentityActivationState::Active) => {
+                let mut presentation = Self::durable_presentation(inspection);
+                presentation.title = "Identity active";
+                presentation
+            }
+            None => IdentityPresentation {
+                title: "Checking account setup",
+                description: "The signing key is available; Omega is checking whether this identity is a candidate or an active account.",
+                icon: IconName::Info,
+                color: Color::Muted,
+                actions: Vec::new(),
+            },
+        })
     }
 
     fn error_message(&self) -> Option<&'static str> {
@@ -1073,7 +1155,7 @@ impl IdentitySection {
                 "The destination already contains an Omega recovery file. Choose another folder."
             }
             IdentityUiError::SecureStorageUnavailable => {
-                "Secure identity storage is unavailable. Unlock it and try again."
+                "The private local identity file is unavailable. Check its ownership and permissions, then try again."
             }
             IdentityUiError::OperationFailed => {
                 "Identity setup did not finish. Omega kept the last durable state unchanged."
@@ -1172,7 +1254,7 @@ impl IdentitySection {
             }
             CustodyState::Lost => IdentityPresentation {
                 title: "Recovery needed",
-                description: "The public identity is known, but its signing key is not available in secure custody.",
+                description: "The public identity is known, but its signing key is not available in the private local identity file.",
                 icon: IconName::LockOff,
                 color: Color::Error,
                 actions: vec![IdentityAction::Recover, IdentityAction::Reset],
@@ -1218,7 +1300,7 @@ impl IdentitySection {
                 IdentityPresentation {
                     title: "Identity ready",
                     description: if needs_recovery {
-                        "Your signing key is in secure local custody. Create an encrypted recovery file before relying on this identity."
+                        "Your signing key is in the private local identity file. Create an encrypted recovery file before relying on this identity."
                     } else {
                         "Your public identity is ready and an encrypted recovery file has been verified."
                     },
@@ -1577,7 +1659,7 @@ impl IdentitySection {
                     .child(Label::new("Your identity"))
                     .child(
                         Label::new(
-                            "Omega uses a Nostr key pair as your portable public identity. Your private key stays in secure local custody.",
+                            "Omega uses a Nostr key pair as your portable public identity. Your private key stays in the channel's private local identity file.",
                         )
                         .color(Color::Muted),
                     ),
@@ -1825,6 +1907,60 @@ mod tests {
             let accessibility_label = presentation.accessibility_label();
             assert!(accessibility_label.starts_with(title));
             assert!(!accessibility_label.contains("nsec"));
+        }
+    }
+
+    #[test]
+    fn ready_custody_presents_each_account_activation_state_honestly() {
+        let ready = inspection(CustodyState::Ready);
+        let cases = [
+            (
+                Some(IdentityActivationState::CandidateLocal),
+                "Local identity created",
+            ),
+            (
+                Some(IdentityActivationState::CandidateExisting),
+                "Existing identity found",
+            ),
+            (
+                Some(IdentityActivationState::Activating),
+                "Identity setup required",
+            ),
+            (Some(IdentityActivationState::Active), "Identity active"),
+            (None, "Checking account setup"),
+        ];
+
+        for (state, title) in cases {
+            let presentation = IdentitySection::account_presentation(&ready, state)
+                .expect("ready custody has an account presentation");
+            assert_eq!(presentation.title, title);
+            assert!(!presentation.accessibility_label().contains("nsec"));
+        }
+    }
+
+    #[test]
+    fn custody_repair_takes_priority_over_account_activation_state() {
+        for state in [
+            CustodyState::Locked,
+            CustodyState::Incomplete,
+            CustodyState::Lost,
+            CustodyState::Conflict,
+            CustodyState::ResetFailed,
+            CustodyState::RelaunchRequired,
+        ] {
+            let inspection = inspection(state);
+            assert!(
+                IdentitySection::account_presentation(
+                    &inspection,
+                    Some(IdentityActivationState::Active)
+                )
+                .is_none(),
+                "{state:?} must remain a custody repair state"
+            );
+            assert_ne!(
+                IdentitySection::durable_presentation(&inspection).title,
+                "Identity active"
+            );
         }
     }
 

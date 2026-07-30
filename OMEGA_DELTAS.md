@@ -8472,3 +8472,38 @@ startup recheck — survives unchanged behind that dropdown.
   `zero_base_is_only_a_legacy_implementation_name` in
   `crates/omega_deltas`, plus
   `a_seeded_refusal_trips_the_proof_counter` in `crates/omega_zero_base`.
+
+### OMEGA-DELTA-0192 — Background identities are candidates until explicit activation
+
+- **Origin:** OMEGA-AUTH-01, omega#176. Amends the account-admission side of
+  `OMEGA-DELTA-0040` without restoring a blocking first-run ceremony.
+- **Silent startup stays.** One shared process startup task still creates a
+  local Nostr identity from `Absent`, adopts the exact file-backed identity
+  from `Unadopted`, or reuses `Ready`, then opens the front door. Named custody
+  refusals are logged and remain repairable; they never park startup.
+- **Custody-ready is not account-active.** Omega atomically stores
+  `identity/identity.account.json`. A freshly generated key is
+  `CandidateLocal`; every ready pre-AUTH-01 identity without this record
+  migrates to `CandidateExisting` with the same public key. The account
+  control shows the state and short public fingerprint. Lost, conflict,
+  incomplete, locked, reset-failed, and relaunch-required remain distinct.
+- **Durable actions activate explicitly.** Public posts, community joins,
+  device grants, hosted-account links, and agent attestations pass a typed
+  identity-action gate. A candidate atomically moves to `Activating` while one
+  `identity/identity.action-intent.json` intent binds account, generation,
+  identity, kind, destination, authorization, payload digest, and expiry.
+  Completion never implies replay: the caller consumes the exact intent once
+  after every binding is revalidated. Cancellation restores the candidate,
+  removes the held intent, and resumes nothing. A second window or process
+  cannot install a competing intent under the channel identity mutation lock.
+- **File custody only.** The root Nostr secret remains the raw 32-byte
+  `identity/identity.secret` file, atomically replaced and owner-only on Unix.
+  This delta enables no macOS Keychain, Secure Enclave, Windows credential
+  vault, Linux secret service, Android keystore, or native key-vault path.
+  `KeyringLocator` remains a serialized compatibility name only.
+- **Enforced by:** activation migration, cancellation, exact-once consumption,
+  stale-binding, concurrent-intent, reset-cleanup, and active-signing tests in
+  `omega_identity`; candidate/active and repair-priority presentation tests in
+  `onboarding`; typed gate tests at the public-channel, community, pairing,
+  hosted-link, and agent-attestation entry points; and the
+  `OMEGA-DELTA-0192` source assertions in `crates/omega_deltas`.

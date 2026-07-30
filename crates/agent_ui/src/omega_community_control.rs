@@ -39,9 +39,11 @@ use omega_community::{
     parse_command,
 };
 use omega_identity::{
-    AdmittedSigningRequest, IdentityService, PublicIdentity, ReceiptRef, SigningPurpose,
-    UnsignedEventTemplate,
+    AdmittedSigningRequest, DurableIdentityActionDecision, DurableIdentityActionDescriptor,
+    DurableIdentityActionKind, IdentityService, ProofRef, PublicIdentity, ReceiptRef, ResourceRef,
+    SigningPurpose, UnsignedEventTemplate,
 };
+use sha2::{Digest as _, Sha256};
 use util::ResultExt as _;
 
 use crate::omega_audience_control::{forget_roster, thread_audience};
@@ -274,6 +276,17 @@ fn status(cx: &mut App) -> String {
 }
 
 fn join(invitation: Invitation, cx: &mut App) -> String {
+    let invitation_text = match invitation.to_text() {
+        Ok(invitation_text) => invitation_text,
+        Err(error) => return format!("Not joined. {error}"),
+    };
+    if let Err(refusal) = require_active_identity_action(
+        DurableIdentityActionKind::CommunityJoin,
+        invitation.descriptor.coordinate.to_string(),
+        invitation_text.as_bytes(),
+    ) {
+        return format!("Not joined. {refusal}");
+    }
     let mut rooms = rooms(cx);
     let report = match Rc::make_mut(&mut rooms).join(invitation, now()) {
         Ok(report) => report,
@@ -416,6 +429,13 @@ fn post(thread_id: ThreadId, text: &str, cx: &mut App) -> String {
         Ok(request_ref) => request_ref,
         Err(error) => return format!("Not sent. The signing request was invalid: {error}"),
     };
+    if let Err(refusal) = require_active_identity_action(
+        DurableIdentityActionKind::PublicPost,
+        joined.repository.coordinate().to_string(),
+        event_id.as_bytes(),
+    ) {
+        return format!("Not sent. {refusal}");
+    }
     let signed =
         match IdentityService::system(*app_identity::CHANNEL).sign(&AdmittedSigningRequest {
             request_ref,
@@ -480,6 +500,55 @@ fn post(thread_id: ThreadId, text: &str, cx: &mut App) -> String {
              duplicate.",
             short_event_id(&signed.id().to_hex())
         ),
+    }
+}
+
+fn require_active_identity_action(
+    kind: DurableIdentityActionKind,
+    destination: String,
+    payload: &[u8],
+) -> Result<(), String> {
+    require_active_identity_action_with(
+        &IdentityService::system(*app_identity::CHANNEL),
+        kind,
+        destination,
+        payload,
+        now(),
+    )
+}
+
+fn require_active_identity_action_with(
+    identity_service: &IdentityService,
+    kind: DurableIdentityActionKind,
+    destination: String,
+    payload: &[u8],
+    issued_at: u64,
+) -> Result<(), String> {
+    let payload_digest = format!("{:x}", Sha256::digest(payload));
+    let destination_digest = format!("{:x}", Sha256::digest(destination.as_bytes()));
+    let intent_ref = ReceiptRef::new(format!("omega-community-action-{}", &payload_digest[..32]))
+        .map_err(|error| format!("the activation intent is invalid: {error}"))?;
+    let descriptor = DurableIdentityActionDescriptor {
+        authorization_ref: ProofRef::new(format!("activation-{}", intent_ref.as_str()))
+            .map_err(|error| format!("the activation authorization is invalid: {error}"))?,
+        intent_ref,
+        kind,
+        destination_ref: ResourceRef::new(format!("community-{destination_digest}"))
+            .map_err(|error| format!("the activation destination is invalid: {error}"))?,
+        payload_digest,
+        expires_at: issued_at
+            .checked_add(600)
+            .ok_or_else(|| "the activation window overflowed".to_string())?,
+    };
+    match identity_service
+        .authorize_or_hold_identity_action(descriptor)
+        .map_err(|error| format!("Omega identity is unavailable: {error}"))?
+    {
+        DurableIdentityActionDecision::Authorized(_) => Ok(()),
+        DurableIdentityActionDecision::ActivationRequired { account, .. } => Err(format!(
+            "Set up identity {} from Omega Identity before this action.",
+            account.fingerprint_display()
+        )),
     }
 }
 
@@ -734,6 +803,9 @@ const NO_KEY_YET: &str = "Omega does not have your key yet, so it cannot say who
 
 #[cfg(test)]
 mod tests {
+    use app_identity::AppChannel;
+    use omega_identity::IdentityActivationState;
+
     use super::*;
 
     #[test]
@@ -750,5 +822,29 @@ mod tests {
     fn event_ids_are_shortened_without_panicking() {
         assert_eq!(short_event_id("0123456789abcdef"), "0123456789ab");
         assert_eq!(short_event_id("short"), "short");
+    }
+
+    #[test]
+    fn candidate_community_action_is_held_before_room_or_network_mutation() {
+        let directory = tempfile::tempdir().expect("identity directory");
+        let service =
+            IdentityService::for_channel_data_root(AppChannel::Dev, directory.path().to_path_buf());
+        service
+            .create(ReceiptRef::new("community-candidate-create").expect("create receipt"))
+            .expect("create candidate identity");
+
+        let refusal = require_active_identity_action_with(
+            &service,
+            DurableIdentityActionKind::CommunityJoin,
+            "forge:tenant.openagents/vortex".to_string(),
+            b"canonical invitation",
+            now(),
+        )
+        .expect_err("candidate join must be held");
+        assert!(refusal.contains("Set up identity"));
+        assert_eq!(
+            service.inspect_account().expect("candidate account").state,
+            IdentityActivationState::Activating
+        );
     }
 }

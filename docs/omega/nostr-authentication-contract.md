@@ -1,15 +1,14 @@
 # Omega Nostr authentication contract
 
-- Status: frozen target contract; runtime behavior is unchanged
-- Packet: `OMEGA-AUTH-00`
+- Status: AUTH-00 contract frozen; AUTH-01 background-identity activation implemented
+- Packets: `OMEGA-AUTH-00`, `OMEGA-AUTH-01`
 - Source baseline: Omega `0136fca2d11900ddc7982665482ed8cd035391c7`
 - Product plan:
   [Omega Nostr authentication and onboarding](https://github.com/OpenAgentsInc/openagents/blob/7010561549ebb46a37257292a9100f990a4a3356/docs/omega/2026-07-30-omega-nostr-authentication-and-onboarding.md)
 
-This document records what Omega ships before the authentication work begins
-and freezes the public-safe Rust contract that the later packets must converge
-on. A type existing in `omega_identity::authentication` does not mean the
-corresponding product flow ships yet.
+This document records the authentication contract and the runtime portions that
+have converged on it. A type existing in `omega_identity::authentication` does
+not by itself mean every later product flow ships.
 
 ## Current shipping behavior
 
@@ -24,8 +23,18 @@ Unix. They are not encrypted at rest. `KeyringLocator` and `keyring_*` fields
 remain version-one compatibility names; they do not mean Omega accesses the
 macOS Keychain.
 
-Ready local custody allows `IdentityService` to sign an admitted Nostr event.
-It does not prove any network or application authority. Omega separately:
+Ready local custody is now distinct from an active account. Startup writes a
+public-safe `identity/identity.account.json` record. A newly generated identity
+is `CandidateLocal`; an already-ready identity without an account record is
+migrated as `CandidateExisting` without changing its key. The account control
+shows that state and the short public fingerprint. `Activating` means one
+typed durable action is held; `Active` means the local activation step
+completed. None of these states proves network or application authority.
+
+Omega gates the five durable identity-bearing actions before signing or
+mutation. Generic admitted signing remains available for bounded protocol work
+such as relay authentication; custody readiness by itself does not authorize a
+durable public action. Omega separately:
 
 - answers a relay's exact NIP-42 challenge and tracks success inside that relay
   connection;
@@ -39,8 +48,8 @@ It does not prove any network or application authority. Omega separately:
 Recovery uses NIP-49 `ncryptsec` artifacts, bounded password work, public-key
 preview, opaque prepared candidates, journaled mutation, and custody read-back.
 The desktop also has an advanced raw-`nsec` backup surface and a value-triggered
-backup nudge. Neither currently activates an account in the sense defined
-below.
+backup nudge. AUTH-02 owns the fuller keep/import/remote-signer activation and
+durable recovery journey.
 
 ## Identities
 
@@ -83,12 +92,19 @@ active use, switching, locking, sign-out, forget, repair, and conflict as
 separate states. `account_generation` is nonzero and will invalidate stale
 network and signing work after account changes.
 
+AUTH-01 implements the first four native states as
+`IdentityActivationState::{CandidateLocal, CandidateExisting, Activating,
+Active}`. The durable account record binds the account reference, generation,
+exact public identity, candidate origin, activation reference, and update
+time. A missing account record beside ready custody means only that an older
+profile needs migration; it never authorizes deletion or key rotation.
+
 `SignerProjection` names the signer kind, availability, recovery state, and
 declared capabilities. Local-native, NIP-46, NIP-07, NIP-55, device-grant, and
 agent-grant signers are distinct. A ready signer still conveys no relay,
 group, hosted, or action authority.
 
-## Future signing authorization
+## Signing and durable-action authorization
 
 `SigningAuthorizationContext` is the target envelope for a future admitted
 signing request. It binds:
@@ -105,6 +121,22 @@ AUTH-00 deliberately does not replace the shipping
 against live state immediately before signing and refuse stale or mismatched
 work.
 
+AUTH-01 adds a narrower gate for the first durable identity-bearing action.
+`DurableIdentityActionDescriptor` covers public posts, community joins, device
+grants, hosted-account links, and agent attestations. It binds an intent,
+destination, authorization proof, payload digest, and expiry. For a candidate,
+Omega atomically persists the corresponding `HeldIdentityAction` in
+`identity/identity.action-intent.json` and moves the account to `Activating`.
+
+Completing activation does not itself replay work. The caller must consume the
+same held action exactly once. Consumption rechecks the account reference,
+account generation, identity, action kind, destination, authorization proof,
+payload digest, and expiry. Cancellation restores the original candidate
+state, clears the held action, and resumes nothing. A product surface must
+provide explicit complete and cancel controls and retain enough typed state to
+resume the original action; redirecting to the account control alone does not
+satisfy this contract.
+
 ## Public-safety rules and fixtures
 
 All public structs deny unknown fields. Contract validation scans public JSON
@@ -120,10 +152,18 @@ round-trip, principal separation, authority non-substitution, unknown-field
 refusal, secret tripwires, account-generation binding, and content-digest
 binding.
 
-## Migration boundary
+## Migration and custody boundary
 
-No runtime decision consumes these projections in AUTH-00. Background
-provisioning, storage, signing, NIP-42, NIP-98, account binding, recovery, and
-backup behavior remain unchanged. `OMEGA-AUTH-01` starts the migration by
-persisting candidate versus active account state without rotating an existing
-key.
+AUTH-01 changes account admission, not secret custody. The person key remains
+the raw 32-byte value in the owner-only, channel-namespaced
+`identity/identity.secret` file. This wave does not enable the macOS Keychain,
+Secure Enclave, Windows credential vault, Linux secret service, Android
+keystore, or any other native secure-enclave or key-vault integration. The
+public account and action-intent files contain no secret material and use the
+same atomic local-file writer.
+
+Fresh profiles still open without a modal. Existing ready identities keep the
+exact public key and signed history. Lost, conflict, incomplete, locked,
+reset-failed, and relaunch-required custody states remain distinct and route
+to the existing repair surface rather than being rounded into a candidate or
+active account.

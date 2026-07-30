@@ -109,6 +109,7 @@ struct DevicePairingOffer {
     host_public_key_hex: String,
     scopes: Vec<Issue31PairingScope>,
     expires_at: u64,
+    identity_action: Option<omega_identity::IdentityActionAuthorization>,
 }
 
 #[derive(Clone)]
@@ -144,6 +145,25 @@ impl DevicePairingEngine {
         scopes: Vec<Issue31PairingScope>,
         now_millis: u64,
     ) -> Result<PairingBootstrap> {
+        self.issue_with_identity_action(
+            endpoint,
+            host_public_key_hex,
+            generation,
+            scopes,
+            now_millis,
+            None,
+        )
+    }
+
+    fn issue_with_identity_action(
+        &self,
+        endpoint: Issue31DirectEndpoint,
+        host_public_key_hex: String,
+        generation: u64,
+        scopes: Vec<Issue31PairingScope>,
+        now_millis: u64,
+        identity_action: Option<omega_identity::IdentityActionAuthorization>,
+    ) -> Result<PairingBootstrap> {
         let expires_at = now_millis.saturating_add(5 * 60 * 1_000);
         let secret_seed = rand::random::<[u8; 32]>();
         let pairing_secret = format!("{:x}", Sha256::digest(secret_seed));
@@ -174,6 +194,7 @@ impl DevicePairingEngine {
                 host_public_key_hex,
                 scopes,
                 expires_at,
+                identity_action,
             },
         );
         Ok(bootstrap)
@@ -214,16 +235,27 @@ pub fn has_device_pairing(cx: &App) -> bool {
     cx.has_global::<DevicePairingRuntime>()
 }
 
-pub fn issue_device_pairing_bootstrap(cx: &App) -> Result<PairingBootstrap> {
+pub fn issue_device_pairing_bootstrap(
+    authorization: omega_identity::IdentityActionAuthorization,
+    cx: &App,
+) -> Result<PairingBootstrap> {
+    if authorization.intent().kind != omega_identity::DurableIdentityActionKind::DeviceGrant {
+        return Err(anyhow!(
+            "the identity action does not authorize a device grant"
+        ));
+    }
+    omega_identity::IdentityService::system(*app_identity::CHANNEL)
+        .validate_identity_action_authorization(&authorization)?;
     let runtime = cx
         .try_global::<DevicePairingRuntime>()
         .ok_or_else(|| anyhow!("Direct phone pairing is not available on this host."))?;
-    runtime.engine.issue(
+    runtime.engine.issue_with_identity_action(
         runtime.endpoint.clone(),
         runtime.host_public_key_hex.clone(),
         runtime.generation,
         runtime.scopes.clone(),
         current_unix_millis(),
+        Some(authorization),
     )
 }
 
@@ -257,6 +289,13 @@ impl omega_device_bridge::GrantAuthority for Issue31DeviceBridgeAuthority {
                 .ok_or(GrantRefusalReason::PairingRefused)?;
             if offer.host_public_key_hex != host_public_key_hex || now_millis >= offer.expires_at {
                 return Err(GrantRefusalReason::PairingExpired);
+            }
+            if let Some(authorization) = &offer.identity_action
+                && omega_identity::IdentityService::system(*app_identity::CHANNEL)
+                    .validate_identity_action_authorization(authorization)
+                    .is_err()
+            {
+                return Err(GrantRefusalReason::PairingRefused);
             }
             let mut controller = self
                 .controller

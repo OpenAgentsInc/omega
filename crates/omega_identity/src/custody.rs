@@ -19,12 +19,15 @@ use thiserror::Error;
 use zeroize::Zeroizing;
 
 use crate::{
-    AdmittedSigningRequest, CompletionRecord, ContractError, CustodyConflict,
-    CustodyConflictReason, CustodyResult, CustodyState, GiftWrappedPrivateMessage,
-    IdentityInspection, IdentityManifest, IdentityRef, ImportedSecret, KeyringLocator,
-    NostrPublicKeyHex, OwnerAttestationRequest, OwnerAttestationResult, PendingIdentityOperation,
-    PendingIdentityTransaction, PrivateMessageRequest, PublicIdentity, PublicStoreError,
-    ReceiptRef, SigningResult, UnwrappedPrivateMessage,
+    AccountRef, AdmittedSigningRequest, CompletionRecord, ContractError, CustodyConflict,
+    CustodyConflictReason, CustodyResult, CustodyState, DurableIdentityActionDecision,
+    DurableIdentityActionDescriptor, GiftWrappedPrivateMessage, HeldIdentityAction,
+    IDENTITY_ACCOUNT_SCHEMA, IDENTITY_ACCOUNT_SCHEMA_VERSION, IdentityAccountRecord,
+    IdentityActionAuthorization, IdentityActivationRequired, IdentityActivationState,
+    IdentityCandidateOrigin, IdentityInspection, IdentityManifest, IdentityRef, ImportedSecret,
+    KeyringLocator, NostrPublicKeyHex, OwnerAttestationRequest, OwnerAttestationResult,
+    PendingIdentityOperation, PendingIdentityTransaction, PrivateMessageRequest, PublicIdentity,
+    PublicStoreError, ReceiptRef, SigningResult, UnwrappedPrivateMessage,
     mutation_lock::{IdentityMutationGuard, MutationLockError},
     proof::{IDENTITY_PROOF_KEYRING_ACCOUNT, IDENTITY_PROOF_KEYRING_SERVICE, ProofCrashBoundary},
     public_store::{
@@ -46,6 +49,14 @@ const IDENTITY_TRANSACTION_SCHEMA: &str = "openagents.omega.identity-transaction
 const RESET_MARKER_SCHEMA: &str = "openagents.omega.identity-reset.v1";
 const BACKUP_VALUE_SCHEMA: &str = "openagents.omega.identity-backup-value.v1";
 const BACKUP_NUDGE_DISMISSED_SCHEMA: &str = "openagents.omega.identity-backup-nudge-dismissed.v1";
+const HELD_IDENTITY_ACTION_SCHEMA: &str = "openagents.omega.held-identity-action.v1";
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct HeldIdentityActionRecord {
+    schema: String,
+    intent: HeldIdentityAction,
+}
 
 /// The first event that gave a background-created identity something to lose.
 #[derive(Debug, Copy, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -93,6 +104,26 @@ fn unix_time_now() -> u64 {
         .duration_since(std::time::UNIX_EPOCH)
         .map_or(0, |duration| duration.as_secs())
 }
+
+fn account_ref_for_identity(identity: &PublicIdentity) -> Result<AccountRef, CustodyError> {
+    AccountRef::new(format!(
+        "omega-account-{}",
+        identity.public_key_hex().as_str()
+    ))
+    .map_err(|_| CustodyError::InvalidActivationState)
+}
+
+fn identity_action_binding_matches(left: &HeldIdentityAction, right: &HeldIdentityAction) -> bool {
+    left.intent_ref == right.intent_ref
+        && left.account_ref == right.account_ref
+        && left.account_generation == right.account_generation
+        && left.identity_ref == right.identity_ref
+        && left.kind == right.kind
+        && left.destination_ref == right.destination_ref
+        && left.authorization_ref == right.authorization_ref
+        && left.payload_digest == right.payload_digest
+}
+
 const NIP49_LOG_N: u8 = 16;
 static RECOVERY_KDF_LOCK: Mutex<()> = Mutex::new(());
 
@@ -326,12 +357,220 @@ impl IdentityService {
         receipt_ref: ReceiptRef,
     ) -> Result<CustodyResult, CustodyError> {
         let inspected = self.inspect_for_process_start()?;
-        match inspected.custody.state {
+        let result = match inspected.custody.state {
             CustodyState::Ready => Ok(inspected.custody),
             CustodyState::Absent => self.create(receipt_ref),
             CustodyState::Unadopted => self.adopt_custodied(receipt_ref),
-            state => Err(CustodyError::CustodyDenied(state)),
+            state => return Err(CustodyError::CustodyDenied(state)),
+        }?;
+        if let Some(identity) = result.identity.as_ref() {
+            let _mutation_guard = IdentityMutationGuard::acquire(&self.locator)?;
+            self.ensure_account_record_locked(identity, IdentityCandidateOrigin::Existing)?;
         }
+        Ok(result)
+    }
+
+    pub fn inspect_account(&self) -> Result<IdentityAccountRecord, CustodyError> {
+        let _mutation_guard = IdentityMutationGuard::acquire(&self.locator)?;
+        self.require_no_reset_locked()?;
+        let resolved = self.resolve_locked();
+        if resolved.result.state != CustodyState::Ready {
+            return Err(CustodyError::CustodyDenied(resolved.result.state));
+        }
+        let identity = resolved
+            .result
+            .identity
+            .ok_or(CustodyError::CustodyDenied(CustodyState::Incomplete))?;
+        self.ensure_account_record_locked(&identity, IdentityCandidateOrigin::Existing)
+    }
+
+    pub fn authorize_or_hold_identity_action(
+        &self,
+        descriptor: DurableIdentityActionDescriptor,
+    ) -> Result<DurableIdentityActionDecision, CustodyError> {
+        let now = unix_time_now();
+        descriptor
+            .validate(now)
+            .map_err(|_| CustodyError::InvalidActivationIntent)?;
+        let _mutation_guard = IdentityMutationGuard::acquire(&self.locator)?;
+        self.require_no_reset_locked()?;
+        let resolved = self.resolve_locked();
+        if resolved.result.state != CustodyState::Ready {
+            return Err(CustodyError::CustodyDenied(resolved.result.state));
+        }
+        let identity = resolved
+            .result
+            .identity
+            .ok_or(CustodyError::CustodyDenied(CustodyState::Incomplete))?;
+        self.authorize_or_hold_identity_action_locked(descriptor, identity, now)
+    }
+
+    fn authorize_or_hold_identity_action_locked(
+        &self,
+        descriptor: DurableIdentityActionDescriptor,
+        identity: PublicIdentity,
+        now: u64,
+    ) -> Result<DurableIdentityActionDecision, CustodyError> {
+        let mut account =
+            self.ensure_account_record_locked(&identity, IdentityCandidateOrigin::Existing)?;
+        let intent = HeldIdentityAction {
+            intent_ref: descriptor.intent_ref,
+            account_ref: account.account_ref.clone(),
+            account_generation: account.account_generation,
+            identity_ref: identity.identity_ref().clone(),
+            kind: descriptor.kind,
+            destination_ref: descriptor.destination_ref,
+            authorization_ref: descriptor.authorization_ref,
+            payload_digest: descriptor.payload_digest,
+            issued_at: now,
+            expires_at: descriptor.expires_at,
+        };
+
+        match account.state {
+            IdentityActivationState::Active => Ok(DurableIdentityActionDecision::Authorized(
+                IdentityActionAuthorization::new(intent),
+            )),
+            IdentityActivationState::CandidateLocal
+            | IdentityActivationState::CandidateExisting => {
+                if let Some(held) = self.read_held_identity_action_locked()? {
+                    if !identity_action_binding_matches(&held, &intent) {
+                        return Err(CustodyError::ActivationInProgress);
+                    }
+                    account.state = IdentityActivationState::Activating;
+                    account.activation_ref = Some(held.intent_ref.clone());
+                    account.updated_at = now;
+                    write_json_document(&self.paths.account_path, &account)?;
+                    return Ok(DurableIdentityActionDecision::ActivationRequired {
+                        account,
+                        intent: held,
+                    });
+                }
+                write_json_document(
+                    &self.paths.held_identity_action_path,
+                    &HeldIdentityActionRecord {
+                        schema: HELD_IDENTITY_ACTION_SCHEMA.to_string(),
+                        intent: intent.clone(),
+                    },
+                )?;
+                account.state = IdentityActivationState::Activating;
+                account.activation_ref = Some(intent.intent_ref.clone());
+                account.updated_at = now;
+                write_json_document(&self.paths.account_path, &account)?;
+                Ok(DurableIdentityActionDecision::ActivationRequired { account, intent })
+            }
+            IdentityActivationState::Activating => {
+                let held = self
+                    .read_held_identity_action_locked()?
+                    .ok_or(CustodyError::InvalidActivationState)?;
+                if !identity_action_binding_matches(&held, &intent) {
+                    return Err(CustodyError::ActivationInProgress);
+                }
+                Ok(DurableIdentityActionDecision::ActivationRequired {
+                    account,
+                    intent: held,
+                })
+            }
+        }
+    }
+
+    pub fn complete_activation(
+        &self,
+        expected: &HeldIdentityAction,
+    ) -> Result<IdentityAccountRecord, CustodyError> {
+        let _mutation_guard = IdentityMutationGuard::acquire(&self.locator)?;
+        let now = unix_time_now();
+        let mut account = self.require_matching_activation_locked(expected, now)?;
+        account.state = IdentityActivationState::Active;
+        account.updated_at = now;
+        write_json_document(&self.paths.account_path, &account)?;
+        Ok(account)
+    }
+
+    pub fn cancel_activation(
+        &self,
+        expected: &HeldIdentityAction,
+    ) -> Result<IdentityAccountRecord, CustodyError> {
+        let _mutation_guard = IdentityMutationGuard::acquire(&self.locator)?;
+        let mut account = self.require_matching_activation_locked(expected, unix_time_now())?;
+        account.state = match account.candidate_origin {
+            IdentityCandidateOrigin::Local => IdentityActivationState::CandidateLocal,
+            IdentityCandidateOrigin::Existing => IdentityActivationState::CandidateExisting,
+        };
+        account.activation_ref = None;
+        account.updated_at = unix_time_now();
+        write_json_document(&self.paths.account_path, &account)?;
+        remove_public_document(&self.paths.held_identity_action_path)?;
+        Ok(account)
+    }
+
+    pub fn take_activated_identity_action(
+        &self,
+        expected: &HeldIdentityAction,
+    ) -> Result<IdentityActionAuthorization, CustodyError> {
+        let _mutation_guard = IdentityMutationGuard::acquire(&self.locator)?;
+        let now = unix_time_now();
+        self.require_no_reset_locked()?;
+        let resolved = self.resolve_locked();
+        if resolved.result.state != CustodyState::Ready {
+            return Err(CustodyError::CustodyDenied(resolved.result.state));
+        }
+        let identity = resolved
+            .result
+            .identity
+            .ok_or(CustodyError::CustodyDenied(CustodyState::Incomplete))?;
+        let account = self
+            .read_account_record_locked()?
+            .ok_or(CustodyError::InvalidActivationState)?;
+        if account.state != IdentityActivationState::Active
+            || account.account_ref != expected.account_ref
+            || account.account_generation != expected.account_generation
+            || account.identity != identity
+            || account.identity.identity_ref() != &expected.identity_ref
+            || !expected.validate(now)
+        {
+            return Err(CustodyError::StaleActivationIntent);
+        }
+        let held = self
+            .read_held_identity_action_locked()?
+            .ok_or(CustodyError::ActivationIntentConsumed)?;
+        if &held != expected {
+            return Err(CustodyError::StaleActivationIntent);
+        }
+        remove_public_document(&self.paths.held_identity_action_path)?;
+        Ok(IdentityActionAuthorization::new(held))
+    }
+
+    pub fn validate_identity_action_authorization(
+        &self,
+        authorization: &IdentityActionAuthorization,
+    ) -> Result<(), CustodyError> {
+        let _mutation_guard = IdentityMutationGuard::acquire(&self.locator)?;
+        self.require_no_reset_locked()?;
+        let now = unix_time_now();
+        let intent = authorization.intent();
+        if !intent.validate(now) {
+            return Err(CustodyError::StaleActivationIntent);
+        }
+        let resolved = self.resolve_locked();
+        if resolved.result.state != CustodyState::Ready {
+            return Err(CustodyError::CustodyDenied(resolved.result.state));
+        }
+        let identity = resolved
+            .result
+            .identity
+            .ok_or(CustodyError::CustodyDenied(CustodyState::Incomplete))?;
+        let account = self
+            .read_account_record_locked()?
+            .ok_or(CustodyError::InvalidActivationState)?;
+        if account.state != IdentityActivationState::Active
+            || account.account_ref != intent.account_ref
+            || account.account_generation != intent.account_generation
+            || account.identity != identity
+            || identity.identity_ref() != &intent.identity_ref
+        {
+            return Err(CustodyError::StaleActivationIntent);
+        }
+        Ok(())
     }
 
     /// Record that the identity now has something to lose.
@@ -744,6 +983,37 @@ impl IdentityService {
             .identity
             .ok_or(CustodyError::CustodyDenied(CustodyState::Incomplete))?;
         request.validate(&identity)?;
+        let now = unix_time_now();
+        let payload_digest = format!(
+            "{:x}",
+            Sha256::digest(
+                serde_json::to_vec(request).map_err(|_| CustodyError::InvalidActivationIntent)?
+            )
+        );
+        let destination_digest = format!(
+            "{:x}",
+            Sha256::digest(request.agent_public_key_hex.as_str().as_bytes())
+        );
+        let descriptor = DurableIdentityActionDescriptor {
+            intent_ref: request.request_ref.clone(),
+            kind: crate::DurableIdentityActionKind::AgentAttestation,
+            destination_ref: crate::ResourceRef::new(format!("agent-{destination_digest}"))
+                .map_err(|_| CustodyError::InvalidActivationIntent)?,
+            authorization_ref: crate::ProofRef::new(format!(
+                "activation-{}",
+                request.request_ref.as_str()
+            ))
+            .map_err(|_| CustodyError::InvalidActivationIntent)?,
+            payload_digest,
+            expires_at: now.saturating_add(600),
+        };
+        if let DurableIdentityActionDecision::ActivationRequired { account, intent } =
+            self.authorize_or_hold_identity_action_locked(descriptor, identity.clone(), now)?
+        {
+            return Err(CustodyError::IdentityActivationRequired(Box::new(
+                IdentityActivationRequired::new(account, intent),
+            )));
+        }
         let secret = resolved
             .secret
             .ok_or(CustodyError::CustodyDenied(CustodyState::Incomplete))?;
@@ -1026,6 +1296,16 @@ impl IdentityService {
                 .recovery_protection_path
                 .try_exists()
                 .map_err(|_| CustodyError::ResetFailed)?
+            || self
+                .paths
+                .account_path
+                .try_exists()
+                .map_err(|_| CustodyError::ResetFailed)?
+            || self
+                .paths
+                .held_identity_action_path
+                .try_exists()
+                .map_err(|_| CustodyError::ResetFailed)?
         {
             return Err(CustodyError::ResetFailed);
         }
@@ -1136,11 +1416,144 @@ impl IdentityService {
             return Err(CustodyError::CustodyDenied(result.state));
         }
         let mut transaction = IdentityTransaction::new(operation, receipt_ref, candidate_ref);
+        transaction.candidate_origin = Some(
+            if operation == TransactionOperation::Create && expected_identity.is_none() {
+                IdentityCandidateOrigin::Local
+            } else {
+                IdentityCandidateOrigin::Existing
+            },
+        );
         if can_recover || can_adopt_custodied {
             transaction.expected_identity = expected_identity.cloned();
         }
         write_json_document(&self.paths.transaction_path, &transaction)?;
         Ok(transaction)
+    }
+
+    fn ensure_account_record_locked(
+        &self,
+        identity: &PublicIdentity,
+        origin: IdentityCandidateOrigin,
+    ) -> Result<IdentityAccountRecord, CustodyError> {
+        if let Some(record) = self.read_account_record_locked()? {
+            if record.identity != *identity
+                || record.account_ref != account_ref_for_identity(identity)?
+            {
+                return Err(CustodyError::CustodyDenied(CustodyState::Conflict));
+            }
+            return Ok(record);
+        }
+
+        let record = IdentityAccountRecord {
+            schema: IDENTITY_ACCOUNT_SCHEMA.to_string(),
+            schema_version: IDENTITY_ACCOUNT_SCHEMA_VERSION,
+            account_ref: account_ref_for_identity(identity)?,
+            account_generation: 1,
+            identity: identity.clone(),
+            state: match origin {
+                IdentityCandidateOrigin::Local => IdentityActivationState::CandidateLocal,
+                IdentityCandidateOrigin::Existing => IdentityActivationState::CandidateExisting,
+            },
+            candidate_origin: origin,
+            activation_ref: None,
+            updated_at: unix_time_now(),
+        };
+        write_json_document(&self.paths.account_path, &record)?;
+        Ok(record)
+    }
+
+    fn install_account_record_locked(
+        &self,
+        identity: &PublicIdentity,
+        origin: IdentityCandidateOrigin,
+    ) -> Result<IdentityAccountRecord, CustodyError> {
+        let Some(existing) = self.read_account_record_locked()? else {
+            return self.ensure_account_record_locked(identity, origin);
+        };
+        if existing.identity == *identity
+            && existing.account_ref == account_ref_for_identity(identity)?
+        {
+            return Ok(existing);
+        }
+
+        let record = IdentityAccountRecord {
+            schema: IDENTITY_ACCOUNT_SCHEMA.to_string(),
+            schema_version: IDENTITY_ACCOUNT_SCHEMA_VERSION,
+            account_ref: account_ref_for_identity(identity)?,
+            account_generation: existing
+                .account_generation
+                .checked_add(1)
+                .ok_or(CustodyError::InvalidActivationState)?,
+            identity: identity.clone(),
+            state: match origin {
+                IdentityCandidateOrigin::Local => IdentityActivationState::CandidateLocal,
+                IdentityCandidateOrigin::Existing => IdentityActivationState::CandidateExisting,
+            },
+            candidate_origin: origin,
+            activation_ref: None,
+            updated_at: unix_time_now(),
+        };
+        remove_public_document(&self.paths.held_identity_action_path)?;
+        write_json_document(&self.paths.account_path, &record)?;
+        Ok(record)
+    }
+
+    fn read_account_record_locked(&self) -> Result<Option<IdentityAccountRecord>, CustodyError> {
+        let record: Option<IdentityAccountRecord> = read_json_document(&self.paths.account_path)
+            .map_err(|_| CustodyError::InvalidActivationState)?;
+        if record.as_ref().is_some_and(|record| !record.validate()) {
+            return Err(CustodyError::InvalidActivationState);
+        }
+        Ok(record)
+    }
+
+    fn read_held_identity_action_locked(&self) -> Result<Option<HeldIdentityAction>, CustodyError> {
+        let record: Option<HeldIdentityActionRecord> =
+            read_json_document(&self.paths.held_identity_action_path)
+                .map_err(|_| CustodyError::InvalidActivationIntent)?;
+        let Some(record) = record else {
+            return Ok(None);
+        };
+        if record.schema != HELD_IDENTITY_ACTION_SCHEMA {
+            return Err(CustodyError::InvalidActivationIntent);
+        }
+        Ok(Some(record.intent))
+    }
+
+    fn require_matching_activation_locked(
+        &self,
+        expected: &HeldIdentityAction,
+        now: u64,
+    ) -> Result<IdentityAccountRecord, CustodyError> {
+        if !expected.validate(now) {
+            return Err(CustodyError::StaleActivationIntent);
+        }
+        self.require_no_reset_locked()?;
+        let resolved = self.resolve_locked();
+        if resolved.result.state != CustodyState::Ready {
+            return Err(CustodyError::CustodyDenied(resolved.result.state));
+        }
+        let identity = resolved
+            .result
+            .identity
+            .ok_or(CustodyError::CustodyDenied(CustodyState::Incomplete))?;
+        let account = self
+            .read_account_record_locked()?
+            .ok_or(CustodyError::InvalidActivationState)?;
+        let held = self
+            .read_held_identity_action_locked()?
+            .ok_or(CustodyError::InvalidActivationIntent)?;
+        if account.state != IdentityActivationState::Activating
+            || account.activation_ref.as_ref() != Some(&expected.intent_ref)
+            || account.account_ref != expected.account_ref
+            || account.account_generation != expected.account_generation
+            || account.identity != identity
+            || identity.identity_ref() != &expected.identity_ref
+            || held != *expected
+        {
+            return Err(CustodyError::StaleActivationIntent);
+        }
+        Ok(account)
     }
 
     fn commit_secret_locked(
@@ -1217,6 +1630,12 @@ impl IdentityService {
             };
             self.write_completion_locked(&completion, &manifest)?;
             self.remove_mismatched_recovery_protection_locked(&expected_identity)?;
+            self.install_account_record_locked(
+                &expected_identity,
+                transaction
+                    .candidate_origin
+                    .unwrap_or(IdentityCandidateOrigin::Existing),
+            )?;
 
             Ok(CustodyResult {
                 state: CustodyState::Ready,
@@ -1254,6 +1673,10 @@ impl IdentityService {
         remove_public_document(&self.paths.completion_path)
             .map_err(|_| CustodyError::TransactionIncomplete)?;
         remove_public_document(&self.paths.manifest_path)
+            .map_err(|_| CustodyError::TransactionIncomplete)?;
+        remove_public_document(&self.paths.account_path)
+            .map_err(|_| CustodyError::TransactionIncomplete)?;
+        remove_public_document(&self.paths.held_identity_action_path)
             .map_err(|_| CustodyError::TransactionIncomplete)?;
         remove_public_document(&self.paths.transaction_path)
             .map_err(|_| CustodyError::TransactionIncomplete)
@@ -1389,6 +1812,9 @@ impl IdentityService {
         remove_public_document(&self.paths.transaction_path)
             .map_err(|_| CustodyState::ResetFailed)?;
         remove_public_document(&self.paths.recovery_protection_path)
+            .map_err(|_| CustodyState::ResetFailed)?;
+        remove_public_document(&self.paths.account_path).map_err(|_| CustodyState::ResetFailed)?;
+        remove_public_document(&self.paths.held_identity_action_path)
             .map_err(|_| CustodyState::ResetFailed)?;
         marker.status = ResetStatus::Complete;
         write_json_document(&self.paths.reset_path, &marker)
@@ -1636,6 +2062,8 @@ struct IdentityTransaction {
     receipt_ref: ReceiptRef,
     candidate_ref: Option<CandidateRef>,
     expected_identity: Option<PublicIdentity>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    candidate_origin: Option<IdentityCandidateOrigin>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     conflict_identities: Vec<PublicIdentity>,
 }
@@ -1652,6 +2080,7 @@ impl IdentityTransaction {
             receipt_ref,
             candidate_ref,
             expected_identity: None,
+            candidate_origin: None,
             conflict_identities: Vec::new(),
         }
     }
@@ -1798,6 +2227,8 @@ struct CustodyPaths {
     recovery_protection_path: PathBuf,
     backup_value_path: PathBuf,
     backup_nudge_dismissed_path: PathBuf,
+    account_path: PathBuf,
+    held_identity_action_path: PathBuf,
 }
 
 impl CustodyPaths {
@@ -1810,6 +2241,8 @@ impl CustodyPaths {
             recovery_protection_path: root.join("identity.recovery-protection.json"),
             backup_value_path: root.join("identity.backup-value.json"),
             backup_nudge_dismissed_path: root.join("identity.backup-nudge-dismissed.json"),
+            account_path: root.join("identity.account.json"),
+            held_identity_action_path: root.join("identity.action-intent.json"),
         }
     }
 }
@@ -1888,6 +2321,18 @@ pub enum CustodyError {
     SigningFailed,
     #[error("the identity transaction is incomplete")]
     TransactionIncomplete,
+    #[error("the identity activation state is invalid")]
+    InvalidActivationState,
+    #[error("the durable identity action intent is invalid")]
+    InvalidActivationIntent,
+    #[error("another identity activation is already in progress")]
+    ActivationInProgress,
+    #[error("the durable identity action intent is stale")]
+    StaleActivationIntent,
+    #[error("the durable identity action intent was already consumed")]
+    ActivationIntentConsumed,
+    #[error(transparent)]
+    IdentityActivationRequired(Box<IdentityActivationRequired>),
     #[error("identity reset could not be verified")]
     ResetFailed,
     #[error("identity mutation serialization is unavailable")]
@@ -1896,6 +2341,12 @@ pub enum CustodyError {
     Contract(#[from] ContractError),
     #[error("public identity state could not be committed")]
     PublicStore(#[from] PublicStoreError),
+}
+
+impl From<IdentityActivationRequired> for CustodyError {
+    fn from(required: IdentityActivationRequired) -> Self {
+        Self::IdentityActivationRequired(Box::new(required))
+    }
 }
 
 impl From<MutationLockError> for CustodyError {
@@ -2123,6 +2574,35 @@ mod tests {
                 content: "Omega custody conformance".to_string(),
             },
         }
+    }
+
+    fn durable_action_descriptor(destination: &str) -> DurableIdentityActionDescriptor {
+        DurableIdentityActionDescriptor {
+            intent_ref: ReceiptRef::new("durable-action-1").expect("valid intent ref"),
+            kind: crate::DurableIdentityActionKind::PublicPost,
+            destination_ref: crate::ResourceRef::new(destination)
+                .expect("valid destination reference"),
+            authorization_ref: crate::ProofRef::new("authorization.action-1")
+                .expect("valid authorization ref"),
+            payload_digest: "ab".repeat(32),
+            expires_at: unix_time_now() + 600,
+        }
+    }
+
+    fn activate_candidate(service: &IdentityService) {
+        let held = match service
+            .authorize_or_hold_identity_action(durable_action_descriptor("activation:test"))
+            .expect("hold activation action")
+        {
+            DurableIdentityActionDecision::ActivationRequired { intent, .. } => intent,
+            DurableIdentityActionDecision::Authorized(_) => return,
+        };
+        service
+            .complete_activation(&held)
+            .expect("complete activation");
+        service
+            .take_activated_identity_action(&held)
+            .expect("consume activation action");
     }
 
     #[test]
@@ -3255,6 +3735,7 @@ mod tests {
             .expect("create identity")
             .identity
             .expect("created public identity");
+        activate_candidate(&service);
         let agent_public_key_hex = NostrPublicKeyHex::new("2".repeat(64)).expect("agent key");
         let result = service
             .sign_owner_attestation(&OwnerAttestationRequest {
@@ -3293,6 +3774,42 @@ mod tests {
                 .expect("serialize result")
                 .contains("private")
         );
+    }
+
+    #[test]
+    fn candidate_owner_attestation_is_held_as_a_typed_agent_action() {
+        let temporary_directory = tempfile::tempdir().expect("create temporary directory");
+        let service = service(FakeStore::empty(), temporary_directory.path().to_path_buf());
+        let identity = service
+            .create(receipt())
+            .expect("create identity")
+            .identity
+            .expect("created public identity");
+        let request = OwnerAttestationRequest {
+            request_ref: ReceiptRef::new("attest-candidate-agent").expect("request ref"),
+            identity_ref: identity.identity_ref().clone(),
+            agent_public_key_hex: NostrPublicKeyHex::new("2".repeat(64)).expect("agent key"),
+            conditions: "scope:read".to_string(),
+        };
+
+        let required = match service.sign_owner_attestation(&request) {
+            Err(CustodyError::IdentityActivationRequired(required)) => required,
+            other => panic!("candidate attestation was not intercepted: {other:?}"),
+        };
+        assert_eq!(
+            required.intent().kind,
+            crate::DurableIdentityActionKind::AgentAttestation
+        );
+        assert_eq!(required.intent().identity_ref, *identity.identity_ref());
+        service
+            .complete_activation(required.intent())
+            .expect("complete exact attestation activation");
+        service
+            .take_activated_identity_action(required.intent())
+            .expect("consume exact held attestation");
+        service
+            .sign_owner_attestation(&request)
+            .expect("active identity signs attestation");
     }
 
     #[test]
@@ -4023,6 +4540,187 @@ mod tests {
             store.state.lock().expect("lock fake store").deletes,
             deletes_before
         );
+    }
+
+    #[test]
+    fn background_creation_and_existing_migration_preserve_the_key_and_origin() {
+        let temporary_directory = tempfile::tempdir().expect("create temporary directory");
+        let store = FakeStore::empty();
+        let data_root = temporary_directory.path().to_path_buf();
+        let initial_service = service(store.clone(), data_root.clone());
+        let created = initial_service
+            .provision_for_process_start(receipt())
+            .expect("provision local candidate");
+        let created_identity = created.identity.expect("created identity");
+        let local = initial_service
+            .inspect_account()
+            .expect("local candidate account");
+        assert_eq!(local.state, IdentityActivationState::CandidateLocal);
+        assert_eq!(local.candidate_origin, IdentityCandidateOrigin::Local);
+        assert_eq!(local.identity, created_identity);
+
+        remove_public_document(&initial_service.paths.account_path)
+            .expect("remove activation metadata");
+        let restarted = service(store, data_root);
+        let migrated = restarted.inspect_account().expect("migrate ready identity");
+        assert_eq!(migrated.state, IdentityActivationState::CandidateExisting);
+        assert_eq!(migrated.candidate_origin, IdentityCandidateOrigin::Existing);
+        assert_eq!(migrated.identity, created_identity);
+        assert_eq!(
+            restarted
+                .inspect()
+                .expect("inspect unchanged custody")
+                .identity,
+            Some(created_identity)
+        );
+    }
+
+    #[test]
+    fn candidate_actions_are_held_cancelled_and_resumed_exactly_once() {
+        let temporary_directory = tempfile::tempdir().expect("create temporary directory");
+        let store = FakeStore::empty();
+        let service = service(store, temporary_directory.path().to_path_buf());
+        service.create(receipt()).expect("create candidate");
+        let descriptor = durable_action_descriptor("nip29:relay:omega-feedback");
+
+        let (account, held) = match service
+            .authorize_or_hold_identity_action(descriptor.clone())
+            .expect("hold candidate action")
+        {
+            DurableIdentityActionDecision::ActivationRequired { account, intent } => {
+                (account, intent)
+            }
+            DurableIdentityActionDecision::Authorized(_) => panic!("candidate bypassed activation"),
+        };
+        assert_eq!(account.state, IdentityActivationState::Activating);
+        assert_eq!(
+            service
+                .authorize_or_hold_identity_action(descriptor.clone())
+                .expect("same action is idempotent"),
+            DurableIdentityActionDecision::ActivationRequired {
+                account,
+                intent: held.clone(),
+            }
+        );
+
+        let cancelled = service
+            .cancel_activation(&held)
+            .expect("cancel exact activation");
+        assert_eq!(cancelled.state, IdentityActivationState::CandidateLocal);
+        assert!(!service.paths.held_identity_action_path.exists());
+
+        let held = match service
+            .authorize_or_hold_identity_action(descriptor)
+            .expect("hold action again")
+        {
+            DurableIdentityActionDecision::ActivationRequired { intent, .. } => intent,
+            DurableIdentityActionDecision::Authorized(_) => panic!("candidate bypassed activation"),
+        };
+        let active = service
+            .complete_activation(&held)
+            .expect("activate exact account");
+        assert_eq!(active.state, IdentityActivationState::Active);
+        let authorization = service
+            .take_activated_identity_action(&held)
+            .expect("take exact action once");
+        assert_eq!(authorization.intent(), &held);
+        assert!(matches!(
+            service.take_activated_identity_action(&held),
+            Err(CustodyError::ActivationIntentConsumed)
+        ));
+    }
+
+    #[test]
+    fn activation_refuses_concurrent_and_stale_action_bindings() {
+        let temporary_directory = tempfile::tempdir().expect("create temporary directory");
+        let store = FakeStore::empty();
+        let service = service(store, temporary_directory.path().to_path_buf());
+        service.create(receipt()).expect("create candidate");
+        let first = match service
+            .authorize_or_hold_identity_action(durable_action_descriptor(
+                "nip29:relay:omega-feedback",
+            ))
+            .expect("hold first action")
+        {
+            DurableIdentityActionDecision::ActivationRequired { intent, .. } => intent,
+            DurableIdentityActionDecision::Authorized(_) => panic!("candidate bypassed activation"),
+        };
+
+        assert!(matches!(
+            service.authorize_or_hold_identity_action(durable_action_descriptor(
+                "nip29:relay:different"
+            )),
+            Err(CustodyError::ActivationInProgress)
+        ));
+
+        let mut stale = first.clone();
+        stale.account_generation += 1;
+        assert!(matches!(
+            service.complete_activation(&stale),
+            Err(CustodyError::StaleActivationIntent)
+        ));
+        service
+            .complete_activation(&first)
+            .expect("activate original binding");
+        assert!(matches!(
+            service.take_activated_identity_action(&stale),
+            Err(CustodyError::StaleActivationIntent)
+        ));
+    }
+
+    #[test]
+    fn activated_action_cannot_be_taken_after_custody_is_lost() {
+        let temporary_directory = tempfile::tempdir().expect("create temporary directory");
+        let store = FakeStore::empty();
+        let service = service(store.clone(), temporary_directory.path().to_path_buf());
+        service.create(receipt()).expect("create candidate");
+        let held = match service
+            .authorize_or_hold_identity_action(durable_action_descriptor("activation:lost"))
+            .expect("hold candidate action")
+        {
+            DurableIdentityActionDecision::ActivationRequired { intent, .. } => intent,
+            DurableIdentityActionDecision::Authorized(_) => panic!("candidate bypassed activation"),
+        };
+        service
+            .complete_activation(&held)
+            .expect("complete activation");
+        store.lose_secret();
+
+        assert!(matches!(
+            service.take_activated_identity_action(&held),
+            Err(CustodyError::CustodyDenied(CustodyState::Lost))
+        ));
+        assert!(service.paths.held_identity_action_path.exists());
+    }
+
+    #[test]
+    fn issued_action_authorization_is_revalidated_against_live_custody() {
+        let temporary_directory = tempfile::tempdir().expect("create temporary directory");
+        let store = FakeStore::empty();
+        let service = service(store.clone(), temporary_directory.path().to_path_buf());
+        service.create(receipt()).expect("create candidate");
+        let held = match service
+            .authorize_or_hold_identity_action(durable_action_descriptor("activation:device-grant"))
+            .expect("hold candidate action")
+        {
+            DurableIdentityActionDecision::ActivationRequired { intent, .. } => intent,
+            DurableIdentityActionDecision::Authorized(_) => panic!("candidate bypassed activation"),
+        };
+        service
+            .complete_activation(&held)
+            .expect("complete activation");
+        let authorization = service
+            .take_activated_identity_action(&held)
+            .expect("consume activated action");
+        service
+            .validate_identity_action_authorization(&authorization)
+            .expect("live account still matches");
+
+        store.lose_secret();
+        assert!(matches!(
+            service.validate_identity_action_authorization(&authorization),
+            Err(CustodyError::CustodyDenied(CustodyState::Lost))
+        ));
     }
 
     #[test]

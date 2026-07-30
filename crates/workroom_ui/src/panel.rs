@@ -43,8 +43,13 @@ use omega_effectd::{
     BindingProjection, BindingState, Issue31GrantProjection, OpenAgentsBinding,
     SharedOmegaEffectdSupervisor, shared_supervisor, try_openagents_binding,
 };
+use omega_identity::{
+    DurableIdentityActionDecision, DurableIdentityActionDescriptor, DurableIdentityActionKind,
+    IdentityService, ProofRef, ReceiptRef, ResourceRef,
+};
 use serde_json::{Value, json};
 use settings::Settings;
+use sha2::{Digest as _, Sha256};
 use text::{Bias, Point};
 use ui::{Button, ButtonStyle, Label, LabelSize, prelude::*};
 use util::ResultExt as _;
@@ -697,7 +702,7 @@ impl SarahWorkroomPanel {
             return;
         };
         // Relation requires the active Omega Nostr public key from isolated custody.
-        let omega_pubkey = match omega_identity::IdentityService::system(*app_identity::CHANNEL)
+        let omega_pubkey = match IdentityService::system(*app_identity::CHANNEL)
             .inspect()
             .ok()
             .and_then(|custody| custody.identity)
@@ -712,11 +717,74 @@ impl SarahWorkroomPanel {
                 return;
             }
         };
+        let payload_digest = format!(
+            "{:x}",
+            Sha256::digest(format!("openagents-account-link\0{omega_pubkey}"))
+        );
+        let intent_ref =
+            match ReceiptRef::new(format!("omega-openagents-link-{}", &payload_digest[..32])) {
+                Ok(intent_ref) => intent_ref,
+                Err(error) => {
+                    self.status = format!("OpenAgents link intent is invalid: {error}").into();
+                    cx.notify();
+                    return;
+                }
+            };
+        let now = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .map_or(0, |duration| duration.as_secs());
+        let activation = IdentityService::system(*app_identity::CHANNEL)
+            .authorize_or_hold_identity_action(DurableIdentityActionDescriptor {
+                authorization_ref: match ProofRef::new(format!(
+                    "activation-{}",
+                    intent_ref.as_str()
+                )) {
+                    Ok(authorization_ref) => authorization_ref,
+                    Err(error) => {
+                        self.status =
+                            format!("OpenAgents link authorization is invalid: {error}").into();
+                        cx.notify();
+                        return;
+                    }
+                },
+                intent_ref,
+                kind: DurableIdentityActionKind::HostedAccountLink,
+                destination_ref: match ResourceRef::new("openagents-account-service") {
+                    Ok(destination_ref) => destination_ref,
+                    Err(error) => {
+                        self.status =
+                            format!("OpenAgents link destination is invalid: {error}").into();
+                        cx.notify();
+                        return;
+                    }
+                },
+                payload_digest,
+                expires_at: now.saturating_add(600),
+            });
+        let authorization = match activation {
+            Ok(DurableIdentityActionDecision::Authorized(authorization)) => authorization,
+            Ok(DurableIdentityActionDecision::ActivationRequired { account, .. }) => {
+                self.status = format!(
+                    "Set up identity {} before binding an OpenAgents account.",
+                    account.fingerprint_display()
+                )
+                .into();
+                cx.notify();
+                return;
+            }
+            Err(error) => {
+                self.status = format!("Omega identity setup is unavailable: {error}").into();
+                cx.notify();
+                return;
+            }
+        };
         self.binding_busy = true;
         self.status = "Binding OpenAgents account securely…".into();
         cx.notify();
         cx.spawn(async move |this, cx| {
-            let projection = binding.bind(&omega_pubkey, cx).await;
+            let projection = binding
+                .bind_authorized(&omega_pubkey, &authorization, cx)
+                .await;
             this.update(cx, |panel, cx| {
                 panel.binding_busy = false;
                 panel.binding_projection = projection.clone();

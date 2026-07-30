@@ -13,7 +13,9 @@ use std::{
 use anyhow::{Context as _, Result, anyhow, ensure};
 use nostr::{Event, JsonUtil as _};
 use omega_identity::{
-    AdmittedSigningRequest, IdentityService, ReceiptRef, SigningPurpose, UnsignedEventTemplate,
+    AdmittedSigningRequest, DurableIdentityActionDecision, DurableIdentityActionDescriptor,
+    DurableIdentityActionKind, IdentityActivationRequired, IdentityService, ProofRef, ReceiptRef,
+    ResourceRef, SigningPurpose, UnsignedEventTemplate,
 };
 use sha2::{Digest as _, Sha256};
 
@@ -169,10 +171,9 @@ pub fn sign_write(
     write: PublicChannelWrite,
     events: &[NostrEventRecord],
 ) -> Result<SignedPublicChannelWrite> {
-    let provision_receipt = ReceiptRef::new("omega.tester-channel.identity.v1")?;
     let custody = identity_service
-        .provision_unattended(provision_receipt)
-        .context("preparing the Omega identity")?;
+        .inspect()
+        .context("inspecting the Omega identity")?;
     let identity = custody
         .identity
         .ok_or_else(|| anyhow!("the Omega identity is not ready"))?;
@@ -201,6 +202,25 @@ pub fn sign_write(
         created_at,
     )?;
     let request_ref = signing_receipt(&identity, &event)?;
+    let payload_digest = format!("{:x}", Sha256::digest(serde_json::to_vec(&event)?));
+    let destination_digest = format!(
+        "{:x}",
+        Sha256::digest(format!("{}\0{}", descriptor.relay_url, descriptor.group_id))
+    );
+    let activation =
+        identity_service.authorize_or_hold_identity_action(DurableIdentityActionDescriptor {
+            intent_ref: request_ref.clone(),
+            kind: DurableIdentityActionKind::PublicPost,
+            destination_ref: ResourceRef::new(format!("nip29-{destination_digest}"))?,
+            authorization_ref: ProofRef::new(format!("activation-{}", request_ref.as_str()))?,
+            payload_digest,
+            expires_at: created_at
+                .checked_add(300)
+                .ok_or_else(|| anyhow!("the activation window overflowed"))?,
+        })?;
+    if let DurableIdentityActionDecision::ActivationRequired { account, intent } = activation {
+        return Err(IdentityActivationRequired::new(account, intent).into());
+    }
     let signed = identity_service
         .sign(&AdmittedSigningRequest {
             request_ref,
@@ -417,6 +437,25 @@ mod tests {
             .expect("alpha feedback channel")
     }
 
+    fn activate_for_write(
+        service: &IdentityService,
+        channel: &ChannelDescriptor,
+        write: PublicChannelWrite,
+        events: &[NostrEventRecord],
+    ) {
+        let error = sign_write(service, channel, write, events)
+            .expect_err("candidate write must require activation");
+        let activation = error
+            .downcast_ref::<IdentityActivationRequired>()
+            .expect("typed activation requirement");
+        service
+            .complete_activation(activation.intent())
+            .expect("complete activation");
+        service
+            .take_activated_identity_action(activation.intent())
+            .expect("take held write once");
+    }
+
     fn event(keys: &Keys, id_seed: u64, created_at: u64, group_id: &str) -> NostrEventRecord {
         let event = EventBuilder::new(Kind::Custom(CHAT_MESSAGE_KIND), id_seed.to_string())
             .custom_created_at(Timestamp::from_secs(created_at))
@@ -581,7 +620,18 @@ mod tests {
         let directory = tempfile::tempdir().expect("identity directory");
         let service =
             IdentityService::for_channel_data_root(AppChannel::Dev, directory.path().to_path_buf());
+        service
+            .create(ReceiptRef::new("test-public-write-create").expect("valid receipt"))
+            .expect("create candidate identity");
         let channel = descriptor();
+        activate_for_write(
+            &service,
+            &channel,
+            PublicChannelWrite::Message {
+                content: "activate identity".to_string(),
+            },
+            &[],
+        );
         let signed = sign_write(
             &service,
             &channel,
@@ -602,6 +652,9 @@ mod tests {
         let directory = tempfile::tempdir().expect("identity directory");
         let service =
             IdentityService::for_channel_data_root(AppChannel::Dev, directory.path().to_path_buf());
+        service
+            .create(ReceiptRef::new("test-public-report-create").expect("valid receipt"))
+            .expect("create candidate identity");
         let channel = descriptor();
         let author = Keys::generate();
         let target = event(&author, 7, 100, &channel.group_id);
@@ -612,6 +665,12 @@ mod tests {
         assert!(
             sign_write(&service, &channel, write.clone(), &[]).is_err(),
             "an arbitrary coordinate must not become a signed public report"
+        );
+        activate_for_write(
+            &service,
+            &channel,
+            write.clone(),
+            std::slice::from_ref(&target),
         );
         let signed =
             sign_write(&service, &channel, write, &[target]).expect("verified target report");
@@ -626,7 +685,18 @@ mod tests {
         let directory = tempfile::tempdir().expect("identity directory");
         let service =
             IdentityService::for_channel_data_root(AppChannel::Dev, directory.path().to_path_buf());
+        service
+            .create(ReceiptRef::new("test-public-retry-create").expect("valid receipt"))
+            .expect("create candidate identity");
         let descriptor = descriptor();
+        activate_for_write(
+            &service,
+            &descriptor,
+            PublicChannelWrite::Message {
+                content: "activate identity".to_string(),
+            },
+            &[],
+        );
         let signed = sign_write(
             &service,
             &descriptor,

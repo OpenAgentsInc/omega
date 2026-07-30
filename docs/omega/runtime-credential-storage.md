@@ -13,6 +13,17 @@ The Nostr signing secret is stored separately as
 `identity/identity.secret` below the channel-specific application data
 directory. It uses the same atomic-write and owner-only permission rules.
 
+The identity directory also contains public-safe authentication metadata:
+
+- `identity/identity.account.json` records the exact public identity, account
+  generation, and candidate, activating, or active state.
+- `identity/identity.action-intent.json` temporarily records one typed durable
+  action while activation is in progress. It contains references, a
+  destination, a payload digest, and an expiry, never the payload or secret.
+
+These metadata records do not make the secret file encrypted and do not grant
+relay, group, hosted-account, or action authority.
+
 The public authentication glossary and target schemas are frozen in
 [Omega Nostr authentication contract](nostr-authentication-contract.md).
 
@@ -31,6 +42,10 @@ security boundary the user's operating-system account and application data
 directory. Omega must never log or render their contents. Unix ownership and
 mode checks ship today; equivalent Windows ACL assurance remains an explicit
 platform-verification requirement.
+
+AUTH-01 deliberately keeps this file-backed design. It does not enable or
+probe the macOS Keychain, Secure Enclave, Windows credential vault, Linux
+secret service, Android keystore, or another native key-vault integration.
 
 Apple code signing and notarization may use a build-machine signing identity.
 That packaging operation is outside the installed application's runtime and

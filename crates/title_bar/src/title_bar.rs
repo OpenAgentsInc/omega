@@ -1098,6 +1098,8 @@ impl TitleBar {
                         )
                         .separator()
                     })
+                    .action("Omega Identity", OpenOnboarding.boxed_clone())
+                    .separator()
                     .map(|this| {
                         let mut this = this.header("Organization");
 

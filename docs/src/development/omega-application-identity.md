@@ -35,25 +35,9 @@ and file modes on Unix. The files are not encrypted at rest. See
 [Runtime credential storage](../../omega/runtime-credential-storage.md) and
 the [Nostr authentication contract](../../omega/nostr-authentication-contract.md).
 
-## Review identity onboarding fixtures
-
-Development builds accept `OMEGA_IDENTITY_FIXTURE` so every public onboarding
-state can be reviewed without writing a key. Supported values are
-`reset-failed`, `locked`, `relaunch-required`, `conflict`, `lost`,
-`incomplete`, `absent`, `creating`, and `ready`.
-
-For example:
-
-```sh
-OMEGA_IDENTITY_FIXTURE=ready cargo run --profile release-fast
-```
-
-These states are presentation fixtures and never write secure custody. The
-masked import preview contains no private key material.
-
 ## Native identity custody
 
-`omega_identity::IdentityService` is the secure native boundary for creating,
+`omega_identity::IdentityService` is the Rust boundary for creating,
 importing, opening, signing with, inspecting, and resetting an Omega identity.
 It stores one 32-byte Nostr secret in the release channel's owner-only
 `identity/identity.secret` file. `KeyringLocator` is a stable version-one
@@ -61,10 +45,16 @@ logical locator name, not a macOS Keychain implementation. On a clean profile,
 the startup coordinator creates this identity silently in the background; it
 does not block the front door on an identity ceremony.
 
+This implementation is file-backed only. AUTH-01 does not enable or probe the
+macOS Keychain, Secure Enclave, Windows credential vault, Linux secret service,
+Android keystore, or another native key vault. Native secure-storage work is
+deferred beyond this wave.
+
 Creation and import are explicit transactions. Omega serializes each mutation
 with a process-global mutex and a channel-scoped cross-process operating-system
 lock, writes the credential, reads it through a fresh credential-provider
-entry, derives its public key, and compares that key with the expected identity.
+entry backed by the local identity file, derives its public key, and compares
+that key with the expected identity.
 Only after that comparison succeeds does it atomically write the public
 manifest and completion record. A mismatch, missing read-back, malformed public
 record, inaccessible store, or lost credential leaves custody non-ready and denies
@@ -77,10 +67,11 @@ public Nostr event.
 
 Create and import use `identity.transaction.json` as a public-safe journal keyed
 by the action receipt. A repeated action resumes the exact transaction; it
-never invokes the generator when the journaled secure value already exists.
-The journal records only operation metadata and, after verified secure storage,
-the expected public identity. A returned failure rolls back to `absent` only
-after credential deletion is read back. If rollback cannot be proved, the
+never invokes the generator when the journaled local-file value already exists.
+The journal records only operation metadata and, after verified local-file
+write and read-back, the expected public identity. A returned failure rolls
+back to `absent` only after credential deletion is read back. If rollback
+cannot be proved, the
 journal remains and replacement creation stays blocked as `incomplete`.
 `inspect_details` exposes the pending operation, original receipt, and optional
 expected public identity without exposing import-candidate or secret material.
@@ -89,8 +80,8 @@ generate only when the journal has not established an expected identity; a
 known identity whose credential is missing remains blocked instead of rotating.
 
 Detailed inspection also classifies conflicts without treating every conflict
-as an owner-choice screen. An ambiguous operating-system credential result has
-no readable candidate key. A manifest/custody mismatch exposes both derived
+as an owner-choice screen. An ambiguous local identity-file result has no
+readable candidate key. A manifest/custody mismatch exposes both derived
 public identities. A pending-transaction mismatch exposes only the conflicting
 public identities from the journal and custody records. Secrets and selected
 paths do not enter the inspection result.
@@ -104,7 +95,7 @@ deletes a differing stored key only when its freshly derived public identity is
 one of those journaled conflict identities, then verifies deletion before
 committing the selected key. A crash or failed delete leaves the journal for an
 exact retry. Normal `adopt` remains unable to replace conflict custody, and an
-ambiguous operating-system credential cannot use this path because Omega cannot
+ambiguous local identity-file result cannot use this path because Omega cannot
 inspect the competing keys.
 
 Reset is marker-first and restart-safe. The initial authorized request writes
@@ -206,13 +197,15 @@ callers must run them on the background executor and propagate
 
 ## Onboarding integration
 
-The Omega onboarding identity section renders `IdentityInspection`, not fixture
-flags. Its durable view contains only public custody state, public identity,
-pending operation/receipt facts, typed conflict details, and recovery-protection
-status. Create, inspect, import, recovery KDF, export, and reset operations run
-on GPUI's background executor. The view holds the foreground waiter task and
-accepts a completion only when both its monotonic generation and operation
-phase still match.
+The Omega onboarding identity section renders real `IdentityInspection` and
+`IdentityAccountRecord` values. It has no fixture environment-variable runtime
+switch. Its durable view contains only public custody state, account activation
+state, public identity and fingerprint, pending operation/receipt facts, typed
+conflict details, and recovery-protection status. Create, inspect, import,
+recovery KDF, export, reset, and account inspection operations run on GPUI's
+background executor. The view holds the foreground waiter task and accepts a
+completion only when both its monotonic generation and operation phase still
+match.
 
 Recovery passwords and advanced Nostr imports use a dedicated `SecureInput`
 instead of the editor-backed form field. It preallocates a bounded
@@ -245,6 +238,24 @@ adopted, and a ready identity is reused without rotating its key. No result
 blocks the editor front door and no onboarding `Finish` action releases a
 startup waiter.
 
+Startup also creates or migrates the public-safe
+`identity/identity.account.json` record. A fresh generated key is
+`CandidateLocal`. A ready identity with no account record is
+`CandidateExisting`; migration preserves the exact key and signed history.
+The account control shows the candidate state and short public fingerprint
+instead of calling ready custody an active account.
+
+The first public post, community join, device grant, hosted-account link, or
+agent attestation passes through the durable identity-action gate. A candidate
+causes one exact intent to be atomically held in
+`identity/identity.action-intent.json` and moves to `Activating`. The intent
+binds account generation, identity, destination, authorization, payload digest,
+and expiry. Activation completion and intent consumption are separate:
+consumption revalidates every binding and succeeds once. Cancellation restores
+the original candidate state, deletes the held intent, and resumes nothing.
+The shared account control is the repair/setup entry point exposed from
+the title bar and from gated action notices.
+
 Named refusal states remain visible through the account and identity repair
 entry points: lost, conflict, incomplete, locked, reset-failed, and
 relaunch-required are not rounded into Ready. They refuse signing until the
@@ -255,9 +266,9 @@ encrypted NIP-49 protection.
 Editor Onboarding is a separately replayable mode available from the Welcome
 page and the `omega::OpenEditorOnboarding` action (also
 `omega::OpenOnboarding`). The Welcome replay remains available on the
-default surface. The two actions are refused: since the mode split was removed
-(omega#161) they are dead command-palette compatibility names. In debug
-builds, `dev::ResetOnboarding` clears the identity and editor completion records
+default surface. The two actions are aliases for the same editor-setup page;
+they do not reinstate a blocking first-run mode. In debug builds,
+`dev::ResetOnboarding` clears the identity and editor completion records
 so reopen can be retested without wiping the whole profile. It renders the
 same Theme and Agent Setup implementations as First Run, with a compact
 identity status that retains custody repair, conflict resolution, recovery, and
