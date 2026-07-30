@@ -1,0 +1,64 @@
+{
+  "schema": "openagents.omega.control-crawl-registry.v1",
+  "description": "Checked-in inventory of interactive surfaces the control-crawl gate must know about (OMEGA-DELTA-0187 / owner review item 17). New surfaces register here in the same commit that introduces them. Status complete means cargo test coverage exists; pending-expansion means the surface is known but hermetic crawl is not yet implemented.",
+  "surfaces": [
+    {
+      "id": "proving-synthetic",
+      "kind": "synthetic",
+      "status": "complete",
+      "crate": "omega_control_crawl",
+      "description": "Core proving scene: working button, menu entry, Escape-dismiss modal, and a deliberate no-op used only by the mutation-proof test.",
+      "coverage": "pointer+keyboard activate; menu entries individual; escape dismissal; mutation proof"
+    },
+    {
+      "id": "omega-front-door",
+      "kind": "hermetic-scene",
+      "status": "pending-expansion",
+      "description": "Sealed composer front door (visual baseline omega_front_door_*).",
+      "follow_up": "Enumerate semantic-tree controls in the sealed front-door scene and wire them into omega_control_crawl."
+    },
+    {
+      "id": "omega-sarah-admission",
+      "kind": "hermetic-scene",
+      "status": "pending-expansion",
+      "description": "Sarah admission / settled voice scenes.",
+      "follow_up": "Crawl admission controls including Escape paths."
+    },
+    {
+      "id": "omega-tester-channel",
+      "kind": "hermetic-scene",
+      "status": "pending-expansion",
+      "description": "Tester-channel first-launch and relay-unavailable scenes.",
+      "follow_up": "Crawl channel rows and empty states."
+    },
+    {
+      "id": "settings-window",
+      "kind": "modal",
+      "status": "pending-expansion",
+      "description": "Settings window must dismiss on Escape (owner law 4 / review item 10).",
+      "follow_up": "Assert Escape dismissal and crawl settings controls."
+    },
+    {
+      "id": "pair-phone",
+      "kind": "modal",
+      "status": "pending-expansion",
+      "description": "Pair-phone surface must dismiss on Escape (owner law 4 / review item 11).",
+      "follow_up": "Assert Escape dismissal."
+    },
+    {
+      "id": "composer-executor-menu",
+      "kind": "menu",
+      "status": "pending-expansion",
+      "description": "Composer executor dropdown entries must each activate (ContextMenuEntry.action trap).",
+      "follow_up": "Activate each menu entry individually via semantic tree."
+    },
+    {
+      "id": "application-menu",
+      "kind": "menu",
+      "status": "pending-expansion",
+      "description": "Application menu honesty currently owner-assisted in the release gate; crawl should absorb it.",
+      "follow_up": "Replace menu-honesty owner row incrementally as entries become crawlable."
+    }
+  ],
+  "exemptions": []
+}

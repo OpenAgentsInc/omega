@@ -11371,6 +11371,14 @@ dependencies = [
 ]
 
 [[package]]
+name = "omega_control_crawl"
+version = "0.1.0"
+dependencies = [
+ "serde",
+ "serde_json",
+]
+
+[[package]]
 name = "omega_deltas"
 version = "0.1.0"
 dependencies = [

@@ -8,6 +8,7 @@
   - [Uninstall](./uninstall.md)
 - [Troubleshooting](./troubleshooting.md)
 - [Alpha Feedback](./alpha-feedback.md)
+- [QA Process](./qa-process.md)
 
 # Working with Code
 

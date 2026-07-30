@@ -1,0 +1,5 @@
+{
+  "schema": "openagents.omega.control-crawl-copy-allowlist.v1",
+  "description": "Exact multi-sentence tooltip or status strings that are allowed to survive the control-crawl copy lint (owner law 2 / OMEGA-DELTA-0187). Prefer deleting the string over allowlisting it. Each entry must name the exact text and a reason.",
+  "entries": []
+}

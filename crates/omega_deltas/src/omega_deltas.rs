@@ -175,6 +175,7 @@ pub const ENFORCED_DELTAS: &[&str] = &[
     "OMEGA-DELTA-0184",
     "OMEGA-DELTA-0185",
     "OMEGA-DELTA-0186",
+    "OMEGA-DELTA-0187",
 ];
 
 /// The concise product contract adjacent to the delta registry.
@@ -23050,6 +23051,7 @@ mod tests {
             "update-safety-lifecycle",
             "distribution",
             "independent-review",
+            "control-crawl",
         ] {
             assert!(
                 gate.contains(row),
@@ -23063,5 +23065,119 @@ mod tests {
                  row's last honest disposition."
             );
         }
+    }
+
+    /// OMEGA-DELTA-0187. The control-crawl gate keeps drawn-implies-working
+    /// from rotting: registry, process doc, hermetic cargo crawl with a
+    /// mutation proof, copy lint, and a release-gate automated row.
+    #[test]
+    fn the_control_crawl_gate_holds() {
+        // Process doc and book entry.
+        let process = read_repository_file("docs/src/qa-process.md");
+        for required in [
+            "Control-crawl gate",
+            "Same-commit registration law",
+            "Severity ladder",
+            "Mutation proof",
+            "drawn implies working",
+            "OMEGA-DELTA-0187",
+        ] {
+            assert!(
+                without_whitespace(&process)
+                    .to_lowercase()
+                    .contains(&without_whitespace(required).to_lowercase()),
+                "OMEGA-DELTA-0187: docs/src/qa-process.md lost `{required}`"
+            );
+        }
+        let summary = read_repository_file("docs/src/SUMMARY.md");
+        assert!(
+            summary.contains("qa-process.md"),
+            "OMEGA-DELTA-0187: docs/src/SUMMARY.md no longer links qa-process.md"
+        );
+
+        // Checked-in registry and copy allowlist exist with the right schemas.
+        let registry = read_repository_file("docs/omega/control-crawl-registry.json");
+        assert!(
+            registry.contains("openagents.omega.control-crawl-registry.v1"),
+            "OMEGA-DELTA-0187: control-crawl registry lost its schema id"
+        );
+        for surface in [
+            "proving-synthetic",
+            "omega-front-door",
+            "settings-window",
+            "pair-phone",
+            "composer-executor-menu",
+        ] {
+            assert!(
+                registry.contains(surface),
+                "OMEGA-DELTA-0187: control-crawl registry lost surface `{surface}`. \
+                 New surfaces register in the same commit (same-commit registration law)."
+            );
+        }
+        let allowlist = read_repository_file("docs/omega/control-crawl-copy-allowlist.json");
+        assert!(
+            allowlist.contains("openagents.omega.control-crawl-copy-allowlist.v1"),
+            "OMEGA-DELTA-0187: copy allowlist lost its schema id"
+        );
+
+        // The crawl crate exists, is a workspace member, and carries the
+        // mutation proof plus the proving-scene crawl.
+        let manifest = read_repository_file("crates/omega_control_crawl/Cargo.toml");
+        assert!(
+            manifest.contains("name = \"omega_control_crawl\""),
+            "OMEGA-DELTA-0187: crates/omega_control_crawl is missing"
+        );
+        let workspace = read_repository_file("Cargo.toml");
+        assert!(
+            workspace.contains("crates/omega_control_crawl")
+                && workspace
+                    .contains("omega_control_crawl = { path = \"crates/omega_control_crawl\" }"),
+            "OMEGA-DELTA-0187: omega_control_crawl is not a workspace member / dependency"
+        );
+        let crawl = read_repository_file("crates/omega_control_crawl/src/omega_control_crawl.rs");
+        for required in [
+            "fn crawl_scene",
+            "deliberate_noop_control_fails_the_crawl",
+            "proving_scene_crawl_passes",
+            "inject_noop",
+            "zero observable consequence",
+            "ActivationMethod::Pointer",
+            "ActivationMethod::Keyboard",
+            "dismiss_with_escape",
+            "is_multi_sentence",
+            "REGISTRY_PATH",
+            "COPY_ALLOWLIST_PATH",
+        ] {
+            assert!(
+                crawl.contains(required),
+                "OMEGA-DELTA-0187: omega_control_crawl lost `{required}`"
+            );
+        }
+        // Mutation proof must assert failure, never invert to expect pass.
+        let mutation = body_of(&crawl, "deliberate_noop_control_fails_the_crawl");
+        assert!(
+            mutation.contains("!report.passed()") || mutation.contains("assert!(!report.passed()"),
+            "OMEGA-DELTA-0187: the mutation proof no longer asserts that a \
+             deliberate no-op fails the crawl"
+        );
+
+        // Release-gate automated row runs the cargo crawl package.
+        let gate = read_repository_file("script/omega-release-gate");
+        for required in [
+            "control-crawl",
+            "omega_control_crawl",
+            "Control-crawl: hermetic drawn-implies-working crawl",
+        ] {
+            assert!(
+                gate.contains(required),
+                "OMEGA-DELTA-0187: script/omega-release-gate lost `{required}`"
+            );
+        }
+        let report = read_repository_file("docs/omega/release-gate.md");
+        assert!(
+            report.contains("control-crawl"),
+            "OMEGA-DELTA-0187: docs/omega/release-gate.md no longer names the \
+             control-crawl row"
+        );
     }
 }

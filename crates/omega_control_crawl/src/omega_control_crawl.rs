@@ -1,0 +1,937 @@
+//! Hermetic control-crawl protocol: drawn implies working.
+//!
+//! OMEGA-DELTA-0187 / owner review item 17. A visible control must produce an
+//! observable consequence when activated with pointer and with keyboard, unless
+//! a registered exemption names why. Menu entries are activated individually so
+//! a display-only row cannot hide behind a parent that only looks interactive.
+//! Escape must dismiss every modal the crawl opens.
+//!
+//! Full GPUI semantic-tree coverage expands scene by scene through the
+//! checked-in registry. This crate owns the protocol, the synthetic proving
+//! scene, the mutation proof, registry load, and the multi-sentence copy lint.
+
+use serde::Deserialize;
+use std::collections::BTreeMap;
+use std::path::{Path, PathBuf};
+
+/// Repository-root-relative path of the crawl registry.
+pub const REGISTRY_PATH: &str = "docs/omega/control-crawl-registry.json";
+
+/// Repository-root-relative path of the multi-sentence copy allowlist.
+pub const COPY_ALLOWLIST_PATH: &str = "docs/omega/control-crawl-copy-allowlist.json";
+
+/// Schema id the registry document must carry.
+pub const REGISTRY_SCHEMA: &str = "openagents.omega.control-crawl-registry.v1";
+
+/// Schema id the copy allowlist must carry.
+pub const COPY_ALLOWLIST_SCHEMA: &str = "openagents.omega.control-crawl-copy-allowlist.v1";
+
+/// How a control was activated.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ActivationMethod {
+    /// Pointer / click path.
+    Pointer,
+    /// Keyboard path (Enter/Space equivalent for the control).
+    Keyboard,
+}
+
+/// Kind of interactive control the crawl knows how to drive.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ControlKind {
+    /// Ordinary button or toggle.
+    Button,
+    /// Individual menu entry (must be activated on its own).
+    MenuEntry,
+    /// Control that opens a modal the crawl must later Escape-dismiss.
+    OpensModal,
+}
+
+/// A registered reason a control may produce no observable consequence.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Exemption {
+    /// Human-readable reason; empty reasons are refused.
+    pub reason: String,
+}
+
+impl Exemption {
+    /// Build an exemption; panics in tests if the reason is empty via validate.
+    pub fn new(reason: impl Into<String>) -> Self {
+        Self {
+            reason: reason.into(),
+        }
+    }
+
+    /// Whether this exemption is well-formed.
+    pub fn is_valid(&self) -> bool {
+        !self.reason.trim().is_empty()
+    }
+}
+
+/// One interactive control the crawl can activate.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct InteractiveControl {
+    /// Stable id inside the scene.
+    pub id: String,
+    /// User-visible label (for failure messages).
+    pub label: String,
+    /// Control kind.
+    pub kind: ControlKind,
+    /// Optional exemption for zero-consequence activation.
+    pub exemption: Option<Exemption>,
+}
+
+/// Observable snapshot used to detect consequence.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct SceneSnapshot {
+    /// Opaque key/value observations the scene chooses to expose.
+    pub observations: BTreeMap<String, String>,
+}
+
+impl SceneSnapshot {
+    /// Insert one observation.
+    pub fn insert(&mut self, key: impl Into<String>, value: impl Into<String>) {
+        self.observations.insert(key.into(), value.into());
+    }
+}
+
+/// Outcome of one activation attempt.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ActivationOutcome {
+    /// Snapshot after the activation.
+    pub after: SceneSnapshot,
+    /// Whether the control claimed to handle the activation.
+    pub handled: bool,
+}
+
+/// A modal currently open in the scene.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct OpenModal {
+    /// Stable modal id.
+    pub id: String,
+    /// User-visible title.
+    pub title: String,
+}
+
+/// Failure recorded by a crawl pass.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct CrawlFailure {
+    /// Control or modal id.
+    pub subject: String,
+    /// Activation method when relevant.
+    pub method: Option<ActivationMethod>,
+    /// Why the crawl failed.
+    pub detail: String,
+}
+
+/// Full report for one scene crawl.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct CrawlReport {
+    /// Scene name.
+    pub scene: String,
+    /// Failures; empty means pass.
+    pub failures: Vec<CrawlFailure>,
+    /// Controls visited.
+    pub controls_activated: usize,
+    /// Modals escape-dismissed.
+    pub modals_dismissed: usize,
+}
+
+impl CrawlReport {
+    /// Whether the crawl passed.
+    pub fn passed(&self) -> bool {
+        self.failures.is_empty()
+    }
+}
+
+/// Scene contract the crawl drives. Production GPUI adapters implement this;
+/// the synthetic proving scene is the first complete implementation.
+pub trait CrawlScene {
+    /// Stable scene name (must match a registry surface id when registered).
+    fn name(&self) -> &str;
+
+    /// Enumerate interactive controls currently reachable.
+    fn enumerate_controls(&self) -> Vec<InteractiveControl>;
+
+    /// Snapshot of observable state before/after activation.
+    fn snapshot(&self) -> SceneSnapshot;
+
+    /// Activate one control. Must not panic on unknown ids; return handled=false.
+    fn activate(&mut self, control_id: &str, method: ActivationMethod) -> ActivationOutcome;
+
+    /// Modals currently open (opened by prior activations in this crawl).
+    fn open_modals(&self) -> Vec<OpenModal>;
+
+    /// Dismiss a modal with Escape. Returns true when the modal is gone.
+    fn dismiss_with_escape(&mut self, modal_id: &str) -> bool;
+}
+
+/// Crawl one scene: activate every control with pointer and keyboard, require
+/// consequence unless exempted, and Escape-dismiss every modal opened.
+pub fn crawl_scene(scene: &mut dyn CrawlScene) -> CrawlReport {
+    let mut report = CrawlReport {
+        scene: scene.name().to_string(),
+        ..CrawlReport::default()
+    };
+
+    let controls = scene.enumerate_controls();
+    for control in &controls {
+        if let Some(exemption) = &control.exemption {
+            if !exemption.is_valid() {
+                report.failures.push(CrawlFailure {
+                    subject: control.id.clone(),
+                    method: None,
+                    detail: "exemption reason is empty; name why this control may be inert"
+                        .to_string(),
+                });
+                continue;
+            }
+        }
+
+        for method in [ActivationMethod::Pointer, ActivationMethod::Keyboard] {
+            let before = scene.snapshot();
+            let outcome = scene.activate(&control.id, method);
+            report.controls_activated += 1;
+
+            if !outcome.handled {
+                report.failures.push(CrawlFailure {
+                    subject: control.id.clone(),
+                    method: Some(method),
+                    detail: format!(
+                        "control {:?} ({}) did not handle {:?} activation",
+                        control.label, control.id, method
+                    ),
+                });
+                continue;
+            }
+
+            let changed = outcome.after != before;
+            if !changed {
+                match &control.exemption {
+                    Some(exemption) if exemption.is_valid() => {}
+                    _ => {
+                        report.failures.push(CrawlFailure {
+                            subject: control.id.clone(),
+                            method: Some(method),
+                            detail: format!(
+                                "zero observable consequence for {:?} ({}) via {:?}; \
+                                 drawn implies working unless a registered exemption names a reason",
+                                control.label, control.id, method
+                            ),
+                        });
+                    }
+                }
+            }
+        }
+    }
+
+    // Capture modal ids first so we can dismiss without holding a borrow.
+    let modal_ids: Vec<(String, String)> = scene
+        .open_modals()
+        .into_iter()
+        .map(|modal| (modal.id, modal.title))
+        .collect();
+    for (modal_id, title) in modal_ids {
+        if scene.dismiss_with_escape(&modal_id) {
+            report.modals_dismissed += 1;
+            // Confirm it is actually gone.
+            let still_open = scene
+                .open_modals()
+                .into_iter()
+                .any(|modal| modal.id == modal_id);
+            if still_open {
+                report.failures.push(CrawlFailure {
+                    subject: modal_id,
+                    method: None,
+                    detail: format!("modal {title:?} claimed Escape dismissal but is still open"),
+                });
+            }
+        } else {
+            report.failures.push(CrawlFailure {
+                subject: modal_id,
+                method: None,
+                detail: format!("modal {title:?} did not dismiss on Escape; every modal must"),
+            });
+        }
+    }
+
+    report
+}
+
+// ---------------------------------------------------------------------------
+// Synthetic proving scene
+// ---------------------------------------------------------------------------
+
+/// Core proving scene used by cargo tests and the release-gate row.
+///
+/// Contains a working toggle, a working menu entry, a modal opener with Escape
+/// dismissal, and — when `inject_noop` is true — a deliberate no-op control
+/// that the mutation-proof test expects to fail the crawl.
+#[derive(Clone, Debug)]
+pub struct ProvingScene {
+    /// When true, include a deliberate no-op control the crawl must fail on.
+    pub inject_noop: bool,
+    toggle_on: bool,
+    menu_fired: u32,
+    modal_open: bool,
+    modal_opened_count: u32,
+}
+
+impl Default for ProvingScene {
+    fn default() -> Self {
+        Self::new(false)
+    }
+}
+
+impl ProvingScene {
+    /// Build a proving scene. Pass `inject_noop = true` only from the mutation
+    /// proof test.
+    pub fn new(inject_noop: bool) -> Self {
+        Self {
+            inject_noop,
+            toggle_on: false,
+            menu_fired: 0,
+            modal_open: false,
+            modal_opened_count: 0,
+        }
+    }
+}
+
+impl CrawlScene for ProvingScene {
+    fn name(&self) -> &str {
+        "proving-synthetic"
+    }
+
+    fn enumerate_controls(&self) -> Vec<InteractiveControl> {
+        let mut controls = vec![
+            InteractiveControl {
+                id: "toggle-working".into(),
+                label: "Working toggle".into(),
+                kind: ControlKind::Button,
+                exemption: None,
+            },
+            InteractiveControl {
+                id: "menu-entry-working".into(),
+                label: "Working menu entry".into(),
+                kind: ControlKind::MenuEntry,
+                exemption: None,
+            },
+            InteractiveControl {
+                id: "open-modal".into(),
+                label: "Open modal".into(),
+                kind: ControlKind::OpensModal,
+                exemption: None,
+            },
+        ];
+        if self.inject_noop {
+            controls.push(InteractiveControl {
+                id: "deliberate-noop".into(),
+                label: "Deliberate no-op".into(),
+                kind: ControlKind::Button,
+                exemption: None,
+            });
+        }
+        controls
+    }
+
+    fn snapshot(&self) -> SceneSnapshot {
+        let mut snapshot = SceneSnapshot::default();
+        snapshot.insert("toggle_on", self.toggle_on.to_string());
+        snapshot.insert("menu_fired", self.menu_fired.to_string());
+        snapshot.insert("modal_open", self.modal_open.to_string());
+        snapshot.insert("modal_opened_count", self.modal_opened_count.to_string());
+        snapshot
+    }
+
+    fn activate(&mut self, control_id: &str, _method: ActivationMethod) -> ActivationOutcome {
+        match control_id {
+            "toggle-working" => {
+                self.toggle_on = !self.toggle_on;
+                ActivationOutcome {
+                    after: self.snapshot(),
+                    handled: true,
+                }
+            }
+            "menu-entry-working" => {
+                self.menu_fired = self.menu_fired.saturating_add(1);
+                ActivationOutcome {
+                    after: self.snapshot(),
+                    handled: true,
+                }
+            }
+            "open-modal" => {
+                // Every activation is observable: bump the open count even when
+                // the modal is already up so pointer then keyboard both change
+                // the snapshot (a real opener re-asserts focus on second arm).
+                self.modal_open = true;
+                self.modal_opened_count = self.modal_opened_count.saturating_add(1);
+                ActivationOutcome {
+                    after: self.snapshot(),
+                    handled: true,
+                }
+            }
+            "deliberate-noop" => {
+                // Handled but inert: the ContextMenuEntry.action trap shape.
+                ActivationOutcome {
+                    after: self.snapshot(),
+                    handled: true,
+                }
+            }
+            _ => ActivationOutcome {
+                after: self.snapshot(),
+                handled: false,
+            },
+        }
+    }
+
+    fn open_modals(&self) -> Vec<OpenModal> {
+        if self.modal_open {
+            vec![OpenModal {
+                id: "proving-modal".into(),
+                title: "Proving modal".into(),
+            }]
+        } else {
+            Vec::new()
+        }
+    }
+
+    fn dismiss_with_escape(&mut self, modal_id: &str) -> bool {
+        if modal_id == "proving-modal" && self.modal_open {
+            self.modal_open = false;
+            true
+        } else {
+            false
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Registry
+// ---------------------------------------------------------------------------
+
+/// Surface status in the crawl registry.
+#[derive(Clone, Debug, PartialEq, Eq, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum SurfaceStatus {
+    /// Crawl coverage is implemented and enforced.
+    Complete,
+    /// Surface is known; crawl implementation still open.
+    PendingExpansion,
+    /// Explicitly out of crawl with a reason on the entry or exemptions list.
+    Exempt,
+}
+
+/// One surface row in the crawl registry.
+#[derive(Clone, Debug, PartialEq, Eq, Deserialize)]
+pub struct RegistrySurface {
+    /// Stable surface id.
+    pub id: String,
+    /// Kind tag (synthetic, hermetic-scene, modal, menu, …).
+    pub kind: String,
+    /// Coverage status.
+    pub status: SurfaceStatus,
+    /// Optional owning crate.
+    #[serde(default)]
+    pub crate_name: Option<String>,
+    /// Description.
+    #[serde(default)]
+    pub description: String,
+}
+
+/// Checked-in crawl registry document.
+#[derive(Clone, Debug, PartialEq, Eq, Deserialize)]
+pub struct CrawlRegistry {
+    /// Schema id.
+    pub schema: String,
+    /// Surfaces the product must not forget.
+    pub surfaces: Vec<RegistrySurface>,
+}
+
+impl CrawlRegistry {
+    /// Parse registry JSON.
+    pub fn parse(json: &str) -> Result<Self, String> {
+        let value: serde_json::Value = serde_json::from_str(json)
+            .map_err(|error| format!("control-crawl registry is not JSON: {error}"))?;
+        // Accept either `crate` or `crate_name` in the document.
+        let normalized = normalize_registry_json(value)?;
+        let registry: Self = serde_json::from_value(normalized)
+            .map_err(|error| format!("control-crawl registry shape is wrong: {error}"))?;
+        if registry.schema != REGISTRY_SCHEMA {
+            return Err(format!(
+                "control-crawl registry schema is {:?}, expected {REGISTRY_SCHEMA}",
+                registry.schema
+            ));
+        }
+        if registry.surfaces.is_empty() {
+            return Err("control-crawl registry has no surfaces".into());
+        }
+        let mut seen = std::collections::BTreeSet::new();
+        for surface in &registry.surfaces {
+            if surface.id.trim().is_empty() {
+                return Err("control-crawl registry has a surface with an empty id".into());
+            }
+            if !seen.insert(surface.id.clone()) {
+                return Err(format!(
+                    "control-crawl registry repeats surface id {:?}",
+                    surface.id
+                ));
+            }
+        }
+        Ok(registry)
+    }
+
+    /// Load the checked-in registry from the repository root.
+    pub fn load_from_repository() -> Result<Self, String> {
+        let path = repository_path(REGISTRY_PATH);
+        let raw = std::fs::read_to_string(&path)
+            .map_err(|error| format!("cannot read {}: {error}", path.display()))?;
+        Self::parse(&raw)
+    }
+
+    /// Whether a surface id is registered.
+    pub fn contains(&self, id: &str) -> bool {
+        self.surfaces.iter().any(|surface| surface.id == id)
+    }
+
+    /// Surface ids with complete crawl coverage.
+    pub fn complete_ids(&self) -> Vec<&str> {
+        self.surfaces
+            .iter()
+            .filter(|surface| surface.status == SurfaceStatus::Complete)
+            .map(|surface| surface.id.as_str())
+            .collect()
+    }
+}
+
+fn normalize_registry_json(mut value: serde_json::Value) -> Result<serde_json::Value, String> {
+    let Some(surfaces) = value
+        .get_mut("surfaces")
+        .and_then(|item| item.as_array_mut())
+    else {
+        return Ok(value);
+    };
+    for surface in surfaces {
+        let Some(object) = surface.as_object_mut() else {
+            continue;
+        };
+        if let Some(crate_value) = object.remove("crate") {
+            object.insert("crate_name".into(), crate_value);
+        }
+    }
+    Ok(value)
+}
+
+// ---------------------------------------------------------------------------
+// Copy lint (owner law 2)
+// ---------------------------------------------------------------------------
+
+/// One allowlisted multi-sentence string.
+#[derive(Clone, Debug, PartialEq, Eq, Deserialize)]
+pub struct CopyAllowlistEntry {
+    /// Exact string allowed.
+    pub text: String,
+    /// Why it is allowed.
+    pub reason: String,
+}
+
+/// Copy allowlist document.
+#[derive(Clone, Debug, PartialEq, Eq, Deserialize)]
+pub struct CopyAllowlist {
+    /// Schema id.
+    pub schema: String,
+    /// Exact allowed strings.
+    #[serde(default)]
+    pub entries: Vec<CopyAllowlistEntry>,
+}
+
+impl CopyAllowlist {
+    /// Parse allowlist JSON.
+    pub fn parse(json: &str) -> Result<Self, String> {
+        let allowlist: Self = serde_json::from_str(json)
+            .map_err(|error| format!("copy allowlist is not valid JSON: {error}"))?;
+        if allowlist.schema != COPY_ALLOWLIST_SCHEMA {
+            return Err(format!(
+                "copy allowlist schema is {:?}, expected {COPY_ALLOWLIST_SCHEMA}",
+                allowlist.schema
+            ));
+        }
+        for entry in &allowlist.entries {
+            if entry.text.trim().is_empty() {
+                return Err("copy allowlist has an entry with empty text".into());
+            }
+            if entry.reason.trim().is_empty() {
+                return Err(format!(
+                    "copy allowlist entry for {:?} has an empty reason",
+                    entry.text
+                ));
+            }
+        }
+        Ok(allowlist)
+    }
+
+    /// Load the checked-in allowlist from the repository root.
+    pub fn load_from_repository() -> Result<Self, String> {
+        let path = repository_path(COPY_ALLOWLIST_PATH);
+        let raw = std::fs::read_to_string(&path)
+            .map_err(|error| format!("cannot read {}: {error}", path.display()))?;
+        Self::parse(&raw)
+    }
+
+    /// Whether `text` is allowlisted.
+    pub fn allows(&self, text: &str) -> bool {
+        self.entries.iter().any(|entry| entry.text == text)
+    }
+}
+
+/// Whether `text` looks like multi-sentence exposition (owner law 2).
+///
+/// A string is multi-sentence when it contains a sentence terminator (`.`,
+/// `!`, or `?`) followed by whitespace and a further alphabetic character.
+/// Single short phrases and one-word tooltips pass.
+pub fn is_multi_sentence(text: &str) -> bool {
+    let trimmed = text.trim();
+    if trimmed.is_empty() {
+        return false;
+    }
+    let bytes = trimmed.as_bytes();
+    let mut index = 0;
+    while index + 2 < bytes.len() {
+        let ch = bytes[index];
+        if matches!(ch, b'.' | b'!' | b'?') {
+            let mut look = index + 1;
+            while look < bytes.len() && bytes[look].is_ascii_whitespace() {
+                look += 1;
+            }
+            if look < bytes.len() && bytes[look].is_ascii_alphabetic() {
+                return true;
+            }
+        }
+        index += 1;
+    }
+    false
+}
+
+/// Lint a set of user-facing strings; returns each multi-sentence string that
+/// is not on the allowlist.
+pub fn lint_copy<'a>(
+    strings: impl IntoIterator<Item = &'a str>,
+    allowlist: &CopyAllowlist,
+) -> Vec<String> {
+    let mut offenders = Vec::new();
+    for text in strings {
+        if is_multi_sentence(text) && !allowlist.allows(text) {
+            offenders.push(text.to_string());
+        }
+    }
+    offenders.sort();
+    offenders.dedup();
+    offenders
+}
+
+// ---------------------------------------------------------------------------
+// Paths
+// ---------------------------------------------------------------------------
+
+/// Resolve a repository-root-relative path from this crate's manifest dir.
+#[must_use]
+pub fn repository_path(relative: &str) -> PathBuf {
+    Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("../..")
+        .join(relative)
+}
+
+// ---------------------------------------------------------------------------
+// Tests
+// ---------------------------------------------------------------------------
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn proving_scene_crawl_passes() {
+        let mut scene = ProvingScene::new(false);
+        let report = crawl_scene(&mut scene);
+        assert!(
+            report.passed(),
+            "proving scene must pass the crawl; failures: {:?}",
+            report.failures
+        );
+        assert!(
+            report.controls_activated >= 6,
+            "expected pointer+keyboard on three controls, got {}",
+            report.controls_activated
+        );
+        assert_eq!(
+            report.modals_dismissed, 1,
+            "open-modal must leave a modal that Escape dismisses"
+        );
+        assert!(
+            !scene.modal_open,
+            "Escape dismissal must leave the proving modal closed"
+        );
+    }
+
+    /// Mutation proof: a deliberate no-op control must fail the crawl.
+    ///
+    /// If this test ever stops failing while `inject_noop` is true, the gate
+    /// can no longer see inert controls and must not land green.
+    #[test]
+    fn deliberate_noop_control_fails_the_crawl() {
+        let mut scene = ProvingScene::new(true);
+        let report = crawl_scene(&mut scene);
+        assert!(
+            !report.passed(),
+            "mutation proof inverted: a deliberate no-op passed the crawl"
+        );
+        let noop_failures: Vec<_> = report
+            .failures
+            .iter()
+            .filter(|failure| failure.subject == "deliberate-noop")
+            .collect();
+        assert!(
+            !noop_failures.is_empty(),
+            "expected failures on deliberate-noop, got {:?}",
+            report.failures
+        );
+        assert!(
+            noop_failures
+                .iter()
+                .any(|failure| { failure.detail.contains("zero observable consequence") }),
+            "noop failures must name zero observable consequence: {noop_failures:?}"
+        );
+        // Pointer and keyboard both required.
+        let methods: Vec<_> = noop_failures
+            .iter()
+            .filter_map(|failure| failure.method)
+            .collect();
+        assert!(
+            methods.contains(&ActivationMethod::Pointer)
+                && methods.contains(&ActivationMethod::Keyboard),
+            "noop must fail for both pointer and keyboard: {methods:?}"
+        );
+    }
+
+    #[test]
+    fn menu_entries_are_activated_individually() {
+        let mut scene = ProvingScene::new(false);
+        let before = scene.menu_fired;
+        let report = crawl_scene(&mut scene);
+        assert!(report.passed(), "{:?}", report.failures);
+        // Pointer + keyboard each fire the menu entry once.
+        assert_eq!(
+            scene.menu_fired,
+            before + 2,
+            "menu entries must be activated individually on both input paths"
+        );
+    }
+
+    #[test]
+    fn escape_dismissal_is_required_for_open_modals() {
+        struct StickyModal;
+        impl CrawlScene for StickyModal {
+            fn name(&self) -> &str {
+                "sticky-modal"
+            }
+            fn enumerate_controls(&self) -> Vec<InteractiveControl> {
+                Vec::new()
+            }
+            fn snapshot(&self) -> SceneSnapshot {
+                SceneSnapshot::default()
+            }
+            fn activate(
+                &mut self,
+                _control_id: &str,
+                _method: ActivationMethod,
+            ) -> ActivationOutcome {
+                ActivationOutcome {
+                    after: self.snapshot(),
+                    handled: false,
+                }
+            }
+            fn open_modals(&self) -> Vec<OpenModal> {
+                vec![OpenModal {
+                    id: "stuck".into(),
+                    title: "Stuck".into(),
+                }]
+            }
+            fn dismiss_with_escape(&mut self, _modal_id: &str) -> bool {
+                false
+            }
+        }
+
+        let mut scene = StickyModal;
+        let report = crawl_scene(&mut scene);
+        assert!(!report.passed());
+        assert!(
+            report
+                .failures
+                .iter()
+                .any(|failure| failure.detail.contains("did not dismiss on Escape")),
+            "{:?}",
+            report.failures
+        );
+    }
+
+    #[test]
+    fn valid_exemption_allows_inert_control() {
+        struct ExemptScene;
+        impl CrawlScene for ExemptScene {
+            fn name(&self) -> &str {
+                "exempt-scene"
+            }
+            fn enumerate_controls(&self) -> Vec<InteractiveControl> {
+                vec![InteractiveControl {
+                    id: "decorative".into(),
+                    label: "Decorative".into(),
+                    kind: ControlKind::Button,
+                    exemption: Some(Exemption::new(
+                        "visual-only badge; not a control in product terms",
+                    )),
+                }]
+            }
+            fn snapshot(&self) -> SceneSnapshot {
+                SceneSnapshot::default()
+            }
+            fn activate(
+                &mut self,
+                _control_id: &str,
+                _method: ActivationMethod,
+            ) -> ActivationOutcome {
+                ActivationOutcome {
+                    after: self.snapshot(),
+                    handled: true,
+                }
+            }
+            fn open_modals(&self) -> Vec<OpenModal> {
+                Vec::new()
+            }
+            fn dismiss_with_escape(&mut self, _modal_id: &str) -> bool {
+                false
+            }
+        }
+
+        let mut scene = ExemptScene;
+        let report = crawl_scene(&mut scene);
+        assert!(report.passed(), "{:?}", report.failures);
+    }
+
+    #[test]
+    fn empty_exemption_reason_fails() {
+        struct BadExempt;
+        impl CrawlScene for BadExempt {
+            fn name(&self) -> &str {
+                "bad-exempt"
+            }
+            fn enumerate_controls(&self) -> Vec<InteractiveControl> {
+                vec![InteractiveControl {
+                    id: "x".into(),
+                    label: "X".into(),
+                    kind: ControlKind::Button,
+                    exemption: Some(Exemption::new("   ")),
+                }]
+            }
+            fn snapshot(&self) -> SceneSnapshot {
+                SceneSnapshot::default()
+            }
+            fn activate(
+                &mut self,
+                _control_id: &str,
+                _method: ActivationMethod,
+            ) -> ActivationOutcome {
+                ActivationOutcome {
+                    after: self.snapshot(),
+                    handled: true,
+                }
+            }
+            fn open_modals(&self) -> Vec<OpenModal> {
+                Vec::new()
+            }
+            fn dismiss_with_escape(&mut self, _modal_id: &str) -> bool {
+                false
+            }
+        }
+
+        let mut scene = BadExempt;
+        let report = crawl_scene(&mut scene);
+        assert!(!report.passed());
+    }
+
+    #[test]
+    fn checked_in_registry_loads_and_names_the_proving_scene() {
+        let registry = CrawlRegistry::load_from_repository()
+            .expect("checked-in control-crawl registry must load");
+        assert!(
+            registry.contains("proving-synthetic"),
+            "registry must list proving-synthetic"
+        );
+        assert!(
+            registry.complete_ids().contains(&"proving-synthetic"),
+            "proving-synthetic must be complete"
+        );
+        // Known sealed / modal surfaces stay registered even while pending.
+        for required in [
+            "omega-front-door",
+            "omega-sarah-admission",
+            "omega-tester-channel",
+            "settings-window",
+            "pair-phone",
+            "composer-executor-menu",
+            "application-menu",
+        ] {
+            assert!(
+                registry.contains(required),
+                "registry lost required surface {required}"
+            );
+        }
+    }
+
+    #[test]
+    fn copy_lint_flags_multi_sentence_and_respects_allowlist() {
+        assert!(is_multi_sentence(
+            "This conversation will run on Omega Agent. The executor is free to change."
+        ));
+        assert!(!is_multi_sentence("Omega Agent"));
+        assert!(!is_multi_sentence("v0.2.0"));
+        assert!(!is_multi_sentence("Ready"));
+
+        let empty = CopyAllowlist {
+            schema: COPY_ALLOWLIST_SCHEMA.into(),
+            entries: Vec::new(),
+        };
+        let essay = "This conversation will run on Omega Agent. The executor is free to change.";
+        let offenders = lint_copy([essay, "Ready", "Send"], &empty);
+        assert_eq!(offenders, vec![essay.to_string()]);
+
+        let allowed = CopyAllowlist {
+            schema: COPY_ALLOWLIST_SCHEMA.into(),
+            entries: vec![CopyAllowlistEntry {
+                text: essay.into(),
+                reason: "temporary until the surface is deleted".into(),
+            }],
+        };
+        assert!(lint_copy([essay], &allowed).is_empty());
+    }
+
+    #[test]
+    fn checked_in_copy_allowlist_loads() {
+        let allowlist =
+            CopyAllowlist::load_from_repository().expect("checked-in copy allowlist must load");
+        assert_eq!(allowlist.schema, COPY_ALLOWLIST_SCHEMA);
+    }
+
+    #[test]
+    fn registry_rejects_wrong_schema_and_duplicate_ids() {
+        let bad_schema =
+            r#"{"schema":"nope","surfaces":[{"id":"a","kind":"x","status":"complete"}]}"#;
+        assert!(CrawlRegistry::parse(bad_schema).is_err());
+
+        let dup = r#"{
+            "schema":"openagents.omega.control-crawl-registry.v1",
+            "surfaces":[
+                {"id":"a","kind":"x","status":"complete"},
+                {"id":"a","kind":"x","status":"complete"}
+            ]
+        }"#;
+        assert!(CrawlRegistry::parse(dup).is_err());
+    }
+}

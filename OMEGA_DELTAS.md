@@ -8281,3 +8281,42 @@ startup recheck — survives unchanged behind that dropdown.
   included, not only the three defaults.
 - **Enforced by:** `removed_editor_crates_stay_removed` and
   `keymaps_name_no_deleted_action` in `crates/omega_deltas`.
+
+### OMEGA-DELTA-0187 — Drawn implies working: the control-crawl gate
+
+- **Upstream Zed:** no product-wide gate that every visible control produces
+  an observable consequence; menu rows can render armed while carrying no
+  action; multi-sentence tooltips and status essays ship freely.
+- **Omega:** owner review item 17 and the standing product laws in the review
+  ledger. A hermetic control-crawl harness enumerates interactive controls per
+  registered scene, activates each with pointer **and** keyboard, and **fails**
+  on zero observable consequence unless a registered exemption names a reason.
+  Menu entries are activated individually (the display-only
+  `ContextMenuEntry.action` trap). Escape dismissal is asserted for every
+  modal the crawl opens. A checked-in crawl registry
+  (`docs/omega/control-crawl-registry.json`) is the inventory: a new surface
+  without a same-commit registration fails the delta check. Multi-sentence
+  tooltips/status strings fail a copy lint unless listed in
+  `docs/omega/control-crawl-copy-allowlist.json`. Process cadence, ownership,
+  severity, and the same-commit registration law live in
+  `docs/src/qa-process.md`.
+- **Scaffold coverage (this land):** the synthetic proving scene in
+  `crates/omega_control_crawl` is `complete`. Sealed front-door, Sarah,
+  tester-channel, settings, pair-phone, composer-executor menu, and
+  application-menu surfaces are registered as `pending-expansion` so the
+  delta check knows they exist; expanding each to a full semantic-tree crawl
+  is follow-up work, not a silent omission.
+- **Mutation proof:** `deliberate_noop_control_fails_the_crawl` injects an
+  inert control and asserts the crawl fails. That test must never be inverted
+  or deleted to green a broken gate.
+- **Release evidence:** `script/omega-release-gate` runs
+  `cargo test -p omega_control_crawl` as the automated `control-crawl` row.
+  Full installed visual crawl of every GPUI scene remains expansion work; the
+  automated row already refuses a broken protocol.
+- **Why:** enabled-looking no-ops (backup-key notice, display-only menu
+  entries, Escape-deaf modals) keep shipping past unit tests that never
+  activate the control. The crawl makes "drawn implies working" a machine
+  check rather than a hope.
+- **Enforced by:** `the_control_crawl_gate_holds` in `crates/omega_deltas`,
+  the tests in `crates/omega_control_crawl`, and the `control-crawl` row of
+  `script/omega-release-gate`.

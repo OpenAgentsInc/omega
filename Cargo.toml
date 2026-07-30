@@ -135,6 +135,7 @@ members = [
     "crates/omega_agent_detect",
     "crates/omega_audience",
     "crates/omega_community",
+    "crates/omega_control_crawl",
     "crates/omega_deltas",
     "crates/omega_acp_server",
     "crates/omega_device_bridge",
@@ -409,6 +410,7 @@ omega_identity = { path = "crates/omega_identity" }
 omega_agent_detect = { path = "crates/omega_agent_detect" }
 omega_audience = { path = "crates/omega_audience" }
 omega_community = { path = "crates/omega_community" }
+omega_control_crawl = { path = "crates/omega_control_crawl" }
 omega_deltas = { path = "crates/omega_deltas" }
 omega_acp_server = { path = "crates/omega_acp_server" }
 omega_device_bridge = { path = "crates/omega_device_bridge" }

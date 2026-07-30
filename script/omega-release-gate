@@ -555,6 +555,45 @@ def main() -> int:
         refs,
     )
 
+    # --- Row: control-crawl (source hermetic crawl, OMEGA-DELTA-0187) ------
+    # Drawn-implies-working protocol + synthetic proving scene + mutation
+    # proof. Full GPUI semantic-tree expansion is registered as
+    # pending-expansion in docs/omega/control-crawl-registry.json; this row
+    # already fails a broken protocol without needing a window.
+    crawl_env = os.environ.copy()
+    crawl = run(
+        [
+            "cargo",
+            "test",
+            "-p",
+            "omega_control_crawl",
+            "--lib",
+        ],
+        cwd=str(ROOT),
+        env=crawl_env,
+    )
+    crawl_output = ((crawl.stdout or "") + (crawl.stderr or "")).strip()
+    crawl_facts = {
+        "command": "cargo test -p omega_control_crawl --lib",
+        "exit_code": crawl.returncode,
+        "output_tail": "\n".join(crawl_output.splitlines()[-80:]),
+        "protocol": "OMEGA-DELTA-0187",
+        "coverage_note": (
+            "Synthetic proving scene + registry + copy lint + mutation proof. "
+            "Hermetic GPUI scene expansion is pending-expansion in the crawl registry."
+        ),
+    }
+    crawl_refs = [evidence.write_text("control-crawl.log", crawl_output + "\n")]
+    add_row(
+        "control-crawl",
+        "Control-crawl: hermetic drawn-implies-working crawl (pointer+keyboard, "
+        "menu entries, Escape dismissal, mutation proof)",
+        "automated-pass" if crawl.returncode == 0 else "automated-fail",
+        crawl_facts,
+        crawl_refs,
+        issues=["omega#160"],
+    )
+
     # --- Row: version truth ------------------------------------------------
     with (app_path / "Contents/Info.plist").open("rb") as handle:
         info = plistlib.load(handle)
