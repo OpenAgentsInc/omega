@@ -24,6 +24,7 @@ omega_actions.workspace = true
 omega_effectd.workspace = true
 omega_identity.workspace = true
 omega_identity_sync.workspace = true
+omega_invites.workspace = true
 omega_signer_broker.workspace = true
 onboarding.workspace = true
 serde_json.workspace = true

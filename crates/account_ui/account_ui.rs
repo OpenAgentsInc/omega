@@ -3,6 +3,10 @@ use std::{
     time::{SystemTime, UNIX_EPOCH},
 };
 
+use agent_ui::omega_invite_control::{
+    InviteControl, InviteControlState, InvitePreviewProjection, InviteRefusal, InviteTerms,
+    JoinStepState, JoinTransactionProjection, join_plan_for_resolved, redacted_invite_input_label,
+};
 use agent_ui::omega_nostr_profile_transport::{
     ProfileChoice, ProfileChoiceOutcome, ProfilePublishError, apply_profile_choice,
 };
@@ -27,6 +31,10 @@ use omega_identity_sync::{
     BulkDecryptConsentState, CacheFallbackReason, HydrationAccountFence, HydrationCache,
     HydrationCacheArea, HydrationReceipt, HydrationSource, HydrationSourceOutcome, HydrationState,
     HydrationTrigger, LocalProfileState, PlaintextPersistencePolicy, TimeoutScope,
+};
+use omega_invites::{
+    InviteProfile, InviteResolver, JoinAccountFence, JoinTransactionStore, ResolvedInvite,
+    SupportLevel,
 };
 use omega_signer_broker::{
     Nip46RelayCoordinator, Nip46RelayError, Nip46WebSocketTransport, RemoteSignerMetadata,
@@ -696,6 +704,9 @@ pub struct IdentityDashboard {
     profile_display_name_input: Entity<Editor>,
     profile_about_input: Entity<Editor>,
     profile_picture_input: Entity<Editor>,
+    invite_input: Entity<SecureInput>,
+    invite_control: InviteControl,
+    pending_invite: Option<(ResolvedInvite, Zeroizing<String>)>,
     hydration_receipt: Option<HydrationReceipt>,
     local_profile_state: Option<LocalProfileState>,
     remote_signer: bool,
@@ -743,6 +754,9 @@ impl IdentityDashboard {
             editor.set_placeholder_text("Picture URL", window, cx);
             editor
         });
+        let invite_input = cx.new(|cx| {
+            SecureInput::new("Paste community invite or relay", "Community invite", 1, cx)
+        });
         let remote_uri_input =
             cx.new(|cx| SecureInput::new("Paste bunker:// connection", "Bunker connection", 1, cx));
         let dashboard = cx.new(|cx| Self {
@@ -767,6 +781,9 @@ impl IdentityDashboard {
             profile_display_name_input,
             profile_about_input,
             profile_picture_input,
+            invite_input,
+            invite_control: InviteControl::default(),
+            pending_invite: None,
             hydration_receipt: None,
             local_profile_state: None,
             remote_signer: false,
@@ -1586,6 +1603,8 @@ impl IdentityDashboard {
             .child(Divider::horizontal())
             .child(self.render_authentication_authority(cx))
             .child(Divider::horizontal())
+            .child(self.render_community_entry(cx))
+            .child(Divider::horizontal())
             .child(
                 h_flex()
                     .gap_2()
@@ -2017,6 +2036,266 @@ impl IdentityDashboard {
 
     fn set_plaintext_policy(&mut self, policy: PlaintextPersistencePolicy, cx: &mut Context<Self>) {
         self.run_identity_sync_mutation(IdentitySyncMutation::PlaintextPolicy(policy), cx);
+    }
+
+    fn resolve_community_invite(&mut self, cx: &mut Context<Self>) {
+        if self.busy {
+            return;
+        }
+        let exact_input = Zeroizing::new(self.invite_input.update(cx, SecureInput::take));
+        let redacted_label = redacted_invite_input_label(&exact_input);
+        self.pending_invite = None;
+        match InviteResolver.resolve(&exact_input) {
+            Ok(resolved) if resolved.preview.support == SupportLevel::Unsupported => {
+                self.invite_control.present_refusal(
+                    InviteRefusal::UnsupportedProfile,
+                    resolved.preview.opaque_evidence.as_ref().map(|evidence| {
+                        format!("sha256:{}:{}", evidence.sha256, evidence.byte_length)
+                    }),
+                );
+                self.message = Some("Unsupported profile preserved as opaque evidence.".into());
+            }
+            Ok(resolved) => {
+                let preview = InvitePreviewProjection::from_core(&resolved.preview);
+                self.invite_control.present_preview(preview);
+                self.pending_invite = Some((resolved, exact_input));
+                self.message = Some(format!("{redacted_label} ready for review.").into());
+            }
+            Err(error) => {
+                zlog::error!("community invite resolve failed: {error}");
+                self.invite_control
+                    .present_refusal(InviteRefusal::Malformed, None);
+                self.message = Some("That invite could not be resolved.".into());
+            }
+        }
+        cx.notify();
+    }
+
+    fn start_community_join(&mut self, cx: &mut Context<Self>) {
+        if self.busy {
+            return;
+        }
+        let Some((account_ref, account_public_key_hex)) = self
+            .selected_entry()
+            .filter(|account| account.is_active)
+            .map(|account| {
+                (
+                    account.account_ref.as_str().to_string(),
+                    account.identity.public_key_hex().as_str().to_string(),
+                )
+            })
+        else {
+            self.message = Some("Select an active identity before joining.".into());
+            cx.notify();
+            return;
+        };
+        let Some(generation) = self
+            .projection
+            .as_ref()
+            .map(|projection| projection.active.generation)
+        else {
+            return;
+        };
+        let Some((resolved, exact_input)) = self.pending_invite.take() else {
+            self.message = Some("Resolve the invite again before starting.".into());
+            cx.notify();
+            return;
+        };
+        let preview = InvitePreviewProjection::from_core(&resolved.preview);
+        if !preview.can_commit() || resolved.preview.profile != InviteProfile::Nip29 {
+            self.pending_invite = Some((resolved, exact_input));
+            self.message = Some("This profile needs an available authority adapter first.".into());
+            cx.notify();
+            return;
+        }
+        let now = unix_time_seconds();
+        let plan = match join_plan_for_resolved(&resolved, exact_input.as_bytes(), now) {
+            Ok(plan) => plan,
+            Err(error) => {
+                zlog::error!("community join plan failed: {error}");
+                self.message = Some("The join transaction could not be prepared.".into());
+                cx.notify();
+                return;
+            }
+        };
+        let fence = match JoinAccountFence::new(account_ref, account_public_key_hex, generation) {
+            Ok(fence) => fence,
+            Err(error) => {
+                zlog::error!("community join account fence failed: {error}");
+                self.message =
+                    Some("The selected identity changed. Resolve the invite again.".into());
+                cx.notify();
+                return;
+            }
+        };
+        let transaction_ref = format!(
+            "join-{}",
+            SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .map_or(0, |duration| duration.as_nanos())
+        );
+        self.busy = true;
+        self.message = None;
+        self.task = Some(cx.spawn(async move |this, cx| {
+            let result = cx
+                .background_spawn(async move {
+                    JoinTransactionStore::system().create(&transaction_ref, fence, plan, now)
+                })
+                .await;
+            this.update(cx, |this, cx| {
+                match result {
+                    Ok(transaction) => {
+                        this.invite_control.present_transaction(
+                            JoinTransactionProjection::from_core(&transaction, &preview),
+                        );
+                        this.message =
+                            Some("Join transaction saved before network mutation.".into());
+                    }
+                    Err(error) => {
+                        zlog::error!("community join transaction creation failed: {error}");
+                        this.message = Some("The join transaction could not be saved.".into());
+                    }
+                }
+                this.busy = false;
+                cx.notify();
+            })
+            .log_err();
+        }));
+        cx.notify();
+    }
+
+    fn render_community_entry(&self, cx: &mut Context<Self>) -> AnyElement {
+        let content =
+            match self.invite_control.state() {
+                InviteControlState::Empty => v_flex()
+                    .gap_2()
+                    .child(detail_row("Invite preview", "Not started", None))
+                    .into_any_element(),
+                InviteControlState::Refused {
+                    refusal,
+                    opaque_evidence_ref,
+                } => v_flex()
+                    .gap_2()
+                    .child(detail_row("Invite", refusal.label(), None))
+                    .when_some(opaque_evidence_ref.clone(), |this, evidence| {
+                        this.child(detail_row("Opaque evidence", evidence, None))
+                    })
+                    .into_any_element(),
+                InviteControlState::Preview(preview) => {
+                    let operations = preview
+                        .operations
+                        .iter()
+                        .map(|operation| operation.label())
+                        .collect::<Vec<_>>()
+                        .join(", ");
+                    let portability = preview
+                        .portability
+                        .iter()
+                        .map(|portability| portability.label())
+                        .collect::<Vec<_>>()
+                        .join(", ");
+                    let terms = match preview.terms {
+                        InviteTerms::NotRequired => "Not required",
+                        InviteTerms::ResolveFromAuthority => "Resolve from authority",
+                        InviteTerms::Required => "Acceptance required",
+                        InviteTerms::Accepted => "Accepted",
+                        InviteTerms::Unknown => "Unknown",
+                    };
+                    v_flex()
+                    .gap_2()
+                    .child(detail_row("Protocol", preview.protocol.label(), None))
+                    .child(detail_row("Authority", preview.authority_label.clone(), None))
+                    .child(detail_row("Authority scope", preview.authority_scope.label(), None))
+                    .child(detail_row("Room", preview.room_label.clone(), None))
+                    .child(detail_row("Visibility", preview.visibility.label(), None))
+                    .child(detail_row("Terms", terms, None))
+                    .child(detail_row("Signing", operations, None))
+                    .child(detail_row("Recovery", preview.recovery.label(), None))
+                    .child(detail_row("Portability", portability, None))
+                    .child(
+                        Button::new("omega-community-start-join", "Join community")
+                            .style(ButtonStyle::Filled)
+                            .size(ButtonSize::Compact)
+                            .disabled(
+                                self.busy
+                                    || !preview.can_commit()
+                                    || preview.protocol
+                                        != agent_ui::omega_invite_control::InviteProtocol::Nip29,
+                            )
+                            .tooltip(Tooltip::text(if preview.protocol
+                                == agent_ui::omega_invite_control::InviteProtocol::Nip29
+                            {
+                                "Save transaction"
+                            } else {
+                                "Adapter unavailable"
+                            }))
+                            .on_click(cx.listener(|this, _, _, cx| {
+                                this.start_community_join(cx)
+                            })),
+                    )
+                    .into_any_element()
+                }
+                InviteControlState::Transaction(transaction) => {
+                    let steps = transaction
+                        .steps
+                        .iter()
+                        .map(|step| {
+                            let state = match step.state {
+                                JoinStepState::Pending => "Pending",
+                                JoinStepState::Complete => "Complete",
+                                JoinStepState::Failed => "Failed",
+                                JoinStepState::Unsupported => "Unsupported",
+                            };
+                            detail_row(step.operation.label(), state, None)
+                        })
+                        .collect::<Vec<_>>();
+                    v_flex()
+                        .gap_2()
+                        .child(detail_row(
+                            "Transaction",
+                            transaction.transaction_ref.clone(),
+                            None,
+                        ))
+                        .child(detail_row("Protocol", transaction.protocol.label(), None))
+                        .child(detail_row(
+                            "Authority",
+                            transaction.authority_label.clone(),
+                            None,
+                        ))
+                        .children(steps)
+                        .child(
+                            Button::new("omega-community-resume-join", "Resume join")
+                                .style(ButtonStyle::OutlinedGhost)
+                                .size(ButtonSize::Compact)
+                                .disabled(true)
+                                .tooltip(Tooltip::text(if transaction.can_resume() {
+                                    "Transport unavailable"
+                                } else {
+                                    "No pending steps"
+                                })),
+                        )
+                        .into_any_element()
+                }
+            };
+
+        v_flex()
+            .gap_2()
+            .child(Label::new("Community entry").size(LabelSize::Small))
+            .child(self.invite_input.clone())
+            .child(
+                Button::new("omega-community-preview-invite", "Preview invite")
+                    .style(ButtonStyle::OutlinedGhost)
+                    .size(ButtonSize::Compact)
+                    .disabled(self.busy)
+                    .on_click(cx.listener(|this, _, _, cx| this.resolve_community_invite(cx))),
+            )
+            .child(content)
+            .child(detail_row(
+                "Invite storage",
+                "Ordinary unencrypted account files",
+                None,
+            ))
+            .into_any_element()
     }
 
     fn run_identity_sync_mutation(

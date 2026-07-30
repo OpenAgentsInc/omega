@@ -1,7 +1,7 @@
 # Omega Nostr authentication contract
 
-- Status: AUTH-00 contract frozen; AUTH-01 through AUTH-06 implemented
-- Packets: `OMEGA-AUTH-00`, `OMEGA-AUTH-01`, `OMEGA-AUTH-02`, `OMEGA-AUTH-03`, `OMEGA-AUTH-04`, `OMEGA-AUTH-05`, `OMEGA-AUTH-06`
+- Status: AUTH-00 contract frozen; AUTH-01 through AUTH-07 implemented
+- Packets: `OMEGA-AUTH-00`, `OMEGA-AUTH-01`, `OMEGA-AUTH-02`, `OMEGA-AUTH-03`, `OMEGA-AUTH-04`, `OMEGA-AUTH-05`, `OMEGA-AUTH-06`, `OMEGA-AUTH-07`
 - Source baseline: Omega `0136fca2d11900ddc7982665482ed8cd035391c7`
 - Product plan:
   [Omega Nostr authentication and onboarding](https://github.com/OpenAgentsInc/openagents/blob/7010561549ebb46a37257292a9100f990a4a3356/docs/omega/2026-07-30-omega-nostr-authentication-and-onboarding.md)
@@ -244,9 +244,11 @@ account records.
 Before network exchange, the desktop UI shows the expected signer when known,
 the requested methods, exact event kinds, exact relay set, seven-day lifetime,
 and dependence on the remote signer for recovery. The first profile is limited
-to login proof plus `sign_event` for kinds `9`, `1111`, `1984`, `22242`, and
-`27235`. NIP-44 encrypt/decrypt and bulk decrypt use separate consent profiles;
-they are not silently folded into connection consent.
+to login proof plus `sign_event` for kinds `9`, `1111`, `1984`, `9021`, `10009`,
+`22242`, and `27235`. Kinds `9021` and `10009` are the exact NIP-29 join-request
+and relay-qualified group-list permissions; Omega does not request an unbounded
+`sign_event` wildcard. NIP-44 encrypt/decrypt and bulk decrypt use separate
+consent profiles; they are not silently folded into connection consent.
 
 Pairing is generation-fenced and correlation-bound. Omega accepts only NIP-46
 events addressed to the disposable client key from a declared relay, verifies
@@ -359,3 +361,59 @@ account and owner-only permissions on Unix. AUTH-06 enables no macOS Keychain,
 Secure Enclave, Windows credential vault, Linux secret service, Android
 keystore, encrypted application vault, native enclave, or hardware-backed
 credential store.
+
+## Community entry interoperability
+
+AUTH-07 resolves community entry without changing the selected account's Nostr
+public key. It recognizes five explicit destination profiles:
+
+- relay-qualified standards-first NIP-29 groups;
+- NIP-29 relay servers whose signed kind `10009` list is updated separately;
+- the pinned Buzz compatibility profile;
+- admitted Armada Concord v1 or v2 profiles; and
+- Omega/OpenAgents service invites.
+
+This first implementation executes the standards-first NIP-29 profile. Buzz,
+Armada Concord, and OpenAgents authority adapters are preview-only and their
+commit controls remain disabled until their typed verification and mutation
+paths are available.
+
+The preview names the profile, authoritative relay or service, room identifier,
+visibility, terms requirement, requested signing operations, recovery model,
+and portability to independent NIP-29, Buzz, Armada, web, and mobile clients.
+These labels are claims about the exact resolved profile. A Buzz extension is
+not presented as complete NIP-29 support, and Concord is not presented as
+encrypted NIP-29. An OpenAgents service can grant only the OpenAgents result it
+actually returns; NIP-42 authentication, relay membership, a Buzz claim, or a
+Concord membership never implies OpenAgents membership, command, moderation,
+payment, or release authority.
+
+Malformed, stale, banned, terms-required, and unsupported-profile outcomes are
+separate refusal states. Unsupported input remains opaque evidence and cannot
+be joined, translated, or projected into a guessed common room model. A
+terms-required preview must be accepted explicitly before the transaction can
+advance.
+
+Omega writes a public-safe join transaction before its first network mutation.
+Relay addition, NIP-42 authentication, invite claim, NIP-29 join, and an
+OpenAgents grant are independent step results. Completed steps are not repeated
+after restart. A partial transaction remains visible with its transaction
+reference, completed and failed steps, and a **Resume join** action; it is not
+rounded up to **Group admitted** and it does not silently roll back evidence of
+a remote mutation.
+
+Raw invite codes, capability query values, and URL fragments are never rendered
+in a preview, error, public transaction projection, log, telemetry event, or
+serialized public record. Public projections retain only profile and authority
+labels, normalized public destination facts, an input digest and byte length,
+and step receipts. The private transaction payload below
+`identity/invites/accounts/<public-key>/` may retain bounded exact step-request
+bytes required for restart-safe NIP-29, Buzz, or Concord work until completion,
+revocation, expiry, or cancellation. It is account-partitioned, never enters a
+public projection, and is deleted with verified read-back.
+
+The public projections describe ordinary unencrypted private transaction files.
+Unix directories use mode `0700` and files use mode `0600`. AUTH-07 enables no
+macOS Keychain, Secure Enclave, Windows credential vault, Linux secret service,
+Android keystore, encrypted application vault, native enclave, or
+hardware-backed credential store.

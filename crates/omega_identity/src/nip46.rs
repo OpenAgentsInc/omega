@@ -273,7 +273,7 @@ impl Nip46PermissionPreview {
                 Nip46CapabilityMethod::LoginProof,
                 Nip46CapabilityMethod::SignEvent,
             ],
-            [9, 1111, 1984, 22242, 27235],
+            [9, 1111, 1984, 9021, 10009, 22242, 27235],
             relays,
             issued_at,
             expires_at,
@@ -1973,7 +1973,7 @@ mod tests {
         );
         assert_eq!(
             preview.event_kinds,
-            BTreeSet::from([9, 1111, 1984, 22242, 27235])
+            BTreeSet::from([9, 1111, 1984, 9021, 10009, 22242, 27235])
         );
         let permission_string = capability_permission_string(&preview);
         assert!(permission_string.contains("sign_event:24246"));

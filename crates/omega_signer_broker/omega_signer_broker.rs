@@ -25,6 +25,8 @@ use thiserror::Error;
 
 pub const FIRST_WAVE_SIGN_EVENT_KINDS: &[u16] = &[9, 1_111, 1_984, 22_242, 27_235];
 pub const PROFILE_METADATA_KIND: u16 = 0;
+pub const GROUP_JOIN_REQUEST_KIND: u16 = 9_021;
+pub const GROUP_LIST_KIND: u16 = 10_009;
 const NIP46_EVENT_KIND: u16 = 24_133;
 const MAX_INBOUND_FRAME_BYTES: usize = 2 * 1024 * 1024;
 const MAX_CONTROL_FRAMES: usize = 64;
@@ -797,6 +799,10 @@ pub enum SignerBrokerError {
     EventKindNotDeclared { kind: u16 },
     #[error("kind-0 profile signing requires explicit remote signer permission")]
     ProfilePermissionRequired,
+    #[error("kind-9021 group join signing requires explicit remote signer permission")]
+    GroupJoinPermissionRequired,
+    #[error("kind-10009 group-list signing requires explicit remote signer permission")]
+    GroupListPermissionRequired,
     #[error("the NIP-46 capability has no bounded relay")]
     NoRelay,
     #[error("the remote signer explicitly rejected the request")]
@@ -852,7 +858,11 @@ fn authorize_remote_sign_event(
     kind: u16,
     now: u64,
 ) -> Result<(), SignerBrokerError> {
-    if kind != PROFILE_METADATA_KIND && !FIRST_WAVE_SIGN_EVENT_KINDS.contains(&kind) {
+    if kind != PROFILE_METADATA_KIND
+        && kind != GROUP_JOIN_REQUEST_KIND
+        && kind != GROUP_LIST_KIND
+        && !FIRST_WAVE_SIGN_EVENT_KINDS.contains(&kind)
+    {
         return Err(SignerBrokerError::EventKindNotDeclared { kind });
     }
     metadata
@@ -861,6 +871,12 @@ fn authorize_remote_sign_event(
         .map_err(|error| match error {
             Nip46Error::UndeclaredCapability if kind == PROFILE_METADATA_KIND => {
                 SignerBrokerError::ProfilePermissionRequired
+            }
+            Nip46Error::UndeclaredCapability if kind == GROUP_JOIN_REQUEST_KIND => {
+                SignerBrokerError::GroupJoinPermissionRequired
+            }
+            Nip46Error::UndeclaredCapability if kind == GROUP_LIST_KIND => {
+                SignerBrokerError::GroupListPermissionRequired
             }
             Nip46Error::UndeclaredCapability => SignerBrokerError::EventKindNotDeclared { kind },
             error => map_nip46_error(error),

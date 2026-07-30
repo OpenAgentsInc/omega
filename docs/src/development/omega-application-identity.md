@@ -197,6 +197,39 @@ Secret-file and cross-process lock operations are synchronous. GPUI
 callers must run them on the background executor and propagate
 `CustodyError` to the onboarding UI instead of blocking the foreground thread.
 
+## Community entry transactions
+
+Community entry reuses the selected Nostr account and never rotates identity to
+match a destination. The Rust resolver distinguishes standards-first NIP-29,
+the pinned Buzz compatibility profile, admitted Armada Concord v1/v2 profiles,
+and Omega/OpenAgents service invites. The GPUI preview names the protocol,
+authority, room, visibility, terms, requested operations, recovery model, and
+client portability before any network mutation.
+
+The join service persists a transaction under
+`identity/invites/accounts/<public-key>/` first. Relay addition, NIP-42
+authentication, invite claim, NIP-29 join, and OpenAgents grant remain separate
+results. The desktop can therefore show partial completion and resume the exact
+transaction without duplicate claims. Unsupported profiles remain unsupported
+and retain only opaque evidence; adapters never infer OpenAgents authority.
+Only the standards-first NIP-29 adapter is executable in this implementation.
+Buzz, Armada Concord, and OpenAgents authority adapters are preview-only, and
+the desktop disables commitment rather than simulating their results.
+
+Invite secrets must not enter public projections, errors, logs, telemetry, or
+public transaction records. Those records contain public-safe metadata, a
+digest, and byte length only. Exact bounded step-request bytes needed to resume
+a NIP-29, Buzz, or Concord claim may live in the private transaction payload.
+The join service binds that payload to the exact account and transaction and
+deletes it with verified read-back after claim completion, revocation, expiry,
+or cancellation.
+
+The private transaction payload is an ordinary unencrypted local file written
+atomically with Unix directory mode `0700` and file mode `0600`. This path
+enables no macOS Keychain, Secure Enclave, Windows credential vault, Linux
+secret service, Android keystore, encrypted application vault, native enclave,
+hardware-backed credential store, or other native key custody.
+
 ## Onboarding integration
 
 The Omega onboarding identity section renders real `IdentityInspection` and

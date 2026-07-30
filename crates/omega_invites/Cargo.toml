@@ -1,0 +1,27 @@
+[package]
+name = "omega_invites"
+version = "0.1.0"
+edition.workspace = true
+publish.workspace = true
+license = "GPL-3.0-or-later"
+
+[lints]
+workspace = true
+
+[lib]
+path = "omega_invites.rs"
+doctest = false
+
+[dependencies]
+atomic-write-file.workspace = true
+nostr.workspace = true
+omega_community.workspace = true
+paths.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+sha2.workspace = true
+thiserror.workspace = true
+url.workspace = true
+
+[dev-dependencies]
+tempfile.workspace = true

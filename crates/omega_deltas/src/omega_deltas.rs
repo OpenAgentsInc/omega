@@ -186,6 +186,7 @@ pub const ENFORCED_DELTAS: &[&str] = &[
     "OMEGA-DELTA-0195",
     "OMEGA-DELTA-0196",
     "OMEGA-DELTA-0197",
+    "OMEGA-DELTA-0198",
 ];
 
 /// The concise product contract adjacent to the delta registry.
@@ -1249,6 +1250,8 @@ pub const DRAFT_PROMPT_STORE_PATH: &str = "crates/agent_ui/src/draft_prompt_stor
 pub const IDENTITY_SYNC_PATH: &str = "crates/omega_identity_sync/omega_identity_sync.rs";
 pub const NOSTR_PROFILE_TRANSPORT_PATH: &str =
     "crates/agent_ui/src/omega_nostr_profile_transport.rs";
+pub const INVITE_INTEROPERABILITY_PATH: &str = "crates/omega_invites/omega_invites.rs";
+pub const INVITE_CONTROL_PATH: &str = "crates/agent_ui/src/omega_invite_control.rs";
 
 /// OMEGA-DELTA-0192. The hosted-account link gate.
 pub const WORKROOM_PANEL_PATH: &str = "crates/workroom_ui/src/panel.rs";
@@ -24596,6 +24599,105 @@ mod tests {
                 assert!(
                     documentation.contains(required),
                     "OMEGA-DELTA-0197: {path} lost `{required}`"
+                );
+            }
+        }
+    }
+
+    /// OMEGA-DELTA-0198. Community entry remains profile-aware, resumable,
+    /// redacted in public projections, and exact about authority.
+    #[test]
+    fn community_entry_preserves_protocol_and_authority_boundaries() {
+        let invites = read_repository_file(INVITE_INTEROPERABILITY_PATH);
+        for required in [
+            "pub struct InviteResolver",
+            "pub enum InviteProfile",
+            "pub enum ResolveRefusal",
+            "pub struct InvitePreview",
+            "pub capability_blockers: BTreeSet<CapabilityBlocker>",
+            "pub struct JoinTransactionStore",
+            "pub struct JoinTransactionProjection",
+            "pub enum JoinStepStatus",
+            "SensitiveInviteMaterial([REDACTED])",
+            "SensitiveRequest([REDACTED])",
+            "identity",
+            "invites",
+            "accounts",
+            "0o700",
+            "0o600",
+        ] {
+            assert!(
+                invites.contains(required),
+                "OMEGA-DELTA-0198: invite interoperability lost `{required}`"
+            );
+        }
+
+        let controller = read_repository_file(INVITE_CONTROL_PATH);
+        for required in [
+            "pub enum InviteProtocol",
+            "InviteProtocol::Unsupported",
+            "pub enum InviteAuthorityScope",
+            "InviteAuthorityScope::Unknown",
+            "pub struct InvitePreviewProjection",
+            "pub fn from_core",
+            "pub struct JoinTransactionProjection",
+            "pub fn can_resume",
+            "pub fn redacted_invite_input_label",
+            "pub fn join_plan_for_resolved",
+            "can_grant_openagents_authority",
+        ] {
+            assert!(
+                controller.contains(required),
+                "OMEGA-DELTA-0198: invite controller lost `{required}`"
+            );
+        }
+
+        let dashboard = read_repository_file(ACCOUNT_UI_PATH);
+        for required in [
+            "Community entry",
+            "Paste community invite or relay",
+            "Preview invite",
+            "Authority scope",
+            "Portability",
+            "Signing",
+            "Recovery",
+            "Join community",
+            "Resume join",
+            "SecureInput::take",
+            ".disabled(true)",
+            "Transport unavailable",
+            "Ordinary unencrypted account files",
+            "JoinTransactionStore::system()",
+        ] {
+            assert!(
+                dashboard.contains(required),
+                "OMEGA-DELTA-0198: account UI lost `{required}`"
+            );
+        }
+
+        for path in [
+            IDENTITY_AUTHENTICATION_DOCUMENT_PATH,
+            RUNTIME_CREDENTIAL_STORAGE_DOCUMENT_PATH,
+            APPLICATION_IDENTITY_DOCUMENT_PATH,
+        ] {
+            let documentation = normalize_prose(&read_repository_file(path));
+            for required in [
+                "identity/invites/accounts/<public-key>/",
+                "ordinary unencrypted",
+                "private transaction payload",
+                "verified read-back",
+                "0700",
+                "0600",
+                "Secure Enclave",
+                "Windows credential vault",
+                "Linux secret service",
+                "Android keystore",
+                "encrypted application vault",
+                "native enclave",
+            ] {
+                assert!(
+                    documentation.contains(required),
+                    "OMEGA-DELTA-0198: {path} lost `{required}`"
                 );
             }
         }

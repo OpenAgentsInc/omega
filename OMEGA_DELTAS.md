@@ -8692,3 +8692,39 @@ startup recheck — survives unchanged behind that dropdown.
   acknowledgement tests in the profile publisher; dashboard state and action
   tests in `account_ui`; and the `OMEGA-DELTA-0197` source assertions in
   `crates/omega_deltas`.
+
+### OMEGA-DELTA-0198 — Community entry preserves protocol and authority boundaries
+
+- **Origin:** OMEGA-AUTH-07, omega#182. Lets one selected Nostr account enter
+  supported communities without translating their authorities into one
+  misleading connected state.
+- **Profiles remain explicit.** Standards-first NIP-29, NIP-29 relay lists, the
+  pinned Buzz profile, admitted Armada Concord v1/v2 profiles, and
+  Omega/OpenAgents service invites have typed previews. Every preview names its
+  protocol, authority, room, visibility, requested signing operations, terms,
+  recovery model, and client portability. Unsupported profile data remains
+  opaque and unjoinable.
+- **Joining is a durable sequence.** A public-safe transaction is written
+  before network mutation. Relay addition, NIP-42 authentication, invite claim,
+  NIP-29 join, and OpenAgents grant are independent results. Partial completion
+  remains visible and resumable without duplicate claims. No relay or protocol
+  result grants OpenAgents membership, command, moderation, payment, or release
+  authority by inference.
+- **Secret-bearing input stays private.** Raw invite codes, capability query
+  values, and URL fragments never enter previews, errors, public transaction
+  projections, logs, telemetry, or public records. A restart-safe NIP-29, Buzz,
+  or Concord claim may retain exact bounded step-request bytes in an
+  account-bound private transaction payload until completion, revocation,
+  expiry, or cancellation, when deletion is verified.
+- **File custody only.** Public join evidence and any private payload live in
+  ordinary unencrypted files below
+  `identity/invites/accounts/<public-key>/`, written atomically with Unix
+  directory mode `0700` and file mode `0600`. This delta enables no macOS
+  Keychain, Secure Enclave, Windows credential vault, Linux secret service,
+  Android keystore, encrypted application vault, native enclave, or
+  hardware-backed credential store.
+- **Enforced by:** profile parsing, preview, redaction, stale, banned, terms,
+  unsupported, partial-result, restart, and duplicate-claim tests in
+  `omega_invites`; public controller projection tests in `agent_ui`; desktop
+  authority and resume affordance assertions in `account_ui`; and the
+  `OMEGA-DELTA-0198` source assertions in `crates/omega_deltas`.

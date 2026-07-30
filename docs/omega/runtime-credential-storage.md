@@ -126,6 +126,31 @@ macOS Keychain, Secure Enclave, Windows credential vault, Linux secret service,
 Android keystore, encrypted application vault, native enclave, or another
 native or hardware-backed key store.
 
+AUTH-07 stores restart-safe community-entry transactions under
+`identity/invites/accounts/<public-key>/`. Their public projections expose an
+input digest and independent receipts for relay addition, NIP-42
+authentication, invite claim, NIP-29 join, and any OpenAgents grant. Partial
+failures remain durable and retryable. Unsupported profile material is
+preserved as opaque evidence rather than interpreted.
+Only standards-first NIP-29 is executable in this implementation. Buzz, Armada
+Concord, and OpenAgents authority adapters remain preview-only and cannot create
+false authority receipts.
+
+Raw invite codes, secret query parameters, and URL fragments are not logged,
+rendered, or included in public records or projections. Those surfaces expose
+only a digest and byte length. A restart-safe NIP-29, Buzz, or Concord claim may
+require exact bounded step-request bytes, so the private transaction payload may
+store them in the same account partition. That payload is read only for the
+exact transaction and is deleted with verified read-back after claim
+completion, revocation, expiry, or cancellation.
+
+The private transaction payload is an ordinary unencrypted file written
+atomically with directory mode `0700` and file mode `0600` on Unix. This is not
+a secret vault and AUTH-07 does not enable the macOS Keychain, Secure Enclave,
+Windows credential vault, Linux secret service, Android keystore, encrypted
+application vault, native enclave, hardware-backed credential store, or
+another native custody integration.
+
 Apple code signing and notarization may use a build-machine signing identity.
 That packaging operation is outside the installed application's runtime and
 does not give Omega access to the build machine's credential store.
