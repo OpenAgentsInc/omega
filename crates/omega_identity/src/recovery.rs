@@ -237,6 +237,13 @@ pub struct PreparedRecovery {
     kind: CandidateKind,
     identity: PublicIdentity,
     pub(crate) secret: SecretKeyMaterial,
+    pub(crate) recovery_protection: Option<PreparedRecoveryProtection>,
+}
+
+pub(crate) struct PreparedRecoveryProtection {
+    pub path: PathBuf,
+    pub artifact_digest: String,
+    pub byte_length: u64,
 }
 
 pub struct SelectedRecovery(PreparedRecovery);
@@ -280,7 +287,22 @@ impl PreparedRecovery {
             kind,
             identity,
             secret,
+            recovery_protection: None,
         })
+    }
+
+    pub(crate) fn with_recovery_protection(
+        mut self,
+        path: PathBuf,
+        artifact_digest: String,
+        byte_length: u64,
+    ) -> Self {
+        self.recovery_protection = Some(PreparedRecoveryProtection {
+            path,
+            artifact_digest,
+            byte_length,
+        });
+        self
     }
 
     pub fn candidate_ref(&self) -> &CandidateRef {

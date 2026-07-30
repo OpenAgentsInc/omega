@@ -20,6 +20,9 @@ The identity directory also contains public-safe authentication metadata:
 - `identity/identity.action-intent.json` temporarily records one typed durable
   action while activation is in progress. It contains references, a
   destination, a payload digest, and an expiry, never the payload or secret.
+- `identity/identity.recovery-protection.json` records that an encrypted
+  recovery artifact for the exact identity was written and verified. It
+  contains no recovery password, ciphertext, or secret.
 
 These metadata records do not make the secret file encrypted and do not grant
 relay, group, hosted-account, or action authority.
@@ -43,7 +46,12 @@ directory. Omega must never log or render their contents. Unix ownership and
 mode checks ship today; equivalent Windows ACL assurance remains an explicit
 platform-verification requirement.
 
-AUTH-01 deliberately keeps this file-backed design. It does not enable or
+AUTH-01 and AUTH-02 deliberately keep this file-backed design. AUTH-02 writes
+the NIP-49 `ncryptsec` artifact to the directory explicitly selected by the
+person and keeps passwords only in zeroizing memory for the operation. It does
+not introduce an encrypted application vault or an account-reset password.
+
+These packets do not enable or
 probe the macOS Keychain, Secure Enclave, Windows credential vault, Linux
 secret service, Android keystore, or another native key-vault integration.
 

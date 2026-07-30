@@ -10,6 +10,7 @@ use std::{
     collections::{BTreeMap, BTreeSet, VecDeque},
     path::Path,
     sync::Arc,
+    time::{SystemTime, UNIX_EPOCH},
 };
 
 use editor::{Editor, EditorEvent};
@@ -19,8 +20,8 @@ use gpui::{
     SharedString, Styled as _, Task, Window, img, list, px,
 };
 use http_client::HttpClient;
-use omega_actions::OpenOnboarding;
-use omega_identity::IdentityActivationRequired;
+use omega_actions::{IdentityActivationEvents, IdentityActivationOutcome, OpenOnboarding};
+use omega_identity::{DurableIdentityActionDecision, HeldIdentityAction};
 use ui::{
     Banner, Button, ButtonSize, ButtonStyle, Color, CopyButton, IconButton, IconName, IconSize,
     Label, LabelSize, ScrollAxes, Scrollbars, Severity, Tooltip, WithScrollbar, prelude::*,
@@ -34,7 +35,8 @@ use crate::{
         PublicChannelMediaUnavailableReason, fetch_public_channel_media,
     },
     omega_public_channel_publish::{
-        PublicChannelWrite, SignedPublicChannelWrite, publish_signed_write, sign_write,
+        PreparedPublicChannelWrite, PublicChannelWrite, SignedPublicChannelWrite,
+        authorize_prepared_write, prepare_write, publish_signed_write, sign_prepared_write,
     },
     omega_public_channel_relay::{
         RelayAdmissionLimits, RelayCursor, RelayGapReason, RelayIntent, RelayLifecycle,
@@ -59,6 +61,15 @@ enum WriteStatus {
     SendingReport,
     ReportSent,
     Failed(String),
+}
+
+enum PublicChannelWriteWork {
+    Published(SignedPublicChannelWrite),
+    ActivationRequired {
+        prepared: PreparedPublicChannelWrite,
+        intent: HeldIdentityAction,
+        fingerprint: String,
+    },
 }
 
 impl WriteStatus {
@@ -528,7 +539,148 @@ impl PublicChannelView {
         let events = self.relay_snapshot.events.clone();
         let work = cx.background_spawn(async move {
             let identity_service = omega_identity::IdentityService::system(*app_identity::CHANNEL);
-            let signed = sign_write(&identity_service, &descriptor, write, &events)?;
+            let prepared = prepare_write(&identity_service, &descriptor, write, &events)?;
+            match authorize_prepared_write(&identity_service, &prepared)? {
+                DurableIdentityActionDecision::Authorized(authorization) => {
+                    let signed = sign_prepared_write(
+                        &identity_service,
+                        &descriptor,
+                        prepared,
+                        &authorization,
+                    )?;
+                    publish_signed_write(&descriptor, &signed)?;
+                    anyhow::Ok(PublicChannelWriteWork::Published(signed))
+                }
+                DurableIdentityActionDecision::ActivationRequired { account, intent } => {
+                    anyhow::Ok(PublicChannelWriteWork::ActivationRequired {
+                        prepared,
+                        intent,
+                        fingerprint: account.fingerprint_display(),
+                    })
+                }
+            }
+        });
+        self.write_task = Some(cx.spawn(async move |this, cx| {
+            let result = work.await;
+            if let Err(error) = this.update_in(cx, move |this, window, cx| match result {
+                Ok(PublicChannelWriteWork::Published(signed)) => {
+                    this.finish_write(signed, window, cx)
+                }
+                Ok(PublicChannelWriteWork::ActivationRequired {
+                    prepared,
+                    intent,
+                    fingerprint,
+                }) => {
+                    let now = match SystemTime::now().duration_since(UNIX_EPOCH) {
+                        Ok(duration) => duration.as_secs(),
+                        Err(error) => {
+                            this.write_status = WriteStatus::Failed(format!(
+                                "Could not retain this write because the system clock is invalid: {error}"
+                            ));
+                            cx.notify();
+                            return;
+                        }
+                    };
+                    let owner = cx.weak_entity();
+                    let callback_intent = intent.clone();
+                    match IdentityActivationEvents::register(
+                        intent,
+                        now,
+                        move |outcome, cx| {
+                            let resume_intent = callback_intent.clone();
+                            if let Err(error) =
+                                owner.update(cx, |this, cx| match outcome {
+                                    IdentityActivationOutcome::Completed => {
+                                        this.resume_prepared_write(
+                                            prepared,
+                                            resume_intent,
+                                            cx,
+                                        );
+                                    }
+                                    IdentityActivationOutcome::Cancelled => {
+                                        this.write_status = WriteStatus::Failed(
+                                            "Identity setup was cancelled; nothing was sent."
+                                                .to_string(),
+                                        );
+                                        cx.notify();
+                                    }
+                                    IdentityActivationOutcome::Expired => {
+                                        this.write_status = WriteStatus::Failed(
+                                            "Identity setup expired; nothing was sent.".to_string(),
+                                        );
+                                        cx.notify();
+                                    }
+                                })
+                            {
+                                log::debug!(
+                                    "public-channel activation finished after its owner closed: {error:#}"
+                                );
+                                if outcome == IdentityActivationOutcome::Completed {
+                                    let identity_service =
+                                        omega_identity::IdentityService::system(
+                                            *app_identity::CHANNEL,
+                                        );
+                                    if let Err(error) = identity_service
+                                        .take_activated_identity_action(&callback_intent)
+                                    {
+                                        log::warn!(
+                                            "could not consume the completed public-write activation after its owner closed: {error}"
+                                        );
+                                    }
+                                }
+                            }
+                        },
+                        cx,
+                    ) {
+                        Ok(()) => {
+                            this.write_status = WriteStatus::Failed(format!(
+                                "Set up identity {fingerprint} to finish this exact write."
+                            ));
+                            window.dispatch_action(OpenOnboarding.boxed_clone(), cx);
+                            cx.notify();
+                        }
+                        Err(error) => {
+                            this.write_status = WriteStatus::Failed(format!(
+                                "Could not retain this write for identity setup: {error}"
+                            ));
+                            cx.notify();
+                        }
+                    }
+                }
+                Err(error) => {
+                    this.write_status = WriteStatus::Failed(error.to_string());
+                    cx.notify();
+                }
+            }) {
+                log::debug!("tester-channel write finished after its view closed: {error:#}");
+            }
+        }));
+    }
+
+    fn resume_prepared_write(
+        &mut self,
+        prepared: PreparedPublicChannelWrite,
+        intent: HeldIdentityAction,
+        cx: &mut Context<Self>,
+    ) {
+        if self.write_status.is_sending() {
+            return;
+        }
+        self.write_status = if prepared.is_report() {
+            WriteStatus::SendingReport
+        } else {
+            WriteStatus::SendingMessage
+        };
+        cx.notify();
+
+        let descriptor = self.descriptor.clone();
+        let work = cx.background_spawn(async move {
+            let identity_service = omega_identity::IdentityService::system(*app_identity::CHANNEL);
+            let authorization = identity_service
+                .take_activated_identity_action(&intent)
+                .map_err(anyhow::Error::from)?;
+            let signed =
+                sign_prepared_write(&identity_service, &descriptor, prepared, &authorization)?;
             publish_signed_write(&descriptor, &signed)?;
             anyhow::Ok(signed)
         });
@@ -537,14 +689,15 @@ impl PublicChannelView {
             if let Err(error) = this.update_in(cx, move |this, window, cx| match result {
                 Ok(signed) => this.finish_write(signed, window, cx),
                 Err(error) => {
-                    if error.downcast_ref::<IdentityActivationRequired>().is_some() {
-                        window.dispatch_action(OpenOnboarding.boxed_clone(), cx);
-                    }
-                    this.write_status = WriteStatus::Failed(error.to_string());
+                    this.write_status = WriteStatus::Failed(format!(
+                        "The prepared write was not sent after identity setup: {error}"
+                    ));
                     cx.notify();
                 }
             }) {
-                log::debug!("tester-channel write finished after its view closed: {error:#}");
+                log::debug!(
+                    "prepared public-channel write finished after its view closed: {error:#}"
+                );
             }
         }));
     }

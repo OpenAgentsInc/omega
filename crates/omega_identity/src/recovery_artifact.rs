@@ -31,9 +31,15 @@ pub(crate) fn discover(path: PathBuf) -> Result<RecoveryCandidate, RecoveryArtif
     ))
 }
 
+pub(crate) struct RecoveryArtifactRead {
+    pub encrypted: EncryptedSecretKey,
+    pub digest: String,
+    pub byte_length: u64,
+}
+
 pub(crate) fn read_encrypted(
     candidate: &RecoveryCandidate,
-) -> Result<EncryptedSecretKey, RecoveryArtifactError> {
+) -> Result<RecoveryArtifactRead, RecoveryArtifactError> {
     let file = secure_open(candidate.path())?;
     let metadata = file.metadata()?;
     validate_metadata(candidate.path(), &metadata)?;
@@ -67,7 +73,24 @@ pub(crate) fn read_encrypted(
     if !(16..=18).contains(&encrypted.log_n()) {
         return Err(RecoveryArtifactError::UnsupportedWorkFactor);
     }
-    Ok(encrypted)
+    Ok(RecoveryArtifactRead {
+        encrypted,
+        digest: hex::encode(Sha256::digest(&bytes)),
+        byte_length: metadata.len(),
+    })
+}
+
+pub(crate) fn verify_protection(
+    path: &Path,
+    expected_digest: &str,
+    expected_byte_length: u64,
+) -> Result<(), RecoveryArtifactError> {
+    let candidate = discover(path.to_path_buf())?;
+    let artifact = read_encrypted(&candidate)?;
+    if artifact.digest != expected_digest || artifact.byte_length != expected_byte_length {
+        return Err(RecoveryArtifactError::CandidateChanged);
+    }
+    Ok(())
 }
 
 pub(crate) fn write_encrypted(
@@ -271,9 +294,10 @@ mod tests {
 
         let candidate = discover(artifact_path).expect("discover official recovery vector");
         let encrypted = read_encrypted(&candidate).expect("read official recovery vector");
-        assert_eq!(encrypted.log_n(), 16);
+        assert_eq!(encrypted.encrypted.log_n(), 16);
         assert_eq!(
             encrypted
+                .encrypted
                 .to_bech32()
                 .expect("encode official recovery vector"),
             NIP49_VECTOR

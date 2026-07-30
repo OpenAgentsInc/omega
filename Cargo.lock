@@ -10933,6 +10933,7 @@ name = "omega_actions"
 version = "0.1.0"
 dependencies = [
  "gpui",
+ "omega_identity",
  "schemars 1.0.4",
  "serde",
  "util",

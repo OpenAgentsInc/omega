@@ -14,8 +14,9 @@ use anyhow::{Context as _, Result, anyhow, ensure};
 use nostr::{Event, JsonUtil as _};
 use omega_identity::{
     AdmittedSigningRequest, DurableIdentityActionDecision, DurableIdentityActionDescriptor,
-    DurableIdentityActionKind, IdentityActivationRequired, IdentityService, ProofRef, ReceiptRef,
-    ResourceRef, SigningPurpose, UnsignedEventTemplate,
+    DurableIdentityActionKind, IdentityActionAuthorization, IdentityActivationRequired,
+    IdentityRef, IdentityService, ProofRef, ReceiptRef, ResourceRef, SigningPurpose,
+    UnsignedEventTemplate,
 };
 use sha2::{Digest as _, Sha256};
 
@@ -51,6 +52,26 @@ impl PublicChannelWrite {
             Self::Message { content } => content,
             Self::Report { .. } => "",
         }
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct PreparedPublicChannelWrite {
+    identity_ref: IdentityRef,
+    request_ref: ReceiptRef,
+    activation: DurableIdentityActionDescriptor,
+    event: UnsignedEventTemplate,
+    is_report: bool,
+}
+
+impl PreparedPublicChannelWrite {
+    pub fn is_report(&self) -> bool {
+        self.is_report
+    }
+
+    #[cfg(test)]
+    fn event(&self) -> &UnsignedEventTemplate {
+        &self.event
     }
 }
 
@@ -171,13 +192,45 @@ pub fn sign_write(
     write: PublicChannelWrite,
     events: &[NostrEventRecord],
 ) -> Result<SignedPublicChannelWrite> {
+    let prepared = prepare_write(identity_service, descriptor, write, events)?;
+    match authorize_prepared_write(identity_service, &prepared)? {
+        DurableIdentityActionDecision::Authorized(authorization) => {
+            sign_prepared_write(identity_service, descriptor, prepared, &authorization)
+        }
+        DurableIdentityActionDecision::ActivationRequired { account, intent } => {
+            Err(IdentityActivationRequired::new(account, intent).into())
+        }
+    }
+}
+
+pub fn prepare_write(
+    identity_service: &IdentityService,
+    descriptor: &ChannelDescriptor,
+    write: PublicChannelWrite,
+    events: &[NostrEventRecord],
+) -> Result<PreparedPublicChannelWrite> {
+    prepare_write_at(
+        identity_service,
+        descriptor,
+        write,
+        events,
+        unix_time_seconds()?,
+    )
+}
+
+fn prepare_write_at(
+    identity_service: &IdentityService,
+    descriptor: &ChannelDescriptor,
+    write: PublicChannelWrite,
+    events: &[NostrEventRecord],
+    created_at: u64,
+) -> Result<PreparedPublicChannelWrite> {
     let custody = identity_service
         .inspect()
         .context("inspecting the Omega identity")?;
     let identity = custody
         .identity
         .ok_or_else(|| anyhow!("the Omega identity is not ready"))?;
-    let created_at = unix_time_seconds()?;
     if let PublicChannelWrite::Report {
         event_id,
         author_public_key,
@@ -207,8 +260,10 @@ pub fn sign_write(
         "{:x}",
         Sha256::digest(format!("{}\0{}", descriptor.relay_url, descriptor.group_id))
     );
-    let activation =
-        identity_service.authorize_or_hold_identity_action(DurableIdentityActionDescriptor {
+    Ok(PreparedPublicChannelWrite {
+        identity_ref: identity.identity_ref().clone(),
+        request_ref: request_ref.clone(),
+        activation: DurableIdentityActionDescriptor {
             intent_ref: request_ref.clone(),
             kind: DurableIdentityActionKind::PublicPost,
             destination_ref: ResourceRef::new(format!("nip29-{destination_digest}"))?,
@@ -217,16 +272,96 @@ pub fn sign_write(
             expires_at: created_at
                 .checked_add(300)
                 .ok_or_else(|| anyhow!("the activation window overflowed"))?,
-        })?;
-    if let DurableIdentityActionDecision::ActivationRequired { account, intent } = activation {
-        return Err(IdentityActivationRequired::new(account, intent).into());
-    }
+        },
+        event,
+        is_report: matches!(write, PublicChannelWrite::Report { .. }),
+    })
+}
+
+pub fn authorize_prepared_write(
+    identity_service: &IdentityService,
+    prepared: &PreparedPublicChannelWrite,
+) -> Result<DurableIdentityActionDecision> {
+    let custody = identity_service
+        .inspect()
+        .context("rechecking the Omega identity before public-write authorization")?;
+    let identity = custody
+        .identity
+        .ok_or_else(|| anyhow!("the Omega identity is not ready"))?;
+    ensure!(
+        identity.identity_ref() == &prepared.identity_ref,
+        "the Omega identity changed after the public write was prepared"
+    );
+    identity_service
+        .authorize_or_hold_identity_action(prepared.activation.clone())
+        .context("authorizing the prepared public tester-channel event")
+}
+
+pub fn sign_prepared_write(
+    identity_service: &IdentityService,
+    live_descriptor: &ChannelDescriptor,
+    prepared: PreparedPublicChannelWrite,
+    authorization: &IdentityActionAuthorization,
+) -> Result<SignedPublicChannelWrite> {
+    live_descriptor.validate()?;
+    let prepared_payload_digest =
+        format!("{:x}", Sha256::digest(serde_json::to_vec(&prepared.event)?));
+    ensure!(
+        prepared_payload_digest == prepared.activation.payload_digest,
+        "the prepared public-write payload changed after identity activation"
+    );
+    let destination_digest = format!(
+        "{:x}",
+        Sha256::digest(format!(
+            "{}\0{}",
+            live_descriptor.relay_url, live_descriptor.group_id
+        ))
+    );
+    let live_destination = ResourceRef::new(format!("nip29-{destination_digest}"))?;
+    let intent = authorization.intent();
+    ensure!(
+        intent.intent_ref == prepared.activation.intent_ref
+            && intent.identity_ref == prepared.identity_ref
+            && intent.kind == prepared.activation.kind
+            && intent.destination_ref == prepared.activation.destination_ref
+            && intent.authorization_ref == prepared.activation.authorization_ref
+            && intent.payload_digest == prepared.activation.payload_digest
+            && intent.expires_at == prepared.activation.expires_at,
+        "the activation authorization does not match the prepared public write"
+    );
+    ensure!(
+        live_destination == intent.destination_ref,
+        "the public channel destination changed after identity activation"
+    );
+    ensure!(
+        live_descriptor
+            .accepted_kinds
+            .contains(&prepared.event.kind),
+        "the public channel no longer accepts the prepared event kind"
+    );
+    identity_service
+        .validate_identity_action_authorization(authorization)
+        .context("revalidating the prepared public-write authorization")?;
+    let custody = identity_service
+        .inspect()
+        .context("rechecking the Omega identity before signing")?;
+    let identity = custody
+        .identity
+        .ok_or_else(|| anyhow!("the Omega identity is not ready"))?;
+    ensure!(
+        identity.identity_ref() == &prepared.identity_ref,
+        "the Omega identity changed before the prepared public write was signed"
+    );
+    ensure!(
+        signing_receipt(&identity, &prepared.event)? == prepared.request_ref,
+        "the prepared public-write receipt no longer matches its exact event"
+    );
     let signed = identity_service
         .sign(&AdmittedSigningRequest {
-            request_ref,
-            identity_ref: identity.identity_ref().clone(),
+            request_ref: prepared.request_ref,
+            identity_ref: prepared.identity_ref,
             purpose: SigningPurpose::NostrEvent,
-            event,
+            event: prepared.event,
         })
         .context("signing the public tester-channel event")?;
     let event = Event::from_json(&signed.signed_event_json)
@@ -260,7 +395,7 @@ pub fn sign_write(
         event,
         record,
         author_public_key: identity.public_key_hex().as_str().to_string(),
-        is_report: matches!(write, PublicChannelWrite::Report { .. }),
+        is_report: prepared.is_report,
     })
 }
 
@@ -421,6 +556,7 @@ mod tests {
     use super::*;
     use app_identity::AppChannel;
     use nostr::{EventBuilder, Keys, Kind, Tag, Timestamp};
+    use omega_identity::RecoveryPassword;
     use serde_json::{Value, json};
 
     use crate::omega_public_channel_relay::{
@@ -448,6 +584,15 @@ mod tests {
         let activation = error
             .downcast_ref::<IdentityActivationRequired>()
             .expect("typed activation requirement");
+        let recovery_directory = tempfile::tempdir().expect("recovery directory");
+        service
+            .export_recovery_artifact(
+                &activation.intent().identity_ref,
+                &recovery_directory.path().join("identity.ncryptsec"),
+                RecoveryPassword::new("test public write recovery".to_string())
+                    .expect("valid recovery password"),
+            )
+            .expect("protect candidate recovery");
         service
             .complete_activation(activation.intent())
             .expect("complete activation");
@@ -648,6 +793,115 @@ mod tests {
     }
 
     #[test]
+    fn activation_resume_signs_the_exact_prepared_event() {
+        let directory = tempfile::tempdir().expect("identity directory");
+        let service =
+            IdentityService::for_channel_data_root(AppChannel::Dev, directory.path().to_path_buf());
+        service
+            .create(ReceiptRef::new("test-prepared-resume-create").expect("valid receipt"))
+            .expect("create candidate identity");
+        let channel = descriptor();
+        let prepared = prepare_write(
+            &service,
+            &channel,
+            PublicChannelWrite::Message {
+                content: "retain this exact event".to_string(),
+            },
+            &[],
+        )
+        .expect("prepare candidate write");
+        let original_event = prepared.event().clone();
+        let original_digest = format!(
+            "{:x}",
+            Sha256::digest(serde_json::to_vec(&original_event).expect("serialize prepared event"))
+        );
+        let activation = match authorize_prepared_write(&service, &prepared)
+            .expect("hold prepared candidate write")
+        {
+            DurableIdentityActionDecision::ActivationRequired { intent, .. } => intent,
+            DurableIdentityActionDecision::Authorized(_) => {
+                panic!("candidate write unexpectedly authorized")
+            }
+        };
+        assert_eq!(activation.payload_digest, original_digest);
+        let recovery_directory = tempfile::tempdir().expect("recovery directory");
+        service
+            .export_recovery_artifact(
+                &activation.identity_ref,
+                &recovery_directory.path().join("identity.ncryptsec"),
+                RecoveryPassword::new("test exact resume recovery".to_string())
+                    .expect("valid recovery password"),
+            )
+            .expect("protect candidate recovery");
+        service
+            .complete_activation(&activation)
+            .expect("complete exact activation");
+        let authorization = service
+            .take_activated_identity_action(&activation)
+            .expect("consume exact held write");
+        assert_eq!(authorization.intent().payload_digest, original_digest);
+        let signed = sign_prepared_write(&service, &channel, prepared, &authorization)
+            .expect("sign exact prepared event");
+
+        assert_eq!(
+            u64::try_from(signed.record.created_at).expect("non-negative event time"),
+            original_event.created_at
+        );
+        assert_eq!(signed.record.content, original_event.content);
+        assert_eq!(signed.record.tags, original_event.tags);
+        assert_eq!(signed.record.kind, original_event.kind);
+        assert!(
+            service.take_activated_identity_action(&activation).is_err(),
+            "the held write must remain one-shot"
+        );
+    }
+
+    #[test]
+    fn prepared_write_refuses_a_changed_live_destination() {
+        let directory = tempfile::tempdir().expect("identity directory");
+        let service =
+            IdentityService::for_channel_data_root(AppChannel::Dev, directory.path().to_path_buf());
+        service
+            .create(ReceiptRef::new("test-live-destination-create").expect("valid receipt"))
+            .expect("create candidate identity");
+        let channel = descriptor();
+        activate_for_write(
+            &service,
+            &channel,
+            PublicChannelWrite::Message {
+                content: "activate destination test".to_string(),
+            },
+            &[],
+        );
+        let prepared = prepare_write(
+            &service,
+            &channel,
+            PublicChannelWrite::Message {
+                content: "must stay in the original channel".to_string(),
+            },
+            &[],
+        )
+        .expect("prepare active write");
+        let authorization =
+            match authorize_prepared_write(&service, &prepared).expect("authorize active write") {
+                DurableIdentityActionDecision::Authorized(authorization) => authorization,
+                DurableIdentityActionDecision::ActivationRequired { .. } => {
+                    panic!("active write unexpectedly requires activation")
+                }
+            };
+        let mut changed_channel = channel;
+        changed_channel.group_id.push_str("-different");
+
+        let error = sign_prepared_write(&service, &changed_channel, prepared, &authorization)
+            .expect_err("changed destination must be refused");
+        assert!(
+            error
+                .to_string()
+                .contains("destination changed after identity activation")
+        );
+    }
+
+    #[test]
     fn signing_a_report_requires_the_exact_verified_channel_message() {
         let directory = tempfile::tempdir().expect("identity directory");
         let service =
@@ -730,6 +984,20 @@ mod tests {
         let mut descriptor = descriptor();
         let relay_self = Keys::generate();
         descriptor.expected_relay_self_pubkey = Some(relay_self.public_key().to_hex());
+        sender_service
+            .create(ReceiptRef::new("test-hermetic-sender-create").expect("valid receipt"))
+            .expect("create sender identity");
+        receiver_service
+            .create(ReceiptRef::new("test-hermetic-receiver-create").expect("valid receipt"))
+            .expect("create receiver identity");
+        activate_for_write(
+            &sender_service,
+            &descriptor,
+            PublicChannelWrite::Message {
+                content: "activate hermetic sender".to_string(),
+            },
+            &[],
+        );
 
         let signed_message = sign_write(
             &sender_service,
@@ -784,6 +1052,15 @@ mod tests {
         assert_eq!(
             received_message.public_key,
             signed_message.author_public_key
+        );
+        activate_for_write(
+            &receiver_service,
+            &descriptor,
+            PublicChannelWrite::Report {
+                event_id: message.id.clone(),
+                author_public_key: message.public_key.clone(),
+            },
+            &receiver_reader.snapshot().events,
         );
 
         let signed_report = sign_write(

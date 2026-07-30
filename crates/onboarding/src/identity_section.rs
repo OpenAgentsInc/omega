@@ -1,16 +1,22 @@
-use std::{fmt, path::PathBuf, sync::Arc};
+use std::{
+    fmt,
+    path::PathBuf,
+    sync::Arc,
+    time::{SystemTime, UNIX_EPOCH},
+};
 
 use db::kvp::KeyValueStore;
 use gpui::{
     AnyElement, App, AppContext, Context, Entity, IntoElement, PathPromptOptions, Render,
     SharedString, Task, Window,
 };
+use omega_actions::IdentityActivationEvents;
 use omega_identity::{
     CandidateRef, CustodyConflictReason, CustodyError, CustodyResult, CustodyState,
-    IdentityAccountRecord, IdentityActivationState, IdentityInspection, IdentityRef,
-    IdentityService, ImportedSecret, PendingIdentityOperation, PreparedRecovery, PublicIdentity,
-    ReceiptRef, RecoveryCandidate, RecoveryPassword, RecoveryProtectionState, RecoveryResolution,
-    RecoveryResolutionState,
+    DurableIdentityActionKind, HeldIdentityAction, IdentityActivationInspection,
+    IdentityActivationState, IdentityInspection, IdentityRef, IdentityService, ImportedSecret,
+    PendingIdentityOperation, PreparedRecovery, PublicIdentity, ReceiptRef, RecoveryCandidate,
+    RecoveryPassword, RecoveryProtectionState, RecoveryResolution, RecoveryResolutionState,
 };
 use ui::prelude::*;
 use ui_input::InputField;
@@ -28,6 +34,12 @@ use crate::{
 
 const IDENTITY_TAB_SLOTS: isize = 12;
 
+fn unix_time_seconds() -> u64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map_or(0, |duration| duration.as_secs())
+}
+
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub(crate) enum IdentitySectionPresentation {
     #[default]
@@ -37,7 +49,17 @@ pub(crate) enum IdentitySectionPresentation {
 
 trait IdentityBackend: Send + Sync {
     fn inspect(&self) -> Result<IdentityInspection, CustodyError>;
-    fn inspect_account(&self) -> Result<IdentityAccountRecord, CustodyError>;
+    fn inspect_activation(&self) -> Result<IdentityActivationInspection, CustodyError>;
+    fn begin_activation(
+        &self,
+        request_ref: ReceiptRef,
+        expires_at: u64,
+    ) -> Result<IdentityActivationInspection, CustodyError>;
+    fn complete_activation(&self, intent: &HeldIdentityAction) -> Result<(), CustodyError>;
+    fn cancel_activation(
+        &self,
+        intent: &HeldIdentityAction,
+    ) -> Result<IdentityActivationInspection, CustodyError>;
     fn create(&self, receipt_ref: ReceiptRef) -> Result<IdentityInspection, CustodyError>;
     fn adopt_custodied(&self, receipt_ref: ReceiptRef) -> Result<IdentityInspection, CustodyError>;
     fn resume_incomplete_create(&self) -> Result<IdentityInspection, CustodyError>;
@@ -95,8 +117,34 @@ impl IdentityBackend for SystemIdentityBackend {
         self.service.inspect_details()
     }
 
-    fn inspect_account(&self) -> Result<IdentityAccountRecord, CustodyError> {
-        self.service.inspect_account()
+    fn inspect_activation(&self) -> Result<IdentityActivationInspection, CustodyError> {
+        self.service.inspect_activation()
+    }
+
+    fn begin_activation(
+        &self,
+        request_ref: ReceiptRef,
+        expires_at: u64,
+    ) -> Result<IdentityActivationInspection, CustodyError> {
+        self.service
+            .begin_identity_activation(request_ref, expires_at)?;
+        self.service.inspect_activation()
+    }
+
+    fn complete_activation(&self, intent: &HeldIdentityAction) -> Result<(), CustodyError> {
+        self.service.complete_activation(intent)?;
+        if intent.kind == DurableIdentityActionKind::AccountSetup {
+            self.service.take_activated_identity_action(intent)?;
+        }
+        Ok(())
+    }
+
+    fn cancel_activation(
+        &self,
+        intent: &HeldIdentityAction,
+    ) -> Result<IdentityActivationInspection, CustodyError> {
+        self.service.cancel_activation(intent)?;
+        self.service.inspect_activation()
     }
 
     fn create(&self, receipt_ref: ReceiptRef) -> Result<IdentityInspection, CustodyError> {
@@ -199,6 +247,8 @@ enum IdentityAction {
     Relaunch,
     Protect,
     ReplaceRecovery,
+    SetUpIdentity,
+    CancelActivation,
 }
 
 impl IdentityAction {
@@ -214,6 +264,8 @@ impl IdentityAction {
             Self::Relaunch => "relaunch",
             Self::Protect => "protect",
             Self::ReplaceRecovery => "replace-recovery",
+            Self::SetUpIdentity => "set-up",
+            Self::CancelActivation => "cancel-activation",
         }
     }
 
@@ -236,6 +288,8 @@ impl IdentityAction {
             // control again. Offering "Protect recovery" beside "Recovery
             // protected" reads as though the protection did not take.
             Self::ReplaceRecovery => "Replace recovery file",
+            Self::SetUpIdentity => "Set up identity",
+            Self::CancelActivation => "Cancel action",
         }
     }
 
@@ -249,6 +303,7 @@ impl IdentityAction {
                 | Self::RetryReset
                 | Self::Relaunch
                 | Self::Protect
+                | Self::SetUpIdentity
         )
     }
 }
@@ -276,6 +331,14 @@ enum RecoveryMode {
     Protect,
 }
 
+#[derive(Debug, Copy, Clone, PartialEq, Eq)]
+enum ActivationMode {
+    Choose,
+    KeepLocal,
+    ExistingIdentityUnavailable,
+    RemoteSignerUnavailable,
+}
+
 struct RecoverySession {
     prepared: Vec<PreparedRecovery>,
     resolution: RecoveryResolution,
@@ -299,7 +362,9 @@ pub(crate) struct IdentitySection {
     first_tab_index: isize,
     operation_task: Option<Task<()>>,
     account_task: Option<Task<()>>,
-    account: Option<IdentityAccountRecord>,
+    activation: Option<IdentityActivationInspection>,
+    activation_mode: Option<ActivationMode>,
+    activation_message: Option<SharedString>,
     profile_task: Option<Task<()>>,
     recovery_mode: Option<RecoveryMode>,
     recovery_candidate: Option<RecoveryCandidate>,
@@ -365,7 +430,9 @@ impl IdentitySection {
             first_tab_index,
             operation_task: None,
             account_task: None,
-            account: None,
+            activation: None,
+            activation_mode: None,
+            activation_message: None,
             profile_task: None,
             recovery_mode: None,
             recovery_candidate: None,
@@ -398,6 +465,8 @@ impl IdentitySection {
     pub(crate) fn clear_transient_state(&mut self, cx: &mut Context<Self>) {
         self.controller.cancel();
         self.operation_task = None;
+        self.activation_mode = None;
+        self.activation_message = None;
         self.recovery_mode = None;
         self.recovery_candidate = None;
         self.recovery_session = None;
@@ -468,21 +537,169 @@ impl IdentitySection {
 
     fn load_account_projection(&mut self, cx: &mut Context<Self>) {
         if !self.is_ready() {
-            self.account = None;
+            self.activation = None;
             self.account_task = None;
             return;
         }
         let backend = self.backend.clone();
         self.account_task = Some(cx.spawn(async move |this, cx| {
             let result = cx
-                .background_spawn(async move { backend.inspect_account() })
+                .background_spawn(async move { backend.inspect_activation() })
                 .await;
             this.update(cx, |this, cx| {
-                this.account = result.log_err();
+                this.activation = result.log_err();
                 cx.notify();
             })
             .log_err();
         }));
+    }
+
+    fn start_activation(&mut self, cx: &mut Context<Self>) {
+        self.activation_message = None;
+        if self
+            .activation
+            .as_ref()
+            .and_then(|activation| activation.held_intent.as_ref())
+            .is_some()
+        {
+            self.activation_mode = Some(ActivationMode::Choose);
+            cx.notify();
+            return;
+        }
+
+        let Ok(request_ref) = Self::next_receipt("omega-identity-account-setup") else {
+            self.activation_message = Some("Identity setup could not start.".into());
+            cx.notify();
+            return;
+        };
+        let expires_at = unix_time_seconds().saturating_add(900);
+        let backend = self.backend.clone();
+        self.account_task = Some(cx.spawn(async move |this, cx| {
+            let result = cx
+                .background_spawn(async move { backend.begin_activation(request_ref, expires_at) })
+                .await;
+            this.update(cx, |this, cx| {
+                match result {
+                    Ok(activation) => {
+                        this.activation = Some(activation);
+                        this.activation_mode = Some(ActivationMode::Choose);
+                        this.activation_message = None;
+                    }
+                    Err(error) => {
+                        zlog::error!("identity activation could not start: {error}");
+                        this.activation_message =
+                            Some("Identity setup could not start. Try again.".into());
+                    }
+                }
+                cx.notify();
+            })
+            .log_err();
+        }));
+        cx.notify();
+    }
+
+    fn cancel_held_activation(&mut self, cx: &mut Context<Self>) {
+        let Some(intent) = self
+            .activation
+            .as_ref()
+            .and_then(|activation| activation.held_intent.clone())
+        else {
+            self.activation_mode = None;
+            cx.notify();
+            return;
+        };
+        let coordinator_owns_intent = IdentityActivationEvents::owns(&intent, cx);
+        let backend = self.backend.clone();
+        self.account_task = Some(cx.spawn(async move |this, cx| {
+            let intent_for_work = intent.clone();
+            let result = cx
+                .background_spawn(async move { backend.cancel_activation(&intent_for_work) })
+                .await;
+            this.update(cx, |this, cx| {
+                match result {
+                    Ok(activation) => {
+                        if coordinator_owns_intent {
+                            IdentityActivationEvents::cancel(&intent, cx).log_err();
+                        }
+                        this.activation = Some(activation);
+                        this.activation_mode = None;
+                        this.activation_message = Some(
+                            "Cancelled. Omega did not resume or publish the held action.".into(),
+                        );
+                    }
+                    Err(error) => {
+                        zlog::error!("identity activation could not be cancelled: {error}");
+                        this.activation_message = Some(
+                            "The held action changed or expired. Reopen identity setup.".into(),
+                        );
+                    }
+                }
+                cx.notify();
+            })
+            .log_err();
+        }));
+        cx.notify();
+    }
+
+    fn complete_held_activation(&mut self, cx: &mut Context<Self>) {
+        let Some(intent) = self
+            .activation
+            .as_ref()
+            .and_then(|activation| activation.held_intent.clone())
+        else {
+            return;
+        };
+        let is_account_setup = intent.kind == DurableIdentityActionKind::AccountSetup;
+        if !is_account_setup && !IdentityActivationEvents::owns(&intent, cx) {
+            self.activation_mode = Some(ActivationMode::Choose);
+            self.activation_message = Some(
+                "This held action lost its in-memory owner after restart. Omega cannot safely recreate or resume it; cancel it and start the action again.".into(),
+            );
+            cx.notify();
+            return;
+        }
+
+        let backend = self.backend.clone();
+        self.account_task = Some(cx.spawn(async move |this, cx| {
+            let result = cx
+                .background_spawn({
+                    let intent = intent.clone();
+                    async move { backend.complete_activation(&intent) }
+                })
+                .await;
+            this.update(cx, |this, cx| {
+                match result {
+                    Ok(()) => {
+                        if !is_account_setup {
+                            if let Err(error) = IdentityActivationEvents::complete(&intent, cx) {
+                                zlog::error!(
+                                    "identity activation owner could not resume exact action: {error}"
+                                );
+                                this.activation_mode = Some(ActivationMode::Choose);
+                                this.activation_message = Some(
+                                    "Identity is active, but Omega could not resume the held action. Cancel it and start the action again.".into(),
+                                );
+                                cx.notify();
+                                return;
+                            }
+                        }
+                        this.activation_mode = None;
+                        this.activation_message =
+                            Some("Identity active. Recovery protection verified.".into());
+                        this.load_account_projection(cx);
+                    }
+                    Err(error) => {
+                        zlog::error!("identity activation could not complete: {error}");
+                        this.activation_mode = Some(ActivationMode::Choose);
+                        this.activation_message =
+                            Some("Identity setup could not complete. Try again.".into());
+                    }
+                }
+                cx.notify();
+            })
+            .log_err();
+        }));
+        cx.notify();
     }
 
     fn start_inspection_operation(
@@ -639,6 +856,8 @@ impl IdentitySection {
                 self.recovery_mode = Some(RecoveryMode::Protect);
                 cx.notify();
             }
+            IdentityAction::SetUpIdentity => self.start_activation(cx),
+            IdentityAction::CancelActivation => self.cancel_held_activation(cx),
         }
     }
 
@@ -868,6 +1087,21 @@ impl IdentitySection {
     }
 
     fn export_recovery(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let activation_intent = self
+            .activation
+            .as_ref()
+            .and_then(|activation| activation.held_intent.clone());
+        if let Some(intent) = activation_intent.as_ref()
+            && intent.kind != DurableIdentityActionKind::AccountSetup
+            && !IdentityActivationEvents::owns(intent, cx)
+        {
+            self.activation_mode = Some(ActivationMode::Choose);
+            self.activation_message = Some(
+                "This held action lost its in-memory owner after restart. Cancel it and start the action again; Omega will not guess or replay its payload.".into(),
+            );
+            cx.notify();
+            return;
+        }
         let mut raw_password =
             Zeroizing::new(self.password_input.update(cx, |input, cx| input.take(cx)));
         let confirmation = Zeroizing::new(
@@ -909,6 +1143,7 @@ impl IdentitySection {
             prompt: Some("Choose a folder for the encrypted recovery file".into()),
         });
         let backend = self.backend.clone();
+        let activation_intent_for_work = activation_intent.clone();
         self.operation_task = Some(cx.spawn_in(window, async move |this, cx| {
             let directory = match paths.await {
                 Ok(Ok(Some(paths))) => paths.into_iter().next(),
@@ -925,13 +1160,59 @@ impl IdentitySection {
             };
             let path = directory.join("omega-identity-recovery.ncryptsec");
             let result = cx
-                .background_spawn(
-                    async move { backend.export_artifact(&identity_ref, path, password) },
-                )
-                .await
-                .map_err(map_custody_error);
-            this.update_in(cx, |this, window, cx| {
-                this.apply_inspection_result(&token, result, window, cx);
+                .background_spawn(async move {
+                    let inspection = backend.export_artifact(&identity_ref, path, password)?;
+                    let activation_completed = match activation_intent_for_work {
+                        Some(intent) => {
+                            backend.complete_activation(&intent)?;
+                            true
+                        }
+                        None => false,
+                    };
+                    Ok::<_, CustodyError>((inspection, activation_completed))
+                })
+                .await;
+            this.update_in(cx, |this, window, cx| match result {
+                Ok((inspection, activation_completed)) => {
+                    if !this.controller.apply(&token, Ok(inspection)) {
+                        return;
+                    }
+                    this.clear_recovery_material(cx);
+                    this.load_local_profile(window, cx);
+                    if activation_completed {
+                        if let Some(intent) = activation_intent.as_ref()
+                            && intent.kind != DurableIdentityActionKind::AccountSetup
+                            && let Err(error) = IdentityActivationEvents::complete(intent, cx)
+                        {
+                            zlog::error!(
+                                "identity activation owner could not resume exact action: {error}"
+                            );
+                            this.activation_mode = Some(ActivationMode::Choose);
+                            this.activation_message = Some(
+                                "Recovery is protected, but Omega could not resume the held action. Cancel it and start the action again.".into(),
+                            );
+                            cx.notify();
+                            return;
+                        }
+                        this.activation_mode = None;
+                        this.activation_message =
+                            Some("Identity active. Recovery file verified.".into());
+                        this.load_account_projection(cx);
+                    } else {
+                        this.load_account_projection(cx);
+                    }
+                    cx.notify();
+                }
+                Err(error) => {
+                    if this
+                        .controller
+                        .apply(&token, Err(map_custody_error(error)))
+                    {
+                        this.clear_recovery_material(cx);
+                        this.activation_mode = Some(ActivationMode::Choose);
+                        cx.notify();
+                    }
+                }
             })
             .log_err();
         }));
@@ -1087,7 +1368,9 @@ impl IdentitySection {
 
         if let Some(presentation) = Self::account_presentation(
             inspection,
-            self.account.as_ref().map(|account| account.state),
+            self.activation
+                .as_ref()
+                .map(|activation| activation.account.state),
         ) {
             return presentation;
         }
@@ -1109,21 +1392,24 @@ impl IdentitySection {
                 description: "Omega created this identity in the background. Set it up before the first public post, community join, device grant, hosted-account link, or agent attestation.",
                 icon: IconName::Person,
                 color: Color::Accent,
-                actions: Vec::new(),
+                actions: vec![IdentityAction::SetUpIdentity],
             },
             Some(IdentityActivationState::CandidateExisting) => IdentityPresentation {
                 title: "Existing identity found",
                 description: "Omega kept the exact public key already in the local identity file. Set it up before the next durable identity-bearing action.",
                 icon: IconName::Person,
                 color: Color::Accent,
-                actions: Vec::new(),
+                actions: vec![IdentityAction::SetUpIdentity],
             },
             Some(IdentityActivationState::Activating) => IdentityPresentation {
                 title: "Identity setup required",
                 description: "A durable action is held before signing or network mutation. Complete identity setup to resume only that exact action, or cancel it.",
                 icon: IconName::Info,
                 color: Color::Warning,
-                actions: Vec::new(),
+                actions: vec![
+                    IdentityAction::SetUpIdentity,
+                    IdentityAction::CancelActivation,
+                ],
             },
             Some(IdentityActivationState::Active) => {
                 let mut presentation = Self::durable_presentation(inspection);
@@ -1320,6 +1606,155 @@ impl IdentitySection {
         }
     }
 
+    fn render_activation_controls(&self, cx: &mut Context<Self>) -> AnyElement {
+        let Some(mode) = self.activation_mode else {
+            return div().into_any_element();
+        };
+        let held_intent = self
+            .activation
+            .as_ref()
+            .and_then(|activation| activation.held_intent.as_ref());
+        let can_complete = held_intent.is_some_and(|intent| {
+            intent.kind == DurableIdentityActionKind::AccountSetup
+                || IdentityActivationEvents::owns(intent, cx)
+        });
+        let recovery_is_protected = self.activation.as_ref().is_some_and(|activation| {
+            activation.recovery_protection.state == RecoveryProtectionState::Protected
+        });
+        let back = Button::new("omega-identity-activation-back", "Back")
+            .style(ButtonStyle::OutlinedGhost)
+            .tab_index(self.first_tab_index + 7)
+            .on_click(cx.listener(|this, _, _, cx| {
+                this.activation_mode = Some(ActivationMode::Choose);
+                this.recovery_mode = None;
+                this.clear_recovery_material(cx);
+                cx.notify();
+            }));
+
+        match mode {
+            ActivationMode::Choose => v_flex()
+                .gap_2()
+                .child(Label::new("Activate your Omega identity"))
+                .child(
+                    Label::new(
+                        "This public key is your durable authorship. Its local secret authorizes signatures; Omega cannot reset it like a password. A signature proves only that this key approved exact content—not identity, truth, membership, or permission.",
+                    )
+                    .color(Color::Muted)
+                    .size(LabelSize::Small),
+                )
+                .child(
+                    h_flex()
+                        .gap_2()
+                        .flex_wrap()
+                        .child(
+                            Button::new(
+                                "omega-identity-activation-keep",
+                                "Keep this identity",
+                            )
+                            .style(ButtonStyle::Filled)
+                            .disabled(!can_complete)
+                            .tab_index(self.first_tab_index + 2)
+                            .on_click(cx.listener(|this, _, _, cx| {
+                                let recovery_is_protected =
+                                    this.activation.as_ref().is_some_and(|activation| {
+                                        activation.recovery_protection.state
+                                            == RecoveryProtectionState::Protected
+                                    });
+                                if recovery_is_protected {
+                                    this.complete_held_activation(cx);
+                                } else {
+                                    this.activation_mode = Some(ActivationMode::KeepLocal);
+                                    this.clear_recovery_material(cx);
+                                    this.recovery_mode = Some(RecoveryMode::Protect);
+                                    cx.notify();
+                                }
+                            })),
+                        )
+                        .child(
+                            Button::new(
+                                "omega-identity-activation-existing",
+                                "Use an existing identity",
+                            )
+                            .style(ButtonStyle::OutlinedGhost)
+                            .tab_index(self.first_tab_index + 3)
+                            .on_click(cx.listener(|this, _, _, cx| {
+                                this.activation_mode =
+                                    Some(ActivationMode::ExistingIdentityUnavailable);
+                                cx.notify();
+                            })),
+                        )
+                        .child(
+                            Button::new(
+                                "omega-identity-activation-remote",
+                                "Use a signer on another device",
+                            )
+                            .style(ButtonStyle::OutlinedGhost)
+                            .tab_index(self.first_tab_index + 4)
+                            .on_click(cx.listener(|this, _, _, cx| {
+                                this.activation_mode =
+                                    Some(ActivationMode::RemoteSignerUnavailable);
+                                cx.notify();
+                            })),
+                        ),
+                )
+                .when(!can_complete, |this| {
+                    this.child(
+                        Label::new(
+                            "Omega restarted after holding this action, so its exact payload is no longer owned in memory. Cancel it below and start the action again.",
+                        )
+                        .color(Color::Warning)
+                        .size(LabelSize::Small),
+                    )
+                })
+                .when(recovery_is_protected, |this| {
+                    this.child(
+                        Label::new(
+                            "The existing encrypted recovery file is already verified; keeping this identity will not force another export.",
+                        )
+                        .color(Color::Muted)
+                        .size(LabelSize::Small),
+                    )
+                })
+                .into_any_element(),
+            ActivationMode::KeepLocal => v_flex()
+                .gap_2()
+                .child(Label::new("Keep this local identity"))
+                .child(
+                    Label::new(
+                        "Create and verify an encrypted NIP-49 recovery file before activation. The password protects that file; it is not an Omega account-reset password.",
+                    )
+                    .color(Color::Muted)
+                    .size(LabelSize::Small),
+                )
+                .child(back)
+                .into_any_element(),
+            ActivationMode::ExistingIdentityUnavailable => v_flex()
+                .gap_2()
+                .child(Label::new("Use an existing identity"))
+                .child(
+                    Label::new(
+                        "Omega will not delete or overwrite this healthy local candidate. Safe account switching and preservation of the previous identity arrive with multi-account support. Recovery import remains available for missing or damaged custody.",
+                    )
+                    .color(Color::Muted)
+                    .size(LabelSize::Small),
+                )
+                .child(back)
+                .into_any_element(),
+            ActivationMode::RemoteSignerUnavailable => v_flex()
+                .gap_2()
+                .child(Label::new("Use a signer on another device"))
+                .child(
+                    Label::new(
+                        "Remote signing is not available in this build. Omega does not activate the account or move the local secret when this path is unavailable.",
+                    )
+                    .color(Color::Muted)
+                    .size(LabelSize::Small),
+                )
+                .child(back)
+                .into_any_element(),
+        }
+    }
+
     fn render_recovery_controls(&self, cx: &mut Context<Self>) -> AnyElement {
         let Some(mode) = self.recovery_mode else {
             return div().into_any_element();
@@ -1328,7 +1763,17 @@ impl IdentitySection {
             .style(ButtonStyle::OutlinedGhost)
             .tab_index(self.first_tab_index + 6)
             .on_click(cx.listener(|this, _, _, cx| {
-                this.clear_transient_state(cx);
+                this.clear_recovery_material(cx);
+                if this
+                    .activation
+                    .as_ref()
+                    .and_then(|activation| activation.held_intent.as_ref())
+                    .is_some()
+                {
+                    this.cancel_held_activation(cx);
+                } else {
+                    this.clear_transient_state(cx);
+                }
             }));
 
         match mode {
@@ -1731,8 +2176,18 @@ impl IdentitySection {
                                 ),
                         )
                     })
+                    .when_some(self.activation_message.clone(), |this, message| {
+                        this.child(
+                            Label::new(message)
+                                .color(Color::Muted)
+                                .size(LabelSize::Small),
+                        )
+                    })
                     .when(!actions.is_empty(), |this| {
                         this.child(self.render_actions(actions, cx))
+                    })
+                    .when(self.activation_mode.is_some(), |this| {
+                        this.child(self.render_activation_controls(cx))
                     })
                     .when(self.recovery_mode.is_some(), |this| {
                         this.child(self.render_recovery_controls(cx))
@@ -1811,8 +2266,18 @@ impl IdentitySection {
                         ),
                 )
             })
+            .when_some(self.activation_message.clone(), |this, message| {
+                this.child(
+                    Label::new(message)
+                        .color(Color::Muted)
+                        .size(LabelSize::Small),
+                )
+            })
             .when(!actions.is_empty(), |this| {
                 this.child(self.render_actions(actions, cx))
+            })
+            .when(self.activation_mode.is_some(), |this| {
+                this.child(self.render_activation_controls(cx))
             })
             .when(self.recovery_mode.is_some(), |this| {
                 this.child(self.render_recovery_controls(cx))
@@ -1936,6 +2401,36 @@ mod tests {
             assert_eq!(presentation.title, title);
             assert!(!presentation.accessibility_label().contains("nsec"));
         }
+    }
+
+    #[test]
+    fn candidates_offer_setup_and_activating_also_offers_exact_cancellation() {
+        let ready = inspection(CustodyState::Ready);
+        for state in [
+            IdentityActivationState::CandidateLocal,
+            IdentityActivationState::CandidateExisting,
+        ] {
+            let presentation = IdentitySection::account_presentation(&ready, Some(state))
+                .expect("ready candidate has an account presentation");
+            assert_eq!(presentation.actions, vec![IdentityAction::SetUpIdentity]);
+        }
+
+        let activating = IdentitySection::account_presentation(
+            &ready,
+            Some(IdentityActivationState::Activating),
+        )
+        .expect("activating account has a presentation");
+        assert_eq!(
+            activating.actions,
+            vec![
+                IdentityAction::SetUpIdentity,
+                IdentityAction::CancelActivation
+            ]
+        );
+        assert_eq!(IdentityAction::SetUpIdentity.label(), "Set up identity");
+        assert_eq!(IdentityAction::CancelActivation.label(), "Cancel action");
+        assert!(IdentityAction::SetUpIdentity.primary());
+        assert!(!IdentityAction::CancelActivation.primary());
     }
 
     #[test]

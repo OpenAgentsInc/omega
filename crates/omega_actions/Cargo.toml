@@ -10,6 +10,10 @@ workspace = true
 
 [dependencies]
 gpui.workspace = true
+omega_identity.workspace = true
 schemars.workspace = true
 serde.workspace = true
 util.workspace = true
+
+[dev-dependencies]
+gpui = { workspace = true, features = ["test-support"] }

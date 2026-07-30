@@ -1,7 +1,155 @@
-use gpui::{Action, actions};
+use gpui::{Action, App, Global, actions};
+use omega_identity::HeldIdentityAction;
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
-use std::{path::PathBuf, sync::Arc};
+use std::{error::Error, fmt, path::PathBuf, sync::Arc};
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum IdentityActivationOutcome {
+    Completed,
+    Cancelled,
+    Expired,
+}
+
+type IdentityActivationCallback = Box<dyn FnOnce(IdentityActivationOutcome, &mut App) + 'static>;
+
+struct PendingIdentityActivation {
+    intent: HeldIdentityAction,
+    callback: IdentityActivationCallback,
+}
+
+/// Process-local ownership of the action that opened identity activation.
+///
+/// The durable identity service stores only an authenticated digest and
+/// destination. The initiating surface keeps the actual payload in this
+/// callback, so it is never projected into another subsystem or written to
+/// disk. A process restart deliberately makes the durable intent an orphan;
+/// onboarding must then cancel it instead of pretending it can resume it.
+///
+/// `Completed` is only a wake-up signal. The callback must consume the exact
+/// held authorization from `omega_identity`, revalidate its live destination,
+/// and resume at most once. The coordinator intentionally cannot authorize or
+/// publish an action itself.
+#[derive(Default)]
+pub struct IdentityActivationEvents {
+    pending: Option<PendingIdentityActivation>,
+}
+
+impl Global for IdentityActivationEvents {}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum IdentityActivationEventError {
+    IntentAlreadyOwned,
+    DifferentIntentPending,
+    IntentNotOwned,
+    IntentExpired,
+}
+
+impl fmt::Display for IdentityActivationEventError {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::IntentAlreadyOwned => {
+                formatter.write_str("the identity activation action already has an owner")
+            }
+            Self::DifferentIntentPending => {
+                formatter.write_str("a different identity activation action is already pending")
+            }
+            Self::IntentNotOwned => {
+                formatter.write_str("the identity activation action is not owned by this process")
+            }
+            Self::IntentExpired => formatter.write_str("the identity activation action expired"),
+        }
+    }
+}
+
+impl Error for IdentityActivationEventError {}
+
+impl IdentityActivationEvents {
+    pub fn register(
+        intent: HeldIdentityAction,
+        now: u64,
+        callback: impl FnOnce(IdentityActivationOutcome, &mut App) + 'static,
+        cx: &mut App,
+    ) -> Result<(), IdentityActivationEventError> {
+        if intent.expires_at <= now {
+            return Err(IdentityActivationEventError::IntentExpired);
+        }
+        let events = cx.default_global::<Self>();
+        if let Some(pending) = &events.pending {
+            if pending.intent == intent {
+                return Err(IdentityActivationEventError::IntentAlreadyOwned);
+            }
+            return Err(IdentityActivationEventError::DifferentIntentPending);
+        }
+        events.pending = Some(PendingIdentityActivation {
+            intent,
+            callback: Box::new(callback),
+        });
+        Ok(())
+    }
+
+    pub fn owns(intent: &HeldIdentityAction, cx: &App) -> bool {
+        cx.try_global::<Self>()
+            .and_then(|events| events.pending.as_ref())
+            .is_some_and(|pending| pending.intent == *intent)
+    }
+
+    pub fn complete(
+        intent: &HeldIdentityAction,
+        cx: &mut App,
+    ) -> Result<(), IdentityActivationEventError> {
+        Self::finish(intent, IdentityActivationOutcome::Completed, cx)
+    }
+
+    pub fn cancel(
+        intent: &HeldIdentityAction,
+        cx: &mut App,
+    ) -> Result<(), IdentityActivationEventError> {
+        Self::finish(intent, IdentityActivationOutcome::Cancelled, cx)
+    }
+
+    pub fn prune_expired(now: u64, cx: &mut App) -> bool {
+        let callback = {
+            let events = cx.default_global::<Self>();
+            match events.pending.as_ref() {
+                Some(pending) if pending.intent.expires_at <= now => {
+                    events.pending.take().map(|pending| pending.callback)
+                }
+                _ => None,
+            }
+        };
+        if let Some(callback) = callback {
+            callback(IdentityActivationOutcome::Expired, cx);
+            true
+        } else {
+            false
+        }
+    }
+
+    fn finish(
+        intent: &HeldIdentityAction,
+        outcome: IdentityActivationOutcome,
+        cx: &mut App,
+    ) -> Result<(), IdentityActivationEventError> {
+        let callback = {
+            let events = cx.default_global::<Self>();
+            let pending = events
+                .pending
+                .as_ref()
+                .ok_or(IdentityActivationEventError::IntentNotOwned)?;
+            if pending.intent != *intent {
+                return Err(IdentityActivationEventError::IntentNotOwned);
+            }
+            events
+                .pending
+                .take()
+                .map(|pending| pending.callback)
+                .ok_or(IdentityActivationEventError::IntentNotOwned)?
+        };
+        callback(outcome, cx);
+        Ok(())
+    }
+}
 
 // If the zed binary doesn't use anything in this crate, it will be optimized away
 // and the actions won't initialize. So we just provide an empty initialization function
@@ -1012,13 +1160,165 @@ pub mod git_panel {
 
 #[cfg(test)]
 mod tests {
-    use super::{OpenEditorOnboarding, OpenOnboarding, dev::ResetOnboarding};
-    use gpui::Action;
+    use std::{cell::Cell, rc::Rc};
+
+    use super::{
+        IdentityActivationEventError, IdentityActivationEvents, IdentityActivationOutcome,
+        OpenEditorOnboarding, OpenOnboarding, dev::ResetOnboarding,
+    };
+    use gpui::{Action, TestAppContext};
+    use omega_identity::{
+        AccountRef, DurableIdentityActionKind, HeldIdentityAction, IdentityRef, ProofRef,
+        ReceiptRef, ResourceRef,
+    };
+
+    fn held_intent(expires_at: u64) -> HeldIdentityAction {
+        HeldIdentityAction {
+            intent_ref: ReceiptRef::new("public-post-request").expect("valid intent ref"),
+            account_ref: AccountRef::new("omega-account-test").expect("valid account ref"),
+            account_generation: 1,
+            identity_ref: IdentityRef::new(
+                "omega-nostr-79be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798",
+            )
+            .expect("valid identity ref"),
+            kind: DurableIdentityActionKind::PublicPost,
+            destination_ref: ResourceRef::new("nip29-test-channel").expect("valid destination ref"),
+            authorization_ref: ProofRef::new("activation-public-post-request")
+                .expect("valid authorization ref"),
+            payload_digest: "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+                .to_string(),
+            issued_at: 10,
+            expires_at,
+        }
+    }
 
     #[test]
     fn onboarding_actions_use_omega_product_namespace() {
         assert_eq!(OpenOnboarding.name(), "omega::OpenOnboarding");
         assert_eq!(OpenEditorOnboarding.name(), "omega::OpenEditorOnboarding");
         assert_eq!(ResetOnboarding.name(), "dev::ResetOnboarding");
+    }
+
+    #[gpui::test]
+    fn activation_completion_resumes_the_exact_owner_once(cx: &mut TestAppContext) {
+        let intent = held_intent(100);
+        let observed = Rc::new(Cell::new(None));
+
+        cx.update(|cx| {
+            IdentityActivationEvents::register(
+                intent.clone(),
+                20,
+                {
+                    let observed = observed.clone();
+                    move |outcome, _| observed.set(Some(outcome))
+                },
+                cx,
+            )
+            .expect("register exact owner");
+            assert!(IdentityActivationEvents::owns(&intent, cx));
+
+            IdentityActivationEvents::complete(&intent, cx).expect("complete exact owner");
+            assert!(!IdentityActivationEvents::owns(&intent, cx));
+            assert_eq!(
+                IdentityActivationEvents::complete(&intent, cx),
+                Err(IdentityActivationEventError::IntentNotOwned)
+            );
+        });
+
+        assert_eq!(observed.get(), Some(IdentityActivationOutcome::Completed));
+    }
+
+    #[gpui::test]
+    fn matching_intent_ref_cannot_resume_a_different_binding(cx: &mut TestAppContext) {
+        let intent = held_intent(100);
+        let mut wrong_destination = intent.clone();
+        wrong_destination.destination_ref =
+            ResourceRef::new("nip29-other-channel").expect("valid destination ref");
+        let observed = Rc::new(Cell::new(None));
+
+        cx.update(|cx| {
+            IdentityActivationEvents::register(
+                intent.clone(),
+                20,
+                {
+                    let observed = observed.clone();
+                    move |outcome, _| observed.set(Some(outcome))
+                },
+                cx,
+            )
+            .expect("register exact owner");
+
+            assert!(!IdentityActivationEvents::owns(&wrong_destination, cx));
+            assert_eq!(
+                IdentityActivationEvents::complete(&wrong_destination, cx),
+                Err(IdentityActivationEventError::IntentNotOwned)
+            );
+            assert!(IdentityActivationEvents::owns(&intent, cx));
+        });
+
+        assert_eq!(observed.get(), None);
+    }
+
+    #[gpui::test]
+    fn expired_activation_is_pruned_and_notified(cx: &mut TestAppContext) {
+        let intent = held_intent(100);
+        let observed = Rc::new(Cell::new(None));
+
+        cx.update(|cx| {
+            IdentityActivationEvents::register(
+                intent.clone(),
+                20,
+                {
+                    let observed = observed.clone();
+                    move |outcome, _| observed.set(Some(outcome))
+                },
+                cx,
+            )
+            .expect("register exact owner");
+            assert!(!IdentityActivationEvents::prune_expired(99, cx));
+            assert!(IdentityActivationEvents::prune_expired(100, cx));
+            assert!(!IdentityActivationEvents::owns(&intent, cx));
+        });
+
+        assert_eq!(observed.get(), Some(IdentityActivationOutcome::Expired));
+    }
+
+    #[gpui::test]
+    fn registration_never_replaces_an_existing_owner(cx: &mut TestAppContext) {
+        let intent = held_intent(100);
+        let first_observed = Rc::new(Cell::new(None));
+        let second_observed = Rc::new(Cell::new(None));
+
+        cx.update(|cx| {
+            IdentityActivationEvents::register(
+                intent.clone(),
+                20,
+                {
+                    let first_observed = first_observed.clone();
+                    move |outcome, _| first_observed.set(Some(outcome))
+                },
+                cx,
+            )
+            .expect("register first owner");
+            assert_eq!(
+                IdentityActivationEvents::register(
+                    intent.clone(),
+                    20,
+                    {
+                        let second_observed = second_observed.clone();
+                        move |outcome, _| second_observed.set(Some(outcome))
+                    },
+                    cx,
+                ),
+                Err(IdentityActivationEventError::IntentAlreadyOwned)
+            );
+            IdentityActivationEvents::cancel(&intent, cx).expect("cancel first owner");
+        });
+
+        assert_eq!(
+            first_observed.get(),
+            Some(IdentityActivationOutcome::Cancelled)
+        );
+        assert_eq!(second_observed.get(), None);
     }
 }

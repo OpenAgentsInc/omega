@@ -256,6 +256,54 @@ the original candidate state, deletes the held intent, and resumes nothing.
 The shared account control is the repair/setup entry point exposed from
 the title bar and from gated action notices.
 
+### Activation and recovery ceremony
+
+The desktop identity section inspects one combined activation projection:
+account state, exact held intent, and recovery-protection state. Candidate
+accounts expose **Set up identity**. An intercepted durable action exposes
+both setup and **Cancel action**; cancellation submits the exact
+`HeldIdentityAction`, clears the durable intent, notifies its process-local
+owner, and never signs, publishes, or resumes anything.
+
+Setup first explains the boundary: the public key is durable authorship, the
+local secret authorizes signatures, Omega cannot reset that secret like a
+password, and a valid signature does not establish identity, truth,
+membership, or permission. The screen then presents three product paths:
+
+- **Keep this identity** is implemented for the local file signer. If recovery
+  is not protected it requires creation and verification of an encrypted
+  NIP-49 file. If the exact identity already has a verified artifact, setup
+  completes without exporting another copy.
+- **Use an existing identity** does not overwrite a healthy local candidate.
+  The screen explains that safe replacement waits for multi-account switching;
+  the existing recovery importer remains available for missing or damaged
+  custody.
+- **Use a signer on another device** is visibly unavailable until remote
+  signer support lands. Selecting it neither activates the account nor moves
+  the local secret.
+
+Password and confirmation use `SecureInput`, and the selected directory
+receives `omega-identity-recovery.ncryptsec`. The password protects that
+artifact only; it is not stored and is not an account-reset password. Export,
+read-back verification, activation, and action resumption are ordered. For an
+intercepted action, the identity section completes durable activation and then
+signals `IdentityActivationEvents` with the exact intent. Only its one-shot
+owner may revalidate, consume, and resume the original payload. A mismatched,
+expired, or ownerless intent cannot resume.
+
+The callback owner is intentionally process-local because the held payload may
+contain content that must not be written into identity metadata. After restart,
+the durable intent is shown as orphaned. Setup is disabled; the person cancels
+it and retries from the initiating surface. Proactive setup uses the typed
+`AccountSetup` intent and may be consumed by the identity section because
+there is no external payload to replay.
+
+These controls are shared by the full desktop onboarding item and its compact
+replay presentation. Mobile and web clients can implement the same state
+machine, education, NIP-49 format, exact-intent rules, and explicit
+unavailability states, but this Rust/GPUI implementation does not assert that
+those clients currently ship the ceremony.
+
 Named refusal states remain visible through the account and identity repair
 entry points: lost, conflict, incomplete, locked, reset-failed, and
 relaunch-required are not rounded into Ready. They refuse signing until the

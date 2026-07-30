@@ -181,6 +181,7 @@ pub const ENFORCED_DELTAS: &[&str] = &[
     "OMEGA-DELTA-0190",
     "OMEGA-DELTA-0191",
     "OMEGA-DELTA-0192",
+    "OMEGA-DELTA-0193",
 ];
 
 /// The concise product contract adjacent to the delta registry.
@@ -1225,6 +1226,7 @@ pub const IDENTITY_SECTION_PATH: &str = "crates/onboarding/src/identity_section.
 /// OMEGA-DELTA-0192. The durable candidate, account, and action-intent types.
 pub const IDENTITY_ACCOUNT_ACTIVATION_PATH: &str =
     "crates/omega_identity/src/account_activation.rs";
+pub const OMEGA_ACTIONS_PATH: &str = "crates/omega_actions/src/lib.rs";
 
 /// OMEGA-DELTA-0192. The always-reachable desktop account entry.
 pub const TITLE_BAR_PATH: &str = "crates/title_bar/src/title_bar.rs";
@@ -22997,7 +22999,8 @@ mod tests {
         for required in [
             "identity-backup-surface",
             "Copy",
-            "Dismiss",
+            "I understand — reveal key",
+            "Raw secret export is an advanced recovery option.",
             "Anyone with this key controls your Omega identity.",
         ] {
             assert!(
@@ -24049,6 +24052,100 @@ mod tests {
             assert!(
                 !documentation.contains("OMEGA_IDENTITY_FIXTURE"),
                 "OMEGA-DELTA-0192: {path} claims the nonexistent identity fixture switch"
+            );
+        }
+    }
+
+    /// OMEGA-DELTA-0193. Candidate activation is an explicit, recoverable
+    /// ceremony and exact held actions resume only through their live owner.
+    #[test]
+    fn identity_activation_requires_recovery_and_exact_action_ownership() {
+        let custody = read_repository_file(IDENTITY_CUSTODY_PATH);
+        for required in [
+            "RecoveryDecisionRequired",
+            "RecoveryProtectionState::Protected",
+            "complete_activation",
+            "take_activated_identity_action",
+            "inspect_activation",
+        ] {
+            assert!(
+                custody.contains(required),
+                "OMEGA-DELTA-0193: activation custody lost `{required}`"
+            );
+        }
+
+        let actions = read_repository_file(OMEGA_ACTIONS_PATH);
+        for required in [
+            "pub struct IdentityActivationEvents",
+            "pending.intent == *intent",
+            "IdentityActivationOutcome::Completed",
+            "IdentityActivationOutcome::Cancelled",
+            "IdentityActivationOutcome::Expired",
+        ] {
+            assert!(
+                actions.contains(required),
+                "OMEGA-DELTA-0193: exact activation ownership lost `{required}`"
+            );
+        }
+
+        let section = read_repository_file(IDENTITY_SECTION_PATH);
+        for required in [
+            "Activate your Omega identity",
+            "Keep this identity",
+            "Use an existing identity",
+            "Use a signer on another device",
+            "encrypted NIP-49 recovery file",
+            "Advanced Nostr secret import",
+            "IdentityActivationEvents::complete",
+            "IdentityActivationEvents::cancel",
+            "lost its in-memory owner after restart",
+            "Remote signing is not available in this build",
+            "Safe account switching and preservation of the previous identity arrive with multi-account support",
+        ] {
+            assert!(
+                section.contains(required),
+                "OMEGA-DELTA-0193: desktop activation ceremony lost `{required}`"
+            );
+        }
+
+        let authentication = read_repository_file(IDENTITY_AUTHENTICATION_DOCUMENT_PATH);
+        let application_identity = read_repository_file(APPLICATION_IDENTITY_DOCUMENT_PATH);
+        let runtime_storage = read_repository_file(RUNTIME_CREDENTIAL_STORAGE_DOCUMENT_PATH);
+        let normalized_authentication = normalize_prose(&authentication);
+        let normalized_application_identity = normalize_prose(&application_identity);
+        assert!(
+            normalized_authentication.contains("NIP-49")
+                && normalized_authentication.contains("Raw `nsec` remains an explicitly advanced")
+                && normalized_authentication.contains("waits for multi-account switching")
+                && normalized_authentication.contains("remote signing waits for the signer packet"),
+            "OMEGA-DELTA-0193: auth contract no longer distinguishes implemented recovery from deferred signers"
+        );
+        assert!(
+            normalized_application_identity.contains("Activation and recovery ceremony")
+                && normalized_application_identity.contains("one-shot owner")
+                && normalized_application_identity.contains("Mobile and web clients"),
+            "OMEGA-DELTA-0193: application identity guide lost activation ownership or client parity guidance"
+        );
+        for (path, documentation) in [
+            (
+                IDENTITY_AUTHENTICATION_DOCUMENT_PATH,
+                authentication.as_str(),
+            ),
+            (
+                APPLICATION_IDENTITY_DOCUMENT_PATH,
+                application_identity.as_str(),
+            ),
+            (
+                RUNTIME_CREDENTIAL_STORAGE_DOCUMENT_PATH,
+                runtime_storage.as_str(),
+            ),
+        ] {
+            assert!(
+                documentation.contains("identity/identity.secret")
+                    && documentation.contains("NIP-49")
+                    && documentation.contains("Secure Enclave")
+                    && documentation.contains("Windows credential vault"),
+                "OMEGA-DELTA-0193: {path} lost the file-only, no-native-vault boundary"
             );
         }
     }

@@ -1514,6 +1514,7 @@ enum DevicePairingSurface {
 
 /// Minimal honest backup surface opened from the identity-backup nudge.
 enum IdentityBackupSurface {
+    Warning,
     Loading,
     Ready { nsec: SharedString },
     Unavailable(SharedString),
@@ -2835,7 +2836,8 @@ impl AgentPanel {
         }));
     }
 
-    /// omega#164. Dismiss the backup nudge, durably, without blocking anything.
+    /// Ask custody to persist the dismissal. Once value has accrued, custody
+    /// refuses until the exact identity has verified recovery protection.
     fn dismiss_identity_backup_nudge(&mut self, cx: &mut Context<Self>) {
         self.offers_identity_backup_nudge = false;
         self.identity_backup_surface = None;
@@ -2850,8 +2852,13 @@ impl AgentPanel {
         cx.notify();
     }
 
-    /// Open the backup surface from the sidebar nudge. Drawn implies working.
+    /// Open the advanced raw-key warning without reading the identity root.
     fn open_identity_backup_surface(&mut self, cx: &mut Context<Self>) {
+        self.identity_backup_surface = Some(IdentityBackupSurface::Warning);
+        cx.notify();
+    }
+
+    fn reveal_identity_backup_nsec(&mut self, cx: &mut Context<Self>) {
         self.identity_backup_surface = Some(IdentityBackupSurface::Loading);
         cx.notify();
         cx.spawn(async move |this, cx| {
@@ -2879,6 +2886,36 @@ impl AgentPanel {
         let surface = self.identity_backup_surface.as_ref()?;
         let border = cx.theme().colors().border;
         let body = match surface {
+            IdentityBackupSurface::Warning => v_flex()
+                .gap_2()
+                .child(
+                    Label::new(
+                        "Raw secret export is an advanced recovery option. NIP-49 encrypted \
+                         recovery is recommended.",
+                    )
+                    .size(LabelSize::XSmall)
+                    .color(Color::Warning),
+                )
+                .child(
+                    Label::new(
+                        "Anyone who sees this key controls your identity. Screenshots, screen \
+                         sharing, and clipboard history can expose it. Omega cannot reset it.",
+                    )
+                    .size(LabelSize::XSmall)
+                    .color(Color::Muted),
+                )
+                .child(
+                    Button::new(
+                        "confirm-reveal-identity-backup-nsec",
+                        "I understand — reveal key",
+                    )
+                    .style(ButtonStyle::Subtle)
+                    .size(ButtonSize::Compact)
+                    .on_click(cx.listener(|this, _, _, cx| {
+                        this.reveal_identity_backup_nsec(cx);
+                    })),
+                )
+                .into_any_element(),
             IdentityBackupSurface::Loading => Label::new("Loading…")
                 .size(LabelSize::XSmall)
                 .color(Color::Muted)
@@ -2896,9 +2933,12 @@ impl AgentPanel {
                         .buffer_font(cx),
                 )
                 .child(
-                    Label::new("Anyone with this key controls your Omega identity.")
-                        .size(LabelSize::XSmall)
-                        .color(Color::Warning),
+                    Label::new(
+                        "Anyone with this key controls your Omega identity. Close this view when \
+                         finished.",
+                    )
+                    .size(LabelSize::XSmall)
+                    .color(Color::Warning),
                 )
                 .child(
                     h_flex()
@@ -2917,7 +2957,7 @@ impl AgentPanel {
                                 }),
                         )
                         .child(
-                            Button::new("dismiss-identity-backup-surface", "Dismiss")
+                            Button::new("close-identity-backup-surface-ready", "Close")
                                 .style(ButtonStyle::Subtle)
                                 .size(ButtonSize::Compact)
                                 .on_click(cx.listener(|this, _, _, cx| {
@@ -14072,11 +14112,8 @@ impl AgentPanel {
 
     #[cfg(any(test, feature = "test-support"))]
     pub fn open_identity_backup_surface_for_tests(&mut self, cx: &mut Context<Self>) {
-        // Tests never probe the real identity root (omega#110). Seed a ready
-        // surface so the click path proves drawn-implies-working without Keychain.
-        self.identity_backup_surface = Some(IdentityBackupSurface::Ready {
-            nsec: SharedString::from("nsec1testbackupexportonly"),
-        });
+        // Tests never probe the real identity root (omega#110).
+        self.identity_backup_surface = Some(IdentityBackupSurface::Warning);
         cx.notify();
     }
 
@@ -14953,11 +14990,13 @@ mod tests {
 
     #[test]
     fn test_identity_backup_surface_variants_cover_the_honest_v1() {
+        let warning = IdentityBackupSurface::Warning;
         let loading = IdentityBackupSurface::Loading;
         let ready = IdentityBackupSurface::Ready {
             nsec: SharedString::from("nsec1test"),
         };
         let unavailable = IdentityBackupSurface::Unavailable("not ready".into());
+        assert!(matches!(warning, IdentityBackupSurface::Warning));
         assert!(matches!(loading, IdentityBackupSurface::Loading));
         match ready {
             IdentityBackupSurface::Ready { nsec } => {

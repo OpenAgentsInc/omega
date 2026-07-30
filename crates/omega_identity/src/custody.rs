@@ -23,11 +23,12 @@ use crate::{
     CustodyConflictReason, CustodyResult, CustodyState, DurableIdentityActionDecision,
     DurableIdentityActionDescriptor, GiftWrappedPrivateMessage, HeldIdentityAction,
     IDENTITY_ACCOUNT_SCHEMA, IDENTITY_ACCOUNT_SCHEMA_VERSION, IdentityAccountRecord,
-    IdentityActionAuthorization, IdentityActivationRequired, IdentityActivationState,
-    IdentityCandidateOrigin, IdentityInspection, IdentityManifest, IdentityRef, ImportedSecret,
-    KeyringLocator, NostrPublicKeyHex, OwnerAttestationRequest, OwnerAttestationResult,
-    PendingIdentityOperation, PendingIdentityTransaction, PrivateMessageRequest, PublicIdentity,
-    PublicStoreError, ReceiptRef, SigningResult, UnwrappedPrivateMessage,
+    IdentityActionAuthorization, IdentityActivationInspection, IdentityActivationRequired,
+    IdentityActivationState, IdentityCandidateOrigin, IdentityInspection, IdentityManifest,
+    IdentityRef, ImportedSecret, KeyringLocator, NostrPublicKeyHex, OwnerAttestationRequest,
+    OwnerAttestationResult, PendingIdentityOperation, PendingIdentityTransaction,
+    PrivateMessageRequest, PublicIdentity, PublicStoreError, ReceiptRef, SigningResult,
+    UnwrappedPrivateMessage,
     mutation_lock::{IdentityMutationGuard, MutationLockError},
     proof::{IDENTITY_PROOF_KEYRING_ACCOUNT, IDENTITY_PROOF_KEYRING_SERVICE, ProofCrashBoundary},
     public_store::{
@@ -37,9 +38,9 @@ use crate::{
         write_identity_manifest_for_locator, write_json_document,
     },
     recovery::{
-        CandidateKind, CandidateRef, PreparedRecovery, RecoveryArtifactReceipt, RecoveryCandidate,
-        RecoveryPassword, RecoveryProtectionRecord, RecoveryProtectionStatus, RecoveryResolution,
-        SelectedRecovery, reconcile_prepared,
+        CandidateKind, CandidateRef, PreparedRecovery, PreparedRecoveryProtection,
+        RecoveryArtifactReceipt, RecoveryCandidate, RecoveryPassword, RecoveryProtectionRecord,
+        RecoveryProtectionStatus, RecoveryResolution, SelectedRecovery, reconcile_prepared,
     },
     recovery_artifact::{self, RecoveryArtifactError},
     secret::{FileSecretStore, SecretKeyMaterial, SecretStore, StoreError},
@@ -384,6 +385,92 @@ impl IdentityService {
         self.ensure_account_record_locked(&identity, IdentityCandidateOrigin::Existing)
     }
 
+    pub fn inspect_activation(&self) -> Result<IdentityActivationInspection, CustodyError> {
+        let _mutation_guard = IdentityMutationGuard::acquire(&self.locator)?;
+        self.require_no_reset_locked()?;
+        let resolved = self.resolve_locked();
+        if resolved.result.state != CustodyState::Ready {
+            return Err(CustodyError::CustodyDenied(resolved.result.state));
+        }
+        let identity = resolved
+            .result
+            .identity
+            .ok_or(CustodyError::CustodyDenied(CustodyState::Incomplete))?;
+        let account =
+            self.ensure_account_record_locked(&identity, IdentityCandidateOrigin::Existing)?;
+        let held_intent = self.read_held_identity_action_locked()?;
+        if let Some(held) = held_intent.as_ref() {
+            if !matches!(
+                account.state,
+                IdentityActivationState::Activating | IdentityActivationState::Active
+            ) {
+                return Err(CustodyError::InvalidActivationState);
+            }
+            if account.activation_ref.as_ref() != Some(&held.intent_ref)
+                || account.account_ref != held.account_ref
+                || account.account_generation != held.account_generation
+                || identity.identity_ref() != &held.identity_ref
+            {
+                return Err(CustodyError::InvalidActivationState);
+            }
+        } else if account.state == IdentityActivationState::Activating {
+            return Err(CustodyError::InvalidActivationState);
+        }
+        let recovery_protection = self.recovery_protection_status_locked(&CustodyResult {
+            state: CustodyState::Ready,
+            identity: Some(identity),
+            receipt_ref: resolved.result.receipt_ref,
+        })?;
+        Ok(IdentityActivationInspection {
+            account,
+            held_intent,
+            recovery_protection,
+        })
+    }
+
+    pub fn begin_identity_activation(
+        &self,
+        request_ref: ReceiptRef,
+        expires_at: u64,
+    ) -> Result<DurableIdentityActionDecision, CustodyError> {
+        let now = unix_time_now();
+        let _mutation_guard = IdentityMutationGuard::acquire(&self.locator)?;
+        self.require_no_reset_locked()?;
+        let resolved = self.resolve_locked();
+        if resolved.result.state != CustodyState::Ready {
+            return Err(CustodyError::CustodyDenied(resolved.result.state));
+        }
+        let identity = resolved
+            .result
+            .identity
+            .ok_or(CustodyError::CustodyDenied(CustodyState::Incomplete))?;
+        let payload_digest = format!(
+            "{:x}",
+            Sha256::digest(
+                format!(
+                    "omega-identity-activation:{}:{}",
+                    request_ref.as_str(),
+                    identity.identity_ref().as_str()
+                )
+                .as_bytes()
+            )
+        );
+        let descriptor = DurableIdentityActionDescriptor {
+            authorization_ref: crate::ProofRef::new(format!("activation-{}", request_ref.as_str()))
+                .map_err(|_| CustodyError::InvalidActivationIntent)?,
+            intent_ref: request_ref,
+            kind: crate::DurableIdentityActionKind::AccountSetup,
+            destination_ref: crate::ResourceRef::new("omega-identity-account")
+                .map_err(|_| CustodyError::InvalidActivationIntent)?,
+            payload_digest,
+            expires_at,
+        };
+        descriptor
+            .validate(now)
+            .map_err(|_| CustodyError::InvalidActivationIntent)?;
+        self.authorize_or_hold_identity_action_locked(descriptor, identity, now)
+    }
+
     pub fn authorize_or_hold_identity_action(
         &self,
         descriptor: DurableIdentityActionDescriptor,
@@ -425,12 +512,21 @@ impl IdentityService {
             issued_at: now,
             expires_at: descriptor.expires_at,
         };
+        let recovery_is_protected = self
+            .recovery_protection_status_locked(&CustodyResult {
+                state: CustodyState::Ready,
+                identity: Some(identity),
+                receipt_ref: None,
+            })?
+            .state
+            == crate::RecoveryProtectionState::Protected;
 
         match account.state {
-            IdentityActivationState::Active => Ok(DurableIdentityActionDecision::Authorized(
-                IdentityActionAuthorization::new(intent),
-            )),
-            IdentityActivationState::CandidateLocal
+            IdentityActivationState::Active if recovery_is_protected => Ok(
+                DurableIdentityActionDecision::Authorized(IdentityActionAuthorization::new(intent)),
+            ),
+            IdentityActivationState::Active
+            | IdentityActivationState::CandidateLocal
             | IdentityActivationState::CandidateExisting => {
                 if let Some(held) = self.read_held_identity_action_locked()? {
                     if !identity_action_binding_matches(&held, &intent) {
@@ -480,6 +576,7 @@ impl IdentityService {
         let _mutation_guard = IdentityMutationGuard::acquire(&self.locator)?;
         let now = unix_time_now();
         let mut account = self.require_matching_activation_locked(expected, now)?;
+        self.require_recovery_protection_locked(&account.identity)?;
         account.state = IdentityActivationState::Active;
         account.updated_at = now;
         write_json_document(&self.paths.account_path, &account)?;
@@ -521,6 +618,7 @@ impl IdentityService {
         let account = self
             .read_account_record_locked()?
             .ok_or(CustodyError::InvalidActivationState)?;
+        self.require_recovery_protection_locked(&identity)?;
         if account.state != IdentityActivationState::Active
             || account.account_ref != expected.account_ref
             || account.account_generation != expected.account_generation
@@ -562,6 +660,7 @@ impl IdentityService {
         let account = self
             .read_account_record_locked()?
             .ok_or(CustodyError::InvalidActivationState)?;
+        self.require_recovery_protection_locked(&identity)?;
         if account.state != IdentityActivationState::Active
             || account.account_ref != intent.account_ref
             || account.account_generation != intent.account_generation
@@ -604,6 +703,14 @@ impl IdentityService {
     /// clothes.
     pub fn dismiss_backup_nudge(&self) -> Result<(), CustodyError> {
         let _mutation_guard = IdentityMutationGuard::acquire(&self.locator)?;
+        if read_json_document::<BackupValueRecord>(&self.paths.backup_value_path)?.is_some() {
+            let resolved = self.resolve_locked();
+            let identity = resolved
+                .result
+                .identity
+                .ok_or(CustodyError::RecoveryDecisionRequired)?;
+            self.require_recovery_protection_locked(&identity)?;
+        }
         write_json_document(
             &self.paths.backup_nudge_dismissed_path,
             &BackupNudgeDismissal {
@@ -651,7 +758,7 @@ impl IdentityService {
             .ok()
             .flatten()
             .is_some();
-        let dismissed =
+        let dismissal_recorded =
             read_json_document::<BackupNudgeDismissal>(&self.paths.backup_nudge_dismissed_path)
                 .ok()
                 .flatten()
@@ -662,6 +769,7 @@ impl IdentityService {
                 inspection.recovery_protection.state == crate::RecoveryProtectionState::Protected
             })
             .unwrap_or(false);
+        let dismissed = dismissal_recorded && (!value_accrued || protected);
         BackupNudgeStatus {
             value_accrued,
             dismissed,
@@ -724,11 +832,12 @@ impl IdentityService {
         candidate: &RecoveryCandidate,
         password: RecoveryPassword,
     ) -> Result<PreparedRecovery, CustodyError> {
-        let encrypted = recovery_artifact::read_encrypted(candidate)?;
+        let artifact = recovery_artifact::read_encrypted(candidate)?;
         let _kdf_guard = RECOVERY_KDF_LOCK
             .lock()
             .map_err(|_| CustodyError::RecoveryDecryptionFailed)?;
-        let secret_key = encrypted
+        let secret_key = artifact
+            .encrypted
             .decrypt(password.as_str())
             .map_err(|_| CustodyError::RecoveryDecryptionFailed)?;
         PreparedRecovery::new(
@@ -736,6 +845,13 @@ impl IdentityService {
             CandidateKind::EncryptedRecoveryArtifact,
             SecretKeyMaterial::from_secret_key(secret_key),
         )
+        .map(|prepared| {
+            prepared.with_recovery_protection(
+                candidate.path().to_path_buf(),
+                artifact.digest,
+                artifact.byte_length,
+            )
+        })
     }
 
     pub fn reconcile_recoveries(&self, candidates: &[&PreparedRecovery]) -> RecoveryResolution {
@@ -779,12 +895,16 @@ impl IdentityService {
         selected: SelectedRecovery,
         receipt_ref: ReceiptRef,
     ) -> Result<CustodyResult, CustodyError> {
-        let prepared = selected.into_prepared();
+        let mut prepared = selected.into_prepared();
         let _mutation_guard = IdentityMutationGuard::acquire(&self.locator)?;
         self.require_no_reset_locked()?;
+        self.verify_prepared_recovery_protection_locked(prepared.recovery_protection.as_ref())?;
         if let Some(result) =
             self.ready_idempotent_result_locked(&receipt_ref, Some(prepared.identity()))?
         {
+            let identity = prepared.identity().clone();
+            let recovery_protection = prepared.recovery_protection.take();
+            self.install_prepared_recovery_protection_locked(&identity, recovery_protection)?;
             return Ok(result);
         }
 
@@ -799,7 +919,11 @@ impl IdentityService {
         {
             return Err(CustodyError::CustodyDenied(CustodyState::Conflict));
         }
-        self.commit_secret_locked(prepared.secret, transaction)
+        let identity = prepared.identity().clone();
+        let recovery_protection = prepared.recovery_protection.take();
+        let result = self.commit_secret_locked(prepared.secret, transaction)?;
+        self.install_prepared_recovery_protection_locked(&identity, recovery_protection)?;
+        Ok(result)
     }
 
     pub fn resolve_conflict(
@@ -807,12 +931,16 @@ impl IdentityService {
         selected: SelectedRecovery,
         receipt_ref: ReceiptRef,
     ) -> Result<CustodyResult, CustodyError> {
-        let prepared = selected.into_prepared();
+        let mut prepared = selected.into_prepared();
         let _mutation_guard = IdentityMutationGuard::acquire(&self.locator)?;
         self.require_no_reset_locked()?;
+        self.verify_prepared_recovery_protection_locked(prepared.recovery_protection.as_ref())?;
         if let Some(result) =
             self.ready_idempotent_result_locked(&receipt_ref, Some(prepared.identity()))?
         {
+            let identity = prepared.identity().clone();
+            let recovery_protection = prepared.recovery_protection.take();
+            self.install_prepared_recovery_protection_locked(&identity, recovery_protection)?;
             return Ok(result);
         }
 
@@ -878,7 +1006,11 @@ impl IdentityService {
             }
         }
 
-        self.commit_secret_locked(prepared.secret, transaction)
+        let identity = prepared.identity().clone();
+        let recovery_protection = prepared.recovery_protection.take();
+        let result = self.commit_secret_locked(prepared.secret, transaction)?;
+        self.install_prepared_recovery_protection_locked(&identity, recovery_protection)?;
+        Ok(result)
     }
 
     pub fn export_recovery_artifact(
@@ -1745,6 +1877,57 @@ impl IdentityService {
         }
     }
 
+    fn require_recovery_protection_locked(
+        &self,
+        identity: &PublicIdentity,
+    ) -> Result<RecoveryProtectionRecord, CustodyError> {
+        match self.read_recovery_protection_locked()? {
+            Some(record) if record.identity() == identity => Ok(record),
+            Some(_) => {
+                remove_public_document(&self.paths.recovery_protection_path)?;
+                Err(CustodyError::RecoveryDecisionRequired)
+            }
+            None => Err(CustodyError::RecoveryDecisionRequired),
+        }
+    }
+
+    fn install_prepared_recovery_protection_locked(
+        &self,
+        identity: &PublicIdentity,
+        protection: Option<PreparedRecoveryProtection>,
+    ) -> Result<(), CustodyError> {
+        let Some(protection) = protection else {
+            return Ok(());
+        };
+        recovery_artifact::verify_protection(
+            &protection.path,
+            &protection.artifact_digest,
+            protection.byte_length,
+        )?;
+        let record = RecoveryProtectionRecord::new(
+            identity.clone(),
+            protection.artifact_digest,
+            protection.byte_length,
+        )?;
+        write_json_document(&self.paths.recovery_protection_path, &record)?;
+        Ok(())
+    }
+
+    fn verify_prepared_recovery_protection_locked(
+        &self,
+        protection: Option<&PreparedRecoveryProtection>,
+    ) -> Result<(), CustodyError> {
+        let Some(protection) = protection else {
+            return Ok(());
+        };
+        recovery_artifact::verify_protection(
+            &protection.path,
+            &protection.artifact_digest,
+            protection.byte_length,
+        )?;
+        Ok(())
+    }
+
     fn remove_mismatched_recovery_protection_locked(
         &self,
         identity: &PublicIdentity,
@@ -2317,6 +2500,8 @@ pub enum CustodyError {
     RecoveryDecryptionFailed,
     #[error("the recovery protection record is invalid")]
     InvalidRecoveryProtection,
+    #[error("create or verify a NIP-49 recovery file before this durable action")]
+    RecoveryDecisionRequired,
     #[error("identity signing failed")]
     SigningFailed,
     #[error("the identity transaction is incomplete")]
@@ -2589,6 +2774,24 @@ mod tests {
         }
     }
 
+    fn protect_held_identity(service: &IdentityService, held: &HeldIdentityAction) {
+        let identity_ref = held.identity_ref.clone();
+        let recovery_path = service
+            .paths
+            .manifest_path
+            .parent()
+            .expect("identity data root")
+            .join("test-activation-recovery.ncryptsec");
+        service
+            .export_recovery_artifact(
+                &identity_ref,
+                &recovery_path,
+                RecoveryPassword::new("test recovery password".to_string())
+                    .expect("valid recovery password"),
+            )
+            .expect("protect activation recovery");
+    }
+
     fn activate_candidate(service: &IdentityService) {
         let held = match service
             .authorize_or_hold_identity_action(durable_action_descriptor("activation:test"))
@@ -2597,6 +2800,7 @@ mod tests {
             DurableIdentityActionDecision::ActivationRequired { intent, .. } => intent,
             DurableIdentityActionDecision::Authorized(_) => return,
         };
+        protect_held_identity(service, &held);
         service
             .complete_activation(&held)
             .expect("complete activation");
@@ -2750,11 +2954,10 @@ mod tests {
         assert_eq!(store.state.lock().expect("lock fake store").writes, 1);
     }
 
-    /// omega#164. The backup nudge is quiet by construction: a fresh profile
-    /// offers nothing, the first value event arms it durably and idempotently,
-    /// and dismissal is a durable fact that survives re-inspection.
+    /// The first value event cannot be hidden indefinitely before a verified
+    /// recovery decision is bound to the exact identity.
     #[test]
-    fn backup_nudge_arms_on_first_value_and_stays_dismissed() {
+    fn post_value_backup_nudge_requires_recovery_before_dismissal() {
         let temporary_directory = tempfile::tempdir().expect("create temporary directory");
         let store = FakeStore::empty();
         let service = service(store, temporary_directory.path().to_path_buf());
@@ -2762,7 +2965,11 @@ mod tests {
         // A first launch has nothing to lose, so there is nothing to offer.
         assert!(!service.backup_nudge_status().should_offer_backup());
 
-        service.create(receipt()).expect("create identity");
+        let identity = service
+            .create(receipt())
+            .expect("create identity")
+            .identity
+            .expect("created identity");
         assert!(
             !service.backup_nudge_status().should_offer_backup(),
             "an identity with no accrued value must not nudge"
@@ -2784,7 +2991,23 @@ mod tests {
             .expect("value record exists");
         assert_eq!(record.kind, BackupValueKind::ChannelPost);
 
-        service.dismiss_backup_nudge().expect("dismiss the nudge");
+        assert!(matches!(
+            service.dismiss_backup_nudge(),
+            Err(CustodyError::RecoveryDecisionRequired)
+        ));
+        assert!(service.backup_nudge_status().should_offer_backup());
+
+        service
+            .export_recovery_artifact(
+                identity.identity_ref(),
+                &temporary_directory.path().join("backup.ncryptsec"),
+                RecoveryPassword::new("backup password".to_string())
+                    .expect("valid backup password"),
+            )
+            .expect("protect recovery");
+        service
+            .dismiss_backup_nudge()
+            .expect("dismiss after recovery decision");
         let dismissed = service.backup_nudge_status();
         assert!(dismissed.value_accrued);
         assert!(dismissed.dismissed);
@@ -3801,6 +4024,7 @@ mod tests {
             crate::DurableIdentityActionKind::AgentAttestation
         );
         assert_eq!(required.intent().identity_ref, *identity.identity_ref());
+        protect_held_identity(&service, required.intent());
         service
             .complete_activation(required.intent())
             .expect("complete exact attestation activation");
@@ -4009,6 +4233,22 @@ mod tests {
             )
             .expect("adopt recovery artifact");
         assert_eq!(adopted.identity.as_ref(), Some(&identity));
+        let destination_protection = destination
+            .inspect_activation()
+            .expect("inspect imported activation")
+            .recovery_protection;
+        assert_eq!(
+            destination_protection.state,
+            RecoveryProtectionState::Protected
+        );
+        assert_eq!(
+            destination_protection
+                .record
+                .as_ref()
+                .expect("imported protection record")
+                .identity(),
+            &identity
+        );
 
         let before = std::fs::read(&artifact_path).expect("read preserved artifact");
         assert!(matches!(
@@ -4037,6 +4277,109 @@ mod tests {
                 0o600
             );
         }
+    }
+
+    #[test]
+    fn changed_or_deleted_prepared_artifact_never_records_recovery_protection() {
+        let temporary_directory = tempfile::tempdir().expect("create temporary directory");
+        let source = service(
+            FakeStore::empty(),
+            temporary_directory.path().join("source"),
+        );
+        let identity = source
+            .create(receipt())
+            .expect("create source identity")
+            .identity
+            .expect("source identity");
+        let original_path = temporary_directory.path().join("original.ncryptsec");
+        source
+            .export_recovery_artifact(
+                identity.identity_ref(),
+                &original_path,
+                RecoveryPassword::new("artifact integrity password".to_string())
+                    .expect("valid recovery password"),
+            )
+            .expect("export source artifact");
+
+        let changed_path = temporary_directory.path().join("changed.ncryptsec");
+        let deleted_path = temporary_directory.path().join("deleted.ncryptsec");
+        std::fs::copy(&original_path, &changed_path).expect("copy changed candidate");
+        std::fs::copy(&original_path, &deleted_path).expect("copy deleted candidate");
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt as _;
+            for path in [&changed_path, &deleted_path] {
+                std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o600))
+                    .expect("protect copied candidate");
+            }
+        }
+
+        let changed_candidate = source
+            .discover_recovery_artifact(changed_path.clone())
+            .expect("discover changed candidate");
+        let changed_prepared = source
+            .prepare_recovery_artifact(
+                &changed_candidate,
+                RecoveryPassword::new("artifact integrity password".to_string())
+                    .expect("valid recovery password"),
+            )
+            .expect("prepare changed candidate");
+        std::fs::write(&changed_path, b"changed-after-preview")
+            .expect("change candidate after preview");
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt as _;
+            std::fs::set_permissions(&changed_path, std::fs::Permissions::from_mode(0o600))
+                .expect("protect changed candidate");
+        }
+        let changed_destination = service(
+            FakeStore::empty(),
+            temporary_directory.path().join("changed-destination"),
+        );
+        assert!(matches!(
+            changed_destination.adopt(
+                select_one(&changed_destination, changed_prepared),
+                ReceiptRef::new("changed-artifact-adopt").expect("valid receipt"),
+            ),
+            Err(CustodyError::InvalidRecoveryArtifact)
+        ));
+        assert_eq!(
+            changed_destination
+                .inspect()
+                .expect("inspect changed destination")
+                .state,
+            CustodyState::Absent
+        );
+
+        let deleted_candidate = source
+            .discover_recovery_artifact(deleted_path.clone())
+            .expect("discover deleted candidate");
+        let deleted_prepared = source
+            .prepare_recovery_artifact(
+                &deleted_candidate,
+                RecoveryPassword::new("artifact integrity password".to_string())
+                    .expect("valid recovery password"),
+            )
+            .expect("prepare deleted candidate");
+        std::fs::remove_file(&deleted_path).expect("delete candidate after preview");
+        let deleted_destination = service(
+            FakeStore::empty(),
+            temporary_directory.path().join("deleted-destination"),
+        );
+        assert!(matches!(
+            deleted_destination.adopt(
+                select_one(&deleted_destination, deleted_prepared),
+                ReceiptRef::new("deleted-artifact-adopt").expect("valid receipt"),
+            ),
+            Err(CustodyError::RecoveryArtifactUnavailable)
+        ));
+        assert_eq!(
+            deleted_destination
+                .inspect()
+                .expect("inspect deleted destination")
+                .state,
+            CustodyState::Absent
+        );
     }
 
     /// The startup gate provisions until `custody.state == CustodyState::Ready`
@@ -4616,6 +4959,7 @@ mod tests {
             DurableIdentityActionDecision::ActivationRequired { intent, .. } => intent,
             DurableIdentityActionDecision::Authorized(_) => panic!("candidate bypassed activation"),
         };
+        protect_held_identity(&service, &held);
         let active = service
             .complete_activation(&held)
             .expect("activate exact account");
@@ -4628,6 +4972,98 @@ mod tests {
             service.take_activated_identity_action(&held),
             Err(CustodyError::ActivationIntentConsumed)
         ));
+    }
+
+    #[test]
+    fn activation_projection_binds_exact_intent_and_recovery_across_restart() {
+        let temporary_directory = tempfile::tempdir().expect("create temporary directory");
+        let data_root = temporary_directory.path().to_path_buf();
+        let store = FakeStore::empty();
+        let current_service = service(store.clone(), data_root.clone());
+        let identity = current_service
+            .create(receipt())
+            .expect("create candidate")
+            .identity
+            .expect("created identity");
+        let request_ref =
+            ReceiptRef::new("voluntary-account-setup").expect("valid activation request");
+        let held = match current_service
+            .begin_identity_activation(request_ref, unix_time_now().saturating_add(600))
+            .expect("begin voluntary activation")
+        {
+            DurableIdentityActionDecision::ActivationRequired { intent, .. } => intent,
+            DurableIdentityActionDecision::Authorized(_) => panic!("candidate bypassed setup"),
+        };
+        let inspection = current_service
+            .inspect_activation()
+            .expect("inspect activation");
+        assert_eq!(inspection.held_intent.as_ref(), Some(&held));
+        assert_eq!(
+            inspection.recovery_protection.state,
+            RecoveryProtectionState::Needed
+        );
+        assert!(matches!(
+            current_service.complete_activation(&held),
+            Err(CustodyError::RecoveryDecisionRequired)
+        ));
+
+        current_service
+            .export_recovery_artifact(
+                identity.identity_ref(),
+                &temporary_directory.path().join("activation.ncryptsec"),
+                RecoveryPassword::new("activation recovery password".to_string())
+                    .expect("valid recovery password"),
+            )
+            .expect("protect exact identity");
+        current_service
+            .complete_activation(&held)
+            .expect("complete protected activation");
+        current_service
+            .take_activated_identity_action(&held)
+            .expect("consume exact account setup intent");
+
+        let restarted = service(store, data_root)
+            .inspect_activation()
+            .expect("inspect activation after restart");
+        assert_eq!(restarted.account.state, IdentityActivationState::Active);
+        assert!(restarted.held_intent.is_none());
+        assert_eq!(
+            restarted.recovery_protection.state,
+            RecoveryProtectionState::Protected
+        );
+    }
+
+    #[test]
+    fn active_account_without_recovery_is_downgraded_on_cancel() {
+        let temporary_directory = tempfile::tempdir().expect("create temporary directory");
+        let service = service(FakeStore::empty(), temporary_directory.path().to_path_buf());
+        service.create(receipt()).expect("create candidate");
+        activate_candidate(&service);
+        remove_public_document(&service.paths.recovery_protection_path)
+            .expect("remove recovery decision");
+
+        let held = match service
+            .authorize_or_hold_identity_action(durable_action_descriptor(
+                "activation:recovery-required",
+            ))
+            .expect("hold action for unprotected active account")
+        {
+            DurableIdentityActionDecision::ActivationRequired { intent, .. } => intent,
+            DurableIdentityActionDecision::Authorized(_) => {
+                panic!("unprotected active account bypassed recovery")
+            }
+        };
+        let cancelled = service
+            .cancel_activation(&held)
+            .expect("cancel unprotected reactivation");
+        assert_eq!(cancelled.state, IdentityActivationState::CandidateLocal);
+        assert!(
+            service
+                .inspect_activation()
+                .expect("inspect downgraded account")
+                .held_intent
+                .is_none()
+        );
     }
 
     #[test]
@@ -4659,6 +5095,7 @@ mod tests {
             service.complete_activation(&stale),
             Err(CustodyError::StaleActivationIntent)
         ));
+        protect_held_identity(&service, &first);
         service
             .complete_activation(&first)
             .expect("activate original binding");
@@ -4681,6 +5118,7 @@ mod tests {
             DurableIdentityActionDecision::ActivationRequired { intent, .. } => intent,
             DurableIdentityActionDecision::Authorized(_) => panic!("candidate bypassed activation"),
         };
+        protect_held_identity(&service, &held);
         service
             .complete_activation(&held)
             .expect("complete activation");
@@ -4706,6 +5144,7 @@ mod tests {
             DurableIdentityActionDecision::ActivationRequired { intent, .. } => intent,
             DurableIdentityActionDecision::Authorized(_) => panic!("candidate bypassed activation"),
         };
+        protect_held_identity(&service, &held);
         service
             .complete_activation(&held)
             .expect("complete activation");

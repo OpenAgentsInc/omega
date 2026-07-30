@@ -3,7 +3,7 @@ use thiserror::Error;
 
 use crate::{
     AccountRef, AuthenticationContractError, IdentityRef, ProofRef, PublicIdentity, ReceiptRef,
-    ResourceRef,
+    RecoveryProtectionStatus, ResourceRef,
 };
 
 pub const IDENTITY_ACCOUNT_SCHEMA: &str = "openagents.omega.identity-account.v1";
@@ -75,11 +75,21 @@ impl IdentityAccountRecord {
 #[derive(Debug, Copy, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum DurableIdentityActionKind {
+    AccountSetup,
     PublicPost,
     CommunityJoin,
     DeviceGrant,
     HostedAccountLink,
     AgentAttestation,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct IdentityActivationInspection {
+    pub account: IdentityAccountRecord,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub held_intent: Option<HeldIdentityAction>,
+    pub recovery_protection: RecoveryProtectionStatus,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]

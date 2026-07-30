@@ -8507,3 +8507,39 @@ startup recheck — survives unchanged behind that dropdown.
   `onboarding`; typed gate tests at the public-channel, community, pairing,
   hosted-link, and agent-attestation entry points; and the
   `OMEGA-DELTA-0192` source assertions in `crates/omega_deltas`.
+
+### OMEGA-DELTA-0193 — Activation makes recovery and exact resumption explicit
+
+- **Origin:** OMEGA-AUTH-02, omega#177. Extends the candidate and held-action
+  model from `OMEGA-DELTA-0192`; it does not add another secret store.
+- **The local path is real.** The desktop account control explains what the
+  public key and signing secret mean, and that a signature does not itself
+  prove identity, truth, membership, or permission. **Keep this identity**
+  requires a verified encrypted NIP-49 recovery artifact before a candidate
+  becomes Active. A verified artifact for that exact identity is reused rather
+  than forcing another export. The password protects the file and is neither
+  persisted nor presented as an account-reset password. Raw `nsec` import is
+  an advanced recovery escape hatch using the zeroizing secure input.
+- **Deferred paths are honest.** **Use an existing identity** does not
+  overwrite a healthy local candidate; safe replacement waits for
+  multi-account switching. **Use a signer on another device** states that
+  remote signing is unavailable and performs no activation or secret move.
+- **Completion is not replay.** The durable action file contains only typed
+  references, a payload digest, and expiry. The initiating surface owns the
+  actual payload through a process-local one-shot callback. After recovery and
+  activation, only that exact owner may revalidate, consume, and resume the
+  held intent. Exact cancellation restores the candidate and tells the owner
+  to resume nothing. After restart, an orphaned durable intent is explained
+  and may be cancelled, but Omega will not guess or recreate its payload.
+  Proactive `AccountSetup`, which has no external payload, is the only
+  ownerless intent the identity screen consumes itself.
+- **File custody only.** The root secret remains the owner-only
+  `identity/identity.secret` file. NIP-49 output goes to the directory the
+  person selects; only public-safe recovery verification metadata is retained.
+  This delta enables no macOS Keychain, Secure Enclave, Windows credential
+  vault, Linux secret service, Android keystore, encrypted application vault,
+  or native enclave path.
+- **Enforced by:** recovery-gated activation and exact-intent tests in
+  `omega_identity`; one-shot owner tests in `omega_actions`; candidate,
+  activation, and cancellation presentation tests in `onboarding`; and the
+  `OMEGA-DELTA-0193` source assertions in `crates/omega_deltas`.

@@ -1,7 +1,7 @@
 # Omega Nostr authentication contract
 
-- Status: AUTH-00 contract frozen; AUTH-01 background-identity activation implemented
-- Packets: `OMEGA-AUTH-00`, `OMEGA-AUTH-01`
+- Status: AUTH-00 contract frozen; AUTH-01 candidate model and AUTH-02 activation ceremony implemented
+- Packets: `OMEGA-AUTH-00`, `OMEGA-AUTH-01`, `OMEGA-AUTH-02`
 - Source baseline: Omega `0136fca2d11900ddc7982665482ed8cd035391c7`
 - Product plan:
   [Omega Nostr authentication and onboarding](https://github.com/OpenAgentsInc/openagents/blob/7010561549ebb46a37257292a9100f990a4a3356/docs/omega/2026-07-30-omega-nostr-authentication-and-onboarding.md)
@@ -47,9 +47,15 @@ durable public action. Omega separately:
 
 Recovery uses NIP-49 `ncryptsec` artifacts, bounded password work, public-key
 preview, opaque prepared candidates, journaled mutation, and custody read-back.
-The desktop also has an advanced raw-`nsec` backup surface and a value-triggered
-backup nudge. AUTH-02 owns the fuller keep/import/remote-signer activation and
-durable recovery journey.
+AUTH-02 makes a verified NIP-49 artifact the normal local-candidate activation
+path. Raw `nsec` remains an explicitly advanced recovery path. The activation
+screen names existing-identity and remote-signer choices, but does not pretend
+they work in this wave: replacing a healthy candidate waits for multi-account
+switching, and remote signing waits for the signer packet.
+
+The recovery password encrypts the exported file. It is not an Omega login or
+password-reset mechanism. A previously verified recovery artifact satisfies
+the activation requirement without forcing another export.
 
 ## Identities
 
@@ -128,14 +134,23 @@ destination, authorization proof, payload digest, and expiry. For a candidate,
 Omega atomically persists the corresponding `HeldIdentityAction` in
 `identity/identity.action-intent.json` and moves the account to `Activating`.
 
-Completing activation does not itself replay work. The caller must consume the
-same held action exactly once. Consumption rechecks the account reference,
+Completing activation does not itself replay work. The initiating surface owns
+the exact action payload in a process-local one-shot callback while the durable
+file stores only its bounded digest and references. After completion, that
+owner must consume the same held action exactly once. Consumption rechecks the account reference,
 account generation, identity, action kind, destination, authorization proof,
 payload digest, and expiry. Cancellation restores the original candidate
 state, clears the held action, and resumes nothing. A product surface must
 provide explicit complete and cancel controls and retain enough typed state to
 resume the original action; redirecting to the account control alone does not
 satisfy this contract.
+
+If Omega restarts, the durable intent remains inspectable but its secret or
+content-bearing payload is deliberately not reconstructed from disk. The
+activation screen therefore refuses completion for that orphan, explains why,
+and offers exact cancellation. The person then starts the originating action
+again. The ownerless `AccountSetup` intent used for proactive setup is the sole
+case the identity screen may consume itself.
 
 ## Public-safety rules and fixtures
 
@@ -154,7 +169,7 @@ binding.
 
 ## Migration and custody boundary
 
-AUTH-01 changes account admission, not secret custody. The person key remains
+AUTH-01 and AUTH-02 change account admission and recovery decisions, not secret custody. The person key remains
 the raw 32-byte value in the owner-only, channel-namespaced
 `identity/identity.secret` file. This wave does not enable the macOS Keychain,
 Secure Enclave, Windows credential vault, Linux secret service, Android
@@ -167,3 +182,7 @@ exact public key and signed history. Lost, conflict, incomplete, locked,
 reset-failed, and relaunch-required custody states remain distinct and route
 to the existing repair surface rather than being rounded into a candidate or
 active account.
+
+AUTH-02 adds no password vault. NIP-49 output is written only to the folder the
+person chooses, while its public-safe verification record remains under the
+identity directory. No recovery password or decrypted secret is persisted.
