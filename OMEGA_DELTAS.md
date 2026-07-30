@@ -1589,10 +1589,11 @@ than it sounds, because the harness omega#81's acceptance sentence names —
   landing half shipped and the typing half did not, and the two were reported
   together.
 - **Omega now:** the guards on the front door's own path are gone.
-  `open_new_conversation_front_door`, `activate_draft`, `new_thread`, and
+  `compose_on_executor`, `activate_draft`, `new_thread`, and
   `ensure_native_agent_connection` no longer refuse a projectless window. The
-  front door prepares one Omega session and shows its folder as **No folder
-  selected**; choosing a Ready row reveals that prepared conversation.
+  front door prepares one Omega session and lands in its focused composer
+  (`OMEGA-DELTA-0184` moved the landing from a chooser screen to the composer
+  itself; the project-optional law is unchanged).
 - **What the guards protected, checked rather than assumed.** The one that could
   plausibly have been load-bearing was `ensure_native_agent_connection`, and it
   is not: `NativeAgentServer::connect` takes the project as `_project` and never
@@ -6415,9 +6416,12 @@ turn may switch.
   `choosing_an_executor_rebuilds_the_thread_once_the_presses_stop` in
   `crates/agent_ui/src/conversation_view.rs`.
 
-- **What this does not cover.** The three-mode front door lands separately.
-  These checks keep the truthful-labeling and immutable-transcript laws live
-  while that selection surface is built.
+- **What this does not cover.** The three-mode front door landed as
+  `OMEGA-DELTA-0177` and was then re-homed into the composer executor dropdown
+  by `OMEGA-DELTA-0184`. These checks keep the truthful-labeling and
+  immutable-transcript laws live underneath whichever selection surface is
+  current: the dropdown's face reads the active conversation's own owner, so
+  the two-selections defect recorded here cannot be restated by it.
 
 ### OMEGA-DELTA-0132 — The Exo child is told where Exo's harness lives, and the Exo lane runs Exo's own harness
 
@@ -6825,8 +6829,12 @@ so removing the section cannot corrupt a person's other sidebar preferences.
 **Superseded in part by the 2026-07-29 three-mode direction.** Executor
 selection returns at the conversation front door. It does not return as a
 provider/model control that can silently retarget a transcript between turns.
-The mode, executor, project, and readiness are visible before the first send;
+The mode, executor, and readiness are visible before the first send;
 after that point the composer reports what the conversation owns.
+`OMEGA-DELTA-0184` re-homed the front door itself into the composer bar as
+the executor dropdown: the selection control now lives in the turn composer,
+but it still only ever creates or re-homes a conversation — over a bound
+transcript it starts a new thread and never retargets the one under it.
 
 Codex, Claude Code, Grok Build, configured ACP agents, Omega's routing
 infrastructure, and Sarah remain available to the creation surface. Their
@@ -7791,10 +7799,19 @@ current image build does not decode it inline.
 
 ### OMEGA-DELTA-0177 — New conversations cross one typed three-mode boundary
 
-- **Omega now:** `agent::NewThread` and the Thread menu open one persistent
-  Agent Panel front door with exactly three rows: **Direct Agent**, **Omega
-  Agent**, and **Sarah**. Every row shows its exact agent or router selection,
-  folder, and one of four closed readiness states before send.
+**Superseded in part by OMEGA-DELTA-0184 (omega#165).** The full-screen
+three-row chooser this delta shipped was the owner's top UX complaint —
+anything between `+` and a blinking cursor is friction — and no longer exists.
+`agent::NewThread` and the Thread menu now land directly in a focused composer
+on the default executor, and the selection surface is the composer's executor
+dropdown. Everything below that is typed law rather than screen description —
+receipts, ownership immutability, honest readiness, draft retention, and the
+startup recheck — survives unchanged behind that dropdown.
+
+- **Omega before 0182:** `agent::NewThread` and the Thread menu opened one
+  persistent Agent Panel front door with exactly three rows: **Direct Agent**,
+  **Omega Agent**, and **Sarah**. Every row showed its exact agent or router
+  selection, folder, and one of four closed readiness states before send.
 - **Ready is proved, not inferred.** A row can report Ready only with a receipt
   bound to its exact target and a session created by that target. Executable,
   configuration, registry, and path detection do not count. The prepared Omega
@@ -8092,3 +8109,48 @@ current image build does not decode it inline.
   reach, so the nudge currently informs without a one-click route to the
   export control. Making that control reachable in the product surface is its
   own bounded decision, not a reason to grow this row into a screen.
+
+### OMEGA-DELTA-0184 — The composer executor dropdown is the new-conversation front door
+
+- **Supersedes the interstitial three-row screen from OMEGA-DELTA-0177.** The
+  owner hit the full-screen "Start a new conversation" chooser in a
+  `release-fast` build and called it horrible friction (omega#165): anything
+  between `+` and a blinking cursor fails the product. The typed boundary
+  survives; the screen does not.
+- **New Thread opens a thread, not a screen.** `agent::NewThread`, the
+  Thread menu, and the toolbar `+`'s Omega entry land directly in a normal
+  conversation with the composer focused, on the default executor
+  (**Omega Agent**). Startup's empty-window landing takes the same path, and
+  the `OMEGA-DELTA-0177` startup recheck still refuses to cover restored
+  state with a new blank composer.
+- **The selection surface is a composer-bar dropdown.** It sits beside the
+  Flash/Pro tier control (`OMEGA-DELTA-0172`) at the same visual weight, in
+  both the loading composer and the zero-base bar. Its fixed order is Omega
+  Agent, the named direct agents (Codex `codex-acp`, Claude Code
+  `claude-acp`, Grok Build `grok-build`), every other installed ACP agent,
+  Sarah (voice), then **Add More Agents…** into the ACP registry.
+  `agent::ToggleComposerExecutorMenu` opens it from the keyboard.
+- **Readiness stays typed and honest.** Every row carries `ModeReadiness` —
+  Ready, Setup required, Temporarily unavailable, or Not supported in this
+  build — and a row that cannot run here renders disabled with its reason,
+  never hidden and never fake-enabled. Ready is still minted only through a
+  `PreparationReceipt` bound to a created session or a connected router, and
+  a Ready claim still travels through the receipt-validated activation from
+  `OMEGA-DELTA-0177`.
+- **One selection authority.** The dropdown's face reads the active
+  conversation's own owner — the loading composer's agent key or the thread
+  view's construction-time identity — never a second selection store, so the
+  `OMEGA-DELTA-0131` two-selections lie cannot be restated. Choosing a row
+  goes through one panel path, `compose_on_executor`, which replaces a blank
+  draft or starts a new conversation.
+- **The ownership law survives unchanged.** Selection is free until the first
+  send; the first send binds the conversation (`OMEGA-DELTA-0178`); choosing
+  a different executor over a bound transcript starts a new thread and never
+  retargets the transcript underneath its entries (`OMEGA-DELTA-0150`).
+  Selecting Sarah routes through `OMEGA-DELTA-0180`'s admission surface.
+- **Enforced by:**
+  `the_composer_executor_dropdown_is_the_new_conversation_front_door` in
+  `crates/omega_deltas`, the rewritten `OMEGA-DELTA-0177` claim check, the
+  Agent Panel GPUI tests for the compose path, and the sealed
+  `omega_front_door_no_project` / `omega_front_door_typing` visual baselines,
+  which photograph the composer landing.

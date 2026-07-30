@@ -13967,6 +13967,12 @@ impl ThreadView {
                     .flex_wrap()
                     .gap_1()
                     .children(self.render_zero_base_provider_notice(cx))
+                    // The new-conversation executor dropdown, beside the tier
+                    // selector at the same visual weight. `OMEGA-DELTA-0184`,
+                    // omega#165: on a bound conversation it starts a new
+                    // thread on the picked executor; it never retargets this
+                    // transcript.
+                    .children(self.render_composer_executor_menu(cx))
                     // Flash / Pro — Omega's hosted model tiers.
                     .child(self.render_model_tier_selector(!turn_running, cx))
                     // omega#99. The inspector's contents are the conversation's
@@ -13999,6 +14005,31 @@ impl ThreadView {
                     .child(self.render_send_button(cx)),
             )
             .into_any_element()
+    }
+
+    /// The new-conversation executor dropdown. `OMEGA-DELTA-0184`, omega#165.
+    ///
+    /// The face reads the conversation's own owner through the panel's row
+    /// model, so it names what is actually running. Whether the conversation
+    /// is bound comes from this thread's own entries: the first send leaves
+    /// an entry, and from then on selection starts a new thread instead of
+    /// retargeting this one.
+    fn render_composer_executor_menu(&self, cx: &Context<Self>) -> Option<AnyElement> {
+        let conversation_is_bound = !self.thread.read(cx).is_draft_thread();
+        // The face reads this thread's own resolved owner identity, captured
+        // at construction — never a separate selection store.
+        let current_label = if self.agent_id.as_ref() == agent::OMEGA_AGENT_ID.as_ref() {
+            SharedString::from("Omega Agent")
+        } else {
+            crate::omega_composer_executor_menu::named_direct_agent_label(self.agent_id.as_ref())
+                .map_or_else(|| self.agent_display_name.clone(), SharedString::from)
+        };
+        crate::omega_composer_executor_menu::render_composer_executor_menu(
+            self.workspace.clone(),
+            current_label,
+            conversation_is_bound,
+            cx,
+        )
     }
 
     /// Flash / Pro dropdown for Omega's hosted inference lanes.

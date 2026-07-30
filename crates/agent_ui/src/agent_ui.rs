@@ -28,6 +28,7 @@ pub mod omega_agent_attach;
 pub mod omega_agent_supervision;
 pub mod omega_audience_control;
 pub mod omega_community_control;
+pub mod omega_composer_executor_menu;
 pub mod omega_executor_disclosure;
 pub mod omega_executor_selector;
 pub mod omega_executor_warmth;
@@ -304,6 +305,8 @@ actions!(
     [
         /// Toggles the menu to create new agent threads.
         ToggleNewThreadMenu,
+        /// Toggles the composer's new-conversation executor dropdown.
+        ToggleComposerExecutorMenu,
         /// Toggles the options menu for agent settings and preferences.
         ToggleOptionsMenu,
         /// Toggles the profile or mode selector for switching between agent profiles.

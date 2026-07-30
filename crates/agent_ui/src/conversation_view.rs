@@ -4236,6 +4236,27 @@ impl ConversationView {
             && self.root_session_id.is_none()
     }
 
+    /// The name the composer executor dropdown shows for this conversation.
+    ///
+    /// `OMEGA-DELTA-0184`. Read from this view's own connection key — the
+    /// conversation's owner — never from a separate selection store, so the
+    /// face cannot disagree with the conversation it sits in.
+    fn composer_executor_label(&self, cx: &App) -> SharedString {
+        match self.agent_key() {
+            Agent::NativeAgent => "Omega Agent".into(),
+            Agent::Custom { id } => self
+                .agent_server_store
+                .read(cx)
+                .agent_display_name(id)
+                .unwrap_or_else(|| {
+                    crate::omega_composer_executor_menu::named_direct_agent_label(id.as_ref())
+                        .map_or_else(|| id.0.clone(), SharedString::from)
+                }),
+            #[cfg(any(test, feature = "test-support"))]
+            Agent::Stub => "Stub".into(),
+        }
+    }
+
     fn render_loading_composer(
         &mut self,
         router_ready: bool,
@@ -4316,6 +4337,25 @@ impl ConversationView {
                                         .gap_1()
                                         .when(omega_zero_base::is_active(), |this| {
                                             this.child(self.vim_mode_indicator.clone())
+                                        })
+                                        .map(|this| {
+                                            // The executor dropdown is live
+                                            // from the very first paint of a
+                                            // new conversation, while its
+                                            // session is still connecting.
+                                            // `OMEGA-DELTA-0184`, omega#165.
+                                            let conversation_is_bound = !self
+                                                .pending_connect_messages
+                                                .is_empty()
+                                                || !self.omega_route_override_is_editable();
+                                            this.children(
+                                                crate::omega_composer_executor_menu::render_composer_executor_menu(
+                                                    self.workspace.clone(),
+                                                    self.composer_executor_label(cx),
+                                                    conversation_is_bound,
+                                                    cx,
+                                                ),
+                                            )
                                         })
                                         .when(
                                             router_ready
@@ -5186,6 +5226,19 @@ impl Focusable for ConversationView {
 
 impl ConversationView {
     pub(crate) fn activation_focus_handle(&self, cx: &App) -> FocusHandle {
+        // `OMEGA-DELTA-0122`, restated for activation (omega#165): while the
+        // pre-session composer is the surface on screen — connecting, or a
+        // RouterReady conversation waiting for its first send — that composer
+        // owns the caret. The composer front door re-activates a conversation
+        // that is already the base view, and activating the container here
+        // would steal focus from the loading composer its first render just
+        // focused — a composer that looks ready and ignores the keyboard.
+        if let Some(loading_composer) = self.loading_composer.as_ref()
+            && self.active_thread().is_none()
+            && !matches!(self.server_state, ServerState::LoadError { .. })
+        {
+            return loading_composer.focus_handle(cx);
+        }
         self.active_thread()
             .map(|thread| thread.read(cx).activation_focus_handle(cx))
             .unwrap_or_else(|| self.focus_handle.clone())

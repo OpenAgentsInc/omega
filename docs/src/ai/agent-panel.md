@@ -164,33 +164,39 @@ select the rail item again.
 
 ### Creating New Threads {#new-thread}
 
-{#action agent::NewThread} and the **Thread > New Thread** menu item open the
-same new-conversation front door. The toolbar `+` retains its compact creation
-menu; choosing **Omega Agent** there reaches this front door, while unavailable
-and setup entries keep their explicit state. The front door has
-three permanent rows in this order: **Direct Agent**, **Omega Agent**, and
-**Sarah**.
+{#action agent::NewThread} and the **Thread > New Thread** menu item open a
+normal thread with the composer focused — there is no interstitial mode
+screen. The default executor is **Omega Agent**, and the executor selection is
+a dropdown in the composer bar, beside the Flash/Pro tier control. The
+dropdown offers the executor rows in one fixed order: Omega Agent, the named
+direct agents (Codex, Claude Code, Grok Build), every other installed ACP
+agent, Sarah (voice), and **Add More Agents…**, which opens the ACP registry.
+The toolbar `+` retains its compact creation menu; choosing **Omega Agent**
+there reaches the same focused composer.
+{#action agent::ToggleComposerExecutorMenu} opens the dropdown from the
+keyboard, and the menu itself is arrow-key driven.
 
-Before a send, every row names its mode, exact agent or router selection,
-folder, and one of four readiness states: **Ready**, **Setup required**,
-**Temporarily unavailable**, or **Not supported in this build**. A Direct Agent
-is Ready only after that exact agent creates its session. Omega Agent is Ready
-when its router has a live executor inventory; its first submitted request then
-selects one exact executor and creates that executor's session. Enter/Space and
-pointer activation use the same selection path, and unavailable rows do not
-create another kind of conversation.
+Every dropdown row carries one of four readiness states: **Ready**, **Setup
+required**, **Temporarily unavailable**, or **Not supported in this build**. A
+row that cannot run here is disabled with its reason — never hidden and never
+fake-enabled. A Direct Agent is Ready only after that exact agent creates its
+session. Omega Agent is Ready when its router has a live executor inventory;
+its first submitted request then selects one exact executor and creates that
+executor's session.
 
-If Omega needs authentication or setup fails, its row says **Setup required**
-with the reason. **Open setup** reveals the same prepared conversation and its
-existing authentication, error, and retry controls.
+Selection is free until the first send: picking a different executor over a
+blank conversation replaces the blank preparation with one bound to the exact
+ACP id, and neither path probes with one session and creates another. The
+first send binds the conversation to its executor. After that, picking a
+different executor in the dropdown starts a new conversation — an existing
+transcript's executor never changes underneath its entries, and the
+transcript title, composer label, and disclosure keep naming the bound
+executor.
 
-The front door prepares one draft for the selected mode while its session is
-connecting. Choosing Omega Agent claims its prepared conversation; choosing a
-configured Direct Agent replaces an unused Omega preparation with one bound to
-the exact ACP id. Neither path probes with one session and creates another.
-Direct setup and authentication errors reveal that same external-agent view,
-with its native controls. Starting another mode never retargets an existing
-transcript.
+If Omega needs authentication or setup fails, its conversation shows **Setup
+required** with the reason and its existing authentication, error, and retry
+controls. Direct setup and authentication errors reveal that same
+external-agent view, with its native controls.
 
 Choosing **Sarah**, **Thread > Sarah voice…**, or **Sarah voice…** in the
 toolbar `+` menu opens the same admission surface inside Agent Panel. Opening
@@ -223,7 +229,7 @@ Prepared conversations are saved before their first physical session, together
 with the exact owner and working folders. If startup restores a conversation,
 terminal, Full Auto surface, pending terminal, or typed draft while the panel is
 opening, Omega keeps that restored state instead of covering it with a new
-front door.
+blank composer.
 
 For a new Omega Agent conversation, **Automatic** derives normalized task
 requirements from the first request and deterministically chooses between the

@@ -57,7 +57,8 @@ use crate::{
     AgentDiffPane, ConversationView, CopyThreadToClipboard, Follow, LoadThreadFromClipboard,
     NewTerminalThread, NewThread, OpenActiveThreadAsMarkdown, OpenAgentDiff, OpenSarahAdmission,
     ResetFastModeWarnings, ResetTrialEndUpsell, ResetTrialUpsell, ShowAllSidebarThreadMetadata,
-    ShowThreadMetadata, ToggleNewThreadMenu, ToggleOptionsMenu, ToggleThreadsSidebar,
+    ShowThreadMetadata, ToggleComposerExecutorMenu, ToggleNewThreadMenu, ToggleOptionsMenu,
+    ToggleThreadsSidebar,
     conversation_view::{
         AcpThreadViewEvent, ConversationPreparation, RootThreadUpdated, ThreadView,
         reset_fast_mode_warnings,
@@ -101,8 +102,7 @@ use language::LanguageRegistry;
 use language_model::LanguageModelRegistry;
 use notifications::status_toast::StatusToast;
 use omega_front_door::{
-    ConversationMode, ConversationTarget, DirectAgentId, ModeReadiness, ModeSetupAction,
-    PreparationReceipt,
+    ConversationTarget, DirectAgentId, ModeReadiness, ModeSetupAction, PreparationReceipt,
 };
 use project::{Project, ProjectPath, Worktree, WorktreeId, git_store::RepositoryId};
 use project_panel::ProjectPanel;
@@ -631,20 +631,21 @@ pub fn init(cx: &mut App) {
                 .register_action(|workspace, action: &SelectAgent, window, cx| {
                     if let Some(panel) = workspace.panel::<AgentPanel>(cx) {
                         panel.update(cx, |panel, cx| {
-                            let agent = AgentId::new(action.agent.clone()).into();
-                            if panel.showing_new_conversation_front_door {
-                                panel.set_selected_agent_and_persist(agent, cx);
-                                panel.selected_front_door_mode = ConversationMode::DirectAgent;
-                                if !panel.project.read(cx).is_via_collab() {
-                                    panel.prepare_direct_draft(
-                                        AgentId::new(action.agent.clone()),
-                                        AgentThreadSource::AgentPanel,
+                            // `OMEGA-DELTA-0184`. A registry selection lands
+                            // the exact requested id as the new-conversation
+                            // draft behind the composer executor dropdown.
+                            // The legacy full-editor surface keeps its
+                            // blank-draft-only selection behavior.
+                            if omega_zero_base::is_active() {
+                                if let Some(agent_id) = DirectAgentId::new(action.agent.as_str()) {
+                                    panel.compose_on_executor(
+                                        ConversationTarget::DirectAgent { agent_id },
                                         window,
                                         cx,
                                     );
                                 }
-                                cx.notify();
                             } else {
+                                let agent = AgentId::new(action.agent.clone()).into();
                                 panel.select_agent(agent, window, cx);
                             }
                         });
@@ -694,6 +695,17 @@ pub fn init(cx: &mut App) {
                         panel.update(cx, |panel, cx| {
                             panel.toggle_new_thread_menu(&ToggleNewThreadMenu, window, cx);
                         });
+                    }
+                })
+                .register_action(|workspace, _: &ToggleComposerExecutorMenu, window, cx| {
+                    if let Some(panel) = workspace.panel::<AgentPanel>(cx) {
+                        workspace.focus_panel::<AgentPanel>(window, cx);
+                        // The handle is cloned out before toggling: showing
+                        // the popover builds the menu synchronously, and the
+                        // builder reads this panel, so toggling from inside a
+                        // panel update would double-lease it.
+                        let handle = panel.read(cx).composer_executor_menu_handle();
+                        handle.toggle(window, cx);
                     }
                 })
                 .register_action(|_workspace, _: &ResetOnboarding, window, cx| {
@@ -1355,11 +1367,11 @@ struct ToolbarSurfaceState {
 }
 
 fn toolbar_surface_state(
-    showing_new_conversation_front_door: bool,
+    showing_admission_surface: bool,
     base_is_terminal: bool,
     active_thread_has_messages: bool,
 ) -> ToolbarSurfaceState {
-    if showing_new_conversation_front_door {
+    if showing_admission_surface {
         return ToolbarSurfaceState {
             mode: ToolbarMode::EmptyThread,
             show_thread_details: false,
@@ -1379,13 +1391,40 @@ fn toolbar_surface_state(
     }
 }
 
+/// One executor row in the composer's new-conversation dropdown.
+///
+/// `OMEGA-DELTA-0184`, omega#165. The typed target and readiness model from
+/// the #151 front door survives here — the interstitial screen died, its law
+/// did not. Every row is present whether or not it can run, so a missing
+/// executor reads as a disabled reason instead of an absence.
 #[derive(Clone)]
-struct NewConversationModeRow {
-    mode: ConversationMode,
-    target: Option<ConversationTarget>,
-    executor: SharedString,
-    project: SharedString,
-    readiness: ModeReadiness,
+pub(crate) struct ComposerExecutorRow {
+    pub(crate) target: ConversationTarget,
+    pub(crate) label: SharedString,
+    pub(crate) readiness: ModeReadiness,
+    pub(crate) is_current: bool,
+}
+
+impl ComposerExecutorRow {
+    /// Whether picking this row can do something on this machine right now.
+    ///
+    /// Ready rows and rows whose setup the selection itself performs are
+    /// selectable. Rows that cannot run here — not installed, not supported
+    /// in this build, or transiently unavailable — render disabled with the
+    /// reason, never hidden and never fake-enabled.
+    pub(crate) fn is_selectable(&self) -> bool {
+        match &self.readiness {
+            ModeReadiness::Ready { .. } => true,
+            ModeReadiness::SetupRequired { action, .. } => matches!(
+                action,
+                ModeSetupAction::PrepareOmegaAgent
+                    | ModeSetupAction::PrepareDirectAgent
+                    | ModeSetupAction::RevealPreparedConversation
+            ),
+            ModeReadiness::TemporarilyUnavailable { .. }
+            | ModeReadiness::NotSupportedInBuild { .. } => false,
+        }
+    }
 }
 
 impl From<AgentThread> for BaseView {
@@ -1934,9 +1973,7 @@ pub struct AgentPanel {
     context_server_registry: Entity<ContextServerRegistry>,
     focus_handle: FocusHandle,
     base_view: BaseView,
-    showing_new_conversation_front_door: bool,
     showing_sarah_admission: bool,
-    selected_front_door_mode: ConversationMode,
     sarah_voice_admission: Entity<crate::composer_voice::SarahVoiceAdmissionProjection>,
     _sarah_voice_admission_observation: Subscription,
     last_created_entry_kind: AgentPanelEntryKind,
@@ -1945,6 +1982,7 @@ pub struct AgentPanel {
     terminals: HashMap<TerminalId, AgentTerminal>,
     pending_terminal_spawn: Option<TerminalId>,
     new_thread_menu_handle: PopoverMenuHandle<ContextMenu>,
+    composer_executor_menu_handle: PopoverMenuHandle<ContextMenu>,
     agent_panel_menu_handle: PopoverMenuHandle<ContextMenu>,
     thread_repository_menu_handle: PopoverMenuHandle<ContextMenu>,
     thread_worktree_menu_handle: PopoverMenuHandle<ContextMenu>,
@@ -2435,6 +2473,16 @@ impl AgentPanel {
             crate::composer_voice::sarah_voice_admission(workspace_entity_id, cx);
         let sarah_voice_admission_observation =
             cx.observe(&sarah_voice_admission, |_this, _projection, cx| cx.notify());
+        // The composer executor dropdown renders inside this panel's render
+        // pass, so it reads its popover handle from an App global instead of
+        // this entity. `OMEGA-DELTA-0184`.
+        let composer_executor_menu_handle = PopoverMenuHandle::default();
+        crate::omega_composer_executor_menu::register_menu_handle(
+            workspace_entity_id,
+            composer_executor_menu_handle.clone(),
+            cx.entity().downgrade(),
+            cx,
+        );
         let workbench_files_panel = workspace.panel::<ProjectPanel>(cx);
         let workbench_files_panel_observation = workbench_files_panel
             .as_ref()
@@ -2639,9 +2687,7 @@ impl AgentPanel {
             connection_store,
             focus_handle: cx.focus_handle(),
             context_server_registry,
-            showing_new_conversation_front_door: false,
             showing_sarah_admission: false,
-            selected_front_door_mode: ConversationMode::OmegaAgent,
             sarah_voice_admission,
             _sarah_voice_admission_observation: sarah_voice_admission_observation,
             draft_thread: None,
@@ -2649,6 +2695,7 @@ impl AgentPanel {
             terminals: HashMap::default(),
             pending_terminal_spawn: None,
             new_thread_menu_handle: PopoverMenuHandle::default(),
+            composer_executor_menu_handle,
             agent_panel_menu_handle: PopoverMenuHandle::default(),
             thread_repository_menu_handle: PopoverMenuHandle::default(),
             thread_worktree_menu_handle: PopoverMenuHandle::default(),
@@ -3045,67 +3092,110 @@ impl AgentPanel {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        self.open_new_conversation_front_door(window, cx);
+        // `OMEGA-DELTA-0184`, omega#165. `+` and `Thread > New Thread` land in
+        // a normal thread with the composer focused — zero interstitial steps.
+        // The default executor is Omega Agent; the composer's executor
+        // dropdown is where a different owner is chosen.
+        self.compose_on_executor(ConversationTarget::OmegaAgent, window, cx);
     }
 
-    fn open_new_conversation_front_door(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        self.open_new_conversation_front_door_for_mode(ConversationMode::OmegaAgent, window, cx);
-    }
-
-    fn open_new_conversation_front_door_for_mode(
+    /// Land a new conversation on `target`, composer focused.
+    ///
+    /// `OMEGA-DELTA-0184`. This is the single activation path behind the
+    /// composer executor dropdown, the `+` action, the Thread menu, and the
+    /// registry's selection handoff. Selection is free until the first send:
+    /// a blank draft on another executor is replaced, while a conversation
+    /// that has content is retained untouched and a new draft is started —
+    /// an existing transcript never changes executors underneath its entries.
+    pub(crate) fn compose_on_executor(
         &mut self,
-        mode: ConversationMode,
+        target: ConversationTarget,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
         self.set_last_created_entry_kind_from_user_action(AgentPanelEntryKind::Thread, cx);
-        self.present_new_conversation_front_door(mode, window, cx);
+        match &target {
+            ConversationTarget::Sarah => {
+                // #154's admission surface owns price/hold truth before any
+                // audio. Selection routes there; it never creates a thread.
+                self.open_sarah_admission(window, cx);
+                return;
+            }
+            ConversationTarget::OmegaAgent => {
+                self.showing_full_auto = false;
+                self.showing_sarah_admission = false;
+                self.set_selected_agent_and_persist(Agent::NativeAgent, cx);
+                self.prepare_omega_draft(AgentThreadSource::AgentPanel, window, cx);
+            }
+            ConversationTarget::DirectAgent { agent_id } => {
+                if self.project.read(cx).is_via_collab() {
+                    self.sidebar.open = true;
+                    self.threads_sidebar_refusal = Some(
+                        "Direct Agent conversations cannot be created in a shared project.".into(),
+                    );
+                    cx.notify();
+                    return;
+                }
+                self.showing_full_auto = false;
+                self.showing_sarah_admission = false;
+                let id = AgentId::new(agent_id.as_str());
+                self.set_selected_agent_and_persist(Agent::Custom { id: id.clone() }, cx);
+                self.prepare_direct_draft(id, AgentThreadSource::AgentPanel, window, cx);
+            }
+        }
+        self.reveal_composer_draft(target, window, cx);
     }
 
-    fn open_startup_front_door(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        self.present_new_conversation_front_door(ConversationMode::OmegaAgent, window, cx);
-    }
-
-    fn present_new_conversation_front_door(
+    /// Reveal the prepared draft for `target` with the composer focused.
+    ///
+    /// Zero interstitial steps: the draft is revealed even while its session
+    /// is still connecting, and the loading composer reports that state
+    /// honestly. When the prepared draft already proves Ready for this exact
+    /// target, the claim still travels through the receipt-validated path
+    /// from `OMEGA-DELTA-0177`, so Ready cannot be minted from detection.
+    fn reveal_composer_draft(
         &mut self,
-        mode: ConversationMode,
+        target: ConversationTarget,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        self.showing_full_auto = false;
-        self.showing_sarah_admission = false;
-        self.showing_new_conversation_front_door = true;
-        self.selected_front_door_mode = mode;
-
-        // Zero Base's existing draft is the preparation entity. Starting a
-        // second probe here would create a second session, metadata row, and
-        // audience binding before the person chose anything. The draft's
-        // ConversationView is therefore retained off-screen until its real
-        // `new_session` completes and then claimed verbatim.
-        match mode {
-            ConversationMode::OmegaAgent => {
-                self.prepare_omega_draft(AgentThreadSource::AgentPanel, window, cx);
-            }
-            ConversationMode::DirectAgent => {
-                if !self.project.read(cx).is_via_collab()
-                    && let Agent::Custom { id } = self.selected_agent.clone()
-                {
-                    self.prepare_direct_draft(id, AgentThreadSource::AgentPanel, window, cx);
-                }
-            }
-            ConversationMode::Sarah => {}
+        if let Some(row) = self
+            .composer_executor_rows(cx)
+            .into_iter()
+            .find(|row| row.target == target)
+            && let ModeReadiness::Ready { receipt } = row.readiness
+        {
+            self.activate_new_conversation_target(target, receipt, window, cx);
+            return;
         }
-        self.focus_handle.focus(window, cx);
-        cx.emit(AgentPanelEvent::ActiveViewChanged);
-        cx.notify();
+        let Some(draft) = self.draft_thread.clone() else {
+            return;
+        };
+        self.set_base_view(
+            BaseView::AgentThread {
+                conversation_view: draft,
+            },
+            true,
+            window,
+            cx,
+        );
+    }
+
+    fn open_startup_front_door(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        // The startup landing is the same composer surface the `+` path
+        // reaches, minus the user-gesture side effects: startup must not
+        // overwrite the person's persisted agent selection or entry kind.
+        // Zero Base's draft is the preparation entity (`OMEGA-DELTA-0177`);
+        // starting a second probe here would create a second session and
+        // metadata row before the person chose anything.
+        self.prepare_omega_draft(AgentThreadSource::AgentPanel, window, cx);
+        self.reveal_composer_draft(ConversationTarget::OmegaAgent, window, cx);
     }
 
     fn open_sarah_admission(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         self.set_last_created_entry_kind_from_user_action(AgentPanelEntryKind::Thread, cx);
         self.showing_full_auto = false;
-        self.showing_new_conversation_front_door = false;
         self.showing_sarah_admission = true;
-        self.selected_front_door_mode = ConversationMode::Sarah;
         self.focus_handle.focus(window, cx);
         window.defer(cx, |window, cx| {
             window.dispatch_action(
@@ -3222,103 +3312,77 @@ impl AgentPanel {
         draft
     }
 
-    fn new_conversation_project_label(&self, cx: &App) -> SharedString {
-        let paths = self
-            .workspace
-            .upgrade()
-            .map(|workspace| workspace.read(cx).root_paths(cx))
-            .unwrap_or_default();
-        if paths.is_empty() {
-            "No folder selected".into()
-        } else {
-            paths
-                .iter()
-                .map(|path| path.display().to_string())
-                .join(", ")
-                .into()
+    /// The named direct agents the dropdown always offers, in order.
+    ///
+    /// omega#165 fixes the order: Omega, then these, then every other
+    /// installed ACP agent, then Sarah. The trio is present whether or not it
+    /// is installed — a missing Codex reads as a disabled reason, never as an
+    /// absence — which is the same never-hidden rule `OMEGA-DELTA-0123`
+    /// established for the legacy selector. Their fixed labels live in
+    /// `crate::omega_composer_executor_menu::named_direct_agent_label`.
+    const NAMED_DIRECT_AGENT_IDS: &'static [&'static str] = &[
+        agent_servers::CODEX_ID,
+        agent_servers::CLAUDE_AGENT_ID,
+        "grok-build",
+    ];
+
+    /// Readiness of a direct-agent draft prepared for `agent_id`, read from
+    /// the draft's own preparation state.
+    ///
+    /// `Ready` is minted only through `PreparationReceipt`, so it proves a
+    /// created session bound to this exact target — detection is never
+    /// readiness (`OMEGA-DELTA-0177`).
+    fn direct_draft_readiness(
+        &self,
+        target: &ConversationTarget,
+        agent_id: &DirectAgentId,
+        label: &SharedString,
+        cx: &App,
+    ) -> ModeReadiness {
+        let Some(draft) = self.draft_thread.as_ref() else {
+            return ModeReadiness::SetupRequired {
+                reason: format!("Create a session with {label}"),
+                action: ModeSetupAction::PrepareDirectAgent,
+            };
+        };
+        let matching_agent = matches!(
+            draft.read(cx).agent_key(),
+            Agent::Custom { id } if id.as_ref() == agent_id.as_str()
+        );
+        if !matching_agent {
+            return ModeReadiness::SetupRequired {
+                reason: format!("Create a session with {label}"),
+                action: ModeSetupAction::PrepareDirectAgent,
+            };
+        }
+        match draft.read(cx).preparation_state(cx) {
+            ConversationPreparation::Loading | ConversationPreparation::RouterReady => {
+                ModeReadiness::TemporarilyUnavailable {
+                    reason: format!("Connecting to {label}…"),
+                }
+            }
+            ConversationPreparation::Ready { session_id } => {
+                PreparationReceipt::after_session_created(target.clone(), session_id).map_or_else(
+                    || ModeReadiness::TemporarilyUnavailable {
+                        reason: format!("Connecting to {label}…"),
+                    },
+                    |receipt| ModeReadiness::Ready { receipt },
+                )
+            }
+            ConversationPreparation::SetupRequired { reason } => ModeReadiness::SetupRequired {
+                reason: reason.to_string(),
+                action: ModeSetupAction::RevealPreparedConversation,
+            },
         }
     }
 
-    fn new_conversation_mode_rows(&self, cx: &App) -> [NewConversationModeRow; 3] {
-        let project = self.new_conversation_project_label(cx);
-        let direct_target = match &self.selected_agent {
-            Agent::Custom { id } => DirectAgentId::new(id.as_ref())
-                .map(|agent_id| ConversationTarget::DirectAgent { agent_id }),
-            Agent::NativeAgent => None,
-            #[cfg(any(test, feature = "test-support"))]
-            Agent::Stub => DirectAgentId::new("stub")
-                .map(|agent_id| ConversationTarget::DirectAgent { agent_id }),
-        };
-        let direct_executor = direct_target.as_ref().map_or_else(
-            || SharedString::from("No direct agent selected"),
-            |target| SharedString::from(target.executor_label().to_owned()),
-        );
-        let direct_readiness = if self.project.read(cx).is_via_collab() {
-            ModeReadiness::NotSupportedInBuild {
-                reason: "Direct agents are not supported in shared projects".into(),
-            }
-        } else if direct_target.is_none() {
-            ModeReadiness::SetupRequired {
-                reason: "Choose an installed ACP agent".into(),
-                action: ModeSetupAction::AddAcpAgent,
-            }
-        } else {
-            self.draft_thread.as_ref().map_or_else(
-                || ModeReadiness::SetupRequired {
-                    reason: "Create a session with the selected ACP agent".into(),
-                    action: ModeSetupAction::PrepareDirectAgent,
-                },
-                |draft| {
-                    let Some(target) = direct_target.as_ref() else {
-                        return ModeReadiness::SetupRequired {
-                            reason: "Choose an installed ACP agent".into(),
-                            action: ModeSetupAction::AddAcpAgent,
-                        };
-                    };
-                    let matching_agent = matches!(
-                        (draft.read(cx).agent_key(), target),
-                        (Agent::Custom { id }, ConversationTarget::DirectAgent { agent_id })
-                            if id.as_ref() == agent_id.as_str()
-                    );
-                    if !matching_agent {
-                        return ModeReadiness::SetupRequired {
-                            reason: "Create a session with the selected ACP agent".into(),
-                            action: ModeSetupAction::PrepareDirectAgent,
-                        };
-                    }
-                    match draft.read(cx).preparation_state(cx) {
-                        ConversationPreparation::Loading | ConversationPreparation::RouterReady => {
-                            ModeReadiness::TemporarilyUnavailable {
-                                reason: format!("Connecting to {}…", target.executor_label()),
-                            }
-                        }
-                        ConversationPreparation::Ready { session_id } => {
-                            PreparationReceipt::after_session_created(target.clone(), session_id)
-                                .map_or_else(
-                                    || ModeReadiness::TemporarilyUnavailable {
-                                        reason: format!(
-                                            "Connecting to {}…",
-                                            target.executor_label()
-                                        ),
-                                    },
-                                    |receipt| ModeReadiness::Ready { receipt },
-                                )
-                        }
-                        ConversationPreparation::SetupRequired { reason } => {
-                            ModeReadiness::SetupRequired {
-                                reason: reason.to_string(),
-                                action: ModeSetupAction::RevealPreparedConversation,
-                            }
-                        }
-                    }
-                },
-            )
-        };
-
+    /// Readiness of the Omega draft, read from its own preparation state.
+    fn omega_draft_readiness(&self, cx: &App) -> ModeReadiness {
         let omega_target = ConversationTarget::OmegaAgent;
-        let omega_readiness = self.draft_thread.as_ref().map_or_else(
-            || ModeReadiness::TemporarilyUnavailable {
-                reason: "Preparing Omega…".into(),
+        self.draft_thread.as_ref().map_or_else(
+            || ModeReadiness::SetupRequired {
+                reason: "Create a session with Omega".into(),
+                action: ModeSetupAction::PrepareOmegaAgent,
             },
             |draft| {
                 if !matches!(draft.read(cx).agent_key(), Agent::NativeAgent) {
@@ -3351,96 +3415,159 @@ impl AgentPanel {
                     }
                 }
             },
-        );
-
-        let sarah_readiness = ModeReadiness::SetupRequired {
-            reason: "Review Sarah's exact admission terms before microphone access".into(),
-            action: ModeSetupAction::RevealPreparedConversation,
-        };
-
-        [
-            NewConversationModeRow {
-                mode: ConversationMode::DirectAgent,
-                target: direct_target,
-                executor: direct_executor,
-                project: project.clone(),
-                readiness: direct_readiness,
-            },
-            NewConversationModeRow {
-                mode: ConversationMode::OmegaAgent,
-                target: Some(omega_target),
-                executor: "Omega router · executor selected when the turn is routed".into(),
-                project: project.clone(),
-                readiness: omega_readiness,
-            },
-            NewConversationModeRow {
-                mode: ConversationMode::Sarah,
-                target: Some(ConversationTarget::Sarah),
-                executor: "Sarah voice executor".into(),
-                project,
-                readiness: sarah_readiness,
-            },
-        ]
+        )
     }
 
-    fn activate_new_conversation_mode(
-        &mut self,
-        mode: ConversationMode,
-        window: &mut Window,
-        cx: &mut Context<Self>,
-    ) {
-        self.selected_front_door_mode = mode;
-        if mode == ConversationMode::Sarah {
-            self.open_sarah_admission(window, cx);
-            return;
-        }
-        let Some(row) = self
-            .new_conversation_mode_rows(cx)
-            .into_iter()
-            .find(|row| row.mode == mode)
-        else {
-            return;
+    /// Every executor the composer dropdown offers, in its fixed order.
+    ///
+    /// `OMEGA-DELTA-0184`, omega#165. One row per executor: Omega first,
+    /// then the named direct agents, then every other installed ACP agent,
+    /// then Sarah. This is the single source of the new-conversation
+    /// executor — the current row is read from the active conversation's own
+    /// owner, never from a second selection store, which is what makes the
+    /// `OMEGA-DELTA-0131` two-stores lie impossible to restate.
+    pub(crate) fn composer_executor_rows(&self, cx: &App) -> Vec<ComposerExecutorRow> {
+        let via_collab = self.project.read(cx).is_via_collab();
+        let agent_server_store = self.project.read(cx).agent_server_store().clone();
+        let agent_server_store = agent_server_store.read(cx);
+        let registry_store = project::AgentRegistryStore::try_global(cx);
+        let registry_store_ref = registry_store.as_ref().map(|store| store.read(cx));
+
+        // The current owner is the active conversation's own agent key, or
+        // Sarah while her admission surface is up. The face of the dropdown
+        // reads this, so it can never disagree with the transcript under it.
+        let current_agent = (!self.showing_sarah_admission)
+            .then(|| self.active_conversation_view())
+            .flatten()
+            .map(|conversation| conversation.read(cx).agent_key().clone());
+
+        let mut rows = Vec::new();
+
+        rows.push(ComposerExecutorRow {
+            target: ConversationTarget::OmegaAgent,
+            label: "Omega Agent".into(),
+            readiness: self.omega_draft_readiness(cx),
+            is_current: matches!(current_agent, Some(Agent::NativeAgent)),
+        });
+
+        let installed: Vec<AgentId> = agent_server_store.external_agents().cloned().collect();
+        let direct_row = |agent_id: &AgentId, label: SharedString| -> Option<ComposerExecutorRow> {
+            let target_id = DirectAgentId::new(agent_id.as_ref())?;
+            let target = ConversationTarget::DirectAgent {
+                agent_id: target_id.clone(),
+            };
+            let is_current = matches!(&current_agent, Some(Agent::Custom { id }) if id == agent_id);
+            // A conversation that is actually running on this agent proves it
+            // exists here, whether or not the install registry lists it — a
+            // face that fell back to another name over it would restate the
+            // `OMEGA-DELTA-0131` lie.
+            let is_available = installed.iter().any(|candidate| candidate == agent_id)
+                || is_current
+                || self.draft_thread.as_ref().is_some_and(|draft| {
+                    matches!(draft.read(cx).agent_key(), Agent::Custom { id } if id == agent_id)
+                });
+            let readiness = if via_collab {
+                ModeReadiness::NotSupportedInBuild {
+                    reason: "Direct agents are not supported in shared projects".into(),
+                }
+            } else if !is_available {
+                ModeReadiness::SetupRequired {
+                    reason: "Not installed — use Add More Agents".into(),
+                    action: ModeSetupAction::AddAcpAgent,
+                }
+            } else {
+                self.direct_draft_readiness(&target, &target_id, &label, cx)
+            };
+            Some(ComposerExecutorRow {
+                target,
+                label,
+                readiness,
+                is_current,
+            })
         };
 
-        if let Some(action) = row.readiness.setup_action() {
-            match action {
-                ModeSetupAction::OpenFolder => {
-                    window.dispatch_action(workspace::Open::default().boxed_clone(), cx)
-                }
-                ModeSetupAction::AddAcpAgent => {
-                    window.dispatch_action(zed_actions::AcpRegistry.boxed_clone(), cx)
-                }
-                ModeSetupAction::PrepareOmegaAgent => {
-                    self.prepare_omega_draft(AgentThreadSource::AgentPanel, window, cx);
-                }
-                ModeSetupAction::PrepareDirectAgent => {
-                    if let Some(ConversationTarget::DirectAgent { agent_id }) = row.target {
-                        self.prepare_direct_draft(
-                            AgentId::new(agent_id.as_str()),
-                            AgentThreadSource::AgentPanel,
-                            window,
-                            cx,
-                        );
-                    }
-                }
-                ModeSetupAction::RevealPreparedConversation => {
-                    if let Some(target) = row.target {
-                        self.reveal_prepared_conversation(&target, window, cx);
-                    }
-                }
+        for id in Self::NAMED_DIRECT_AGENT_IDS {
+            let agent_id = AgentId::new(*id);
+            let label = agent_server_store
+                .agent_display_name(&agent_id)
+                .unwrap_or_else(|| {
+                    SharedString::from(
+                        crate::omega_composer_executor_menu::named_direct_agent_label(id)
+                            .unwrap_or(id),
+                    )
+                });
+            rows.extend(direct_row(&agent_id, label));
+        }
+
+        let mut other_installed: Vec<(AgentId, SharedString)> = installed
+            .iter()
+            .filter(|agent_id| {
+                !Self::NAMED_DIRECT_AGENT_IDS
+                    .iter()
+                    .any(|named| agent_id.as_ref() == *named)
+            })
+            .map(|agent_id| {
+                let display_name = agent_server_store
+                    .agent_display_name(agent_id)
+                    .or_else(|| {
+                        registry_store_ref
+                            .as_ref()
+                            .and_then(|store| store.agent(agent_id))
+                            .map(|agent| agent.name().clone())
+                    })
+                    .unwrap_or_else(|| agent_id.0.clone());
+                (agent_id.clone(), display_name)
+            })
+            .collect();
+        other_installed.sort_unstable_by_key(|(_, name)| name.to_lowercase());
+        for (agent_id, display_name) in other_installed {
+            rows.extend(direct_row(&agent_id, display_name));
+        }
+
+        // The active or drafted direct agent may be absent from the install
+        // registry (a restored conversation, or an agent installed by hand).
+        // It still gets a row, so the trigger's face can always name it.
+        for uncovered in [
+            current_agent.as_ref().and_then(|agent| match agent {
+                Agent::Custom { id } => Some(id.clone()),
+                _ => None,
+            }),
+            self.draft_thread
+                .as_ref()
+                .and_then(|draft| match draft.read(cx).agent_key() {
+                    Agent::Custom { id } => Some(id.clone()),
+                    _ => None,
+                }),
+        ]
+        .into_iter()
+        .flatten()
+        {
+            let covered = rows.iter().any(|row| {
+                matches!(
+                    &row.target,
+                    ConversationTarget::DirectAgent { agent_id }
+                        if agent_id.as_str() == uncovered.as_ref()
+                )
+            });
+            if !covered {
+                let display_name = agent_server_store
+                    .agent_display_name(&uncovered)
+                    .unwrap_or_else(|| uncovered.0.clone());
+                rows.extend(direct_row(&uncovered, display_name));
             }
-            cx.notify();
-            return;
         }
 
-        let ModeReadiness::Ready { receipt } = row.readiness else {
-            cx.notify();
-            return;
-        };
-        let Some(target) = row.target else {
-            return;
-        };
-        self.activate_new_conversation_target(target, receipt, window, cx);
+        rows.push(ComposerExecutorRow {
+            target: ConversationTarget::Sarah,
+            label: "Sarah (voice)".into(),
+            readiness: ModeReadiness::SetupRequired {
+                reason: "Review Sarah's exact admission terms before microphone access".into(),
+                action: ModeSetupAction::RevealPreparedConversation,
+            },
+            is_current: self.showing_sarah_admission,
+        });
+
+        rows
     }
 
     fn activate_new_conversation_target(
@@ -3466,7 +3593,6 @@ impl AgentPanel {
                 if !receipt_is_live {
                     return;
                 }
-                self.showing_new_conversation_front_door = false;
                 self.set_base_view(
                     BaseView::AgentThread {
                         conversation_view: draft,
@@ -3494,7 +3620,6 @@ impl AgentPanel {
                 if !receipt.proves(&target, &session_id) {
                     return;
                 }
-                self.showing_new_conversation_front_door = false;
                 self.set_base_view(
                     BaseView::AgentThread {
                         conversation_view: draft,
@@ -3506,58 +3631,6 @@ impl AgentPanel {
             }
             ConversationTarget::Sarah => {}
         }
-    }
-
-    fn reveal_prepared_conversation(
-        &mut self,
-        target: &ConversationTarget,
-        window: &mut Window,
-        cx: &mut Context<Self>,
-    ) -> bool {
-        match target {
-            ConversationTarget::OmegaAgent => self.reveal_prepared_omega(window, cx),
-            ConversationTarget::DirectAgent { agent_id } => {
-                let Some(draft) = self.draft_thread.clone() else {
-                    return false;
-                };
-                if !matches!(
-                    draft.read(cx).agent_key(),
-                    Agent::Custom { id } if id.as_ref() == agent_id.as_str()
-                ) {
-                    return false;
-                }
-                self.showing_new_conversation_front_door = false;
-                self.set_base_view(
-                    BaseView::AgentThread {
-                        conversation_view: draft,
-                    },
-                    true,
-                    window,
-                    cx,
-                );
-                true
-            }
-            ConversationTarget::Sarah => false,
-        }
-    }
-
-    fn reveal_prepared_omega(&mut self, window: &mut Window, cx: &mut Context<Self>) -> bool {
-        let Some(draft) = self.draft_thread.clone() else {
-            return false;
-        };
-        if !matches!(draft.read(cx).agent_key(), Agent::NativeAgent) {
-            return false;
-        }
-        self.showing_new_conversation_front_door = false;
-        self.set_base_view(
-            BaseView::AgentThread {
-                conversation_view: draft,
-            },
-            true,
-            window,
-            cx,
-        );
-        true
     }
 
     /// `OMEGA-DELTA-0034`. The front door's own entry point, project or no
@@ -3725,12 +3798,13 @@ impl AgentPanel {
         cx: &mut Context<Self>,
     ) {
         if is_zero_base {
-            self.set_selected_agent_and_persist(action.agent.clone().into(), cx);
-            self.open_new_conversation_front_door_for_mode(
-                ConversationMode::DirectAgent,
-                window,
-                cx,
-            );
+            // `OMEGA-DELTA-0177`/`OMEGA-DELTA-0184`: the typed action keeps
+            // its exact requested ACP identity and lands it as the
+            // new-conversation draft behind the composer executor dropdown.
+            // It never calls the legacy retarget clamp.
+            if let Some(agent_id) = DirectAgentId::new(action.agent.as_ref()) {
+                self.compose_on_executor(ConversationTarget::DirectAgent { agent_id }, window, cx);
+            }
             cx.notify();
             return;
         }
@@ -4851,7 +4925,6 @@ impl AgentPanel {
             self.full_auto = Some(cx.new(|cx| FullAutoPanel::new(workspace, window, cx)));
         }
         self.showing_sarah_admission = false;
-        self.showing_new_conversation_front_door = false;
         self.showing_full_auto = true;
         if focus {
             self.focus_handle(cx).focus(window, cx);
@@ -5481,7 +5554,6 @@ impl AgentPanel {
             view.update(cx, |view, cx| view.resume(cx));
             self.showing_full_auto = false;
             self.showing_sarah_admission = false;
-            self.showing_new_conversation_front_door = false;
             self.threads_sidebar_refusal = None;
             self.focus_handle.focus(window, cx);
             cx.emit(AgentPanelEvent::ActiveViewChanged);
@@ -6489,7 +6561,6 @@ impl AgentPanel {
         if !self.has_open_project(cx) {
             return false;
         }
-        self.showing_new_conversation_front_door = false;
         self.external_thread(
             Some(Agent::NativeAgent),
             None,
@@ -6634,6 +6705,15 @@ impl AgentPanel {
         cx: &mut Context<Self>,
     ) {
         self.new_thread_menu_handle.toggle(window, cx);
+    }
+
+    /// The shared popover handle behind every mount of the composer executor
+    /// dropdown. Only one composer is on screen at a time, so one handle
+    /// serves the loading composer and the zero-base bar alike. The
+    /// `agent::ToggleComposerExecutorMenu` action toggles it, which is what
+    /// makes the dropdown keyboard-reachable (`OMEGA-DELTA-0184`, omega#165).
+    pub(crate) fn composer_executor_menu_handle(&self) -> PopoverMenuHandle<ContextMenu> {
+        self.composer_executor_menu_handle.clone()
     }
 
     pub fn increase_font_size(
@@ -7319,7 +7399,6 @@ impl AgentPanel {
         // the selected run.
         self.showing_full_auto = false;
         self.showing_sarah_admission = false;
-        self.showing_new_conversation_front_door = false;
         if let Some(view) = self
             .public_channels
             .selected_channel_id()
@@ -8189,8 +8268,7 @@ impl AgentPanel {
         // Startup waits for the panel to be installed. Restore and fixture
         // work can complete during that wait, so the decision must be made
         // again when the task actually reaches the panel.
-        if self.showing_new_conversation_front_door
-            || self.showing_full_auto
+        if self.showing_full_auto
             || self.pending_terminal_spawn.is_some()
             || !matches!(self.base_view, BaseView::Uninitialized)
             || self.destination_has_meaningful_state(cx)
@@ -8841,142 +8919,6 @@ impl AgentPanel {
             })
     }
 
-    fn render_new_conversation_front_door(&self, cx: &mut Context<Self>) -> AnyElement {
-        let rows = self.new_conversation_mode_rows(cx);
-
-        v_flex()
-            .id("omega-new-conversation-front-door")
-            .debug_selector(|| "omega.new-conversation.front-door".into())
-            .size_full()
-            .items_center()
-            .justify_center()
-            .px_6()
-            .child(
-                v_flex()
-                    .w_full()
-                    .max_w(px(640.))
-                    .gap_3()
-                    .child(
-                        Label::new("Start a new conversation")
-                            .size(LabelSize::Large)
-                            .color(Color::Default),
-                    )
-                    .child(
-                        Label::new(
-                            "Choose the mode that will own this conversation. Its executor never changes underneath the transcript.",
-                        )
-                        .size(LabelSize::Small)
-                        .color(Color::Muted),
-                    )
-                    .children(rows.into_iter().enumerate().map(|(index, row)| {
-                        let mode = row.mode;
-                        let reason = row.readiness.reason().map(str::to_owned);
-                        let action_label = row
-                            .readiness
-                            .setup_action()
-                            .map(ModeSetupAction::label);
-                        let actionable = mode == ConversationMode::Sarah
-                            || matches!(row.readiness, ModeReadiness::Ready { .. })
-                            || action_label.is_some();
-                        let readiness_label = if mode == ConversationMode::Sarah {
-                            "Review admission"
-                        } else {
-                            action_label.unwrap_or_else(|| row.readiness.label())
-                        };
-                        let accessible_description = if mode == ConversationMode::Sarah {
-                            "Open Sarah admission to review exact price, credit hold, session limit, transcript policy, capabilities, and confirmations before microphone access."
-                                .to_string()
-                        } else {
-                            format!(
-                                "Executor: {}. Folder: {}. {}{}",
-                                row.executor,
-                                row.project,
-                                row.readiness.label(),
-                                reason
-                                    .as_deref()
-                                    .map(|reason| format!(": {reason}"))
-                                    .unwrap_or_default()
-                            )
-                        };
-                        let button = Button::new(
-                            ElementId::Name(
-                                format!("omega-new-conversation-{}", mode.token()).into(),
-                            ),
-                            mode.label(),
-                        )
-                        .debug_selector(move || {
-                            format!("omega.new-conversation.mode.{}", mode.token())
-                        })
-                        .style(ButtonStyle::Subtle)
-                        .size(ButtonSize::Large)
-                        .full_width()
-                        .tab_index(index as isize)
-                        .toggle_state(self.selected_front_door_mode == mode)
-                        .aria_label(format!("{} mode", mode.label()))
-                        .aria_description(accessible_description)
-                        .disabled(!actionable)
-                        .when(actionable, |button| {
-                            button.on_click(cx.listener(move |this, _, window, cx| {
-                                this.activate_new_conversation_mode(mode, window, cx);
-                            }))
-                        });
-
-                        v_flex()
-                            .id(("omega-new-conversation-row", index))
-                            .debug_selector(move || {
-                                format!("omega.new-conversation.row.{}", mode.token())
-                            })
-                            .when(actionable, |row| {
-                                row.on_key_down(cx.listener(
-                                    move |this, event: &gpui::KeyDownEvent, window, cx| {
-                                        if omega_front_door::is_mode_activation_key(
-                                            event.keystroke.key.as_str(),
-                                            event.keystroke.modifiers.modified(),
-                                        ) {
-                                            this.activate_new_conversation_mode(mode, window, cx);
-                                            cx.stop_propagation();
-                                        }
-                                    },
-                                ))
-                            })
-                            .w_full()
-                            .gap_1()
-                            .p_2()
-                            .border_1()
-                            .border_color(cx.theme().colors().border)
-                            .rounded_md()
-                            .child(button)
-                            .child(
-                                Label::new(format!("Executor: {}", row.executor))
-                                    .size(LabelSize::XSmall)
-                                    .color(Color::Muted),
-                            )
-                            .child(
-                                Label::new(format!("Folder: {}", row.project))
-                                    .size(LabelSize::XSmall)
-                                    .color(Color::Muted),
-                            )
-                            .child(
-                                Label::new(format!(
-                                    "{}{}",
-                                    readiness_label,
-                                    reason
-                                        .as_deref()
-                                        .map(|reason| format!(" — {reason}"))
-                                        .unwrap_or_default()
-                                ))
-                                .size(LabelSize::XSmall)
-                                .color(if actionable {
-                                    Color::Default
-                                } else {
-                                    Color::Muted
-                                }),
-                            )
-                    })),
-            )
-            .into_any_element()
-    }
-
     fn render_sarah_admission(&self, cx: &mut Context<Self>) -> AnyElement {
         use crate::composer_voice::SarahVoiceAdmissionProjection;
         use zed_actions::workroom::{EndVoice, RetryVoice, StartVoice, ToggleVoiceMute};
@@ -9163,12 +9105,19 @@ impl AgentPanel {
                     .max_w(px(720.))
                     .gap_3()
                     .child(
-                        Button::new("omega-sarah-admission-back", "Back to conversation modes")
+                        Button::new("omega-sarah-admission-back", "Back to conversation")
                             .style(ButtonStyle::Subtle)
                             .on_click(cx.listener(|this, _, window, cx| {
+                                // Leaving admission returns to the composer,
+                                // not to an interstitial: the executor
+                                // dropdown in the composer bar is where a
+                                // different owner is chosen (omega#165).
                                 this.showing_sarah_admission = false;
-                                this.showing_new_conversation_front_door = true;
-                                this.focus_handle.focus(window, cx);
+                                if matches!(this.base_view, BaseView::Uninitialized) {
+                                    this.open_startup_front_door(window, cx);
+                                } else {
+                                    this.focus_handle.focus(window, cx);
+                                }
                                 cx.notify();
                             })),
                     )
@@ -9229,39 +9178,31 @@ impl AgentPanel {
         // beside it disabled.
         let can_create_entries = true;
         let supports_terminal = self.supports_terminal(cx);
-        let toolbar_state =
-            if self.showing_new_conversation_front_door || self.showing_sarah_admission {
-                toolbar_surface_state(true, false, false)
-            } else {
-                toolbar_surface_state(
-                    false,
-                    matches!(self.base_view, BaseView::Terminal { .. }),
-                    self.active_thread_has_messages(cx),
-                )
-            };
+        let toolbar_state = if self.showing_sarah_admission {
+            toolbar_surface_state(true, false, false)
+        } else {
+            toolbar_surface_state(
+                false,
+                matches!(self.base_view, BaseView::Terminal { .. }),
+                self.active_thread_has_messages(cx),
+            )
+        };
         let showing_terminal = matches!(toolbar_state.mode, ToolbarMode::Terminal);
-        let direct_without_target = self.showing_new_conversation_front_door
-            && self.selected_front_door_mode == ConversationMode::DirectAgent
-            && !matches!(self.selected_agent, Agent::Custom { .. });
 
-        let agent_for_new_threads =
-            if self.showing_new_conversation_front_door || self.showing_sarah_admission {
-                match self.selected_front_door_mode {
-                    ConversationMode::OmegaAgent | ConversationMode::Sarah => Agent::NativeAgent,
-                    ConversationMode::DirectAgent => self.selected_agent.clone(),
-                }
-            } else {
-                self.active_conversation_view()
-                    .map(|conversation| conversation.read(cx).agent_key().clone())
-                    .unwrap_or_else(|| self.selected_agent.clone())
-            };
+        // `OMEGA-DELTA-0131`. The heading derives from the active
+        // conversation's own owner — never directly from stale stored state —
+        // so the toolbar cannot name one executor while the transcript under
+        // it runs another.
+        let agent_for_new_threads = if self.showing_sarah_admission {
+            Agent::NativeAgent
+        } else {
+            self.active_conversation_view()
+                .map(|conversation| conversation.read(cx).agent_key().clone())
+                .unwrap_or_else(|| self.selected_agent.clone())
+        };
         let (selected_agent_custom_icon, selected_agent_label) = if showing_terminal {
             (None, SharedString::from("Terminal"))
-        } else if direct_without_target {
-            (None, SharedString::from("Direct Agent"))
-        } else if (self.showing_new_conversation_front_door || self.showing_sarah_admission)
-            && self.selected_front_door_mode == ConversationMode::Sarah
-        {
+        } else if self.showing_sarah_admission {
             (None, SharedString::from("Sarah"))
         } else if let Agent::Custom { id, .. } = &agent_for_new_threads {
             let store = agent_server_store.read(cx);
@@ -9318,8 +9259,10 @@ impl AgentPanel {
                                                     workspace.panel::<AgentPanel>(cx)
                                                 {
                                                     panel.update(cx, |panel, cx| {
-                                                        panel.open_new_conversation_front_door(
-                                                            window, cx,
+                                                        panel.compose_on_executor(
+                                                            ConversationTarget::OmegaAgent,
+                                                            window,
+                                                            cx,
                                                         );
                                                     });
                                                 }
@@ -9515,8 +9458,6 @@ impl AgentPanel {
         let has_custom_icon = selected_agent_custom_icon.is_some();
         let selected_agent_builtin_icon = if showing_terminal {
             Some(IconName::Terminal)
-        } else if direct_without_target {
-            Some(IconName::Sparkle)
         } else {
             agent_for_new_threads.icon()
         };
@@ -13951,9 +13892,6 @@ impl Render for AgentPanel {
                 if self.showing_sarah_admission {
                     return parent.child(self.render_sarah_admission(cx));
                 }
-                if self.showing_new_conversation_front_door {
-                    return parent.child(self.render_new_conversation_front_door(cx));
-                }
                 // Full Auto is a surface of this panel, not a destination
                 // beside it. `OMEGA-DELTA-0020`.
                 if self.showing_full_auto
@@ -14866,8 +14804,18 @@ impl AgentPanel {
         self.active_conversation_view()
     }
 
-    pub fn new_conversation_front_door_visible_for_tests(&self) -> bool {
-        self.showing_new_conversation_front_door
+    /// The composer front door landed: the base view is the blank draft
+    /// conversation, so the person is one keystroke from a first message.
+    ///
+    /// omega#165 replaced the full-screen chooser with this landing, so
+    /// "front door visible" now means "the focused composer draft is the
+    /// active view".
+    pub fn front_door_composer_visible_for_tests(&self) -> bool {
+        matches!(
+            (&self.base_view, &self.draft_thread),
+            (BaseView::AgentThread { conversation_view }, Some(draft))
+                if conversation_view.entity_id() == draft.entity_id()
+        )
     }
 
     pub fn activate_prepared_omega_for_tests(
@@ -14879,18 +14827,16 @@ impl AgentPanel {
             return false;
         };
         let ready = self
-            .new_conversation_mode_rows(cx)
+            .composer_executor_rows(cx)
             .into_iter()
-            .find(|row| row.mode == ConversationMode::OmegaAgent)
+            .find(|row| row.target == ConversationTarget::OmegaAgent)
             .is_some_and(|row| matches!(row.readiness, ModeReadiness::Ready { .. }));
         if !ready {
             return false;
         }
-        self.activate_new_conversation_mode(ConversationMode::OmegaAgent, window, cx);
-        !self.showing_new_conversation_front_door
-            && self
-                .active_conversation_view()
-                .is_some_and(|active| active.entity_id() == prepared.entity_id())
+        self.compose_on_executor(ConversationTarget::OmegaAgent, window, cx);
+        self.active_conversation_view()
+            .is_some_and(|active| active.entity_id() == prepared.entity_id())
     }
 
     /// Creates a draft thread using a stub server and sets it as the active view.
@@ -15896,7 +15842,6 @@ mod tests {
                 Some(mounted_conversation),
                 "the delayed startup task must not replace a conversation mounted while it waited"
             );
-            assert!(!panel.showing_new_conversation_front_door);
         });
 
         panel.update_in(&mut cx, |panel, window, cx| {
@@ -15904,8 +15849,8 @@ mod tests {
         });
         panel.read_with(&cx, |panel, _cx| {
             assert!(
-                panel.showing_new_conversation_front_door,
-                "an explicit New Thread action must still open the front door"
+                panel.front_door_composer_visible_for_tests(),
+                "an explicit New Thread action must still land in a focused composer draft"
             );
         });
     }
@@ -15932,7 +15877,7 @@ mod tests {
         panel.read_with(&cx, |panel, _cx| {
             assert_eq!(panel.active_terminal_id(), Some(terminal_id));
             assert!(
-                !panel.showing_new_conversation_front_door,
+                !panel.front_door_composer_visible_for_tests(),
                 "the delayed startup task must not cover a restored terminal"
             );
         });
@@ -15952,7 +15897,10 @@ mod tests {
         cx.run_until_parked();
 
         panel.read_with(&cx, |panel, _cx| {
-            assert!(panel.showing_new_conversation_front_door);
+            assert!(
+                panel.front_door_composer_visible_for_tests(),
+                "an empty startup should land in the focused composer draft"
+            );
             assert!(
                 panel.draft_thread.is_some(),
                 "an empty startup should prepare the Omega conversation"
@@ -15981,8 +15929,8 @@ mod tests {
                 "generic activation must not repeat the last terminal choice"
             );
             assert!(
-                panel.showing_new_conversation_front_door,
-                "generic activation should open the new-conversation front door"
+                panel.front_door_composer_visible_for_tests(),
+                "generic activation should land in the focused composer draft"
             );
             assert!(
                 panel.draft_thread.is_some(),
@@ -16282,10 +16230,9 @@ mod tests {
                 "generic panel activation must not repeat the last explicit terminal choice"
             );
             assert!(
-                panel.active_conversation_view().is_none(),
-                "the new-conversation front door should not claim its prepared draft before selection"
+                panel.front_door_composer_visible_for_tests(),
+                "generic activation should land in the focused composer draft"
             );
-            assert!(panel.showing_new_conversation_front_door);
             assert!(panel.should_create_terminal_for_new_entry(cx));
         });
     }
@@ -17558,12 +17505,12 @@ mod tests {
 
         panel.read_with(cx, |panel, _cx| {
             assert!(
-                panel.showing_new_conversation_front_door,
-                "an empty workspace must show the three-mode front door"
+                panel.front_door_composer_visible_for_tests(),
+                "an empty workspace must land in the focused composer draft"
             );
             assert!(
                 panel.draft_thread.is_some(),
-                "an empty workspace must prepare one Omega session behind the front door"
+                "an empty workspace must prepare one Omega session behind the composer"
             );
         });
 
@@ -17867,11 +17814,11 @@ mod tests {
     }
 
     #[gpui::test]
-    async fn new_conversation_front_door_reuses_prepared_omega_for_keyboard_and_pointer(
+    async fn composer_front_door_claims_prepared_omega_and_offers_the_dropdown(
         cx: &mut TestAppContext,
     ) {
         let (panel, mut cx) = setup_visible_panel(cx).await;
-        let keyboard_prepared =
+        let prepared =
             install_prepared_omega_for_test(&panel, SessionTrackingConnection::new(), &mut cx);
 
         panel.update_in(&mut cx, |panel, window, cx| {
@@ -17879,112 +17826,102 @@ mod tests {
         });
         cx.run_until_parked();
 
+        // Zero interstitial steps (omega#165): the prepared conversation is
+        // claimed through its receipt and the composer is the active view.
         let prepared_entity = panel.read_with(&cx, |panel, cx| {
-            let rows = panel.new_conversation_mode_rows(cx);
+            let rows = panel.composer_executor_rows(cx);
             assert_eq!(
-                rows.iter().map(|row| row.mode).collect::<Vec<_>>(),
-                [
-                    ConversationMode::DirectAgent,
-                    ConversationMode::OmegaAgent,
-                    ConversationMode::Sarah,
-                ]
+                rows.first().map(|row| row.target.clone()),
+                Some(ConversationTarget::OmegaAgent),
+                "Omega is the first row and the default executor"
             );
-            assert!(matches!(
-                rows[0].readiness,
-                ModeReadiness::SetupRequired {
-                    action: ModeSetupAction::AddAcpAgent,
-                    ..
-                }
-            ));
-            assert!(matches!(rows[1].readiness, ModeReadiness::Ready { .. }));
-            assert!(matches!(
-                rows[2].readiness,
-                ModeReadiness::SetupRequired { .. }
-            ));
-            let draft = panel
-                .draft_thread
-                .as_ref()
-                .expect("the front door should retain one prepared Omega conversation");
             assert_eq!(
-                draft.read(cx).preparation_state(cx),
-                ConversationPreparation::RouterReady
+                rows.last().map(|row| row.label.clone()),
+                Some(SharedString::from("Sarah (voice)")),
+                "Sarah stays visible at the end of the dropdown"
             );
-            draft.entity_id()
-        });
-        assert_eq!(prepared_entity, keyboard_prepared.entity_id());
-
-        cx.update(|window, cx| panel.focus_handle(cx).focus(window, cx));
-        let mut omega_button_focused = false;
-        for _ in 0..32 {
-            omega_button_focused = cx
-                .debug_render_snapshot()
-                .occurrences("omega.new-conversation.mode.omega-agent")
-                .first()
-                .is_some_and(|occurrence| occurrence.focused);
-            if omega_button_focused {
-                break;
+            // The named direct agents are permanent rows, in the issue's
+            // order, and honest about not being installed here.
+            let named: Vec<_> = rows
+                .iter()
+                .skip(1)
+                .take(3)
+                .map(|row| row.label.to_string())
+                .collect();
+            assert_eq!(named, ["Codex", "Claude Code", "Grok Build"]);
+            for row in rows.iter().skip(1).take(3) {
+                assert!(
+                    !row.is_selectable(),
+                    "{} is not installed in this fixture, so its row must be \
+                     disabled with the reason rather than fake-enabled",
+                    row.label
+                );
+                assert!(matches!(
+                    row.readiness,
+                    ModeReadiness::SetupRequired {
+                        action: ModeSetupAction::AddAcpAgent,
+                        ..
+                    }
+                ));
             }
-            cx.update(|window, cx| window.focus_next(cx));
-            cx.run_until_parked();
-        }
-        assert!(
-            omega_button_focused,
-            "the Ready Omega row must participate in keyboard focus navigation"
-        );
-        cx.simulate_keystrokes("enter");
-        cx.run_until_parked();
-
-        panel.read_with(&cx, |panel, cx| {
-            assert!(!panel.showing_new_conversation_front_door);
+            let omega = &rows[0];
+            assert!(matches!(omega.readiness, ModeReadiness::Ready { .. }));
+            assert!(
+                omega.is_current,
+                "the dropdown's face reads the active conversation's owner"
+            );
             let active = panel
                 .active_conversation_view()
-                .expect("keyboard activation should claim the prepared conversation");
+                .expect("the front door lands in the composer, not a chooser");
+            assert_eq!(active.entity_id(), prepared.entity_id());
+            assert_eq!(
+                active.read(cx).preparation_state(cx),
+                ConversationPreparation::RouterReady
+            );
+            active.entity_id()
+        });
+
+        // The dropdown is composer chrome, reachable from the keyboard
+        // through its dedicated toggle action.
+        assert!(
+            !cx.debug_render_snapshot()
+                .occurrences("omega.composer.executor-menu")
+                .is_empty(),
+            "the executor dropdown trigger must render in the composer bar"
+        );
+        cx.dispatch_action(ToggleComposerExecutorMenu);
+        cx.run_until_parked();
+        panel.read_with(&cx, |panel, _cx| {
+            assert!(
+                panel.composer_executor_menu_handle().is_deployed(),
+                "agent::ToggleComposerExecutorMenu must open the dropdown"
+            );
+        });
+        cx.dispatch_action(ToggleComposerExecutorMenu);
+        cx.run_until_parked();
+
+        // A second New Thread from the claimed (still blank) conversation
+        // reuses the same preparation rather than probing a second session.
+        panel.update_in(&mut cx, |panel, window, cx| {
+            panel.new_thread(&NewThread, window, cx);
+        });
+        cx.run_until_parked();
+        panel.read_with(&cx, |panel, cx| {
+            let active = panel
+                .active_conversation_view()
+                .expect("repeating New Thread keeps a composer active");
             assert_eq!(active.entity_id(), prepared_entity);
             assert_eq!(
                 active.read(cx).preparation_state(cx),
                 ConversationPreparation::RouterReady
             );
         });
-
-        let pointer_prepared =
-            install_prepared_omega_for_test(&panel, SessionTrackingConnection::new(), &mut cx);
-        panel.update_in(&mut cx, |panel, window, cx| {
-            panel.new_thread(&NewThread, window, cx);
-        });
-        cx.run_until_parked();
-        panel.read_with(&cx, |panel, cx| {
-            assert_eq!(
-                panel
-                    .draft_thread
-                    .as_ref()
-                    .expect("pointer activation starts from the logical Omega draft")
-                    .read(cx)
-                    .preparation_state(cx),
-                ConversationPreparation::RouterReady
-            );
-        });
-        let omega_bounds = cx
-            .debug_bounds("omega.new-conversation.mode.omega-agent")
-            .expect("the Omega mode row should be rendered");
-        cx.simulate_click(omega_bounds.center(), Modifiers::default());
-        cx.run_until_parked();
-
-        panel.read_with(&cx, |panel, cx| {
-            let active = panel
-                .active_conversation_view()
-                .expect("pointer activation should claim the prepared conversation");
-            assert_eq!(active.entity_id(), pointer_prepared.entity_id());
-            assert_ne!(active.entity_id(), prepared_entity);
-            assert_eq!(
-                active.read(cx).preparation_state(cx),
-                ConversationPreparation::RouterReady
-            );
-            assert!(!panel.showing_new_conversation_front_door);
-        });
     }
 
     #[gpui::test]
-    async fn non_omega_modes_do_not_claim_or_fallback_to_prepared_omega(cx: &mut TestAppContext) {
+    async fn sarah_selection_routes_to_admission_and_retains_prepared_omega(
+        cx: &mut TestAppContext,
+    ) {
         let (panel, mut cx) = setup_visible_panel(cx).await;
         panel.update_in(&mut cx, |panel, window, cx| {
             panel.new_thread(&NewThread, window, cx);
@@ -17995,32 +17932,23 @@ mod tests {
             let draft = panel
                 .draft_thread
                 .as_ref()
-                .expect("the front door should hold its prepared Omega conversation");
-            assert!(panel.active_conversation_view().is_none());
+                .expect("the composer front door holds its prepared Omega conversation");
             (draft.entity_id(), draft.read(cx).thread_id)
         });
 
+        // Selecting Sarah in the dropdown reuses #154's admission surface —
+        // price/hold truth before audio — and never claims or discards the
+        // prepared Omega conversation.
         panel.update_in(&mut cx, |panel, window, cx| {
-            panel.activate_new_conversation_mode(ConversationMode::DirectAgent, window, cx);
-        });
-        panel.read_with(&cx, |panel, cx| {
-            assert!(panel.showing_new_conversation_front_door);
-            assert!(panel.active_conversation_view().is_none());
-            let draft = panel
-                .draft_thread
-                .as_ref()
-                .expect("Direct setup must retain the prepared Omega conversation");
-            assert_eq!(draft.entity_id(), prepared_entity);
-            assert_eq!(draft.read(cx).thread_id, prepared_thread_id);
-        });
-
-        panel.update_in(&mut cx, |panel, window, cx| {
-            panel.activate_new_conversation_mode(ConversationMode::Sarah, window, cx);
+            panel.compose_on_executor(ConversationTarget::Sarah, window, cx);
         });
         panel.read_with(&cx, |panel, cx| {
             assert!(panel.showing_sarah_admission);
-            assert!(!panel.showing_new_conversation_front_door);
-            assert!(panel.active_conversation_view().is_none());
+            let rows = panel.composer_executor_rows(cx);
+            let sarah = rows
+                .last()
+                .expect("the dropdown always carries the Sarah row");
+            assert!(sarah.is_current, "the dropdown's face names Sarah");
             let draft = panel
                 .draft_thread
                 .as_ref()
@@ -18091,7 +18019,6 @@ mod tests {
 
         panel.read_with(&cx, |panel, _cx| {
             assert!(panel.showing_sarah_admission);
-            assert!(!panel.showing_new_conversation_front_door);
         });
         let loading = cx.debug_render_snapshot();
         assert_eq!(
@@ -18290,30 +18217,25 @@ mod tests {
         cx.run_until_parked();
 
         panel.read_with(&cx, |panel, cx| {
-            assert!(panel.showing_new_conversation_front_door);
-            assert_eq!(
-                panel.selected_front_door_mode,
-                ConversationMode::DirectAgent
-            );
             assert_eq!(
                 panel.selected_agent,
                 Agent::Custom {
                     id: requested_agent.clone(),
                 }
             );
-            assert!(panel.active_conversation_view().is_none());
 
+            let requested_target = ConversationTarget::DirectAgent {
+                agent_id: DirectAgentId::new(requested_agent.as_ref())
+                    .expect("the requested ACP id is valid"),
+            };
             let direct = panel
-                .new_conversation_mode_rows(cx)
+                .composer_executor_rows(cx)
                 .into_iter()
-                .find(|row| row.mode == ConversationMode::DirectAgent)
-                .expect("the typed Direct row must remain visible");
-            assert_eq!(
-                direct.target,
-                Some(ConversationTarget::DirectAgent {
-                    agent_id: DirectAgentId::new(requested_agent.as_ref())
-                        .expect("the requested ACP id is valid"),
-                })
+                .find(|row| row.target == requested_target)
+                .expect("the typed Direct row must remain visible in the dropdown");
+            assert!(
+                direct.is_current,
+                "the dropdown's face must name the requested agent"
             );
             assert!(
                 panel.draft_thread.as_ref().is_some_and(|draft| {
@@ -18323,6 +18245,11 @@ mod tests {
                     )
                 }),
                 "the Direct action must prepare the requested agent, never Omega"
+            );
+            assert_eq!(
+                panel.active_conversation_view().map(Entity::entity_id),
+                panel.draft_thread.as_ref().map(Entity::entity_id),
+                "the typed action lands in the prepared composer, not a chooser"
             );
             assert!(!matches!(
                 direct.readiness,
@@ -18341,16 +18268,14 @@ mod tests {
             id: agent_id.clone(),
         };
 
+        let target = ConversationTarget::DirectAgent {
+            agent_id: DirectAgentId::new("opencode").expect("valid id"),
+        };
         let prepared = panel.update_in(&mut cx, |panel, window, cx| {
             panel.connection_store.update(cx, |store, cx| {
                 store.restart_connection(direct_agent.clone(), server, cx);
             });
-            panel.set_selected_agent_and_persist(direct_agent, cx);
-            panel.open_new_conversation_front_door_for_mode(
-                ConversationMode::DirectAgent,
-                window,
-                cx,
-            );
+            panel.compose_on_executor(target.clone(), window, cx);
             panel
                 .draft_thread
                 .clone()
@@ -18365,12 +18290,12 @@ mod tests {
             });
         panel.update_in(&mut cx, |panel, window, cx| {
             let direct = panel
-                .new_conversation_mode_rows(cx)
+                .composer_executor_rows(cx)
                 .into_iter()
-                .find(|row| row.mode == ConversationMode::DirectAgent)
+                .find(|row| row.target == target)
                 .expect("Direct row remains visible");
             assert!(matches!(direct.readiness, ModeReadiness::Ready { .. }));
-            panel.activate_new_conversation_mode(ConversationMode::DirectAgent, window, cx);
+            panel.compose_on_executor(target.clone(), window, cx);
         });
 
         panel.read_with(&cx, |panel, cx| {
@@ -18409,30 +18334,23 @@ mod tests {
             let exact_agent = Agent::Custom {
                 id: exact_id.clone(),
             };
+            let target = ConversationTarget::DirectAgent {
+                agent_id: DirectAgentId::new(agent_id).expect("the table contains valid ACP ids"),
+            };
             panel.update_in(&mut cx, |panel, window, cx| {
                 panel.connection_store.update(cx, |store, cx| {
                     store.restart_connection(exact_agent.clone(), server, cx);
                 });
-                panel.set_selected_agent_and_persist(exact_agent.clone(), cx);
-                panel.open_new_conversation_front_door_for_mode(
-                    ConversationMode::DirectAgent,
-                    window,
-                    cx,
-                );
+                panel.compose_on_executor(target.clone(), window, cx);
             });
             cx.run_until_parked();
 
             panel.read_with(&cx, |panel, cx| {
                 let direct = panel
-                    .new_conversation_mode_rows(cx)
+                    .composer_executor_rows(cx)
                     .into_iter()
-                    .find(|row| row.mode == ConversationMode::DirectAgent)
+                    .find(|row| row.target == target)
                     .expect("Direct row remains available");
-                let target = ConversationTarget::DirectAgent {
-                    agent_id: DirectAgentId::new(agent_id)
-                        .expect("the table contains valid ACP ids"),
-                };
-                assert_eq!(direct.target, Some(target.clone()));
                 let ModeReadiness::Ready { receipt } = direct.readiness else {
                     panic!("{agent_id} should have a real preparation receipt");
                 };
@@ -18471,6 +18389,9 @@ mod tests {
             id: direct_id.clone(),
         };
 
+        let direct_target = ConversationTarget::DirectAgent {
+            agent_id: DirectAgentId::new("grok-build").expect("valid id"),
+        };
         panel.update_in(&mut cx, |panel, window, cx| {
             panel.connection_store.update(cx, |store, cx| {
                 store.restart_connection(direct_agent.clone(), direct_server, cx);
@@ -18480,21 +18401,18 @@ mod tests {
                     cx,
                 );
             });
-            panel.set_selected_agent_and_persist(direct_agent.clone(), cx);
-            panel.open_new_conversation_front_door_for_mode(
-                ConversationMode::DirectAgent,
-                window,
-                cx,
-            );
+            panel.compose_on_executor(direct_target.clone(), window, cx);
         });
         cx.run_until_parked();
 
+        // Selection is free until the first send: picking Omega in the
+        // dropdown replaces the blank Direct preparation with an Omega one.
         panel.update_in(&mut cx, |panel, window, cx| {
             let omega = panel
-                .new_conversation_mode_rows(cx)
+                .composer_executor_rows(cx)
                 .into_iter()
-                .find(|row| row.mode == ConversationMode::OmegaAgent)
-                .expect("Omega row remains available from Direct mode");
+                .find(|row| row.target == ConversationTarget::OmegaAgent)
+                .expect("Omega row remains available from a Direct draft");
             assert!(matches!(
                 omega.readiness,
                 ModeReadiness::SetupRequired {
@@ -18502,7 +18420,7 @@ mod tests {
                     ..
                 }
             ));
-            panel.activate_new_conversation_mode(ConversationMode::OmegaAgent, window, cx);
+            panel.compose_on_executor(ConversationTarget::OmegaAgent, window, cx);
         });
         cx.run_until_parked();
         panel.read_with(&cx, |panel, cx| {
@@ -18515,22 +18433,10 @@ mod tests {
                     .agent_key(),
                 Agent::NativeAgent
             ));
-            let direct = panel
-                .new_conversation_mode_rows(cx)
-                .into_iter()
-                .find(|row| row.mode == ConversationMode::DirectAgent)
-                .expect("Direct row remains available from Omega mode");
-            assert!(matches!(
-                direct.readiness,
-                ModeReadiness::SetupRequired {
-                    action: ModeSetupAction::PrepareDirectAgent,
-                    ..
-                }
-            ));
         });
 
         panel.update_in(&mut cx, |panel, window, cx| {
-            panel.activate_new_conversation_mode(ConversationMode::DirectAgent, window, cx);
+            panel.compose_on_executor(direct_target.clone(), window, cx);
         });
         cx.run_until_parked();
         panel.read_with(&cx, |panel, cx| {
@@ -18543,8 +18449,88 @@ mod tests {
                     .agent_key(),
                 &Agent::Custom { id: direct_id }
             );
-            assert!(panel.showing_new_conversation_front_door);
-            assert!(panel.active_conversation_view().is_none());
+            assert_eq!(
+                panel.active_conversation_view().map(Entity::entity_id),
+                panel.draft_thread.as_ref().map(Entity::entity_id),
+                "each replacement lands in the composer immediately"
+            );
+        });
+    }
+
+    /// The dropdown's central law (omega#165): once a conversation has
+    /// content, choosing a different executor starts a NEW thread — the
+    /// existing transcript keeps its owner and its text, untouched.
+    #[gpui::test]
+    async fn composing_on_a_new_executor_never_retargets_a_bound_conversation(
+        cx: &mut TestAppContext,
+    ) {
+        let (panel, mut cx) = setup_visible_panel(cx).await;
+        let direct_server = Rc::new(StubAgentServer::new(
+            SessionTrackingConnection::new().with_agent_id("grok-build"),
+        ));
+        let direct_id = AgentId::new("grok-build");
+        let direct_agent = Agent::Custom {
+            id: direct_id.clone(),
+        };
+        let direct_target = ConversationTarget::DirectAgent {
+            agent_id: DirectAgentId::new("grok-build").expect("valid id"),
+        };
+        panel.update_in(&mut cx, |panel, window, cx| {
+            panel.connection_store.update(cx, |store, cx| {
+                store.restart_connection(direct_agent.clone(), direct_server, cx);
+            });
+            panel.compose_on_executor(direct_target.clone(), window, cx);
+        });
+        cx.run_until_parked();
+
+        let bound_entity = panel.read_with(&cx, |panel, cx| {
+            let active = panel
+                .active_conversation_view()
+                .expect("the Direct draft is the active view");
+            assert_eq!(active.read(cx).agent_key(), &direct_agent);
+            active.entity_id()
+        });
+        let bound_thread_id = panel.read_with(&cx, |panel, cx| {
+            panel
+                .active_thread_id(cx)
+                .expect("the Direct draft has a thread id")
+        });
+
+        // Give the conversation content, which binds it for the dropdown.
+        let thread_view = panel.read_with(&cx, |panel, cx| {
+            panel
+                .active_thread_view(cx)
+                .expect("the Direct draft renders a thread view")
+        });
+        let message_editor = thread_view.read_with(&cx, |view, _cx| view.message_editor.clone());
+        message_editor.update_in(&mut cx, |editor, window, cx| {
+            editor.set_text("bound to grok-build", window, cx);
+        });
+
+        panel.update_in(&mut cx, |panel, window, cx| {
+            panel.compose_on_executor(ConversationTarget::OmegaAgent, window, cx);
+        });
+        cx.run_until_parked();
+
+        panel.read_with(&cx, |panel, cx| {
+            let active = panel
+                .active_conversation_view()
+                .expect("choosing Omega starts a new conversation");
+            assert_ne!(
+                active.entity_id(),
+                bound_entity,
+                "the bound conversation must not be reused"
+            );
+            assert!(matches!(active.read(cx).agent_key(), Agent::NativeAgent));
+            let retained = panel
+                .retained_threads
+                .get(&bound_thread_id)
+                .expect("the bound conversation is retained, not discarded");
+            assert_eq!(
+                retained.read(cx).agent_key(),
+                &direct_agent,
+                "the existing transcript's executor never changes"
+            );
         });
     }
 
@@ -18565,9 +18551,9 @@ mod tests {
 
         panel.read_with(&cx, |panel, cx| {
             let omega = panel
-                .new_conversation_mode_rows(cx)
+                .composer_executor_rows(cx)
                 .into_iter()
-                .find(|row| row.mode == ConversationMode::OmegaAgent)
+                .find(|row| row.target == ConversationTarget::OmegaAgent)
                 .expect("the Omega row must remain present after setup fails");
             assert!(
                 matches!(
@@ -18587,10 +18573,9 @@ mod tests {
         });
 
         panel.update_in(&mut cx, |panel, window, cx| {
-            panel.activate_new_conversation_mode(ConversationMode::OmegaAgent, window, cx);
+            panel.compose_on_executor(ConversationTarget::OmegaAgent, window, cx);
         });
         panel.read_with(&cx, |panel, cx| {
-            assert!(!panel.showing_new_conversation_front_door);
             assert_eq!(
                 panel.active_conversation_view().map(Entity::entity_id),
                 Some(prepared.entity_id())
@@ -18610,16 +18595,14 @@ mod tests {
         let direct_agent = Agent::Custom {
             id: agent_id.clone(),
         };
+        let target = ConversationTarget::DirectAgent {
+            agent_id: DirectAgentId::new(agent_id.as_ref()).expect("valid id"),
+        };
         let prepared = panel.update_in(&mut cx, |panel, window, cx| {
             panel.connection_store.update(cx, |store, cx| {
                 store.restart_connection(direct_agent.clone(), server, cx);
             });
-            panel.set_selected_agent_and_persist(direct_agent, cx);
-            panel.open_new_conversation_front_door_for_mode(
-                ConversationMode::DirectAgent,
-                window,
-                cx,
-            );
+            panel.compose_on_executor(target.clone(), window, cx);
             panel
                 .draft_thread
                 .clone()
@@ -18629,9 +18612,9 @@ mod tests {
 
         panel.update_in(&mut cx, |panel, window, cx| {
             let direct = panel
-                .new_conversation_mode_rows(cx)
+                .composer_executor_rows(cx)
                 .into_iter()
-                .find(|row| row.mode == ConversationMode::DirectAgent)
+                .find(|row| row.target == target)
                 .expect("Direct row remains visible after setup fails");
             assert!(matches!(
                 direct.readiness,
@@ -18640,7 +18623,7 @@ mod tests {
                     ..
                 }
             ));
-            panel.activate_new_conversation_mode(ConversationMode::DirectAgent, window, cx);
+            panel.compose_on_executor(target.clone(), window, cx);
         });
 
         panel.read_with(&cx, |panel, cx| {
@@ -21126,20 +21109,19 @@ mod tests {
             let expected = Agent::Custom {
                 id: AgentId::new("opencode"),
             };
-            assert!(panel.showing_new_conversation_front_door);
-            assert_eq!(
-                panel.selected_front_door_mode,
-                ConversationMode::DirectAgent
-            );
             assert_eq!(panel.selected_agent, expected);
             assert_eq!(
                 panel
                     .draft_thread
                     .as_ref()
-                    .expect("registry selection should replace the offscreen preparation")
+                    .expect("registry selection should replace the blank preparation")
                     .read(cx)
                     .agent_key(),
                 &expected
+            );
+            assert!(
+                panel.front_door_composer_visible_for_tests(),
+                "registry selection keeps the person in the composer"
             );
         });
     }
@@ -21237,9 +21219,7 @@ mod tests {
     }
 
     #[gpui::test]
-    async fn test_new_thread_preserves_exact_direct_selection_while_preparing_omega(
-        cx: &mut TestAppContext,
-    ) {
+    async fn test_new_thread_defaults_to_omega_and_syncs_the_selection(cx: &mut TestAppContext) {
         init_test(cx);
         let fs = FakeFs::new(cx.executor());
         cx.update(|cx| {
@@ -21287,16 +21267,18 @@ mod tests {
         cx.run_until_parked();
 
         panel.read_with(cx, |panel, cx| {
+            // omega#165: `+` lands on the default executor. There is no
+            // hidden second selection store left behind — the dropdown is the
+            // one authority, and it reads the conversation it sits under.
             assert_eq!(
-                panel.selected_agent, custom_agent,
-                "preparing Omega must not overwrite the exact direct-agent selection"
+                panel.selected_agent,
+                Agent::NativeAgent,
+                "NewThread defaults to Omega and syncs the stored selection to it"
             );
             assert!(
-                panel.showing_new_conversation_front_door,
-                "NewThread must open the mode boundary instead of starting the selected agent"
+                panel.front_door_composer_visible_for_tests(),
+                "NewThread lands in the focused composer draft"
             );
-            let rows = panel.new_conversation_mode_rows(cx);
-            assert_eq!(rows[0].executor.as_ref(), "my-custom-agent");
             assert!(matches!(
                 panel
                     .draft_thread

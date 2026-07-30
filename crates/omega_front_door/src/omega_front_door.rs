@@ -112,11 +112,6 @@ pub enum ConversationMode {
     Sarah,
 }
 
-#[must_use]
-pub fn is_mode_activation_key(key: &str, modified: bool) -> bool {
-    !modified && matches!(key, "enter" | "space")
-}
-
 impl ConversationMode {
     #[must_use]
     pub const fn all() -> &'static [Self] {
@@ -1057,13 +1052,10 @@ mod tests {
         );
     }
 
-    #[test]
-    fn mode_activation_keys_are_pointer_equivalent() {
-        assert!(is_mode_activation_key("enter", false));
-        assert!(is_mode_activation_key("space", false));
-        assert!(!is_mode_activation_key("enter", true));
-        assert!(!is_mode_activation_key("down", false));
-    }
+    // `is_mode_activation_key` and its pointer-equivalence test left with the
+    // full-screen chooser (omega#165). The composer executor dropdown's
+    // keyboard path is `agent::ToggleComposerExecutorMenu` plus the context
+    // menu's own key handling, which needs no bespoke key predicate here.
 
     #[test]
     fn readiness_has_exactly_four_honest_states() {

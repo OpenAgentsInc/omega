@@ -10826,7 +10826,10 @@ fn run_omega_agent_visual_tests_inner(
         cx.set_debug_accessibility_active(workspace_window, true)?;
         let snapshot = cx.debug_render_snapshot(workspace_window)?;
         let mut probe = SemanticProbe::new(&snapshot);
-        probe.require_visible("omega.new-conversation.front-door")?;
+        // omega#165: the interstitial chooser is gone. The landing is the
+        // focused composer with the executor dropdown as composer chrome.
+        probe.require_absent("omega.new-conversation.front-door")?;
+        probe.require_visible("omega.composer.executor-menu")?;
         probe.require_absent("welcome-content")?;
     }
 
@@ -10838,16 +10841,12 @@ fn run_omega_agent_visual_tests_inner(
         workspace
             .read(cx)
             .panel::<AgentPanel>(cx)
-            .is_some_and(|panel| {
-                panel
-                    .read(cx)
-                    .new_conversation_front_door_visible_for_tests()
-            })
+            .is_some_and(|panel| panel.read(cx).front_door_composer_visible_for_tests())
     });
     anyhow::ensure!(
         panel_is_open,
         "the agent panel is not the open surface; the capture would show the \
-         launchpad rather than the front door"
+         launchpad rather than the composer front door"
     );
 
     // These scene names are reserved for the structurally sealed zero-base

@@ -221,9 +221,14 @@ the voice session. An existing transcript never changes executors underneath
 its entries. Every title, composer label, status, and disclosure names the
 executor actually doing the work.
 
-The new-conversation boundary always shows the three modes in that order. Each
-row has exactly one readiness state: **Ready**, **Setup required**,
-**Temporarily unavailable**, or **Not supported in this build**. Direct Ready
+The new-conversation boundary is the composer's executor dropdown, not an
+interstitial screen: a new thread lands directly in a focused composer on the
+default executor (Omega Agent), and the dropdown beside the model-tier control
+offers Omega, the named direct agents, every installed ACP agent, and Sarah in
+a fixed order. Each row has exactly one readiness state: **Ready**, **Setup
+required**, **Temporarily unavailable**, or **Not supported in this build**,
+and a row that cannot run here is disabled with its reason rather than hidden
+or fake-enabled. Direct Ready
 requires a connection and a created session bound to the exact target. Omega
 Ready requires a connected router with a typed executor-readiness inventory;
 its physical executor session is deliberately deferred until the first request

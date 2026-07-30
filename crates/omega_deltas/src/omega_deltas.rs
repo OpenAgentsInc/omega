@@ -172,6 +172,7 @@ pub const ENFORCED_DELTAS: &[&str] = &[
     "OMEGA-DELTA-0181",
     "OMEGA-DELTA-0182",
     "OMEGA-DELTA-0183",
+    "OMEGA-DELTA-0184",
 ];
 
 /// The concise product contract adjacent to the delta registry.
@@ -13882,7 +13883,7 @@ mod tests {
         assert!(
             outer.contains(".flex_wrap()"),
             "OMEGA-DELTA-0105: the outer row of zero base's composer bar in {} \
-             no longer wraps. It carries six controls; without wrapping, a \
+             no longer wraps. It carries seven controls; without wrapping, a \
              narrow dock clips the one at the end, which is Send.",
             view_path.display()
         );
@@ -18235,10 +18236,9 @@ mod tests {
         assert!(
             toolbar.contains("let agent_for_new_threads")
                 && toolbar.contains("self.active_conversation_view()")
-                && toolbar.contains("self.selected_front_door_mode")
                 && toolbar.contains("agent_for_new_threads.icon()"),
             "OMEGA-DELTA-0131/0178: toolbar label and icon no longer derive \
-             from the active owner or typed front-door target."
+             from the active owner."
         );
         assert!(
             !toolbar.contains("self.selected_agent.label()"),
@@ -22032,14 +22032,16 @@ mod tests {
 
         let panel = read_repository_file(AGENT_PANEL_PATH);
         assert!(!panel.contains("Direct agents are not available in this alpha yet"));
-        let open = function_body(&panel, "open_new_conversation_front_door_for_mode")
-            .expect("OMEGA-DELTA-0177: front-door opener is gone");
-        assert!(open.contains("present_new_conversation_front_door"));
-        assert!(!open.contains("omega_executor_selector::ready_here"));
-        let present = function_body(&panel, "present_new_conversation_front_door")
-            .expect("OMEGA-DELTA-0177: front-door presentation boundary is gone");
-        assert!(present.contains("prepare_omega_draft"));
-        assert!(!present.contains("omega_executor_selector::ready_here"));
+        // OMEGA-DELTA-0184 re-homed the boundary from a chooser screen into
+        // the composer executor dropdown. The typed opener is now
+        // `compose_on_executor`, and it still prepares the exact draft
+        // entity rather than probing with a disposable session.
+        let compose = function_body(&panel, "compose_on_executor")
+            .expect("OMEGA-DELTA-0177/0184: the typed new-conversation opener is gone");
+        assert!(compose.contains("prepare_omega_draft"));
+        assert!(compose.contains("prepare_direct_draft"));
+        assert!(compose.contains("open_sarah_admission"));
+        assert!(!compose.contains("omega_executor_selector::ready_here"));
 
         let conversation = read_repository_file("crates/agent_ui/src/conversation_view.rs");
         for required in [
@@ -22058,7 +22060,7 @@ mod tests {
 
         let creation = function_body(&panel, "new_thread_with_workspace")
             .expect("OMEGA-DELTA-0177: generic new-thread boundary is gone");
-        assert!(creation.contains("open_new_conversation_front_door"));
+        assert!(creation.contains("compose_on_executor"));
         assert!(!creation.contains("new_terminal"));
 
         let activation = function_body(&panel, "activate_new_conversation_target")
@@ -22104,7 +22106,7 @@ mod tests {
             ),
             (
                 "docs/src/ai/agent-panel.md",
-                "three permanent rows in this order",
+                "The default executor is **Omega Agent**, and the executor selection is",
             ),
             (
                 "docs/omega/taxonomy.md",
@@ -22624,5 +22626,144 @@ mod tests {
             "OMEGA-DELTA-0183: the pairing authority records by default, so \
              every state-machine test writes into the real identity root."
         );
+    }
+
+    /// OMEGA-DELTA-0184. The composer executor dropdown is the
+    /// new-conversation front door: no interstitial screen stands between
+    /// `+` and a focused composer, and the dropdown is the one selection
+    /// authority.
+    #[test]
+    fn the_composer_executor_dropdown_is_the_new_conversation_front_door() {
+        let panel = read_repository_file(AGENT_PANEL_PATH);
+
+        // The interstitial surface is gone from the binary. These are the
+        // chooser's own strings, not the dropdown's: the dropdown's bound
+        // header reads "Start a new conversation on".
+        for gone in [
+            "render_new_conversation_front_door",
+            "showing_new_conversation_front_door",
+            "selected_front_door_mode",
+            "omega.new-conversation.front-door",
+            "omega.new-conversation.mode.",
+            "is_mode_activation_key",
+        ] {
+            assert!(
+                !panel.contains(gone),
+                "OMEGA-DELTA-0184: the full-screen chooser surface returned \
+                 to the Agent Panel (`{gone}`). The owner called it horrible \
+                 friction: anything between `+` and a blinking cursor fails \
+                 omega#165."
+            );
+        }
+
+        // One activation path. New Thread, the Thread menu, and the dropdown
+        // all go through `compose_on_executor`, and it lands in the composer
+        // with focus rather than presenting a mode screen.
+        let creation = body_of(&panel, "new_thread_with_workspace");
+        assert!(
+            creation.contains("compose_on_executor")
+                && creation.contains("ConversationTarget::OmegaAgent"),
+            "OMEGA-DELTA-0184: New Thread no longer lands on the default \
+             executor through the one compose path."
+        );
+        let reveal = body_of(&panel, "reveal_composer_draft");
+        assert!(
+            reveal.contains("activate_new_conversation_target")
+                && reveal.contains("ModeReadiness::Ready { receipt }"),
+            "OMEGA-DELTA-0184: a Ready preparation must still be claimed \
+             through the receipt-validated path from OMEGA-DELTA-0177."
+        );
+        let startup = body_of(&panel, "open_startup_front_door");
+        assert!(
+            startup.contains("prepare_omega_draft") && startup.contains("reveal_composer_draft"),
+            "OMEGA-DELTA-0184: the startup landing no longer reaches the \
+             focused composer draft."
+        );
+
+        // The row model is the panel's, and its face is the active
+        // conversation's own owner — never a second selection store.
+        let rows = body_of(&panel, "composer_executor_rows");
+        for required in [
+            "ConversationTarget::OmegaAgent",
+            "ConversationTarget::Sarah",
+            "NAMED_DIRECT_AGENT_IDS",
+            "self.active_conversation_view()",
+            "self.showing_sarah_admission",
+        ] {
+            assert!(
+                rows.contains(required),
+                "OMEGA-DELTA-0184: the dropdown row model lost `{required}`."
+            );
+        }
+
+        // The dropdown itself: mounted in both composer bars, selection
+        // handled through the panel path, disabled rows carry their reason,
+        // and the registry entry keeps the install path visible.
+        let menu = read_repository_file("crates/agent_ui/src/omega_composer_executor_menu.rs");
+        for required in [
+            "pub const UNBOUND_MENU_HEADER",
+            "pub const BOUND_MENU_HEADER",
+            "compose_on_executor",
+            "omega-composer-executor-trigger",
+            "named_direct_agent_label",
+            "Add More Agents…",
+            "zed_actions::AcpRegistry",
+            "row.is_selectable()",
+        ] {
+            assert!(
+                menu.contains(required),
+                "OMEGA-DELTA-0184: the composer executor dropdown lost `{required}`."
+            );
+        }
+        assert!(
+            !menu.contains("reset_onto_new_executor")
+                && !menu.contains("rebuild_onto_new_executor"),
+            "OMEGA-DELTA-0184: the dropdown reached the legacy retarget seam. \
+             Selection creates or re-homes a conversation; it never retargets \
+             the transcript it sits under (OMEGA-DELTA-0150)."
+        );
+
+        let thread_view = read_repository_file(ZERO_BASE_THREAD_VIEW_PATH);
+        let bar = body_of(&thread_view, "render_zero_base_executor_bar");
+        assert!(
+            bar.contains("self.render_composer_executor_menu(cx)"),
+            "OMEGA-DELTA-0184: the zero-base composer bar no longer offers \
+             the executor dropdown beside the tier selector."
+        );
+        let conversation = read_repository_file("crates/agent_ui/src/conversation_view.rs");
+        assert!(
+            conversation.contains("render_composer_executor_menu")
+                && conversation.contains("composer_executor_label"),
+            "OMEGA-DELTA-0184: the loading composer lost the executor \
+             dropdown, so a brand-new conversation would have no selection \
+             surface at the moment selection matters most."
+        );
+
+        // The ownership fence: the bound flag comes from the thread's own
+        // entries, so a conversation with content can only ever start a new
+        // thread from the dropdown.
+        let mount = body_of(&thread_view, "render_composer_executor_menu");
+        assert!(
+            mount.contains("is_draft_thread()"),
+            "OMEGA-DELTA-0184: the thread bar no longer derives boundness \
+             from the transcript's own entries."
+        );
+
+        for (path, required) in [
+            (
+                "docs/src/ai/agent-panel.md",
+                "a dropdown in the composer bar",
+            ),
+            (
+                "docs/omega/taxonomy.md",
+                "The new-conversation boundary is the composer's executor dropdown",
+            ),
+        ] {
+            let document = read_repository_file(path);
+            assert!(
+                without_whitespace(&document).contains(&without_whitespace(required)),
+                "OMEGA-DELTA-0184: {path} lost `{required}`"
+            );
+        }
     }
 }
