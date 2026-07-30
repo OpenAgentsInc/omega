@@ -165,6 +165,7 @@ pub const ENFORCED_DELTAS: &[&str] = &[
     "OMEGA-DELTA-0174",
     "OMEGA-DELTA-0175",
     "OMEGA-DELTA-0176",
+    "OMEGA-DELTA-0177",
 ];
 
 /// The concise product contract adjacent to the delta registry.
@@ -1109,7 +1110,6 @@ pub const PROJECT_OPTIONAL_FRONT_DOOR_FNS: &[&str] = &[
 /// every guard fails as loudly as restoring one.
 pub const PROJECT_REQUIRED_FNS: &[&str] = &[
     "restore_new_draft",
-    "new_external_agent_thread",
     "refresh_skills",
     "load_thread_from_clipboard",
     "initialize_from_source_workspace_if_needed",
@@ -6507,6 +6507,26 @@ mod tests {
                 path.display()
             );
         }
+
+        let external_wrapper = function_body(&source, "new_external_agent_thread")
+            .expect("OMEGA-DELTA-0034: the external-agent action wrapper is gone");
+        assert!(
+            external_wrapper.contains("omega_zero_base::is_active()")
+                && external_wrapper.contains("new_external_agent_thread_for_mode"),
+            "OMEGA-DELTA-0034: the external-agent action no longer separates the sealed typed refusal from full-editor creation"
+        );
+        let external_by_mode = function_body(&source, "new_external_agent_thread_for_mode")
+            .expect("OMEGA-DELTA-0034: the mode-specific external-agent action is gone");
+        let zero_base_return = external_by_mode
+            .find("return;")
+            .expect("OMEGA-DELTA-0034: the zero-base external-agent refusal must return");
+        let project_guard = external_by_mode
+            .find("if !self.has_open_project(cx)")
+            .expect("OMEGA-DELTA-0034: full-editor external-agent creation lost its project guard");
+        assert!(
+            zero_base_return < project_guard,
+            "OMEGA-DELTA-0034: the zero-base external-agent refusal reaches the full-editor project guard"
+        );
     }
 
     /// OMEGA-DELTA-0013. The new-thread chord fires from anywhere in the window.
@@ -21066,7 +21086,7 @@ mod tests {
             "**Direct Agent**",
             "**Omega Agent**",
             "**Sarah**",
-            "The chosen mode, concrete executor, project, and readiness are visible before the first send.",
+            "The chosen mode, concrete executor or router selection, project, and readiness are visible before the first send.",
             "Vim remains part of the product",
         ] {
             assert!(
@@ -21915,6 +21935,105 @@ mod tests {
                     "OMEGA-DELTA-0176: {keymap_path} resolves `{keystroke}` to refused `{action}`"
                 );
             }
+        }
+    }
+
+    /// OMEGA-DELTA-0177. The default new-conversation boundary owns the mode
+    /// choice, and a prepared session is claimed rather than probed and
+    /// discarded or used to retarget an existing transcript.
+    #[test]
+    fn the_three_mode_front_door_claims_one_exact_prepared_conversation() {
+        let core = read_repository_file("crates/omega_front_door/src/omega_front_door.rs");
+        for required in [
+            "pub enum ConversationMode",
+            "DirectAgent",
+            "OmegaAgent",
+            "Sarah",
+            "pub enum ModeReadiness",
+            "SetupRequired",
+            "TemporarilyUnavailable",
+            "NotSupportedInBuild",
+            "RevealPreparedConversation",
+            "pub struct PreparationReceipt",
+            "pub fn proves(&self, target: &ConversationTarget, session_id: &str)",
+        ] {
+            assert!(
+                core.contains(required),
+                "OMEGA-DELTA-0177: typed front-door contract lost `{required}`"
+            );
+        }
+
+        let panel = read_repository_file(AGENT_PANEL_PATH);
+        let open = function_body(&panel, "open_new_conversation_front_door")
+            .expect("OMEGA-DELTA-0177: front-door opener is gone");
+        assert!(open.contains("prepare_omega_draft"));
+        assert!(!open.contains("omega_executor_selector::ready_here"));
+
+        let conversation = read_repository_file("crates/agent_ui/src/conversation_view.rs");
+        for required in [
+            "pub(crate) enum ConversationPreparation",
+            "Loading",
+            "Ready { session_id: String }",
+            "SetupRequired { reason: SharedString }",
+            "reason: error.to_string().into()",
+        ] {
+            assert!(
+                conversation.contains(required),
+                "OMEGA-DELTA-0177: preparation classification lost `{required}`"
+            );
+        }
+
+        let creation = function_body(&panel, "new_thread_with_workspace")
+            .expect("OMEGA-DELTA-0177: generic new-thread boundary is gone");
+        assert!(creation.contains("open_new_conversation_front_door"));
+        assert!(!creation.contains("new_terminal"));
+
+        let activation = function_body(&panel, "activate_new_conversation_target")
+            .expect("OMEGA-DELTA-0177: typed target activation is gone");
+        for required in [
+            "receipt.proves",
+            "prepared_omega_session_id",
+            "conversation_view: draft",
+        ] {
+            assert!(
+                activation.contains(required),
+                "OMEGA-DELTA-0177: prepared-entity claim lost `{required}`"
+            );
+        }
+        assert!(
+            !activation.contains("reset_onto_new_executor")
+                && !activation.contains("rebuild_onto_new_executor"),
+            "OMEGA-DELTA-0177: creation-time selection retargets an existing transcript"
+        );
+
+        let metadata = read_repository_file("crates/agent_ui/src/thread_metadata_store.rs");
+        assert!(
+            metadata.contains("let agent_id = view.agent_key().id();"),
+            "OMEGA-DELTA-0177: metadata no longer persists immutable conversation ownership"
+        );
+
+        for (path, required) in [
+            (
+                "PRODUCT.md",
+                "Ready means that the named target has connected and created an actual session",
+            ),
+            (
+                "docs/src/ai/agent-panel.md",
+                "three permanent rows in this order",
+            ),
+            (
+                "docs/omega/taxonomy.md",
+                "receipt bound to the exact target and session",
+            ),
+            (
+                "docs/omega/taxonomy.md",
+                "current schema and restore path do not enforce an unknown classification",
+            ),
+        ] {
+            assert!(
+                read_repository_file(path).contains(required),
+                "OMEGA-DELTA-0177: {path} lost `{required}`"
+            );
         }
     }
 }

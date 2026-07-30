@@ -99,6 +99,219 @@ pub fn launch_surface(restore_on_startup: RestoreOnStartup) -> LaunchSurface {
     }
 }
 
+/// The permanent choices at Omega's new-conversation boundary.
+///
+/// This is intentionally not an open string vocabulary. A conversation owns
+/// one of these modes for its lifetime; changing mode means creating another
+/// conversation.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ConversationMode {
+    DirectAgent,
+    OmegaAgent,
+    Sarah,
+}
+
+#[must_use]
+pub fn is_mode_activation_key(key: &str, modified: bool) -> bool {
+    !modified && matches!(key, "enter" | "space")
+}
+
+impl ConversationMode {
+    #[must_use]
+    pub const fn all() -> &'static [Self] {
+        &[Self::DirectAgent, Self::OmegaAgent, Self::Sarah]
+    }
+
+    #[must_use]
+    pub const fn label(self) -> &'static str {
+        match self {
+            Self::DirectAgent => "Direct Agent",
+            Self::OmegaAgent => "Omega Agent",
+            Self::Sarah => "Sarah",
+        }
+    }
+
+    #[must_use]
+    pub const fn token(self) -> &'static str {
+        match self {
+            Self::DirectAgent => "direct-agent",
+            Self::OmegaAgent => "omega-agent",
+            Self::Sarah => "sarah",
+        }
+    }
+}
+
+/// The executor identity resolved before a conversation may be created.
+///
+/// The direct-agent identifier is the exact persisted ACP identifier. It is
+/// never normalized to the native Omega identifier, because doing so would
+/// turn an unavailable direct executor into a different conversation mode.
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub struct DirectAgentId(String);
+
+impl DirectAgentId {
+    #[must_use]
+    pub fn new(agent_id: impl Into<String>) -> Option<Self> {
+        let agent_id = agent_id.into();
+        (!agent_id.trim().is_empty()).then_some(Self(agent_id))
+    }
+
+    #[must_use]
+    pub fn as_str(&self) -> &str {
+        &self.0
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub enum ConversationTarget {
+    DirectAgent { agent_id: DirectAgentId },
+    OmegaAgent,
+    Sarah,
+}
+
+impl ConversationTarget {
+    #[must_use]
+    pub const fn mode(&self) -> ConversationMode {
+        match self {
+            Self::DirectAgent { .. } => ConversationMode::DirectAgent,
+            Self::OmegaAgent => ConversationMode::OmegaAgent,
+            Self::Sarah => ConversationMode::Sarah,
+        }
+    }
+
+    #[must_use]
+    pub fn executor_label(&self) -> &str {
+        match self {
+            Self::DirectAgent { agent_id } => agent_id.as_str(),
+            Self::OmegaAgent => "Omega router",
+            Self::Sarah => "Sarah voice executor",
+        }
+    }
+
+    /// Interpret an owner identity written under the current persistence
+    /// contract as a conversation target.
+    ///
+    /// Legacy non-null rows may contain executor identities instead of owner
+    /// identities. This function has no version marker with which to detect
+    /// them, so callers must not treat its result as proof that a legacy row
+    /// recorded a conversation owner.
+    #[must_use]
+    pub fn from_persisted_agent_id(
+        agent_id: &str,
+        omega_agent_id: &str,
+        sarah_agent_id: Option<&str>,
+    ) -> Option<Self> {
+        if agent_id == omega_agent_id {
+            Some(Self::OmegaAgent)
+        } else if sarah_agent_id == Some(agent_id) {
+            Some(Self::Sarah)
+        } else {
+            Some(Self::DirectAgent {
+                agent_id: DirectAgentId::new(agent_id)?,
+            })
+        }
+    }
+}
+
+/// Proof that a particular target completed real session creation.
+///
+/// Fields stay private so `Ready` cannot be assembled from binary discovery
+/// or a successful connection alone. The UI validates this receipt against
+/// both the selected target and the still-live prepared session before claim.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PreparationReceipt {
+    target: ConversationTarget,
+    session_id: String,
+}
+
+impl PreparationReceipt {
+    #[must_use]
+    pub fn after_session_created(
+        target: ConversationTarget,
+        session_id: impl Into<String>,
+    ) -> Option<Self> {
+        let session_id = session_id.into();
+        (!session_id.trim().is_empty()).then_some(Self { target, session_id })
+    }
+
+    #[must_use]
+    pub fn proves(&self, target: &ConversationTarget, session_id: &str) -> bool {
+        self.target == *target && self.session_id == session_id
+    }
+}
+
+/// A real action that can satisfy a setup requirement.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ModeSetupAction {
+    OpenFolder,
+    AddAcpAgent,
+    RevealPreparedConversation,
+}
+
+impl ModeSetupAction {
+    #[must_use]
+    pub const fn label(self) -> &'static str {
+        match self {
+            Self::OpenFolder => "Choose Folder",
+            Self::AddAcpAgent => "Add an ACP Agent",
+            Self::RevealPreparedConversation => "Open setup",
+        }
+    }
+}
+
+/// Readiness observed at the new-conversation boundary.
+///
+/// `Ready` means a connection and an actual session both exist. Detection of
+/// an executable, configuration file, or registered server is not readiness.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ModeReadiness {
+    Ready {
+        receipt: PreparationReceipt,
+    },
+    SetupRequired {
+        reason: String,
+        action: ModeSetupAction,
+    },
+    TemporarilyUnavailable {
+        reason: String,
+    },
+    NotSupportedInBuild {
+        reason: String,
+    },
+}
+
+impl ModeReadiness {
+    #[must_use]
+    pub const fn label(&self) -> &'static str {
+        match self {
+            Self::Ready { .. } => "Ready",
+            Self::SetupRequired { .. } => "Setup required",
+            Self::TemporarilyUnavailable { .. } => "Temporarily unavailable",
+            Self::NotSupportedInBuild { .. } => "Not supported in this build",
+        }
+    }
+
+    #[must_use]
+    pub fn reason(&self) -> Option<&str> {
+        match self {
+            Self::Ready { .. } => None,
+            Self::SetupRequired { reason, .. }
+            | Self::TemporarilyUnavailable { reason }
+            | Self::NotSupportedInBuild { reason } => Some(reason),
+        }
+    }
+
+    #[must_use]
+    pub const fn setup_action(&self) -> Option<ModeSetupAction> {
+        match self {
+            Self::SetupRequired { action, .. } => Some(*action),
+            Self::Ready { .. }
+            | Self::TemporarilyUnavailable { .. }
+            | Self::NotSupportedInBuild { .. } => None,
+        }
+    }
+}
+
 // -------------------------------------------------------------------------
 // Executor disclosure
 // -------------------------------------------------------------------------
@@ -784,6 +997,99 @@ pub fn full_auto_element_ids(source: &str) -> std::collections::BTreeSet<String>
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn the_new_conversation_mode_set_is_closed_and_ordered() {
+        assert_eq!(
+            ConversationMode::all(),
+            &[
+                ConversationMode::DirectAgent,
+                ConversationMode::OmegaAgent,
+                ConversationMode::Sarah,
+            ]
+        );
+        assert_eq!(
+            ConversationMode::all()
+                .iter()
+                .map(|mode| mode.label())
+                .collect::<Vec<_>>(),
+            ["Direct Agent", "Omega Agent", "Sarah"]
+        );
+    }
+
+    #[test]
+    fn mode_activation_keys_are_pointer_equivalent() {
+        assert!(is_mode_activation_key("enter", false));
+        assert!(is_mode_activation_key("space", false));
+        assert!(!is_mode_activation_key("enter", true));
+        assert!(!is_mode_activation_key("down", false));
+    }
+
+    #[test]
+    fn readiness_has_exactly_four_honest_states() {
+        let Some(receipt) =
+            PreparationReceipt::after_session_created(ConversationTarget::OmegaAgent, "session-1")
+        else {
+            panic!("a non-empty session id must produce a receipt");
+        };
+        let states = [
+            ModeReadiness::Ready { receipt },
+            ModeReadiness::SetupRequired {
+                reason: "folder required".into(),
+                action: ModeSetupAction::OpenFolder,
+            },
+            ModeReadiness::TemporarilyUnavailable {
+                reason: "provider offline".into(),
+            },
+            ModeReadiness::NotSupportedInBuild {
+                reason: "audio omitted".into(),
+            },
+        ];
+        assert_eq!(
+            states.iter().map(ModeReadiness::label).collect::<Vec<_>>(),
+            [
+                "Ready",
+                "Setup required",
+                "Temporarily unavailable",
+                "Not supported in this build",
+            ]
+        );
+        assert_eq!(states[1].setup_action(), Some(ModeSetupAction::OpenFolder));
+        assert!(states[2].setup_action().is_none());
+    }
+
+    #[test]
+    fn direct_targets_preserve_the_exact_persisted_agent_id() {
+        let Some(target) =
+            ConversationTarget::from_persisted_agent_id("codex.acp/nightly", "omega", None)
+        else {
+            panic!("a non-empty direct agent id must resolve");
+        };
+        let Some(agent_id) = DirectAgentId::new("codex.acp/nightly") else {
+            panic!("a non-empty direct agent id must be valid");
+        };
+        assert_eq!(target, ConversationTarget::DirectAgent { agent_id });
+        assert_eq!(target.mode(), ConversationMode::DirectAgent);
+        assert_eq!(target.executor_label(), "codex.acp/nightly");
+        assert_eq!(
+            ConversationTarget::from_persisted_agent_id("omega", "omega", None),
+            Some(ConversationTarget::OmegaAgent)
+        );
+        assert!(ConversationTarget::from_persisted_agent_id("", "omega", None).is_none());
+    }
+
+    #[test]
+    fn readiness_receipts_are_bound_to_the_exact_target_and_session() {
+        let target = ConversationTarget::OmegaAgent;
+        let Some(receipt) = PreparationReceipt::after_session_created(target.clone(), "session-1")
+        else {
+            panic!("a non-empty session id must produce a receipt");
+        };
+        assert!(receipt.proves(&target, "session-1"));
+        assert!(!receipt.proves(&ConversationTarget::Sarah, "session-1"));
+        assert!(!receipt.proves(&target, "session-2"));
+        assert!(PreparationReceipt::after_session_created(target, "").is_none());
+    }
 
     /// The front door replaces the empty buffer and nothing else.
     #[test]

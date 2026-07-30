@@ -58,7 +58,7 @@ Once Zed and Python are installed, open a folder containing Python code to start
 ### Step 1: Launch Zed with a Python Project
 
 Open Zed.
-Choose a folder from the new-thread menu, or launch from the terminal:
+Choose **Thread > Choose Folder**, or launch from the terminal:
 
 ```bash
 zed path/to/your/project

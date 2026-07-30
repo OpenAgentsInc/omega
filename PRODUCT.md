@@ -20,7 +20,7 @@ Omega has one normal, flag-free launch surface: a conversation, composer, naviga
 - **Omega Agent** routes work among eligible executors and discloses the route it chose.
 - **Sarah** is the voice conversation mode and states its eligibility, price, limits, and authority before a session starts.
 
-The chosen mode, concrete executor, project, and readiness are visible before the first send. Once a conversation starts, its executor does not change underneath its transcript, and every surface names the executor that actually does the work.
+The chosen mode, concrete executor or router selection, project, and readiness are visible before the first send. Ready means that the named target has connected and created an actual session; executable or configuration detection alone is not enough. Once a conversation starts, its mode and owner do not change underneath its transcript, and every surface names the executor that actually does the work.
 
 The legacy `--full-editor` compatibility path may remain during the alpha transition, but it is not a second advertised experience and is scheduled for post-alpha removal. Vim remains part of the product in the composer and the focused editing surface.
 

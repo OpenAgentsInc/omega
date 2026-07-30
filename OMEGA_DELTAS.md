@@ -1589,10 +1589,10 @@ than it sounds, because the harness omega#81's acceptance sentence names —
   landing half shipped and the typing half did not, and the two were reported
   together.
 - **Omega now:** the guards on the front door's own path are gone.
-  `activate_new_thread`, `activate_draft`, `new_thread`,
-  `ensure_native_agent_connection` and `toggle_new_thread_menu` no longer refuse
-  a projectless window, the toolbar's create controls are live, and a thread's
-  title is editable. Typing on a fresh install starts a real thread.
+  `open_new_conversation_front_door`, `activate_draft`, `new_thread`, and
+  `ensure_native_agent_connection` no longer refuse a projectless window. The
+  front door prepares one Omega session and shows its folder as **No folder
+  selected**; choosing a Ready row reveals that prepared conversation.
 - **What the guards protected, checked rather than assumed.** The one that could
   plausibly have been load-bearing was `ensure_native_agent_connection`, and it
   is not: `NativeAgentServer::connect` takes the project as `_project` and never
@@ -1601,8 +1601,9 @@ than it sounds, because the harness omega#81's acceptance sentence names —
   spinning up a connection for a window upstream had decided would never show
   the agent — a resource choice resting on a premise Omega does not share.
 - **The workspace-touching guards stay.** A terminal genuinely needs a working
-  directory, so `should_create_terminal_for_new_entry` keeps its check and a
-  projectless `new_thread` falls through to a thread rather than a terminal.
+  directory, so `should_create_terminal_for_new_entry` keeps its check and
+  `agent::NewTerminalThread` remains distinct. Generic `agent::NewThread`
+  always opens the mode boundary and never repeats a previous terminal choice.
   Loading a thread from the clipboard, resuming a persisted draft, refreshing
   skills, initialising from a source workspace, and starting an external ACP
   agent all still require a project. Removing *those* would not be
@@ -6250,6 +6251,10 @@ every title, composer label, pending state, and disclosure names the executor
 that is doing the work, or clearly distinguishes “will be” from “is”. Restoring
 choice must not restore the disconnected selections described below.
 
+The old blank-thread selector and executor rebuild seam remain only on the
+legacy `--full-editor` compatibility surface. The default three-mode front door
+creates or opens another conversation and never invokes that retarget path.
+
 The owner selected Exo, was shown **Exo** in the composer's executor selector,
 typed `who are you`, and read back *"I'm Codex, your AI coding collaborator."*
 His question was the right one: **"IS IT FUCKING EXO AND HOW DO I KNOW"**.
@@ -7713,3 +7718,48 @@ current image build does not decode it inline.
   `the_application_menu_is_the_approved_six_menu_contract` in `zed`, the exact
   zero-base admission unit test, and mounted `agent_ui` coverage that dispatches
   menu actions while focus is outside Agent Panel.
+
+### OMEGA-DELTA-0177 — New conversations cross one typed three-mode boundary
+
+- **Omega now:** `agent::NewThread` and the Thread menu open one persistent
+  Agent Panel front door with exactly three rows: **Direct Agent**, **Omega
+  Agent**, and **Sarah**. Every row shows its exact agent or router selection,
+  folder, and one of four closed readiness states before send.
+- **Ready is proved, not inferred.** A row can report Ready only with a receipt
+  bound to its exact target and a session created by that target. Executable,
+  configuration, registry, and path detection do not count. The prepared Omega
+  `ConversationView` is the entity selection reveals; preparation is never a
+  disposable probe followed by a second session.
+- **Ownership is immutable.** Direct targets carry a validated, non-empty ACP
+  agent id and may not substitute Omega. Existing Agent serialization and
+  thread metadata persist the conversation owner, while disclosure records the
+  executor Omega routed to. No redundant mode column or volatile readiness
+  receipt is persisted.
+- **Unavailable modes remain truthful.** Direct Agent and Sarah are permanent
+  rows but report **Not supported in this build** until their providers land.
+  Disabled rows have no activation handler and cannot fall back to Omega. A
+  generic new-thread action never repeats a previously selected terminal;
+  `agent::NewTerminalThread` owns terminal creation.
+- **Typed compatibility actions keep their request.** In sealed zero base,
+  `agent::NewExternalAgentThread` preserves the exact requested ACP identity,
+  selects the Direct Agent row, and shows its unsupported state. It never calls
+  the legacy retarget clamp or activates the prepared Omega conversation. The
+  full-editor action keeps its existing draft-creation behavior.
+- **Loading text owns its conversation.** Draft retention covers the loading
+  editor, accepted pre-connect messages, the connected message queue, draft
+  prompt, and composer. Opening the front door cannot discard or retarget text
+  during any connection handoff phase.
+- **Compatibility scope:** the legacy `--full-editor` executor selector and
+  rebuild seam remain temporarily available only on that compatibility
+  surface. Default front-door selection never calls either retarget path.
+- **Legacy ownership is ambiguous.** New metadata writes persist the exact
+  conversation owner. Older inactive rows may hold either an owner or an
+  executor, and the current schema and restore path do not distinguish those
+  meanings. This delta therefore makes no claim that existing restoration is
+  a safe ownership proof; agent-scoped route journals are insufficient to make
+  it one. #152 must add versioned owner semantics before Direct Agent becomes
+  available.
+- **Enforced by:** `the_three_mode_front_door_claims_one_exact_prepared_conversation`
+  in `crates/omega_deltas`, the typed core tests in `omega_front_door`, and
+  focused Agent Panel GPUI tests for row order, receipt/entity reuse, metadata
+  ownership, and unavailable-mode refusal.

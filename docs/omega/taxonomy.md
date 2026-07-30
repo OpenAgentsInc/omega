@@ -220,6 +220,22 @@ the voice session. An existing transcript never changes executors underneath
 its entries. Every title, composer label, status, and disclosure names the
 executor actually doing the work.
 
+The new-conversation boundary always shows the three modes in that order. Each
+row has exactly one readiness state: **Ready**, **Setup required**,
+**Temporarily unavailable**, or **Not supported in this build**. Ready requires
+both a connection and a created session, represented by a
+receipt bound to the exact target and session. Registration, binary discovery,
+or path detection is not readiness. The receipt is volatile; ownership is
+restored from the agent identity already persisted with the thread rather than
+a second mode column.
+
+New metadata writes preserve the exact conversation owner. Older inactive rows
+whose non-null agent id may instead name a routed executor are ambiguous. The
+current schema and restore path do not enforce an unknown classification, so a
+restored legacy value is not proof of conversation ownership. Agent-scoped
+route journals cannot resolve that ambiguity. Direct Agent requires versioned
+owner semantics before it can become available.
+
 Sealed, structurally: the window starts with no centre pane group, tab bar,
 title bar, or status bar. It is not the editor hidden behind a zoomed panel.
 A plain click on a transcript file link is the narrow exception: it reveals the

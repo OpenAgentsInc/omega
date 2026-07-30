@@ -560,6 +560,13 @@ impl AgentWorkbenchFrontDoor {
         visual.set_debug_accessibility_active(true);
         if scene.active_thread_id.is_some() {
             visual.dispatch_action(crate::NewThread);
+            let activated = panel.update_in(&mut visual, |panel, window, cx| {
+                panel.activate_prepared_omega_for_tests(window, cx)
+            });
+            anyhow::ensure!(
+                activated,
+                "the workbench fixture could not activate its prepared Omega session"
+            );
         }
 
         panel.update_in(&mut visual, |panel, _window, cx| {

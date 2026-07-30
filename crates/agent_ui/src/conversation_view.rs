@@ -1082,6 +1082,13 @@ enum ServerState {
     Connected(ConnectedServerState),
 }
 
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) enum ConversationPreparation {
+    Loading,
+    Ready { session_id: String },
+    SetupRequired { reason: SharedString },
+}
+
 // current -> Entity
 // hashmap of threads, current becomes session_id
 pub struct ConnectedServerState {
@@ -2382,6 +2389,68 @@ impl ConversationView {
 
     pub fn is_loading(&self) -> bool {
         matches!(self.server_state, ServerState::Loading { .. })
+    }
+
+    pub(crate) fn preparation_state(&self, cx: &App) -> ConversationPreparation {
+        match &self.server_state {
+            ServerState::Loading { .. } => ConversationPreparation::Loading,
+            ServerState::LoadError { error } => ConversationPreparation::SetupRequired {
+                reason: error.to_string().into(),
+            },
+            ServerState::Connected(connected) if !connected.auth_state.is_ok() => {
+                ConversationPreparation::SetupRequired {
+                    reason: "This agent requires authentication before creating a session".into(),
+                }
+            }
+            ServerState::Connected(_) => {
+                let Some(thread) = self.root_thread(cx) else {
+                    return ConversationPreparation::SetupRequired {
+                        reason: "The agent connected but did not create a session".into(),
+                    };
+                };
+                ConversationPreparation::Ready {
+                    session_id: thread.read(cx).session_id().to_string(),
+                }
+            }
+        }
+    }
+
+    /// Whether this conversation already owns text that must survive a new-
+    /// conversation gesture.
+    ///
+    /// Session creation has several handoff phases. Looking only at ACP
+    /// entries misses text still in the loading editor, accepted turns waiting
+    /// for a connection, and turns already handed to the connected queue.
+    pub fn has_unsubmitted_or_pending_content(&self, cx: &App) -> bool {
+        if !self.pending_connect_messages.is_empty()
+            || self
+                .loading_composer
+                .as_ref()
+                .is_some_and(|editor| !editor.read(cx).text(cx).trim().is_empty())
+        {
+            return true;
+        }
+
+        if let Some(thread_view) = self.root_thread_view() {
+            let thread_view = thread_view.read(cx);
+            if thread_view.has_queued_messages()
+                || !thread_view
+                    .message_editor
+                    .read(cx)
+                    .text(cx)
+                    .trim()
+                    .is_empty()
+            {
+                return true;
+            }
+        }
+
+        self.root_thread(cx).is_some_and(|thread| {
+            thread
+                .read(cx)
+                .draft_prompt()
+                .is_some_and(|blocks| !blocks.is_empty())
+        })
     }
 
     fn handle_thread_event(
@@ -6076,6 +6145,10 @@ pub(crate) mod tests {
                     }
                 ),
             }
+            assert!(matches!(
+                view.preparation_state(cx),
+                ConversationPreparation::SetupRequired { .. }
+            ));
         });
     }
 
@@ -6205,7 +6278,7 @@ pub(crate) mod tests {
 
         // When new_session returns AuthRequired, the server should transition
         // to Connected + Unauthenticated rather than getting stuck in Loading.
-        conversation_view.read_with(cx, |view, _cx| {
+        conversation_view.read_with(cx, |view, cx| {
             let connected = view
                 .as_connected()
                 .expect("Should be in Connected state even though auth is required");
@@ -6229,6 +6302,10 @@ pub(crate) mod tests {
                 connected.threads.is_empty(),
                 "There should be no threads since no session was created"
             );
+            assert!(matches!(
+                view.preparation_state(cx),
+                ConversationPreparation::SetupRequired { .. }
+            ));
         });
 
         conversation_view.read_with(cx, |view, _cx| {
@@ -6281,6 +6358,10 @@ pub(crate) mod tests {
                 active.read(cx).thread_error.is_none(),
                 "The new thread should have no errors"
             );
+            assert!(matches!(
+                view.preparation_state(cx),
+                ConversationPreparation::Ready { .. }
+            ));
         });
 
         conversation_view.update_in(cx, |view, window, cx| view.logout(window, cx));
@@ -7190,6 +7271,10 @@ pub(crate) mod tests {
                 matches!(this.server_state, ServerState::Loading { .. }),
                 "the executor must still be connecting for this test to mean anything"
             );
+            assert_eq!(
+                this.preparation_state(cx),
+                ConversationPreparation::Loading
+            );
             let editor = this.loading_composer(window, cx);
             editor.update(cx, |editor, cx| editor.set_text("hi", window, cx));
             this.submit_while_connecting(window, cx);
@@ -7216,6 +7301,10 @@ pub(crate) mod tests {
                 vec!["hi".to_string(), "and a second one".to_string()],
                 "several Enters while connecting must queue in order"
             );
+            assert!(
+                this.has_unsubmitted_or_pending_content(cx),
+                "accepted loading messages must prevent a new-conversation gesture from reusing this view"
+            );
         });
 
         cx.run_until_parked();
@@ -7234,10 +7323,14 @@ pub(crate) mod tests {
                 "the second pending message must wait its turn in the ordinary queue"
             );
         });
-        conversation_view.read_with(cx, |this, _| {
+        conversation_view.read_with(cx, |this, cx| {
             assert!(
                 this.pending_connect_messages.is_empty(),
                 "dispatch must take the pending list so nothing can dispatch twice"
+            );
+            assert!(
+                this.has_unsubmitted_or_pending_content(cx),
+                "a turn handed to the connected queue must remain protected from reuse"
             );
         });
 
@@ -7563,7 +7656,7 @@ pub(crate) mod tests {
         }
     }
 
-    struct FailingAgentServer;
+    pub(crate) struct FailingAgentServer;
 
     impl AgentServer for FailingAgentServer {
         fn logo(&self) -> ui::IconName {

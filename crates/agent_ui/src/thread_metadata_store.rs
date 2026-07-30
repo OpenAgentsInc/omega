@@ -1336,7 +1336,11 @@ impl ThreadMetadataStore {
             .map(|t| t.interacted_at)
             .unwrap_or(Some(updated_at));
 
-        let agent_id = thread_ref.connection().agent_id();
+        // Conversation ownership is immutable even when Omega routes a turn
+        // to a different executor. Persist the owner used to construct the
+        // ConversationView; the thread connection is execution disclosure and
+        // may legitimately report Codex, Claude, or an engine lane instead.
+        let agent_id = view.agent_key().id();
 
         // Preserve project-dependent fields for archived threads.
         // The worktree may already have been removed from the

@@ -22,10 +22,11 @@ Open the registry with **Add More Agents** in the new-thread menu or with
 with {#action agent::OpenSettings}, go to the **External Agents** page, click
 `Add Agent`, and choose `Install from Registry`.
 
-During the default-surface alpha, direct-agent rows in the new-thread menu are
-visible but disabled with an explanation until their creation path is enabled.
-Installing an agent makes it available to that path; it does not remove the
-temporary product guard.
+During the current default-surface build, **Direct Agent** remains permanently
+visible in the three-mode new-conversation front door and says **Not supported
+in this build**. Installing an agent makes its exact ACP id available to the
+direct path; it does not make that row claim Ready before the direct-session
+provider is included. A refused direct path never falls back to Omega Agent.
 
 ## Common Agents {#common-agents}
 
@@ -92,9 +93,14 @@ Pi is an agent harness, not a Zed LLM subscription. Configure any provider auth,
 
 ## Start an External Agent Thread {#start-thread}
 
-Open the [Agent Panel](./agent-panel.md), then use the agent selector or the new-thread menu to start a thread with an installed External Agent.
+Open the [Agent Panel](./agent-panel.md) and run {#action agent::NewThread} to
+inspect the permanent Direct Agent row. In the current build the row remains
+disabled; it never substitutes Omega Agent for the installed agent you named.
 
-You can also create keybindings for specific agents with {#action agent::NewExternalAgentThread}.
+The typed {#action agent::NewExternalAgentThread} action remains available on
+the transitional full-editor compatibility surface. In sealed zero base it
+preserves the exact agent you requested and opens the Direct Agent row on its
+truthful unsupported state; it does not start Omega Agent as a fallback.
 
 ## Configuration Boundaries {#configuration-boundaries}
 

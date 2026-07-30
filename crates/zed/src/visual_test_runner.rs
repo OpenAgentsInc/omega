@@ -191,9 +191,11 @@ use {
         unstaged_diff::UnstagedDiff,
     },
     gpui::{
-        App, AppContext as _, Bounds, Entity, Focusable as _, KeyBinding, Modifiers,
-        VisualTestAppContext, WindowBounds, WindowHandle, WindowOptions, point, px, size,
+        AnyWindowHandle, App, AppContext as _, Bounds, Entity, Focusable as _, KeyBinding,
+        Modifiers, VisualTestAppContext, WindowBounds, WindowHandle, WindowOptions, point, px,
+        size,
     },
+    language_model::{LanguageModelProviderId, LanguageModelRegistry},
     omega_workbench_harness::{
         CheckStatus, HERMETIC_SCENES, PixelProof, PixelStatus, ProofCheck, ProofLane, ProofOutcome,
         ProofReceipt, RegionPixelProof, ScenePhase, SemanticProbe, WORKBENCH_OUTLINE_PIXEL_SCENES,
@@ -1339,28 +1341,6 @@ fn run_visual_tests(project_path: PathBuf, update_baseline: bool) -> Result<()> 
         }
     }
 
-    // Omega's own rendered proofs: the front door with no project, typing
-    // starting a thread, the executor line on three thread kinds, and a pin
-    // that could not be honoured. omega#76, #77, #78.
-    #[cfg(feature = "visual-tests")]
-    {
-        println!("\n--- Omega: front door, executor disclosure, route pin ---");
-        match run_omega_agent_visual_tests(app_state.clone(), &mut cx, update_baseline) {
-            Ok(TestResult::Passed) => {
-                println!("\u{2713} omega_agent_surfaces: PASSED");
-                passed += 1;
-            }
-            Ok(TestResult::BaselineUpdated(_)) => {
-                println!("\u{2713} omega_agent_surfaces: Baselines updated");
-                updated += 1;
-            }
-            Err(e) => {
-                eprintln!("\u{2717} omega_agent_surfaces: FAILED - {}", e);
-                failed += 1;
-            }
-        }
-    }
-
     // Run Test 5: Agent Thread View tests
     #[cfg(feature = "visual-tests")]
     {
@@ -1505,6 +1485,28 @@ fn run_visual_tests(project_path: PathBuf, update_baseline: bool) -> Result<()> 
                 e
             );
             failed += 1;
+        }
+    }
+
+    // Dedicated front-door proof scenes may enter the shipped, one-way
+    // zero-base mode, so keep the Omega group after every full-editor scene in
+    // this process.
+    #[cfg(feature = "visual-tests")]
+    {
+        println!("\n--- Omega: front door, executor disclosure, route pin ---");
+        match run_omega_agent_visual_tests(app_state.clone(), &mut cx, update_baseline) {
+            Ok(TestResult::Passed) => {
+                println!("\u{2713} omega_agent_surfaces: PASSED");
+                passed += 1;
+            }
+            Ok(TestResult::BaselineUpdated(_)) => {
+                println!("\u{2713} omega_agent_surfaces: Baselines updated");
+                updated += 1;
+            }
+            Err(e) => {
+                eprintln!("\u{2717} omega_agent_surfaces: FAILED - {}", e);
+                failed += 1;
+            }
         }
     }
 
@@ -4971,6 +4973,19 @@ fn run_omega_workbench_shell_visual_capture_in_window(
         .context("mounting production AgentPanel workbench shell")?;
     cx.run_until_parked();
 
+    let activated = cx
+        .update_window(workspace_window.into(), |_, window, cx| {
+            panel.update(cx, |panel, cx| {
+                panel.activate_prepared_omega_for_tests(window, cx)
+            })
+        })
+        .context("activating the workbench shell's prepared Omega session")?;
+    anyhow::ensure!(
+        activated,
+        "workbench shell scene {scene_name:?} did not reach Omega Ready"
+    );
+    cx.run_until_parked();
+
     anyhow::ensure!(
         cx.read(|cx| panel.read(cx).active_thread_id(cx).is_some()),
         "workbench shell scene {scene_name:?} has no active production thread"
@@ -7741,8 +7756,8 @@ fn configure_workbench_shell_scene(
                     "scoped Git diff published a foreign active path: {opened_path:?}"
                 );
                 workspace_window
-                    .update(cx, |_workspace, window, cx| {
-                        AgentPanel::open_front_door(window, cx);
+                    .update(cx, |workspace, window, cx| {
+                        workspace.open_panel::<AgentPanel>(window, cx);
                     })
                     .context("restoring Agent Panel after scoped Git diff proof")?;
                 cx.run_until_parked();
@@ -10166,11 +10181,11 @@ fn run_omega_agent_visual_tests(
 
 #[cfg(all(target_os = "macos", feature = "visual-tests"))]
 fn finish_omega_agent_visual_tests(
-    workspace_window: WindowHandle<Workspace>,
+    workspace_window: AnyWindowHandle,
     cx: &mut VisualTestAppContext,
     results: &[TestResult],
 ) -> Result<TestResult> {
-    cx.update_window(workspace_window.into(), |_, window, _cx| {
+    cx.update_window(workspace_window, |_, window, _cx| {
         window.remove_window();
     })
     .log_err();
@@ -10191,6 +10206,33 @@ fn run_omega_agent_visual_tests_inner(
     update_baseline: bool,
 ) -> Result<TestResult> {
     use agent_ui::AgentPanel;
+
+    let capture_sealed_front_door = workbench_proof_active()
+        && workbench_any_selected(&["omega_front_door_no_project", "omega_front_door_typing"]);
+    if capture_sealed_front_door {
+        // The desktop's flag-free launch enters this one-way mode before
+        // opening a workspace. The proof command runs one selected scene in
+        // its own process, so disclosure-only scenes retain their existing
+        // full-editor setup and no reset path is invented.
+        omega_zero_base::enter_from_command_line();
+        anyhow::ensure!(
+            omega_zero_base::is_active(),
+            "the front-door proof must run in flag-free zero base"
+        );
+    } else {
+        // These legacy baselines intentionally prove disclosure independently
+        // of provider setup. OpenAgents now authenticates eagerly during test
+        // initialization, so remove it from this provider-unavailable fixture
+        // before the onboarding card snapshots the registry.
+        cx.update(|cx| {
+            LanguageModelRegistry::global(cx).update(cx, |registry, cx| {
+                registry.unregister_provider(
+                    LanguageModelProviderId::from("openagents".to_string()),
+                    cx,
+                );
+            });
+        });
+    }
 
     // A project with **no worktree**. This is the whole point of the first two
     // captures: a window with nothing to restore is by definition a window with
@@ -10216,58 +10258,110 @@ fn run_omega_agent_visual_tests_inner(
         origin: point(px(0.0), px(0.0)),
         size: window_size,
     };
-    let workspace_window: WindowHandle<Workspace> = cx
-        .update(|cx| {
-            cx.open_window(
-                WindowOptions {
-                    window_bounds: Some(WindowBounds::Windowed(bounds)),
-                    focus: false,
-                    show: false,
-                    ..Default::default()
-                },
-                |window, cx| {
-                    cx.new(|cx| {
-                        Workspace::new(None, project.clone(), app_state.clone(), window, cx)
-                    })
-                },
-            )
-        })
-        .context("Failed to open the Omega front door window")?;
+    let (workspace_window, workspace) = if capture_sealed_front_door {
+        let workspace_window: WindowHandle<MultiWorkspace> = cx
+            .update(|cx| {
+                cx.open_window(
+                    WindowOptions {
+                        window_bounds: Some(WindowBounds::Windowed(bounds)),
+                        focus: false,
+                        show: false,
+                        ..Default::default()
+                    },
+                    |window, cx| {
+                        let workspace = cx.new(|cx| {
+                            Workspace::new(None, project.clone(), app_state.clone(), window, cx)
+                        });
+                        cx.new(|cx| MultiWorkspace::new(workspace, window, cx))
+                    },
+                )
+            })
+            .context("Failed to open the sealed Omega front door window")?;
+        let workspace = workspace_window
+            .update(cx, |multi_workspace, _window, _cx| {
+                multi_workspace.workspace().clone()
+            })
+            .context("Failed to read the zero-base workspace")?;
+        (workspace_window.into(), workspace)
+    } else {
+        // Disclosure and route-pin scenes predate zero base and intentionally
+        // keep their raw Workspace root. Wrapping them in MultiWorkspace adds
+        // unrelated title/status chrome and invalidates those baselines.
+        let workspace_window: WindowHandle<Workspace> = cx
+            .update(|cx| {
+                cx.open_window(
+                    WindowOptions {
+                        window_bounds: Some(WindowBounds::Windowed(bounds)),
+                        focus: false,
+                        show: false,
+                        ..Default::default()
+                    },
+                    |window, cx| {
+                        cx.new(|cx| {
+                            Workspace::new(None, project.clone(), app_state.clone(), window, cx)
+                        })
+                    },
+                )
+            })
+            .context("Failed to open the Omega disclosure window")?;
+        let workspace = workspace_window
+            .entity(cx)
+            .context("Failed to read the disclosure workspace")?;
+        (workspace_window.into(), workspace)
+    };
 
     cx.run_until_parked();
 
     // The window really has no project. Asserted rather than assumed, because
     // every claim these captures make rests on it — a capture taken with a
     // worktree quietly present would prove the opposite of what it says.
-    let visible_worktrees = workspace_window
-        .update(cx, |workspace, _window, cx| {
-            workspace.project().read(cx).visible_worktrees(cx).count()
-        })
-        .context("Failed to read the project's worktrees")?;
+    let visible_worktrees = cx.read(|cx| {
+        workspace
+            .read(cx)
+            .project()
+            .read(cx)
+            .visible_worktrees(cx)
+            .count()
+    });
     anyhow::ensure!(
         visible_worktrees == 0,
         "the front door capture needs a projectless window; found {visible_worktrees} worktree(s)"
     );
 
-    let (weak_workspace, async_window_cx) = workspace_window
-        .update(cx, |workspace, window, cx| {
-            (workspace.weak_handle(), window.to_async(cx))
+    let (weak_workspace, async_window_cx) = cx
+        .update_window(workspace_window, |_root, window, cx| {
+            (workspace.downgrade(), window.to_async(cx))
         })
         .context("Failed to get workspace handle")?;
 
     cx.background_executor.allow_parking();
+    if capture_sealed_front_door {
+        cx.foreground_executor
+            .block_test(agent_ui::initialize_workbench_panels(
+                weak_workspace.clone(),
+                async_window_cx.clone(),
+            ))
+            .context("Failed to initialize zero base's native workbench panels")?;
+    }
     let panel = cx
         .foreground_executor
         .block_test(AgentPanel::load(weak_workspace, async_window_cx))
         .context("Failed to load AgentPanel")?;
     cx.background_executor.forbid_parking();
 
-    workspace_window
-        .update(cx, |workspace, window, cx| {
+    cx.update_window(workspace_window, |_root, window, cx| {
+        workspace.update(cx, |workspace, cx| {
             workspace.add_panel(panel.clone(), window, cx);
             workspace.open_panel::<AgentPanel>(window, cx);
-        })
-        .context("Failed to add the agent panel")?;
+            if capture_sealed_front_door {
+                panel.update(cx, |panel, cx| {
+                    use workspace::dock::Panel as _;
+                    panel.set_zoomed(true, window, cx);
+                });
+            }
+        });
+    })
+    .context("Failed to add the agent panel")?;
 
     cx.run_until_parked();
 
@@ -10275,50 +10369,81 @@ fn run_omega_agent_visual_tests_inner(
     // on a window with nothing to restore. Not a hand-rolled approximation of
     // it: `open_front_door` is the entry `OMEGA-DELTA-0019` added, and driving
     // anything else here would photograph a path no user takes.
-    workspace_window
-        .update(cx, |_workspace, window, cx| {
+    cx.update_window(workspace_window, |_root, window, cx| {
+        workspace.update(cx, |_workspace, cx| {
             AgentPanel::open_front_door(window, cx);
-        })
-        .context("Failed to open the front door")?;
+        });
+    })
+    .context("Failed to open the front door")?;
 
     cx.run_until_parked();
+    if capture_sealed_front_door {
+        cx.update_window(workspace_window, |_root, _window, cx| {
+            workspace.update(cx, |_workspace, cx| {
+                omega_zero_base::seal();
+                cx.notify();
+            });
+        })
+        .context("Failed to seal the zero-base workspace")?;
+        anyhow::ensure!(
+            omega_zero_base::is_sealed(),
+            "the front-door capture must use the structurally sealed zero-base surface"
+        );
+        cx.run_until_parked();
+    }
+
+    if capture_sealed_front_door {
+        let center_visible = cx.read(|cx| workspace.read(cx).center_visible_for_tests());
+        anyhow::ensure!(
+            !center_visible,
+            "the sealed front-door proof rendered the editor center beside the agent surface"
+        );
+
+        cx.set_debug_accessibility_active(workspace_window.into(), true)?;
+        let snapshot = cx.debug_render_snapshot(workspace_window.into())?;
+        let mut probe = SemanticProbe::new(&snapshot);
+        probe.require_visible("omega.new-conversation.front-door")?;
+        probe.require_absent("welcome-content")?;
+    }
 
     // The panel must actually be the focused, visible dock surface. A capture
     // taken with the panel absent shows the launchpad and would read as a
     // perfectly plausible screenshot of something else entirely — which is what
     // the first run of this test produced, and how it was caught.
-    let panel_is_open = workspace_window
-        .update(cx, |workspace, _window, cx| {
-            workspace
-                .panel::<AgentPanel>(cx)
-                .is_some_and(|panel| panel.read(cx).active_thread_id(cx).is_some())
-        })
-        .unwrap_or(false);
+    let panel_is_open = cx.read(|cx| {
+        workspace
+            .read(cx)
+            .panel::<AgentPanel>(cx)
+            .is_some_and(|panel| {
+                panel
+                    .read(cx)
+                    .new_conversation_front_door_visible_for_tests()
+            })
+    });
     anyhow::ensure!(
         panel_is_open,
         "the agent panel is not the open surface; the capture would show the \
          launchpad rather than the front door"
     );
 
-    // omega#76's exit, first half. Before this delta the panel answered a
-    // projectless window with "Open Project / Clone Repository" and there was
-    // nothing to type into.
-    let thread_id = cx
-        .read(|cx| panel.read(cx).active_thread_id(cx))
-        .ok_or_else(|| {
-            anyhow::anyhow!(
-                "the front door produced no thread on a projectless window — \
-                 this is the omega#76 defect, and the capture below would show \
-                 the empty-project state"
-            )
-        })?;
-
-    let front_door = run_visual_test(
-        "omega_front_door_no_project",
-        workspace_window.into(),
-        cx,
-        update_baseline,
-    )?;
+    // These scene names are reserved for the structurally sealed zero-base
+    // surface. The generic suite still uses this setup for the disclosure
+    // scenes below, but must not overwrite or compare the sealed baselines with
+    // the full-editor layout.
+    let front_door = if capture_sealed_front_door {
+        anyhow::ensure!(
+            omega_zero_base::is_sealed(),
+            "omega_front_door_no_project cannot be captured outside sealed zero base"
+        );
+        run_visual_test(
+            "omega_front_door_no_project",
+            workspace_window.into(),
+            cx,
+            update_baseline,
+        )?
+    } else {
+        TestResult::Passed
+    };
     if !workbench_any_selected(&[
         "omega_front_door_typing",
         "omega_executor_disclosure_native",
@@ -10332,9 +10457,27 @@ fn run_omega_agent_visual_tests_inner(
         return finish_omega_agent_visual_tests(workspace_window, cx, &[front_door]);
     }
 
-    // omega#76's exit, second half: **typing starts a real thread**. The
-    // keystrokes go into this window through GPUI's own dispatch, so nothing
-    // depends on which application macOS thinks is frontmost.
+    let activated = cx
+        .update_window(workspace_window.into(), |_, window, cx| {
+            panel.update(cx, |panel, cx| {
+                panel.activate_prepared_omega_for_tests(window, cx)
+            })
+        })
+        .context("Failed to activate the prepared Omega session")?;
+    anyhow::ensure!(
+        activated,
+        "the front door did not reach Ready with an actual Omega session"
+    );
+    cx.run_until_parked();
+
+    let thread_id = cx
+        .read(|cx| panel.read(cx).active_thread_id(cx))
+        .ok_or_else(|| {
+            anyhow::anyhow!("activating Omega did not claim the prepared projectless session")
+        })?;
+
+    // The keystrokes go into this window through GPUI's own dispatch, so
+    // nothing depends on which application macOS thinks is frontmost.
     cx.simulate_input(workspace_window.into(), "route this thread on purpose");
     cx.run_until_parked();
 
@@ -10353,12 +10496,20 @@ fn run_omega_agent_visual_tests_inner(
          editor holds {typed:?}"
     );
 
-    let typing = run_visual_test(
-        "omega_front_door_typing",
-        workspace_window.into(),
-        cx,
-        update_baseline,
-    )?;
+    let typing = if capture_sealed_front_door {
+        anyhow::ensure!(
+            omega_zero_base::is_sealed(),
+            "omega_front_door_typing cannot be captured outside sealed zero base"
+        );
+        run_visual_test(
+            "omega_front_door_typing",
+            workspace_window.into(),
+            cx,
+            update_baseline,
+        )?
+    } else {
+        TestResult::Passed
+    };
     if !workbench_any_selected(&[
         "omega_executor_disclosure_native",
         "omega_route_pin_honoured",

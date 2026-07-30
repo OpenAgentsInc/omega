@@ -160,17 +160,32 @@ select the rail item again.
 
 ### Creating New Threads {#new-thread}
 
-By default, the Agent Panel uses Omega Agent, Omega's first-party agent.
+{#action agent::NewThread} and the **Thread > New Thread** menu item open the
+same new-conversation front door. The toolbar `+` retains its compact creation
+menu; choosing **Omega Agent** there reaches this front door, while unavailable
+and setup entries keep their explicit state. The front door has
+three permanent rows in this order: **Direct Agent**, **Omega Agent**, and
+**Sarah**.
 
-Start a new thread with {#kb agent::NewThread}, or open the "New Thread…" menu using the agent selector button on the left (in the empty state) or the `+` icon in the top-right of the panel toolbar. You can also open that menu with {#kb agent::ToggleNewThreadMenu}.
+Before a send, every row names its mode, exact agent or router selection,
+folder, and one of four readiness states: **Ready**, **Setup required**,
+**Temporarily unavailable**, or **Not supported in this build**. Ready is shown
+only after the named target has connected and created a session. Enter/Space
+and pointer activation use the same selection path, and unavailable rows do not
+create another kind of conversation.
 
-From the "New Thread…" menu you can:
+If Omega needs authentication or setup fails, its row says **Setup required**
+with the reason. **Open setup** reveals the same prepared conversation and its
+existing authentication, error, and retry controls.
 
-- Pick **Omega Agent** or any installed [External Agent](./external-agents.md) to start a new thread with that agent.
-- Choose **New From Summary** to start a fresh Omega Agent thread seeded with a summary of the current conversation — useful for compacting long threads as you approach the context window limit.
-- Choose **Terminal** to open a terminal thread directly in the Agent Panel — see [Terminal Threads](#terminal-threads) for details.
+The front door prepares one Omega Agent draft while its session is connecting.
+Choosing Omega Agent claims that same prepared conversation; it does not probe
+with one session and create another. Direct Agent and Sarah stay visible with
+their honest unavailable state until their session providers are included.
+Starting another mode never retargets an existing transcript.
 
-{#action agent::NewExternalAgentThread} creates a new thread with the specified External Agent id.
+Use {#action agent::NewTerminalThread} for a terminal thread. The generic new
+thread action no longer repeats the last terminal choice.
 
 You can also start a new thread from the [Threads Sidebar](./parallel-agents.md#threads-sidebar), scoped to a specific project — see [Running Multiple Threads](./parallel-agents.md#running-multiple-threads).
 

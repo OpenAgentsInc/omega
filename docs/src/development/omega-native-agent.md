@@ -4,15 +4,17 @@ Omega Agent is the admitted first-party orchestrator identity. Its first
 executor is the inherited native Rust runtime described here; the rename does
 not make the native loop the router, a service identity, or a new run
 authority. The sealed default surface presents it as **Omega Agent** in the
-new-thread menu.
+three-mode new-conversation front door.
 
 This page explains how to expose the current implementation, what it does, and
 where it fits in Omega's architecture.
 
 ## Open It in Omega Today {#open-it}
 
-Open the new-thread menu and choose **Omega Agent**. No editor-panel switch or
-View-menu path is required on the default surface.
+Run {#action agent::NewThread} and choose **Omega Agent** after its row reports
+Ready. The row becomes Ready only after the prepared connection has created a
+session, and selection reuses that exact conversation entity. No editor-panel
+switch or View-menu path is required on the default surface.
 
 The transitional `--full-editor` compatibility surface retains the upstream
 settings-file and panel controls. There, {#action omega::OpenSettingsFile}
@@ -27,10 +29,11 @@ also disables the Agent Panel and removes its actions.
 Omega Agent is an agent runtime, not a model. It needs a language model configured
 through Omega's inherited LLM provider support.
 
-Omega's default native-agent selection is `google/gemini-3.6-flash`. It needs a
-Google API key, which you enter in Agent Settings. You can instead configure
-another direct provider, an OpenAI-compatible endpoint, or a local provider
-such as Ollama in Agent Settings.
+Omega's default native-agent selection is `google/gemini-3.6-flash`, reached
+through OpenAgents hosted compute when an authenticated account is available.
+A locally configured Google key is an optional fallback, not a prerequisite.
+You can instead configure another direct provider, an OpenAI-compatible
+endpoint, or a local provider such as Ollama in Agent Settings.
 
 Omega deliberately does not provide Zed-hosted models:
 
@@ -41,9 +44,10 @@ Omega deliberately does not provide Zed-hosted models:
 - Provider credentials remain with the selected provider and use the existing
   credential storage path.
 
-An External Agent such as Codex ACP is a different choice in the same
-new-thread menu. It does not supply a model to Omega Agent. The external agent
-owns its own runtime, authentication, model selection, tools, and sessions.
+An External Agent such as Codex ACP is a different mode in the same
+new-conversation front door. It does not supply a model to Omega Agent. The
+external agent owns its own runtime, authentication, model selection, tools,
+and sessions.
 
 ## What Omega Agent Is {#what-it-is}
 

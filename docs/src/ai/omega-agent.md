@@ -10,6 +10,12 @@ in the [Agent Panel](./agent-panel.md) and [Threads Sidebar](./parallel-agents.m
 uses models configured through [LLM Providers](./llm-providers.md), and
 integrates with Omega's project, editor, terminal, and review surfaces.
 
+The new-conversation front door prepares one Omega Agent conversation and
+shows it as Ready only after its connection creates a real session. Selecting
+the row reveals that same prepared conversation. Its persisted owner remains
+Omega Agent even when the router later discloses Codex, Claude, or an engine
+lane as the executor for a turn.
+
 Use Omega Agent when you want the agent to:
 
 - read and search your project

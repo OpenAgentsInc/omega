@@ -31,6 +31,10 @@ When you have multiple projects open:
 
 Think of projects in the threads sidebar like browser tabs, but for repositories.
 
+The new-conversation front door shows the exact current folder on all three
+mode rows before a send. A missing folder is stated as **No folder selected**;
+Omega does not silently borrow a folder from another conversation.
+
 ## Opening in a New Window
 
 Sometimes you want a completely separate window. Here's how:
@@ -77,8 +81,8 @@ Options:
 - `existing_window` (default): Open folders in the current window's threads sidebar
 - `new_window`: Open folders in a new window
 
-This setting affects CLI and double-click behavior, not the folder chooser in
-the new-thread menu.
+This setting affects CLI and double-click behavior, not **Thread > Choose
+Folder** or the folder shown on the new-conversation front door.
 
 ## Adding Folders to a Project
 
