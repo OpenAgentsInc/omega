@@ -1,7 +1,7 @@
 use std::{
     cell::Cell,
     fmt,
-    path::PathBuf,
+    path::{Path, PathBuf},
     rc::Rc,
     sync::{
         Arc,
@@ -1409,6 +1409,31 @@ struct ThreadIdentityOperationError {
     message: SharedString,
 }
 
+/// Logs a recurring failure once per distinct cause instead of once per
+/// occurrence, so a render-driven failure path cannot flood the log.
+#[derive(Default)]
+struct DistinctFailureLog {
+    last_message: Option<String>,
+}
+
+impl DistinctFailureLog {
+    /// Returns true when `message` differs from the last recorded failure and
+    /// should be logged; repeats of the same cause return false.
+    fn should_log(&mut self, message: &str) -> bool {
+        if self.last_message.as_deref() == Some(message) {
+            return false;
+        }
+        self.last_message = Some(message.to_string());
+        true
+    }
+
+    /// A success resets the log so a later recurrence of the same cause is
+    /// reported again.
+    fn record_success(&mut self) {
+        self.last_message = None;
+    }
+}
+
 pub struct AgentPanel {
     workspace: WeakEntity<Workspace>,
     vim_mode_indicator: Entity<vim::ModeIndicator>,
@@ -1517,6 +1542,12 @@ pub struct AgentPanel {
     thread_outline_navigation_target: Option<(acp_thread::ThreadEntryId, usize)>,
     workbench_shell: workbench_shell::WorkbenchShell,
     workbench_shell_enabled: bool,
+    /// Thread keys whose durable disk selection was already adopted (or
+    /// reset), so a render-driven sync does not re-read disk per frame.
+    workbench_selection_restore_attempted: HashSet<String>,
+    /// Deduplicates the render-driven workbench sync failure warning so a
+    /// persistent failure logs once per distinct cause, not once per frame.
+    workbench_sync_failure_log: DistinctFailureLog,
     workbench_files_panel: Option<Entity<ProjectPanel>>,
     workbench_files_panel_handed_off: bool,
     _workbench_files_panel_observation: Option<Subscription>,
@@ -2130,6 +2161,8 @@ impl AgentPanel {
             thread_outline_navigation_target: None,
             workbench_shell,
             workbench_shell_enabled: omega_zero_base::is_active(),
+            workbench_selection_restore_attempted: HashSet::default(),
+            workbench_sync_failure_log: DistinctFailureLog::default(),
             workbench_files_panel,
             workbench_files_panel_handed_off: false,
             _workbench_files_panel_observation: workbench_files_panel_observation,
@@ -9679,9 +9712,17 @@ impl AgentPanel {
             }
             Err(error) => Err(error),
         };
-        if let Err(error) = result {
-            log::warn!("failed to synchronize workbench shell: {error:#}");
-            self.workbench_shell.record_error(error.to_string());
+        match result {
+            Ok(()) => self.workbench_sync_failure_log.record_success(),
+            Err(error) => {
+                // This sync runs per render; a persistent failure must log
+                // once per distinct cause, not once per frame.
+                let message = format!("{error:#}");
+                if self.workbench_sync_failure_log.should_log(&message) {
+                    log::warn!("failed to synchronize workbench shell: {message}");
+                }
+                self.workbench_shell.record_error(error.to_string());
+            }
         }
         self.synchronize_thread_outline(cx);
         if self.workbench_shell_enabled
@@ -10592,37 +10633,71 @@ impl AgentPanel {
         thread_id: &str,
         _cx: &mut Context<Self>,
     ) {
-        if self
-            .workbench_shell
-            .projection()
-            .persisted_selection
-            .is_some()
+        let projection = self.workbench_shell.projection();
+        if projection.persisted_selection.is_some() {
+            return;
+        }
+        // RestoreSelection can only re-select a thread the projection already
+        // tracks and only while online, so wait for sync_active_thread to open
+        // the thread first. Adopting earlier used to poke `persisted_selection`
+        // past validation and permanently poison the projection with
+        // "persisted revision N does not match projection revision 0".
+        if projection.connection != omega_workbench_state::ConnectionPhase::Online
+            || !projection.threads.contains_key(thread_id)
         {
             return;
         }
-        match crate::workbench_surface_store::read_selection(paths::data_dir().as_path(), thread_id)
+        if !self
+            .workbench_selection_restore_attempted
+            .insert(thread_id.to_string())
         {
-            Ok(Some(selection)) => {
-                let revision = selection.revision.max(1);
-                let _ = self.workbench_shell.projection_mut().apply(
-                    omega_workbench_state::ProjectionTransition::PersistSelection { revision },
-                );
-                // Re-apply the disk record after PersistSelection stamped the active
-                // thread, so cold restore sees the saved surface request.
-                self.workbench_shell.projection_mut().persisted_selection = Some(selection);
-                let _ = self
-                    .workbench_shell
-                    .projection_mut()
-                    .apply(omega_workbench_state::ProjectionTransition::ColdStart);
-                let _ = self
-                    .workbench_shell
-                    .projection_mut()
-                    .apply(omega_workbench_state::ProjectionTransition::RestoreSelection);
-            }
-            Ok(None) => {}
-            Err(error) => {
-                log::warn!("workbench surface disk restore failed: {error:#}");
-            }
+            return;
+        }
+        let data_dir = paths::data_dir();
+        let selection =
+            match crate::workbench_surface_store::read_selection(data_dir.as_path(), thread_id) {
+                Ok(Some(selection)) => selection,
+                Ok(None) => return,
+                Err(error) => {
+                    Self::reset_workbench_selection_record(data_dir.as_path(), thread_id, &error);
+                    return;
+                }
+            };
+        let projection = self.workbench_shell.projection_mut();
+        let mut result = projection
+            .apply(
+                omega_workbench_state::ProjectionTransition::AdoptPersistedSelection { selection },
+            )
+            .map(|_| ());
+        if result.is_ok() {
+            result = projection
+                .apply(omega_workbench_state::ProjectionTransition::ColdStart)
+                .map(|_| ());
+        }
+        if result.is_ok() {
+            result = projection
+                .apply(omega_workbench_state::ProjectionTransition::RestoreSelection)
+                .map(|_| ());
+        }
+        if let Err(error) = result {
+            // The record is incompatible with the current projection; reset it
+            // once instead of refusing it forever. `apply` is transactional,
+            // so the in-memory projection stays valid.
+            Self::reset_workbench_selection_record(
+                data_dir.as_path(),
+                thread_id,
+                &anyhow::Error::new(error),
+            );
+        }
+    }
+
+    fn reset_workbench_selection_record(data_dir: &Path, thread_id: &str, cause: &anyhow::Error) {
+        log::warn!(
+            "resetting the persisted workbench surface record for thread {thread_id:?} \
+             because it cannot be adopted: {cause:#}"
+        );
+        if let Err(error) = crate::workbench_surface_store::remove_selection(data_dir, thread_id) {
+            log::warn!("failed to reset the workbench surface record: {error:#}");
         }
     }
 
@@ -13776,6 +13851,36 @@ mod tests {
         assert!(is_known_terminal_agent_command("codex"));
         assert!(!is_known_terminal_agent_command("cargo"));
         assert!(!is_known_terminal_agent_command("internal-agent"));
+    }
+
+    #[test]
+    fn test_workbench_sync_failure_logs_once_per_distinct_cause() {
+        // The workbench sync runs per render; a persistent failure must not
+        // produce one warning per frame.
+        let mut failure_log = DistinctFailureLog::default();
+        let mismatch = "persisted revision 2 does not match projection revision 0";
+        assert!(failure_log.should_log(mismatch), "first cause logs");
+        assert!(
+            !failure_log.should_log(mismatch),
+            "the same recurring cause must not log again"
+        );
+        assert!(
+            !failure_log.should_log(mismatch),
+            "no matter how many frames repeat it"
+        );
+        assert!(
+            failure_log.should_log("a different cause"),
+            "a distinct cause logs"
+        );
+        assert!(
+            !failure_log.should_log("a different cause"),
+            "and then deduplicates too"
+        );
+        failure_log.record_success();
+        assert!(
+            failure_log.should_log("a different cause"),
+            "a recurrence after recovery is a new report"
+        );
     }
 
     #[test]

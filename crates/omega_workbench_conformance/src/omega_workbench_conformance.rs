@@ -393,6 +393,7 @@ pub enum ActionKind {
     Reconnect,
     ReceiveProjectionSnapshot,
     PersistSelection,
+    AdoptPersistedSelection,
     ColdStart,
     RestoreSelection,
     InvalidateCapability,
@@ -400,7 +401,7 @@ pub enum ActionKind {
 }
 
 impl ActionKind {
-    pub const ALL: [Self; 29] = [
+    pub const ALL: [Self; 30] = [
         Self::OpenThread,
         Self::CloseThread,
         Self::SwitchThread,
@@ -426,6 +427,7 @@ impl ActionKind {
         Self::Reconnect,
         Self::ReceiveProjectionSnapshot,
         Self::PersistSelection,
+        Self::AdoptPersistedSelection,
         Self::ColdStart,
         Self::RestoreSelection,
         Self::InvalidateCapability,
@@ -459,6 +461,7 @@ impl ActionKind {
             Self::Reconnect => "reconnect",
             Self::ReceiveProjectionSnapshot => "receive_projection_snapshot",
             Self::PersistSelection => "persist_selection",
+            Self::AdoptPersistedSelection => "adopt_persisted_selection",
             Self::ColdStart => "cold_start",
             Self::RestoreSelection => "restore_selection",
             Self::InvalidateCapability => "invalidate_capability",
@@ -585,6 +588,9 @@ pub enum Transition {
     PersistSelection {
         revision: u64,
     },
+    AdoptPersistedSelection {
+        selection: PersistedSelection,
+    },
     ColdStart,
     RestoreSelection,
     InvalidateCapability {
@@ -628,6 +634,7 @@ impl Transition {
             Self::Reconnect => ActionKind::Reconnect,
             Self::ReceiveProjectionSnapshot { .. } => ActionKind::ReceiveProjectionSnapshot,
             Self::PersistSelection { .. } => ActionKind::PersistSelection,
+            Self::AdoptPersistedSelection { .. } => ActionKind::AdoptPersistedSelection,
             Self::ColdStart => ActionKind::ColdStart,
             Self::RestoreSelection => ActionKind::RestoreSelection,
             Self::InvalidateCapability { .. } => ActionKind::InvalidateCapability,
@@ -1427,6 +1434,36 @@ fn try_apply_transition(
                     binding,
                     requested_surface,
                     dock_visible,
+                });
+                TransitionEffect::Applied
+            }
+        }
+        Transition::AdoptPersistedSelection { selection } => {
+            validate_transition_identifier(validate_thread_id(&selection.thread_id))?;
+            if let Some(binding) = &selection.binding {
+                validate_transition_identifier(validate_binding(binding))?;
+            }
+            if selection.dock_visible && selection.requested_surface.is_none() {
+                return rejected(
+                    RejectCode::InvalidBinding,
+                    "persisted open dock has no requested surface",
+                );
+            }
+            // A durable record adopts at the higher of its own revision and
+            // this session's persistence revision, so adoption never installs
+            // a selection whose revision disagrees with the state revision.
+            let revision = selection.revision.max(1).max(state.persistence_revision);
+            if state
+                .persisted_selection
+                .as_ref()
+                .is_some_and(|current| current.revision >= revision)
+            {
+                TransitionEffect::OlderRevisionIgnored
+            } else {
+                state.persistence_revision = revision;
+                state.persisted_selection = Some(PersistedSelection {
+                    revision,
+                    ..selection.clone()
                 });
                 TransitionEffect::Applied
             }
@@ -2382,6 +2419,57 @@ mod tests {
             Ok(report) => report,
             Err(error) => panic!("valid restore trace was rejected: {error}"),
         };
+        let restored = report.final_state.threads.get(&thread_id).map(|thread| {
+            (
+                thread.requested_surface,
+                thread.effective_surface,
+                thread.dock_visible,
+            )
+        });
+        assert_eq!(
+            restored,
+            Some((Some(SurfaceId::Git), Some(SurfaceId::Git), true))
+        );
+        assert!(!report.final_state.restore_pending);
+    }
+
+    #[test]
+    fn adopting_a_durable_record_reconciles_a_fresh_persistence_revision() {
+        // Regression companion for the production defect where a disk record
+        // at revision 2 met a fresh projection at revision 0 and the mismatch
+        // was installed permanently instead of being reconciled.
+        let thread_id = thread("thread-a");
+        let initial = one_bound_thread_state();
+        assert_eq!(initial.persistence_revision, 0);
+
+        let mut trace = ConformanceTrace::new(initial.clone()).require([
+            ActionKind::AdoptPersistedSelection,
+            ActionKind::ColdStart,
+            ActionKind::RestoreSelection,
+        ]);
+        let mut state = initial;
+        push_valid(
+            &mut trace,
+            &mut state,
+            Transition::AdoptPersistedSelection {
+                selection: PersistedSelection {
+                    revision: 2,
+                    thread_id: thread_id.clone(),
+                    generation: 0,
+                    binding: Some(Binding::new("repository-a", "worktree-a")),
+                    requested_surface: Some(SurfaceId::Git),
+                    dock_visible: true,
+                },
+            },
+        );
+        push_valid(&mut trace, &mut state, Transition::ColdStart);
+        push_valid(&mut trace, &mut state, Transition::RestoreSelection);
+
+        let report = match check_trace(&trace) {
+            Ok(report) => report,
+            Err(error) => panic!("adoption trace was rejected: {error}"),
+        };
+        assert_eq!(report.final_state.persistence_revision, 2);
         let restored = report.final_state.threads.get(&thread_id).map(|thread| {
             (
                 thread.requested_surface,

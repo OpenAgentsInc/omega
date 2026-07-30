@@ -94,6 +94,18 @@ pub fn read_selection(data_dir: &Path, thread_id: &str) -> Result<Option<Persist
     }
 }
 
+/// Remove a thread's durable selection record, used to reset persisted state
+/// that can no longer be adopted into a current projection.
+pub fn remove_selection(data_dir: &Path, thread_id: &str) -> Result<()> {
+    let path = record_path(data_dir, thread_id);
+    match std::fs::remove_file(&path) {
+        Ok(()) => Ok(()),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
+        Err(error) => Err(error)
+            .with_context(|| format!("removing workbench surface record {}", path.display())),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -129,5 +141,22 @@ mod tests {
     fn missing_record_is_none_not_error() {
         let dir = tempdir().expect("temp dir");
         assert_eq!(read_selection(dir.path(), "missing").expect("read"), None);
+    }
+
+    #[test]
+    fn remove_selection_resets_a_record_and_tolerates_absence() {
+        let dir = tempdir().expect("temp dir");
+        let selection = PersistedSelection {
+            thread_id: "thread-1".into(),
+            generation: 0,
+            binding: None,
+            requested_surface: Some(WorkSurface::Plan),
+            dock_open: true,
+            revision: 2,
+        };
+        write_selection(dir.path(), &selection).expect("write");
+        remove_selection(dir.path(), "thread-1").expect("remove");
+        assert_eq!(read_selection(dir.path(), "thread-1").expect("read"), None);
+        remove_selection(dir.path(), "thread-1").expect("removing again is fine");
     }
 }

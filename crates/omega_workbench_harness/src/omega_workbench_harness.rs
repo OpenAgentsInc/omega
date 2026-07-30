@@ -8612,6 +8612,11 @@ fn conformance_transition(
                 revision: *revision,
             }
         }
+        projection::ProjectionTransition::AdoptPersistedSelection { selection } => {
+            conformance::Transition::AdoptPersistedSelection {
+                selection: conformance_persisted_selection(selection),
+            }
+        }
         projection::ProjectionTransition::ColdStart => conformance::Transition::ColdStart,
         projection::ProjectionTransition::RestoreSelection => {
             conformance::Transition::RestoreSelection
@@ -9158,6 +9163,19 @@ mod tests {
             available_surfaces: surfaces.clone(),
         });
         recorder.apply(projection::ProjectionTransition::PersistSelection { revision: 1 });
+        recorder.apply(projection::ProjectionTransition::AdoptPersistedSelection {
+            selection: projection::PersistedSelection {
+                thread_id: "thread-a".into(),
+                generation: 5,
+                binding: Some(
+                    projection::RepositoryBinding::new("repository-b", "worktree-d")
+                        .expect("valid adopted binding"),
+                ),
+                requested_surface: Some(projection::WorkSurface::Files),
+                dock_open: true,
+                revision: 2,
+            },
+        });
         recorder.apply(projection::ProjectionTransition::ColdStart);
         recorder.apply(projection::ProjectionTransition::RestoreSelection);
         recorder.apply(projection::ProjectionTransition::Disconnect);

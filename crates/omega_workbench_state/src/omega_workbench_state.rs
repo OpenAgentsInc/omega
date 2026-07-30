@@ -964,6 +964,27 @@ impl WorkbenchProjection {
                 });
                 Ok(TransitionEffect::Applied)
             }
+            ProjectionTransition::AdoptPersistedSelection { selection } => {
+                selection.validate()?;
+                // Durable records come from an earlier projection instance, so
+                // adoption must re-stamp the persistence revision: keep the
+                // record's revision when it is ahead, and never regress a
+                // projection that already persisted further in this session.
+                let revision = selection.revision.max(1).max(self.persistence_revision);
+                if self
+                    .persisted_selection
+                    .as_ref()
+                    .is_some_and(|current| current.revision >= revision)
+                {
+                    return Ok(TransitionEffect::OlderRevisionIgnored);
+                }
+                self.persistence_revision = revision;
+                self.persisted_selection = Some(PersistedSelection {
+                    revision,
+                    ..selection
+                });
+                Ok(TransitionEffect::Applied)
+            }
             ProjectionTransition::ColdStart => {
                 for thread in self.threads.values_mut() {
                     thread.dock_open = false;
@@ -1248,6 +1269,9 @@ pub enum ProjectionTransition {
     },
     PersistSelection {
         revision: u64,
+    },
+    AdoptPersistedSelection {
+        selection: PersistedSelection,
     },
     ColdStart,
     RestoreSelection,
@@ -2004,6 +2028,114 @@ mod tests {
         assert_eq!(visible.thread_id, "thread-a");
         assert_eq!(visible.effective_surface, Some(WorkSurface::Review));
         assert_eq!(projection.persistence_revision, 2);
+    }
+
+    #[test]
+    fn adopting_a_disk_selection_into_a_fresh_projection_reconciles_revisions() {
+        // Regression: a previous session persisted revision 2 to disk, while a
+        // fresh projection starts at persistence revision 0. Directly poking
+        // `persisted_selection` used to install that mismatch permanently and
+        // every later transition failed validation with
+        // "persisted revision 2 does not match projection revision 0".
+        let disk_selection = PersistedSelection {
+            thread_id: "thread-a".into(),
+            generation: 0,
+            binding: Some(binding("worktree-a")),
+            requested_surface: Some(WorkSurface::Git),
+            dock_open: true,
+            revision: 2,
+        };
+
+        let mut projection = WorkbenchProjection::new();
+        assert_eq!(projection.persistence_revision, 0);
+        open_thread(&mut projection, "thread-a", "worktree-a");
+        assert_eq!(
+            projection
+                .apply(ProjectionTransition::AdoptPersistedSelection {
+                    selection: disk_selection.clone(),
+                })
+                .expect("adopt the disk selection"),
+            TransitionEffect::Applied
+        );
+        assert_eq!(projection.persistence_revision, 2);
+        assert!(projection.validate().is_ok());
+
+        projection
+            .apply(ProjectionTransition::ColdStart)
+            .expect("cold start after adoption");
+        projection
+            .apply(ProjectionTransition::RestoreSelection)
+            .expect("restore the adopted selection");
+        let visible = projection.visible_projection().expect("visible projection");
+        assert_eq!(visible.thread_id, "thread-a");
+        assert_eq!(visible.effective_surface, Some(WorkSurface::Git));
+        assert!(visible.dock_open);
+
+        // Later transitions keep working: the projection is not poisoned.
+        projection
+            .apply(ProjectionTransition::RequestSurface {
+                thread_id: "thread-a".into(),
+                surface: WorkSurface::Files,
+            })
+            .expect("the projection accepts transitions after adoption");
+    }
+
+    #[test]
+    fn adoption_never_regresses_persistence_and_ignores_older_records() {
+        let mut projection = WorkbenchProjection::new();
+        open_thread(&mut projection, "thread-a", "worktree-a");
+        projection
+            .apply(ProjectionTransition::RequestSurface {
+                thread_id: "thread-a".into(),
+                surface: WorkSurface::Review,
+            })
+            .expect("select review");
+        projection
+            .apply(ProjectionTransition::PersistSelection { revision: 5 })
+            .expect("persist in this session");
+
+        // An in-memory selection at revision 5 outranks a disk record at 2.
+        assert_eq!(
+            projection
+                .apply(ProjectionTransition::AdoptPersistedSelection {
+                    selection: PersistedSelection {
+                        thread_id: "thread-a".into(),
+                        generation: 0,
+                        binding: Some(binding("worktree-a")),
+                        requested_surface: Some(WorkSurface::Git),
+                        dock_open: true,
+                        revision: 2,
+                    },
+                })
+                .expect("older record is handled"),
+            TransitionEffect::OlderRevisionIgnored
+        );
+        assert_eq!(projection.persistence_revision, 5);
+        assert_eq!(
+            projection
+                .persisted_selection
+                .as_ref()
+                .and_then(|selection| selection.requested_surface),
+            Some(WorkSurface::Review)
+        );
+
+        // A revision-0 record (never validly written) is clamped, not adopted
+        // at a reserved revision.
+        let mut fresh = WorkbenchProjection::new();
+        fresh
+            .apply(ProjectionTransition::AdoptPersistedSelection {
+                selection: PersistedSelection {
+                    thread_id: "thread-a".into(),
+                    generation: 0,
+                    binding: None,
+                    requested_surface: None,
+                    dock_open: false,
+                    revision: 0,
+                },
+            })
+            .expect("adopt a zero-revision record");
+        assert_eq!(fresh.persistence_revision, 1);
+        assert!(fresh.validate().is_ok());
     }
 
     #[test]
