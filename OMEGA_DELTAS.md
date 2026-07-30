@@ -7706,8 +7706,9 @@ current image build does not decode it inline.
 - **Unavailable creation modes say why.** Sarah remains visible but disabled
   as `Sarah Voice — Voice access is not available yet`. Direct-agent rows are
   disabled with a concrete zero-base, missing-folder, or shared-project reason.
-  **Add More Agents** remains enabled and opens the ACP Registry. These rows can
-  be enabled only when their actual creation paths land.
+  **Add More Agents** remains enabled and opens the ACP Registry. The
+  direct-unavailable portion is superseded by OMEGA-DELTA-0178; shared projects
+  remain the product-level refusal.
 - **No borrowed or dead shortcut remains.** Save As is absent from the menu and
   all three default keymaps. Sarah's former `cmd-shift-s` / `ctrl-shift-s`
   binding is also absent; issue #154 owns a future deliberate voice shortcut.
@@ -7763,3 +7764,42 @@ current image build does not decode it inline.
   in `crates/omega_deltas`, the typed core tests in `omega_front_door`, and
   focused Agent Panel GPUI tests for row order, receipt/entity reuse, metadata
   ownership, and unavailable-mode refusal.
+
+### OMEGA-DELTA-0178 — Direct Agent owns one exact ACP session
+
+- **Supersedes the Direct Agent refusal in OMEGA-DELTA-0176 and
+  OMEGA-DELTA-0177.** Installed Codex (`codex-acp`), Claude Code
+  (`claude-acp`), registry Grok (`grok-build`), legacy custom Grok (`grok`),
+  and generic ACP agents such as `opencode` are selectable in zero base. IDs
+  remain exact; `grok` and `grok-build` are never aliases.
+- **One target, view, and session.** A Direct selection replaces an unused
+  off-screen preparation with `Agent::Custom { id }`. Loading, native auth and
+  configuration, setup failure, retry, composer identity, and Ready receipt
+  all belong to that same `ConversationView`. Activation claims it rather than
+  creating a second session, and no Direct path substitutes Omega Agent.
+- **The registry returns to the front door.** **Add More Agents** opens the
+  visible ACP Registry. Its installed-agent `SelectAgent` action updates the
+  active front-door target and immediately prepares that exact id, even though
+  the registry temporarily owns the center surface.
+- **Ownership is versioned.** `sidebar_threads.conversation_owner_version = 1`
+  means `agent_id` is the immutable conversation owner. Pre-version native-null
+  rows remain `LegacyOmega`; pre-version non-null rows are
+  `LegacyAmbiguous` and visibly refuse restore rather than guessing. Existing
+  rows preserve the `(agent_id, version)` pair atomically. Unknown future
+  versions fail closed. Read-only cross-channel import detects older schemas
+  and classifies their rows as legacy without migrating another channel's DB.
+- **Identity follows the active owner.** Direct loading and connecting labels,
+  toolbar text, transcript restore, and sidebar reopen derive from the active
+  exact `ConversationView` or v1 metadata, never from the process-global Omega
+  router selector or a last-used native clamp.
+- **Refusal never launches a substitute.** Shared projects keep the requested
+  Direct target visible but start neither that ACP agent nor Omega. Deleting an
+  ambiguous legacy archive removes local metadata and worktree records without
+  reconnecting an unproven agent for remote deletion.
+- **Test coverage:** `direct_agents_restore_exact_owners_without_native_fallback`
+  in `crates/omega_deltas`; metadata migration and cross-channel tests; focused
+  Agent Panel tests for exact preparation and restore, registry selection,
+  setup failure, owner switching, toolbar front-door precedence, and zero-base
+  external actions; plus the archive remote-delete ownership helper test. The
+  shared-project refusal remains an explicit fail-closed source policy pending
+  installed lifecycle proof.

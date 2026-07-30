@@ -10,7 +10,6 @@ use crate::thread_metadata_store::{
 use crate::{Agent, ArchiveSelectedThread, DEFAULT_THREAD_TITLE, RemoveSelectedThread};
 
 use agent::ThreadStore;
-use agent_client_protocol::schema::v1 as acp;
 use agent_settings::AgentSettings;
 use chrono::{DateTime, Datelike as _, Local, NaiveDate, TimeDelta, Utc};
 use collections::HashMap;
@@ -28,7 +27,7 @@ use picker::{
     Picker, PickerDelegate,
     highlighted_match_with_paths::{HighlightedMatch, HighlightedMatchWithPaths},
 };
-use project::{AgentId, AgentServerStore};
+use project::AgentServerStore;
 use settings::Settings as _;
 use theme::ActiveTheme;
 use ui::{
@@ -722,17 +721,10 @@ impl ThreadsArchiveView {
                                 }
                             })
                             .on_click({
-                                let agent = thread.agent_id.clone();
-                                let thread_id = thread.thread_id;
-                                let session_id = thread.session_id.clone();
+                                let thread = thread.clone();
                                 cx.listener(move |this, _, _, cx| {
                                     this.preserve_selection_on_next_update = true;
-                                    this.delete_thread(
-                                        thread_id,
-                                        session_id.clone(),
-                                        agent.clone(),
-                                        cx,
-                                    );
+                                    this.delete_thread(thread.clone(), cx);
                                     cx.stop_propagation();
                                 })
                             }),
@@ -796,24 +788,25 @@ impl ThreadsArchiveView {
         };
 
         self.preserve_selection_on_next_update = true;
-        self.delete_thread(
-            thread.thread_id,
-            thread.session_id.clone(),
-            thread.agent_id.clone(),
-            cx,
-        );
+        let thread = thread.clone();
+        self.delete_thread(thread, cx);
     }
 
-    fn delete_thread(
-        &mut self,
-        thread_id: ThreadId,
-        session_id: Option<acp::SessionId>,
-        agent: AgentId,
-        cx: &mut Context<Self>,
-    ) {
+    fn delete_thread(&mut self, thread: ThreadMetadata, cx: &mut Context<Self>) {
+        let thread_id = thread.thread_id;
+        let session_id = thread.session_id.clone();
+        let remote_delete_agent = remote_delete_agent(&thread);
         ThreadMetadataStore::global(cx).update(cx, |store, cx| store.delete(thread_id, cx));
 
-        let agent = Agent::from(agent);
+        let Some(agent) = remote_delete_agent else {
+            cx.spawn(async move |_this, cx| {
+                crate::thread_worktree_archive::cleanup_thread_archived_worktrees(thread_id, cx)
+                    .await;
+                anyhow::Ok(())
+            })
+            .detach_and_log_err(cx);
+            return;
+        };
 
         let Some(agent_connection_store) = self.agent_connection_store.upgrade() else {
             return;
@@ -1102,6 +1095,13 @@ impl Render for ThreadsArchiveView {
             .when(!has_query, |this| this.child(self.render_toolbar(cx)))
             .child(content)
     }
+}
+
+fn remote_delete_agent(thread: &ThreadMetadata) -> Option<Agent> {
+    // A legacy non-Omega identifier did not record an owner contract. Deleting
+    // its local archive is safe, but reconnecting it could authenticate to and
+    // delete from an agent the user never proved owned this conversation.
+    thread.restorable_agent().ok()
 }
 
 struct ProjectPickerModal {
@@ -1635,6 +1635,50 @@ impl PickerDelegate for ProjectPickerDelegate {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::thread_metadata_store::ConversationOwnerVersion;
+    use agent_client_protocol::schema::v1 as acp;
+
+    fn thread_metadata(
+        agent_id: project::AgentId,
+        conversation_owner_version: ConversationOwnerVersion,
+    ) -> ThreadMetadata {
+        ThreadMetadata {
+            thread_id: ThreadId::new(),
+            session_id: Some(acp::SessionId::new("session")),
+            agent_id,
+            conversation_owner_version,
+            title: None,
+            title_override: None,
+            updated_at: Utc::now(),
+            created_at: None,
+            interacted_at: None,
+            worktree_paths: Default::default(),
+            remote_connection: None,
+            archived: true,
+        }
+    }
+
+    #[test]
+    fn remote_delete_requires_proven_conversation_ownership() {
+        let exact_id = project::AgentId::new("grok-build");
+        let exact = thread_metadata(exact_id.clone(), ConversationOwnerVersion::V1);
+        assert!(matches!(
+            remote_delete_agent(&exact),
+            Some(Agent::Custom { id, .. }) if id == exact_id
+        ));
+
+        let omega = thread_metadata(
+            agent::OMEGA_AGENT_ID.clone(),
+            ConversationOwnerVersion::Legacy,
+        );
+        assert_eq!(remote_delete_agent(&omega), Some(Agent::NativeAgent));
+
+        let ambiguous = thread_metadata(
+            project::AgentId::new("grok-build"),
+            ConversationOwnerVersion::Legacy,
+        );
+        assert_eq!(remote_delete_agent(&ambiguous), None);
+    }
 
     #[test]
     fn test_fuzzy_match_positions_returns_byte_indices() {

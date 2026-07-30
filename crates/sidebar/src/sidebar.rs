@@ -3633,14 +3633,33 @@ impl Sidebar {
         window: &mut Window,
         cx: &mut App,
     ) {
-        let load_thread = |agent_panel: Entity<AgentPanel>,
-                           metadata: &ThreadMetadata,
-                           focus: bool,
-                           window: &mut Window,
-                           cx: &mut App| {
+        let Ok(agent) = metadata.restorable_agent() else {
+            workspace.update(cx, |workspace, cx| {
+                let toast = StatusToast::new(
+                    "This legacy thread has no verified Direct Agent owner, so Omega will not guess an executor.",
+                    cx,
+                    |this, _cx| {
+                        this.icon(
+                            Icon::new(IconName::Warning)
+                                .size(IconSize::Small)
+                                .color(Color::Warning),
+                        )
+                        .dismiss_button(true)
+                    },
+                );
+                workspace.toggle_status_toast(toast, cx);
+            });
+            return;
+        };
+        let load_thread = move |agent_panel: Entity<AgentPanel>,
+                                metadata: &ThreadMetadata,
+                                focus: bool,
+                                window: &mut Window,
+                                cx: &mut App| {
+            let agent = agent.clone();
             agent_panel.update(cx, |panel, cx| {
                 panel.load_agent_thread(
-                    Agent::from(metadata.agent_id.clone()),
+                    agent,
                     metadata.thread_id,
                     Some(metadata.folder_paths().clone()),
                     metadata.title.clone(),
@@ -4089,6 +4108,20 @@ impl Sidebar {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
+        if metadata.restorable_agent().is_err() {
+            if let Some(workspace) = self
+                .multi_workspace
+                .upgrade()
+                .map(|multi_workspace| multi_workspace.read(cx).workspace().clone())
+            {
+                Self::show_thread_title_toast(
+                    workspace,
+                    "This legacy thread has no verified Direct Agent owner, so Omega will not guess an executor.",
+                    cx,
+                );
+            }
+            return;
+        }
         let thread_id = metadata.thread_id;
         let weak_archive_view = match &self.view {
             SidebarView::Archive(view) => Some(view.downgrade()),

@@ -29,7 +29,9 @@ use workspace::{ModalView, MultiWorkspace, Workspace};
 use crate::{
     Agent, AgentPanel,
     agent_connection_store::AgentConnectionStore,
-    thread_metadata_store::{ThreadId, ThreadMetadata, ThreadMetadataStore, WorktreePaths},
+    thread_metadata_store::{
+        ConversationOwnerVersion, ThreadId, ThreadMetadata, ThreadMetadataStore, WorktreePaths,
+    },
 };
 
 pub struct AcpThreadImportOnboarding;
@@ -874,6 +876,7 @@ fn collect_importable_threads(
                 thread_id: ThreadId::new(),
                 session_id: Some(session.session_id),
                 agent_id: agent_id.clone(),
+                conversation_owner_version: ConversationOwnerVersion::V1,
                 title: session.title,
                 title_override: None,
                 updated_at: session.updated_at.unwrap_or_else(|| Utc::now()),

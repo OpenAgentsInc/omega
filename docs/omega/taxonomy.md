@@ -229,12 +229,10 @@ or path detection is not readiness. The receipt is volatile; ownership is
 restored from the agent identity already persisted with the thread rather than
 a second mode column.
 
-New metadata writes preserve the exact conversation owner. Older inactive rows
-whose non-null agent id may instead name a routed executor are ambiguous. The
-current schema and restore path do not enforce an unknown classification, so a
-restored legacy value is not proof of conversation ownership. Agent-scoped
-route journals cannot resolve that ambiguity. Direct Agent requires versioned
-owner semantics before it can become available.
+New metadata writes preserve the exact conversation owner under the v1 owner
+contract. Older rows remain explicitly legacy: a historical native-null row is
+recognized as legacy Omega, while a non-null agent id may name either an owner
+or a routed executor and is therefore refused as ambiguous. No timestamp, installed-agent match, or route journal upgrades a legacy row by inference.
 
 Sealed, structurally: the window starts with no centre pane group, tab bar,
 title bar, or status bar. It is not the editor hidden behind a zoomed panel.

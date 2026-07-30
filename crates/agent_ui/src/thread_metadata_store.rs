@@ -72,7 +72,16 @@ const THREAD_ID_MIGRATION_KEY: &str = "thread-metadata-thread-id-backfill";
 pub(crate) fn list_thread_metadata_from_connection(
     connection: &db::sqlez::connection::Connection,
 ) -> anyhow::Result<Vec<ThreadMetadata>> {
-    connection.select::<ThreadMetadata>(ThreadMetadataDb::LIST_QUERY)?()
+    let schema = connection.select_row_bound::<&str, String>(
+        "SELECT sql FROM sqlite_master WHERE type = 'table' AND name = ?1",
+    )?("sidebar_threads")?
+    .context("sidebar_threads schema is missing")?;
+    let query = if schema.contains("conversation_owner_version") {
+        ThreadMetadataDb::LIST_QUERY
+    } else {
+        ThreadMetadataDb::LEGACY_LIST_QUERY
+    };
+    connection.select::<ThreadMetadata>(query)?()
 }
 
 /// Run the `ThreadMetadataDb` migrations on a raw connection.
@@ -133,6 +142,7 @@ fn migrate_thread_metadata(cx: &mut App) -> Task<anyhow::Result<()>> {
                         thread_id: ThreadId::new(),
                         session_id: Some(entry.id),
                         agent_id: OMEGA_AGENT_ID.clone(),
+                        conversation_owner_version: ConversationOwnerVersion::V1,
                         title: if entry.title.is_empty()
                             || entry.title.as_ref() == DEFAULT_THREAD_TITLE
                         {
@@ -315,6 +325,14 @@ pub struct ThreadMetadata {
     pub thread_id: ThreadId,
     pub session_id: Option<acp::SessionId>,
     pub agent_id: AgentId,
+    /// Version of the meaning carried by `agent_id`.
+    ///
+    /// Rows written before direct conversations were restored used this field
+    /// for several different identities (conversation owner, routed executor,
+    /// and imported server). A non-native value from those rows cannot safely
+    /// be interpreted as a Direct Agent owner. New rows explicitly record the
+    /// v1 owner contract.
+    pub conversation_owner_version: ConversationOwnerVersion,
     pub title: Option<SharedString>,
     /// User-supplied title that takes precedence over `title`. Set when the
     /// user renames a thread, so that subsequent agent-driven title updates
@@ -330,7 +348,48 @@ pub struct ThreadMetadata {
     pub archived: bool,
 }
 
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum ConversationOwnerVersion {
+    /// The row predates explicit conversation ownership. A legacy native-null
+    /// row is known to be Omega; a legacy non-native id is ambiguous.
+    #[default]
+    Legacy,
+    /// `agent_id` is the immutable agent used to construct ConversationView.
+    V1,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum ConversationOwner {
+    Exact(AgentId),
+    LegacyOmega,
+    LegacyAmbiguous(AgentId),
+}
+
 impl ThreadMetadata {
+    pub fn conversation_owner(&self) -> ConversationOwner {
+        match self.conversation_owner_version {
+            ConversationOwnerVersion::V1 => ConversationOwner::Exact(self.agent_id.clone()),
+            ConversationOwnerVersion::Legacy
+                if self.agent_id.as_ref() == OMEGA_AGENT_ID.as_ref() =>
+            {
+                ConversationOwner::LegacyOmega
+            }
+            ConversationOwnerVersion::Legacy => {
+                ConversationOwner::LegacyAmbiguous(self.agent_id.clone())
+            }
+        }
+    }
+
+    pub fn restorable_agent(&self) -> anyhow::Result<crate::Agent> {
+        match self.conversation_owner() {
+            ConversationOwner::LegacyOmega => Ok(crate::Agent::NativeAgent),
+            ConversationOwner::Exact(agent_id) => Ok(crate::Agent::from(agent_id)),
+            ConversationOwner::LegacyAmbiguous(agent_id) => anyhow::bail!(
+                "Thread ownership predates the Direct Agent contract; recorded id `{agent_id}` is ambiguous"
+            ),
+        }
+    }
+
     /// A thread is a draft until its first message is sent, at which point
     /// it gets an ACP `session_id`.
     pub fn is_draft(&self) -> bool {
@@ -1340,7 +1399,15 @@ impl ThreadMetadataStore {
         // to a different executor. Persist the owner used to construct the
         // ConversationView; the thread connection is execution disclosure and
         // may legitimately report Codex, Claude, or an engine lane instead.
-        let agent_id = view.agent_key().id();
+        let (agent_id, conversation_owner_version) = existing_thread.map_or_else(
+            || (view.agent_key().id(), ConversationOwnerVersion::V1),
+            |metadata| {
+                (
+                    metadata.agent_id.clone(),
+                    metadata.conversation_owner_version,
+                )
+            },
+        );
 
         // Preserve project-dependent fields for archived threads.
         // The worktree may already have been removed from the
@@ -1386,6 +1453,7 @@ impl ThreadMetadataStore {
             thread_id,
             session_id,
             agent_id,
+            conversation_owner_version,
             title,
             title_override,
             created_at: Some(created_at),
@@ -1506,6 +1574,9 @@ impl Domain for ThreadMetadataDb {
         sql!(
             ALTER TABLE sidebar_threads ADD COLUMN title_override TEXT;
         ),
+        sql!(
+            ALTER TABLE sidebar_threads ADD COLUMN conversation_owner_version INTEGER;
+        ),
     ];
 }
 
@@ -1522,7 +1593,13 @@ impl ThreadMetadataDb {
 
     const LIST_QUERY: &str = "SELECT thread_id, session_id, agent_id, title, updated_at, \
         created_at, interacted_at, folder_paths, folder_paths_order, archived, main_worktree_paths, \
-        main_worktree_paths_order, remote_connection, title_override \
+        main_worktree_paths_order, remote_connection, title_override, conversation_owner_version \
+        FROM sidebar_threads \
+        ORDER BY updated_at DESC";
+
+    const LEGACY_LIST_QUERY: &str = "SELECT thread_id, session_id, agent_id, title, updated_at, \
+        created_at, interacted_at, folder_paths, folder_paths_order, archived, main_worktree_paths, \
+        main_worktree_paths_order, remote_connection, title_override, NULL AS conversation_owner_version \
         FROM sidebar_threads \
         ORDER BY updated_at DESC";
 
@@ -1573,12 +1650,16 @@ impl ThreadMetadataDb {
             .transpose()
             .context("serialize thread metadata remote connection")?;
         let title_override = row.title_override.as_ref().map(|t| t.to_string());
+        let conversation_owner_version = match row.conversation_owner_version {
+            ConversationOwnerVersion::Legacy => None,
+            ConversationOwnerVersion::V1 => Some(1_i64),
+        };
         let thread_id = row.thread_id;
         let archived = row.archived;
 
         self.write(move |conn| {
-            let sql = "INSERT INTO sidebar_threads(thread_id, session_id, agent_id, title, updated_at, created_at, interacted_at, folder_paths, folder_paths_order, archived, main_worktree_paths, main_worktree_paths_order, remote_connection, title_override) \
-                       VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14) \
+            let sql = "INSERT INTO sidebar_threads(thread_id, session_id, agent_id, title, updated_at, created_at, interacted_at, folder_paths, folder_paths_order, archived, main_worktree_paths, main_worktree_paths_order, remote_connection, title_override, conversation_owner_version) \
+                       VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15) \
                        ON CONFLICT(thread_id) DO UPDATE SET \
                            session_id = excluded.session_id, \
                            agent_id = excluded.agent_id, \
@@ -1592,7 +1673,8 @@ impl ThreadMetadataDb {
                            main_worktree_paths = excluded.main_worktree_paths, \
                            main_worktree_paths_order = excluded.main_worktree_paths_order, \
                            remote_connection = excluded.remote_connection, \
-                           title_override = excluded.title_override";
+                           title_override = excluded.title_override, \
+                           conversation_owner_version = excluded.conversation_owner_version";
             let mut stmt = Statement::prepare(conn, sql)?;
             let mut i = stmt.bind(&thread_id, 1)?;
             i = stmt.bind(&session_id, i)?;
@@ -1607,7 +1689,8 @@ impl ThreadMetadataDb {
             i = stmt.bind(&main_worktree_paths, i)?;
             i = stmt.bind(&main_worktree_paths_order, i)?;
             i = stmt.bind(&remote_connection, i)?;
-            stmt.bind(&title_override, i)?;
+            i = stmt.bind(&title_override, i)?;
+            stmt.bind(&conversation_owner_version, i)?;
             stmt.exec()
         })
         .await
@@ -1765,6 +1848,8 @@ impl Column for ThreadMetadata {
         let (remote_connection_json, next): (Option<String>, i32) =
             Column::column(statement, next)?;
         let (title_override, next): (Option<String>, i32) = Column::column(statement, next)?;
+        let (conversation_owner_version, next): (Option<i64>, i32) =
+            Column::column(statement, next)?;
 
         let agent_id = agent_id
             .map(|id| AgentId::new(id))
@@ -1817,6 +1902,13 @@ impl Column for ThreadMetadata {
                 thread_id,
                 session_id: id.map(acp::SessionId::new),
                 agent_id,
+                conversation_owner_version: match conversation_owner_version {
+                    None => ConversationOwnerVersion::Legacy,
+                    Some(1) => ConversationOwnerVersion::V1,
+                    Some(version) => {
+                        anyhow::bail!("unsupported conversation owner version {version}")
+                    }
+                },
                 title: if title.is_empty() || title == DEFAULT_THREAD_TITLE {
                     None
                 } else {
@@ -1912,6 +2004,7 @@ mod tests {
             archived: false,
             session_id: Some(acp::SessionId::new(session_id)),
             agent_id: agent::OMEGA_AGENT_ID.clone(),
+            conversation_owner_version: ConversationOwnerVersion::V1,
             title: if title.is_empty() {
                 None
             } else {
@@ -2209,6 +2302,7 @@ mod tests {
             thread_id: session1_thread_id,
             session_id: Some(acp::SessionId::new("session-1")),
             agent_id: agent::OMEGA_AGENT_ID.clone(),
+            conversation_owner_version: ConversationOwnerVersion::V1,
             title: Some("First Thread".into()),
             title_override: None,
             updated_at: updated_time,
@@ -2294,6 +2388,7 @@ mod tests {
             thread_id: ThreadId::new(),
             session_id: Some(acp::SessionId::new("a-session-0")),
             agent_id: agent::OMEGA_AGENT_ID.clone(),
+            conversation_owner_version: ConversationOwnerVersion::V1,
             title: Some("Existing Metadata".into()),
             title_override: None,
             updated_at: now - chrono::Duration::seconds(10),
@@ -2420,6 +2515,7 @@ mod tests {
             thread_id: ThreadId::new(),
             session_id: Some(acp::SessionId::new("existing-session")),
             agent_id: agent::OMEGA_AGENT_ID.clone(),
+            conversation_owner_version: ConversationOwnerVersion::V1,
             title: Some("Existing Metadata".into()),
             title_override: None,
             updated_at: existing_updated_at,
@@ -2866,6 +2962,7 @@ mod tests {
                         thread_id: thread_id_without_worktree,
                         session_id: Some(session_without_worktree.clone()),
                         agent_id: AgentId::from("stub"),
+                        conversation_owner_version: ConversationOwnerVersion::V1,
                         title: Some("No Project Thread".into()),
                         title_override: None,
                         updated_at: Utc::now(),
@@ -3222,6 +3319,7 @@ mod tests {
             archived: false,
             session_id: Some(acp::SessionId::new("local-linked")),
             agent_id: agent::OMEGA_AGENT_ID.clone(),
+            conversation_owner_version: ConversationOwnerVersion::V1,
             title: Some("Local Linked".into()),
             title_override: None,
             updated_at: now,
@@ -3236,6 +3334,7 @@ mod tests {
             archived: false,
             session_id: Some(acp::SessionId::new("remote-linked")),
             agent_id: agent::OMEGA_AGENT_ID.clone(),
+            conversation_owner_version: ConversationOwnerVersion::V1,
             title: Some("Remote Linked".into()),
             title_override: None,
             updated_at: now - chrono::Duration::seconds(1),
@@ -3844,6 +3943,156 @@ mod tests {
     }
 
     // ── Migration tests ────────────────────────────────────────────────
+
+    #[test]
+    fn cross_channel_read_keeps_pre_owner_rows_legacy() {
+        use db::sqlez::connection::Connection;
+
+        let connection = Connection::open_memory(Some("cross_channel_read_keeps_legacy_owner"));
+        let old_migrations =
+            &ThreadMetadataDb::MIGRATIONS[..ThreadMetadataDb::MIGRATIONS.len() - 1];
+        connection
+            .migrate(ThreadMetadataDb::NAME, old_migrations, &mut |_, _, _| false)
+            .expect("old metadata schema should migrate");
+        connection
+            .exec(
+                "INSERT INTO sidebar_threads \
+                 (thread_id, session_id, agent_id, title, updated_at) \
+                 VALUES (randomblob(16), 'legacy-direct', 'codex-acp', 'Legacy', \
+                         '2026-07-29T00:00:00Z')",
+            )
+            .expect("legacy insert should prepare")()
+        .expect("legacy insert should succeed");
+        connection
+            .exec(
+                "INSERT INTO sidebar_threads \
+                 (thread_id, session_id, agent_id, title, updated_at) \
+                 VALUES (randomblob(16), 'legacy-omega', NULL, 'Legacy Omega', \
+                         '2026-07-29T00:30:00Z')",
+            )
+            .expect("legacy Omega insert should prepare")()
+        .expect("legacy Omega insert should succeed");
+
+        let rows = list_thread_metadata_from_connection(&connection)
+            .expect("an older channel remains readable without migrating its database");
+        let legacy_direct = rows
+            .iter()
+            .find(|row| {
+                row.session_id
+                    .as_ref()
+                    .is_some_and(|id| id.0.as_ref() == "legacy-direct")
+            })
+            .expect("legacy Direct row should remain readable");
+        assert_eq!(
+            legacy_direct.conversation_owner(),
+            ConversationOwner::LegacyAmbiguous(AgentId::new("codex-acp"))
+        );
+        assert!(legacy_direct.restorable_agent().is_err());
+        let legacy_omega = rows
+            .iter()
+            .find(|row| {
+                row.session_id
+                    .as_ref()
+                    .is_some_and(|id| id.0.as_ref() == "legacy-omega")
+            })
+            .expect("legacy NULL owner should remain readable");
+        assert_eq!(
+            legacy_omega.conversation_owner(),
+            ConversationOwner::LegacyOmega
+        );
+        assert_eq!(
+            legacy_omega
+                .restorable_agent()
+                .expect("legacy NULL owner is known Omega"),
+            crate::Agent::NativeAgent
+        );
+
+        run_thread_metadata_migrations(&connection);
+        connection
+            .exec(
+                "INSERT INTO sidebar_threads \
+                 (thread_id, session_id, agent_id, title, updated_at, conversation_owner_version) \
+                 VALUES (randomblob(16), 'exact-direct', 'grok-build', 'Exact', \
+                         '2026-07-29T01:00:00Z', 1)",
+            )
+            .expect("exact insert should prepare")()
+        .expect("exact insert should succeed");
+        connection
+            .exec(
+                "INSERT INTO sidebar_threads \
+                 (thread_id, session_id, agent_id, title, updated_at, conversation_owner_version) \
+                 VALUES (randomblob(16), 'exact-omega', NULL, 'Exact Omega', \
+                         '2026-07-29T01:30:00Z', 1)",
+            )
+            .expect("exact Omega insert should prepare")()
+        .expect("exact Omega insert should succeed");
+        let rows = list_thread_metadata_from_connection(&connection)
+            .expect("current owner schema should remain readable");
+        let exact = rows
+            .iter()
+            .find(|row| {
+                row.session_id
+                    .as_ref()
+                    .is_some_and(|id| id.0.as_ref() == "exact-direct")
+            })
+            .expect("the exact owner row should reload");
+        assert_eq!(
+            exact.conversation_owner(),
+            ConversationOwner::Exact(AgentId::new("grok-build"))
+        );
+        assert_eq!(
+            exact.restorable_agent().expect("v1 Direct owner restores"),
+            crate::Agent::Custom {
+                id: AgentId::new("grok-build")
+            }
+        );
+        let exact_omega = rows
+            .iter()
+            .find(|row| {
+                row.session_id
+                    .as_ref()
+                    .is_some_and(|id| id.0.as_ref() == "exact-omega")
+            })
+            .expect("v1 NULL owner should reload");
+        assert_eq!(
+            exact_omega.conversation_owner(),
+            ConversationOwner::Exact(OMEGA_AGENT_ID.clone())
+        );
+        assert_eq!(
+            exact_omega
+                .restorable_agent()
+                .expect("v1 NULL owner remains exact Omega"),
+            crate::Agent::NativeAgent
+        );
+        let legacy = rows
+            .iter()
+            .find(|row| {
+                row.session_id
+                    .as_ref()
+                    .is_some_and(|id| id.0.as_ref() == "legacy-direct")
+            })
+            .expect("migration must retain the legacy row");
+        assert!(matches!(
+            legacy.conversation_owner(),
+            ConversationOwner::LegacyAmbiguous(_)
+        ));
+        connection
+            .exec(
+                "INSERT INTO sidebar_threads \
+                 (thread_id, session_id, agent_id, title, updated_at, conversation_owner_version) \
+                 VALUES (randomblob(16), 'future-owner', 'opencode', 'Future', \
+                         '2026-07-29T02:00:00Z', 2)",
+            )
+            .expect("future insert should prepare")()
+        .expect("future insert should succeed");
+        let error = list_thread_metadata_from_connection(&connection)
+            .expect_err("unknown owner versions must not be interpreted as legacy");
+        assert!(
+            error
+                .to_string()
+                .contains("unsupported conversation owner version 2")
+        );
+    }
 
     #[test]
     fn test_thread_id_primary_key_migration_backfills_null_thread_ids() {

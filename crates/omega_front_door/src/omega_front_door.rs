@@ -245,6 +245,8 @@ impl PreparationReceipt {
 pub enum ModeSetupAction {
     OpenFolder,
     AddAcpAgent,
+    PrepareOmegaAgent,
+    PrepareDirectAgent,
     RevealPreparedConversation,
 }
 
@@ -254,6 +256,8 @@ impl ModeSetupAction {
         match self {
             Self::OpenFolder => "Choose Folder",
             Self::AddAcpAgent => "Add an ACP Agent",
+            Self::PrepareOmegaAgent => "Start Omega session",
+            Self::PrepareDirectAgent => "Start direct session",
             Self::RevealPreparedConversation => "Open setup",
         }
     }

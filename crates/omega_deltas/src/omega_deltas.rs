@@ -166,6 +166,7 @@ pub const ENFORCED_DELTAS: &[&str] = &[
     "OMEGA-DELTA-0175",
     "OMEGA-DELTA-0176",
     "OMEGA-DELTA-0177",
+    "OMEGA-DELTA-0178",
 ];
 
 /// The concise product contract adjacent to the delta registry.
@@ -16596,9 +16597,9 @@ mod tests {
         // 5. The reopen carries the thread's own executor, not the selected one.
         let reopen = body_of(&panel, "open_thread_from_threads_sidebar");
         assert!(
-            reopen.contains("Agent::from(row.agent_id"),
+            reopen.contains("metadata.restorable_agent()"),
             "OMEGA-DELTA-0118: `open_thread_from_threads_sidebar` in {} no \
-             longer reopens under the executor the store recorded. A session id \
+             longer reopens under the versioned owner the store recorded. A session id \
              names a conversation inside the agent server that created it, so \
              resuming a Codex session on Claude's connection answers `no rollout \
              found for thread id ...` — an adapter's error about a file, in \
@@ -18164,10 +18165,9 @@ mod tests {
              them. The accessor reads:\n{code}"
         );
 
-        // The heading names what `+` would open, which is the accessor's answer
-        // and not a second reading of stored state. The front door may change
-        // how the accessor decides, but the visible promise and creation must
-        // continue to consume that same decision.
+        // The heading names the active exact owner, or the typed front-door
+        // target while that boundary is visible. The icon and label must be
+        // derived from the same resolved value.
         let toolbar = function_body(shipping, "render_toolbar")
             .or_else(|| function_body(shipping, "render_panel_toolbar"))
             .unwrap_or_else(|| {
@@ -18177,17 +18177,16 @@ mod tests {
                 )
             });
         assert!(
-            toolbar.contains("self.selected_agent(cx)"),
-            "OMEGA-DELTA-0131: the toolbar reads a different value from \
-             `selected_agent(cx)`, so `New … Thread` can name an agent that a \
-             new thread would not be built on."
+            toolbar.contains("let agent_for_new_threads")
+                && toolbar.contains("self.active_conversation_view()")
+                && toolbar.contains("self.selected_front_door_mode")
+                && toolbar.contains("agent_for_new_threads.icon()"),
+            "OMEGA-DELTA-0131/0178: toolbar label and icon no longer derive \
+             from the active owner or typed front-door target."
         );
         assert!(
-            !toolbar.contains("&self.selected_agent")
-                && !toolbar.contains("self.selected_agent.label()"),
-            "OMEGA-DELTA-0131: the toolbar still reaches the stored field \
-             directly somewhere. Every read here is about the thread `+` would \
-             open, which is the accessor's answer."
+            !toolbar.contains("self.selected_agent.label()"),
+            "OMEGA-DELTA-0131: the toolbar labels directly from stale stored state."
         );
 
         // The sidebar's header and the thread's toolbar are one line across the
@@ -21768,7 +21767,6 @@ mod tests {
         for required in [
             "Sarah — Voice access is not available yet",
             ".action(Box::new(zed_actions::workroom::StartVoice))",
-            "Direct agents are not available in this alpha yet",
             ".disabled(unavailable_reason.is_some())",
             "Box::new(zed_actions::AcpRegistry)",
             "_: &ToggleThreadsSidebar",
@@ -21964,7 +21962,8 @@ mod tests {
         }
 
         let panel = read_repository_file(AGENT_PANEL_PATH);
-        let open = function_body(&panel, "open_new_conversation_front_door")
+        assert!(!panel.contains("Direct agents are not available in this alpha yet"));
+        let open = function_body(&panel, "open_new_conversation_front_door_for_mode")
             .expect("OMEGA-DELTA-0177: front-door opener is gone");
         assert!(open.contains("prepare_omega_draft"));
         assert!(!open.contains("omega_executor_selector::ready_here"));
@@ -22008,7 +22007,7 @@ mod tests {
 
         let metadata = read_repository_file("crates/agent_ui/src/thread_metadata_store.rs");
         assert!(
-            metadata.contains("let agent_id = view.agent_key().id();"),
+            metadata.contains("view.agent_key().id(), ConversationOwnerVersion::V1"),
             "OMEGA-DELTA-0177: metadata no longer persists immutable conversation ownership"
         );
 
@@ -22027,7 +22026,7 @@ mod tests {
             ),
             (
                 "docs/omega/taxonomy.md",
-                "current schema and restore path do not enforce an unknown classification",
+                "No timestamp, installed-agent match, or route journal upgrades a legacy row",
             ),
         ] {
             assert!(
@@ -22035,5 +22034,61 @@ mod tests {
                 "OMEGA-DELTA-0177: {path} lost `{required}`"
             );
         }
+    }
+
+    /// OMEGA-DELTA-0178. Direct Agent owns an exact ACP ConversationView and
+    /// session, while versioned metadata refuses ambiguous pre-contract ids.
+    #[test]
+    fn direct_agents_restore_exact_owners_without_native_fallback() {
+        let panel = read_repository_file(AGENT_PANEL_PATH);
+        let prepare = function_body(&panel, "prepare_direct_draft")
+            .expect("OMEGA-DELTA-0178: Direct preparation is gone");
+        for required in [
+            "Agent::Custom { id: agent_id }",
+            "create_agent_thread_inner",
+            "self.draft_thread = Some(draft.clone())",
+        ] {
+            assert!(
+                prepare.contains(required),
+                "OMEGA-DELTA-0178: Direct preparation lost `{required}`"
+            );
+        }
+        assert!(!prepare.contains("Agent::NativeAgent"));
+
+        let activation = function_body(&panel, "activate_new_conversation_target")
+            .expect("OMEGA-DELTA-0178: target activation is gone");
+        for required in [
+            "ConversationTarget::DirectAgent",
+            "Agent::Custom",
+            "receipt.proves(&target, &session_id)",
+            "conversation_view: draft",
+        ] {
+            assert!(
+                activation.contains(required),
+                "OMEGA-DELTA-0178: exact Direct claim lost `{required}`"
+            );
+        }
+
+        let metadata = read_repository_file("crates/agent_ui/src/thread_metadata_store.rs");
+        for required in [
+            "conversation_owner_version INTEGER",
+            "pub enum ConversationOwnerVersion",
+            "LegacyAmbiguous",
+            "unsupported conversation owner version",
+            "pub fn restorable_agent",
+            "NULL AS conversation_owner_version",
+        ] {
+            assert!(
+                metadata.contains(required),
+                "OMEGA-DELTA-0178: owner migration lost `{required}`"
+            );
+        }
+
+        let selector = read_repository_file("crates/agent_ui/src/omega_executor_selector.rs");
+        assert!(!selector.contains("Coming soon — selectable in an upcoming version"));
+        assert!(
+            read_repository_file("docs/src/ai/external-agents.md")
+                .contains("Codex, Claude Code, Grok, and configured generic ACP agents")
+        );
     }
 }

@@ -22,11 +22,16 @@ Open the registry with **Add More Agents** in the new-thread menu or with
 with {#action agent::OpenSettings}, go to the **External Agents** page, click
 `Add Agent`, and choose `Install from Registry`.
 
-During the current default-surface build, **Direct Agent** remains permanently
-visible in the three-mode new-conversation front door and says **Not supported
-in this build**. Installing an agent makes its exact ACP id available to the
-direct path; it does not make that row claim Ready before the direct-session
-provider is included. A refused direct path never falls back to Omega Agent.
+**Direct Agent** is permanently visible in the three-mode new-conversation
+front door. With no agent selected it opens this registry. After you select an
+installed agent, Omega prepares a session with that exact ACP id and reports
+its own loading, authentication, configuration, or launch error. The row says
+Ready only after that agent has created a session; it never falls back to Omega
+Agent.
+
+Direct Agent is unavailable in shared projects. Omega keeps the requested agent
+visible with that refusal and starts neither the external agent nor an Omega
+session in its place.
 
 ## Common Agents {#common-agents}
 
@@ -94,13 +99,28 @@ Pi is an agent harness, not a Zed LLM subscription. Configure any provider auth,
 ## Start an External Agent Thread {#start-thread}
 
 Open the [Agent Panel](./agent-panel.md) and run {#action agent::NewThread} to
-inspect the permanent Direct Agent row. In the current build the row remains
-disabled; it never substitutes Omega Agent for the installed agent you named.
+inspect the permanent Direct Agent row. Choose an installed agent from the new
+thread menu, or use **Add More Agents** to open the visible ACP registry. Codex, Claude Code, Grok, and configured generic ACP agents all use the same exact-id path.
 
-The typed {#action agent::NewExternalAgentThread} action remains available on
-the transitional full-editor compatibility surface. In sealed zero base it
-preserves the exact agent you requested and opens the Direct Agent row on its
-truthful unsupported state; it does not start Omega Agent as a fallback.
+Agent ids are not aliases. The registry's `grok-build` and a legacy custom
+server named `grok` are separate owners and restore only their own sessions.
+The same rule applies to a generic agent such as `opencode`: every surface
+resolves and names the same exact owner, while process routing and relaunch
+metadata retain its exact id. Display surfaces may use that owner's configured
+display name or the conversation title.
+
+The typed {#action agent::NewExternalAgentThread} action preserves the exact
+agent you requested. In sealed zero base it opens the Direct Agent row while
+that agent connects; in the transitional full-editor compatibility surface it
+starts the same external agent directly.
+
+Thread metadata written by this version marks the conversation owner with an
+explicit version and restores that exact agent after relaunch. Older non-native
+metadata used the agent id for more than one meaning, so Omega refuses those
+ambiguous sessions rather than guessing an owner. Older native-null rows remain
+recognizable as legacy Omega conversations. Permanently deleting an ambiguous
+legacy row removes its local metadata and archived worktrees without connecting
+to an unproven external agent for remote deletion.
 
 ## Configuration Boundaries {#configuration-boundaries}
 

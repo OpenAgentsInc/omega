@@ -1435,7 +1435,11 @@ impl ConversationView {
         // field can name it now rather than after the handshake. Falls back to
         // the router's name when nothing has been chosen — a first launch,
         // where the answer genuinely is not known yet.
-        let loading_placeholder = crate::omega_executor_selector::selected()
+        let routed_executor = routed_executor_for_owner(
+            &self.connection_key,
+            crate::omega_executor_selector::selected(),
+        );
+        let loading_placeholder = routed_executor
             .map(|executor| placeholder_text(executor.name(), false))
             .unwrap_or_else(|| {
                 let name = self
@@ -1518,7 +1522,11 @@ impl ConversationView {
     /// falling back to the router's display name on a first launch where
     /// nothing has been chosen yet.
     fn connecting_executor_name(&self, cx: &App) -> SharedString {
-        crate::omega_executor_selector::selected()
+        let routed_executor = routed_executor_for_owner(
+            &self.connection_key,
+            crate::omega_executor_selector::selected(),
+        );
+        routed_executor
             .map(|executor| SharedString::from(executor.name()))
             .unwrap_or_else(|| {
                 self.agent_server_store
@@ -4548,6 +4556,15 @@ impl ConversationView {
     }
 }
 
+fn routed_executor_for_owner(
+    owner: &Agent,
+    routed_executor: Option<crate::omega_executor_selector::SelectableExecutor>,
+) -> Option<crate::omega_executor_selector::SelectableExecutor> {
+    matches!(owner, Agent::NativeAgent)
+        .then_some(routed_executor)
+        .flatten()
+}
+
 fn loading_contents_spinner(size: IconSize) -> AnyElement {
     Icon::new(IconName::LoadCircle)
         .size(size)
@@ -5011,6 +5028,21 @@ pub(crate) mod tests {
     use crate::thread_metadata_store::ThreadMetadataStore;
 
     use super::*;
+
+    #[test]
+    fn direct_owner_ignores_a_stale_router_selection() {
+        let stale = Some(crate::omega_executor_selector::SelectableExecutor::Grok);
+        assert_eq!(
+            routed_executor_for_owner(
+                &Agent::Custom {
+                    id: AgentId::new("grok-build"),
+                },
+                stale,
+            ),
+            None
+        );
+        assert_eq!(routed_executor_for_owner(&Agent::NativeAgent, stale), stale);
+    }
 
     #[test]
     fn test_data_retention_error_maps_from_provider_error() {
@@ -6181,6 +6213,8 @@ pub(crate) mod tests {
                         thread_id: ThreadId::new(),
                         session_id: Some(resume_session_id.clone()),
                         agent_id: ProjectAgentId::new("Flaky"),
+                        conversation_owner_version:
+                            crate::thread_metadata_store::ConversationOwnerVersion::V1,
                         title: Some(stored_title.clone()),
                         title_override: None,
                         updated_at: Utc::now(),

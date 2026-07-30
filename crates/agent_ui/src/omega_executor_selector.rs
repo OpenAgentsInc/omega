@@ -13,12 +13,10 @@
 //! # One public executor, with Exo admitted only by an explicit launch
 //!
 //! [`SelectableExecutor`] retains the five runtime identities because routing,
-//! disclosure, thread recovery, and adapter warming still need to distinguish
-//! them. The public selector is narrower: Omega is the only ordinary choice,
-//! and Exo joins it only when this process was launched with `--enable-exo`.
-//! Codex, Claude, and Grok remain loaded as routing infrastructure behind Omega, but
-//! their disabled rows say that direct selection is coming in a future
-//! version.
+//! disclosure, thread recovery, and adapter warming need to distinguish them.
+//! This legacy router selector remains narrower: Omega and opted-in Exo only.
+//! Direct ACP ownership is selected at the three-mode front door, where an
+//! exact `Agent::Custom` conversation is constructed.
 //!
 //! [`ready`] remains the capability inventory used by background warming.
 //! [`selectable`] applies the separate public-selection policy:
@@ -36,9 +34,8 @@
 //!   when it attaches, so the list cannot offer a lane the attach then
 //!   declines.
 //!
-//! Keeping these lists separate is the point. Hiding a runtime from direct
-//! selection must not stop Omega from starting it ahead of time or routing a
-//! turn to it internally.
+//! Keeping these lists separate lets the UI explain a detected but unusable
+//! runtime without pretending that detection created an ACP session.
 //!
 //! # Why choosing re-attaches instead of re-pinning
 //!
@@ -99,9 +96,6 @@ pub const CHOOSING_RECONNECTS: &str =
 /// the feature and the one a person actually reads.
 pub const ONLY_BEFORE_THE_FIRST_MESSAGE: &str = "The executor is chosen before the first message. Start a new conversation \
      to run on a different one.";
-
-/// Why external ACP executors are visible but not directly selectable.
-pub const DIRECT_SELECTION_COMING_SOON: &str = "Coming soon — selectable in an upcoming version";
 
 /// The five executors a person may choose between.
 ///
@@ -293,9 +287,8 @@ pub fn ready_here() -> Vec<SelectableExecutor> {
 
 /// Apply the public executor-selection policy to a capability inventory.
 ///
-/// Codex, Claude, and Grok remain in the inventory so Omega can route to them and
-/// keep their adapters warm. They are deliberately absent from this result,
-/// which is the only list the menu makes clickable.
+/// The legacy Omega-router selection policy. Direct ACP agents are not routed
+/// through this selector; the front door constructs their exact owner.
 #[must_use]
 pub fn selectable(ready: &[SelectableExecutor], exo_enabled: bool) -> Vec<SelectableExecutor> {
     ready
@@ -389,9 +382,7 @@ pub fn unavailable_here() -> Vec<(SelectableExecutor, &'static str)> {
 
 /// Disabled rows shown by the public executor menu.
 ///
-/// Exo keeps its machine-specific reason when the launch opted in but no lane
-/// resolves. External ACP executors always use the product-timeline message:
-/// installation status does not make direct selection available yet.
+/// Every unavailable row carries the machine-specific capability reason.
 #[must_use]
 pub fn selector_unavailable_here() -> Vec<(SelectableExecutor, &'static str)> {
     let selectable = selectable_here();
@@ -404,19 +395,14 @@ pub fn selector_unavailable_here() -> Vec<(SelectableExecutor, &'static str)> {
             if selectable.contains(&choice) {
                 return None;
             }
-            match choice {
-                SelectableExecutor::Omega => None,
-                SelectableExecutor::Codex
-                | SelectableExecutor::Claude
-                | SelectableExecutor::Grok => Some((choice, DIRECT_SELECTION_COMING_SOON)),
-                SelectableExecutor::Exo => Some((
-                    choice,
-                    unavailable
-                        .iter()
-                        .find(|(candidate, _)| *candidate == choice)
-                        .map_or("Exo is unavailable for this launch", |(_, reason)| *reason),
-                )),
-            }
+            unavailable
+                .iter()
+                .find(|(candidate, _)| *candidate == choice)
+                .copied()
+                .or_else(|| {
+                    (choice == SelectableExecutor::Exo)
+                        .then_some((choice, "Exo is unavailable for this launch"))
+                })
         })
         .collect()
 }
@@ -518,8 +504,7 @@ pub fn select(choice: SelectableExecutor) {
         SelectableExecutor::Codex | SelectableExecutor::Claude | SelectableExecutor::Grok
     ) {
         log::warn!(
-            "OMEGA-DELTA-0146: ignored a direct {} selection because only \
-             Omega is selectable in this version",
+            "ignored routed {} selection; choose it as a Direct Agent owner at the front door",
             choice.selector_name()
         );
         return;

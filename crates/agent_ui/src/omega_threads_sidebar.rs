@@ -38,7 +38,7 @@ use workspace::PathList;
 
 use crate::Agent;
 use crate::omega_executor_selector::SelectableExecutor;
-use crate::thread_metadata_store::{ThreadId, ThreadMetadata};
+use crate::thread_metadata_store::{ConversationOwner, ThreadId, ThreadMetadata};
 
 /// How many rows the sidebar will draw.
 ///
@@ -145,8 +145,20 @@ pub fn rows<'a>(
         .take(MAX_ROWS)
         .map(|thread| {
             let executor = recorded_executor(&thread.agent_id);
-            let unreopenable =
-                reopen_refusal(executor, &thread.agent_id, unavailable, registered_agents);
+            let unreopenable = match thread.conversation_owner() {
+                ConversationOwner::LegacyAmbiguous(ref agent_id) => Some(Unreopenable {
+                    note: "Owner unverified — legacy thread".into(),
+                    refusal: format!(
+                        "This thread predates verified Direct Agent ownership. Its recorded id \
+                         `{agent_id}` may be an owner or a routed executor, so Omega will not \
+                         guess which agent owns the session."
+                    )
+                    .into(),
+                }),
+                ConversationOwner::LegacyOmega | ConversationOwner::Exact(_) => {
+                    reopen_refusal(executor, &thread.agent_id, unavailable, registered_agents)
+                }
+            };
             ThreadRow {
                 thread_id: thread.thread_id,
                 agent_id: thread.agent_id.clone(),
@@ -324,6 +336,7 @@ mod tests {
             thread_id: ThreadId::new(),
             session_id: session.then(|| acp::SessionId::new("session")),
             agent_id: AgentId::new(agent),
+            conversation_owner_version: crate::thread_metadata_store::ConversationOwnerVersion::V1,
             title: Some(title.into()),
             title_override: None,
             updated_at,

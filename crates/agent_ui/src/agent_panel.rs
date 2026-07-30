@@ -595,7 +595,21 @@ pub fn init(cx: &mut App) {
                     if let Some(panel) = workspace.panel::<AgentPanel>(cx) {
                         panel.update(cx, |panel, cx| {
                             let agent = AgentId::new(action.agent.clone()).into();
-                            panel.select_agent(agent, window, cx);
+                            if panel.showing_new_conversation_front_door {
+                                panel.set_selected_agent_and_persist(agent, cx);
+                                panel.selected_front_door_mode = ConversationMode::DirectAgent;
+                                if !panel.project.read(cx).is_via_collab() {
+                                    panel.prepare_direct_draft(
+                                        AgentId::new(action.agent.clone()),
+                                        AgentThreadSource::AgentPanel,
+                                        window,
+                                        cx,
+                                    );
+                                }
+                                cx.notify();
+                            } else {
+                                panel.select_agent(agent, window, cx);
+                            }
                         });
                     }
                 })
@@ -1290,6 +1304,44 @@ enum BaseView {
     },
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum ToolbarMode {
+    Terminal,
+    EmptyThread,
+    ActiveThread,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct ToolbarSurfaceState {
+    mode: ToolbarMode,
+    show_thread_details: bool,
+}
+
+fn toolbar_surface_state(
+    showing_new_conversation_front_door: bool,
+    base_is_terminal: bool,
+    active_thread_has_messages: bool,
+) -> ToolbarSurfaceState {
+    if showing_new_conversation_front_door {
+        return ToolbarSurfaceState {
+            mode: ToolbarMode::EmptyThread,
+            show_thread_details: false,
+        };
+    }
+
+    let mode = if base_is_terminal {
+        ToolbarMode::Terminal
+    } else if active_thread_has_messages {
+        ToolbarMode::ActiveThread
+    } else {
+        ToolbarMode::EmptyThread
+    };
+    ToolbarSurfaceState {
+        mode,
+        show_thread_details: true,
+    }
+}
+
 #[derive(Clone)]
 struct NewConversationModeRow {
     mode: ConversationMode,
@@ -1771,7 +1823,7 @@ impl AgentPanel {
                     }) {
                         Ok(Some((store, reload_task))) => {
                             reload_task.await;
-                            let thread_id = store.read_with(cx, |store, _cx| {
+                            let metadata = store.read_with(cx, |store, _cx| {
                                 let primary = info.thread_id.and_then(|tid| store.entry(tid));
                                 let fallback = info.session_id.as_ref().and_then(|sid| {
                                     store.entry_by_session(&acp::SessionId::new(sid.clone()))
@@ -1779,10 +1831,10 @@ impl AgentPanel {
                                 primary
                                     .or(fallback)
                                     .filter(|entry| !entry.archived)
-                                    .map(|entry| entry.thread_id)
+                                    .cloned()
                             });
-                            match thread_id {
-                                Some(thread_id) => Some((info, thread_id)),
+                            match metadata {
+                                Some(metadata) => Some((info, metadata)),
                                 None => {
                                     log::info!(
                                         "last active thread is archived or missing, skipping restoration"
@@ -1846,8 +1898,24 @@ impl AgentPanel {
                     // so the draft survives reload bound to the right
                     // backend; otherwise fall back to the serialized
                     // selection, then the global last-used agent.
+                    let restored_agent = thread_to_restore.as_ref().and_then(|(_, metadata)| {
+                        match metadata.restorable_agent() {
+                            Ok(agent) if !is_via_collab || agent.is_native() => Some(agent),
+                            Ok(_) => {
+                                panel.threads_sidebar_refusal = Some(
+                                    "Direct Agent threads cannot be restored in a shared project."
+                                        .into(),
+                                );
+                                None
+                            }
+                            Err(error) => {
+                                panel.threads_sidebar_refusal = Some(error.to_string().into());
+                                None
+                            }
+                        }
+                    });
                     let initial_agent = match &thread_to_restore {
-                        Some((info, _)) => Some(clamp(info.agent_type.clone())),
+                        Some(_) => restored_agent.clone(),
                         None => serialized_panel
                             .as_ref()
                             .and_then(|p| p.selected_agent.clone())
@@ -1867,11 +1935,12 @@ impl AgentPanel {
                             window,
                             cx,
                         );
-                    } else if let Some((info, thread_id)) = thread_to_restore {
-                        let agent = panel.selected_agent.clone();
+                    } else if let Some((info, metadata)) = thread_to_restore
+                        && let Some(agent) = restored_agent
+                    {
                         panel.load_agent_thread(
                             agent,
-                            thread_id,
+                            metadata.thread_id,
                             info.work_dirs.as_ref().map(PathList::deserialize),
                             info.title.clone().map(Into::into),
                             false,
@@ -2306,47 +2375,13 @@ impl AgentPanel {
         &self.connection_store
     }
 
-    /// The agent a legacy, untyped thread request here is built on.
+    /// The exact agent selected for a new or restored conversation.
     ///
-    /// `OMEGA-DELTA-0131`, omega#121. The panel's inherited agent selection is
-    /// kept per workspace and globally as the last-used agent.
-    ///
-    /// The owner selected Exo, the selector said Exo, he typed `who are you`,
-    /// and Codex answered. Every other surface was telling the truth: the
-    /// thread was titled "New Codex Thread", the composer read "Message Codex",
-    /// and the reply said "I'm Codex". His panel had been on `Agent::Codex`
-    /// since an earlier session, so the conversation held Codex's *own* server
-    /// — and Omega's router is the only thing that reads the executor
-    /// selection. Choosing an executor tore that connection down and rebuilt
-    /// the same one, three times in six seconds, logging nothing but the
-    /// choice.
-    ///
-    /// So an untyped zero-base request is built on Omega's router. The typed
-    /// three-mode front door does not call this accessor for an explicit
-    /// Direct Agent target; that path carries the exact ACP id or refuses.
-    ///
-    /// **The clamp is here, on the accessor, and not on the stored field.**
-    /// That is the correction to the first version of this fix, which clamped
-    /// every write. `OMEGA-DELTA-0118` promises a thread reopens under *the
-    /// executor that recorded it*, and the panel restores the last thread's own
-    /// agent at launch to keep that promise — so clamping the writes rewrote a
-    /// Codex thread's owner to the router on the way back in, the router had no
-    /// route record for a session it had never opened, and the owner's next
-    /// launch said `Failed to Launch — no thread found with ID`. A reopened
-    /// thread keeps the agent it was recorded under.
-    ///
-    /// Beside the collaboration rule below for the same reason: both are cases
-    /// where the stored selection is not what a new thread may use.
+    /// Zero base uses an explicit Omega target for its default front-door row,
+    /// so this accessor must not reinterpret a stored Direct selection as
+    /// native. Shared projects remain native-only.
     pub fn selected_agent(&self, cx: &App) -> Agent {
         if self.project.read(cx).is_via_collab() {
-            Agent::NativeAgent
-        } else if omega_zero_base::is_active() && !matches!(self.selected_agent, Agent::NativeAgent)
-        {
-            log::info!(
-                "OMEGA-DELTA-0150: a new thread in zero base is built on Omega's \
-                 native router rather than on {} directly",
-                self.selected_agent.label()
-            );
             Agent::NativeAgent
         } else {
             self.selected_agent.clone()
@@ -2364,16 +2399,21 @@ impl AgentPanel {
         // Share links / clipboard imports enter with only a session id. If
         // this machine already has a metadata row for the session, route
         // through the normal thread-id path.
-        let existing_thread_id = ThreadMetadataStore::try_global(cx).and_then(|store| {
-            store
-                .read(cx)
-                .entry_by_session(&session_id)
-                .map(|m| m.thread_id)
-        });
-        if let Some(thread_id) = existing_thread_id {
+        let existing_metadata = ThreadMetadataStore::try_global(cx)
+            .and_then(|store| store.read(cx).entry_by_session(&session_id).cloned());
+        if let Some(metadata) = existing_metadata {
+            let Ok(agent) = metadata.restorable_agent() else {
+                self.sidebar.open = true;
+                self.threads_sidebar_refusal = Some(
+                    "This thread predates verified Direct Agent ownership, so Omega cannot safely choose its executor."
+                        .into(),
+                );
+                cx.notify();
+                return;
+            };
             self.load_agent_thread(
-                crate::Agent::NativeAgent,
-                thread_id,
+                agent,
+                metadata.thread_id,
                 work_dirs,
                 title,
                 true,
@@ -2382,34 +2422,13 @@ impl AgentPanel {
                 cx,
             );
         } else {
-            self.external_thread_by_session(
-                crate::Agent::NativeAgent,
-                session_id,
-                work_dirs,
-                title,
-                true,
-                AgentThreadSource::AgentPanel,
-                window,
-                cx,
+            self.sidebar.open = true;
+            self.threads_sidebar_refusal = Some(
+                "This session has no verified conversation owner, so Omega will not guess an executor."
+                    .into(),
             );
+            cx.notify();
         }
-    }
-
-    fn external_thread_by_session(
-        &mut self,
-        agent: Agent,
-        session_id: acp::SessionId,
-        work_dirs: Option<PathList>,
-        title: Option<SharedString>,
-        focus: bool,
-        source: AgentThreadSource,
-        window: &mut Window,
-        cx: &mut Context<Self>,
-    ) {
-        let thread = self.create_agent_thread_with_server_for_external_session(
-            agent, None, session_id, work_dirs, title, None, source, window, cx,
-        );
-        self.set_base_view(thread.into(), focus, window, cx);
     }
 
     pub(crate) fn context_server_registry(&self) -> &Entity<ContextServerRegistry> {
@@ -2465,17 +2484,38 @@ impl AgentPanel {
     }
 
     fn open_new_conversation_front_door(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.open_new_conversation_front_door_for_mode(ConversationMode::OmegaAgent, window, cx);
+    }
+
+    fn open_new_conversation_front_door_for_mode(
+        &mut self,
+        mode: ConversationMode,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
         self.set_last_created_entry_kind_from_user_action(AgentPanelEntryKind::Thread, cx);
         self.showing_full_auto = false;
         self.showing_new_conversation_front_door = true;
-        self.selected_front_door_mode = ConversationMode::OmegaAgent;
+        self.selected_front_door_mode = mode;
 
         // Zero Base's existing draft is the preparation entity. Starting a
         // second probe here would create a second session, metadata row, and
         // audience binding before the person chose anything. The draft's
         // ConversationView is therefore retained off-screen until its real
         // `new_session` completes and then claimed verbatim.
-        self.prepare_omega_draft(AgentThreadSource::AgentPanel, window, cx);
+        match mode {
+            ConversationMode::OmegaAgent => {
+                self.prepare_omega_draft(AgentThreadSource::AgentPanel, window, cx);
+            }
+            ConversationMode::DirectAgent => {
+                if !self.project.read(cx).is_via_collab()
+                    && let Agent::Custom { id } = self.selected_agent.clone()
+                {
+                    self.prepare_direct_draft(id, AgentThreadSource::AgentPanel, window, cx);
+                }
+            }
+            ConversationMode::Sarah => {}
+        }
         self.focus_handle.focus(window, cx);
         cx.emit(AgentPanelEvent::ActiveViewChanged);
         cx.notify();
@@ -2515,6 +2555,59 @@ impl AgentPanel {
 
         let thread = self.create_agent_thread_inner(
             Agent::NativeAgent,
+            false,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            source,
+            window,
+            cx,
+        );
+        let draft = thread.conversation_view;
+        self.observe_draft_editor(&draft, cx);
+        self.draft_thread = Some(draft.clone());
+        draft
+    }
+
+    fn prepare_direct_draft(
+        &mut self,
+        agent_id: AgentId,
+        source: AgentThreadSource,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> Entity<ConversationView> {
+        let direct_agent = Agent::Custom { id: agent_id };
+        if let Some(draft) = self.draft_thread.clone() {
+            if *draft.read(cx).agent_key() == direct_agent && !self.draft_has_content(&draft, cx) {
+                return draft;
+            }
+
+            let draft_id = draft.read(cx).thread_id;
+            if self.draft_has_content(&draft, cx) {
+                self.retained_threads.insert(draft_id, draft);
+            } else {
+                if matches!(
+                    &self.base_view,
+                    BaseView::AgentThread { conversation_view }
+                        if conversation_view.entity_id() == draft.entity_id()
+                ) {
+                    self.base_view = BaseView::Uninitialized;
+                    self.refresh_base_view_subscriptions(window, cx);
+                }
+                ThreadMetadataStore::global(cx).update(cx, |store, cx| {
+                    store.delete(draft_id, cx);
+                });
+            }
+            self.draft_thread = None;
+            self._draft_editor_observation = None;
+        }
+
+        let thread = self.create_agent_thread_inner(
+            direct_agent,
             false,
             None,
             None,
@@ -2581,10 +2674,60 @@ impl AgentPanel {
             ModeReadiness::NotSupportedInBuild {
                 reason: "Direct agents are not supported in shared projects".into(),
             }
-        } else {
-            ModeReadiness::NotSupportedInBuild {
-                reason: "Direct-agent conversations are not supported in this build".into(),
+        } else if direct_target.is_none() {
+            ModeReadiness::SetupRequired {
+                reason: "Choose an installed ACP agent".into(),
+                action: ModeSetupAction::AddAcpAgent,
             }
+        } else {
+            self.draft_thread.as_ref().map_or_else(
+                || ModeReadiness::SetupRequired {
+                    reason: "Create a session with the selected ACP agent".into(),
+                    action: ModeSetupAction::PrepareDirectAgent,
+                },
+                |draft| {
+                    let Some(target) = direct_target.as_ref() else {
+                        return ModeReadiness::SetupRequired {
+                            reason: "Choose an installed ACP agent".into(),
+                            action: ModeSetupAction::AddAcpAgent,
+                        };
+                    };
+                    let matching_agent = matches!(
+                        (draft.read(cx).agent_key(), target),
+                        (Agent::Custom { id }, ConversationTarget::DirectAgent { agent_id })
+                            if id.as_ref() == agent_id.as_str()
+                    );
+                    if !matching_agent {
+                        return ModeReadiness::SetupRequired {
+                            reason: "Create a session with the selected ACP agent".into(),
+                            action: ModeSetupAction::PrepareDirectAgent,
+                        };
+                    }
+                    match draft.read(cx).preparation_state(cx) {
+                        ConversationPreparation::Loading => ModeReadiness::TemporarilyUnavailable {
+                            reason: format!("Connecting to {}…", target.executor_label()),
+                        },
+                        ConversationPreparation::Ready { session_id } => {
+                            PreparationReceipt::after_session_created(target.clone(), session_id)
+                                .map_or_else(
+                                    || ModeReadiness::TemporarilyUnavailable {
+                                        reason: format!(
+                                            "Connecting to {}…",
+                                            target.executor_label()
+                                        ),
+                                    },
+                                    |receipt| ModeReadiness::Ready { receipt },
+                                )
+                        }
+                        ConversationPreparation::SetupRequired { reason } => {
+                            ModeReadiness::SetupRequired {
+                                reason: reason.to_string(),
+                                action: ModeSetupAction::RevealPreparedConversation,
+                            }
+                        }
+                    }
+                },
+            )
         };
 
         let omega_target = ConversationTarget::OmegaAgent;
@@ -2592,23 +2735,33 @@ impl AgentPanel {
             || ModeReadiness::TemporarilyUnavailable {
                 reason: "Preparing Omega…".into(),
             },
-            |draft| match draft.read(cx).preparation_state(cx) {
-                ConversationPreparation::Loading => ModeReadiness::TemporarilyUnavailable {
-                    reason: "Creating an Omega session…".into(),
-                },
-                ConversationPreparation::Ready { session_id } => {
-                    PreparationReceipt::after_session_created(omega_target.clone(), session_id)
-                        .map_or_else(
-                            || ModeReadiness::TemporarilyUnavailable {
-                                reason: "Creating an Omega session…".into(),
-                            },
-                            |receipt| ModeReadiness::Ready { receipt },
-                        )
+            |draft| {
+                if !matches!(draft.read(cx).agent_key(), Agent::NativeAgent) {
+                    return ModeReadiness::SetupRequired {
+                        reason: "Create a session with Omega".into(),
+                        action: ModeSetupAction::PrepareOmegaAgent,
+                    };
                 }
-                ConversationPreparation::SetupRequired { reason } => ModeReadiness::SetupRequired {
-                    reason: reason.to_string(),
-                    action: ModeSetupAction::RevealPreparedConversation,
-                },
+                match draft.read(cx).preparation_state(cx) {
+                    ConversationPreparation::Loading => ModeReadiness::TemporarilyUnavailable {
+                        reason: "Creating an Omega session…".into(),
+                    },
+                    ConversationPreparation::Ready { session_id } => {
+                        PreparationReceipt::after_session_created(omega_target.clone(), session_id)
+                            .map_or_else(
+                                || ModeReadiness::TemporarilyUnavailable {
+                                    reason: "Creating an Omega session…".into(),
+                                },
+                                |receipt| ModeReadiness::Ready { receipt },
+                            )
+                    }
+                    ConversationPreparation::SetupRequired { reason } => {
+                        ModeReadiness::SetupRequired {
+                            reason: reason.to_string(),
+                            action: ModeSetupAction::RevealPreparedConversation,
+                        }
+                    }
+                }
             },
         );
 
@@ -2664,8 +2817,23 @@ impl AgentPanel {
                 ModeSetupAction::AddAcpAgent => {
                     window.dispatch_action(zed_actions::AcpRegistry.boxed_clone(), cx)
                 }
+                ModeSetupAction::PrepareOmegaAgent => {
+                    self.prepare_omega_draft(AgentThreadSource::AgentPanel, window, cx);
+                }
+                ModeSetupAction::PrepareDirectAgent => {
+                    if let Some(ConversationTarget::DirectAgent { agent_id }) = row.target {
+                        self.prepare_direct_draft(
+                            AgentId::new(agent_id.as_str()),
+                            AgentThreadSource::AgentPanel,
+                            window,
+                            cx,
+                        );
+                    }
+                }
                 ModeSetupAction::RevealPreparedConversation => {
-                    self.reveal_prepared_omega(window, cx);
+                    if let Some(target) = row.target {
+                        self.reveal_prepared_conversation(&target, window, cx);
+                    }
                 }
             }
             cx.notify();
@@ -2710,9 +2878,68 @@ impl AgentPanel {
                     cx,
                 );
             }
-            // Unavailable typed targets stay inert instead of falling through
-            // `selected_agent` or claiming the prepared Omega conversation.
-            ConversationTarget::DirectAgent { .. } | ConversationTarget::Sarah => {}
+            ConversationTarget::DirectAgent { agent_id } => {
+                let target = ConversationTarget::DirectAgent {
+                    agent_id: agent_id.clone(),
+                };
+                let Some(draft) = self.draft_thread.clone() else {
+                    return;
+                };
+                let matching_agent = matches!(
+                    draft.read(cx).agent_key(),
+                    Agent::Custom { id } if id.as_ref() == agent_id.as_str()
+                );
+                let session_id = match draft.read(cx).preparation_state(cx) {
+                    ConversationPreparation::Ready { session_id } if matching_agent => session_id,
+                    _ => return,
+                };
+                if !receipt.proves(&target, &session_id) {
+                    return;
+                }
+                self.showing_new_conversation_front_door = false;
+                self.set_base_view(
+                    BaseView::AgentThread {
+                        conversation_view: draft,
+                    },
+                    true,
+                    window,
+                    cx,
+                );
+            }
+            ConversationTarget::Sarah => {}
+        }
+    }
+
+    fn reveal_prepared_conversation(
+        &mut self,
+        target: &ConversationTarget,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> bool {
+        match target {
+            ConversationTarget::OmegaAgent => self.reveal_prepared_omega(window, cx),
+            ConversationTarget::DirectAgent { agent_id } => {
+                let Some(draft) = self.draft_thread.clone() else {
+                    return false;
+                };
+                if !matches!(
+                    draft.read(cx).agent_key(),
+                    Agent::Custom { id } if id.as_ref() == agent_id.as_str()
+                ) {
+                    return false;
+                }
+                self.showing_new_conversation_front_door = false;
+                self.set_base_view(
+                    BaseView::AgentThread {
+                        conversation_view: draft,
+                    },
+                    true,
+                    window,
+                    cx,
+                );
+                true
+            }
+            ConversationTarget::Sarah => false,
         }
     }
 
@@ -2845,11 +3072,22 @@ impl AgentPanel {
             return;
         };
 
-        let agent = if self.project.read(cx).is_via_collab() {
-            Agent::NativeAgent
-        } else {
-            Agent::from(metadata.agent_id.clone())
+        let Ok(agent) = metadata.restorable_agent() else {
+            self.sidebar.open = true;
+            self.threads_sidebar_refusal = Some(
+                "This draft predates verified Direct Agent ownership, so Omega cannot safely choose its executor."
+                    .into(),
+            );
+            cx.notify();
+            return;
         };
+        if self.project.read(cx).is_via_collab() && !agent.is_native() {
+            self.sidebar.open = true;
+            self.threads_sidebar_refusal =
+                Some("Direct Agent drafts cannot be restored in a shared project.".into());
+            cx.notify();
+            return;
+        }
         let initial_content = crate::draft_prompt_store::read(thread_id, cx).map(|blocks| {
             AgentInitialContent::ContentBlock {
                 blocks,
@@ -2890,8 +3128,19 @@ impl AgentPanel {
     ) {
         if is_zero_base {
             self.set_selected_agent_and_persist(action.agent.clone().into(), cx);
-            self.open_new_conversation_front_door(window, cx);
-            self.selected_front_door_mode = ConversationMode::DirectAgent;
+            self.open_new_conversation_front_door_for_mode(
+                ConversationMode::DirectAgent,
+                window,
+                cx,
+            );
+            cx.notify();
+            return;
+        }
+
+        if self.project.read(cx).is_via_collab() {
+            self.sidebar.open = true;
+            self.threads_sidebar_refusal =
+                Some("Direct Agent conversations cannot be created in a shared project.".into());
             cx.notify();
             return;
         }
@@ -4168,8 +4417,18 @@ impl AgentPanel {
         // because it was an overlay covering the thread it had just opened.
         // A persistent sidebar is beside that thread rather than on top of it,
         // and closing it would take away the list the person is picking from.
+        let metadata = ThreadMetadataStore::try_global(cx)
+            .and_then(|store| store.read(cx).entry(row.thread_id).cloned());
+        let Some(agent) = metadata.and_then(|metadata| metadata.restorable_agent().ok()) else {
+            self.threads_sidebar_refusal = Some(
+                "This thread predates verified Direct Agent ownership, so Omega cannot safely choose an executor for its session."
+                    .into(),
+            );
+            cx.notify();
+            return;
+        };
         self.load_agent_thread(
-            Agent::from(row.agent_id.clone()),
+            agent,
             row.thread_id,
             Some(row.folder_paths.clone()),
             Some(row.title.clone()),
@@ -6654,42 +6913,6 @@ impl AgentPanel {
         )
     }
 
-    /// Legacy entry that resumes a thread by raw ACP session id when no
-    /// local [`ThreadMetadata`] row exists yet (share-link imports and
-    /// clipboard imports).
-    ///
-    /// TODO(legacy-session-id): migrate remaining callers (share-link
-    /// handler, clipboard import) to mint a [`ThreadId`] + seed metadata
-    /// so they can route through [`create_agent_thread_with_server`] and
-    /// this entry can be deleted.
-    fn create_agent_thread_with_server_for_external_session(
-        &mut self,
-        agent: Agent,
-        server_override: Option<Rc<dyn AgentServer>>,
-        resume_session_id: acp::SessionId,
-        work_dirs: Option<PathList>,
-        title: Option<SharedString>,
-        initial_content: Option<AgentInitialContent>,
-        source: AgentThreadSource,
-        window: &mut Window,
-        cx: &mut Context<Self>,
-    ) -> AgentThread {
-        self.create_agent_thread_inner(
-            agent,
-            true,
-            server_override,
-            None,
-            Some(resume_session_id),
-            work_dirs,
-            title,
-            initial_content,
-            None,
-            source,
-            window,
-            cx,
-        )
-    }
-
     fn create_agent_thread_inner(
         &mut self,
         agent: Agent,
@@ -8075,18 +8298,38 @@ impl AgentPanel {
         // beside it disabled.
         let can_create_entries = true;
         let supports_terminal = self.supports_terminal(cx);
-        let has_open_project = self.has_open_project(cx);
-        let is_zero_base = omega_zero_base::is_active();
-        let showing_terminal = matches!(self.visible_surface(), VisibleSurface::Terminal(_));
+        let toolbar_state = if self.showing_new_conversation_front_door {
+            toolbar_surface_state(true, false, false)
+        } else {
+            toolbar_surface_state(
+                false,
+                matches!(self.base_view, BaseView::Terminal { .. }),
+                self.active_thread_has_messages(cx),
+            )
+        };
+        let showing_terminal = matches!(toolbar_state.mode, ToolbarMode::Terminal);
+        let direct_without_target = self.showing_new_conversation_front_door
+            && self.selected_front_door_mode == ConversationMode::DirectAgent
+            && !matches!(self.selected_agent, Agent::Custom { .. });
 
-        // `OMEGA-DELTA-0131`. The same accessor a new thread is built from, not
-        // the stored field. This heading names the thread pressing `+` would
-        // open, and in zero base that is Omega's router whatever the field
-        // holds — the field may be holding the agent of a *reopened* thread,
-        // which is a different question.
-        let agent_for_new_threads = self.selected_agent(cx);
+        let agent_for_new_threads = if self.showing_new_conversation_front_door {
+            match self.selected_front_door_mode {
+                ConversationMode::OmegaAgent | ConversationMode::Sarah => Agent::NativeAgent,
+                ConversationMode::DirectAgent => self.selected_agent.clone(),
+            }
+        } else {
+            self.active_conversation_view()
+                .map(|conversation| conversation.read(cx).agent_key().clone())
+                .unwrap_or_else(|| self.selected_agent.clone())
+        };
         let (selected_agent_custom_icon, selected_agent_label) = if showing_terminal {
             (None, SharedString::from("Terminal"))
+        } else if direct_without_target {
+            (None, SharedString::from("Direct Agent"))
+        } else if self.showing_new_conversation_front_door
+            && self.selected_front_door_mode == ConversationMode::Sarah
+        {
+            (None, SharedString::from("Sarah"))
         } else if let Agent::Custom { id, .. } = &agent_for_new_threads {
             let store = agent_server_store.read(cx);
             let icon = store.agent_icon(&id);
@@ -8111,13 +8354,7 @@ impl AgentPanel {
                     workspace.project().read(cx).is_via_collab()
                 })
                 .unwrap_or_default();
-            let direct_agent_unavailable_reason = if is_zero_base {
-                Some(SharedString::from(
-                    "Direct agents are not available in this alpha yet",
-                ))
-            } else if !has_open_project {
-                Some(SharedString::from("Choose a folder to use direct agents"))
-            } else if is_via_collab {
+            let direct_agent_unavailable_reason = if is_via_collab {
                 Some(SharedString::from(
                     "Direct agents are unavailable in shared projects",
                 ))
@@ -8338,16 +8575,18 @@ impl AgentPanel {
             })
         };
 
-        let is_thread_loading = self
-            .active_conversation_view()
-            .map(|thread| thread.read(cx).is_loading())
-            .unwrap_or(false);
+        let is_thread_loading = toolbar_state.show_thread_details
+            && self
+                .active_conversation_view()
+                .is_some_and(|thread| thread.read(cx).is_loading());
 
         let has_custom_icon = selected_agent_custom_icon.is_some();
         let selected_agent_builtin_icon = if showing_terminal {
             Some(IconName::Terminal)
+        } else if direct_without_target {
+            Some(IconName::Sparkle)
         } else {
-            self.selected_agent.icon()
+            agent_for_new_threads.icon()
         };
         let selected_agent_label_for_tooltip = selected_agent_label.clone();
 
@@ -8389,19 +8628,7 @@ impl AgentPanel {
             selected_agent.into_any_element()
         };
 
-        enum ToolbarMode {
-            Terminal,
-            EmptyThread,
-            ActiveThread,
-        }
-
-        let mode = if matches!(self.base_view, BaseView::Terminal { .. }) {
-            ToolbarMode::Terminal
-        } else if self.active_thread_has_messages(cx) {
-            ToolbarMode::ActiveThread
-        } else {
-            ToolbarMode::EmptyThread
-        };
+        let mode = toolbar_state.mode;
 
         let is_full_screen = self.is_zoomed(window, cx);
         let (icon_id, icon_name, tooltip_text) = if is_full_screen {
@@ -8438,7 +8665,11 @@ impl AgentPanel {
                 .into_any_element()
         });
 
-        let thread_identity = self.render_thread_identity(window, cx);
+        let thread_identity = if toolbar_state.show_thread_details {
+            self.render_thread_identity(window, cx)
+        } else {
+            None
+        };
 
         let toolbar_content = {
             let new_thread_menu = PopoverMenu::new("new_thread_menu")
@@ -8464,8 +8695,10 @@ impl AgentPanel {
                 .with_handle(self.new_thread_menu_handle.clone())
                 .menu(move |window, cx| new_thread_menu_builder(window, cx));
 
-            let sandbox_status = self
-                .active_conversation_view()
+            let sandbox_status = toolbar_state
+                .show_thread_details
+                .then(|| self.active_conversation_view())
+                .flatten()
                 .and_then(|conversation_view| conversation_view.read(cx).root_thread_view())
                 .and_then(|thread_view| {
                     thread_view.update(cx, |thread_view, cx| thread_view.render_sandbox_status(cx))
@@ -13829,6 +14062,36 @@ mod tests {
     use std::sync::Arc;
     use std::time::Instant;
 
+    #[test]
+    fn front_door_toolbar_ignores_every_hidden_base_surface_state() {
+        for (base_is_terminal, active_thread_has_messages) in
+            [(false, false), (false, true), (true, false), (true, true)]
+        {
+            assert_eq!(
+                toolbar_surface_state(true, base_is_terminal, active_thread_has_messages),
+                ToolbarSurfaceState {
+                    mode: ToolbarMode::EmptyThread,
+                    show_thread_details: false,
+                }
+            );
+        }
+
+        assert_eq!(
+            toolbar_surface_state(false, false, true),
+            ToolbarSurfaceState {
+                mode: ToolbarMode::ActiveThread,
+                show_thread_details: true,
+            }
+        );
+        assert_eq!(
+            toolbar_surface_state(false, true, true),
+            ToolbarSurfaceState {
+                mode: ToolbarMode::Terminal,
+                show_thread_details: true,
+            }
+        );
+    }
+
     struct PairingContentBudgetView {
         image: Arc<RenderImage>,
         image_size: Pixels,
@@ -13978,11 +14241,17 @@ mod tests {
     struct SessionTrackingConnection {
         next_session_number: Arc<Mutex<usize>>,
         sessions: Arc<Mutex<HashSet<acp::SessionId>>>,
+        agent_id: Option<AgentId>,
     }
 
     impl SessionTrackingConnection {
         fn new() -> Self {
             Self::default()
+        }
+
+        fn with_agent_id(mut self, agent_id: impl Into<AgentId>) -> Self {
+            self.agent_id = Some(agent_id.into());
+            self
         }
 
         fn create_session(
@@ -14019,7 +14288,9 @@ mod tests {
 
     impl AgentConnection for SessionTrackingConnection {
         fn agent_id(&self) -> AgentId {
-            agent::OMEGA_AGENT_ID.clone()
+            self.agent_id
+                .clone()
+                .unwrap_or_else(|| agent::OMEGA_AGENT_ID.clone())
         }
 
         fn telemetry_id(&self) -> SharedString {
@@ -14992,6 +15263,8 @@ mod tests {
                         thread_id: ThreadId::new(),
                         session_id: Some(resume_session_id.clone()),
                         agent_id: ProjectAgentId::new("Flaky"),
+                        conversation_owner_version:
+                            crate::thread_metadata_store::ConversationOwnerVersion::V1,
                         title: Some("Persistent chat".into()),
                         title_override: None,
                         updated_at: Utc::now(),
@@ -16475,7 +16748,10 @@ mod tests {
             );
             assert!(matches!(
                 rows[0].readiness,
-                ModeReadiness::NotSupportedInBuild { .. }
+                ModeReadiness::SetupRequired {
+                    action: ModeSetupAction::AddAcpAgent,
+                    ..
+                }
             ));
             assert!(matches!(rows[1].readiness, ModeReadiness::Ready { .. }));
             assert!(matches!(
@@ -16602,7 +16878,7 @@ mod tests {
     }
 
     #[gpui::test]
-    async fn zero_base_external_agent_action_opens_the_exact_direct_refusal(
+    async fn zero_base_external_agent_action_prepares_the_exact_direct_agent(
         cx: &mut TestAppContext,
     ) {
         let (panel, mut cx) = setup_visible_panel(cx).await;
@@ -16646,16 +16922,236 @@ mod tests {
                         .expect("the requested ACP id is valid"),
                 })
             );
-            assert!(matches!(
+            assert!(
+                panel.draft_thread.as_ref().is_some_and(|draft| {
+                    matches!(
+                        draft.read(cx).agent_key(),
+                        Agent::Custom { id } if id == &requested_agent
+                    )
+                }),
+                "the Direct action must prepare the requested agent, never Omega"
+            );
+            assert!(!matches!(
                 direct.readiness,
                 ModeReadiness::NotSupportedInBuild { .. }
             ));
-            assert!(
-                panel.draft_thread.as_ref().is_some_and(|draft| {
-                    matches!(draft.read(cx).agent_key(), Agent::NativeAgent)
-                }),
-                "Omega may prepare off-screen, but the Direct action must not activate it"
+        });
+    }
+
+    #[gpui::test]
+    async fn direct_mode_claims_one_exact_prepared_session(cx: &mut TestAppContext) {
+        let (panel, mut cx) = setup_visible_panel(cx).await;
+        let connection = SessionTrackingConnection::new().with_agent_id("opencode");
+        let server = Rc::new(StubAgentServer::new(connection));
+        let agent_id = AgentId::new("opencode");
+        let direct_agent = Agent::Custom {
+            id: agent_id.clone(),
+        };
+
+        let prepared = panel.update_in(&mut cx, |panel, window, cx| {
+            panel.connection_store.update(cx, |store, cx| {
+                store.restart_connection(direct_agent.clone(), server, cx);
+            });
+            panel.set_selected_agent_and_persist(direct_agent, cx);
+            panel.open_new_conversation_front_door_for_mode(
+                ConversationMode::DirectAgent,
+                window,
+                cx,
             );
+            panel
+                .draft_thread
+                .clone()
+                .expect("Direct must retain its preparation entity")
+        });
+        cx.run_until_parked();
+
+        let prepared_session =
+            prepared.read_with(&cx, |prepared, cx| match prepared.preparation_state(cx) {
+                ConversationPreparation::Ready { session_id } => session_id,
+                state => panic!("expected a ready Direct session, got {state:?}"),
+            });
+        panel.update_in(&mut cx, |panel, window, cx| {
+            let direct = panel
+                .new_conversation_mode_rows(cx)
+                .into_iter()
+                .find(|row| row.mode == ConversationMode::DirectAgent)
+                .expect("Direct row remains visible");
+            assert!(matches!(direct.readiness, ModeReadiness::Ready { .. }));
+            panel.activate_new_conversation_mode(ConversationMode::DirectAgent, window, cx);
+        });
+
+        panel.read_with(&cx, |panel, cx| {
+            let active = panel
+                .active_conversation_view()
+                .expect("Direct activation should claim the preparation");
+            assert_eq!(active.entity_id(), prepared.entity_id());
+            assert_eq!(active.read(cx).agent_key(), &Agent::Custom { id: agent_id });
+            assert_eq!(
+                active
+                    .read(cx)
+                    .root_thread(cx)
+                    .expect("the exact prepared session remains attached")
+                    .read(cx)
+                    .session_id()
+                    .to_string(),
+                prepared_session
+            );
+        });
+    }
+
+    #[gpui::test]
+    async fn direct_preparation_receipts_preserve_named_and_generic_ids(cx: &mut TestAppContext) {
+        let (panel, mut cx) = setup_visible_panel(cx).await;
+        for agent_id in [
+            agent_servers::CODEX_ID,
+            agent_servers::CLAUDE_AGENT_ID,
+            agent_servers::GROK_ID,
+            "grok-build",
+            "opencode",
+        ] {
+            let server = Rc::new(StubAgentServer::new(
+                SessionTrackingConnection::new().with_agent_id(agent_id),
+            ));
+            let exact_id = AgentId::new(agent_id);
+            let exact_agent = Agent::Custom {
+                id: exact_id.clone(),
+            };
+            panel.update_in(&mut cx, |panel, window, cx| {
+                panel.connection_store.update(cx, |store, cx| {
+                    store.restart_connection(exact_agent.clone(), server, cx);
+                });
+                panel.set_selected_agent_and_persist(exact_agent.clone(), cx);
+                panel.open_new_conversation_front_door_for_mode(
+                    ConversationMode::DirectAgent,
+                    window,
+                    cx,
+                );
+            });
+            cx.run_until_parked();
+
+            panel.read_with(&cx, |panel, cx| {
+                let direct = panel
+                    .new_conversation_mode_rows(cx)
+                    .into_iter()
+                    .find(|row| row.mode == ConversationMode::DirectAgent)
+                    .expect("Direct row remains available");
+                let target = ConversationTarget::DirectAgent {
+                    agent_id: DirectAgentId::new(agent_id)
+                        .expect("the table contains valid ACP ids"),
+                };
+                assert_eq!(direct.target, Some(target.clone()));
+                let ModeReadiness::Ready { receipt } = direct.readiness else {
+                    panic!("{agent_id} should have a real preparation receipt");
+                };
+                let session_id = panel
+                    .draft_thread
+                    .as_ref()
+                    .expect("Direct preparation is retained")
+                    .read(cx)
+                    .root_thread(cx)
+                    .expect("receipt follows session creation")
+                    .read(cx)
+                    .session_id()
+                    .to_string();
+                assert!(receipt.proves(&target, &session_id));
+                assert_eq!(
+                    panel
+                        .draft_thread
+                        .as_ref()
+                        .expect("Direct preparation is retained")
+                        .read(cx)
+                        .agent_key(),
+                    &Agent::Custom { id: exact_id }
+                );
+            });
+        }
+    }
+
+    #[gpui::test]
+    async fn switching_direct_and_omega_replaces_the_preparation_owner(cx: &mut TestAppContext) {
+        let (panel, mut cx) = setup_visible_panel(cx).await;
+        let direct_server = Rc::new(StubAgentServer::new(
+            SessionTrackingConnection::new().with_agent_id("grok-build"),
+        ));
+        let direct_id = AgentId::new("grok-build");
+        let direct_agent = Agent::Custom {
+            id: direct_id.clone(),
+        };
+
+        panel.update_in(&mut cx, |panel, window, cx| {
+            panel.connection_store.update(cx, |store, cx| {
+                store.restart_connection(direct_agent.clone(), direct_server, cx);
+                store.restart_connection(
+                    Agent::NativeAgent,
+                    Rc::new(StubAgentServer::new(SessionTrackingConnection::new())),
+                    cx,
+                );
+            });
+            panel.set_selected_agent_and_persist(direct_agent.clone(), cx);
+            panel.open_new_conversation_front_door_for_mode(
+                ConversationMode::DirectAgent,
+                window,
+                cx,
+            );
+        });
+        cx.run_until_parked();
+
+        panel.update_in(&mut cx, |panel, window, cx| {
+            let omega = panel
+                .new_conversation_mode_rows(cx)
+                .into_iter()
+                .find(|row| row.mode == ConversationMode::OmegaAgent)
+                .expect("Omega row remains available from Direct mode");
+            assert!(matches!(
+                omega.readiness,
+                ModeReadiness::SetupRequired {
+                    action: ModeSetupAction::PrepareOmegaAgent,
+                    ..
+                }
+            ));
+            panel.activate_new_conversation_mode(ConversationMode::OmegaAgent, window, cx);
+        });
+        cx.run_until_parked();
+        panel.read_with(&cx, |panel, cx| {
+            assert!(matches!(
+                panel
+                    .draft_thread
+                    .as_ref()
+                    .expect("Omega selection prepares a replacement")
+                    .read(cx)
+                    .agent_key(),
+                Agent::NativeAgent
+            ));
+            let direct = panel
+                .new_conversation_mode_rows(cx)
+                .into_iter()
+                .find(|row| row.mode == ConversationMode::DirectAgent)
+                .expect("Direct row remains available from Omega mode");
+            assert!(matches!(
+                direct.readiness,
+                ModeReadiness::SetupRequired {
+                    action: ModeSetupAction::PrepareDirectAgent,
+                    ..
+                }
+            ));
+        });
+
+        panel.update_in(&mut cx, |panel, window, cx| {
+            panel.activate_new_conversation_mode(ConversationMode::DirectAgent, window, cx);
+        });
+        cx.run_until_parked();
+        panel.read_with(&cx, |panel, cx| {
+            assert_eq!(
+                panel
+                    .draft_thread
+                    .as_ref()
+                    .expect("Direct selection prepares another replacement")
+                    .read(cx)
+                    .agent_key(),
+                &Agent::Custom { id: direct_id }
+            );
+            assert!(panel.showing_new_conversation_front_door);
+            assert!(panel.active_conversation_view().is_none());
         });
     }
 
@@ -16705,6 +17201,63 @@ mod tests {
             assert_eq!(
                 panel.active_conversation_view().map(Entity::entity_id),
                 Some(prepared.entity_id())
+            );
+            assert!(matches!(
+                prepared.read(cx).preparation_state(cx),
+                ConversationPreparation::SetupRequired { .. }
+            ));
+        });
+    }
+
+    #[gpui::test]
+    async fn direct_setup_failure_reveals_the_exact_agent_view(cx: &mut TestAppContext) {
+        let (panel, mut cx) = setup_visible_panel(cx).await;
+        let server = Rc::new(crate::conversation_view::tests::FailingAgentServer);
+        let agent_id = server.agent_id();
+        let direct_agent = Agent::Custom {
+            id: agent_id.clone(),
+        };
+        let prepared = panel.update_in(&mut cx, |panel, window, cx| {
+            panel.connection_store.update(cx, |store, cx| {
+                store.restart_connection(direct_agent.clone(), server, cx);
+            });
+            panel.set_selected_agent_and_persist(direct_agent, cx);
+            panel.open_new_conversation_front_door_for_mode(
+                ConversationMode::DirectAgent,
+                window,
+                cx,
+            );
+            panel
+                .draft_thread
+                .clone()
+                .expect("Direct setup retains its exact error view")
+        });
+        cx.run_until_parked();
+
+        panel.update_in(&mut cx, |panel, window, cx| {
+            let direct = panel
+                .new_conversation_mode_rows(cx)
+                .into_iter()
+                .find(|row| row.mode == ConversationMode::DirectAgent)
+                .expect("Direct row remains visible after setup fails");
+            assert!(matches!(
+                direct.readiness,
+                ModeReadiness::SetupRequired {
+                    action: ModeSetupAction::RevealPreparedConversation,
+                    ..
+                }
+            ));
+            panel.activate_new_conversation_mode(ConversationMode::DirectAgent, window, cx);
+        });
+
+        panel.read_with(&cx, |panel, cx| {
+            assert_eq!(
+                panel.active_conversation_view().map(Entity::entity_id),
+                Some(prepared.entity_id())
+            );
+            assert_eq!(
+                prepared.read(cx).agent_key(),
+                &Agent::Custom { id: agent_id }
             );
             assert!(matches!(
                 prepared.read(cx).preparation_state(cx),
@@ -18458,6 +19011,106 @@ mod tests {
     }
 
     #[gpui::test]
+    async fn metadata_bound_open_restores_exact_direct_and_refuses_legacy_custom(
+        cx: &mut TestAppContext,
+    ) {
+        use crate::thread_metadata_store::{ConversationOwnerVersion, ThreadMetadata};
+
+        let (panel, mut cx) = setup_panel(cx).await;
+        let legacy_session = acp::SessionId::new("legacy-custom-session");
+        cx.update(|_, cx| {
+            ThreadMetadataStore::global(cx).update(cx, |store, cx| {
+                store.save(
+                    ThreadMetadata {
+                        thread_id: ThreadId::new(),
+                        session_id: Some(legacy_session.clone()),
+                        agent_id: AgentId::new("codex-acp"),
+                        conversation_owner_version: ConversationOwnerVersion::Legacy,
+                        title: Some("Legacy custom".into()),
+                        title_override: None,
+                        updated_at: Utc::now(),
+                        created_at: Some(Utc::now()),
+                        interacted_at: None,
+                        worktree_paths: WorktreePaths::default(),
+                        remote_connection: None,
+                        archived: false,
+                    },
+                    cx,
+                );
+            });
+        });
+        panel.update_in(&mut cx, |panel, window, cx| {
+            panel.open_thread(legacy_session.clone(), None, None, window, cx);
+        });
+        cx.run_until_parked();
+        panel.read_with(&cx, |panel, _cx| {
+            assert!(panel.active_conversation_view().is_none());
+            assert!(
+                panel
+                    .threads_sidebar_refusal
+                    .as_ref()
+                    .is_some_and(|refusal| refusal.contains("cannot safely choose"))
+            );
+        });
+
+        let exact_id = AgentId::new("grok-build");
+        let exact_agent = Agent::Custom {
+            id: exact_id.clone(),
+        };
+        let exact_session = acp::SessionId::new("exact-direct-session");
+        panel.update(&mut cx, |panel, cx| {
+            panel.connection_store.update(cx, |store, cx| {
+                store.restart_connection(
+                    exact_agent.clone(),
+                    Rc::new(StubAgentServer::new(
+                        SessionTrackingConnection::new().with_agent_id(exact_id.clone()),
+                    )),
+                    cx,
+                );
+            });
+            ThreadMetadataStore::global(cx).update(cx, |store, cx| {
+                store.save(
+                    ThreadMetadata {
+                        thread_id: ThreadId::new(),
+                        session_id: Some(exact_session.clone()),
+                        agent_id: exact_id.clone(),
+                        conversation_owner_version: ConversationOwnerVersion::V1,
+                        title: Some("Exact Direct".into()),
+                        title_override: None,
+                        updated_at: Utc::now(),
+                        created_at: Some(Utc::now()),
+                        interacted_at: None,
+                        worktree_paths: WorktreePaths::default(),
+                        remote_connection: None,
+                        archived: false,
+                    },
+                    cx,
+                );
+            });
+        });
+        panel.update_in(&mut cx, |panel, window, cx| {
+            panel.open_thread(exact_session.clone(), None, None, window, cx);
+        });
+        cx.run_until_parked();
+
+        panel.read_with(&cx, |panel, cx| {
+            let active = panel
+                .active_conversation_view()
+                .expect("v1 Direct metadata should open a conversation");
+            assert_eq!(active.read(cx).agent_key(), &exact_agent);
+            assert_eq!(
+                active
+                    .read(cx)
+                    .root_thread(cx)
+                    .expect("the exact session should load")
+                    .read(cx)
+                    .session_id(),
+                &exact_session
+            );
+        });
+    }
+
+    #[gpui::test]
     async fn test_initial_content_for_thread_summary_uses_own_session_id(cx: &mut TestAppContext) {
         init_test(cx);
         cx.update(|cx| {
@@ -19049,6 +19702,41 @@ mod tests {
             Some(expected_agent),
             "the selection should be persisted as the global last-used agent"
         );
+    }
+
+    #[gpui::test]
+    async fn registry_selection_prepares_exact_agent_from_front_door(cx: &mut TestAppContext) {
+        let (panel, mut cx) = setup_visible_panel(cx).await;
+        panel.update_in(&mut cx, |panel, window, cx| {
+            panel.new_thread(&NewThread, window, cx);
+        });
+        cx.run_until_parked();
+
+        cx.dispatch_action(SelectAgent {
+            agent: "opencode".to_string(),
+        });
+        cx.run_until_parked();
+
+        panel.read_with(&cx, |panel, cx| {
+            let expected = Agent::Custom {
+                id: AgentId::new("opencode"),
+            };
+            assert!(panel.showing_new_conversation_front_door);
+            assert_eq!(
+                panel.selected_front_door_mode,
+                ConversationMode::DirectAgent
+            );
+            assert_eq!(panel.selected_agent, expected);
+            assert_eq!(
+                panel
+                    .draft_thread
+                    .as_ref()
+                    .expect("registry selection should replace the offscreen preparation")
+                    .read(cx)
+                    .agent_key(),
+                &expected
+            );
+        });
     }
 
     #[gpui::test]

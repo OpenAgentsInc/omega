@@ -178,11 +178,13 @@ If Omega needs authentication or setup fails, its row says **Setup required**
 with the reason. **Open setup** reveals the same prepared conversation and its
 existing authentication, error, and retry controls.
 
-The front door prepares one Omega Agent draft while its session is connecting.
-Choosing Omega Agent claims that same prepared conversation; it does not probe
-with one session and create another. Direct Agent and Sarah stay visible with
-their honest unavailable state until their session providers are included.
-Starting another mode never retargets an existing transcript.
+The front door prepares one draft for the selected mode while its session is
+connecting. Choosing Omega Agent claims its prepared conversation; choosing a
+configured Direct Agent replaces an unused Omega preparation with one bound to
+the exact ACP id. Neither path probes with one session and creates another.
+Direct setup and authentication errors reveal that same external-agent view,
+with its native controls. Sarah remains visible with its honest unavailable
+state. Starting another mode never retargets an existing transcript.
 
 Use {#action agent::NewTerminalThread} for a terminal thread. The generic new
 thread action no longer repeats the last terminal choice.
