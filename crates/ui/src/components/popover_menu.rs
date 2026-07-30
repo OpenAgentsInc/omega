@@ -351,6 +351,7 @@ pub struct PopoverMenuFrameState<M: ManagedView> {
     child_element: Option<AnyElement>,
     menu_element: Option<AnyElement>,
     menu_handle: Rc<RefCell<Option<Entity<M>>>>,
+    menu_needs_position: bool,
 }
 
 impl<M: ManagedView> Element for PopoverMenu<M> {
@@ -378,22 +379,23 @@ impl<M: ManagedView> Element for PopoverMenu<M> {
                 let element_state = element_state.unwrap_or_default();
                 let mut menu_layout_id = None;
 
-                let menu_element = element_state.menu.borrow_mut().as_mut().map(|menu| {
+                let menu_element = element_state.menu.borrow_mut().as_mut().and_then(|menu| {
+                    // An external handle can open the menu before the trigger's
+                    // first prepaint. Drawing without these bounds would place
+                    // the deferred element at its layout origin.
+                    let child_bounds = element_state.child_bounds?;
                     let offset = self.resolved_offset(window);
-                    let mut anchored = anchored()
+                    let anchored = anchored()
                         .snap_to_window_with_margin(px(8.))
                         .anchor(self.anchor)
-                        .offset(offset);
-                    if let Some(child_bounds) = element_state.child_bounds {
-                        anchored =
-                            anchored.position(child_bounds.corner(self.resolved_attach()) + offset);
-                    }
+                        .offset(offset)
+                        .position(child_bounds.corner(self.resolved_attach()) + offset);
                     let mut element = deferred(anchored.child(div().occlude().child(menu.clone())))
                         .with_priority(1)
                         .into_any();
 
                     menu_layout_id = Some(element.request_layout(window, cx));
-                    element
+                    Some(element)
                 });
 
                 let mut child_element = self.child_builder.take().map(|child_builder| {
@@ -413,6 +415,9 @@ impl<M: ManagedView> Element for PopoverMenu<M> {
                 let child_layout_id = child_element
                     .as_mut()
                     .map(|child_element| child_element.request_layout(window, cx));
+                let menu_needs_position = element_state.child_bounds.is_none()
+                    && element_state.menu.borrow().is_some()
+                    && child_layout_id.is_some();
 
                 let mut style = Style::default();
                 if self.full_width {
@@ -433,6 +438,7 @@ impl<M: ManagedView> Element for PopoverMenu<M> {
                             child_layout_id,
                             menu_element,
                             menu_handle: element_state.menu.clone(),
+                            menu_needs_position,
                         },
                     ),
                     element_state,
@@ -456,6 +462,10 @@ impl<M: ManagedView> Element for PopoverMenu<M> {
 
         if let Some(menu) = request_layout.menu_element.as_mut() {
             menu.prepaint(window, cx);
+        }
+
+        if request_layout.menu_needs_position {
+            window.refresh();
         }
 
         request_layout.child_layout_id.map(|layout_id| {
