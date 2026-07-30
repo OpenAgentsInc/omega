@@ -110,9 +110,7 @@ metadata retain its exact id. Display surfaces may use that owner's configured
 display name or the conversation title.
 
 The typed {#action agent::NewExternalAgentThread} action preserves the exact
-agent you requested. In sealed zero base it opens the Direct Agent row while
-that agent connects; in the transitional full-editor compatibility surface it
-starts the same external agent directly.
+agent you requested: it opens the Direct Agent row while that agent connects.
 
 Thread metadata written by this version marks the conversation owner with an
 explicit version and restores that exact agent after relaunch. Older non-native

@@ -324,6 +324,12 @@ pub async fn open_remote_project(
                                 RemoteConnectionOptions::Mock(_) => {
                                     "Failed to connect to mock server"
                                 }
+                                // Feature unification can add `Mock` (via
+                                // `remote/test-support`) without this crate's
+                                // `test-support`; the arm above is then cfg'd
+                                // out. Mock connections are test-only.
+                                #[allow(unreachable_patterns)]
+                                _ => "Failed to connect to mock server",
                             },
                             Some(&format!("{e:#}")),
                             &["Retry", "Cancel"],
@@ -385,6 +391,12 @@ pub async fn open_remote_project(
                                 RemoteConnectionOptions::Mock(_) => {
                                     "Failed to connect to mock server"
                                 }
+                                // Feature unification can add `Mock` (via
+                                // `remote/test-support`) without this crate's
+                                // `test-support`; the arm above is then cfg'd
+                                // out. Mock connections are test-only.
+                                #[allow(unreachable_patterns)]
+                                _ => "Failed to connect to mock server",
                             },
                             Some(&format!("{e:#}")),
                             &["Retry", "Cancel"],

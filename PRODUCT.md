@@ -22,7 +22,7 @@ Omega has one normal, flag-free launch surface: a conversation, composer, naviga
 
 The chosen mode, concrete executor or router selection, project, and readiness are visible before the first send. Ready means that the named target has connected and created an actual session; executable or configuration detection alone is not enough. Once a conversation starts, its mode and owner do not change underneath its transcript, and every surface names the executor that actually does the work.
 
-The legacy `--full-editor` compatibility path may remain during the alpha transition, but it is not a second advertised experience and is scheduled for post-alpha removal. Vim remains part of the product in the composer and the focused editing surface.
+There is no second launch surface and no launch mode vocabulary: the full-editor mode split was removed (omega#161), and the flag-free launch is the application. Vim remains part of the product in the composer and the focused editing surface.
 
 ## Brand Personality
 

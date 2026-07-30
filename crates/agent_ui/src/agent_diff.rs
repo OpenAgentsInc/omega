@@ -2288,7 +2288,7 @@ impl AgentDiff {
         let weak_workspace = workspace.downgrade();
 
         for editor in editors {
-            if let Some(buffer) = Self::full_editor_buffer(editor.read(cx), cx) {
+            if let Some(buffer) = Self::full_mode_editor_buffer(editor.read(cx), cx) {
                 self.register_editor(weak_workspace.clone(), buffer, editor, window, cx);
             };
         }
@@ -2388,13 +2388,13 @@ impl AgentDiff {
     ) {
         if let workspace::Event::ItemAdded { item } = event
             && let Some(editor) = item.downcast::<Editor>()
-            && let Some(buffer) = Self::full_editor_buffer(editor.read(cx), cx)
+            && let Some(buffer) = Self::full_mode_editor_buffer(editor.read(cx), cx)
         {
             self.register_editor(workspace.downgrade(), buffer, editor, window, cx);
         }
     }
 
-    fn full_editor_buffer(editor: &Editor, cx: &App) -> Option<WeakEntity<Buffer>> {
+    fn full_mode_editor_buffer(editor: &Editor, cx: &App) -> Option<WeakEntity<Buffer>> {
         if editor.mode().is_full() {
             editor
                 .buffer()

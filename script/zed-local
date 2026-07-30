@@ -15,8 +15,8 @@ SUMMARY
 
   $ script/zed-local -2 ssh://your-ssh-uri-here
 
-  Omega starts in zero base unless --full-editor is passed explicitly after
-  the launcher options.
+  Omega has one launch surface (omega#161); arguments after the launcher
+  options are passed through to the first instance unchanged.
 
 OPTIONS
   --help            Print this help message
@@ -201,9 +201,9 @@ setTimeout(() => {
     } else if (i != 0 && othersOnPreview) {
       binaryPath = "/Applications/Zed Preview.app/Contents/MacOS/zed";
     }
-    // OMEGA-DELTA-0116. The development launcher preserves Omega's default
-    // mode. Arguments belong to the first instance exactly as the help text
-    // says; a full editor is opened only when the caller passes its flag.
+    // OMEGA-DELTA-0116, omega#161. There is no mode for a launcher to
+    // change. Arguments belong to the first instance exactly as the help
+    // text says.
     const instanceArgs = i == 0 ? args : [];
     spawn(binaryPath, instanceArgs, {
       stdio: "inherit",

@@ -1973,6 +1973,13 @@ pub(crate) fn icon_for_remote_connection(options: Option<&RemoteConnectionOption
             RemoteConnectionOptions::Docker(_) => IconName::Box,
             #[cfg(any(test, feature = "test-support"))]
             RemoteConnectionOptions::Mock(_) => IconName::Server,
+            // Cargo feature unification can add the `Mock` variant (via
+            // `remote/test-support`) without enabling this crate's own
+            // `test-support`, which removes the arm above and breaks the
+            // build. Mock connections are constructed only by test code, so
+            // this arm is unreachable at runtime in that combination.
+            #[allow(unreachable_patterns)]
+            _ => unreachable!("mock remote connections exist only in test builds"),
         },
     }
 }

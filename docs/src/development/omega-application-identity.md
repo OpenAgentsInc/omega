@@ -262,9 +262,9 @@ the custody/public-manifest startup inspection.
 
 Editor Onboarding is a separately replayable mode available from the Welcome
 page and the `omega::OpenEditorOnboarding` action (also
-`omega::OpenOnboarding`). The Welcome replay remains available on the sealed
-default surface. The two actions are refused there; they are command-palette
-compatibility paths only in the transitional `--full-editor` surface. In debug
+`omega::OpenOnboarding`). The Welcome replay remains available on the
+default surface. The two actions are refused: since the mode split was removed
+(omega#161) they are dead command-palette compatibility names. In debug
 builds, `dev::ResetOnboarding` clears the identity and editor completion records
 so reopen can be retested without wiping the whole profile. It renders the
 same Theme and Agent Setup implementations as First Run, with a compact

@@ -2417,11 +2417,14 @@ than it sounds, because the harness omega#81's acceptance sentence names —
 
 ### OMEGA-DELTA-0047 — Zero base is read from the process command line and from nowhere else
 
-> **`OMEGA-DELTA-0052` changed which way the default points.** This delta is
-> about *where* the mode is read from, and that is unchanged. Zero base is now
-> what `omega` does with no arguments, and `--full-editor` asks for the editor.
-> Read the sentences below as "the command line decides, once", not as "the flag
-> turns it on".
+> **`OMEGA-DELTA-0052` changed which way the default points, and omega#161
+> removed the mode entirely.** There is no reader left: the crate has no entry
+> point, `is_active` is constant `true`, and no argument selects a surface.
+> The property this delta protected — nothing but the person at the keyboard
+> could change the window's shape — is now enforced by absence: the check
+> fails if an entry point, a mode selector, or a settings/env/file reader
+> grows back. Read the historical sentences below as the record of how the
+> mode worked while it existed.
 
 - **Before this change:** Omega had one surface. Every mode-like behaviour it
   had was a setting, and a setting is writable by a project settings file and by
@@ -2456,6 +2459,11 @@ than it sounds, because the harness omega#81's acceptance sentence names —
   batches land, the filter, refusal gate, and intact keymaps remain
   load-bearing and this delta continues to check them rather than pretending
   the deletion has already happened.
+- **Amended by omega#161.** The mode split is removed: the filter and refusal
+  gate install unconditionally, `initialize_panels` has exactly one shape, and
+  the refusal sentence names no flag because there is no editor to start. The
+  refusal-and-filter mechanisms and the intact keymaps remain load-bearing
+  until omega#162 deletes the gated crates; this delta keeps checking them.
 
 - **Before this change:** Omega's two ways to make a surface go away were
   deletion (`OMEGA-DELTA-0009`, `OMEGA-DELTA-0012`) and a settings default.
@@ -2473,10 +2481,10 @@ than it sounds, because the harness omega#81's acceptance sentence names —
   restricted to `omega_zero_base::ADMITTED_NAMESPACES` and
   `ADMITTED_ACTIONS`, and an action outside that set is refused at dispatch.
 - **A refusal is a sentence, never a silent no-op.** The refusal names the
-  action, names the mode, and names the way to get the thing it refused.
-  `OMEGA-DELTA-0052` cut the first of the two ways out it used to name: there is
-  no control in the window any more, so the sentence names `--full-editor` and
-  nothing else.
+  action and says what Omega is instead. `OMEGA-DELTA-0052` cut the first of
+  the two ways out it used to name (the control in the window), and omega#161
+  cut the second (the editor flag): there is nothing left for the sentence to
+  offer, so offering anything would be a lie.
 - **The gate is the reason "not rendered" is safe.** A surface that is only
   visually absent is still one key press away, so the mode installs an action
   gate consulted before any listener runs, and the two halves are applied
@@ -2518,12 +2526,15 @@ than it sounds, because the harness omega#81's acceptance sentence names —
   than to make anything pass. What stays is the half that still holds: the line
   is drawn, and it has no cheaper zero-base-specific rendering path.
 - **Photographed, not asserted.** `omega_zero_base_wide` and
-  `omega_zero_base_narrow` are recorded by `run_omega_exo_visual_tests` through
-  the same capture that records `omega_exo_workspace_wide` and
-  `omega_exo_workspace_narrow`, so the turn in the picture is a real streamed
-  Exo turn over `exo acp` — text deltas, a `shell` tool call, its result, and
-  the durable Exo session, turn and event references — and not a mock. Compared
-  in-process through Metal at `MATCH_THRESHOLD` 0.99.
+  `omega_zero_base_narrow` are recorded by `run_omega_exo_visual_tests`, so the
+  turn in the picture is a real streamed Exo turn over `exo acp` — text
+  deltas, a `shell` tool call, its result, and the durable Exo session, turn
+  and event references — and not a mock. Compared in-process through Metal at
+  `MATCH_THRESHOLD` 0.99. Until omega#161 the same capture also recorded
+  `omega_exo_workspace_wide`/`_narrow` on the `--full-editor` surface, with a
+  one-way mode flip between the pairs and a per-scene surface assertion; the
+  mode split's removal retired that pair, the `ExoSceneSurface` enum, and the
+  flip machinery, and the check now refuses their return.
 - **Every wait in the capture is bounded.** This is what had made these
   baselines unrecordable, and it is worth naming precisely because the first
   diagnosis was wrong. The capture waited with `run_until_parked`, which returns
@@ -2660,10 +2671,15 @@ than it sounds, because the harness omega#81's acceptance sentence names —
 - **Amended by the 2026-07-29 single-experience direction.** A normal,
   flag-free launch is the only advertised Omega experience. The
   `--full-editor` path may remain for the alpha transition, but it is not a
-  second product and is scheduled for removal after the alpha gate. While it
-  remains, there is still no runtime switch between the two shapes; removing
-  that one-way boundary early would reintroduce the hidden-editor escape this
-  delta was written to prevent.
+  second product and is scheduled for removal after the alpha gate.
+- **Amended by omega#161: the transition is over.** `--full-editor`, `--diff`,
+  `--dev-container`, and `--demo-workroom` are deleted from the argument
+  parser. For one release a stale invocation gets a one-line startup error
+  naming the removal; after that it is a plain unknown argument. `--zero-base`
+  stays accepted-and-ignored. `is_active()` is constant `true`, the crate's
+  entry point and `ENTERED` static are gone, and the refusal sentence names no
+  flag because there is no editor to start. The check now enforces absence:
+  a revived selector, entry point, or flag literal fails it.
 
 - **Upstream Zed:** starting the binary with no arguments opens the editor. There
   is no mode, so there is nothing to leave.
@@ -2746,6 +2762,19 @@ than it sounds, because the harness omega#81's acceptance sentence names —
   mode. Post-alpha subtraction collapses the sealed render into the ordinary
   render. Until then, the structural seal remains checked so the advertised
   surface cannot reveal the legacy editor accidentally.
+- **Amended by omega#161: the seal moved to process start.** The ordering this
+  entry defends below — “the seal is later than the mode” — protected
+  `OMEGA-DELTA-0040`'s centre-pane identity onboarding, and omega#164 deleted
+  that page: identity is provisioned silently in the background and nothing
+  renders in the centre before the thread, so there is no dead end left for a
+  startup seal to create. `crates/zed/src/main.rs` now calls
+  `omega_zero_base::seal()` once, before `app.run`, so the editor chrome is
+  never drawn — not even for a frame — and `initialize_panels` no longer
+  seals. `seal()` lost its mode guard with the mode, and `is_sealed()` reads
+  the one static. Test processes and proof harnesses still start unsealed and
+  opt in per scene. The structural render sites in `workspace` and
+  `title_bar` are unchanged and still checked; they become the ordinary
+  render's own shape when omega#162 deletes the legacy layout.
 
 - **Upstream Zed:** the workspace is an editor. Panels sit in docks around a
   centre pane group, and a zoomed panel is drawn over that group rather than
@@ -2792,14 +2821,14 @@ than it sounds, because the harness omega#81's acceptance sentence names —
   action, its control must not be drawn**, and not rendering the status bar in a
   sealed zero base is how every control on it obeys that rule at once, including
   ones a later crate adds.
-- **`--full-editor` is untouched.** The seal is gated on the mode being active,
-  and `seal()` does nothing when it is not, so a build started with the flag
-  cannot be sealed by a stray call. Every surface above renders exactly as it
-  did.
+- **`--full-editor` was untouched while it existed.** The seal was gated on
+  the mode being active, so a build started with the flag could not be sealed
+  by a stray call. omega#161 removed the flag and the guard together: there is
+  no unsealed shipped surface left to protect.
 - **Enforced by:** `the_transitional_sealed_layout_starts_without_the_legacy_editor` in
-  `crates/omega_deltas/`, which pins the seal's four render sites, the early
-  return in the reveal path, the requirement that `is_sealed` implies the mode
-  is on, and the ordering of the seal after `await_identity_ready`.
+  `crates/omega_deltas/`, which pins the seal's render sites, the early
+  return in the reveal path, and the single startup seal call before
+  `app.run` in `crates/zed/src/main.rs`.
 - **What this does not cover.** This is about what the workspace draws. It says
   nothing about what the thread surface draws inside it — that is
   `OMEGA-DELTA-0049` and `OMEGA-DELTA-0051` — and it does not claim the admitted
@@ -2841,9 +2870,11 @@ than it sounds, because the harness omega#81's acceptance sentence names —
   path that is not a directory, and the bundle and system prefixes in
   `LAUNCHER_PREFIXES`. A directory under `$HOME` is accepted, because almost
   every real checkout is one.
-- **Only in zero base.** `omega --full-editor` opens an empty workspace exactly
-  as it always has. The editor is a surface a person then chooses a folder in,
-  and choosing for them would be a change nobody asked for.
+- **Only in zero base — until omega#161 removed the other surface.** While
+  `--full-editor` existed it opened an empty workspace exactly as upstream did,
+  and this behaviour was guarded to the mode. The guard is gone with the flag:
+  there is one surface, and it always opens the chosen working directory or
+  says it opened none.
 - **The composer line changed with it.** It used to read "No AI provider
   configured — leave zero base to add one", and the zero-base baselines caught
   it rendered directly beneath a turn that had just completed through
@@ -4930,10 +4961,11 @@ than merely stated.
   names something to edit"*. So `omega --user-data-dir <profile>
   /Users/…/work/omega` booted the full editor — file tree, dock, status bar —
   while a bare `omega` stayed in zero base.
-- **Omega now:** a path argument sets the **project** and leaves the **mode**
-  alone. `omega <path>` opens zero base with `<path>` as the folder the thread
-  reads, searches and runs in. `--full-editor` is the flag that opens the
-  editor.
+- **Omega now:** a path argument sets the **project**. `omega <path>` opens
+  the surface with `<path>` as the folder the thread reads, searches and runs
+  in. While the mode split existed, `--full-editor` was the one flag that
+  opened the editor; omega#161 removed it, so there is no mode for a path to
+  leave alone any more.
 - **Why this was the same defect twice.** The owner's rule, given when zero base
   became the default, is quoted in `OMEGA-DELTA-0052`: *"they must be stuck in
   zero base with no way out if it was started in this mode. which must be the
@@ -4942,16 +4974,18 @@ than merely stated.
   inside the app and left its twin on the command line — and left it reachable
   **by accident**, because opening a project is the most ordinary thing a person
   types. The owner found it in about ten seconds.
-- **The dedicated mode flag is the only selector.** `--diff`,
-  `--dev-container`, and `--demo-workroom` ask for surfaces zero base does not
-  draw, so each declares `--full-editor` as a clap prerequisite. Omitting it is
-  a visible command-line error. Intentional use of an editor-only option does
-  not turn that option into the editor's own mode flag.
-- **Development uses the same default.** `script/zed-local` used to append
-  `--full-editor` to every local Omega process, so "open in dev mode" meant
-  "silently opt out of zero base." It now passes the caller's arguments to the
-  first instance unchanged and passes no arguments to the others. A developer
-  gets the editor only by typing the same explicit flag as everyone else.
+- **The dedicated mode flag was the only selector, and now none exists.**
+  While the split lasted, `--diff`, `--dev-container`, and `--demo-workroom`
+  asked for surfaces the default did not draw, so each declared
+  `--full-editor` as a clap prerequisite and omitting it was a visible
+  command-line error. omega#161 deleted all four arguments; for one release a
+  stale invocation gets a startup error naming the removal, and the check now
+  fails if any argument grows back into a surface selector.
+- **Development uses the same launch.** `script/zed-local` used to append the
+  editor flag to every local Omega process, so "open in dev mode" meant
+  "silently opt out of the product surface." It passes the caller's arguments
+  to the first instance unchanged and passes no arguments to the others, and
+  since omega#161 there is no editor flag for anyone to type.
 - **A path that no longer changes the mode has to do something.** Otherwise the
   repair turns `omega <path>` from "opens the wrong product" into "does nothing
   visible", which is not obviously better. `resolve_zero_base_project_arguments`
@@ -5014,8 +5048,8 @@ than merely stated.
   rendered, and the spelling moved into the composer.
 - **`OMEGA-DELTA-0052` is amended, and not to make a check pass.** Its list of
   implied terms lost `paths_or_urls` and its prose says why. Both halves it
-  actually defends are re-asserted here: the default still points at zero base,
-  and `--full-editor` is still what asks for the editor.
+  defended were re-asserted here while the split lasted; since omega#161 the
+  stronger property holds — no argument asks for any second surface at all.
 - **What this does not cover.** **No window has been opened.** No check in this
   repository starts the binary, so nothing here proves what a person sees:
   `omega <path>` staying in zero base, the header carrying the folder, or an
@@ -5082,12 +5116,13 @@ than merely stated.
   would turn a cosmetic problem back into a dead click. Prose ranges such as
   *"(lines 1-150)"* written **beside** a link are not part of its target and are
   not read; only the link's own text is.
-- **A full editor keeps its editor.** The reader takes the click only when
-  `omega_zero_base::is_sealed()`, which is the exact moment the centre pane stops
-  being drawn — not `is_active`, because `OMEGA-DELTA-0053` still renders the
-  ordinary workspace for the identity gate before the seal. Links that are not
-  local files — `https`, threads, fetches, rules, directories — are declined and
-  keep the handling they have.
+- **The reader is bound to the seal.** The reader takes the click only when
+  `omega_zero_base::is_sealed()`, which is the exact moment the centre pane
+  stops being drawn. Under omega#161 the shipped process seals at startup, so
+  in production this is always; unsealed windows exist only in tests and proof
+  harnesses, where the ordinary open path keeps its behaviour. Links that are
+  not local files — `https`, threads, fetches, rules, directories — are
+  declined and keep the handling they have.
 - **Enforced by:** `a_transcript_file_link_opens_a_reader_in_zero_base` in
   `crates/omega_deltas`, plus the nine parser tests in
   `crates/agent_ui/src/omega_file_peek.rs`. Each assertion in the delta check was
@@ -5468,11 +5503,12 @@ than merely stated.
   reachable through `agent::ToggleThreadsSidebar`, and the `agent` namespace was
   already admitted: **`ADMITTED_NAMESPACES` and `ADMITTED_ACTIONS` are byte-for-byte
   unchanged by this delta.**
-- **The menu entry names the action that works in the mode the window is in.**
-  In `--full-editor` it still names `multi_workspace::ToggleWorkspaceSidebar`,
-  because there the project switcher is the right answer and it is not refused.
-  In zero base it names the panel's own. Two entries with one label is not a
-  fork of the feature: it is one label over the only sidebar each window has.
+- **The menu entry names the action that works in the window it is in.** In
+  the legacy editor surface it named `multi_workspace::ToggleWorkspaceSidebar`,
+  because there the project switcher was the right answer and not refused; the
+  default surface names the panel's own. omega#161 removed the editor surface
+  (and with it the workspace sidebar registration), so the panel's action is
+  the one a person can reach.
 - **Nothing was deleted, and `cmd-alt-j` still means what it meant.** The
   editor's binding is untouched in all three shipped keymaps. What was added is
   a narrower context, `AgentPanel && ZeroBase`, which is why the panel's key
@@ -6316,9 +6352,11 @@ every title, composer label, pending state, and disclosure names the executor
 that is doing the work, or clearly distinguishes “will be” from “is”. Restoring
 choice must not restore the disconnected selections described below.
 
-The old blank-thread selector and executor rebuild seam remain only on the
-legacy `--full-editor` compatibility surface. The default three-mode front door
-creates or opens another conversation and never invokes that retarget path.
+The old blank-thread selector and executor rebuild seam remained only on the
+legacy `--full-editor` compatibility surface, which omega#161 removed; its
+code path is dead behind the constant surface check until omega#162 deletes
+it. The default three-mode front door creates or opens another conversation
+and never invokes that retarget path.
 
 The owner selected Exo, was shown **Exo** in the composer's executor selector,
 typed `who are you`, and read back *"I'm Codex, your AI coding collaborator."*
@@ -7698,11 +7736,10 @@ current image build does not decode it inline.
   pending state, status, and turn disclosure names the executor that actually
   does the work. A pending change distinguishes “will be” from “is”, and no
   readiness observation silently substitutes an executor.
-- **The shell is converging, not multiplying.** The legacy `--full-editor`
-  compatibility path may remain during the alpha transition but is not an
-  advertised experience. `OMEGA-DELTA-0048`, `0052`, and `0053` keep its
-  transitional hiding and sealing mechanisms honest until post-alpha removal
-  collapses them into the one application layout.
+- **The shell converged.** The legacy `--full-editor` compatibility path was
+  removed by omega#161: there is one launch surface and no mode vocabulary.
+  `OMEGA-DELTA-0048`, `0052`, and `0053` keep the hiding, refusal, and sealing
+  mechanisms honest until omega#162 deletes the gated legacy crates.
 - **Vim stays.** The `vim` crate and `assets/keymaps/vim.json` remain in the
   kept product closure. Modal editing belongs in the composer and focused
   editing surface; admitting its action set and re-homing its mode indicator
@@ -7831,7 +7868,8 @@ startup recheck — survives unchanged behind that dropdown.
   `agent::NewExternalAgentThread` preserves the exact requested ACP identity,
   selects the Direct Agent row, and shows its unsupported state. It never calls
   the legacy retarget clamp or activates the prepared Omega conversation. The
-  full-editor action keeps its existing draft-creation behavior.
+  legacy editor-surface draft-creation branch is dead code since omega#161 and
+  is deleted with the gated crates in omega#162.
 - **Loading text owns its conversation.** Draft retention covers the loading
   editor, accepted pre-connect messages, the connected message queue, draft
   prompt, and composer. Opening the front door cannot discard or retarget text
@@ -7842,9 +7880,9 @@ startup recheck — survives unchanged behind that dropdown.
   rechecks the mounted panel before presenting the front door. A conversation,
   terminal, Full Auto surface, pending terminal restore, or typed draft that
   appeared while startup waited remains selected and usable.
-- **Compatibility scope:** the legacy `--full-editor` executor selector and
-  rebuild seam remain temporarily available only on that compatibility
-  surface. Default front-door selection never calls either retarget path.
+- **Compatibility scope:** the legacy editor-surface executor selector and
+  rebuild seam became unreachable when omega#161 removed `--full-editor`.
+  Default front-door selection never calls either retarget path.
 - **Legacy ownership is ambiguous.** New metadata writes persist the exact
   conversation owner. Older inactive rows may hold either an owner or an
   executor, and the current schema and restore path do not distinguish those

@@ -16,7 +16,7 @@ By default, when you open a folder in Zed, it opens as a new project in your cur
 | Action                         | Result                                    |
 | ------------------------------ | ----------------------------------------- |
 | Thread > Choose Folder…        | Opens in current window (threads sidebar) |
-| Full editor: Open Recent       | Opens in current window (threads sidebar) |
+| Open Recent (removed surface)  | Opens in current window (threads sidebar) |
 | Drag folder to Zed             | Opens in current window (threads sidebar) |
 | `zed ~/project`                | Opens in current window (threads sidebar) |
 
@@ -41,9 +41,9 @@ Sometimes you want a completely separate window. Here's how:
 
 ### From Open Recent
 
-In the transitional `--full-editor` compatibility surface, use
-{#kb projects::OpenRecent} from the command palette. The `projects` action
-namespace is not available from the sealed default surface.
+The `projects` action namespace is not available from Omega's surface, and the
+transitional editor surface that exposed {#kb projects::OpenRecent} was removed
+with the mode split (omega#161).
 
 - **Enter** or **click** opens in the current window (threads sidebar)
 - **Cmd+Enter** or **Cmd+click** (macOS) / **Ctrl+Enter** or **Ctrl+click** (Linux/Windows) opens in a new window

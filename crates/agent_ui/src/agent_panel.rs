@@ -634,8 +634,9 @@ pub fn init(cx: &mut App) {
                             // `OMEGA-DELTA-0184`. A registry selection lands
                             // the exact requested id as the new-conversation
                             // draft behind the composer executor dropdown.
-                            // The legacy full-editor surface keeps its
-                            // blank-draft-only selection behavior.
+                            // The `else` branch is dead since omega#161
+                            // removed the mode split; it is deleted with the
+                            // gated crates in omega#162.
                             if omega_zero_base::is_active() {
                                 if let Some(agent_id) = DirectAgentId::new(action.agent.as_str()) {
                                     panel.compose_on_executor(
@@ -14468,6 +14469,7 @@ impl AgentPanel {
     pub fn mark_workbench_identity_inconsistent_for_tests(
         &mut self,
         message: impl Into<SharedString>,
+        window: &mut Window,
         cx: &mut Context<Self>,
     ) -> Result<()> {
         let visible = self
@@ -14497,6 +14499,11 @@ impl AgentPanel {
         );
         self.thread_identity_observation_revision =
             self.thread_identity_observation_revision.saturating_add(1);
+        // An inconsistent repository authority closes Files on the next sync.
+        // Move focus to the transcript now, the way the shipped invalidation
+        // paths do, so the focused Files tree does not vanish underneath the
+        // window and drop focus into the hidden center pane.
+        self.focus_thread_transcript(window, cx);
         cx.notify();
         Ok(())
     }
@@ -17550,10 +17557,13 @@ mod tests {
             );
         });
 
-        // The parts that genuinely need a worktree still refuse. Removing
-        // *these* guards would not be project-optional threads; it would be
-        // threads that fail later and less legibly.
-        let before_external = panel.read_with(cx, |panel, _cx| panel.selected_agent.clone());
+        // omega#161. The typed external-agent action lands the exact
+        // requested id as the composer draft (`OMEGA-DELTA-0184`); the legacy
+        // project guard that silently ignored the action on an empty
+        // workspace is dead with the mode split. What must stay true is
+        // legibility: the selection is visible, and the draft's preparation
+        // state reports readiness instead of silently running an executor
+        // with no working directory.
         panel.update_in(cx, |panel, window, cx| {
             panel.new_external_agent_thread(
                 &NewExternalAgentThread {
@@ -17564,11 +17574,24 @@ mod tests {
             );
         });
         cx.run_until_parked();
-        panel.read_with(cx, |panel, _cx| {
+        panel.read_with(cx, |panel, cx| {
             assert_eq!(
-                panel.selected_agent, before_external,
-                "an empty workspace must not start an external ACP agent, \
-                 which has no working directory to run in"
+                panel.selected_agent,
+                Agent::Custom {
+                    id: AgentId::new("external-agent")
+                },
+                "the typed action must land the exact requested direct agent"
+            );
+            let draft = panel
+                .draft_thread
+                .as_ref()
+                .expect("the direct selection must prepare a visible draft");
+            assert_eq!(
+                *draft.read(cx).agent_key(),
+                Agent::Custom {
+                    id: AgentId::new("external-agent")
+                },
+                "the draft must belong to the requested direct agent"
             );
         });
 
@@ -21309,10 +21332,10 @@ mod tests {
             panel
         });
 
-        panel.update_in(cx, |panel, window, cx| {
-            panel.activate_draft(false, AgentThreadSource::AgentPanel, window, cx);
-        });
-
+        // omega#161. `SelectAgent` lands through `compose_on_executor`
+        // (`OMEGA-DELTA-0184`), which needs no visible draft first. The
+        // legacy path required an active draft before `select_agent` acted;
+        // that branch is dead with the mode split.
         cx.dispatch_action(SelectAgent {
             agent: "my-configured-agent".to_string(),
         });
@@ -22010,9 +22033,15 @@ mod tests {
                 initial_draft_id,
                 "a new draft should have been created for the new agent"
             );
+            // omega#161. The direct-draft path preserves the exact requested
+            // ACP identifier (`DirectAgentId` is never normalized to a typed
+            // variant), so the parked-draft contract is proven against the
+            // custom form of the same id.
             assert_eq!(
                 *draft.read(cx).agent_key(),
-                Agent::Stub,
+                Agent::Custom {
+                    id: Agent::Stub.id()
+                },
                 "new draft should use the new agent"
             );
             assert!(

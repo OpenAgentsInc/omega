@@ -206,6 +206,24 @@ fn main() {
     #[cfg(unix)]
     util::prevent_root_execution();
 
+    // omega#161. The full-editor mode split is removed: Omega has one surface,
+    // the flag-free launch. For one release a stale invocation gets this named
+    // error instead of clap's plain unknown-argument refusal, so a script that
+    // carried the flag learns what happened rather than guessing at a typo.
+    for removed in [
+        "--full-editor",
+        "--diff",
+        "--dev-container",
+        "--demo-workroom",
+    ] {
+        if std::env::args().any(|argument| argument == removed) {
+            eprintln!(
+                "{removed} was removed (omega#161): Omega has one surface now, so run `omega` without it."
+            );
+            process::exit(1);
+        }
+    }
+
     let mut args = Args::parse();
 
     // `zed --askpass` Makes zed operate in nc/netcat mode for use with askpass
@@ -265,12 +283,6 @@ fn main() {
         return;
     }
 
-    if args.demo_workroom {
-        unsafe {
-            std::env::set_var(workroom_ui::PUBLIC_DEMO_ENV, "1");
-        }
-    }
-
     // OMEGA-DELTA-0144. Exo is absent unless the person launching this exact
     // process opts in. Read this before paths, logs, settings, or agent UI
     // initialization so none of those surfaces can discover or start Exo on a
@@ -279,39 +291,26 @@ fn main() {
         omega_front_door::enable_exo_from_command_line();
     }
 
-    // omega#99. Zero base is entered here and nowhere else: from the parsed
-    // process command line, once, before anything reads a settings file. It is
-    // deliberately not a setting, because a settings value is writable by a
-    // project settings file and by anything else that can write settings, and a
-    // mode that hides authority-bearing surfaces must not be settable by
-    // something that is not the person at the keyboard.
+    // omega#161. There is no mode to enter any more: the surface omega#99
+    // built as "zero base" is the application, `--full-editor` is removed, and
+    // no argument, settings key, or environment variable selects a second
+    // launch shape. `--zero-base` is still accepted and does nothing, because
+    // it asks for what it already gets.
     //
-    // OMEGA-DELTA-0052, omega#100. The default is inverted. `omega` with no
-    // arguments is zero base, and `--full-editor` is what asks for the editor.
-    // The owner asked for it in as many words: "they must be stuck in zero base
-    // with no way out if it was started in this mode. which must be the default
-    // starting now. booting the full editor must require a separate flag."
-    //
-    // The reader did not move, which is the part `OMEGA-DELTA-0047` is about:
-    // still the parsed command line, still once, still never a settings key.
-    // Only the direction of the default changed.
-    //
-    // OMEGA-DELTA-0116, omega#111. The mode depends on this one flag and no
-    // other argument. Paths select the zero-base project. Editor-only options
-    // declare `requires = "full_editor"` below, so clap refuses them with a
-    // visible command-line error instead of silently changing the mode or
-    // accepting a request zero base cannot draw.
-    //
-    // `--zero-base` is accepted and does nothing, because it now asks for what
-    // it already gets.
-    if !args.full_editor {
-        omega_zero_base::enter_from_command_line();
-        // OMEGA-DELTA-0116. Now that the path no longer changes the mode, it
-        // has to do the thing it was actually typed for. Zero base draws no
-        // buffer, so the argument is resolved to the directory the thread can
-        // see rather than left as a file to open in a pane that is not there.
-        resolve_zero_base_project_arguments(&mut args);
-    }
+    // OMEGA-DELTA-0053, amended by omega#161. Seal here, before any window
+    // opens, so the editor chrome is never drawn — not even for a frame. The
+    // seal used to wait for `OMEGA-DELTA-0040`'s centre-pane identity
+    // onboarding to be answered inside `initialize_panels`; omega#164 deleted
+    // that page and provisions the Nostr identity silently in the background,
+    // so nothing renders in the centre before the thread and sealing at
+    // startup is safe.
+    omega_zero_base::seal();
+
+    // OMEGA-DELTA-0116. A path argument names the project, never a mode. The
+    // surface draws no buffer, so the argument is resolved to the directory
+    // the thread can see rather than left as a file to open in a pane that is
+    // not there.
+    resolve_zero_base_project_arguments(&mut args);
 
     // OMEGA-DELTA-0093. Read beside zero base, and for the same reason: both
     // are command-line facts that a surface deep in startup has to consult
@@ -932,12 +931,11 @@ fn main() {
 
         initialize_workspace(app_state.clone(), cx);
 
-        // omega#99. After every other `init` has registered its actions and
-        // filled the palette, so the restriction and the gate see the whole
-        // registry. Without the flag this is not called and nothing changes.
-        if omega_zero_base::entered_from_command_line() {
-            omega_zero_base_ui::init(cx);
-        }
+        // omega#99, amended by omega#161. After every other `init` has
+        // registered its actions and filled the palette, so the restriction
+        // and the gate see the whole registry. Unconditional now: there is
+        // one surface, and the gate is part of it.
+        omega_zero_base_ui::init(cx);
 
         cx.activate(true);
 
@@ -953,30 +951,15 @@ fn main() {
             .map(|arg| parse_url_arg(arg, cx))
             .collect();
 
-        // Check if any diff paths are directories to determine diff_all mode
-        let diff_all_mode = args
-            .diff
-            .chunks(2)
-            .any(|pair| Path::new(&pair[0]).is_dir() || Path::new(&pair[1]).is_dir());
-
-        let diff_paths: Vec<[String; 2]> = args
-            .diff
-            .chunks(2)
-            .map(|chunk| [chunk[0].clone(), chunk[1].clone()])
-            .collect();
-
         #[cfg(target_os = "windows")]
         let wsl = args.wsl;
         #[cfg(not(target_os = "windows"))]
         let wsl = None;
 
-        if !urls.is_empty() || !diff_paths.is_empty() {
+        if !urls.is_empty() {
             open_listener.open(RawOpenRequest {
                 urls,
-                diff_paths,
                 wsl,
-                diff_all: diff_all_mode,
-                dev_container: args.dev_container,
                 ..Default::default()
             })
         }
@@ -1722,20 +1705,12 @@ fn resolve_zero_base_project_arguments(args: &mut Args) {
 /// the composer says so in one line, because putting an agent's file tools in a
 /// directory nobody named is worse than having none.
 ///
-/// Only in zero base. With `--full-editor` a bare `omega` opens an empty
-/// workspace exactly as it always has, because the editor is a surface a person
-/// then chooses a folder in, and choosing for them would be the change nobody
-/// asked for.
-///
 /// `OMEGA-DELTA-0116`. This is the *bare* `omega` path, and only that. When a
 /// path argument was given it has already become the workspace by the time this
 /// runs, through the open listener, so the working directory is the fallback
 /// for a launch that named nothing rather than a second opinion about one that
 /// did.
 async fn open_zero_base_project(app_state: &Arc<AppState>, cx: &mut AsyncApp) -> bool {
-    if !omega_zero_base::is_active() {
-        return false;
-    }
     let root = match omega_workdir::from_env() {
         Ok(root) => root,
         Err(reason) => {
@@ -2063,40 +2038,18 @@ struct Args {
     ///
     /// URLs can use `file://`, the current Omega channel scheme, or the legacy `zed://` scheme.
     ///
-    /// OMEGA-DELTA-0116. In zero base a path names the folder the thread works
-    /// in — a file argument names the folder that holds it — and it never opens
-    /// the editor. Use --full-editor for that.
+    /// OMEGA-DELTA-0116. A path names the folder the thread works in — a file
+    /// argument names the folder that holds it — and it never opens an editor
+    /// pane.
     paths_or_urls: Vec<String>,
 
-    /// Opens the explicitly fictional, offline-safe public demo workroom.
+    /// Accepted and ignored: the surface this flag used to name is what Omega
+    /// always does now.
     ///
-    /// A custom user data directory is required so the demo cannot read or
-    /// modify the normal Omega profile.
-    #[arg(long, requires_all = ["user_data_dir", "full_editor"])]
-    demo_workroom: bool,
-
-    /// Accepted and ignored: zero base is what Omega does by default.
-    ///
-    /// OMEGA-DELTA-0052. Kept so commands and scripts that carry it keep
-    /// working. Use --full-editor for the editor.
+    /// OMEGA-DELTA-0052, omega#161. Kept so commands and scripts that carry it
+    /// keep working.
     #[arg(long)]
     zero_base: bool,
-
-    /// Opens the full Omega editor instead of zero base.
-    ///
-    /// OMEGA-DELTA-0052. Omega opens zero base by default: one agent thread, the
-    /// controls that operate it, and nothing else. The editor around the thread
-    /// is not rendered and the actions outside the admitted set are refused with
-    /// a sentence, and there is no way out of the mode inside a running process.
-    /// Nothing is deleted — the same binary is a full editor with this flag. The
-    /// choice is read here, once, and never written anywhere, so ending the
-    /// process leaves nothing to repair.
-    ///
-    /// OMEGA-DELTA-0116. A path argument does *not* imply the editor. It names
-    /// the folder the thread works in and leaves the mode alone. Editor-only
-    /// options require this flag too; no other argument can select the mode.
-    #[arg(long)]
-    full_editor: bool,
 
     /// Enables the optional Exo integration for this process.
     ///
@@ -2145,17 +2098,6 @@ struct Args {
     )]
     omega_send_timeout_secs: u64,
 
-    /// Pairs of file paths to diff. Can be specified multiple times.
-    /// When directories are provided, recurses into them and shows all changed files in a single multi-diff view.
-    #[arg(
-        long,
-        requires = "full_editor",
-        action = clap::ArgAction::Append,
-        num_args = 2,
-        value_names = ["OLD_PATH", "NEW_PATH"]
-    )]
-    diff: Vec<String>,
-
     /// Sets a custom directory for all user data (e.g., database, extensions, logs).
     ///
     /// This overrides the default platform-specific data directory location.
@@ -2177,13 +2119,6 @@ struct Args {
     #[cfg(target_os = "windows")]
     #[arg(long, value_name = "USER@DISTRO")]
     wsl: Option<String>,
-
-    /// Open the project in a dev container.
-    ///
-    /// Automatically triggers "Reopen in Dev Container" if a `.devcontainer/`
-    /// configuration is found in the project directory.
-    #[arg(long, requires = "full_editor")]
-    dev_container: bool,
 
     /// Instructs Omega to run as a dev server on this machine. (not implemented)
     #[arg(long)]

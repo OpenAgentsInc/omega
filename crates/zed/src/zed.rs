@@ -20,20 +20,16 @@ use anyhow::Context as _;
 pub use app_menus::*;
 use assets::Assets;
 
-use agent_computer_ui::AgentComputerPanel;
 use breadcrumbs::Breadcrumbs;
 use client::zed_urls;
 use collections::VecDeque;
-use debugger_ui::debugger_panel::DebugPanel;
 use editor::{Editor, MultiBuffer};
 use extension_host::ExtensionStore;
 use feature_flags::{FeatureFlagAppExt as _, PanicFeatureFlag};
 use fs::Fs;
-use futures::FutureExt as _;
 use futures::{StreamExt, channel::mpsc, select_biased};
 use git_ui::branch_diff::BranchDiffToolbar;
 use git_ui::commit_view::CommitViewToolbar;
-use git_ui::git_panel::GitPanel;
 use git_ui::project_diff::ProjectDiffToolbar;
 use git_ui::solo_diff_view::{SoloDiffGitToolbar, SoloDiffStyleToolbar};
 use git_ui::staged_diff::StagedDiffToolbar;
@@ -45,10 +41,8 @@ use gpui::{
     UpdateGlobal, WeakEntity, Window, WindowBounds, WindowHandle, WindowKind, WindowOptions,
     actions, image_cache, img, point, px, retain_all,
 };
-use image_viewer::ImageInfo;
 use language::Capability;
 use language_onboarding::BasedPyrightBanner;
-use language_tools::lsp_button::{self, LspButton};
 use language_tools::lsp_log_view::LspLogToolbarItemView;
 use markdown::{Markdown, MarkdownElement, MarkdownFont, MarkdownStyle};
 use migrate::{MigrationBanner, MigrationEvent, MigrationNotification, MigrationType};
@@ -73,7 +67,6 @@ use settings::{
     SettingsFile, SettingsStore, VIM_KEYMAP_PATH, initial_local_debug_tasks_content,
     initial_project_settings_content, initial_tasks_content, update_settings_file,
 };
-use sidebar::Sidebar;
 use workroom_ui::SarahWorkroomPanel;
 #[cfg(debug_assertions)]
 use workspace::workspace_error::{ErrorAction, ErrorSeverity, WorkspaceError};
@@ -87,7 +80,7 @@ use std::{
 use terminal_view::terminal_panel::{self, TerminalPanel};
 use theme::{ActiveTheme, SystemAppearance, ThemeRegistry, deserialize_icon_theme};
 use theme_settings::{ThemeSettings, load_user_theme};
-use ui::{Navigable, NavigableEntry, PopoverMenuHandle, TintColor, prelude::*};
+use ui::{Navigable, NavigableEntry, TintColor, prelude::*};
 use util::markdown::MarkdownString;
 use util::rel_path::RelPath;
 use util::{ResultExt, asset_str, maybe};
@@ -513,7 +506,6 @@ pub fn initialize_workspace(app_state: Arc<AppState>, cx: &mut App) {
                 .unwrap_or(true)
         });
 
-        let window_handle = window.window_handle();
         let multi_workspace_handle = cx.entity();
         cx.subscribe_in(
             &multi_workspace_handle,
@@ -554,23 +546,10 @@ pub fn initialize_workspace(app_state: Arc<AppState>, cx: &mut App) {
         )
         .detach();
 
-        // omega#124. Zero base is one thread and its composer. The Agent
-        // Panel already draws the only sidebar that mode has, so registering
-        // the workspace sidebar as well gave a person two of them side by
-        // side, one of them listing editor surfaces zero base does not open.
-        if !omega_zero_base::is_active() {
-            cx.defer(move |cx| {
-                window_handle
-                    .update(cx, |_, window, cx| {
-                        let sidebar =
-                            cx.new(|cx| Sidebar::new(multi_workspace_handle.clone(), window, cx));
-                        multi_workspace_handle.update(cx, |multi_workspace, cx| {
-                            multi_workspace.register_sidebar(sidebar, cx);
-                        });
-                    })
-                    .ok();
-            });
-        }
+        // omega#124, amended by omega#161. The Agent Panel draws the only
+        // sidebar the surface has. The `MultiWorkspace` sidebar listed editor
+        // surfaces this application does not open, so it is not registered at
+        // all any more.
     })
     .detach();
 
@@ -609,95 +588,13 @@ pub fn initialize_workspace(app_state: Arc<AppState>, cx: &mut App) {
             }
         }
 
-        // omega#99. Zero base draws none of the editor's own status-bar
-        // indicators. They are not rendered rather than removed: with
-        // `--full-editor` the block below runs exactly as it always has.
-        //
-        // OMEGA-DELTA-0052, omega#100. It used to draw one control here — the
-        // visible way out — and that control is gone with the mode's exit. The
-        // status bar in zero base is now empty rather than carrying one button.
-        // One indicator is created at workspace initialization and shared by
-        // the full-editor status bar and every Agent UI conversation.
+        // omega#99, amended by omega#161. The surface draws none of the
+        // editor's own status-bar indicators, and the status bar itself is not
+        // rendered once the window is sealed. The block that built the editor
+        // status bar is deleted with the mode split. One Vim mode indicator is
+        // created at workspace initialization and shared by every Agent UI
+        // conversation (`OMEGA-DELTA-0175`).
         let vim_mode_indicator = cx.new(|cx| vim::ModeIndicator::new(window, cx));
-
-        if omega_zero_base::is_active() {
-            let panels_task = initialize_panels(vim_mode_indicator, window, cx);
-            workspace.set_panels_task(panels_task);
-            register_actions(app_state.clone(), workspace, window, cx);
-
-            if !workspace.has_active_modal(window, cx) {
-                workspace.focus_handle(cx).focus(window, cx);
-            }
-            return;
-        }
-
-        let edit_prediction_menu_handle = PopoverMenuHandle::default();
-        let edit_prediction_ui = cx.new(|cx| {
-            edit_prediction_ui::EditPredictionButton::new(
-                app_state.fs.clone(),
-                app_state.user_store.clone(),
-                edit_prediction_menu_handle.clone(),
-                workspace.project().clone(),
-                cx,
-            )
-        });
-        workspace.register_action({
-            move |_, _: &edit_prediction_ui::ToggleMenu, window, cx| {
-                edit_prediction_menu_handle.toggle(window, cx);
-            }
-        });
-
-        let search_button = cx.new(|_| search::search_status_button::SearchButton::new());
-        let diagnostic_summary =
-            cx.new(|cx| diagnostics::items::DiagnosticIndicator::new(workspace, cx));
-        let active_file_name = cx.new(|_| workspace::active_file_name::ActiveFileName::new());
-        let activity_indicator = activity_indicator::ActivityIndicator::new(
-            workspace,
-            workspace.project().read(cx).languages().clone(),
-            window,
-            cx,
-        );
-        let active_buffer_encoding =
-            cx.new(|_| encoding_selector::ActiveBufferEncoding::new(workspace));
-        let active_buffer_language =
-            cx.new(|_| language_selector::ActiveBufferLanguage::new(workspace));
-        let active_toolchain_language =
-            cx.new(|cx| toolchain_selector::ActiveToolchain::new(workspace, window, cx));
-        let image_info = cx.new(|_cx| ImageInfo::new(workspace));
-
-        let lsp_button_menu_handle = PopoverMenuHandle::default();
-        let lsp_button =
-            cx.new(|cx| LspButton::new(workspace, lsp_button_menu_handle.clone(), window, cx));
-        workspace.register_action({
-            move |_, _: &lsp_button::ToggleMenu, window, cx| {
-                lsp_button_menu_handle.toggle(window, cx);
-            }
-        });
-
-        let cursor_position =
-            cx.new(|_| go_to_line::cursor_position::CursorPosition::new(workspace));
-        let line_ending_indicator =
-            cx.new(|_| line_ending_selector::LineEndingIndicator::default());
-        let git_blame_status = cx.new(|_| git_ui::GitBlameStatus::default());
-        let merge_conflict_indicator =
-            cx.new(|cx| git_ui::MergeConflictIndicator::new(workspace, cx));
-        workspace.status_bar().update(cx, |status_bar, cx| {
-            status_bar.add_left_item(search_button, window, cx);
-            status_bar.add_left_item(lsp_button, window, cx);
-            status_bar.add_left_item(diagnostic_summary, window, cx);
-            status_bar.add_left_item(active_file_name, window, cx);
-            status_bar.add_left_item(git_blame_status, window, cx);
-            status_bar.add_left_item(merge_conflict_indicator, window, cx);
-            status_bar.add_left_item(activity_indicator, window, cx);
-            status_bar.add_right_item(edit_prediction_ui, window, cx);
-            status_bar.add_right_item(active_buffer_encoding, window, cx);
-            status_bar.add_right_item(active_buffer_language, window, cx);
-            status_bar.add_right_item(active_toolchain_language, window, cx);
-            status_bar.add_right_item(line_ending_indicator, window, cx);
-            status_bar.add_right_item(vim_mode_indicator.clone(), window, cx);
-            status_bar.add_right_item(cursor_position, window, cx);
-            status_bar.add_right_item(image_info, window, cx);
-        });
 
         let panels_task = initialize_panels(vim_mode_indicator, window, cx);
         workspace.set_panels_task(panels_task);
@@ -828,108 +725,49 @@ pub(crate) fn initialize_panels(
     cx: &mut Context<Workspace>,
 ) -> Task<anyhow::Result<()>> {
     // The workbench rail draws Files, Git, and Terminal, so their native panels
-    // must be registered before AgentPanel snapshots them. The remaining
-    // editor-only panels stay out of this branch. AgentPanel is then opened and
-    // zoomed before the structural seal removes the legacy dock and editor
-    // layout from the rendered surface.
-    if omega_zero_base::is_active() {
-        return cx.spawn_in(window, async move |workspace_handle, cx| {
-            // Keep startup readiness ahead of the front door: the silent
-            // background identity provisioning (omega#164) completes or
-            // refuses by name before this panel opens and zooms.
-            await_identity_ready(cx).await.log_err();
+    // must be registered before AgentPanel snapshots them. The editor-only
+    // panels are never loaded: omega#161 removed the mode split, so this is the
+    // one panel shape the application has. AgentPanel is then opened and
+    // zoomed; the structural seal (`OMEGA-DELTA-0053`, set at process start
+    // since omega#161) keeps the legacy dock and editor layout off the
+    // rendered surface throughout.
+    cx.spawn_in(window, async move |workspace_handle, cx| {
+        // Keep startup readiness ahead of the front door: the silent
+        // background identity provisioning (omega#164) completes or
+        // refuses by name before this panel opens and zooms.
+        await_identity_ready(cx).await.log_err();
 
-            agent_ui::initialize_workbench_panels(workspace_handle.clone(), cx.clone())
-                .await
-                .context("failed to initialize the native workbench panels")?;
-
-            initialize_agent_panel(
-                workspace_handle.clone(),
-                vim_mode_indicator.clone(),
-                cx.clone(),
-            )
+        agent_ui::initialize_workbench_panels(workspace_handle.clone(), cx.clone())
             .await
+            .context("failed to initialize the native workbench panels")?;
+
+        initialize_agent_panel(
+            workspace_handle.clone(),
+            vim_mode_indicator.clone(),
+            cx.clone(),
+        )
+        .await
+        .log_err();
+
+        // Voice keeps its existing Sarah workroom owner and state machine,
+        // but the surface does not add that owner to a dock.
+        SarahWorkroomPanel::load(workspace_handle.clone(), cx.clone())
+            .await
+            .context("failed to load Sarah voice owner")
             .log_err();
 
-            // Voice keeps its existing Sarah workroom owner and state machine,
-            // but zero base does not add that owner to a dock.
-            SarahWorkroomPanel::load(workspace_handle.clone(), cx.clone())
-                .await
-                .context("failed to load Sarah voice owner")
-                .log_err();
-
-            workspace_handle
-                .update_in(cx, |workspace, window, cx| {
-                    workspace.open_panel::<agent_ui::AgentPanel>(window, cx);
-                    if let Some(panel) = workspace.panel::<agent_ui::AgentPanel>(cx) {
-                        panel.update(cx, |panel, cx| {
-                            use workspace::dock::Panel as _;
-                            panel.set_zoomed(true, window, cx);
-                        });
-                    }
-                    workspace.focus_panel::<agent_ui::AgentPanel>(window, cx);
-                    // OMEGA-DELTA-0053. Seal the window here and nowhere else.
-                    //
-                    // Seal only after the thread opens. From here the editor is
-                    // not rendered rather than covered by the zoom above, so a
-                    // control that survives the action gate cannot put it back.
-                    omega_zero_base::seal();
-                    cx.notify();
-                })
-                .log_err();
-
-            anyhow::Ok(())
-        });
-    }
-
-    cx.spawn_in(window, async move |workspace_handle, cx| {
-        let project_panel = ProjectPanel::load(workspace_handle.clone(), cx.clone());
-        let outline_panel = OutlinePanel::load(workspace_handle.clone(), cx.clone());
-        let terminal_panel = TerminalPanel::load(workspace_handle.clone(), cx.clone());
-        let git_panel = GitPanel::load(workspace_handle.clone(), cx.clone());
-        let debug_panel = DebugPanel::load(workspace_handle.clone(), cx);
-        let agent_computer_panel = AgentComputerPanel::load(workspace_handle.clone(), cx.clone());
-        let sarah_workroom_panel = SarahWorkroomPanel::load(workspace_handle.clone(), cx.clone());
-
-        async fn add_panel_when_ready(
-            panel_task: impl Future<Output = anyhow::Result<Entity<impl workspace::Panel>>> + 'static,
-            workspace_handle: WeakEntity<Workspace>,
-            mut cx: gpui::AsyncWindowContext,
-        ) {
-            if let Some(panel) = panel_task.await.context("failed to load panel").log_err()
-            {
-                workspace_handle
-                    .update_in(&mut cx, |workspace, window, cx| {
-                        workspace.add_panel(panel, window, cx);
-                    })
-                    .log_err();
-            }
-        }
-
-        futures::join!(
-            add_panel_when_ready(project_panel, workspace_handle.clone(), cx.clone()),
-            add_panel_when_ready(outline_panel, workspace_handle.clone(), cx.clone()),
-            add_panel_when_ready(terminal_panel, workspace_handle.clone(), cx.clone()),
-            add_panel_when_ready(git_panel, workspace_handle.clone(), cx.clone()),
-            add_panel_when_ready(debug_panel, workspace_handle.clone(), cx.clone()),
-            add_panel_when_ready(agent_computer_panel, workspace_handle.clone(), cx.clone()),
-            add_panel_when_ready(sarah_workroom_panel, workspace_handle.clone(), cx.clone()),
-            initialize_agent_panel(
-                workspace_handle.clone(),
-                vim_mode_indicator.clone(),
-                cx.clone(),
-            )
-            .map(|r| r.log_err()),
-        );
-
-        if workroom_ui::public_demo_mode() {
-            workspace_handle
-                .update_in(cx, |workspace, window, cx| {
-                    workspace.open_panel::<ProjectPanel>(window, cx);
-                    workspace.open_panel::<SarahWorkroomPanel>(window, cx);
-                })
-                .log_err();
-        }
+        workspace_handle
+            .update_in(cx, |workspace, window, cx| {
+                workspace.open_panel::<agent_ui::AgentPanel>(window, cx);
+                if let Some(panel) = workspace.panel::<agent_ui::AgentPanel>(cx) {
+                    panel.update(cx, |panel, cx| {
+                        use workspace::dock::Panel as _;
+                        panel.set_zoomed(true, window, cx);
+                    });
+                }
+                workspace.focus_panel::<agent_ui::AgentPanel>(window, cx);
+            })
+            .log_err();
 
         anyhow::Ok(())
     })

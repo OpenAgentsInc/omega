@@ -1797,8 +1797,8 @@ impl AgentWorkbenchFrontDoor {
     ) -> Result<()> {
         let message = message.into();
         let mut visual = VisualTestContext::from_window(self.window, cx);
-        self.panel.update_in(&mut visual, |panel, _window, cx| {
-            panel.mark_workbench_identity_inconsistent_for_tests(message, cx)
+        self.panel.update_in(&mut visual, |panel, window, cx| {
+            panel.mark_workbench_identity_inconsistent_for_tests(message, window, cx)
         })?;
         visual.run_until_parked();
         Ok(())

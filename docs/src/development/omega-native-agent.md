@@ -16,10 +16,9 @@ Ready. The row becomes Ready only after the prepared connection has created a
 session, and selection reuses that exact conversation entity. No editor-panel
 switch or View-menu path is required on the default surface.
 
-The transitional `--full-editor` compatibility surface retains the upstream
-settings-file and panel controls. There, {#action omega::OpenSettingsFile}
-opens the JSON settings file and {#action agent::ToggleFocus} focuses the Agent
-Panel; neither control is advertised by the sealed default application menu.
+The transitional editor compatibility surface was removed with the mode
+split (omega#161): Omega has one launch surface, and the upstream
+settings-file and panel controls are not advertised by its application menu.
 
 If a project has `"disable_ai": true` in its project settings, that setting
 also disables the Agent Panel and removes its actions.

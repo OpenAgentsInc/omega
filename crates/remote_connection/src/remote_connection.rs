@@ -245,6 +245,14 @@ impl RemoteConnectionModal {
             RemoteConnectionOptions::Mock(options) => {
                 (format!("mock-{}", options.id), None, false, false)
             }
+            // Cargo feature unification can enable `remote/test-support`
+            // (adding the `Mock` variant) without enabling this crate's own
+            // `test-support`, which removes the arm above and made
+            // `cargo test -p title_bar` fail to build. Mock connections are
+            // constructed only by test code, so this arm is unreachable at
+            // runtime in that feature combination.
+            #[allow(unreachable_patterns)]
+            _ => unreachable!("mock remote connections exist only in test builds"),
         };
         Self {
             prompt: cx.new(|cx| {

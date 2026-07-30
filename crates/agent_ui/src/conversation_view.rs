@@ -8571,16 +8571,11 @@ pub(crate) mod tests {
         conversation_view: Entity<ConversationView>,
         cx: &mut VisualTestContext,
     ) {
-        let (workspace, indicator) = conversation_view.read_with(cx, |view, _cx| {
-            (view.workspace.clone(), view.vim_mode_indicator.clone())
-        });
+        let workspace = conversation_view.read_with(cx, |view, _cx| view.workspace.clone());
         workspace
             .update_in(cx, |workspace, window, cx| {
                 workspace.add_item_to_active_pane(
-                    Box::new(cx.new(|_| VimIndicatorTestItem {
-                        conversation_view,
-                        indicator,
-                    })),
+                    Box::new(cx.new(|_| VimIndicatorTestItem { conversation_view })),
                     None,
                     true,
                     window,
@@ -8626,9 +8621,12 @@ pub(crate) mod tests {
         }
     }
 
+    // omega#161. The shipped composer bar renders the shared indicator
+    // itself (`omega_zero_base::is_active()` is constant `true`), so this
+    // item hosts only the conversation view; a second copy of the indicator
+    // here would double the rendered selector the test counts.
     struct VimIndicatorTestItem {
         conversation_view: Entity<ConversationView>,
-        indicator: Entity<vim::ModeIndicator>,
     }
 
     impl Item for VimIndicatorTestItem {
@@ -8653,9 +8651,7 @@ pub(crate) mod tests {
 
     impl Render for VimIndicatorTestItem {
         fn render(&mut self, _window: &mut Window, _cx: &mut Context<Self>) -> impl IntoElement {
-            v_flex()
-                .child(self.conversation_view.clone())
-                .child(self.indicator.clone())
+            v_flex().child(self.conversation_view.clone())
         }
     }
 

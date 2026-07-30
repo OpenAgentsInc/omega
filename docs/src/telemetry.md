@@ -54,10 +54,10 @@ This data does not include your code or sensitive project details. Events are se
 
 Usage data is tied to a random telemetry ID. If you've authenticated, this ID may be linked to your email so Zed can analyze patterns over time and reach out for feedback.
 
-Omega's sealed default surface does not expose the upstream telemetry-log
-viewer, and the Help menu has no telemetry row. In the transitional
-`--full-editor` compatibility surface, run {#action omega::OpenTelemetryLog}
-from the command palette to inspect the local log.
+Omega's surface does not expose the upstream telemetry-log viewer, and the
+Help menu has no telemetry row; the transitional editor surface that offered
+{#action omega::OpenTelemetryLog} was removed with the mode split (omega#161).
+Inspect the local log file directly instead.
 
 For the full list of event types, see the `Event` enum in [telemetry_events.rs](https://github.com/zed-industries/zed/blob/main/crates/telemetry_events/src/telemetry_events.rs).
 

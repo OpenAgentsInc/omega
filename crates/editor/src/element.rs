@@ -10981,7 +10981,7 @@ mod tests {
     }
 
     #[gpui::test]
-    async fn test_soft_wrap_editor_width_full_editor(cx: &mut TestAppContext) {
+    async fn test_soft_wrap_editor_width_full_mode(cx: &mut TestAppContext) {
         init_test(cx, |_| {});
         let window = cx.add_window(|window, cx| {
             let buffer = MultiBuffer::build_simple(&"a ".to_string().repeat(100), cx);

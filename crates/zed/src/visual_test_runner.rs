@@ -1507,9 +1507,8 @@ fn run_visual_tests(project_path: PathBuf, update_baseline: bool) -> Result<()> 
         }
     }
 
-    // Dedicated front-door proof scenes may enter the shipped, one-way
-    // zero-base mode, so keep the Omega group after every full-editor scene in
-    // this process.
+    // Dedicated front-door proof scenes may seal the window one-way, so keep
+    // the Omega group after every unsealed scene in this process.
     #[cfg(feature = "visual-tests")]
     {
         println!("\n--- Omega: front door, executor disclosure, route pin ---");
@@ -10731,15 +10730,11 @@ fn run_omega_agent_visual_tests_inner(
             "omega_tester_channel_relay_unavailable",
         ]);
     if capture_sealed_front_door {
-        // The desktop's flag-free launch enters this one-way mode before
-        // opening a workspace. The proof command runs one selected scene in
-        // its own process, so disclosure-only scenes retain their existing
-        // full-editor setup and no reset path is invented.
-        omega_zero_base::enter_from_command_line();
-        anyhow::ensure!(
-            omega_zero_base::is_active(),
-            "the front-door proof must run in flag-free zero base"
-        );
+        // omega#161. The shipped launch is the one surface; nothing needs
+        // entering any more. The sealed scenes still opt into the structural
+        // seal themselves further down, exactly where the shipped startup
+        // seals, and the proof command runs one selected scene per process so
+        // no reset path is invented.
     } else {
         // These legacy baselines intentionally prove disclosure independently
         // of provider setup. OpenAgents now authenticates eagerly during test
@@ -10953,10 +10948,10 @@ fn run_omega_agent_visual_tests_inner(
          launchpad rather than the composer front door"
     );
 
-    // These scene names are reserved for the structurally sealed zero-base
-    // surface. The generic suite still uses this setup for the disclosure
-    // scenes below, but must not overwrite or compare the sealed baselines with
-    // the full-editor layout.
+    // These scene names are reserved for the structurally sealed surface. The
+    // generic suite still uses this setup for the disclosure scenes below, but
+    // must not overwrite or compare the sealed baselines with the unsealed
+    // layout.
     let front_door = if capture_sealed_front_door {
         anyhow::ensure!(
             omega_zero_base::is_sealed(),
@@ -12678,50 +12673,18 @@ fn run_omega_exo_visual_tests(
     // window. The macOS platform does not dispatch a bounds callback for that
     // test-only resize, so a second screenshot can silently retain the first
     // viewport. Two fresh windows prove both responsive branches directly.
-    let wide = run_omega_exo_visual_capture(
-        app_state.clone(),
-        cx,
-        lane_path.clone(),
-        "omega_exo_workspace_wide",
-        size(px(1320.), px(860.)),
-        ExoSceneSurface::FullEditor,
-        update_baseline,
-    )?;
-    let narrow = run_omega_exo_visual_capture(
-        app_state.clone(),
-        cx,
-        lane_path.clone(),
-        "omega_exo_workspace_narrow",
-        size(px(720.), px(900.)),
-        ExoSceneSurface::FullEditor,
-        update_baseline,
-    )?;
-
-    // omega#99. The zero-base scenes come last, and the order is the mechanism.
-    // `omega_zero_base` is a process-global entered once and, since
-    // `OMEGA-DELTA-0052`, never left, so the two scenes above are ordinary only
-    // because they were taken before this line. That is what makes the pair of
-    // pairs worth having, and `run_omega_exo_visual_capture` asserts it per
-    // scene rather than trusting the reading order of this function.
     //
-    // OMEGA-DELTA-0052. Zero base is now the shipped default for `omega`, and
-    // this runner is unaffected by that: it is a separate binary with its own
-    // `main`, it never parses `Args`, and the only thing that turns the mode on
-    // in this process is the call below. So the ordinary-surface baselines still
-    // photograph something that happens — a person who starts Omega with
-    // `--full-editor` sees exactly it.
-    omega_zero_base::enter_from_command_line();
-    anyhow::ensure!(
-        omega_zero_base::is_active(),
-        "the zero-base scenes must be photographed with the mode actually on"
-    );
+    // omega#161. There used to be a second pair here — the same Exo turn on
+    // the `--full-editor` surface, photographed before a one-way mode flip.
+    // The mode split is removed, so the surface these two scenes photograph is
+    // the only one the shipped binary draws, and the flip machinery went with
+    // the flag.
     let zero_base_wide = run_omega_exo_visual_capture(
         app_state.clone(),
         cx,
         lane_path.clone(),
         "omega_zero_base_wide",
         size(px(1320.), px(860.)),
-        ExoSceneSurface::ZeroBase,
         update_baseline,
     )?;
     let zero_base_narrow = run_omega_exo_visual_capture(
@@ -12730,11 +12693,10 @@ fn run_omega_exo_visual_tests(
         lane_path,
         "omega_zero_base_narrow",
         size(px(720.), px(900.)),
-        ExoSceneSurface::ZeroBase,
         update_baseline,
     )?;
 
-    for result in [&wide, &narrow, &zero_base_wide, &zero_base_narrow] {
+    for result in [&zero_base_wide, &zero_base_narrow] {
         if let TestResult::BaselineUpdated(path) = result {
             return Ok(TestResult::BaselineUpdated(path.clone()));
         }
@@ -12762,18 +12724,6 @@ fn step_scheduler(cx: &mut VisualTestAppContext, budget: usize) {
     }
 }
 
-/// Which Omega surface a scene photographs the Exo turn on.
-///
-/// omega#99. Named rather than a `bool` because the call sites read at a
-/// glance, and because the difference is the whole point of the second pair:
-/// the same real Exo turn, on the ordinary surface and on the subtracted one.
-#[cfg(all(target_os = "macos", feature = "visual-tests"))]
-#[derive(Clone, Copy, PartialEq, Eq)]
-enum ExoSceneSurface {
-    FullEditor,
-    ZeroBase,
-}
-
 #[cfg(all(target_os = "macos", feature = "visual-tests"))]
 fn run_omega_exo_visual_capture(
     app_state: Arc<AppState>,
@@ -12781,7 +12731,6 @@ fn run_omega_exo_visual_capture(
     lane_path: PathBuf,
     test_name: &'static str,
     window_size: gpui::Size<gpui::Pixels>,
-    surface: ExoSceneSurface,
     update_baseline: bool,
 ) -> Result<TestResult> {
     use agent_ui::AgentPanel;
@@ -12835,32 +12784,13 @@ fn run_omega_exo_visual_capture(
         .context("failed to open the Exo workspace window")?;
     cx.run_until_parked();
 
-    // OMEGA-DELTA-0052, omega#100. Zero base's status bar is empty now.
-    //
-    // This is where the runner used to call `install_on_workspace` to add the
-    // mode's one status-bar control before capturing. There is no control, so
-    // there is nothing to install, and the scene is what the shipped binary
-    // draws for the same reason it was before: the mode flag is on and the
-    // surfaces that read it render the subtracted form.
-    //
-    // What is left is worth asserting, because it is the property the pair of
-    // pairs rests on and it is now the *only* thing that separates them. The
-    // mode is a process global, entered once and never left, so a scene ordered
-    // wrongly would photograph the subtracted surface and file it under the
-    // ordinary one — and the baseline would look plausible.
-    anyhow::ensure!(
-        omega_zero_base::is_active() == (surface == ExoSceneSurface::ZeroBase),
-        "{test_name} asks for {}, and zero base is {}",
-        match surface {
-            ExoSceneSurface::ZeroBase => "the subtracted surface",
-            ExoSceneSurface::FullEditor => "the ordinary surface",
-        },
-        if omega_zero_base::is_active() {
-            "on"
-        } else {
-            "off"
-        }
-    );
+    // OMEGA-DELTA-0052, omega#161. There is no per-scene surface assertion
+    // any more: the mode split is removed, `omega_zero_base::is_active()` is
+    // constant, and the surface these scenes photograph is the only one the
+    // shipped binary draws. The runner used to flip a process-global here and
+    // assert the flip per scene so an ordering mistake could not file the
+    // subtracted window under the ordinary name; both names and both surfaces
+    // are gone with the flag.
     let (weak_workspace, async_window_cx) = workspace_window
         .update(cx, |workspace, window, cx| {
             (workspace.weak_handle(), window.to_async(cx))

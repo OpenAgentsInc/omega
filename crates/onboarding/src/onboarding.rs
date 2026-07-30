@@ -66,7 +66,10 @@ pub use identity_startup::install_test_identity_startup;
 /// The retired first-run journey's completion key. omega#164 removed that
 /// journey — startup provisions the identity silently in the background — so
 /// the key is written by nothing and retained only so a debug reset still
-/// clears records older profiles may hold.
+/// clears records older profiles may hold. The cfg matches its one consumer,
+/// `onboarding_completion_keys`; without it a release build flags the
+/// constant as dead code.
+#[cfg(any(debug_assertions, test))]
 const IDENTITY_ONBOARDING_COMPLETION_KEY: &str = "omega_identity_onboarding_completion_v1";
 const EDITOR_ONBOARDING_COMPLETION_KEY: &str = "omega_editor_onboarding_completion_v1";
 const EDITOR_ONBOARDING_COMPLETION_SCHEMA: &str =

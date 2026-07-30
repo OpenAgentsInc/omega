@@ -418,6 +418,13 @@ impl ProjectPicker {
                 connection_string: format!("mock-{}", options.id).into(),
                 nickname: None,
             },
+            // Cargo feature unification can add the `Mock` variant (via
+            // `remote/test-support`) without enabling this crate's own
+            // `test-support`, which removes the arm above and breaks the
+            // build. Mock connections are constructed only by test code, so
+            // this arm is unreachable at runtime in that combination.
+            #[allow(unreachable_patterns)]
+            _ => unreachable!("mock remote connections exist only in test builds"),
         };
         let _path_task = cx
             .spawn_in(window, {

@@ -257,21 +257,22 @@ ordinary editable centre pane beside the thread for that file. Command-click
 keeps the compact read-only peek, and closing the last editor tab restores the
 agent-only surface.
 
-There is no runtime switch to a second application surface. The legacy
-`--full-editor` compatibility path may remain during the alpha transition, but
-it is not part of the normal launch and is scheduled for post-alpha removal.
+There is no runtime switch to a second application surface, and since
+omega#161 there is no second surface at all: the full-editor mode split is
+removed, and the flag-free launch is the application. "Zero base" survives
+only as the implementation name of crates and checks; it is not a mode a
+person can be in or out of.
 Vim remains supported in the composer and the focused editing surface.
 
-A **path argument names the project, not the mode**. `omega <path>` opens zero
-base with `<path>` as the folder the thread reads, searches and runs in; a file
+A **path argument names the project**. `omega <path>` opens the surface with
+`<path>` as the folder the thread reads, searches and runs in; a file
 argument names the folder that holds it. The folder is named in the panel
 header, because an agent whose directory is invisible cannot be checked. That
 header value is always clickable: it chooses a folder when none is attached and
-changes the directory after one has been chosen. During the alpha transition,
-`--diff`, `--dev-container`, and `--demo-workroom` remain legacy editor-only
-arguments and require the compatibility `--full-editor` path — see
-`OMEGA-DELTA-0116`. None of those flags changes what a normal, flag-free Omega
-launch exposes.
+changes the directory after one has been chosen. The legacy editor-only
+arguments (`--diff`, `--dev-container`, `--demo-workroom`) were removed with
+the mode split (omega#161); for one release a stale invocation gets a startup
+error naming the removal — see `OMEGA-DELTA-0116`.
 
 ### Words for evidence
 

@@ -1,93 +1,57 @@
-//! Zero base — one Exo thread and nothing else.
+//! The Omega surface — one agent thread and the controls that operate it.
 //!
-//! omega#99. The owner asked for one capability to work first: a window that
-//! shows Exo, the controls that operate Exo, and nothing else. Zero base is a
-//! subtraction of the editor around that thread. It is not a second product,
-//! and it is not a second code path through the Exo lane.
+//! omega#99 built this as a mode: a subtraction of the editor around the
+//! thread, entered from the command line. omega#100 made it the default,
+//! omega#161 removed the mode split entirely. There is no other surface any
+//! more — no `--full-editor`, no mode selector, no second launch shape — so
+//! this crate no longer records *whether* the surface is on. What it still
+//! owns is the action inventory: which namespaces and actions the surface
+//! admits, and the one sentence a refused action answers with.
 //!
-//! # Where the mode comes from
+//! # Why the crate survives the mode
 //!
-//! The process command line, once, at start. Nothing else. It is deliberately
-//! *not* a setting: a settings value is writable by a project settings file and
-//! by anything else that can write settings, so a mode that hides
-//! authority-bearing surfaces would be settable by something that is not the
-//! person at the keyboard. `OMEGA-DELTA-0020` records the same objection
-//! against a composer mode flag. It is also not a release channel and not a
-//! second binary — `OMEGA-DELTA-0038` requires the packaged gate to open every
-//! executable that ships, and a second binary doubles that surface.
+//! The admitted set is consulted by the palette filter, the dispatch gate, and
+//! every crate that needs to know whether a control belongs on the surface.
+//! One list, one authority, checked by `crates/omega_deltas` — that job did
+//! not end when the mode did.
 //!
-//! This crate therefore reads no file, no environment variable and no settings
-//! store. [`enter_from_command_line`] is the only way in, and the only caller
-//! is the argument parser in `crates/zed/src/main.rs`.
+//! # What the surface does
 //!
-//! # Which way the default points
+//! Two mechanisms, and the distinction decides what breaks:
 //!
-//! `OMEGA-DELTA-0052`, omega#100. Zero base is what `omega` does with no
-//! arguments, and the editor is what [`FULL_EDITOR_FLAG`] asks for. The owner
-//! said it in as many words: *"they must be stuck in zero base with no way out
-//! if it was started in this mode. which must be the default starting now.
-//! booting the full editor must require a separate flag."*
-//!
-//! The reader did not move. `OMEGA-DELTA-0047` is about *where* the mode is
-//! read from — the parsed command line, once, never a settings key — and that
-//! is unchanged. What changed is which way the boolean points when nobody says
-//! anything.
-//!
-//! # There is no way out
-//!
-//! `OMEGA-DELTA-0052`. A process that starts in zero base stays in zero base
-//! until it exits. There is no `leave`, no status-bar control, and no action
-//! that puts the editor back, because the owner asked for exactly that. Ending
-//! the process is still a complete repair: the mode is never written to disk.
-//!
-//! # What the mode does
-//!
-//! Three mechanisms, and the distinction decides what breaks:
-//!
-//! - **Not rendered.** The panels, the status-bar items and the Full Auto entry
-//!   are never built. Cheapest, and on its own the most dangerous: the
-//!   capability behind an unrendered surface is still one key press away.
+//! - **Not rendered.** The editor panels, the status-bar items and the Full
+//!   Auto entry are never built. Cheapest, and on its own the most dangerous:
+//!   the capability behind an unrendered surface is still one key press away.
 //! - **Disabled.** Everything outside [`ADMITTED_NAMESPACES`] and
-//!   [`ADMITTED_ACTIONS`] is refused at dispatch with [`refusal`] — one sentence
-//!   that names the mode and how to start Omega without it. Never a silent
-//!   no-op.
-//! - **Removed.** Nothing. The same binary is a full editor with
-//!   [`FULL_EDITOR_FLAG`]. An unresolvable key binding panics Omega before any
-//!   window opens, so zero base deletes no action and edits no keymap file.
+//!   [`ADMITTED_ACTIONS`] is refused at dispatch with [`refusal`] — one
+//!   sentence that names the action. Never a silent no-op.
+//!
+//! Deletion of the editor crates behind the gate is omega#162's separate,
+//! subsequent work. Until it lands, an unresolvable key binding still panics
+//! Omega before any window opens, so this surface deletes no action and edits
+//! no keymap file.
 
 #![deny(missing_docs)]
 
 use std::sync::atomic::{AtomicBool, Ordering};
 
-/// The command-line flag that used to enter zero base, as a person types it.
+/// The command-line flag that used to name this surface, as a person types it.
 ///
-/// `OMEGA-DELTA-0052`. Zero base is the default now, so this flag asks for what
-/// it already gets. It is still accepted, and it still does nothing else, so
-/// commands and scripts that carry it keep working.
+/// `OMEGA-DELTA-0052`. Zero base has been the default since omega#100 and the
+/// only surface since omega#161, so this flag asks for what it already gets.
+/// It is still accepted, and it still does nothing, so commands and scripts
+/// that carry it keep working.
 pub const FLAG: &str = "--zero-base";
 
-/// The command-line flag that asks for the editor around the thread.
+/// Has the surface taken the window over yet?
 ///
-/// `OMEGA-DELTA-0052`. The one way to start Omega as a full editor.
-pub const FULL_EDITOR_FLAG: &str = "--full-editor";
-
-/// What a person sees when zero base refuses something.
-pub const MODE_NAME: &str = "zero base";
-
-/// Is this process in zero base? Written once, by the argument parser.
-///
-/// One-way for the life of the process. There is no companion static for
-/// leaving, because `OMEGA-DELTA-0052` removed leaving.
-static ENTERED: AtomicBool = AtomicBool::new(false);
-
-/// Has zero base's own surface taken the window over yet?
-///
-/// `OMEGA-DELTA-0053`. Written once, by the workspace initialiser, after the
-/// identity gate has been answered and the thread is open. The gate is silent
-/// now — omega#164 provisions the Nostr identity in the background — but the
-/// order is unchanged: the seal happens only after the readiness wait resolves
-/// and the thread renders, so nothing is sealed over a window that has not
-/// finished becoming the product.
+/// `OMEGA-DELTA-0053`. Written once, at process start, by
+/// `crates/zed/src/main.rs`. The seal used to wait for the identity gate's
+/// centre-pane onboarding to be answered; omega#164 removed that page and
+/// provisions the Nostr identity silently in the background, so there is
+/// nothing left that needs the unsealed editor chrome and the seal moved to
+/// startup with omega#161. Proof harnesses that build their own windows call
+/// [`seal`] themselves when a scene photographs the sealed surface.
 static SEALED: AtomicBool = AtomicBool::new(false);
 
 /// The namespaces zero base admits.
@@ -423,48 +387,32 @@ pub const ADMITTED_ACTIONS: &[&str] = &[
     "workroom::RetryVoice",
 ];
 
-/// Enter zero base, from the parsed command line and from nowhere else.
+/// Is this the one Omega surface? Constant `true` since omega#161.
 ///
-/// Idempotent, and one-way for the life of the process: `OMEGA-DELTA-0052`
-/// removed the way out, so nothing turns this off again. The mode is never
-/// written to disk, so ending the process is always a complete repair.
-///
-/// The name still says where the mode comes from, and that is still true after
-/// `OMEGA-DELTA-0052`: the caller is the argument parser, and it calls this when
-/// the parsed command line asked for no editor. A default is a decision made
-/// from the command line as much as a flag is.
-pub fn enter_from_command_line() {
-    ENTERED.store(true, Ordering::SeqCst);
-}
-
-/// Is zero base on right now?
+/// The mode split is gone: there is no flag, no static, and no second launch
+/// shape this could distinguish. The function survives because the call sites
+/// that ask it are the exact inventory of code the mode used to gate — the
+/// map omega#162's crate deletion works from — and because a caller reads
+/// better asking a named question than carrying a bare `true`.
 #[must_use]
 pub fn is_active() -> bool {
-    ENTERED.load(Ordering::SeqCst)
+    true
 }
 
-/// Did this process start in zero base?
+/// The surface owns the window. One-way for the life of the process.
 ///
-/// The same answer as [`is_active`] since `OMEGA-DELTA-0052`, and kept separate
-/// because the two questions are asked for different reasons: this one decides
-/// what to install once at startup, and [`is_active`] is asked on every render.
-#[must_use]
-pub fn entered_from_command_line() -> bool {
-    ENTERED.load(Ordering::SeqCst)
-}
-
-/// Zero base's surface now owns the window. One-way, like entry.
-///
-/// `OMEGA-DELTA-0053`. Called by the workspace initialiser once the identity
-/// gate is answered and the thread is open. It does nothing outside zero base,
-/// so a build started with the editor flag cannot be sealed by a stray call.
+/// `OMEGA-DELTA-0053`, amended by omega#161. Called once at process start by
+/// `crates/zed/src/main.rs`, before any window opens, so the editor chrome is
+/// never drawn — not even for a frame. The seal used to wait for
+/// `OMEGA-DELTA-0040`'s centre-pane identity onboarding; omega#164 deleted
+/// that page, so nothing renders in the centre before the thread and sealing
+/// at startup is safe. Test processes and proof harnesses start unsealed and
+/// call this themselves when a scene needs the sealed render.
 pub fn seal() {
-    if is_active() {
-        SEALED.store(true, Ordering::SeqCst);
-    }
+    SEALED.store(true, Ordering::SeqCst);
 }
 
-/// Has zero base's surface taken the window over?
+/// Has the surface taken the window over?
 ///
 /// `OMEGA-DELTA-0053`. While this is true the workspace starts with no editor
 /// pane, tab bar, title bar, or status bar. They are not merely covered by a
@@ -473,7 +421,7 @@ pub fn seal() {
 /// the center remains beside the agent surface until its final tab closes.
 #[must_use]
 pub fn is_sealed() -> bool {
-    is_active() && SEALED.load(Ordering::SeqCst)
+    SEALED.load(Ordering::SeqCst)
 }
 
 /// Does zero base admit this action name?
@@ -489,18 +437,19 @@ pub fn admits_action(name: &str) -> bool {
 
 /// The one sentence a refused action answers with.
 ///
-/// It names the action, the mode, and how to start Omega without the mode. A
-/// refusal a person cannot read is the same thing as a silent no-op.
+/// It names the action and says what Omega is instead. A refusal a person
+/// cannot read is the same thing as a silent no-op.
 ///
-/// `OMEGA-DELTA-0052` changed the second half of the sentence. It used to name
-/// a control in the window, and that control is gone: there is no way out of a
-/// running zero base, so a sentence that offered one would be a lie a person
-/// would go looking for.
+/// `OMEGA-DELTA-0052` removed the control in the window the sentence used to
+/// name, and omega#161 removed the flag it named after that: there is no
+/// editor to start any more, so the sentence offers nothing. A sentence that
+/// offered a way to the refused surface would be a lie a person would go
+/// looking for.
 #[must_use]
 pub fn refusal(action_name: &str) -> String {
     format!(
-        "{action_name} is off in {MODE_NAME}, which shows one Exo thread and \
-         nothing else. Start Omega with {FULL_EDITOR_FLAG} for the editor."
+        "{action_name} is not part of Omega, which shows one agent thread and \
+         the controls that operate it."
     )
 }
 
@@ -508,46 +457,32 @@ pub fn refusal(action_name: &str) -> String {
 mod tests {
     use super::*;
 
-    /// The mode reader names the command line, and once it is on it stays on.
+    /// The surface is always on, and sealing is the one remaining one-way step.
     ///
-    /// `OMEGA-DELTA-0052`. This test used to end by leaving and proving nothing
-    /// re-entered. There is no leaving now, so it ends by proving the opposite
-    /// property: the mode is one-way for the life of the process.
-    ///
-    /// The static starts `false` here even though zero base is the shipped
-    /// default, and that is the point of the split: the default lives in the
-    /// argument parser in `crates/zed/src/main.rs`, not in this crate. A crate
-    /// that defaulted itself to on would be a second reader of the mode, which
-    /// `OMEGA-DELTA-0047` refuses.
+    /// omega#161. This test used to prove the mode was off until the command
+    /// line turned it on. There is no mode any more: `is_active` is constant
+    /// `true`, and the only process state left is the seal, which starts off
+    /// so tests and proof harnesses can exercise the unsealed render, and
+    /// which production sets once at startup.
     #[test]
-    fn the_mode_is_off_until_the_command_line_turns_it_on() {
-        // The statics are process-wide, so this test owns the transitions and
-        // the others below only read derived pure functions.
-        assert!(!is_active(), "zero base must be off in a fresh process");
-        assert!(!entered_from_command_line());
+    fn the_surface_is_always_on_and_the_seal_is_one_way() {
+        assert!(is_active(), "there is only one surface since omega#161");
 
-        enter_from_command_line();
-        assert!(is_active());
-        assert!(entered_from_command_line());
-
-        enter_from_command_line();
-        assert!(
-            is_active(),
-            "entering twice is the same as entering once, and nothing turns the \
-             mode off inside a process"
-        );
-
-        // OMEGA-DELTA-0053. Sealing is a second one-way step, after the
-        // identity gate, and it is what stops the editor being one un-zoom
-        // away. It happens inside this test because the statics are
-        // process-wide and this test owns the transitions.
+        // OMEGA-DELTA-0053. The seal is process-wide, so this test owns the
+        // transition and the others below only read derived pure functions.
         assert!(
             !is_sealed(),
-            "entering zero base does not seal the window on its own; the \
-             identity gate renders in the ordinary workspace first"
+            "a fresh test process starts unsealed so harnesses can build the \
+             unsealed render before opting in"
         );
         seal();
         assert!(is_sealed());
+        seal();
+        assert!(
+            is_sealed(),
+            "sealing twice is the same as sealing once, and nothing unseals \
+             inside a process"
+        );
     }
 
     #[test]
@@ -715,18 +650,18 @@ mod tests {
         }
     }
 
-    /// `OMEGA-DELTA-0052`. The sentence names how to start Omega differently,
-    /// and never a control in the window.
+    /// `OMEGA-DELTA-0052`, amended by omega#161. The sentence names the action
+    /// and offers nothing: no control in the window, and no flag — the editor
+    /// the old sentence pointed at no longer exists.
     #[test]
-    fn a_refusal_is_one_readable_sentence_naming_the_editor_flag() {
+    fn a_refusal_is_one_readable_sentence_offering_no_way_out() {
         let sentence = refusal("project_panel::ToggleFocus");
         assert!(sentence.contains("project_panel::ToggleFocus"));
-        assert!(sentence.contains(MODE_NAME));
-        assert!(sentence.contains(FULL_EDITOR_FLAG));
+        assert!(sentence.contains("Omega"));
         assert!(
-            !sentence.contains("Leave"),
-            "there is no way out of a running zero base, so the refusal must \
-             not send a person looking for a button that does not exist: {sentence}"
+            !sentence.contains("Leave") && !sentence.contains("--full-editor"),
+            "the refusal must not send a person looking for a button or a flag \
+             that does not exist: {sentence}"
         );
     }
 }
