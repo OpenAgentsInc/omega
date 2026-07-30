@@ -188,6 +188,12 @@ Direct setup and authentication errors reveal that same external-agent view,
 with its native controls. Sarah remains visible with its honest unavailable
 state. Starting another mode never retargets an existing transcript.
 
+Prepared conversations are saved before their first physical session, together
+with the exact owner and working folders. If startup restores a conversation,
+terminal, Full Auto surface, pending terminal, or typed draft while the panel is
+opening, Omega keeps that restored state instead of covering it with a new
+front door.
+
 For a new Omega Agent conversation, **Automatic** derives normalized task
 requirements from the first request and deterministically chooses between the
 native loop and ready ordinary ACP agents. You can instead choose one exact

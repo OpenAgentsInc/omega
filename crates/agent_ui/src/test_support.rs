@@ -280,20 +280,24 @@ pub fn open_thread_with_custom_connection<C>(
 }
 
 pub fn send_message(panel: &Entity<AgentPanel>, cx: &mut VisualTestContext) {
-    let thread_view = panel.read_with(cx, |panel, cx| panel.active_thread_view(cx).unwrap());
-    let message_editor = thread_view.read_with(cx, |view, _cx| view.message_editor.clone());
-    message_editor.update_in(cx, |editor, window, cx| {
-        editor.set_text("Hello", window, cx);
+    let conversation_view = panel.read_with(cx, |panel, _cx| {
+        panel.active_conversation_view().unwrap().clone()
     });
-    thread_view.update_in(cx, |view, window, cx| view.send(window, cx));
+    conversation_view.update_in(cx, |view, window, cx| {
+        view.set_composer_text_for_tests("Hello", window, cx);
+    });
+    conversation_view.update_in(cx, |view, window, cx| {
+        view.send_for_tests(window, cx);
+    });
     cx.run_until_parked();
 }
 
 pub fn type_draft_prompt(panel: &Entity<AgentPanel>, text: &str, cx: &mut VisualTestContext) {
-    let thread_view = panel.read_with(cx, |panel, cx| panel.active_thread_view(cx).unwrap());
-    let message_editor = thread_view.read_with(cx, |view, _cx| view.message_editor.clone());
-    message_editor.update_in(cx, |editor, window, cx| {
-        editor.set_text(text, window, cx);
+    let conversation_view = panel.read_with(cx, |panel, _cx| {
+        panel.active_conversation_view().unwrap().clone()
+    });
+    conversation_view.update_in(cx, |view, window, cx| {
+        view.set_composer_text_for_tests(text, window, cx);
     });
     cx.run_until_parked();
     // Drain the debounced draft-prompt persist task so the kvp write has
@@ -549,6 +553,17 @@ impl AgentWorkbenchFrontDoor {
                 panel.enable_workbench_shell_for_tests(cx);
                 panel.set_zoomed(true, window, cx);
             });
+            if scene.active_thread_id.is_some() {
+                panel.update(cx, |panel, cx| {
+                    panel.open_draft_with_server(
+                        Rc::new(StubAgentServer::new(
+                            StubAgentConnection::new().with_agent_id("workbench-fixture".into()),
+                        ).with_connection_agent_id()),
+                        window,
+                        cx,
+                    );
+                });
+            }
             workspace.add_panel(panel.clone(), window, cx);
             let focused = workspace.focus_panel::<AgentPanel>(window, cx).is_some();
             Ok((panel, focused))
@@ -558,16 +573,6 @@ impl AgentWorkbenchFrontDoor {
         }
 
         visual.set_debug_accessibility_active(true);
-        if scene.active_thread_id.is_some() {
-            visual.dispatch_action(crate::NewThread);
-            let activated = panel.update_in(&mut visual, |panel, window, cx| {
-                panel.activate_prepared_omega_for_tests(window, cx)
-            });
-            anyhow::ensure!(
-                activated,
-                "the workbench fixture could not activate its prepared Omega session"
-            );
-        }
 
         panel.update_in(&mut visual, |panel, _window, cx| {
             for surface in &scene.surfaces {
@@ -587,8 +592,9 @@ impl AgentWorkbenchFrontDoor {
         }
         visual.run_until_parked();
 
-        let has_active_thread =
-            panel.read_with(&visual, |panel, cx| panel.active_thread_view(cx).is_some());
+        let has_active_thread = panel.read_with(&visual, |panel, _cx| {
+            panel.active_conversation_view().is_some()
+        });
         if has_active_thread != scene.active_thread_id.is_some() {
             bail!(
                 "rendered active-thread state {has_active_thread} did not match fixture expectation {}",

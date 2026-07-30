@@ -1302,6 +1302,19 @@ impl ThreadMetadataStore {
                         .insert(entity_id, subscription);
                 })
                 .ok();
+
+            let initial_store = weak_store.clone();
+            cx.defer(move |cx| {
+                initial_store
+                    .update(cx, |this, cx| {
+                        this.handle_conversation_event(
+                            view_entity,
+                            &crate::conversation_view::RootThreadUpdated,
+                            cx,
+                        );
+                    })
+                    .log_err();
+            });
         })
         .detach();
 
@@ -1365,6 +1378,65 @@ impl ThreadMetadataStore {
         let view = conversation_view.read(cx);
         let thread_id = view.thread_id;
         let Some(thread) = view.root_thread(cx) else {
+            let project = view.project().read(cx);
+            if project.is_via_collab() {
+                return;
+            }
+            let existing_thread = self.entry(thread_id).cloned();
+            let project_worktree_paths = project.worktree_paths(cx);
+            let worktree_paths = worktree_paths_for_work_dirs(
+                existing_thread
+                    .as_ref()
+                    .map(|thread| &thread.worktree_paths),
+                &project_worktree_paths,
+                Some(view.work_dirs()),
+            );
+            let updated_at = Utc::now();
+            let created_at = existing_thread
+                .as_ref()
+                .and_then(|thread| thread.created_at)
+                .unwrap_or(updated_at);
+            let (agent_id, conversation_owner_version) = existing_thread.as_ref().map_or_else(
+                || (view.agent_key().id(), ConversationOwnerVersion::V1),
+                |metadata| {
+                    (
+                        metadata.agent_id.clone(),
+                        metadata.conversation_owner_version,
+                    )
+                },
+            );
+            self.save(
+                ThreadMetadata {
+                    thread_id,
+                    session_id: existing_thread
+                        .as_ref()
+                        .and_then(|thread| thread.session_id.clone()),
+                    agent_id,
+                    conversation_owner_version,
+                    title: existing_thread
+                        .as_ref()
+                        .and_then(|thread| thread.title.clone()),
+                    title_override: existing_thread
+                        .as_ref()
+                        .and_then(|thread| thread.title_override.clone()),
+                    created_at: Some(created_at),
+                    interacted_at: existing_thread
+                        .as_ref()
+                        .map(|thread| thread.interacted_at)
+                        .unwrap_or(Some(updated_at)),
+                    updated_at,
+                    archived: existing_thread
+                        .as_ref()
+                        .map(|thread| thread.archived)
+                        .unwrap_or(worktree_paths.is_empty()),
+                    worktree_paths,
+                    remote_connection: existing_thread
+                        .as_ref()
+                        .and_then(|thread| thread.remote_connection.clone())
+                        .or_else(|| project.remote_connection_options(cx)),
+                },
+                cx,
+            );
             return;
         };
 

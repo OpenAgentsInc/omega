@@ -7749,7 +7749,13 @@ current image build does not decode it inline.
 - **Loading text owns its conversation.** Draft retention covers the loading
   editor, accepted pre-connect messages, the connected message queue, draft
   prompt, and composer. Opening the front door cannot discard or retarget text
-  during any connection handoff phase.
+  during any connection handoff phase. A sessionless prepared conversation is
+  persisted with its exact owner and work directories before its first send,
+  then promoted in place when the physical session is created.
+- **Startup does not overwrite restored state.** The asynchronous startup task
+  rechecks the mounted panel before presenting the front door. A conversation,
+  terminal, Full Auto surface, pending terminal restore, or typed draft that
+  appeared while startup waited remains selected and usable.
 - **Compatibility scope:** the legacy `--full-editor` executor selector and
   rebuild seam remain temporarily available only on that compatibility
   surface. Default front-door selection never calls either retarget path.

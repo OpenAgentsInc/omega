@@ -902,6 +902,35 @@ impl ConversationView {
         &self.desired_work_dirs
     }
 
+    pub(crate) fn project(&self) -> &Entity<Project> {
+        &self.project
+    }
+
+    #[cfg(any(test, feature = "test-support"))]
+    pub(crate) fn set_composer_text_for_tests(
+        &mut self,
+        text: &str,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if let Some(thread_view) = self.root_thread_view() {
+            let message_editor = thread_view.read(cx).message_editor.clone();
+            message_editor.update(cx, |editor, cx| editor.set_text(text, window, cx));
+        } else {
+            let loading_composer = self.loading_composer(window, cx);
+            loading_composer.update(cx, |editor, cx| editor.set_text(text, window, cx));
+        }
+    }
+
+    #[cfg(any(test, feature = "test-support"))]
+    pub(crate) fn send_for_tests(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if let Some(thread_view) = self.root_thread_view() {
+            thread_view.update(cx, |thread_view, cx| thread_view.send(window, cx));
+        } else {
+            self.submit_before_session(window, cx);
+        }
+    }
+
     pub fn identity_mutation_unavailable_reason(&self, cx: &App) -> Option<SharedString> {
         match &self.server_state {
             ServerState::Loading { .. } => Some(
@@ -1593,6 +1622,12 @@ impl ConversationView {
         // composer, because a person types a sentence into nothing.
         editor.read(cx).focus_handle(cx).focus(window, cx);
 
+        self._subscriptions
+            .push(cx.subscribe(&editor, |this, _editor, event, cx| {
+                if matches!(event, EditorEvent::Edited { .. }) {
+                    this.schedule_draft_prompt_persist(cx);
+                }
+            }));
         self.loading_composer = Some(editor.clone());
         editor
     }
@@ -3151,15 +3186,23 @@ impl ConversationView {
                 .timer(DRAFT_PROMPT_PERSIST_DEBOUNCE)
                 .await;
             let persist = this.update(cx, |this, cx| {
-                let thread = this.root_thread(cx)?;
-                let thread = thread.read(cx);
-                if !thread.is_draft_thread() {
-                    return None;
-                }
-                let snapshot: Vec<acp::ContentBlock> = thread
-                    .draft_prompt()
-                    .map(|p| p.to_vec())
-                    .unwrap_or_default();
+                let snapshot = if let Some(thread) = this.root_thread(cx) {
+                    let thread = thread.read(cx);
+                    if !thread.is_draft_thread() {
+                        return None;
+                    }
+                    thread
+                        .draft_prompt()
+                        .map(|prompt| prompt.to_vec())
+                        .unwrap_or_default()
+                } else {
+                    this.loading_composer
+                        .as_ref()
+                        .map(|editor| editor.read(cx).text(cx))
+                        .filter(|text| !text.is_empty())
+                        .map(|text| vec![acp::ContentBlock::Text(acp::TextContent::new(text))])
+                        .unwrap_or_default()
+                };
                 Some(if snapshot.is_empty() {
                     crate::draft_prompt_store::delete(thread_id, cx)
                 } else {

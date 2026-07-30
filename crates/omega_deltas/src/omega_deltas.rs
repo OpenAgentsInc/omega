@@ -22020,8 +22020,12 @@ mod tests {
         assert!(!panel.contains("Direct agents are not available in this alpha yet"));
         let open = function_body(&panel, "open_new_conversation_front_door_for_mode")
             .expect("OMEGA-DELTA-0177: front-door opener is gone");
-        assert!(open.contains("prepare_omega_draft"));
+        assert!(open.contains("present_new_conversation_front_door"));
         assert!(!open.contains("omega_executor_selector::ready_here"));
+        let present = function_body(&panel, "present_new_conversation_front_door")
+            .expect("OMEGA-DELTA-0177: front-door presentation boundary is gone");
+        assert!(present.contains("prepare_omega_draft"));
+        assert!(!present.contains("omega_executor_selector::ready_here"));
 
         let conversation = read_repository_file("crates/agent_ui/src/conversation_view.rs");
         for required in [

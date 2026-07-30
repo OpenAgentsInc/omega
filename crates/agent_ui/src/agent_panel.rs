@@ -2494,6 +2494,19 @@ impl AgentPanel {
         cx: &mut Context<Self>,
     ) {
         self.set_last_created_entry_kind_from_user_action(AgentPanelEntryKind::Thread, cx);
+        self.present_new_conversation_front_door(mode, window, cx);
+    }
+
+    fn open_startup_front_door(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.present_new_conversation_front_door(ConversationMode::OmegaAgent, window, cx);
+    }
+
+    fn present_new_conversation_front_door(
+        &mut self,
+        mode: ConversationMode,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
         self.showing_full_auto = false;
         self.showing_new_conversation_front_door = true;
         self.selected_front_door_mode = mode;
@@ -4178,9 +4191,14 @@ impl AgentPanel {
                     let Some(panel) = workspace.panel::<Self>(cx) else {
                         return false;
                     };
+                    if !panel.read(cx).should_open_startup_front_door(cx) {
+                        return true;
+                    }
                     workspace.focus_panel::<Self>(window, cx);
                     panel.update(cx, |panel, cx| {
-                        panel.open_new_conversation_front_door(window, cx);
+                        if panel.should_open_startup_front_door(cx) {
+                            panel.open_startup_front_door(window, cx);
+                        }
                     });
                     true
                 })?;
@@ -7039,10 +7057,11 @@ impl AgentPanel {
     /// Whether the active view is in the **ephemeral** new-draft slot
     pub fn active_view_is_new_draft(&self, cx: &App) -> bool {
         self.draft_thread.as_ref().is_some_and(|draft| {
-            draft
+            let draft_is_unpromoted = draft
                 .read(cx)
                 .root_thread(cx)
-                .is_some_and(|thread| thread.read(cx).is_draft_thread())
+                .is_none_or(|thread| thread.read(cx).is_draft_thread());
+            draft_is_unpromoted
                 && self
                     .active_conversation_view()
                     .is_some_and(|active| active.entity_id() == draft.entity_id())
@@ -7050,8 +7069,10 @@ impl AgentPanel {
     }
     /// Whether the active thread is any kind of draft
     pub fn active_thread_is_draft(&self, cx: &App) -> bool {
-        self.active_agent_thread(cx)
-            .is_some_and(|thread| thread.read(cx).is_draft_thread())
+        self.active_agent_thread(cx).map_or_else(
+            || self.active_view_is_new_draft(cx),
+            |thread| thread.read(cx).is_draft_thread(),
+        )
     }
 }
 
@@ -7486,21 +7507,28 @@ impl Panel for AgentPanel {
 
 impl AgentPanel {
     fn ensure_thread_initialized(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        // `OMEGA-DELTA-0020`. A user who opened Full Auto as the first thing
-        // in a fresh panel leaves `base_view` uninitialized, so re-activating
-        // the panel would create a thread here, and `set_base_view` would
-        // clear `showing_full_auto` and bounce them out of the surface they
-        // were looking at. Initializing a thread can wait until they ask for
-        // one.
-        if self.showing_full_auto {
-            return;
+        if self.should_open_startup_front_door(cx) {
+            self.open_startup_front_door(window, cx);
         }
-        if matches!(self.base_view, BaseView::Uninitialized) {
-            if self.pending_terminal_spawn.is_some() {
-                return;
-            }
-            self.open_new_conversation_front_door(window, cx);
+    }
+
+    fn should_open_startup_front_door(&self, cx: &App) -> bool {
+        // Startup waits for the panel to be installed. Restore and fixture
+        // work can complete during that wait, so the decision must be made
+        // again when the task actually reaches the panel.
+        if self.showing_new_conversation_front_door
+            || self.showing_full_auto
+            || self.pending_terminal_spawn.is_some()
+            || !matches!(self.base_view, BaseView::Uninitialized)
+            || self.destination_has_meaningful_state(cx)
+        {
+            return false;
         }
+
+        !self
+            .draft_thread
+            .as_ref()
+            .is_some_and(|draft| self.draft_has_content(draft, cx))
     }
 
     fn destination_has_meaningful_state(&self, cx: &App) -> bool {
@@ -14828,6 +14856,105 @@ mod tests {
     }
 
     #[gpui::test]
+    async fn test_delayed_startup_front_door_preserves_mounted_conversation(
+        cx: &mut TestAppContext,
+    ) {
+        let (panel, mut cx) = setup_panel(cx).await;
+        let workspace = panel
+            .read_with(&cx, |panel, _cx| panel.workspace.upgrade())
+            .expect("test panel should retain its workspace");
+
+        workspace.update_in(&mut cx, |workspace, window, cx| {
+            AgentPanel::open_front_door(window, cx);
+            workspace.add_panel(panel.clone(), window, cx);
+        });
+        panel.update_in(&mut cx, |panel, window, cx| {
+            panel.open_draft_with_server(
+                Rc::new(StubAgentServer::new(StubAgentConnection::new())),
+                window,
+                cx,
+            );
+        });
+        let mounted_conversation = panel.read_with(&cx, |panel, _cx| {
+            panel
+                .active_conversation_view()
+                .expect("fixture should mount a conversation")
+                .entity_id()
+        });
+
+        cx.run_until_parked();
+
+        panel.read_with(&cx, |panel, _cx| {
+            assert_eq!(
+                panel.active_conversation_view().map(Entity::entity_id),
+                Some(mounted_conversation),
+                "the delayed startup task must not replace a conversation mounted while it waited"
+            );
+            assert!(!panel.showing_new_conversation_front_door);
+        });
+
+        panel.update_in(&mut cx, |panel, window, cx| {
+            panel.new_thread(&NewThread, window, cx);
+        });
+        panel.read_with(&cx, |panel, _cx| {
+            assert!(
+                panel.showing_new_conversation_front_door,
+                "an explicit New Thread action must still open the front door"
+            );
+        });
+    }
+
+    #[gpui::test]
+    async fn test_delayed_startup_front_door_preserves_restored_terminal(cx: &mut TestAppContext) {
+        let (panel, mut cx) = setup_panel(cx).await;
+        let workspace = panel
+            .read_with(&cx, |panel, _cx| panel.workspace.upgrade())
+            .expect("test panel should retain its workspace");
+
+        workspace.update_in(&mut cx, |workspace, window, cx| {
+            AgentPanel::open_front_door(window, cx);
+            workspace.add_panel(panel.clone(), window, cx);
+        });
+        let terminal_id = panel
+            .update_in(&mut cx, |panel, window, cx| {
+                panel.insert_test_terminal("Restored terminal", true, window, cx)
+            })
+            .expect("test terminal should be inserted");
+
+        cx.run_until_parked();
+
+        panel.read_with(&cx, |panel, _cx| {
+            assert_eq!(panel.active_terminal_id(), Some(terminal_id));
+            assert!(
+                !panel.showing_new_conversation_front_door,
+                "the delayed startup task must not cover a restored terminal"
+            );
+        });
+    }
+
+    #[gpui::test]
+    async fn test_delayed_startup_front_door_opens_empty_panel(cx: &mut TestAppContext) {
+        let (panel, mut cx) = setup_panel(cx).await;
+        let workspace = panel
+            .read_with(&cx, |panel, _cx| panel.workspace.upgrade())
+            .expect("test panel should retain its workspace");
+
+        workspace.update_in(&mut cx, |workspace, window, cx| {
+            AgentPanel::open_front_door(window, cx);
+            workspace.add_panel(panel.clone(), window, cx);
+        });
+        cx.run_until_parked();
+
+        panel.read_with(&cx, |panel, _cx| {
+            assert!(panel.showing_new_conversation_front_door);
+            assert!(
+                panel.draft_thread.is_some(),
+                "an empty startup should prepare the Omega conversation"
+            );
+        });
+    }
+
+    #[gpui::test]
     async fn test_repeated_activation_opens_one_front_door_instead_of_last_terminal(
         cx: &mut TestAppContext,
     ) {
@@ -15145,13 +15272,14 @@ mod tests {
 
         loaded.read_with(cx, |panel, cx| {
             assert!(
-                panel.active_terminal_id().is_some(),
-                "new workspace should initialize to a terminal when terminal was the globally last used entry kind"
+                panel.active_terminal_id().is_none(),
+                "generic panel activation must not repeat the last explicit terminal choice"
             );
             assert!(
                 panel.active_conversation_view().is_none(),
-                "new workspace should not initialize to a draft when terminal is the global entry kind"
+                "the new-conversation front door should not claim its prepared draft before selection"
             );
+            assert!(panel.showing_new_conversation_front_door);
             assert!(panel.should_create_terminal_for_new_entry(cx));
         });
     }
@@ -18953,11 +19081,16 @@ mod tests {
         let (panel, mut cx) = setup_panel(cx).await;
         cx.run_until_parked();
 
+        let agent = Agent::Custom {
+            id: "session-tracking-test".into(),
+        };
         panel.update(&mut cx, |panel, cx| {
             panel.connection_store.update(cx, |store, cx| {
                 store.restart_connection(
-                    Agent::NativeAgent,
-                    Rc::new(StubAgentServer::new(SessionTrackingConnection::new())),
+                    agent.clone(),
+                    Rc::new(StubAgentServer::new(
+                        SessionTrackingConnection::new().with_agent_id("session-tracking-test"),
+                    )),
                     cx,
                 );
             });
@@ -18966,7 +19099,7 @@ mod tests {
 
         panel.update_in(&mut cx, |panel, window, cx| {
             panel.external_thread(
-                Some(Agent::NativeAgent),
+                Some(agent),
                 None,
                 None,
                 None,
@@ -20237,7 +20370,7 @@ mod tests {
         let parked_thread_id = crate::test_support::active_thread_id(&panel, cx);
         crate::test_support::type_draft_prompt(&panel, "parked prompt", cx);
         panel.update_in(cx, |panel, window, cx| {
-            panel.new_thread(&NewThread, window, cx);
+            panel.activate_new_thread(true, AgentThreadSource::AgentPanel, window, cx);
         });
         cx.run_until_parked();
 
