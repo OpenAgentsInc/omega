@@ -8391,16 +8391,12 @@ impl AgentPanel {
                 this.toggle_zoom(&ToggleZoom, window, cx);
             }));
 
-        let max_content_width = AgentSettings::get_global(cx).max_content_width;
-
-        let base_container = h_flex()
-            .size_full()
-            .when(
-                matches!(mode, ToolbarMode::EmptyThread | ToolbarMode::ActiveThread),
-                |this| this.when_some(max_content_width, |this, max_w| this.max_w(max_w).mx_auto()),
-            )
-            .flex_none()
-            .justify_between();
+        // Upstream caps this row at `max_content_width` and centers it, which
+        // is invisible in a narrow dock but floats the thread title near the
+        // middle of the window in the full-window workbench. The toolbar spans
+        // its container: title flush left, controls flush right. Conversation
+        // content keeps its own reading-width centering.
+        let base_container = h_flex().size_full().flex_none().justify_between();
 
         let empty_thread_title = matches!(mode, ToolbarMode::EmptyThread).then(|| {
             Label::new(format!("New {} Thread", selected_agent_label))
