@@ -13,7 +13,7 @@ Use **Panel Layout > Agentic** from the user menu in the title bar (or the {#act
 
 ## Threads Sidebar {#threads-sidebar}
 
-The sidebar shows your threads grouped by project. Each project gets its own section with a header. Threads appear below with their title, status indicator, and which agent is running them. Threads running in linked Git worktrees appear under the same project as their main worktree. See [Worktree Isolation](#worktree-isolation).
+The sidebar shows your threads grouped by project. Each project gets its own section with a header. Threads appear below with their title, agent, and lifecycle: **Running**, **Waiting for you**, **Failed**, **Completed**, or **Cancelled**. Waiting means the agent needs a confirmation or another response before it can continue. The active thread repeats its agent and lifecycle in the header and provides a targeted cancel control while it is running or waiting. Threads running in linked Git worktrees appear under the same project as their main worktree. See [Worktree Isolation](#worktree-isolation).
 
 Terminal Threads also appear as entries in the sidebar alongside agent threads, identified by a terminal icon. Click one to switch to it.
 
@@ -47,6 +47,8 @@ If you have External Agents installed, Zed will detect whether you have existing
 
 Each thread runs independently, so you can send a prompt, open a second thread, and give it a different task while the first continues working. To scope a new thread to a specific project, hover over that project's header in the Threads Sidebar and click the `+` button, or use {#action agents_sidebar::NewThreadInGroup} from the keyboard. See [Creating New Threads](./agent-panel.md#new-thread) for the other entry points.
 
+Switching threads does not cancel background work. Cancelling from an active thread stops only that thread; other agents and their queues continue independently. Thread identity, transcript, terminal lifecycle, and queued prompts are restored after relaunch. Restored open queues remain paused until you explicitly resume them, because Omega cannot infer provider quiescence from a new process's local Idle state. A turn that was interrupted by relaunch is shown as failed rather than incorrectly shown as still running.
+
 Each thread can use a different agent, so you can run Zed's built-in agent in one thread and an [External Agent](./external-agents.md) like Claude Code or Codex in another.
 
 ### Thread Types {#thread-types}
@@ -76,6 +78,8 @@ A single project can contain multiple folders (a multi-root folder project). Age
 ## Worktree Isolation {#worktree-isolation}
 
 If two threads might edit the same files, start one in a new [Git worktree](../git.md#git-worktrees) to give it an isolated checkout.
+
+Before a direct agent begins a root turn, Omega checks whether another direct agent is already writing in any selected worktree. If so, the warning names the occupying thread, agent, and path. Choose **Cancel** to preserve the prompt without starting it, or **Run here anyway** only when concurrent writes are intentional. The same guard applies to queued prompts. Local path aliases and overlapping roots count as the same worktree; identical remote paths on different hosts do not.
 
 Worktrees are managed from the title bar. Click the worktree picker (to the right of the project picker) to switch between existing worktrees or create a new one. New worktrees are created in a detached HEAD state, so you won't accidentally share a branch between worktrees.
 

@@ -676,10 +676,10 @@ fn affects_thread_metadata(event: &AcpThreadEvent) -> bool {
         | AcpThreadEvent::Error
         | AcpThreadEvent::LoadError(_)
         | AcpThreadEvent::Refusal
+        | AcpThreadEvent::StatusChanged
         | AcpThreadEvent::WorkingDirectoriesUpdated => true,
         // --
         AcpThreadEvent::EntryUpdated(_)
-        | AcpThreadEvent::StatusChanged
         | AcpThreadEvent::EntriesRemoved(_)
         | AcpThreadEvent::Retry(_)
         | AcpThreadEvent::TokenUsageUpdated
@@ -756,6 +756,7 @@ pub struct ConversationView {
     /// causes mermaid diagrams to re-render).
     last_theme_id: Option<String>,
     draft_prompt_persist_task: Option<Task<()>>,
+    send_queue_journal: Rc<crate::omega_send_queue::SendQueueJournal>,
     /// Cache + worktree snapshot for resolving paths in markdown code spans.
     /// Shared with the child [`ThreadView`] when one is constructed.
     pub(crate) code_span_resolver: AgentCodeSpanResolver,
@@ -907,7 +908,7 @@ impl ConversationView {
     }
 
     #[cfg(any(test, feature = "test-support"))]
-    pub(crate) fn set_composer_text_for_tests(
+    pub fn set_composer_text_for_tests(
         &mut self,
         text: &str,
         window: &mut Window,
@@ -923,7 +924,7 @@ impl ConversationView {
     }
 
     #[cfg(any(test, feature = "test-support"))]
-    pub(crate) fn send_for_tests(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+    pub fn send_for_tests(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         if let Some(thread_view) = self.root_thread_view() {
             thread_view.update(cx, |thread_view, cx| thread_view.send(window, cx));
         } else {
@@ -1362,6 +1363,7 @@ impl ConversationView {
         cx: &mut Context<Self>,
     ) -> Self {
         let agent_server_store = project.read(cx).agent_server_store().clone();
+        let send_queue_journal = crate::omega_send_queue::SendQueueJournal::global(cx);
         let code_span_resolver = AgentCodeSpanResolver::new(&project.downgrade(), cx);
         let mut subscriptions = vec![
             cx.observe_global_in::<SettingsStore>(window, Self::agent_ui_font_size_changed),
@@ -1390,6 +1392,10 @@ impl ConversationView {
         }));
 
         cx.on_release(|this, cx| {
+            if let Some(session_id) = this.root_session_id.as_ref() {
+                crate::omega_agent_supervision::AgentSupervision::global(cx)
+                    .remove_snapshot(session_id.0.as_ref());
+            }
             this.request_elicitation_form_states.clear();
             if let Some(connected) = this.as_connected() {
                 connected.close_all_sessions(cx).detach();
@@ -1470,6 +1476,7 @@ impl ConversationView {
             pending_connect_messages: Vec::new(),
             last_theme_id: Some(cx.theme().id.clone()),
             draft_prompt_persist_task: None,
+            send_queue_journal,
             code_span_resolver,
             request_elicitation_form_states: HashMap::default(),
             _subscriptions: subscriptions,
@@ -1817,6 +1824,13 @@ impl ConversationView {
                     });
                     let current =
                         this.new_thread_view(thread, conversation, false, None, window, cx);
+                    current.update(cx, |thread_view, cx| {
+                        thread_view.rehydrate_durable_queue(
+                            this.send_queue_journal.clone(),
+                            window,
+                            cx,
+                        );
+                    });
                     let was_focused = this.focus_handle.contains_focused(window, cx);
                     this.hand_loading_draft_over(&current, window, cx);
                     if was_focused {
@@ -1876,11 +1890,32 @@ impl ConversationView {
             thread_view
                 .update(cx, |thread_view, cx| {
                     for message in pending {
-                        thread_view.add_to_queue(message.content, Vec::new(), window, cx);
+                        let fallback_content = message.content.clone();
+                        if let Err(error) =
+                            thread_view.add_to_queue(message.content, Vec::new(), window, cx)
+                        {
+                            thread_view.message_editor.update(cx, |editor, cx| {
+                                if editor.is_empty(cx) {
+                                    editor.set_message(fallback_content, window, cx);
+                                } else {
+                                    editor.append_message(
+                                        fallback_content,
+                                        Some("\n\n"),
+                                        window,
+                                        cx,
+                                    );
+                                }
+                            });
+                            thread_view.handle_message_queue_error(error, cx);
+                        }
                     }
                     let is_generating = thread_view.thread.read(cx).status() != ThreadStatus::Idle;
-                    if let Some(entry) = thread_view.message_queue.try_fast_track(is_generating) {
-                        thread_view.dispatch_queued_entry(entry, window, cx);
+                    match thread_view.message_queue.try_fast_track(is_generating) {
+                        Ok(Some(candidate)) => {
+                            thread_view.dispatch_queued_candidate(candidate, window, cx)
+                        }
+                        Ok(None) => {}
+                        Err(error) => thread_view.handle_message_queue_error(error, cx),
                     }
                 })
                 .ok();
@@ -2346,8 +2381,18 @@ impl ConversationView {
                 match result {
                     Ok(thread) => {
                         let desired_work_dirs = this.desired_work_dirs.clone();
+                        let restored_lifecycle =
+                            ThreadMetadataStore::try_global(cx).and_then(|store| {
+                                store
+                                    .read(cx)
+                                    .entry(this.thread_id)
+                                    .map(|metadata| metadata.lifecycle)
+                            });
                         thread.update(cx, |thread, cx| {
                             thread.set_work_dirs(desired_work_dirs, cx);
+                            if let Some(lifecycle) = restored_lifecycle {
+                                thread.restore_terminal_status(lifecycle.terminal_status());
+                            }
                         });
                         this.clear_resolved_request_elicitations_for_connection(&connection, cx);
                         let root_session_id = thread.read(cx).session_id().clone();
@@ -2366,6 +2411,13 @@ impl ConversationView {
                             window,
                             cx,
                         );
+                        current.update(cx, |thread_view, cx| {
+                            thread_view.rehydrate_durable_queue(
+                                this.send_queue_journal.clone(),
+                                window,
+                                cx,
+                            );
+                        });
 
                         let was_focused = this.focus_handle.contains_focused(window, cx);
                         this.hand_loading_draft_over(&current, window, cx);
@@ -2863,6 +2915,23 @@ impl ConversationView {
         // session is its root; every other thread it holds is a subagent of
         // it, whatever the thread says about itself.
         let is_subagent = self.root_session_id.as_ref() != Some(&session_id);
+        if !is_subagent {
+            let snapshot = {
+                let thread = thread.read(cx);
+                crate::omega_agent_supervision::ThreadSupervisionSnapshot {
+                    thread_key: session_id.0.to_string(),
+                    title: thread
+                        .title()
+                        .unwrap_or_else(|| DEFAULT_THREAD_TITLE.into()),
+                    executor: {
+                        use crate::omega_executor_disclosure::ThreadExecutorDisclosure as _;
+                        thread.omega_executor_disclosure(cx).label().into()
+                    },
+                    lifecycle: crate::omega_agent_supervision::lifecycle_for_thread(&thread),
+                }
+            };
+            crate::omega_agent_supervision::AgentSupervision::global(cx).set_snapshot(snapshot);
+        }
         if !is_subagent && affects_thread_metadata(event) {
             cx.emit(RootThreadUpdated);
         }
@@ -2972,14 +3041,19 @@ impl ConversationView {
                             .message_queue
                             .first()
                             .is_some_and(|entry| entry.editor.focus_handle(cx).is_focused(window));
-                        if let Some(entry) = active
+                        match active
                             .message_queue
                             .on_generation_stopped(is_first_editor_focused)
                         {
-                            active.dispatch_queued_entry(entry, window, cx);
-                            true
-                        } else {
-                            false
+                            Ok(Some(candidate)) => {
+                                active.dispatch_queued_candidate(candidate, window, cx);
+                                true
+                            }
+                            Ok(None) => false,
+                            Err(error) => {
+                                active.handle_message_queue_error(error, cx);
+                                false
+                            }
                         }
                     })
                 } else {
@@ -6229,14 +6303,16 @@ pub(crate) mod tests {
         });
 
         active_thread(&conversation_view, cx).update_in(cx, |thread, window, cx| {
-            thread.add_to_queue(
-                vec![acp::ContentBlock::Text(acp::TextContent::new(
-                    "queued".to_string(),
-                ))],
-                vec![],
-                window,
-                cx,
-            );
+            thread
+                .add_to_queue(
+                    vec![acp::ContentBlock::Text(acp::TextContent::new(
+                        "queued".to_string(),
+                    ))],
+                    vec![],
+                    window,
+                    cx,
+                )
+                .expect("queue admission");
         });
 
         cx.deactivate_window();
@@ -6274,14 +6350,16 @@ pub(crate) mod tests {
         add_to_workspace(conversation_view.clone(), cx);
 
         let id = active_thread(&conversation_view, cx).update_in(cx, |thread, window, cx| {
-            thread.add_to_queue(
-                vec![acp::ContentBlock::Text(acp::TextContent::new(
-                    "queued".to_string(),
-                ))],
-                vec![],
-                window,
-                cx,
-            );
+            thread
+                .add_to_queue(
+                    vec![acp::ContentBlock::Text(acp::TextContent::new(
+                        "queued".to_string(),
+                    ))],
+                    vec![],
+                    window,
+                    cx,
+                )
+                .expect("queue admission");
             thread.message_queue.first_id().unwrap()
         });
         cx.run_until_parked();
@@ -6296,7 +6374,10 @@ pub(crate) mod tests {
         });
 
         active_thread(&conversation_view, cx).update(cx, |thread, _cx| {
-            thread.message_queue.toggle_steer(id);
+            thread
+                .message_queue
+                .toggle_steer(id)
+                .expect("steer preference persisted");
         });
         active_thread(&conversation_view, cx).read_with(cx, |thread, _cx| {
             assert!(
@@ -6304,6 +6385,175 @@ pub(crate) mod tests {
                 "steering should be on after toggling"
             );
         });
+    }
+
+    #[gpui::test]
+    async fn failed_queued_edit_cannot_send_stale_text_and_moves_new_text_to_composer(
+        cx: &mut TestAppContext,
+    ) {
+        init_test(cx);
+        let directory = tempfile::tempdir().expect("temporary queue directory");
+        let journal_path = directory.path().join("queue.json");
+        let journal = Rc::new(crate::omega_send_queue::SendQueueJournal::at(
+            journal_path.clone(),
+        ));
+        cx.update(|cx| {
+            crate::omega_send_queue::SendQueueJournal::set_global_for_tests(journal.clone(), cx);
+        });
+
+        let (conversation_view, cx) =
+            setup_conversation_view(StubAgentServer::default_response(), cx).await;
+        let thread = active_thread(&conversation_view, cx);
+        let id = thread.update_in(cx, |thread, window, cx| {
+            thread
+                .add_to_queue(
+                    vec![acp::ContentBlock::Text(acp::TextContent::new("old body"))],
+                    Vec::new(),
+                    window,
+                    cx,
+                )
+                .expect("initial queue admission");
+            thread.message_queue.first_id().expect("queued item")
+        });
+
+        std::fs::remove_file(&journal_path).expect("remove queue journal");
+        std::fs::create_dir(&journal_path).expect("make journal rewrite fail");
+        thread.update_in(cx, |thread, window, cx| {
+            let new_content = vec![acp::ContentBlock::Text(acp::TextContent::new(
+                "new visible body",
+            ))];
+            let editor = thread
+                .message_queue
+                .entry_by_id(id)
+                .expect("queued item")
+                .editor
+                .clone();
+            editor.update(cx, |editor, cx| {
+                editor.set_message(new_content.clone(), window, cx);
+            });
+            assert!(matches!(
+                thread.message_queue.update(id, new_content, Vec::new()),
+                Err(MessageQueueError::Journal(
+                    crate::omega_send_queue::SendQueueRefusal::NotPersisted
+                ))
+            ));
+            assert!(
+                matches!(
+                    thread.message_queue.send_now(id, false),
+                    Err(MessageQueueError::UnsavedEntry)
+                ),
+                "Send Now must not dispatch the stale durable body under newer visible text"
+            );
+        });
+
+        std::fs::remove_dir(&journal_path).expect("restore writable journal path");
+        let temporary_path = journal_path.with_extension("json.tmp");
+        if temporary_path.exists() {
+            std::fs::remove_file(temporary_path).expect("remove failed rewrite temporary");
+        }
+        thread.update_in(cx, |thread, window, cx| {
+            assert!(thread.move_queued_message_to_main_editor(id, None, None, window, cx));
+            assert!(thread.message_queue.is_empty());
+            assert_eq!(thread.message_editor.read(cx).text(cx), "new visible body");
+        });
+        assert!(
+            journal
+                .open_items(
+                    &thread.read_with(cx, |thread, _cx| { thread.root_thread_id.to_key_string() })
+                )
+                .is_empty()
+        );
+    }
+
+    #[gpui::test]
+    async fn restored_queues_are_rehydrated_by_logical_thread_without_crossing(
+        cx: &mut TestAppContext,
+    ) {
+        init_test(cx);
+        let directory = tempfile::tempdir().expect("temporary queue directory");
+        let journal = Rc::new(crate::omega_send_queue::SendQueueJournal::at(
+            directory.path().join("queue.json"),
+        ));
+        let first_thread_id = ThreadId::new();
+        let second_thread_id = ThreadId::new();
+        for (thread_id, item_id, text) in [
+            (first_thread_id, "first-item", "first thread only"),
+            (second_thread_id, "second-item", "second thread only"),
+        ] {
+            let thread_key = thread_id.to_key_string();
+            journal
+                .admit(
+                    &thread_key,
+                    item_id,
+                    text,
+                    omega_front_door::SendCommand::Enqueue,
+                    omega_front_door::ExecutorClass::ExternalAcp,
+                    omega_front_door::SteerCapability::Unknown,
+                )
+                .expect("queue item persisted");
+            journal
+                .set_processing_state(
+                    &thread_key,
+                    crate::omega_send_queue::SendQueueProcessingState::Paused,
+                )
+                .expect("paused recovery state persisted");
+        }
+        cx.update(|cx| {
+            crate::omega_send_queue::SendQueueJournal::set_global_for_tests(journal, cx);
+        });
+
+        let (first, cx) = setup_conversation_view_for_agent_without_settling(
+            StubAgentServer::default_response(),
+            Agent::Custom { id: "Test".into() },
+            None,
+            Some(first_thread_id),
+            cx,
+        )
+        .await;
+        cx.run_until_parked();
+
+        let (workspace, project, thread_store) = first.read_with(cx, |view, _cx| {
+            (
+                view.workspace.clone(),
+                view.project.clone(),
+                view.thread_store.clone(),
+            )
+        });
+        let connection_store =
+            cx.update(|_window, cx| cx.new(|cx| AgentConnectionStore::new(project.clone(), cx)));
+        let second = cx.update(|window, cx| {
+            cx.new(|cx| {
+                ConversationView::new(
+                    Rc::new(StubAgentServer::default_response()),
+                    connection_store,
+                    Agent::Custom { id: "Test".into() },
+                    None,
+                    Some(second_thread_id),
+                    None,
+                    None,
+                    None,
+                    workspace,
+                    project,
+                    thread_store,
+                    AgentThreadSource::AgentPanel,
+                    window,
+                    cx,
+                )
+            })
+        });
+        cx.run_until_parked();
+
+        let queued_text = |view: &Entity<ConversationView>, cx: &VisualTestContext| {
+            active_thread(view, cx).read_with(cx, |thread, _cx| {
+                let entry = thread.message_queue.first().expect("restored queue item");
+                match entry.content.first() {
+                    Some(acp::ContentBlock::Text(text)) => text.text.clone(),
+                    _ => panic!("restored durable queue item must be plain text"),
+                }
+            })
+        };
+        assert_eq!(queued_text(&first, cx), "first thread only");
+        assert_eq!(queued_text(&second, cx), "second thread only");
     }
 
     #[gpui::test]
@@ -6325,14 +6575,16 @@ pub(crate) mod tests {
 
         // Queue a follow-up while the agent is generating.
         active_thread(&conversation_view, cx).update_in(cx, |thread, window, cx| {
-            thread.add_to_queue(
-                vec![acp::ContentBlock::Text(acp::TextContent::new(
-                    "queued".to_string(),
-                ))],
-                vec![],
-                window,
-                cx,
-            );
+            thread
+                .add_to_queue(
+                    vec![acp::ContentBlock::Text(acp::TextContent::new(
+                        "queued".to_string(),
+                    ))],
+                    vec![],
+                    window,
+                    cx,
+                )
+                .expect("queue admission");
         });
 
         // User stops generation: the queued message must NOT be sent.
@@ -6373,6 +6625,58 @@ pub(crate) mod tests {
             queue_len, 0,
             "queued message should be auto-sent after the user re-engages"
         );
+    }
+
+    #[gpui::test]
+    async fn failed_queue_pause_does_not_cancel_the_running_turn(cx: &mut TestAppContext) {
+        init_test(cx);
+        let directory = tempfile::tempdir().expect("temporary queue directory");
+        let journal_path = directory.path().join("queue.json");
+        let journal = Rc::new(crate::omega_send_queue::SendQueueJournal::at(
+            journal_path.clone(),
+        ));
+        cx.update(|cx| {
+            crate::omega_send_queue::SendQueueJournal::set_global_for_tests(journal, cx);
+        });
+
+        let (conversation_view, cx) =
+            setup_conversation_view(StubAgentServer::new(StubAgentConnection::new()), cx).await;
+        let message_editor = message_editor(&conversation_view, cx);
+        message_editor.update_in(cx, |editor, window, cx| {
+            editor.set_text("running turn", window, cx);
+        });
+        let thread = active_thread(&conversation_view, cx);
+        thread.update_in(cx, |thread, window, cx| thread.send(window, cx));
+        cx.run_until_parked();
+        thread.update_in(cx, |thread, window, cx| {
+            thread
+                .add_to_queue(
+                    vec![acp::ContentBlock::Text(acp::TextContent::new(
+                        "must remain queued",
+                    ))],
+                    Vec::new(),
+                    window,
+                    cx,
+                )
+                .expect("queue admission");
+        });
+
+        std::fs::remove_file(&journal_path).expect("remove queue journal");
+        std::fs::create_dir(&journal_path).expect("make pause persistence fail");
+        thread.update(cx, |thread, cx| thread.cancel_generation(cx));
+        cx.run_until_parked();
+
+        thread.read_with(cx, |thread, cx| {
+            assert_eq!(thread.thread.read(cx).status(), ThreadStatus::Generating);
+            assert_eq!(thread.message_queue.len(), 1);
+            assert!(thread.thread_error.is_some());
+        });
+
+        std::fs::remove_dir(&journal_path).expect("restore writable journal path");
+        let temporary_path = journal_path.with_extension("json.tmp");
+        if temporary_path.exists() {
+            std::fs::remove_file(temporary_path).expect("remove failed rewrite temporary");
+        }
     }
 
     #[gpui::test]
@@ -6802,12 +7106,13 @@ pub(crate) mod tests {
 
         // Simulate a previous run that persisted metadata for this session.
         let resume_session_id = acp::SessionId::new("persistent-session");
+        let persisted_thread_id = ThreadId::new();
         let stored_title: SharedString = "Persistent chat".into();
         cx.update(|_window, cx| {
             ThreadMetadataStore::global(cx).update(cx, |store, cx| {
                 store.save(
                     ThreadMetadata {
-                        thread_id: ThreadId::new(),
+                        thread_id: persisted_thread_id,
                         session_id: Some(resume_session_id.clone()),
                         agent_id: ProjectAgentId::new("Flaky"),
                         conversation_owner_version:
@@ -6820,6 +7125,8 @@ pub(crate) mod tests {
                         worktree_paths: WorktreePaths::from_folder_paths(&PathList::default()),
                         remote_connection: None,
                         archived: false,
+                        lifecycle:
+                            crate::omega_agent_supervision::SupervisedThreadLifecycle::Failed,
                     },
                     cx,
                 );
@@ -6836,7 +7143,7 @@ pub(crate) mod tests {
                     connection_store,
                     Agent::Custom { id: "Flaky".into() },
                     Some(resume_session_id.clone()),
-                    None,
+                    Some(persisted_thread_id),
                     None,
                     None,
                     None,
@@ -6895,6 +7202,35 @@ pub(crate) mod tests {
             assert_eq!(
                 thread_session, resume_session_id,
                 "the live AcpThread should hold the resumed session id"
+            );
+            assert_eq!(
+                active_thread.read(cx).thread.read(cx).terminal_status(),
+                acp_thread::ThreadTerminalStatus::Failed,
+                "a failed terminal state must survive reopening"
+            );
+        });
+
+        cx.update(|window, cx| {
+            ThreadMetadataStore::global(cx).update(cx, |store, cx| {
+                let mut metadata = store
+                    .entry(persisted_thread_id)
+                    .cloned()
+                    .expect("persisted metadata should remain available");
+                metadata.lifecycle =
+                    crate::omega_agent_supervision::SupervisedThreadLifecycle::Cancelled;
+                store.save(metadata, cx);
+            });
+            conversation_view.update(cx, |view, cx| view.reset(window, cx));
+        });
+        cx.run_until_parked();
+        conversation_view.read_with(cx, |view, cx| {
+            let active_thread = view
+                .active_thread()
+                .expect("cancelled thread should reopen");
+            assert_eq!(
+                active_thread.read(cx).thread.read(cx).terminal_status(),
+                acp_thread::ThreadTerminalStatus::Cancelled,
+                "a cancelled terminal state must survive reopening"
             );
         });
     }
@@ -7834,6 +8170,7 @@ pub(crate) mod tests {
             agent,
             Agent::Custom { id: "Test".into() },
             initial_content,
+            None,
             cx,
         )
         .await
@@ -7843,6 +8180,7 @@ pub(crate) mod tests {
         agent: impl AgentServer + 'static,
         agent_key: Agent,
         initial_content: Option<AgentInitialContent>,
+        thread_id: Option<ThreadId>,
         cx: &mut TestAppContext,
     ) -> (Entity<ConversationView>, &mut VisualTestContext) {
         let fs = FakeFs::new(cx.executor());
@@ -7868,7 +8206,7 @@ pub(crate) mod tests {
                     connection_store.clone(),
                     agent_key.clone(),
                     None,
-                    None,
+                    thread_id,
                     None,
                     None,
                     initial_content,
@@ -8015,6 +8353,7 @@ pub(crate) mod tests {
             },
             Agent::NativeAgent,
             None,
+            None,
             cx,
         )
         .await;
@@ -8085,6 +8424,7 @@ pub(crate) mod tests {
             Agent::Custom {
                 id: "direct-agent".into(),
             },
+            None,
             None,
             cx,
         )
@@ -13306,14 +13646,16 @@ pub(crate) mod tests {
         });
 
         active_thread(&conversation_view, cx).update_in(cx, |thread, window, cx| {
-            thread.add_to_queue(
-                vec![acp::ContentBlock::Text(acp::TextContent::new(
-                    "queued message".to_string(),
-                ))],
-                vec![],
-                window,
-                cx,
-            );
+            thread
+                .add_to_queue(
+                    vec![acp::ContentBlock::Text(acp::TextContent::new(
+                        "queued message".to_string(),
+                    ))],
+                    vec![],
+                    window,
+                    cx,
+                )
+                .expect("queue admission");
         });
         cx.run_until_parked();
 
@@ -13474,14 +13816,16 @@ pub(crate) mod tests {
 
         // Add a plain-text message to the queue directly.
         active_thread(&conversation_view, cx).update_in(cx, |thread, window, cx| {
-            thread.add_to_queue(
-                vec![acp::ContentBlock::Text(acp::TextContent::new(
-                    "queued message".to_string(),
-                ))],
-                vec![],
-                window,
-                cx,
-            );
+            thread
+                .add_to_queue(
+                    vec![acp::ContentBlock::Text(acp::TextContent::new(
+                        "queued message".to_string(),
+                    ))],
+                    vec![],
+                    window,
+                    cx,
+                )
+                .expect("queue admission");
             // Main editor must be empty for this path — it is by default, but
             // assert to make the precondition explicit.
             assert!(thread.message_editor.read(cx).is_empty(cx));
@@ -13524,14 +13868,16 @@ pub(crate) mod tests {
 
         // Add a plain-text message to the queue.
         active_thread(&conversation_view, cx).update_in(cx, |thread, window, cx| {
-            thread.add_to_queue(
-                vec![acp::ContentBlock::Text(acp::TextContent::new(
-                    "queued message".to_string(),
-                ))],
-                vec![],
-                window,
-                cx,
-            );
+            thread
+                .add_to_queue(
+                    vec![acp::ContentBlock::Text(acp::TextContent::new(
+                        "queued message".to_string(),
+                    ))],
+                    vec![],
+                    window,
+                    cx,
+                )
+                .expect("queue admission");
             let id = thread.message_queue.first_id().unwrap();
             thread.move_queued_message_to_main_editor(id, None, None, window, cx);
         });
@@ -13560,22 +13906,26 @@ pub(crate) mod tests {
         add_to_workspace(conversation_view.clone(), cx);
 
         active_thread(&conversation_view, cx).update_in(cx, |thread, window, cx| {
-            thread.add_to_queue(
-                vec![acp::ContentBlock::Text(acp::TextContent::new(
-                    "first queued".to_string(),
-                ))],
-                vec![],
-                window,
-                cx,
-            );
-            thread.add_to_queue(
-                vec![acp::ContentBlock::Text(acp::TextContent::new(
-                    "second queued".to_string(),
-                ))],
-                vec![],
-                window,
-                cx,
-            );
+            thread
+                .add_to_queue(
+                    vec![acp::ContentBlock::Text(acp::TextContent::new(
+                        "first queued".to_string(),
+                    ))],
+                    vec![],
+                    window,
+                    cx,
+                )
+                .expect("first queue admission");
+            thread
+                .add_to_queue(
+                    vec![acp::ContentBlock::Text(acp::TextContent::new(
+                        "second queued".to_string(),
+                    ))],
+                    vec![],
+                    window,
+                    cx,
+                )
+                .expect("second queue admission");
         });
         cx.run_until_parked();
 
@@ -13679,14 +14029,16 @@ pub(crate) mod tests {
                 .session_capabilities
                 .write()
                 .set_prompt_capabilities(acp::PromptCapabilities::new().image(true));
-            thread.add_to_queue(
-                vec![acp::ContentBlock::Text(acp::TextContent::new(
-                    "queued message".to_string(),
-                ))],
-                vec![],
-                window,
-                cx,
-            );
+            thread
+                .add_to_queue(
+                    vec![acp::ContentBlock::Text(acp::TextContent::new(
+                        "queued message".to_string(),
+                    ))],
+                    vec![],
+                    window,
+                    cx,
+                )
+                .expect("queue admission");
         });
         conversation_view.update(cx, |_, cx| cx.notify());
         cx.run_until_parked();

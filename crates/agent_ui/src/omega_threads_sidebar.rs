@@ -37,6 +37,7 @@ use project::AgentId;
 use workspace::PathList;
 
 use crate::Agent;
+use crate::omega_agent_supervision::SupervisedThreadLifecycle;
 use crate::omega_executor_selector::SelectableExecutor;
 use crate::thread_metadata_store::{ConversationOwner, ThreadId, ThreadMetadata};
 
@@ -85,6 +86,7 @@ pub struct ThreadRow {
     /// [`unavailable_note`](Self::unavailable_note), and clicking it says this
     /// sentence instead of opening anything.
     pub refusal: Option<SharedString>,
+    pub lifecycle: SupervisedThreadLifecycle,
 }
 
 impl ThreadRow {
@@ -172,6 +174,7 @@ pub fn rows<'a>(
                     .as_ref()
                     .map(|unreopenable| unreopenable.note.clone()),
                 refusal: unreopenable.map(|unreopenable| unreopenable.refusal),
+                lifecycle: thread.lifecycle,
             }
         })
         .collect()
@@ -345,6 +348,7 @@ mod tests {
             worktree_paths: Default::default(),
             remote_connection: None,
             archived: false,
+            lifecycle: SupervisedThreadLifecycle::Completed,
         }
     }
 

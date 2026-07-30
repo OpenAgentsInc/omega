@@ -239,11 +239,11 @@ You can also start a new thread from the [Threads Sidebar](./parallel-agents.md#
 
 ### Managing Multiple Threads {#multiple-threads}
 
-You can run multiple agent threads at once, each working independently with its own agent, context window, and conversation history. Open the Threads Sidebar with {#kb multi_workspace::ToggleWorkspaceSidebar} to see all your threads grouped by project. Click any thread to switch to it, or use the thread switcher ({#kb agents_sidebar::ToggleThreadSwitcher}) to cycle between recent threads without opening the sidebar.
+You can run multiple agent threads at once, each working independently with its own agent, context window, conversation history, durable message queue, and lifecycle. Open the Threads Sidebar with {#kb multi_workspace::ToggleWorkspaceSidebar} to see all your threads grouped by project. Each row shows its agent and whether it is Running, Waiting for you, Failed, Completed, or Cancelled. Click any thread to switch to it, or use the thread switcher ({#kb agents_sidebar::ToggleThreadSwitcher}) to cycle between recent threads without opening the sidebar. Cancelling the active thread does not cancel any other thread.
 
 Threads you're no longer working on can be archived by hovering over them in the sidebar and clicking the archive icon, or selecting them and pressing {#kb agent::ArchiveSelectedThread}. The Thread History holds all your threads across all projects, sorted chronologically, and you can restore them at any time.
 
-If two threads might edit the same files, you can isolate one in a new Git worktree. Use the worktree picker in the title bar to pick which worktree the agent runs in, or create a new one. See [Worktree Isolation](./parallel-agents.md#worktree-isolation) for details.
+If two threads might edit the same files, you can isolate one in a new Git worktree. Use the worktree picker in the title bar to pick which worktree the agent runs in, or create a new one. If another direct agent already owns the selected worktree, Omega names the conflicting thread and requires **Cancel** or **Run here anyway** before starting. Cancelling preserves the prompt. See [Worktree Isolation](./parallel-agents.md#worktree-isolation) for details.
 
 For more details on the Threads Sidebar and managing multiple projects, see [Parallel Agents](./parallel-agents.md).
 
@@ -258,7 +258,7 @@ Messages sent while the agent is in the generating state get, by default, queued
 
 By default, queued messages get sent once the agent finishes generating. If you want a queued message to reach the Omega Agent sooner—interrupting it at its next step (usually between a tool call and a response) rather than waiting for it to finish—toggle "Steer" on that message. Steering is only available for the Omega Agent, since Zed can't detect turn boundaries for external agents.
 
-You can edit or remove (an individual or all) queued messages.
+You can edit or remove (an individual or all) queued messages. Queued text and per-thread processing state are written durably before Omega acknowledges the queue operation, and are restored independently for each thread after relaunch. Restored open queues start paused until you explicitly resume them; a fresh local Idle state is not treated as proof that the provider's pre-relaunch turn finished. If storage cannot be updated, Omega keeps the unsaved state visible and does not dispatch stale text.
 You can also still interrupt the agent immediately if you want by either clicking on the stop button or by clicking the "Send Now" (double-enter) on a queued message.
 
 ### Checkpoints {#checkpoints}

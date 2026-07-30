@@ -169,6 +169,7 @@ pub const ENFORCED_DELTAS: &[&str] = &[
     "OMEGA-DELTA-0178",
     "OMEGA-DELTA-0179",
     "OMEGA-DELTA-0180",
+    "OMEGA-DELTA-0181",
 ];
 
 /// The concise product contract adjacent to the delta registry.
@@ -21074,7 +21075,7 @@ mod tests {
         assert!(
             dispatch.contains("add_to_queue(")
                 && dispatch.contains("try_fast_track(")
-                && dispatch.contains("dispatch_queued_entry("),
+                && dispatch.contains("dispatch_queued_candidate("),
             "OMEGA-DELTA-0170: the dispatch in {} no longer rides the thread's \
              ordinary message queue. That queue is where ordering, \
              exactly-once, and the subagent fence (43219aacd1) already live; a \
@@ -22298,5 +22299,86 @@ mod tests {
                 "OMEGA-DELTA-0180: {path} lost `{required}`"
             );
         }
+    }
+
+    /// OMEGA-DELTA-0181. Direct agent turns expose a durable lifecycle, keep
+    /// queued input durable, and require an explicit choice before two writers
+    /// share a worktree.
+    #[test]
+    fn concurrent_agent_supervision_is_visible_durable_and_guarded() {
+        let supervision = read_repository_file("crates/agent_ui/src/omega_agent_supervision.rs");
+        for required in [
+            "pub enum SupervisedThreadLifecycle",
+            "WaitingForPerson",
+            "pub const fn durable_terminal",
+            "pub fn lifecycle_for_thread",
+            "pub struct WorktreeClaimToken",
+            "remote_connection_identity",
+            "std::fs::canonicalize",
+            "allow_collision",
+        ] {
+            assert!(
+                supervision.contains(required),
+                "OMEGA-DELTA-0181: supervision contract lost `{required}`"
+            );
+        }
+
+        let thread_view = read_repository_file(ZERO_BASE_THREAD_VIEW_PATH);
+        for required in [
+            "fn request_worktree_admission",
+            "Another agent is already using this worktree",
+            "Run here anyway",
+            "WorktreeAdmission::Cancelled",
+            "dispatch_queued_candidate",
+            "promote_for_dispatch",
+        ] {
+            assert!(
+                thread_view.contains(required),
+                "OMEGA-DELTA-0181: guarded dispatch lost `{required}`"
+            );
+        }
+        assert!(
+            thread_view.contains("&[\"Cancel\", \"Run here anyway\"]")
+                && thread_view.contains("if answer != 1"),
+            "OMEGA-DELTA-0181: the collision prompt must default to Cancel and require the explicit override answer"
+        );
+        assert!(
+            thread_view.contains("let reaches_running_turn = entry.disposition()")
+                && thread_view.contains("let cancelled = if reaches_running_turn"),
+            "OMEGA-DELTA-0181: queued dispatch must use the promoted entry's durable disposition"
+        );
+
+        let queue = read_repository_file("crates/agent_ui/src/omega_send_queue.rs");
+        for required in [
+            "SEND_QUEUE_JOURNAL_SCHEMA",
+            "SendQueueProcessingState",
+            "JournalUnreadable",
+            "claim_for_dispatch",
+            "pub fn update(",
+            "cancel_all",
+            "send queue items must be an array",
+            "send queue threadStates must be an array",
+            "duplicate send queue item identity",
+            "duplicate send queue thread state",
+            "send queue sequence space is exhausted",
+            "sequence.checked_add(1)",
+        ] {
+            assert!(
+                queue.contains(required),
+                "OMEGA-DELTA-0181: durable queue lost `{required}`"
+            );
+        }
+
+        let renderer_queue =
+            read_repository_file("crates/agent_ui/src/conversation_view/message_queue.rs");
+        assert!(renderer_queue.contains("restart_with_an_open_queue_requires_explicit_resume"));
+
+        let metadata = read_repository_file("crates/agent_ui/src/thread_metadata_store.rs");
+        assert!(metadata.contains("lifecycle TEXT NOT NULL DEFAULT \"completed\""));
+        assert!(metadata.contains("lifecycle.durable_terminal().token()"));
+
+        let docs = read_repository_file("docs/src/ai/parallel-agents.md");
+        assert!(docs.contains("Run here anyway"));
+        assert!(docs.contains("Waiting for you"));
     }
 }

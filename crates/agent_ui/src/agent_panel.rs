@@ -116,9 +116,9 @@ use terminal_view::{TerminalView, terminal_panel::TerminalPanel};
 use text::{OffsetRangeExt, Point};
 use theme_settings::ThemeSettings;
 use ui::{
-    CommonAnimationExt, ContextMenu, ContextMenuEntry, GradientFade, IconButton, KeyBinding,
-    ListItem, ListItemSpacing, PopoverMenu, PopoverMenuHandle, ProjectEmptyState, Tab, Tooltip,
-    prelude::*, utils::WithRemSize,
+    ContextMenu, ContextMenuEntry, GradientFade, IconButton, KeyBinding, ListItem, ListItemSpacing,
+    PopoverMenu, PopoverMenuHandle, ProjectEmptyState, Tab, Tooltip, prelude::*,
+    utils::WithRemSize,
 };
 use util::{ResultExt as _, paths::PathStyle, rel_path::RelPath};
 use workspace::{
@@ -134,6 +134,36 @@ const LAST_USED_AGENT_KEY: &str = "agent_panel__last_used_external_agent";
 const LAST_CREATED_ENTRY_KIND_KEY: &str = "agent_panel__last_created_entry_kind";
 const TERMINAL_AGENT_TELEMETRY_ID: &str = "terminal";
 const TERMINAL_INIT_COMMAND_STARTUP_TIMEOUT: Duration = Duration::from_secs(5);
+
+fn render_thread_lifecycle_badge(
+    lifecycle: crate::omega_agent_supervision::SupervisedThreadLifecycle,
+    element_id: ElementId,
+) -> AnyElement {
+    let color = match lifecycle {
+        crate::omega_agent_supervision::SupervisedThreadLifecycle::Running => Color::Accent,
+        crate::omega_agent_supervision::SupervisedThreadLifecycle::WaitingForPerson => {
+            Color::Warning
+        }
+        crate::omega_agent_supervision::SupervisedThreadLifecycle::Failed => Color::Error,
+        crate::omega_agent_supervision::SupervisedThreadLifecycle::Completed => Color::Success,
+        crate::omega_agent_supervision::SupervisedThreadLifecycle::Cancelled => Color::Muted,
+    };
+    let label = lifecycle.label();
+    h_flex()
+        .id(element_id)
+        .debug_selector(move || format!("omega.thread.lifecycle.{}", lifecycle.token()))
+        .role(gpui::Role::Status)
+        .aria_label(format!("Thread status: {label}"))
+        .flex_none()
+        .gap_0p5()
+        .child(
+            Icon::new(IconName::Circle)
+                .size(IconSize::XSmall)
+                .color(color),
+        )
+        .child(Label::new(label).size(LabelSize::XSmall).color(color))
+        .into_any_element()
+}
 const KNOWN_TERMINAL_AGENT_COMMANDS: &[&str] = &[
     "agent", // Unfortunately, both Cursor cli + grok
     "agy",
@@ -5071,6 +5101,7 @@ impl AgentPanel {
         Some(
             column
                 .id("omega-sidebar")
+                .debug_selector(|| "omega-sidebar".into())
                 .child(
                     // `OMEGA-DELTA-0131`. The same height, background and border
                     // as the thread's toolbar beside it, because they are one
@@ -5558,10 +5589,9 @@ impl AgentPanel {
         let active_thread_id = self.active_thread_id(cx);
 
         rows.into_iter()
-            .enumerate()
-            .fold(v_flex().w_full().pb_1(), |list, (index, row)| {
+            .fold(v_flex().w_full().pb_1(), |list, row| {
                 let is_active = active_thread_id.as_ref() == Some(&row.thread_id);
-                let is_generating = self.is_thread_generating(&row.thread_id, cx);
+                let lifecycle = self.thread_lifecycle(&row.thread_id, cx);
                 let reopenable = row.is_reopenable();
                 // A row that will refuse says so unclicked. It already knew, and
                 // a list whose dead rows look exactly like its live ones asks a
@@ -5570,68 +5600,73 @@ impl AgentPanel {
                 // form, so it stands in place of the bare name rather than
                 // beside it.
                 let executor = row.unavailable_note.clone().or(row.executor.clone());
+                let accessible_executor = row.executor.clone().unwrap_or_else(|| "Omega".into());
                 let age = row.age.clone();
                 let title = row.title.clone();
+                let thread_key = row.thread_id.to_key_string();
+                let accessible_label = format!(
+                    "{}, executor {}, status {}",
+                    title,
+                    accessible_executor,
+                    lifecycle.label()
+                );
                 list.child(
-                    ListItem::new(("threads-sidebar-row", index))
-                        .toggle_state(is_active)
-                        .inset(true)
-                        .spacing(ListItemSpacing::Sparse)
-                        .on_click(cx.listener(move |this, _, window, cx| {
-                            this.open_thread_from_threads_sidebar(&row, window, cx);
-                        }))
-                        .child(
-                            h_flex()
-                                .w_full()
-                                .items_center()
-                                .justify_between()
-                                .child(
-                                    v_flex()
-                                        .min_w_0()
-                                        .flex_1()
-                                        .gap_0p5()
-                                        .child(
-                                            Label::new(title)
-                                                .size(LabelSize::Small)
-                                                .color(if is_active {
-                                                    Color::Accent
-                                                } else if reopenable {
-                                                    Color::Default
-                                                } else {
-                                                    Color::Muted
-                                                })
-                                                .truncate(),
-                                        )
-                                        .child(
-                                            h_flex()
-                                                .gap_1p5()
-                                                .child(
-                                                    Label::new(age)
-                                                        .size(LabelSize::XSmall)
-                                                        .color(Color::Muted),
-                                                )
-                                                .children(executor.map(|executor| {
-                                                    Label::new(executor)
-                                                        .size(LabelSize::XSmall)
-                                                        .color(Color::Muted)
-                                                })),
-                                        ),
-                                )
-                                .when(is_generating, |this| {
-                                    this.child(
-                                        h_flex()
-                                            .id("running-spinner")
-                                            .flex_none()
-                                            .justify_center()
-                                            .child(
-                                                Icon::new(IconName::LoadCircle)
-                                                    .size(IconSize::Small)
-                                                    .color(Color::Muted)
-                                                    .with_rotate_animation(2),
-                                            ),
+                    ListItem::new(ElementId::Name(
+                        format!("omega.threads.row.{thread_key}").into(),
+                    ))
+                    .debug_selector(format!("omega.threads.row.{thread_key}"))
+                    .aria_role(gpui::Role::Button)
+                    .aria_label(accessible_label)
+                    .toggle_state(is_active)
+                    .inset(true)
+                    .spacing(ListItemSpacing::Sparse)
+                    .on_click(cx.listener(move |this, _, window, cx| {
+                        this.open_thread_from_threads_sidebar(&row, window, cx);
+                    }))
+                    .child(
+                        h_flex()
+                            .w_full()
+                            .items_center()
+                            .justify_between()
+                            .child(
+                                v_flex()
+                                    .min_w_0()
+                                    .flex_1()
+                                    .gap_0p5()
+                                    .child(
+                                        Label::new(title)
+                                            .size(LabelSize::Small)
+                                            .color(if is_active {
+                                                Color::Accent
+                                            } else if reopenable {
+                                                Color::Default
+                                            } else {
+                                                Color::Muted
+                                            })
+                                            .truncate(),
                                     )
-                                }),
-                        ),
+                                    .child(
+                                        h_flex()
+                                            .gap_1p5()
+                                            .child(
+                                                Label::new(age)
+                                                    .size(LabelSize::XSmall)
+                                                    .color(Color::Muted),
+                                            )
+                                            .children(executor.map(|executor| {
+                                                Label::new(executor)
+                                                    .size(LabelSize::XSmall)
+                                                    .color(Color::Muted)
+                                            })),
+                                    ),
+                            )
+                            .child(render_thread_lifecycle_badge(
+                                lifecycle,
+                                ElementId::Name(
+                                    format!("omega.threads.lifecycle.{thread_key}").into(),
+                                ),
+                            )),
+                    ),
                 )
             })
             .children(self.threads_sidebar_refusal.clone().map(|refusal| {
@@ -6971,6 +7006,39 @@ impl AgentPanel {
             }
         }
         false
+    }
+
+    fn thread_lifecycle(
+        &self,
+        thread_id: &ThreadId,
+        cx: &App,
+    ) -> crate::omega_agent_supervision::SupervisedThreadLifecycle {
+        let conversation_views = self
+            .active_conversation_view()
+            .into_iter()
+            .chain(self.retained_threads.values());
+        for conversation_view in conversation_views {
+            if conversation_view.read(cx).thread_id == *thread_id
+                && let Some(thread) = conversation_view.read(cx).root_thread(cx)
+            {
+                return crate::omega_agent_supervision::lifecycle_for_thread(thread.read(cx));
+            }
+        }
+
+        ThreadMetadataStore::try_global(cx)
+            .and_then(|store| store.read(cx).entry(*thread_id).cloned())
+            .map(|metadata| {
+                metadata
+                    .session_id
+                    .as_ref()
+                    .and_then(|session_id| {
+                        cx.try_global::<crate::omega_agent_supervision::AgentSupervision>()
+                            .and_then(|supervision| supervision.snapshot(session_id.0.as_ref()))
+                    })
+                    .map(|snapshot| snapshot.lifecycle)
+                    .unwrap_or(metadata.lifecycle)
+            })
+            .unwrap_or_default()
     }
 
     pub fn cancel_thread(&self, thread_id: &ThreadId, cx: &mut Context<Self>) -> bool {
@@ -9373,6 +9441,68 @@ impl AgentPanel {
             None
         };
 
+        let thread_supervision = toolbar_state
+            .show_thread_details
+            .then(|| {
+                let conversation_view = self.active_conversation_view()?;
+                let thread_id = conversation_view.read(cx).thread_id;
+                let thread = conversation_view.read(cx).root_thread(cx)?;
+                let thread = thread.read(cx);
+                let lifecycle = crate::omega_agent_supervision::lifecycle_for_thread(thread);
+                use crate::omega_executor_disclosure::ThreadExecutorDisclosure as _;
+                let executor = thread.omega_executor_disclosure(cx).label();
+                let can_cancel = matches!(
+                lifecycle,
+                crate::omega_agent_supervision::SupervisedThreadLifecycle::Running
+                    | crate::omega_agent_supervision::SupervisedThreadLifecycle::WaitingForPerson
+            );
+                let thread_key = thread_id.to_key_string();
+
+                Some(
+                    h_flex()
+                        .id(ElementId::Name(
+                            format!("omega.thread.supervision.{thread_key}").into(),
+                        ))
+                        .debug_selector(|| "omega.thread.supervision".into())
+                        .role(gpui::Role::Group)
+                        .aria_label(format!("Executor {executor}, status {}", lifecycle.label()))
+                        .gap_1()
+                        .child(
+                            Label::new(executor)
+                                .size(LabelSize::XSmall)
+                                .color(Color::Muted)
+                                .truncate(),
+                        )
+                        .child(render_thread_lifecycle_badge(
+                            lifecycle,
+                            ElementId::Name(
+                                format!("omega.thread.header.lifecycle.{thread_key}").into(),
+                            ),
+                        ))
+                        .when(can_cancel, |this| {
+                            this.child(
+                                Button::new(
+                                    ElementId::Name(
+                                        format!("omega.thread.cancel.{thread_key}").into(),
+                                    ),
+                                    "Cancel",
+                                )
+                                .debug_selector(|| "omega.thread.cancel".into())
+                                .style(ButtonStyle::Subtle)
+                                .size(ButtonSize::Compact)
+                                .aria_label("Cancel this agent run")
+                                .on_click(cx.listener(
+                                    move |this, _, _window, cx| {
+                                        this.cancel_thread(&thread_id, cx);
+                                    },
+                                )),
+                            )
+                        })
+                        .into_any_element(),
+                )
+            })
+            .flatten();
+
         let toolbar_content = {
             let new_thread_menu = PopoverMenu::new("new_thread_menu")
                 .trigger_with_tooltip(
@@ -9429,6 +9559,7 @@ impl AgentPanel {
                         .h_full()
                         .flex_none()
                         .gap_1()
+                        .children(thread_supervision)
                         .children(sandbox_status)
                         .when(can_create_entries, |this| this.child(new_thread_menu))
                         .child(full_screen_button)
@@ -16078,6 +16209,8 @@ mod tests {
                         worktree_paths: WorktreePaths::from_folder_paths(&PathList::default()),
                         remote_connection: None,
                         archived: false,
+                        lifecycle:
+                            crate::omega_agent_supervision::SupervisedThreadLifecycle::Completed,
                     },
                     cx,
                 );
@@ -16608,6 +16741,7 @@ mod tests {
         let session_id = active_session_id(panel, cx);
         let thread_id = active_thread_id(panel, cx);
         send_message(panel, cx);
+        run_here_anyway_if_worktree_collision(cx);
         cx.update(|_, cx| {
             connection.send_update(
                 session_id.clone(),
@@ -16617,6 +16751,15 @@ mod tests {
         });
         cx.run_until_parked();
         (session_id, thread_id)
+    }
+
+    fn run_here_anyway_if_worktree_collision(cx: &mut VisualTestContext) {
+        let Some((title, _)) = cx.pending_prompt() else {
+            return;
+        };
+        assert_eq!(title, "Another agent is already using this worktree");
+        cx.simulate_prompt_answer("Run here anyway");
+        cx.run_until_parked();
     }
 
     fn open_idle_thread_with_non_loadable_connection(
@@ -19968,6 +20111,7 @@ mod tests {
         let connection_b = StubAgentConnection::new();
         open_thread_with_connection(&panel, connection_b, &mut cx);
         send_message(&panel, &mut cx);
+        run_here_anyway_if_worktree_collision(&mut cx);
 
         let thread_id_b = active_thread_id(&panel, &cx);
 
@@ -20094,6 +20238,8 @@ mod tests {
                         worktree_paths: WorktreePaths::default(),
                         remote_connection: None,
                         archived: false,
+                        lifecycle:
+                            crate::omega_agent_supervision::SupervisedThreadLifecycle::Completed,
                     },
                     cx,
                 );
@@ -20143,6 +20289,8 @@ mod tests {
                         worktree_paths: WorktreePaths::default(),
                         remote_connection: None,
                         archived: false,
+                        lifecycle:
+                            crate::omega_agent_supervision::SupervisedThreadLifecycle::Completed,
                     },
                     cx,
                 );
@@ -20512,12 +20660,14 @@ mod tests {
         )]);
         open_thread_with_custom_connection(&panel, connection_c.clone(), &mut cx);
         send_message(&panel, &mut cx);
+        run_here_anyway_if_worktree_collision(&mut cx);
         let thread_id_c = active_thread_id(&panel, &cx);
 
         // Open thread B — thread C (idle, non-loadable) is retained in background.
         let connection_b = StubAgentConnection::new().with_agent_id("agent-b".into());
         open_thread_with_custom_connection(&panel, connection_b.clone(), &mut cx);
         send_message(&panel, &mut cx);
+        run_here_anyway_if_worktree_collision(&mut cx);
         let session_id_b = active_session_id(&panel, &cx);
         let _thread_id_b = active_thread_id(&panel, &cx);
 

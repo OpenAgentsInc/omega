@@ -3505,6 +3505,16 @@ pub const WORKBENCH_IDENTITY_REGIONS: &[CaptureRegionSpec] = &[CaptureRegionSpec
     8,
 )];
 
+pub const CONCURRENT_AGENT_REGIONS: &[CaptureRegionSpec] = &[CaptureRegionSpec::selector_union(
+    "concurrent-supervision",
+    &[
+        "omega-sidebar",
+        "omega.workbench.toolbar",
+        "omega.workbench.transcript",
+    ],
+    8,
+)];
+
 pub const WORKBENCH_FILES_REGIONS: &[CaptureRegionSpec] = &[CaptureRegionSpec::selector_union(
     "files-surface",
     &["omega.workbench.surface.files"],
@@ -4317,6 +4327,38 @@ pub const HERMETIC_SCENES: &[SceneSpec] = &[
         name: "omega_sarah_session_settled",
         phase: ScenePhase::Recording,
         viewport: ViewportFixture::new(900, 720, 2000),
+        fixture_version: 1,
+        pixel_policy: APPLE_SILICON_METAL_POLICY,
+        regions: &[],
+    },
+    SceneSpec {
+        name: "omega_concurrent_agents_codex_waiting",
+        phase: ScenePhase::Recording,
+        viewport: ViewportFixture::new(1180, 760, 2000),
+        fixture_version: 1,
+        pixel_policy: APPLE_SILICON_METAL_POLICY,
+        regions: CONCURRENT_AGENT_REGIONS,
+    },
+    SceneSpec {
+        name: "omega_concurrent_agents_claude_running",
+        phase: ScenePhase::Recording,
+        viewport: ViewportFixture::new(1180, 760, 2000),
+        fixture_version: 1,
+        pixel_policy: APPLE_SILICON_METAL_POLICY,
+        regions: CONCURRENT_AGENT_REGIONS,
+    },
+    SceneSpec {
+        name: "omega_concurrent_agents_cancel_isolated",
+        phase: ScenePhase::Recording,
+        viewport: ViewportFixture::new(1180, 760, 2000),
+        fixture_version: 1,
+        pixel_policy: APPLE_SILICON_METAL_POLICY,
+        regions: CONCURRENT_AGENT_REGIONS,
+    },
+    SceneSpec {
+        name: "omega_concurrent_agents_worktree_collision",
+        phase: ScenePhase::Recording,
+        viewport: ViewportFixture::new(1180, 760, 2000),
         fixture_version: 1,
         pixel_policy: APPLE_SILICON_METAL_POLICY,
         regions: &[],

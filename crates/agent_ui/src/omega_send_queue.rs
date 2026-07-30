@@ -42,7 +42,9 @@
 use std::cell::RefCell;
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
+use std::rc::Rc;
 
+use gpui::{App, Global};
 use omega_front_door::{
     ExecutorClass, QueueItemState, Quiescence, SendCommand, SendDisposition, SteerCapability,
     disposition, may_promote,
@@ -106,6 +108,9 @@ pub enum SendQueueRefusal {
     NotQuiescent,
     /// The record could not be written, so the user was not told it was queued.
     NotPersisted,
+    /// The existing journal could not be decoded. It is left untouched so a
+    /// later write cannot erase input that may still be recoverable.
+    JournalUnreadable,
 }
 
 impl SendQueueRefusal {
@@ -116,9 +121,45 @@ impl SendQueueRefusal {
             Self::UnknownItem => "unknown_item",
             Self::NotQuiescent => "not_quiescent",
             Self::NotPersisted => "not_persisted",
+            Self::JournalUnreadable => "journal_unreadable",
         }
     }
 }
+
+/// Whether a thread may automatically spend its next queued item.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SendQueueProcessingState {
+    AutoProcess,
+    Paused,
+    AbsorbingCancel,
+}
+
+impl SendQueueProcessingState {
+    const fn token(self) -> &'static str {
+        match self {
+            Self::AutoProcess => "auto_process",
+            Self::Paused => "paused",
+            Self::AbsorbingCancel => "absorbing_cancel",
+        }
+    }
+
+    fn parse_token(token: &str) -> Option<Self> {
+        match token {
+            "auto_process" => Some(Self::AutoProcess),
+            "paused" => Some(Self::Paused),
+            "absorbing_cancel" => Some(Self::AbsorbingCancel),
+            _ => None,
+        }
+    }
+}
+
+struct GlobalSendQueueJournal {
+    journal: Rc<SendQueueJournal>,
+    #[cfg(any(test, feature = "test-support"))]
+    _temporary_directory: Option<tempfile::TempDir>,
+}
+
+impl Global for GlobalSendQueueJournal {}
 
 /// The durable queue.
 ///
@@ -131,10 +172,43 @@ pub struct SendQueueJournal {
     /// hash order — a journal that changes when nothing decided differently is
     /// a journal nobody can diff.
     items: RefCell<BTreeMap<String, QueuedSend>>,
+    processing_states: RefCell<BTreeMap<String, SendQueueProcessingState>>,
     next_sequence: RefCell<u64>,
+    load_error: Option<String>,
 }
 
 impl SendQueueJournal {
+    /// The single journal shared by every open conversation in this app.
+    pub fn global(cx: &mut App) -> Rc<Self> {
+        if let Some(global) = cx.try_global::<GlobalSendQueueJournal>() {
+            return global.journal.clone();
+        }
+
+        #[cfg(any(test, feature = "test-support"))]
+        let (journal, temporary_directory) = {
+            let directory = tempfile::tempdir().expect("temporary send queue directory");
+            let journal = Rc::new(Self::at(directory.path().join(SEND_QUEUE_JOURNAL_FILE)));
+            (journal, Some(directory))
+        };
+        #[cfg(not(any(test, feature = "test-support")))]
+        let journal = Rc::new(Self::at_data_dir());
+
+        cx.set_global(GlobalSendQueueJournal {
+            journal: journal.clone(),
+            #[cfg(any(test, feature = "test-support"))]
+            _temporary_directory: temporary_directory,
+        });
+        journal
+    }
+
+    #[cfg(any(test, feature = "test-support"))]
+    pub fn set_global_for_tests(journal: Rc<Self>, cx: &mut App) {
+        cx.set_global(GlobalSendQueueJournal {
+            journal,
+            _temporary_directory: None,
+        });
+    }
+
     /// The journal at the Omega data directory's usual place.
     #[must_use]
     pub fn at_data_dir() -> Self {
@@ -147,25 +221,36 @@ impl SendQueueJournal {
 
     /// The journal at an explicit path. Loads what is already there.
     ///
-    /// An unreadable journal starts empty **and says so loudly**. It does not
-    /// silently continue, because a queue that quietly forgot an admitted
-    /// message is the defect this module exists to prevent, and a warning is
-    /// the only honest thing available at this layer.
+    /// An unreadable journal is retained and every mutation is refused. A
+    /// later write must not overwrite input that may still be recoverable.
     #[must_use]
     pub fn at(path: PathBuf) -> Self {
-        let items = load(&path).unwrap_or_else(|error| {
-            log::warn!(
-                "OMEGA-DELTA-0032: send queue at {} could not be read ({error:#}); \
-                 starting from empty. Any admitted message it held is lost.",
-                path.display()
-            );
-            BTreeMap::new()
-        });
+        let (items, processing_states, load_error) = match load(&path) {
+            Ok((items, processing_states)) => (items, processing_states, None),
+            Err(error) => {
+                log::error!(
+                    "OMEGA-DELTA-0032: send queue at {} could not be read ({error:#}); \
+                     refusing to overwrite it",
+                    path.display()
+                );
+                (BTreeMap::new(), BTreeMap::new(), Some(error.to_string()))
+            }
+        };
         let next = items.values().map(|item| item.sequence).max().unwrap_or(0) + 1;
         Self {
             path,
             items: RefCell::new(items),
+            processing_states: RefCell::new(processing_states),
             next_sequence: RefCell::new(next),
+            load_error,
+        }
+    }
+
+    pub fn ensure_readable(&self) -> Result<(), SendQueueRefusal> {
+        if self.load_error.is_some() {
+            Err(SendQueueRefusal::JournalUnreadable)
+        } else {
+            Ok(())
         }
     }
 
@@ -186,11 +271,14 @@ impl SendQueueJournal {
         class: ExecutorClass,
         capability: SteerCapability,
     ) -> Result<QueuedSend, SendQueueRefusal> {
-        let sequence = {
-            let mut next = self.next_sequence.borrow_mut();
-            let sequence = *next;
-            *next += 1;
-            sequence
+        self.ensure_readable()?;
+        let sequence = *self.next_sequence.borrow();
+        let Some(next_sequence) = sequence.checked_add(1) else {
+            log::error!(
+                "OMEGA-DELTA-0032: {} cannot admit another item because its sequence space is exhausted",
+                self.path.display()
+            );
+            return Err(SendQueueRefusal::NotPersisted);
         };
         let item = QueuedSend {
             item_id: item_id.to_owned(),
@@ -202,19 +290,72 @@ impl SendQueueJournal {
             capability,
             state: QueueItemState::Queued,
         };
-        self.items
+        let key = Self::key(thread_id, item_id);
+        let previous = self.items.borrow_mut().insert(key.clone(), item.clone());
+        let previous_processing_state = self
+            .processing_states
             .borrow_mut()
-            .insert(Self::key(thread_id, item_id), item.clone());
+            .insert(thread_id.to_owned(), SendQueueProcessingState::AutoProcess);
         match self.persist() {
-            Ok(()) => Ok(item),
+            Ok(()) => {
+                *self.next_sequence.borrow_mut() = next_sequence;
+                Ok(item)
+            }
             Err(error) => {
                 log::error!(
                     "OMEGA-DELTA-0032: {item_id} could not be admitted to {}: {error:#}",
                     self.path.display()
                 );
-                self.items
-                    .borrow_mut()
-                    .remove(&Self::key(thread_id, item_id));
+                let mut items = self.items.borrow_mut();
+                if let Some(previous) = previous {
+                    items.insert(key, previous);
+                } else {
+                    items.remove(&key);
+                }
+                let mut states = self.processing_states.borrow_mut();
+                if let Some(previous) = previous_processing_state {
+                    states.insert(thread_id.to_owned(), previous);
+                } else {
+                    states.remove(thread_id);
+                }
+                Err(SendQueueRefusal::NotPersisted)
+            }
+        }
+    }
+
+    /// Replace the durable body and send intention of an open item.
+    pub fn update(
+        &self,
+        thread_id: &str,
+        item_id: &str,
+        text: &str,
+        command: SendCommand,
+        class: ExecutorClass,
+        capability: SteerCapability,
+    ) -> Result<QueuedSend, SendQueueRefusal> {
+        self.ensure_readable()?;
+        let key = Self::key(thread_id, item_id);
+        self.require_open(&key)?;
+        let previous = {
+            let mut items = self.items.borrow_mut();
+            let item = items.get_mut(&key).ok_or(SendQueueRefusal::UnknownItem)?;
+            let previous = item.clone();
+            item.text = text.to_owned();
+            item.command = command;
+            item.class = class;
+            item.capability = capability;
+            previous
+        };
+        match self.persist() {
+            Ok(()) => self
+                .items
+                .borrow()
+                .get(&key)
+                .cloned()
+                .ok_or(SendQueueRefusal::UnknownItem),
+            Err(error) => {
+                log::error!("OMEGA-DELTA-0032: {key} could not save a queue edit: {error:#}");
+                self.items.borrow_mut().insert(key, previous);
                 Err(SendQueueRefusal::NotPersisted)
             }
         }
@@ -260,6 +401,113 @@ impl SendQueueJournal {
     #[must_use]
     pub fn head_for(&self, thread_id: &str) -> Option<QueuedSend> {
         self.open_items(thread_id).into_iter().next()
+    }
+
+    #[must_use]
+    pub fn processing_state(&self, thread_id: &str) -> SendQueueProcessingState {
+        self.processing_states
+            .borrow()
+            .get(thread_id)
+            .copied()
+            .unwrap_or(SendQueueProcessingState::AutoProcess)
+    }
+
+    pub fn set_processing_state(
+        &self,
+        thread_id: &str,
+        state: SendQueueProcessingState,
+    ) -> Result<(), SendQueueRefusal> {
+        self.ensure_readable()?;
+        let previous = self
+            .processing_states
+            .borrow_mut()
+            .insert(thread_id.to_owned(), state);
+        if let Err(error) = self.persist() {
+            log::error!(
+                "OMEGA-DELTA-0032: {thread_id} could not save queue processing state: {error:#}"
+            );
+            let mut states = self.processing_states.borrow_mut();
+            if let Some(previous) = previous {
+                states.insert(thread_id.to_owned(), previous);
+            } else {
+                states.remove(thread_id);
+            }
+            return Err(SendQueueRefusal::NotPersisted);
+        }
+        Ok(())
+    }
+
+    /// Claim an item immediately before dispatching it.
+    ///
+    /// A running turn admits only an explicit send disposition that reaches
+    /// that turn. Ordinary queued input still requires proven quiescence.
+    pub fn claim_for_dispatch(
+        &self,
+        thread_id: &str,
+        item_id: &str,
+        quiescence: Quiescence,
+        processing_state: SendQueueProcessingState,
+    ) -> Result<QueuedSend, SendQueueRefusal> {
+        self.ensure_readable()?;
+        let key = Self::key(thread_id, item_id);
+        let previous_item = self
+            .items
+            .borrow()
+            .get(&key)
+            .cloned()
+            .ok_or(SendQueueRefusal::UnknownItem)?;
+        if !previous_item.state.is_open() {
+            return Err(SendQueueRefusal::ItemIsTerminal);
+        }
+        let may_dispatch = previous_item.may_promote(quiescence)
+            || (quiescence == Quiescence::Running
+                && previous_item.disposition().reaches_running_turn());
+        if !may_dispatch {
+            return Err(SendQueueRefusal::NotQuiescent);
+        }
+
+        let updated = {
+            let mut items = self.items.borrow_mut();
+            let item = items.get_mut(&key).ok_or(SendQueueRefusal::UnknownItem)?;
+            item.state = QueueItemState::Promoted;
+            item.clone()
+        };
+        let previous_processing_state = self
+            .processing_states
+            .borrow_mut()
+            .insert(thread_id.to_owned(), processing_state);
+        if let Err(error) = self.persist() {
+            log::error!("OMEGA-DELTA-0032: {key} could not be claimed: {error:#}");
+            self.items.borrow_mut().insert(key, previous_item);
+            let mut states = self.processing_states.borrow_mut();
+            if let Some(previous) = previous_processing_state {
+                states.insert(thread_id.to_owned(), previous);
+            } else {
+                states.remove(thread_id);
+            }
+            return Err(SendQueueRefusal::NotPersisted);
+        }
+        Ok(updated)
+    }
+
+    /// Cancel every open item for one thread in a single durable rewrite.
+    pub fn cancel_all(&self, thread_id: &str) -> Result<(), SendQueueRefusal> {
+        self.ensure_readable()?;
+        let previous = self.items.borrow().clone();
+        for item in self
+            .items
+            .borrow_mut()
+            .values_mut()
+            .filter(|item| item.thread_id == thread_id && item.state.is_open())
+        {
+            item.state = QueueItemState::Cancelled;
+        }
+        if let Err(error) = self.persist() {
+            log::error!("OMEGA-DELTA-0032: {thread_id} could not clear its queue: {error:#}");
+            *self.items.borrow_mut() = previous;
+            return Err(SendQueueRefusal::NotPersisted);
+        }
+        Ok(())
     }
 
     /// Promote the queue head, but only after proven quiescence.
@@ -324,11 +572,13 @@ impl SendQueueJournal {
     }
 
     fn transition(&self, key: &str, state: QueueItemState) -> Result<QueuedSend, SendQueueRefusal> {
-        let updated = {
+        self.ensure_readable()?;
+        let (previous, updated) = {
             let mut items = self.items.borrow_mut();
             let item = items.get_mut(key).ok_or(SendQueueRefusal::UnknownItem)?;
+            let previous = item.clone();
             item.state = state;
-            item.clone()
+            (previous, item.clone())
         };
         match self.persist() {
             Ok(()) => Ok(updated),
@@ -337,6 +587,7 @@ impl SendQueueJournal {
                     "OMEGA-DELTA-0032: {key} could not record {}: {error:#}",
                     state.token()
                 );
+                self.items.borrow_mut().insert(key.to_owned(), previous);
                 Err(SendQueueRefusal::NotPersisted)
             }
         }
@@ -347,7 +598,12 @@ impl SendQueueJournal {
     }
 
     fn persist(&self) -> anyhow::Result<()> {
+        anyhow::ensure!(
+            self.load_error.is_none(),
+            "the existing send queue journal is unreadable"
+        );
         let items = self.items.borrow();
+        let processing_states = self.processing_states.borrow();
         let document = serde_json::json!({
             "schema": SEND_QUEUE_JOURNAL_SCHEMA,
             "items": items
@@ -361,6 +617,13 @@ impl SendQueueJournal {
                     "class": item.class.token(),
                     "capability": item.capability.token(),
                     "state": item.state.token(),
+                }))
+                .collect::<Vec<_>>(),
+            "threadStates": processing_states
+                .iter()
+                .map(|(thread_id, state)| serde_json::json!({
+                    "threadId": thread_id,
+                    "state": state.token(),
                 }))
                 .collect::<Vec<_>>(),
         });
@@ -388,9 +651,14 @@ fn parse_capability(token: &str) -> Option<SteerCapability> {
         .find(|capability| capability.token() == token)
 }
 
-fn load(path: &Path) -> anyhow::Result<BTreeMap<String, QueuedSend>> {
+fn load(
+    path: &Path,
+) -> anyhow::Result<(
+    BTreeMap<String, QueuedSend>,
+    BTreeMap<String, SendQueueProcessingState>,
+)> {
     if !path.exists() {
-        return Ok(BTreeMap::new());
+        return Ok((BTreeMap::new(), BTreeMap::new()));
     }
     let document: Value = serde_json::from_slice(&std::fs::read(path)?)?;
     let schema = document.get("schema").and_then(Value::as_str);
@@ -399,11 +667,11 @@ fn load(path: &Path) -> anyhow::Result<BTreeMap<String, QueuedSend>> {
         "unsupported send queue schema {schema:?}"
     );
     let mut items = BTreeMap::new();
-    for entry in document
+    let entries = document
         .get("items")
         .and_then(Value::as_array)
-        .unwrap_or(&Vec::new())
-    {
+        .ok_or_else(|| anyhow::anyhow!("send queue items must be an array"))?;
+    for entry in entries {
         let (
             Some(item_id),
             Some(thread_id),
@@ -438,8 +706,13 @@ fn load(path: &Path) -> anyhow::Result<BTreeMap<String, QueuedSend>> {
         else {
             anyhow::bail!("send queue entry is not a complete queued send");
         };
+        let key = SendQueueJournal::key(thread_id, item_id);
+        anyhow::ensure!(
+            !items.contains_key(&key),
+            "duplicate send queue item identity for {thread_id}/{item_id}"
+        );
         items.insert(
-            SendQueueJournal::key(thread_id, item_id),
+            key,
             QueuedSend {
                 item_id: item_id.to_owned(),
                 thread_id: thread_id.to_owned(),
@@ -452,7 +725,33 @@ fn load(path: &Path) -> anyhow::Result<BTreeMap<String, QueuedSend>> {
             },
         );
     }
-    Ok(items)
+
+    let mut processing_states = BTreeMap::new();
+    let state_entries = document
+        .get("threadStates")
+        .and_then(Value::as_array)
+        .ok_or_else(|| anyhow::anyhow!("send queue threadStates must be an array"))?;
+    for entry in state_entries {
+        let (Some(thread_id), Some(state)) = (
+            entry.get("threadId").and_then(Value::as_str),
+            entry
+                .get("state")
+                .and_then(Value::as_str)
+                .and_then(SendQueueProcessingState::parse_token),
+        ) else {
+            anyhow::bail!("send queue thread state is incomplete");
+        };
+        anyhow::ensure!(
+            !processing_states.contains_key(thread_id),
+            "duplicate send queue thread state for {thread_id}"
+        );
+        processing_states.insert(thread_id.to_owned(), state);
+    }
+    anyhow::ensure!(
+        items.values().all(|item| item.sequence < u64::MAX),
+        "send queue sequence space is exhausted"
+    );
+    Ok((items, processing_states))
 }
 
 /// The line the composer shows for one admitted item.
@@ -683,7 +982,243 @@ mod tests {
         )
         .expect("written");
         assert!(load(&path).is_err());
-        assert!(SendQueueJournal::at(path).open_items("thread-1").is_empty());
+        let original = std::fs::read(&path).expect("foreign document remains readable");
+        let journal = SendQueueJournal::at(path.clone());
+        assert!(journal.open_items("thread-1").is_empty());
+        assert_eq!(
+            journal.admit(
+                "thread-1",
+                "item-1",
+                "do not erase the old file",
+                SendCommand::Enqueue,
+                ExecutorClass::NativeLoop,
+                SteerCapability::Unknown,
+            ),
+            Err(SendQueueRefusal::JournalUnreadable)
+        );
+        assert_eq!(
+            std::fs::read(path).expect("foreign document is not overwritten"),
+            original
+        );
+    }
+
+    #[test]
+    fn malformed_required_collections_are_refused_without_overwrite() {
+        for (name, document) in [
+            (
+                "missing-items",
+                serde_json::json!({
+                    "schema": SEND_QUEUE_JOURNAL_SCHEMA,
+                    "threadStates": [],
+                }),
+            ),
+            (
+                "non-array-items",
+                serde_json::json!({
+                    "schema": SEND_QUEUE_JOURNAL_SCHEMA,
+                    "items": {},
+                    "threadStates": [],
+                }),
+            ),
+            (
+                "missing-thread-states",
+                serde_json::json!({
+                    "schema": SEND_QUEUE_JOURNAL_SCHEMA,
+                    "items": [],
+                }),
+            ),
+            (
+                "non-array-thread-states",
+                serde_json::json!({
+                    "schema": SEND_QUEUE_JOURNAL_SCHEMA,
+                    "items": [],
+                    "threadStates": {},
+                }),
+            ),
+            (
+                "duplicate-item-identity",
+                serde_json::json!({
+                    "schema": SEND_QUEUE_JOURNAL_SCHEMA,
+                    "items": [
+                        {
+                            "itemId": "item-1",
+                            "threadId": "thread-1",
+                            "sequence": 1,
+                            "text": "first",
+                            "command": SendCommand::Enqueue.token(),
+                            "class": ExecutorClass::NativeLoop.token(),
+                            "capability": SteerCapability::Unknown.token(),
+                            "state": QueueItemState::Queued.token(),
+                        },
+                        {
+                            "itemId": "item-1",
+                            "threadId": "thread-1",
+                            "sequence": 2,
+                            "text": "second",
+                            "command": SendCommand::Enqueue.token(),
+                            "class": ExecutorClass::NativeLoop.token(),
+                            "capability": SteerCapability::Unknown.token(),
+                            "state": QueueItemState::Queued.token(),
+                        },
+                    ],
+                    "threadStates": [],
+                }),
+            ),
+            (
+                "duplicate-thread-state",
+                serde_json::json!({
+                    "schema": SEND_QUEUE_JOURNAL_SCHEMA,
+                    "items": [],
+                    "threadStates": [
+                        { "threadId": "thread-1", "state": "paused" },
+                        { "threadId": "thread-1", "state": "auto_process" },
+                    ],
+                }),
+            ),
+            (
+                "exhausted-sequence",
+                serde_json::json!({
+                    "schema": SEND_QUEUE_JOURNAL_SCHEMA,
+                    "items": [{
+                        "itemId": "item-1",
+                        "threadId": "thread-1",
+                        "sequence": u64::MAX,
+                        "text": "cannot allocate a successor",
+                        "command": SendCommand::Enqueue.token(),
+                        "class": ExecutorClass::NativeLoop.token(),
+                        "capability": SteerCapability::Unknown.token(),
+                        "state": QueueItemState::Queued.token(),
+                    }],
+                    "threadStates": [],
+                }),
+            ),
+        ] {
+            let directory = tempfile::tempdir().expect("temporary queue directory");
+            let path = directory.path().join(format!("{name}.json"));
+            let original = serde_json::to_vec_pretty(&document).expect("JSON document");
+            std::fs::write(&path, &original).expect("malformed journal written");
+
+            let journal = SendQueueJournal::at(path.clone());
+            assert_eq!(
+                journal.admit(
+                    "thread-1",
+                    "item-1",
+                    "must not erase malformed data",
+                    SendCommand::Enqueue,
+                    ExecutorClass::NativeLoop,
+                    SteerCapability::Unknown,
+                ),
+                Err(SendQueueRefusal::JournalUnreadable),
+                "{name} was accepted as an empty journal"
+            );
+            assert_eq!(
+                std::fs::read(path).expect("malformed journal remains readable"),
+                original,
+                "{name} was overwritten"
+            );
+        }
+    }
+
+    #[test]
+    fn a_full_sequence_space_refuses_admission_without_overwrite() {
+        let directory = tempfile::tempdir().expect("temporary queue directory");
+        let path = directory.path().join(SEND_QUEUE_JOURNAL_FILE);
+        let document = serde_json::json!({
+            "schema": SEND_QUEUE_JOURNAL_SCHEMA,
+            "items": [{
+                "itemId": "item-1",
+                "threadId": "thread-1",
+                "sequence": u64::MAX - 1,
+                "text": "last admissible sequence",
+                "command": SendCommand::Enqueue.token(),
+                "class": ExecutorClass::NativeLoop.token(),
+                "capability": SteerCapability::Unknown.token(),
+                "state": QueueItemState::Queued.token(),
+            }],
+            "threadStates": [],
+        });
+        let original = serde_json::to_vec_pretty(&document).expect("JSON document");
+        std::fs::write(&path, &original).expect("full journal written");
+
+        let journal = SendQueueJournal::at(path.clone());
+        assert_eq!(
+            journal.admit(
+                "thread-1",
+                "item-2",
+                "must not overflow",
+                SendCommand::Enqueue,
+                ExecutorClass::NativeLoop,
+                SteerCapability::Unknown,
+            ),
+            Err(SendQueueRefusal::NotPersisted)
+        );
+        assert_eq!(
+            std::fs::read(path).expect("full journal remains readable"),
+            original
+        );
+    }
+
+    #[test]
+    fn a_failed_edit_write_rolls_back_the_durable_body() {
+        let dir = tempfile::tempdir().expect("temp dir");
+        let path = dir.path().join(SEND_QUEUE_JOURNAL_FILE);
+        let journal = SendQueueJournal::at(path.clone());
+        admit(
+            &journal,
+            "item-1",
+            SendCommand::Enqueue,
+            ExecutorClass::NativeLoop,
+            SteerCapability::Unknown,
+        );
+        std::fs::remove_file(&path).expect("remove journal file");
+        std::fs::create_dir(&path).expect("replace journal file with directory");
+
+        assert_eq!(
+            journal.update(
+                "thread-1",
+                "item-1",
+                "new text that was not saved",
+                SendCommand::Enqueue,
+                ExecutorClass::NativeLoop,
+                SteerCapability::Unknown,
+            ),
+            Err(SendQueueRefusal::NotPersisted)
+        );
+        assert_eq!(
+            journal
+                .head_for("thread-1")
+                .expect("item remains queued")
+                .text,
+            "look at the other file too"
+        );
+    }
+
+    #[test]
+    fn pause_and_absorbing_cancel_survive_a_journal_restart() {
+        let dir = tempfile::tempdir().expect("temp dir");
+        let path = dir.path().join(SEND_QUEUE_JOURNAL_FILE);
+        {
+            let journal = SendQueueJournal::at(path.clone());
+            journal
+                .set_processing_state("paused-thread", SendQueueProcessingState::Paused)
+                .expect("pause persisted");
+            journal
+                .set_processing_state(
+                    "cancelling-thread",
+                    SendQueueProcessingState::AbsorbingCancel,
+                )
+                .expect("absorbing state persisted");
+        }
+
+        let reopened = SendQueueJournal::at(path);
+        assert_eq!(
+            reopened.processing_state("paused-thread"),
+            SendQueueProcessingState::Paused
+        );
+        assert_eq!(
+            reopened.processing_state("cancelling-thread"),
+            SendQueueProcessingState::AbsorbingCancel
+        );
     }
 
     #[test]

@@ -2177,6 +2177,7 @@ pub struct AcpThread {
     pending_terminal_output: HashMap<acp::TerminalId, Vec<Vec<u8>>>,
     pending_terminal_exit: HashMap<acp::TerminalId, acp::TerminalExitStatus>,
     had_error: bool,
+    terminal_status: ThreadTerminalStatus,
     /// The user's unsent prompt text, persisted so it can be restored when reloading the thread.
     draft_prompt: Option<Vec<acp::ContentBlock>>,
     /// The initial scroll position for the thread view, set during session registration.
@@ -2285,10 +2286,18 @@ pub enum TerminalProviderCommand {
     },
 }
 
-#[derive(PartialEq, Eq, Debug)]
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum ThreadStatus {
     Idle,
     Generating,
+}
+
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub enum ThreadTerminalStatus {
+    Failed,
+    #[default]
+    Completed,
+    Cancelled,
 }
 
 #[derive(Debug, Clone)]
@@ -2419,6 +2428,7 @@ impl AcpThread {
             pending_terminal_output: HashMap::default(),
             pending_terminal_exit: HashMap::default(),
             had_error: false,
+            terminal_status: ThreadTerminalStatus::Completed,
             draft_prompt: None,
             ui_scroll_position: None,
             streaming_text_buffer: None,
@@ -2644,6 +2654,18 @@ impl AcpThread {
         } else {
             ThreadStatus::Idle
         }
+    }
+
+    pub fn terminal_status(&self) -> ThreadTerminalStatus {
+        self.terminal_status
+    }
+
+    pub fn restore_terminal_status(&mut self, status: ThreadTerminalStatus) -> bool {
+        if self.status() != ThreadStatus::Idle {
+            return false;
+        }
+        self.terminal_status = status;
+        true
     }
 
     pub fn had_error(&self) -> bool {
@@ -4350,6 +4372,7 @@ impl AcpThread {
     ) -> BoxFuture<'static, Result<Option<acp::PromptResponse>>> {
         self.clear_completed_plan_entries(cx);
         self.had_error = false;
+        self.terminal_status = ThreadTerminalStatus::Completed;
         self.plan_interruption = None;
 
         let (tx, rx) = oneshot::channel();
@@ -4409,6 +4432,9 @@ impl AcpThread {
                                 cx.emit(AcpThreadEvent::StatusChanged);
                             }
                             this.had_error = true;
+                            if is_same_turn {
+                                this.terminal_status = ThreadTerminalStatus::Failed;
+                            }
                             this.plan_interruption = Some("maximum tokens reached".into());
                             this.push_projection_marker(
                                 ThreadEventKind::Error,
@@ -4441,6 +4467,7 @@ impl AcpThread {
 
                         let canceled = matches!(r.stop_reason, acp::StopReason::Cancelled);
                         if canceled && is_same_turn {
+                            this.terminal_status = ThreadTerminalStatus::Cancelled;
                             this.plan_interruption = Some("agent cancelled".into());
                             this.cancel_pending_turn_entries(cx);
                         }
@@ -4452,6 +4479,9 @@ impl AcpThread {
                         // Handle refusal - distinguish between user prompt and tool call refusals
                         if let acp::StopReason::Refusal = r.stop_reason {
                             this.had_error = true;
+                            if is_same_turn {
+                                this.terminal_status = ThreadTerminalStatus::Failed;
+                            }
                             this.plan_interruption = Some("agent refused".into());
                             if let Some((user_msg_ix, _)) = this.last_user_message() {
                                 // Check if there's a completed tool call with results after the last user message
@@ -4499,10 +4529,16 @@ impl AcpThread {
                             cx.emit(AcpThreadEvent::StatusChanged);
                         }
                         let (kind, status) = if r.stop_reason == acp::StopReason::Cancelled {
+                            if is_same_turn {
+                                this.terminal_status = ThreadTerminalStatus::Cancelled;
+                            }
                             (ThreadEventKind::Cancellation, ThreadEventStatus::Canceled)
                         } else if r.stop_reason == acp::StopReason::Refusal {
                             (ThreadEventKind::Refusal, ThreadEventStatus::Rejected)
                         } else if r.stop_reason == acp::StopReason::EndTurn {
+                            if is_same_turn {
+                                this.terminal_status = ThreadTerminalStatus::Completed;
+                            }
                             (ThreadEventKind::Completion, ThreadEventStatus::Completed)
                         } else {
                             (ThreadEventKind::Unknown, ThreadEventStatus::Unknown)
@@ -4520,6 +4556,9 @@ impl AcpThread {
                             this.cancel_pending_turn_entries(cx);
                         }
                         this.had_error = true;
+                        if is_same_turn {
+                            this.terminal_status = ThreadTerminalStatus::Failed;
+                        }
                         this.plan_interruption = Some("agent error".into());
                         this.push_projection_marker(
                             ThreadEventKind::Error,
@@ -4552,6 +4591,7 @@ impl AcpThread {
         let Some(turn) = self.running_turn.take() else {
             return Task::ready(());
         };
+        self.terminal_status = ThreadTerminalStatus::Cancelled;
         self.mark_pending_entries_as_canceled(permission_outcome, cx);
         self.connection.cancel(&self.session_id, cx);
         cx.emit(AcpThreadEvent::StatusChanged);
@@ -8157,6 +8197,7 @@ mod tests {
 
         // Verify the message was truncated (user prompt refusal)
         thread.read_with(cx, |thread, cx| {
+            assert_eq!(thread.terminal_status(), ThreadTerminalStatus::Failed);
             assert_eq!(thread.to_markdown(cx), "");
         });
     }
@@ -11158,6 +11199,7 @@ mod tests {
 
         assert!(response.is_ok(), "send should not fail: {response:?}");
         thread.read_with(cx, |thread, _| {
+            assert_eq!(thread.terminal_status(), ThreadTerminalStatus::Completed);
             let AgentThreadEntry::UserMessage(message) = &thread.entries[0] else {
                 panic!("expected first entry to be a user message")
             };
@@ -11223,6 +11265,7 @@ mod tests {
         );
 
         thread.read_with(cx, |thread, _| {
+            assert_eq!(thread.terminal_status(), ThreadTerminalStatus::Cancelled);
             let tool_entry = thread
                 .entries
                 .iter()

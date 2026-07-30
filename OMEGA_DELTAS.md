@@ -7907,3 +7907,35 @@ current image build does not decode it inline.
   the application-menu contract test; and managed-session projection,
   settlement, reconnect, transcript-recovery, and revocation tests at their
   source boundaries.
+
+### OMEGA-DELTA-0181 — Concurrent agent turns are supervised and isolated
+
+- **Every direct agent thread exposes one lifecycle.** The Threads Sidebar and
+  active-thread header identify the executor and show Running, Waiting for you,
+  Failed, Completed, or Cancelled. Waiting for a person takes precedence over a
+  generic running state. Only terminal states survive a restart; an interrupted
+  nonterminal record fails closed instead of pretending that work is still
+  live.
+- **Cancellation is thread-owned.** The active-thread control cancels only that
+  thread. Switching threads does not stop background work, and relaunch keeps
+  each thread's identity, terminal lifecycle, transcript, and durable queued
+  messages independent.
+- **Concurrent writers require an explicit decision.** Before a direct root
+  turn begins, Omega claims every selected worktree for the lifetime of that
+  turn. Local aliases are canonicalized, multi-root overlap is detected, and
+  remote paths are scoped by remote identity. A collision names the occupying
+  thread, executor, and path, then offers **Cancel** or **Run here anyway**.
+  Cancelling restores a direct prompt or leaves a queued prompt untouched.
+- **The queue is durable and fail-closed.** A prompt is acknowledged as queued
+  only after its text, executor class, steer capability, disposition inputs,
+  ordering identity, and per-thread processing state are atomically persisted.
+  Promotion happens only after worktree admission, terminal items cannot be
+  reopened, failed edits remain visibly unsaved, and corrupt storage is never
+  overwritten. Restored open queues start paused until a person explicitly
+  resumes them; a new process's local Idle state is not provider quiescence.
+  Pause, resume, send-now, cancellation, and restart recovery are isolated by
+  thread.
+- **Enforced by:** `concurrent_agent_supervision_is_visible_durable_and_guarded`
+  in `crates/omega_deltas`; lifecycle, collision, metadata migration, and queue
+  journal unit tests; Agent Panel GPUI coverage; and the concurrent-agent visual
+  workbench sequence.

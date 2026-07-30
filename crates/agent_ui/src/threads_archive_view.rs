@@ -1655,6 +1655,7 @@ mod tests {
             worktree_paths: Default::default(),
             remote_connection: None,
             archived: true,
+            lifecycle: crate::omega_agent_supervision::SupervisedThreadLifecycle::Completed,
         }
     }
 

@@ -28,7 +28,10 @@ use ui::{App, Context, SharedString, ThreadItemWorktreeInfo, WorktreeKind};
 use util::ResultExt as _;
 use workspace::{PathList, SerializedWorkspaceLocation, WorkspaceDb};
 
-use crate::DEFAULT_THREAD_TITLE;
+use crate::{
+    DEFAULT_THREAD_TITLE,
+    omega_agent_supervision::{SupervisedThreadLifecycle, lifecycle_for_thread},
+};
 
 #[derive(Clone, Copy, PartialEq, Eq, Hash, Debug, serde::Serialize, serde::Deserialize)]
 pub struct ThreadId(uuid::Uuid);
@@ -76,8 +79,10 @@ pub(crate) fn list_thread_metadata_from_connection(
         "SELECT sql FROM sqlite_master WHERE type = 'table' AND name = ?1",
     )?("sidebar_threads")?
     .context("sidebar_threads schema is missing")?;
-    let query = if schema.contains("conversation_owner_version") {
+    let query = if schema.contains("lifecycle") {
         ThreadMetadataDb::LIST_QUERY
+    } else if schema.contains("conversation_owner_version") {
+        ThreadMetadataDb::PRE_LIFECYCLE_LIST_QUERY
     } else {
         ThreadMetadataDb::LEGACY_LIST_QUERY
     };
@@ -157,6 +162,7 @@ fn migrate_thread_metadata(cx: &mut App) -> Task<anyhow::Result<()>> {
                         worktree_paths: WorktreePaths::from_folder_paths(&entry.folder_paths),
                         remote_connection: None,
                         archived: true,
+                        lifecycle: SupervisedThreadLifecycle::Completed,
                     })
                 })
                 .collect::<Vec<_>>()
@@ -346,6 +352,7 @@ pub struct ThreadMetadata {
     pub worktree_paths: WorktreePaths,
     pub remote_connection: Option<RemoteConnectionOptions>,
     pub archived: bool,
+    pub lifecycle: SupervisedThreadLifecycle,
 }
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
@@ -1434,6 +1441,10 @@ impl ThreadMetadataStore {
                         .as_ref()
                         .and_then(|thread| thread.remote_connection.clone())
                         .or_else(|| project.remote_connection_options(cx)),
+                    lifecycle: existing_thread
+                        .as_ref()
+                        .map(|thread| thread.lifecycle)
+                        .unwrap_or_default(),
                 },
                 cx,
             );
@@ -1534,6 +1545,7 @@ impl ThreadMetadataStore {
             worktree_paths,
             remote_connection,
             archived,
+            lifecycle: lifecycle_for_thread(&thread_ref).durable_terminal(),
         };
 
         self.save(metadata, cx);
@@ -1649,6 +1661,9 @@ impl Domain for ThreadMetadataDb {
         sql!(
             ALTER TABLE sidebar_threads ADD COLUMN conversation_owner_version INTEGER;
         ),
+        sql!(
+            ALTER TABLE sidebar_threads ADD COLUMN lifecycle TEXT NOT NULL DEFAULT "completed";
+        ),
     ];
 }
 
@@ -1665,13 +1680,19 @@ impl ThreadMetadataDb {
 
     const LIST_QUERY: &str = "SELECT thread_id, session_id, agent_id, title, updated_at, \
         created_at, interacted_at, folder_paths, folder_paths_order, archived, main_worktree_paths, \
-        main_worktree_paths_order, remote_connection, title_override, conversation_owner_version \
+        main_worktree_paths_order, remote_connection, title_override, conversation_owner_version, lifecycle \
+        FROM sidebar_threads \
+        ORDER BY updated_at DESC";
+
+    const PRE_LIFECYCLE_LIST_QUERY: &str = "SELECT thread_id, session_id, agent_id, title, updated_at, \
+        created_at, interacted_at, folder_paths, folder_paths_order, archived, main_worktree_paths, \
+        main_worktree_paths_order, remote_connection, title_override, conversation_owner_version, 'completed' AS lifecycle \
         FROM sidebar_threads \
         ORDER BY updated_at DESC";
 
     const LEGACY_LIST_QUERY: &str = "SELECT thread_id, session_id, agent_id, title, updated_at, \
         created_at, interacted_at, folder_paths, folder_paths_order, archived, main_worktree_paths, \
-        main_worktree_paths_order, remote_connection, title_override, NULL AS conversation_owner_version \
+        main_worktree_paths_order, remote_connection, title_override, NULL AS conversation_owner_version, 'completed' AS lifecycle \
         FROM sidebar_threads \
         ORDER BY updated_at DESC";
 
@@ -1726,12 +1747,13 @@ impl ThreadMetadataDb {
             ConversationOwnerVersion::Legacy => None,
             ConversationOwnerVersion::V1 => Some(1_i64),
         };
+        let lifecycle = row.lifecycle.durable_terminal().token();
         let thread_id = row.thread_id;
         let archived = row.archived;
 
         self.write(move |conn| {
-            let sql = "INSERT INTO sidebar_threads(thread_id, session_id, agent_id, title, updated_at, created_at, interacted_at, folder_paths, folder_paths_order, archived, main_worktree_paths, main_worktree_paths_order, remote_connection, title_override, conversation_owner_version) \
-                       VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15) \
+            let sql = "INSERT INTO sidebar_threads(thread_id, session_id, agent_id, title, updated_at, created_at, interacted_at, folder_paths, folder_paths_order, archived, main_worktree_paths, main_worktree_paths_order, remote_connection, title_override, conversation_owner_version, lifecycle) \
+                       VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16) \
                        ON CONFLICT(thread_id) DO UPDATE SET \
                            session_id = excluded.session_id, \
                            agent_id = excluded.agent_id, \
@@ -1746,7 +1768,8 @@ impl ThreadMetadataDb {
                            main_worktree_paths_order = excluded.main_worktree_paths_order, \
                            remote_connection = excluded.remote_connection, \
                            title_override = excluded.title_override, \
-                           conversation_owner_version = excluded.conversation_owner_version";
+                           conversation_owner_version = excluded.conversation_owner_version, \
+                           lifecycle = excluded.lifecycle";
             let mut stmt = Statement::prepare(conn, sql)?;
             let mut i = stmt.bind(&thread_id, 1)?;
             i = stmt.bind(&session_id, i)?;
@@ -1762,7 +1785,8 @@ impl ThreadMetadataDb {
             i = stmt.bind(&main_worktree_paths_order, i)?;
             i = stmt.bind(&remote_connection, i)?;
             i = stmt.bind(&title_override, i)?;
-            stmt.bind(&conversation_owner_version, i)?;
+            i = stmt.bind(&conversation_owner_version, i)?;
+            stmt.bind(&lifecycle, i)?;
             stmt.exec()
         })
         .await
@@ -1922,6 +1946,7 @@ impl Column for ThreadMetadata {
         let (title_override, next): (Option<String>, i32) = Column::column(statement, next)?;
         let (conversation_owner_version, next): (Option<i64>, i32) =
             Column::column(statement, next)?;
+        let (lifecycle, next): (String, i32) = Column::column(statement, next)?;
 
         let agent_id = agent_id
             .map(|id| AgentId::new(id))
@@ -1995,6 +2020,9 @@ impl Column for ThreadMetadata {
                 worktree_paths,
                 remote_connection,
                 archived,
+                lifecycle: SupervisedThreadLifecycle::from_token(&lifecycle)
+                    .context("unsupported thread lifecycle")?
+                    .durable_terminal(),
             },
             next,
         ))
@@ -2088,6 +2116,7 @@ mod tests {
             interacted_at: None,
             worktree_paths: WorktreePaths::from_folder_paths(&folder_paths),
             remote_connection: None,
+            lifecycle: SupervisedThreadLifecycle::Completed,
         }
     }
 
@@ -2182,6 +2211,30 @@ mod tests {
         assert_eq!(rows[0].title.as_deref(), Some("Agent Generated Title"));
         assert_eq!(rows[0].title_override.as_deref(), Some("User Title"));
         assert_eq!(rows[0].title().as_deref(), Some("User Title"));
+    }
+
+    #[gpui::test]
+    async fn test_database_does_not_restore_a_live_lifecycle(_cx: &mut TestAppContext) {
+        let mut metadata = make_metadata(
+            "session-running-at-shutdown",
+            "Interrupted thread",
+            Utc::now(),
+            PathList::new(&[Path::new("/project-a")]),
+        );
+        metadata.lifecycle = SupervisedThreadLifecycle::Running;
+
+        let thread = std::thread::current();
+        let test_name = thread.name().unwrap_or("unknown_test");
+        let db_name = format!("THREAD_METADATA_DB_{test_name}");
+        let db = ThreadMetadataDb(gpui::block_on(db::open_test_db::<ThreadMetadataDb>(
+            &db_name,
+        )));
+
+        db.save(metadata).await.unwrap();
+
+        let rows = db.list().unwrap();
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].lifecycle, SupervisedThreadLifecycle::Failed);
     }
 
     #[gpui::test]
@@ -2383,6 +2436,7 @@ mod tests {
             worktree_paths: WorktreePaths::from_folder_paths(&second_paths),
             remote_connection: None,
             archived: false,
+            lifecycle: SupervisedThreadLifecycle::Completed,
         };
 
         cx.update(|cx| {
@@ -2469,6 +2523,7 @@ mod tests {
             worktree_paths: WorktreePaths::from_folder_paths(&project_a_paths),
             remote_connection: None,
             archived: false,
+            lifecycle: SupervisedThreadLifecycle::Completed,
         };
 
         cx.update(|cx| {
@@ -2596,6 +2651,7 @@ mod tests {
             worktree_paths: WorktreePaths::from_folder_paths(&project_paths),
             remote_connection: None,
             archived: false,
+            lifecycle: SupervisedThreadLifecycle::Completed,
         };
 
         cx.update(|cx| {
@@ -3043,6 +3099,7 @@ mod tests {
                         worktree_paths: WorktreePaths::from_folder_paths(&PathList::default()),
                         remote_connection: None,
                         archived: true,
+                        lifecycle: SupervisedThreadLifecycle::Completed,
                     },
                     cx,
                 );
@@ -3399,6 +3456,7 @@ mod tests {
             interacted_at: None,
             worktree_paths: linked_worktree_paths.clone(),
             remote_connection: None,
+            lifecycle: SupervisedThreadLifecycle::Completed,
         };
 
         let remote_linked_thread = ThreadMetadata {
@@ -3414,6 +3472,7 @@ mod tests {
             interacted_at: None,
             worktree_paths: linked_worktree_paths,
             remote_connection: Some(remote_a.clone()),
+            lifecycle: SupervisedThreadLifecycle::Completed,
         };
 
         cx.update(|cx| {

@@ -1,6 +1,9 @@
 use crate::{
     DEFAULT_THREAD_TITLE, SelectPermissionGranularity,
     conversation_view::thread_search_bar::{ThreadSearchBar, ThreadSearchBarEvent},
+    omega_agent_supervision::{
+        AgentSupervision, SupervisedThreadLifecycle, ThreadSupervisionSnapshot, WorktreeClaimToken,
+    },
     open_abs_path_at_point,
     thread_metadata_store::{ThreadId, ThreadMetadataStore},
 };
@@ -68,6 +71,11 @@ const DATA_RETENTION_LEARN_MORE_URL: &str = "https://support.claude.com/en/artic
 struct ThreadFeedbackState {
     feedback: Option<ThreadFeedback>,
     comments_editor: Option<Entity<Editor>>,
+}
+
+pub(crate) enum WorktreeAdmission {
+    Accepted(Option<WorktreeClaimToken>),
+    Cancelled,
 }
 
 impl ThreadFeedbackState {
@@ -1603,8 +1611,10 @@ impl ThreadView {
         let is_generating = thread.read(cx).status() != ThreadStatus::Idle;
 
         if is_editor_empty {
-            if let Some(entry) = self.message_queue.try_fast_track(is_generating) {
-                self.dispatch_queued_entry(entry, window, cx);
+            match self.message_queue.try_fast_track(is_generating) {
+                Ok(Some(candidate)) => self.dispatch_queued_candidate(candidate, window, cx),
+                Ok(None) => {}
+                Err(error) => self.handle_message_queue_error(error, cx),
             }
             return;
         }
@@ -1697,6 +1707,7 @@ impl ThreadView {
 
         cx.spawn_in(window, async move |this, cx| {
             let (mut content, tracked_buffers) = contents.await?;
+            let original_content = content.clone();
 
             cx.update(|window, cx| {
                 message_editor.update(cx, |message_editor, cx| {
@@ -1724,7 +1735,13 @@ impl ThreadView {
                 // Queue the remainder first, then start the command turn; the
                 // queue auto-processes when the command turn stops.
                 if !content.is_empty() {
-                    this.add_to_queue(content, tracked_buffers, window, cx);
+                    if let Err(error) = this.add_to_queue(content, tracked_buffers, window, cx) {
+                        message_editor.update(cx, |editor, cx| {
+                            editor.set_message(original_content, window, cx);
+                        });
+                        this.handle_message_queue_error(error, cx);
+                        return;
+                    }
                 }
                 this.send_content(
                     Task::ready(Ok(Some((vec![command_block], Vec::new())))),
@@ -1754,7 +1771,9 @@ impl ThreadView {
         self.editing_message.take();
         // Sending a message is active engagement: un-freeze the queue if it
         // was paused by a manual stop.
-        self.message_queue.resume();
+        if let Err(error) = self.message_queue.resume() {
+            self.handle_message_queue_error(error, cx);
+        }
 
         if self.should_be_following {
             self.workspace
@@ -1807,20 +1826,107 @@ impl ThreadView {
             );
             return Ok("sent".into());
         }
-        self.add_to_queue_with_steer(
+        if let Err(error) = self.add_to_queue_with_steer(
             content,
             Vec::new(),
             disposition == omega_effectd::Issue31AgentThreadDisposition::Steer,
             window,
             cx,
-        );
+        ) {
+            let message = error.user_message().to_string();
+            self.handle_message_queue_error(error, cx);
+            return Err(message);
+        }
         Ok(self.omega_send_disposition(cx).phrase())
+    }
+
+    pub(crate) fn request_worktree_admission(
+        &self,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> Task<anyhow::Result<WorktreeAdmission>> {
+        let thread = self.thread.read(cx);
+        if thread.parent_session_id().is_some() {
+            return Task::ready(Ok(WorktreeAdmission::Accepted(None)));
+        }
+
+        let snapshot = ThreadSupervisionSnapshot {
+            thread_key: thread.session_id().0.to_string(),
+            title: thread
+                .title()
+                .unwrap_or_else(|| DEFAULT_THREAD_TITLE.into()),
+            executor: {
+                use crate::omega_executor_disclosure::ThreadExecutorDisclosure as _;
+                thread.omega_executor_disclosure(cx).label().into()
+            },
+            lifecycle: SupervisedThreadLifecycle::Running,
+        };
+        let work_dirs = thread
+            .work_dirs()
+            .map(|work_dirs| work_dirs.ordered_paths().cloned().collect::<Vec<_>>())
+            .unwrap_or_default();
+        let remote_connection = self
+            .project
+            .upgrade()
+            .and_then(|project| project.read(cx).remote_connection_options(cx));
+        let supervision = AgentSupervision::global(cx);
+
+        match supervision.claim(
+            snapshot.clone(),
+            work_dirs.clone(),
+            remote_connection.as_ref(),
+            false,
+        ) {
+            Ok(claim) => Task::ready(Ok(WorktreeAdmission::Accepted(Some(claim)))),
+            Err(collision) => {
+                let detail = format!(
+                    "{} is already running with {} in {}. The requested root {} overlaps that worktree. Running two agents in one worktree can overwrite or conflict with changes. Use a separate worktree unless you intentionally want concurrent writes.",
+                    collision.occupant.title,
+                    collision.occupant.executor,
+                    collision.occupied_path.display(),
+                    collision.requested_path.display(),
+                );
+                let prompt = window.prompt(
+                    PromptLevel::Warning,
+                    "Another agent is already using this worktree",
+                    Some(&detail),
+                    &["Cancel", "Run here anyway"],
+                    cx,
+                );
+                cx.spawn(async move |_this, _cx| {
+                    let answer = prompt.await?;
+                    if answer != 1 {
+                        return Ok(WorktreeAdmission::Cancelled);
+                    }
+                    let claim = supervision
+                        .claim(snapshot, work_dirs, remote_connection.as_ref(), true)
+                        .map_err(|collision| {
+                            anyhow::anyhow!(
+                                "failed to override worktree collision for {}",
+                                collision.requested_path.display()
+                            )
+                        })?;
+                    Ok(WorktreeAdmission::Accepted(Some(claim)))
+                })
+            }
+        }
     }
 
     pub fn send_content(
         &mut self,
         contents_task: Task<anyhow::Result<Option<(Vec<acp::ContentBlock>, Vec<Entity<Buffer>>)>>>,
         is_native_command: bool,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.send_content_with_worktree_claim(contents_task, is_native_command, None, window, cx);
+    }
+
+    pub(crate) fn send_content_with_worktree_claim(
+        &mut self,
+        contents_task: Task<anyhow::Result<Option<(Vec<acp::ContentBlock>, Vec<Entity<Buffer>>)>>>,
+        is_native_command: bool,
+        worktree_claim: Option<WorktreeClaimToken>,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
@@ -1846,6 +1952,33 @@ impl ThreadView {
         let task = cx.spawn_in(window, async move |this, cx| {
             let Some((contents, tracked_buffers)) = contents_task.await? else {
                 return Ok(());
+            };
+
+            let worktree_claim = match worktree_claim {
+                Some(claim) => Some(claim),
+                None => {
+                    let admission = this.update_in(cx, |this, window, cx| {
+                        this.request_worktree_admission(window, cx)
+                    })?;
+                    match admission.await? {
+                        WorktreeAdmission::Accepted(claim) => claim,
+                        WorktreeAdmission::Cancelled => {
+                            this.update_in(cx, |this, window, cx| {
+                                if this.message_editor.read(cx).is_empty(cx) {
+                                    this.message_editor.update(cx, |editor, cx| {
+                                        editor.set_message(contents, window, cx);
+                                    });
+                                } else {
+                                    this.message_editor.update(cx, |editor, cx| {
+                                        editor.append_message(contents, Some("\n\n"), window, cx);
+                                    });
+                                }
+                                cx.notify();
+                            })?;
+                            return Ok(());
+                        }
+                    }
+                }
             };
 
             let generation = this.update(cx, |this, cx| {
@@ -1928,6 +2061,7 @@ impl ThreadView {
             });
 
             let res = send.await;
+            drop(worktree_claim);
             let turn_time_ms = turn_start_time.elapsed().as_millis();
             drop(_stop_turn);
             let status = if res.is_ok() {
@@ -1997,7 +2131,10 @@ impl ThreadView {
         cx: &mut Context<Self>,
     ) {
         let thread = self.thread.clone();
-        self.message_queue.pause();
+        if let Err(error) = self.message_queue.pause() {
+            self.handle_message_queue_error(error, cx);
+            return;
+        }
 
         let cancelled = thread.update(cx, |thread, cx| thread.cancel(cx));
 
@@ -2147,7 +2284,12 @@ impl ThreadView {
     pub fn cancel_generation(&mut self, cx: &mut Context<Self>) {
         self.thread_retry_status.take();
         self.thread_error.take();
-        self.message_queue.pause();
+        if let Err(error) = self.message_queue.pause() {
+            self.handle_message_queue_error(error, cx);
+            self.sync_generating_indicator(cx);
+            cx.notify();
+            return;
+        }
         self._cancel_task = Some(self.thread.update(cx, |thread, cx| thread.cancel(cx)));
         self.sync_generating_indicator(cx);
         cx.notify();
@@ -2268,10 +2410,14 @@ impl ThreadView {
             }
 
             this.update_in(cx, |this, window, cx| {
-                this.add_to_queue(content, tracked_buffers, window, cx);
-                message_editor.update(cx, |message_editor, cx| {
-                    message_editor.clear(window, cx);
-                });
+                match this.add_to_queue(content, tracked_buffers, window, cx) {
+                    Ok(()) => {
+                        message_editor.update(cx, |message_editor, cx| {
+                            message_editor.clear(window, cx);
+                        });
+                    }
+                    Err(error) => this.handle_message_queue_error(error, cx),
+                }
                 cx.notify();
             })?;
             Ok(())
@@ -2285,8 +2431,8 @@ impl ThreadView {
         tracked_buffers: Vec<Entity<Buffer>>,
         window: &mut Window,
         cx: &mut Context<Self>,
-    ) {
-        self.add_to_queue_with_steer(content, tracked_buffers, false, window, cx);
+    ) -> Result<(), MessageQueueError> {
+        self.add_to_queue_with_steer(content, tracked_buffers, false, window, cx)
     }
 
     fn add_to_queue_with_steer(
@@ -2296,7 +2442,35 @@ impl ThreadView {
         steer: bool,
         window: &mut Window,
         cx: &mut Context<Self>,
-    ) {
+    ) -> Result<(), MessageQueueError> {
+        let (executor_class, steer_capability) = self.omega_queue_executor_context(cx);
+        let entry = self.build_queue_entry(
+            content,
+            tracked_buffers,
+            steer,
+            MessageQueue::new_durable_item_id(),
+            executor_class,
+            steer_capability,
+            window,
+            cx,
+        );
+        self.message_queue.enqueue(entry)?;
+        self.sync_queue_flag_to_native_thread(cx);
+        cx.notify();
+        Ok(())
+    }
+
+    fn build_queue_entry(
+        &mut self,
+        content: Vec<acp::ContentBlock>,
+        tracked_buffers: Vec<Entity<Buffer>>,
+        steer: bool,
+        durable_item_id: String,
+        executor_class: omega_front_door::ExecutorClass,
+        steer_capability: omega_front_door::SteerCapability,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> QueueEntry {
         // The ID must be allocated up front so the editor event subscription
         // can capture it before the entry (which owns the subscription) exists.
         let id = self.message_queue.next_id();
@@ -2326,16 +2500,66 @@ impl ThreadView {
                 this.handle_queue_editor_event(id, event, window, cx);
             });
 
-        self.message_queue.enqueue(QueueEntry {
+        QueueEntry {
             id,
+            durable_item_id,
             content,
             tracked_buffers,
             steer,
+            executor_class,
+            steer_capability,
+            is_durably_synced: true,
             editor,
             _subscription: subscription,
-        });
+        }
+    }
+
+    pub(crate) fn rehydrate_durable_queue(
+        &mut self,
+        journal: Rc<crate::omega_send_queue::SendQueueJournal>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let restored = match self
+            .message_queue
+            .bind(journal, self.root_thread_id.to_key_string())
+        {
+            Ok(restored) => restored,
+            Err(error) => {
+                self.handle_message_queue_error(error, cx);
+                return;
+            }
+        };
+
+        for item in restored {
+            let entry = self.build_queue_entry(
+                vec![acp::ContentBlock::Text(acp::TextContent::new(item.text))],
+                Vec::new(),
+                item.command == omega_front_door::SendCommand::Steer,
+                item.item_id,
+                item.class,
+                item.capability,
+                window,
+                cx,
+            );
+            self.message_queue.restore(entry);
+        }
         self.sync_queue_flag_to_native_thread(cx);
         cx.notify();
+    }
+
+    pub(super) fn handle_message_queue_error(
+        &mut self,
+        error: MessageQueueError,
+        cx: &mut Context<Self>,
+    ) {
+        self.handle_thread_error(
+            ThreadError::Other {
+                message: error.user_message(),
+                acp_error_code: Some(error.to_string().into()),
+            },
+            cx,
+        );
     }
 
     fn handle_queue_editor_event(
@@ -2383,9 +2607,8 @@ impl ThreadView {
             let (content, tracked_buffers) = contents_task.await?;
 
             this.update(cx, |this, cx| {
-                if let Some(entry) = this.message_queue.entry_by_id_mut(id) {
-                    entry.content = content;
-                    entry.tracked_buffers = tracked_buffers;
+                if let Err(error) = this.message_queue.update(id, content, tracked_buffers) {
+                    this.handle_message_queue_error(error, cx);
                 }
                 cx.notify();
             })?;
@@ -2400,17 +2623,29 @@ impl ThreadView {
         id: QueueEntryId,
         cx: &mut Context<Self>,
     ) -> Option<QueueEntry> {
-        let removed = self.message_queue.remove(id);
-        if removed.is_some() {
-            self.sync_queue_flag_to_native_thread(cx);
+        match self.message_queue.remove(id) {
+            Ok(removed) => {
+                if removed.is_some() {
+                    self.sync_queue_flag_to_native_thread(cx);
+                }
+                removed
+            }
+            Err(error) => {
+                self.handle_message_queue_error(error, cx);
+                None
+            }
         }
-        removed
     }
 
     fn toggle_queue_entry_steer(&mut self, id: QueueEntryId, cx: &mut Context<Self>) {
-        self.message_queue.toggle_steer(id);
-        self.sync_queue_flag_to_native_thread(cx);
-        cx.notify();
+        match self.message_queue.toggle_steer(id) {
+            Ok(true) => {
+                self.sync_queue_flag_to_native_thread(cx);
+                cx.notify();
+            }
+            Ok(false) => {}
+            Err(error) => self.handle_message_queue_error(error, cx),
+        }
     }
 
     /// `OMEGA-DELTA-0032`. What this thread's executor does with the front
@@ -2423,11 +2658,24 @@ impl ThreadView {
     /// "cancel the turn and restart" on two of the three classes. That is the
     /// implicit provider steer omega#79 exists to make impossible.
     pub fn omega_send_disposition(&self, cx: &App) -> omega_front_door::SendDisposition {
-        let command = if self.message_queue.front_wants_steer() {
-            omega_front_door::SendCommand::Steer
-        } else {
-            omega_front_door::SendCommand::Enqueue
-        };
+        if let Some(entry) = self.message_queue.first() {
+            return entry.disposition();
+        }
+        let (executor_class, steer_capability) = self.omega_queue_executor_context(cx);
+        omega_front_door::disposition(
+            omega_front_door::SendCommand::Enqueue,
+            executor_class,
+            steer_capability,
+        )
+    }
+
+    fn omega_queue_executor_context(
+        &self,
+        cx: &App,
+    ) -> (
+        omega_front_door::ExecutorClass,
+        omega_front_door::SteerCapability,
+    ) {
         use crate::omega_executor_disclosure::ThreadExecutorDisclosure as _;
         let disclosure = self.thread.read(cx).omega_executor_disclosure(cx);
         // Only an external peer negotiates. Omega owns the native loop's stop,
@@ -2438,7 +2686,7 @@ impl ThreadView {
             }
             _ => omega_front_door::SteerCapability::Unknown,
         };
-        omega_front_door::disposition(command, disclosure.class, capability)
+        (disclosure.class, capability)
     }
 
     pub fn sync_queue_flag_to_native_thread(&self, cx: &mut Context<Self>) {
@@ -2462,9 +2710,52 @@ impl ThreadView {
         cx: &mut Context<Self>,
     ) {
         let is_generating = self.thread.read(cx).status() == acp_thread::ThreadStatus::Generating;
-        if let Some(entry) = self.message_queue.send_now(id, is_generating) {
-            self.dispatch_queued_entry(entry, window, cx);
+        match self.message_queue.send_now(id, is_generating) {
+            Ok(Some(candidate)) => self.dispatch_queued_candidate(candidate, window, cx),
+            Ok(None) => {}
+            Err(error) => self.handle_message_queue_error(error, cx),
         }
+    }
+
+    pub(crate) fn dispatch_queued_candidate(
+        &mut self,
+        id: QueueEntryId,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let admission = self.request_worktree_admission(window, cx);
+        cx.spawn_in(window, async move |this, cx| {
+            let admission = admission.await;
+            this.update_in(cx, |this, window, cx| match admission {
+                Ok(WorktreeAdmission::Accepted(worktree_claim)) => {
+                    let quiescence = if this.thread.read(cx).status() == ThreadStatus::Idle {
+                        omega_front_door::Quiescence::Proven
+                    } else {
+                        omega_front_door::Quiescence::Running
+                    };
+                    match this.message_queue.promote_for_dispatch(id, quiescence) {
+                        Ok(Some(entry)) => {
+                            this.dispatch_queued_entry(entry, worktree_claim, window, cx)
+                        }
+                        Ok(None) => {}
+                        Err(error) => {
+                            this.message_queue.finish_dispatch_attempt(id);
+                            this.handle_message_queue_error(error, cx);
+                        }
+                    }
+                }
+                Ok(WorktreeAdmission::Cancelled) => {
+                    this.message_queue.finish_dispatch_attempt(id);
+                    cx.notify();
+                }
+                Err(error) => {
+                    this.message_queue.finish_dispatch_attempt(id);
+                    this.handle_thread_error(error, cx);
+                }
+            })?;
+            anyhow::Ok(())
+        })
+        .detach_and_log_err(cx);
     }
 
     /// The shared "actually send this entry" path, used by fast-track,
@@ -2473,6 +2764,7 @@ impl ThreadView {
     pub fn dispatch_queued_entry(
         &mut self,
         entry: QueueEntry,
+        worktree_claim: Option<WorktreeClaimToken>,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
@@ -2482,6 +2774,7 @@ impl ThreadView {
 
         self.message_editor.focus_handle(cx).focus(window, cx);
 
+        let reaches_running_turn = entry.disposition().reaches_running_turn();
         let content = entry.content;
         let tracked_buffers = entry.tracked_buffers;
 
@@ -2506,7 +2799,7 @@ impl ThreadView {
         // never cancels one. Cancelling unconditionally here is what turned a
         // refused steer into an interrupted turn on the two classes that were
         // never asked.
-        let cancelled = if self.omega_send_disposition(cx).reaches_running_turn() {
+        let cancelled = if reaches_running_turn {
             self.thread.update(cx, |thread, cx| thread.cancel(cx))
         } else {
             Task::ready(())
@@ -2528,7 +2821,13 @@ impl ThreadView {
             Ok(Some((content, tracked_buffers)))
         });
 
-        self.send_content(contents_task, is_native_command, window, cx);
+        self.send_content_with_worktree_claim(
+            contents_task,
+            is_native_command,
+            worktree_claim,
+            window,
+            cx,
+        );
     }
 
     pub fn move_queued_message_to_main_editor(
@@ -3906,9 +4205,13 @@ impl ThreadView {
     }
 
     fn clear_queue(&mut self, cx: &mut Context<Self>) {
-        self.message_queue.clear();
-        self.sync_queue_flag_to_native_thread(cx);
-        cx.notify();
+        match self.message_queue.clear() {
+            Ok(()) => {
+                self.sync_queue_flag_to_native_thread(cx);
+                cx.notify();
+            }
+            Err(error) => self.handle_message_queue_error(error, cx),
+        }
     }
 
     fn render_plan_summary(

@@ -176,7 +176,10 @@ fn print_workbench_scene_catalog() -> Result<bool> {
 // All macOS-specific imports grouped together
 #[cfg(target_os = "macos")]
 use {
-    acp_thread::{AgentConnection, StubAgentConnection},
+    acp_thread::{
+        AgentConnection, AuthorizationKind, PermissionOptions, StubAgentConnection,
+        ThreadTerminalStatus,
+    },
     agent_client_protocol::schema::v1 as acp,
     agent_servers::{AgentServer, AgentServerDelegate},
     agent_ui::{Agent, AgentPanel},
@@ -1210,7 +1213,7 @@ fn run_visual_tests(project_path: PathBuf, update_baseline: bool) -> Result<()> 
         // reopens two threads the first process left on disk and photographs
         // the executor lines a cold process derives for them.
         let restart_phase = std::env::var("OMEGA_VISUAL_PHASE").as_deref() == Ok("restart");
-        let outcome = if restart_phase && !workbench_proof_active() {
+        let outcome = if restart_phase {
             println!("\n--- Omega: executor disclosure after a restart ---");
             run_omega_restart_visual_tests(app_state.clone(), &mut cx, update_baseline)
         } else {
@@ -4010,6 +4013,14 @@ const OMEGA_AGENT_PROOF_SCENES: &[&str] = &[
 ];
 
 #[cfg(all(target_os = "macos", feature = "visual-tests"))]
+const OMEGA_CONCURRENT_AGENT_PROOF_SCENES: &[&str] = &[
+    "omega_concurrent_agents_codex_waiting",
+    "omega_concurrent_agents_claude_running",
+    "omega_concurrent_agents_cancel_isolated",
+    "omega_concurrent_agents_worktree_collision",
+];
+
+#[cfg(all(target_os = "macos", feature = "visual-tests"))]
 fn run_omega_recording_visual_tests(
     app_state: Arc<AppState>,
     cx: &mut VisualTestAppContext,
@@ -4018,6 +4029,13 @@ fn run_omega_recording_visual_tests(
     let mut results = Vec::new();
     if workbench_any_selected(OMEGA_AGENT_PROOF_SCENES) {
         results.push(run_omega_agent_visual_tests(
+            app_state.clone(),
+            cx,
+            update_baseline,
+        )?);
+    }
+    if workbench_any_selected(OMEGA_CONCURRENT_AGENT_PROOF_SCENES) {
+        results.push(run_omega_concurrent_agent_visual_tests(
             app_state.clone(),
             cx,
             update_baseline,
@@ -11626,12 +11644,23 @@ fn run_omega_restart_visual_tests_inner(
 #[cfg(target_os = "macos")]
 struct StubAgentServer {
     connection: StubAgentConnection,
+    agent_id: AgentId,
 }
 
 #[cfg(target_os = "macos")]
 impl StubAgentServer {
     fn new(connection: StubAgentConnection) -> Self {
-        Self { connection }
+        Self {
+            connection,
+            agent_id: "Visual Test Agent".into(),
+        }
+    }
+
+    fn with_agent_id(connection: StubAgentConnection, agent_id: AgentId) -> Self {
+        Self {
+            connection,
+            agent_id,
+        }
     }
 }
 
@@ -11642,7 +11671,7 @@ impl AgentServer for StubAgentServer {
     }
 
     fn agent_id(&self) -> AgentId {
-        "Visual Test Agent".into()
+        self.agent_id.clone()
     }
 
     fn connect(
@@ -11657,6 +11686,654 @@ impl AgentServer for StubAgentServer {
     fn into_any(self: Rc<Self>) -> Rc<dyn Any> {
         self
     }
+}
+
+#[cfg(all(target_os = "macos", feature = "visual-tests"))]
+fn create_concurrent_agent_project(
+    app_state: &Arc<AppState>,
+    worktrees: &[PathBuf],
+    cx: &mut VisualTestAppContext,
+) -> Result<Entity<Project>> {
+    for worktree in worktrees {
+        std::fs::create_dir_all(worktree)
+            .with_context(|| format!("creating visual worktree {}", worktree.display()))?;
+    }
+    let project = cx.update(|cx| {
+        Project::local(
+            app_state.client.clone(),
+            app_state.node_runtime.clone(),
+            app_state.user_store.clone(),
+            app_state.languages.clone(),
+            app_state.fs.clone(),
+            None,
+            project::LocalProjectFlags {
+                init_worktree_trust: false,
+                ..Default::default()
+            },
+            cx,
+        )
+    });
+    for worktree in worktrees {
+        let add_worktree = project.update(cx, |project, cx| {
+            project.find_or_create_worktree(worktree, true, cx)
+        });
+        cx.background_executor.allow_parking();
+        cx.foreground_executor
+            .block_test(add_worktree)
+            .with_context(|| format!("adding visual worktree {}", worktree.display()))?;
+        cx.background_executor.forbid_parking();
+    }
+    cx.run_until_parked();
+    Ok(project)
+}
+
+#[cfg(all(target_os = "macos", feature = "visual-tests"))]
+fn open_concurrent_agent_panel(
+    app_state: Arc<AppState>,
+    project: Entity<Project>,
+    cx: &mut VisualTestAppContext,
+) -> Result<(AnyWindowHandle, Entity<Workspace>, Entity<AgentPanel>)> {
+    let bounds = Bounds {
+        origin: point(px(0.), px(0.)),
+        size: size(px(1180.), px(760.)),
+    };
+    let workspace_window: WindowHandle<Workspace> = cx
+        .update(|cx| {
+            cx.open_window(
+                WindowOptions {
+                    window_bounds: Some(WindowBounds::Windowed(bounds)),
+                    focus: false,
+                    show: false,
+                    ..Default::default()
+                },
+                |window, cx| cx.new(|cx| Workspace::new(None, project, app_state, window, cx)),
+            )
+        })
+        .context("opening concurrent-agent visual window")?;
+    cx.run_until_parked();
+
+    let workspace = workspace_window
+        .entity(cx)
+        .context("reading concurrent-agent workspace")?;
+    let (weak_workspace, async_window_cx) = workspace_window
+        .update(cx, |workspace, window, cx| {
+            (workspace.weak_handle(), window.to_async(cx))
+        })
+        .context("reading concurrent-agent workspace handles")?;
+    cx.background_executor.allow_parking();
+    let panel = cx
+        .foreground_executor
+        .block_test(AgentPanel::load(weak_workspace, async_window_cx))
+        .context("loading concurrent-agent panel")?;
+    cx.background_executor.forbid_parking();
+    workspace_window
+        .update(cx, |workspace, window, cx| {
+            workspace.add_panel(panel.clone(), window, cx);
+            workspace.open_panel::<AgentPanel>(window, cx);
+            panel.update(cx, |panel, cx| {
+                use workspace::dock::Panel as _;
+                panel.enable_workbench_shell_for_tests(cx);
+                panel.set_zoomed(true, window, cx);
+                if !panel.threads_sidebar_open_for_tests() {
+                    panel.toggle_threads_sidebar(cx);
+                }
+            });
+        })
+        .context("opening concurrent-agent panel")?;
+    cx.run_until_parked();
+    Ok((workspace_window.into(), workspace, panel))
+}
+
+#[cfg(all(target_os = "macos", feature = "visual-tests"))]
+fn open_concurrent_direct_thread(
+    panel: &Entity<AgentPanel>,
+    workspace_window: AnyWindowHandle,
+    connection: StubAgentConnection,
+    agent_id: &'static str,
+    title: &'static str,
+    worktree: &Path,
+    cx: &mut VisualTestAppContext,
+) -> Result<(
+    agent_ui::ThreadId,
+    acp::SessionId,
+    Entity<acp_thread::AcpThread>,
+)> {
+    let server: Rc<dyn AgentServer> = Rc::new(StubAgentServer::with_agent_id(
+        connection,
+        AgentId::new(agent_id),
+    ));
+    cx.update_window(workspace_window, |_root, window, cx| {
+        panel.update(cx, |panel, cx| {
+            panel.open_external_thread_with_server_and_work_dirs(
+                server,
+                workspace::PathList::new(&[worktree]),
+                window,
+                cx,
+            );
+        });
+    })?;
+    cx.run_until_parked();
+    let (thread_id, thread) = cx
+        .read(|cx| {
+            let panel = panel.read(cx);
+            Some((panel.active_thread_id(cx)?, panel.active_agent_thread(cx)?))
+        })
+        .context("the visual Direct Agent thread did not connect")?;
+    let session_id = thread.read_with(cx, |thread, _cx| thread.session_id().clone());
+    let set_title = thread.update(cx, |thread, cx| thread.set_title(title.into(), cx));
+    cx.background_executor.allow_parking();
+    cx.foreground_executor
+        .block_test(set_title)
+        .context("setting visual Direct Agent thread title")?;
+    cx.background_executor.forbid_parking();
+    cx.run_until_parked();
+    Ok((thread_id, session_id, thread))
+}
+
+#[cfg(all(target_os = "macos", feature = "visual-tests"))]
+fn send_concurrent_visual_prompt(
+    panel: &Entity<AgentPanel>,
+    workspace_window: AnyWindowHandle,
+    text: &str,
+    cx: &mut VisualTestAppContext,
+) -> Result<()> {
+    let conversation = cx
+        .read(|cx| {
+            let thread_id = panel.read(cx).active_thread_id(cx)?;
+            panel
+                .read(cx)
+                .conversation_view_for_id(&thread_id, cx)
+                .cloned()
+        })
+        .context("the active concurrent-agent composer is unavailable")?;
+    cx.update_window(workspace_window, |_root, window, cx| {
+        conversation.update(cx, |conversation, cx| {
+            conversation.set_composer_text_for_tests(text, window, cx);
+            conversation.send_for_tests(window, cx);
+        });
+    })?;
+    cx.run_until_parked();
+    Ok(())
+}
+
+#[cfg(all(target_os = "macos", feature = "visual-tests"))]
+fn switch_concurrent_visual_thread(
+    workspace_window: AnyWindowHandle,
+    thread_id: agent_ui::ThreadId,
+    cx: &mut VisualTestAppContext,
+) -> Result<()> {
+    cx.simulate_click_selector(
+        workspace_window,
+        &format!("omega.threads.row.{}", thread_id.to_key_string()),
+    )?;
+    cx.run_until_parked();
+    Ok(())
+}
+
+#[cfg(all(target_os = "macos", feature = "visual-tests"))]
+fn concurrent_thread_lifecycle(
+    panel: &Entity<AgentPanel>,
+    thread_id: agent_ui::ThreadId,
+    cx: &App,
+) -> Result<agent_ui::omega_agent_supervision::SupervisedThreadLifecycle> {
+    let conversation = panel
+        .read(cx)
+        .conversation_view_for_id(&thread_id, cx)
+        .cloned()
+        .context("concurrent thread view is not retained")?;
+    let thread = conversation
+        .read(cx)
+        .active_thread()
+        .map(|thread_view| thread_view.read(cx).thread.clone())
+        .context("concurrent thread has no root session")?;
+    Ok(agent_ui::omega_agent_supervision::lifecycle_for_thread(
+        thread.read(cx),
+    ))
+}
+
+#[cfg(all(target_os = "macos", feature = "visual-tests"))]
+fn capture_concurrent_agent_scene(
+    scene_name: &'static str,
+    workspace_window: AnyWindowHandle,
+    panel: &Entity<AgentPanel>,
+    active_thread_id: agent_ui::ThreadId,
+    codex_thread_id: agent_ui::ThreadId,
+    codex_title: &str,
+    codex_status: agent_ui::omega_agent_supervision::SupervisedThreadLifecycle,
+    claude_thread_id: agent_ui::ThreadId,
+    claude_title: &str,
+    claude_status: agent_ui::omega_agent_supervision::SupervisedThreadLifecycle,
+    cx: &mut VisualTestAppContext,
+    update_baseline: bool,
+) -> Result<TestResult> {
+    anyhow::ensure!(
+        cx.read(|cx| panel.read(cx).active_thread_id(cx)) == Some(active_thread_id),
+        "{scene_name} has the wrong active thread"
+    );
+    anyhow::ensure!(
+        cx.read(|cx| concurrent_thread_lifecycle(panel, codex_thread_id, cx))? == codex_status,
+        "{scene_name} has the wrong Codex lifecycle"
+    );
+    anyhow::ensure!(
+        cx.read(|cx| concurrent_thread_lifecycle(panel, claude_thread_id, cx))? == claude_status,
+        "{scene_name} has the wrong Claude lifecycle"
+    );
+
+    cx.update_window(workspace_window, |_root, window, _cx| window.refresh())?;
+    cx.run_until_parked();
+    cx.set_debug_accessibility_active(workspace_window, true)?;
+    let snapshot = cx.debug_render_snapshot(workspace_window)?;
+    let mut probe = SemanticProbe::new(&snapshot);
+    probe.require_visible("omega-sidebar")?;
+    probe.require_visible("omega.thread.supervision")?;
+    for (thread_id, title, executor, lifecycle) in [
+        (codex_thread_id, codex_title, "Codex", codex_status),
+        (claude_thread_id, claude_title, "Claude", claude_status),
+    ] {
+        let thread_key = thread_id.to_key_string();
+        probe.require_accessible(
+            &format!("omega.threads.row.{thread_key}"),
+            "Button",
+            &format!("{title}, executor {executor}, status {}", lifecycle.label()),
+        )?;
+        probe.require_accessible(
+            &format!("omega.threads.lifecycle.{thread_key}"),
+            "Status",
+            &format!("Thread status: {}", lifecycle.label()),
+        )?;
+    }
+    let active_key = active_thread_id.to_key_string();
+    let active_lifecycle = if active_thread_id == codex_thread_id {
+        codex_status
+    } else {
+        claude_status
+    };
+    probe.require_accessible(
+        &format!("omega.thread.header.lifecycle.{active_key}"),
+        "Status",
+        &format!("Thread status: {}", active_lifecycle.label()),
+    )?;
+    if matches!(
+        active_lifecycle,
+        agent_ui::omega_agent_supervision::SupervisedThreadLifecycle::Running
+            | agent_ui::omega_agent_supervision::SupervisedThreadLifecycle::WaitingForPerson
+    ) {
+        probe.require_accessible(
+            &format!("omega.thread.cancel.{active_key}"),
+            "Button",
+            "Cancel this agent run",
+        )?;
+    }
+    record_workbench_semantic_checks(scene_name, probe.into_checks());
+    record_workbench_semantic_check(scene_name, "two-direct-agent-identities-asserted");
+    run_visual_test(scene_name, workspace_window, cx, update_baseline)
+}
+
+#[cfg(all(target_os = "macos", feature = "visual-tests"))]
+fn finish_concurrent_agent_visual_tests(
+    workspace_window: AnyWindowHandle,
+    workspace: &Entity<Workspace>,
+    panel: &Entity<AgentPanel>,
+    threads: &[Entity<acp_thread::AcpThread>],
+    cx: &mut VisualTestAppContext,
+    results: &[TestResult],
+) -> Result<TestResult> {
+    for thread in threads {
+        let cancel_task = thread.update(cx, |thread, cx| thread.cancel(cx));
+        drop(cancel_task);
+    }
+
+    panel.update(cx, |panel, cx| {
+        panel.connection_store().update(cx, |store, cx| {
+            for agent_id in [agent_servers::CODEX_ID, agent_servers::CLAUDE_AGENT_ID] {
+                store.restart_connection(
+                    Agent::Custom {
+                        id: AgentId::new(agent_id),
+                    },
+                    Rc::new(StubAgentServer::new(StubAgentConnection::new())),
+                    cx,
+                );
+            }
+        });
+    });
+    cx.run_until_parked();
+
+    cx.update_window(workspace_window, |_root, window, cx| {
+        workspace.update(cx, |workspace, cx| {
+            workspace.remove_panel(panel, window, cx);
+            let project = workspace.project().clone();
+            project.update(cx, |project, cx| {
+                let worktree_ids: Vec<_> = project
+                    .worktrees(cx)
+                    .map(|worktree| worktree.read(cx).id())
+                    .collect();
+                for worktree_id in worktree_ids {
+                    project.remove_worktree(worktree_id, cx);
+                }
+            });
+        });
+    })
+    .log_err();
+    cx.run_until_parked();
+    let result = finish_omega_agent_visual_tests(workspace_window, cx, results);
+    for _ in 0..15 {
+        cx.advance_clock(Duration::from_millis(100));
+        cx.run_until_parked();
+    }
+    result
+}
+
+#[cfg(all(target_os = "macos", feature = "visual-tests"))]
+fn run_omega_concurrent_agent_visual_tests(
+    app_state: Arc<AppState>,
+    cx: &mut VisualTestAppContext,
+    update_baseline: bool,
+) -> Result<TestResult> {
+    use agent_ui::omega_agent_supervision::SupervisedThreadLifecycle;
+
+    const CODEX_WAITING: &str = "omega_concurrent_agents_codex_waiting";
+    const CLAUDE_RUNNING: &str = "omega_concurrent_agents_claude_running";
+    const CANCEL_ISOLATED: &str = "omega_concurrent_agents_cancel_isolated";
+    const WORKTREE_COLLISION: &str = "omega_concurrent_agents_worktree_collision";
+    const CODEX_TITLE: &str = "Codex indexes the migration";
+    const CLAUDE_TITLE: &str = "Claude audits the release";
+    const CODEX_HISTORY: &str = "Codex history sentinel: inspect the migration.";
+    const CLAUDE_HISTORY: &str = "Claude history sentinel: audit the release.";
+    const CODEX_QUEUED: &str = "Codex queued sentinel: verify the schema next.";
+    const CLAUDE_QUEUED: &str = "Claude queued sentinel: run the release checks next.";
+
+    cx.update(|cx| {
+        agent_ui::omega_send_queue::SendQueueJournal::set_global_for_tests(
+            Rc::new(agent_ui::omega_send_queue::SendQueueJournal::at_data_dir()),
+            cx,
+        );
+    });
+
+    let fixture_root = paths::data_dir().join("omega-concurrent-agent-visual");
+    let codex_worktree = fixture_root.join("codex-worktree");
+    let claude_worktree = fixture_root.join("claude-worktree");
+    let project = create_concurrent_agent_project(
+        &app_state,
+        &[codex_worktree.clone(), claude_worktree.clone()],
+        cx,
+    )?;
+    let (workspace_window, workspace, panel) = open_concurrent_agent_panel(app_state, project, cx)?;
+
+    let codex_connection = StubAgentConnection::new()
+        .with_agent_id(AgentId::new(agent_servers::CODEX_ID))
+        .with_telemetry_id("Codex".into());
+    let (codex_thread_id, _codex_session_id, codex_thread) = open_concurrent_direct_thread(
+        &panel,
+        workspace_window,
+        codex_connection.clone(),
+        agent_servers::CODEX_ID,
+        CODEX_TITLE,
+        &codex_worktree,
+        cx,
+    )?;
+    send_concurrent_visual_prompt(&panel, workspace_window, CODEX_HISTORY, cx)?;
+
+    let permission_task = codex_thread.update(cx, |thread, cx| {
+        thread.request_tool_call_authorization(
+            acp::ToolCall::new("omega-concurrent-codex-confirm", "Apply the migration")
+                .kind(acp::ToolKind::Edit)
+                .status(acp::ToolCallStatus::Pending)
+                .into(),
+            PermissionOptions::Flat(vec![
+                acp::PermissionOption::new(
+                    "allow-once",
+                    "Allow once",
+                    acp::PermissionOptionKind::AllowOnce,
+                ),
+                acp::PermissionOption::new(
+                    "reject-once",
+                    "Reject",
+                    acp::PermissionOptionKind::RejectOnce,
+                ),
+            ]),
+            AuthorizationKind::PermissionGrant,
+            cx,
+        )
+    })?;
+    permission_task.detach();
+    cx.run_until_parked();
+
+    let claude_connection = StubAgentConnection::new()
+        .with_agent_id(AgentId::new(agent_servers::CLAUDE_AGENT_ID))
+        .with_telemetry_id("Claude".into());
+    let (claude_thread_id, claude_session_id, claude_thread) = open_concurrent_direct_thread(
+        &panel,
+        workspace_window,
+        claude_connection.clone(),
+        agent_servers::CLAUDE_AGENT_ID,
+        CLAUDE_TITLE,
+        &claude_worktree,
+        cx,
+    )?;
+    send_concurrent_visual_prompt(&panel, workspace_window, CLAUDE_HISTORY, cx)?;
+    cx.update(|cx| {
+        claude_connection.send_update(
+            claude_session_id.clone(),
+            acp::SessionUpdate::AgentMessageChunk(acp::ContentChunk::new(
+                "Claude is still running the independent release audit.".into(),
+            )),
+            cx,
+        );
+    });
+    cx.run_until_parked();
+
+    send_concurrent_visual_prompt(&panel, workspace_window, CLAUDE_QUEUED, cx)?;
+    switch_concurrent_visual_thread(workspace_window, codex_thread_id, cx)?;
+    send_concurrent_visual_prompt(&panel, workspace_window, CODEX_QUEUED, cx)?;
+
+    let (codex_queue, claude_queue) = cx.update(|cx| {
+        let journal = agent_ui::omega_send_queue::SendQueueJournal::global(cx);
+        (
+            journal.open_items(&codex_thread_id.to_key_string()),
+            journal.open_items(&claude_thread_id.to_key_string()),
+        )
+    });
+    anyhow::ensure!(
+        codex_queue.len() == 1 && codex_queue[0].text == CODEX_QUEUED,
+        "Codex queue did not retain its independent item: {codex_queue:?}"
+    );
+    anyhow::ensure!(
+        claude_queue.len() == 1 && claude_queue[0].text == CLAUDE_QUEUED,
+        "Claude queue did not retain its independent item: {claude_queue:?}"
+    );
+    cx.update(|cx| -> Result<()> {
+        let journal = agent_ui::omega_send_queue::SendQueueJournal::global(cx);
+        journal
+            .set_processing_state(
+                &codex_thread_id.to_key_string(),
+                agent_ui::omega_send_queue::SendQueueProcessingState::Paused,
+            )
+            .map_err(|error| anyhow::anyhow!("pausing Codex queue failed: {error:?}"))?;
+        journal
+            .set_processing_state(
+                &claude_thread_id.to_key_string(),
+                agent_ui::omega_send_queue::SendQueueProcessingState::Paused,
+            )
+            .map_err(|error| anyhow::anyhow!("pausing Claude queue failed: {error:?}"))?;
+        Ok(())
+    })?;
+
+    let mut results = Vec::new();
+    if workbench_any_selected(&[CODEX_WAITING]) {
+        let capture = capture_concurrent_agent_scene(
+            CODEX_WAITING,
+            workspace_window,
+            &panel,
+            codex_thread_id,
+            codex_thread_id,
+            CODEX_TITLE,
+            SupervisedThreadLifecycle::WaitingForPerson,
+            claude_thread_id,
+            CLAUDE_TITLE,
+            SupervisedThreadLifecycle::Running,
+            cx,
+            update_baseline,
+        );
+        match capture {
+            Ok(capture) => results.push(capture),
+            Err(error) => {
+                finish_concurrent_agent_visual_tests(
+                    workspace_window,
+                    &workspace,
+                    &panel,
+                    &[codex_thread.clone(), claude_thread.clone()],
+                    cx,
+                    &[],
+                )
+                .log_err();
+                return Err(error);
+            }
+        }
+        record_workbench_semantic_check(CODEX_WAITING, "per-thread-queued-input-isolated");
+    }
+
+    switch_concurrent_visual_thread(workspace_window, claude_thread_id, cx)?;
+    if workbench_any_selected(&[CLAUDE_RUNNING]) {
+        results.push(capture_concurrent_agent_scene(
+            CLAUDE_RUNNING,
+            workspace_window,
+            &panel,
+            claude_thread_id,
+            codex_thread_id,
+            CODEX_TITLE,
+            SupervisedThreadLifecycle::WaitingForPerson,
+            claude_thread_id,
+            CLAUDE_TITLE,
+            SupervisedThreadLifecycle::Running,
+            cx,
+            update_baseline,
+        )?);
+        record_workbench_semantic_check(CLAUDE_RUNNING, "sidebar-switch-preserved-both-turns");
+    }
+
+    switch_concurrent_visual_thread(workspace_window, codex_thread_id, cx)?;
+    cx.simulate_click_selector(workspace_window, "omega.thread.cancel")?;
+    cx.run_until_parked();
+    switch_concurrent_visual_thread(workspace_window, claude_thread_id, cx)?;
+    anyhow::ensure!(
+        codex_thread.read_with(cx, |thread, _cx| thread.terminal_status())
+            == ThreadTerminalStatus::Cancelled,
+        "cancelling Codex did not produce a cancelled terminal status"
+    );
+    anyhow::ensure!(
+        cx.read(|cx| concurrent_thread_lifecycle(&panel, claude_thread_id, cx))?
+            == SupervisedThreadLifecycle::Running,
+        "cancelling Codex changed Claude's running lifecycle"
+    );
+    if workbench_any_selected(&[CANCEL_ISOLATED]) {
+        results.push(capture_concurrent_agent_scene(
+            CANCEL_ISOLATED,
+            workspace_window,
+            &panel,
+            claude_thread_id,
+            codex_thread_id,
+            CODEX_TITLE,
+            SupervisedThreadLifecycle::Cancelled,
+            claude_thread_id,
+            CLAUDE_TITLE,
+            SupervisedThreadLifecycle::Running,
+            cx,
+            update_baseline,
+        )?);
+        record_workbench_semantic_check(CANCEL_ISOLATED, "cancel-one-left-other-running");
+    }
+
+    let mut collision_thread = None;
+    if workbench_any_selected(&[WORKTREE_COLLISION]) {
+        let collision_capture = (|| -> Result<TestResult> {
+            let collision_connection = StubAgentConnection::new()
+                .with_agent_id(AgentId::new(agent_servers::CODEX_ID))
+                .with_telemetry_id("Codex".into());
+            let (_collision_thread_id, _collision_session_id, thread) =
+                open_concurrent_direct_thread(
+                    &panel,
+                    workspace_window,
+                    collision_connection,
+                    agent_servers::CODEX_ID,
+                    "Codex shares Claude's worktree",
+                    &claude_worktree,
+                    cx,
+                )?;
+            collision_thread = Some(thread);
+            cx.update(ui_prompt::use_internal_prompt_renderer);
+            send_concurrent_visual_prompt(
+                &panel,
+                workspace_window,
+                "Try to write in Claude's occupied worktree.",
+                cx,
+            )?;
+            cx.set_debug_accessibility_active(workspace_window, true)?;
+            let snapshot = cx.debug_render_snapshot(workspace_window)?;
+            let accessibility = snapshot
+                .accessibility_tree_json()
+                .context("collision prompt accessibility tree was not active")?;
+            for expected in [
+                "Another agent is already using this worktree",
+                "Run here anyway",
+                "Cancel",
+                CLAUDE_TITLE,
+                "Claude",
+            ] {
+                anyhow::ensure!(
+                    accessibility.contains(expected),
+                    "collision prompt did not expose {expected:?}"
+                );
+            }
+            record_workbench_semantic_check(
+                WORKTREE_COLLISION,
+                "occupied-worktree-owner-and-risk-visible",
+            );
+            record_workbench_semantic_check(
+                WORKTREE_COLLISION,
+                "run-here-anyway-and-cancel-visible",
+            );
+            let capture =
+                run_visual_test(WORKTREE_COLLISION, workspace_window, cx, update_baseline)?;
+            cx.simulate_click_selector(workspace_window, "prompt.action.0")?;
+            cx.run_until_parked();
+            Ok(capture)
+        })();
+
+        match collision_capture {
+            Ok(capture) => results.push(capture),
+            Err(error) => {
+                log::error!("concurrent-agent collision visual failed: {error:#}");
+                cx.simulate_click_selector(workspace_window, "prompt.action.0")
+                    .log_err();
+                cx.run_until_parked();
+                let mut threads = vec![codex_thread.clone(), claude_thread.clone()];
+                threads.extend(collision_thread.clone());
+                finish_concurrent_agent_visual_tests(
+                    workspace_window,
+                    &workspace,
+                    &panel,
+                    &threads,
+                    cx,
+                    &[],
+                )
+                .log_err();
+                return Err(error);
+            }
+        }
+    }
+
+    drop(codex_connection);
+    drop(claude_connection);
+    let mut threads = vec![codex_thread, claude_thread];
+    threads.extend(collision_thread);
+    finish_concurrent_agent_visual_tests(
+        workspace_window,
+        &workspace,
+        &panel,
+        &threads,
+        cx,
+        &results,
+    )
 }
 
 /// A visual-test server that connects to one real, explicitly named Exo lane.

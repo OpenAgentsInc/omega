@@ -22,8 +22,12 @@ fn process_settings(cx: &mut App) {
     if settings.use_system_prompts && cfg!(not(any(target_os = "linux", target_os = "freebsd"))) {
         cx.reset_prompt_builder();
     } else {
-        cx.set_prompt_builder(zed_prompt_renderer);
+        use_internal_prompt_renderer(cx);
     }
+}
+
+pub fn use_internal_prompt_renderer(cx: &mut App) {
+    cx.set_prompt_builder(zed_prompt_renderer);
 }
 
 /// Use this function in conjunction with [App::set_prompt_builder] to force
@@ -37,6 +41,10 @@ fn zed_prompt_renderer(
     window: &mut Window,
     cx: &mut App,
 ) -> RenderablePromptHandle {
+    let accessibility_label = detail
+        .filter(|detail| !detail.is_empty())
+        .map(|detail| format!("{message}. {detail}"))
+        .unwrap_or_else(|| message.to_string());
     let renderer = cx.new({
         |cx| ZedPromptRenderer {
             _level: level,
@@ -44,6 +52,7 @@ fn zed_prompt_renderer(
             actions: actions.iter().map(|a| a.label().to_string()).collect(),
             focus: cx.focus_handle(),
             active_action_id: 0,
+            accessibility_label: accessibility_label.into(),
             detail: detail
                 .filter(|text| !text.is_empty())
                 .map(|text| cx.new(|cx| Markdown::new(SharedString::new(text), None, None, cx))),
@@ -59,6 +68,7 @@ pub struct ZedPromptRenderer {
     actions: Vec<String>,
     focus: FocusHandle,
     active_action_id: usize,
+    accessibility_label: SharedString,
     detail: Option<Entity<Markdown>>,
 }
 
@@ -113,6 +123,10 @@ impl Render for ZedPromptRenderer {
         let settings = ThemeSettings::get_global(cx);
 
         let dialog = v_flex()
+            .id("zed-prompt")
+            .debug_selector(|| "zed-prompt".into())
+            .role(gpui::Role::Alert)
+            .aria_label(self.accessibility_label.clone())
             .key_context("Prompt")
             .cursor_default()
             .track_focus(&self.focus)
@@ -143,6 +157,7 @@ impl Render for ZedPromptRenderer {
                     .gap_1()
                     .children(self.actions.iter().enumerate().map(|(ix, action)| {
                         Button::new(ix, action.clone())
+                            .debug_selector(move || format!("prompt.action.{ix}"))
                             .full_width()
                             .style(ButtonStyle::Outlined)
                             .when(ix == self.active_action_id, |s| {
