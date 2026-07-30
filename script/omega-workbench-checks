@@ -1,0 +1,71 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+repository_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+lane="${1:-all}"
+
+if [[ $# -gt 1 ]]; then
+  echo "usage: script/omega-workbench-checks [all|model|portable|metal]" >&2
+  exit 2
+fi
+
+run_model() {
+  "$repository_root/script/omega-workbench-model"
+  cargo test \
+    -p omega_workbench_state \
+    -p omega_workbench_conformance \
+    -p omega_workbench_harness \
+    -- --nocapture
+}
+
+run_portable() {
+  cargo test -p omega_workbench_harness --features gpui-support -- --nocapture
+  cargo test -p agent_ui --features test-support \
+    workbench_front_door_tests -- --nocapture
+  ITERATIONS=16 SEED=0 cargo test -p agent_ui --features test-support \
+    workbench_keyboard_actions_route_focus -- --nocapture
+  LEAK_BACKTRACE=1 cargo test -p agent_ui --features test-support \
+    workbench_surface_hosts_release_with_window -- --nocapture
+  ITERATIONS=16 SEED=0 cargo test -p gpui debug_render_snapshot -- --nocapture
+  cargo test -p scheduler test_parking_panics -- --nocapture
+  cargo test -p gpui test_leak_detector_snapshot_detects_new_leak -- --nocapture
+}
+
+run_metal() {
+  if [[ "$(uname -m)" != "arm64" ]]; then
+    echo "The committed Metal baselines require arm64." >&2
+    exit 1
+  fi
+
+  for shard_index in 0 1; do
+    "$repository_root/script/omega-workbench-proof" \
+      --pixel-only \
+      --seed 0 \
+      --shard-index "$shard_index" \
+      --shard-count 2 \
+      --output "target/omega-workbench-proof/shard-$shard_index"
+  done
+}
+
+cd "$repository_root"
+
+case "$lane" in
+  all)
+    run_model
+    run_portable
+    run_metal
+    ;;
+  model)
+    run_model
+    ;;
+  portable)
+    run_portable
+    ;;
+  metal)
+    run_metal
+    ;;
+  *)
+    echo "usage: script/omega-workbench-checks [all|model|portable|metal]" >&2
+    exit 2
+    ;;
+esac

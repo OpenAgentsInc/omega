@@ -189,21 +189,15 @@ probe pass, which detects a vacuous green invariant.
 See `docs/spec/workbench_projection/README.md` for the complete variable,
 action, property, mutation, and bound definitions.
 
-## CI
+## Local gates
 
-`.github/workflows/omega_workbench_proof.yml` has four responsibilities:
+`script/omega-workbench-checks` preserves the projection model, portable
+semantics, and sharded Apple Silicon pixel lanes without GitHub Actions. Run it
+without an argument for the complete gate, or pass `model`, `portable`, or
+`metal` for one lane. External infrastructure may invoke the same entry point.
 
-- **Projection model and conformance** installs a pinned Java runtime, verifies
-  the pinned TLA+ Tools download, runs every model/probe/mutation, and tests the
-  reducer, checker, and harness traces.
-- **Portable semantics** exercises GPUI semantic probes and deterministic
-  scheduler behavior.
-- **Metal pixels** runs the sharded Apple Silicon comparisons.
-- **Required** fails unless every preceding lane succeeded, including cancelled
-  or skipped jobs.
-
-Keep model checking in the logical lane. Do not add Java or TLC to a Metal
-pixel job.
+Keep model checking in the logical lane. Do not add Java or TLC to the Metal
+pixel lane.
 
 ## Extending the workbench
 

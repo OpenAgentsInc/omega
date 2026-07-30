@@ -5,7 +5,6 @@ set -euo pipefail
 # Brackets are used around characters so these don't show up in normal search.
 pattern='tod[o]!|FIXM[E]'
 result=$(git grep --no-color --ignore-case --line-number --extended-regexp -e $pattern -- \
-  ':(exclude).github/workflows/ci.yml' \
   ':(exclude)*criteria.md' \
   ':(exclude)*prompt.md' || true)
 if [[ -n "${result}" ]]; then

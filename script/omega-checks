@@ -1,0 +1,49 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+repository_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+lane="${1:-all}"
+
+if [[ $# -gt 1 ]]; then
+  echo "usage: script/omega-checks [all|style|clippy|test|workbench]" >&2
+  exit 2
+fi
+
+run_style() {
+  "$repository_root/script/prettier"
+  cargo fmt --all -- --check
+  "$repository_root/script/check-todos"
+  "$repository_root/script/check-keymaps"
+}
+
+run_tests() {
+  "$repository_root/script/clear-target-dir-if-larger-than" 350 200
+  cargo nextest run --workspace --no-fail-fast --no-tests=warn
+}
+
+cd "$repository_root"
+
+case "$lane" in
+  all)
+    run_style
+    "$repository_root/script/clippy"
+    run_tests
+    "$repository_root/script/omega-workbench-checks"
+    ;;
+  style)
+    run_style
+    ;;
+  clippy)
+    "$repository_root/script/clippy"
+    ;;
+  test)
+    run_tests
+    ;;
+  workbench)
+    "$repository_root/script/omega-workbench-checks"
+    ;;
+  *)
+    echo "usage: script/omega-checks [all|style|clippy|test|workbench]" >&2
+    exit 2
+    ;;
+esac

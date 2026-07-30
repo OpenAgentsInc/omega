@@ -387,15 +387,21 @@ pub const CONTRIBUTION_SKILL_CITED_PATHS: &[&str] = &[
 /// OMEGA-DELTA-0106. The repository a change has to reach to have landed.
 pub const CONTRIBUTION_AUTHORITY: &str = "OpenAgentsInc/omega";
 
-/// OMEGA-DELTA-0106. The mechanical fact that GitHub still runs the checks.
-///
-/// Cited rather than assumed: "GitHub is authoritative" is allowed to become
-/// false, and when it does, this constant is what stops the skills from being
-/// silently left behind.
-pub const GITHUB_TEST_WORKFLOW_PATH: &str = ".github/workflows/run_tests.yml";
+/// OMEGA-DELTA-0106. GitHub-hosted automation is forbidden in this repository.
+pub const FORBIDDEN_GITHUB_AUTOMATION_PATHS: &[&str] = &[
+    ".github/actions",
+    ".github/workflows",
+    ".github/actionlint.yml",
+    ".github/zizmor.yml",
+    "extensions/workflows",
+    "tooling/xtask/src/tasks/workflow_checks",
+    "tooling/xtask/src/tasks/workflow_checks.rs",
+    "tooling/xtask/src/tasks/workflows",
+    "tooling/xtask/src/tasks/workflows.rs",
+];
 
-/// OMEGA-DELTA-0106. Claims the contribution skills must not make while
-/// [`GITHUB_TEST_WORKFLOW_PATH`] still exists.
+/// OMEGA-DELTA-0106. Claims the contribution skills must not make before the
+/// repository authority actually changes.
 ///
 /// Each is a phrase from the Forge epic's *target* state. The epic describes
 /// GitHub as demoted to a read-only mirror; that is not true today, and a skill
@@ -14713,19 +14719,21 @@ mod tests {
     /// against a copy of the sentences. Every file they send a contributor to
     /// has to exist; the delta ID shape they teach has to be the shape
     /// `ENFORCED_DELTAS` uses; the repository they say a change lands in has
-    /// to be the one whose workflows run the checks; and none of the Forge
-    /// epic's *target* claims may appear while that is still true.
+    /// to be the repository that accepts the change; none of the Forge epic's
+    /// *target* claims may appear before that authority actually changes; and
+    /// GitHub-hosted automation must remain absent.
     #[test]
     fn the_contribution_skills_describe_the_path_this_repository_uses() {
-        let workflow = repository_path(GITHUB_TEST_WORKFLOW_PATH);
-        assert!(
-            workflow.exists(),
-            "OMEGA-DELTA-0106: {} is gone. If the checks no longer run on \
-             GitHub, then the contribution skills are describing a path this \
-             repository has left, and they — not this check — are what has to \
-             change.",
-            workflow.display()
-        );
+        for relative in FORBIDDEN_GITHUB_AUTOMATION_PATHS {
+            let path = repository_path(relative);
+            assert!(
+                !path.exists(),
+                "OMEGA-DELTA-0106: {} exists. Omega must not contain or \
+                 generate GitHub Actions; keep test and release automation in \
+                 repository-owned scripts or external infrastructure.",
+                path.display()
+            );
+        }
 
         for (name, relative) in CONTRIBUTION_SKILLS {
             let skill_path = repository_path(relative);
@@ -14734,13 +14742,10 @@ mod tests {
             for claim in PREMATURE_MIGRATION_CLAIMS {
                 assert!(
                     !skill.contains(claim),
-                    "OMEGA-DELTA-0106: `{name}` in {} says `{claim}` while {} \
-                     still runs this repository's checks. The Forge epic \
-                     describes that as its target, not as today; a skill that \
-                     states it sends every joining contributor's agent to a \
-                     forge that will not take their commit.",
+                    "OMEGA-DELTA-0106: `{name}` in {} says `{claim}` before \
+                     the repository authority changed. The Forge epic \
+                     describes that as its target, not as today.",
                     skill_path.display(),
-                    workflow.display()
                 );
             }
         }

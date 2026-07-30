@@ -4248,14 +4248,15 @@ than merely stated.
   in a state a person is shown. Retrying forever is the failure omega#108 names,
   because a person watching "sending…" for an hour has been told nothing.
 - **The skills are the migration seam, and they describe today.** GitHub is
-  authoritative for this repository. The Forge epic (openagents#9242) describes
-  demoting it as a *target*, and the owner directed that the conversion be
-  figured out through these workrooms rather than before them. So
-  `omega-contributing` describes the GitHub path, and a check refuses the
-  epic's target phrasing for as long as `.github/workflows/run_tests.yml` still
-  runs the checks. When that changes, the skill changes, and every contributor's
-  agent learns the new path at once instead of a hundred people finding out
-  separately.
+  authoritative for accepting changes to this repository, but Omega must not
+  contain GitHub Actions. Test and release gates remain repository-owned local
+  scripts or external infrastructure. The Forge epic (openagents#9242)
+  describes demoting GitHub as a *target*, and the owner directed that the
+  conversion be figured out through these workrooms rather than before them.
+  So `omega-contributing` describes the current contribution path, a check
+  refuses the epic's target phrasing until the authority actually changes, and
+  the same check refuses GitHub Actions, their configuration, and their source
+  generator.
 - **The precedence is unchanged, and this is the point.** `SkillSource::BuiltIn`
   stays at precedence `0`, so a contributor's own `omega-contributing` shadows
   the shipped one. A default somebody cannot replace is a removal of their
@@ -8402,4 +8403,3 @@ startup recheck — survives unchanged behind that dropdown.
   in `crates/omega_deltas`; unit tests on the composer menu constants, the
   threads sidebar (legacy note absent), and
   `settings_window_closes_on_close_window_action` in `crates/settings_ui`.
-

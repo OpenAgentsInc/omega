@@ -915,7 +915,7 @@ When a UI change intentionally changes a scene:
 Baseline updates are disabled when `CI` or `GITHUB_ACTIONS` is set. `--update`
 also rejects semantic-only and multi-iteration runs.
 
-## Sharding and CI {#ci}
+## Sharding and local gates {#ci}
 
 Select one deterministic catalog shard with both arguments:
 
@@ -929,35 +929,24 @@ script/omega-workbench-proof \
 The catalog order defines the shard assignment. The harness rejects an empty or
 out-of-range shard.
 
-`.github/workflows/omega_workbench_proof.yml` runs on pull requests, merge
-groups, pushes to `main`, and manual dispatches. Its jobs are:
+Omega contains no GitHub Actions. The former gate lanes are preserved by the
+repository-owned runner:
 
-- **Projection model and conformance** on GitHub-hosted `ubuntu-22.04`. It
-  exhausts the bounded model, confirms every reachability probe and red
-  mutation, tests the independent checker, and runs all production reducer
-  traces.
-- **Portable semantics** on GitHub-hosted `ubuntu-22.04`. It runs the
-  `omega_workbench_harness` tests, the production Agent UI scene adapter, a
-  16-iteration GPUI `debug_render_snapshot` seed sweep starting at seed `0`,
-  and the deliberate pending-task and retained-entity failure probes.
-- **Metal pixels** on GitHub-hosted `macos-15`, the pinned Apple Silicon runner
-  image for these baselines. A two-shard matrix verifies that the runner is
-  `arm64`, then runs the pixel lane at seed `0`. The output for shard `<n>` is
-  `target/omega-workbench-proof/shard-<n>`.
-- **Required** on GitHub-hosted `ubuntu-24.04`. It fails unless the model,
-  portable, and Metal jobs all succeeded, including when an upstream job was
-  cancelled or skipped.
+```sh
+script/omega-workbench-checks
+```
 
-The workflow disables Cargo debug information for its dev, test, and release
-profiles. The proof does not inspect debug symbols, and omitting them keeps the
-independent Rust build products inside the standard hosted runners' disk
-budget. Local developer profiles are unchanged.
+Pass `model`, `portable`, or `metal` to run one lane. The model lane exhausts
+the bounded model and runs reducer conformance. The portable lane runs the
+harness, production Agent UI adapter, deterministic GPUI seed sweep, and
+pending-task and retained-entity probes. The Metal lane requires Apple Silicon
+and runs both pixel shards at seed `0`, writing evidence under
+`target/omega-workbench-proof/shard-<n>`. External infrastructure may invoke
+this script, but repository automation must not live in `.github/workflows`.
 
-The Metal job attempts to upload each failed shard's output folder as
-`omega-workbench-proof-shard-<n>` for 14 days. Receipts, current images, and
-diff images produced before the failure remain together in that artifact. A
-failure before any evidence is written produces an artifact warning instead of
-hiding the original test failure.
+The broader local gate is `script/omega-checks`. It preserves formatting,
+clippy, workspace-nextest, and workbench entry points without relying on a
+specific automation host.
 
 Use these focused checks while developing the harness:
 
@@ -967,7 +956,7 @@ cargo test -p omega_workbench_harness
 cargo test -p omega_workbench_harness --features gpui-support
 ```
 
-CI must not use `--update`. Missing scenes, duplicate scene names, zero semantic
+Automated gates must not use `--update`. Missing scenes, duplicate scene names, zero semantic
 assertions, skipped captures, and invalid receipts are failures rather than
 successful skips.
 
