@@ -184,8 +184,9 @@ override only, and a blank value counts as unset (OMEGA-DELTA-0167):
   device itself, after that device proves possession of its key.
 - `OPENAGENTS_OMEGA_NOSTR_DEVICE_SCOPES`: comma-separated owner-approved
   scope subset applied to the admitted device keys. Defaults to
-  `observe_issue31` alone, because OMEGA-DELTA-0154 makes the mirror
-  read-only. Accepted values are
+  `observe_issue31,send_message`: the bridge mirror remains read-only, while
+  the separately signed command lane may enqueue or steer an existing Omega
+  agent thread. Accepted values are
   `observe_issue31`, `send_message`, `interrupt_turn`, `control_full_auto`,
   `request_provider_handoff`, and `act_in_community`. A grant contains only the
   intersection of this policy and the device request; an empty intersection

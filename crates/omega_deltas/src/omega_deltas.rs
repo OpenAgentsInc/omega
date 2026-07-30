@@ -20588,10 +20588,11 @@ mod tests {
 
         assert!(
             shipped.contains("DEFAULT_DEVICE_SCOPES")
-                && shipped.contains("&[omega_effectd::Issue31PairingScope::ObserveIssue31]"),
+                && shipped.contains("omega_effectd::Issue31PairingScope::ObserveIssue31")
+                && shipped.contains("omega_effectd::Issue31PairingScope::SendMessage"),
             "OMEGA-DELTA-0167: the default device scope set changed. \
-             OMEGA-DELTA-0154 makes the mirror read-only, so observation is the \
-             whole of what a phone may hold before an owner grants more."
+             The mirror remains read-only, while the separately signed command \
+             lane is limited by default to messages for existing agent threads."
         );
 
         assert!(

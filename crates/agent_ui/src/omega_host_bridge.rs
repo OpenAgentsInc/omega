@@ -444,11 +444,14 @@ const DEFAULT_NOSTR_RELAY_URL: &str = "wss://relay.openagents.com";
 const DEFAULT_SARAH_PUBLIC_KEY_HEX: &str =
     "bcf86577b45042c960c99fe4ac1380a3ef0565ccbdd5c81e3f20f0919fe4fd14";
 
-/// OMEGA-DELTA-0154. The mirror is read-only, so observation is the whole of
-/// what a paired phone may hold by default. No scope carrying command or
-/// steering authority may be added here.
-const DEFAULT_DEVICE_SCOPES: &[omega_effectd::Issue31PairingScope] =
-    &[omega_effectd::Issue31PairingScope::ObserveIssue31];
+/// The bridge projection remains read-only. A paired owner phone also receives
+/// the narrow `send_message` scope so its separately signed command intent can
+/// enqueue or steer an existing Omega agent thread through the audited host
+/// command pump.
+const DEFAULT_DEVICE_SCOPES: &[omega_effectd::Issue31PairingScope] = &[
+    omega_effectd::Issue31PairingScope::ObserveIssue31,
+    omega_effectd::Issue31PairingScope::SendMessage,
+];
 
 /// Fallback when Tailscale is absent. A phone cannot dial `localhost` — that
 /// is only useful for a simulator on the same machine. When Tailscale is up
@@ -3576,27 +3579,27 @@ mod tests {
     /// the first one. An invented placeholder key here would be a device
     /// nobody holds sitting in an allowlist.
     #[test]
-    fn a_fresh_install_admits_no_device_and_grants_only_observation() {
+    fn a_fresh_install_admits_no_device_and_grants_owner_thread_commands() {
         let lookup = no_overrides();
         assert!(resolve_admitted_device_public_key_hexes(&lookup).is_empty());
         assert_eq!(
             resolve_approved_device_scopes(&lookup).expect("the built-in scope set parses"),
-            vec![omega_effectd::Issue31PairingScope::ObserveIssue31]
+            vec![
+                omega_effectd::Issue31PairingScope::ObserveIssue31,
+                omega_effectd::Issue31PairingScope::SendMessage,
+            ]
         );
     }
 
-    /// OMEGA-DELTA-0154. The mirror is read-only, so no default may carry
-    /// command or steering authority.
     #[test]
-    fn no_default_scope_carries_command_authority() {
-        for scope in DEFAULT_DEVICE_SCOPES {
-            assert_eq!(
-                *scope,
+    fn default_phone_scope_is_limited_to_observation_and_agent_messages() {
+        assert_eq!(
+            DEFAULT_DEVICE_SCOPES,
+            &[
                 omega_effectd::Issue31PairingScope::ObserveIssue31,
-                "a default scope beyond observation would grant a phone authority \
-                 the read-only mirror does not have"
-            );
-        }
+                omega_effectd::Issue31PairingScope::SendMessage,
+            ]
+        );
     }
 
     #[test]
