@@ -392,8 +392,16 @@ startup_mint_patterns = (
 )
 if any(re.search(pattern, startup_code) for pattern in startup_mint_patterns):
     fail(f"{startup_relative_path}: startup identity minting is forbidden")
-if "inspect_for_process_start" not in startup_code:
-    fail(f"{startup_relative_path}: startup must inspect custody without minting an identity")
+# OMEGA-DELTA-0040 (amended by omega#164): startup provisions custody through
+# the custody service's single inspect-then-provision entry point instead of
+# minting key material directly. `provision_for_process_start` performs
+# `inspect_for_process_start` internally (see crates/omega_identity custody),
+# so the startup file must route through it and never generate keys itself.
+if "provision_for_process_start" not in startup_code:
+    fail(
+        f"{startup_relative_path}: startup must provision custody through "
+        "provision_for_process_start, never mint an identity directly"
+    )
 
 if failures:
     print("Omega identity verification failed:", file=sys.stderr)
