@@ -1,3 +1,4 @@
+mod account_scope;
 mod agent_configuration;
 pub mod agent_connection_store;
 mod agent_diff;

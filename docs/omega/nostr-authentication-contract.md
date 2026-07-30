@@ -1,7 +1,7 @@
 # Omega Nostr authentication contract
 
-- Status: AUTH-00 contract frozen; AUTH-01 candidate model and AUTH-02 activation ceremony implemented
-- Packets: `OMEGA-AUTH-00`, `OMEGA-AUTH-01`, `OMEGA-AUTH-02`
+- Status: AUTH-00 contract frozen; AUTH-01 through AUTH-03 implemented
+- Packets: `OMEGA-AUTH-00`, `OMEGA-AUTH-01`, `OMEGA-AUTH-02`, `OMEGA-AUTH-03`
 - Source baseline: Omega `0136fca2d11900ddc7982665482ed8cd035391c7`
 - Product plan:
   [Omega Nostr authentication and onboarding](https://github.com/OpenAgentsInc/openagents/blob/7010561549ebb46a37257292a9100f990a4a3356/docs/omega/2026-07-30-omega-nostr-authentication-and-onboarding.md)
@@ -30,6 +30,22 @@ migrated as `CandidateExisting` without changing its key. The account control
 shows that state and the short public fingerprint. `Activating` means one
 typed durable action is held; `Active` means the local activation step
 completed. None of these states proves network or application authority.
+
+AUTH-03 adds a durable multi-account registry at
+`identity/accounts/index.json`. The existing root identity migrates without
+moving or rotating its `identity/identity.secret` file. Added local identities
+are created once in deterministic per-account directories below
+`identity/accounts/`, each with its own `identity.secret` and public-safe
+custody documents. The account dashboard exposes the public fingerprint,
+optional local profile, signer state, recovery state, last successful signer
+use, and separate add, setup, switch, lock or unlock, sign-out, forget, and
+retirement entry points.
+
+Adding a local identity produces a `CandidateLocal` with NIP-49 protection
+needed. **Complete setup** opens the existing recovery-gated activation
+ceremony; the dashboard does not silently promote the candidate. Retirement
+remains unavailable until a signed retirement policy is implemented. Remote
+signer enrollment is deferred to OMEGA-AUTH-04 (omega#179).
 
 Omega gates the five durable identity-bearing actions before signing or
 mutation. Generic admitted signing remains available for bounded protocol work
@@ -95,8 +111,13 @@ cannot substitute.
 
 `AccountLifecycleState` freezes local and imported candidates, activation,
 active use, switching, locking, sign-out, forget, repair, and conflict as
-separate states. `account_generation` is nonzero and will invalidate stale
-network and signing work after account changes.
+separate states. AUTH-03 implements a monotonic generation for active-account
+selection.
+Switch, lock, unlock, sign out, and forget compare the expected generation
+before mutation. Signing resolves the currently selected account partition and
+revalidates the account reference, public identity, lifecycle, and generation;
+stale selection tokens and locked, signed-out, or forgotten accounts are
+refused.
 
 AUTH-01 implements the first four native states as
 `IdentityActivationState::{CandidateLocal, CandidateExisting, Activating,
@@ -186,3 +207,25 @@ active account.
 AUTH-02 adds no password vault. NIP-49 output is written only to the folder the
 person chooses, while its public-safe verification record remains under the
 identity directory. No recovery password or decrypted secret is persisted.
+
+## Account switching and local removal
+
+AUTH-03 preserves the legacy root account and added local candidates instead of
+overwriting either one. The registry records the active account reference and
+generation, signer summary, recovery state, optional local profile, lifecycle,
+and storage locator. A crash-resumable switch transaction verifies the target
+partition before committing a new active selection and generation.
+
+Drafts, audience state, and community room state use namespaces derived from
+the public identity. Forget this device starts a durable per-account purge
+journal. Registry-owned custody files are deleted and read back by the identity
+service; Drafts and combined RoomState are marked deleted only after their
+owning stores return verified success. Decrypted cache, wallet state, relay
+state, signer sessions, and device grants do not yet expose owner purge hooks,
+so they remain named, retryable partial failures. Omega does not turn those
+pending integrations into a successful purge.
+
+Forget this device is local lifecycle, not Nostr event retraction. Its
+confirmation states that events held by relays or peers remain and that an
+external NIP-49 recovery file is not deleted. Identity retirement is a
+different future signed-policy operation and is unavailable in this wave.

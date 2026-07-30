@@ -39,8 +39,10 @@ the [Nostr authentication contract](../../omega/nostr-authentication-contract.md
 
 `omega_identity::IdentityService` is the Rust boundary for creating,
 importing, opening, signing with, inspecting, and resetting an Omega identity.
-It stores one 32-byte Nostr secret in the release channel's owner-only
-`identity/identity.secret` file. `KeyringLocator` is a stable version-one
+The migrated root account stores its 32-byte Nostr secret in the release
+channel's owner-only `identity/identity.secret` file. Added local accounts use
+the same file format in deterministic per-account directories under
+`identity/accounts/`. `KeyringLocator` is a stable version-one
 logical locator name, not a macOS Keychain implementation. On a clean profile,
 the startup coordinator creates this identity silently in the background; it
 does not block the front door on an identity ceremony.
@@ -253,8 +255,41 @@ binds account generation, identity, destination, authorization, payload digest,
 and expiry. Activation completion and intent consumption are separate:
 consumption revalidates every binding and succeeds once. Cancellation restores
 the original candidate state, deletes the held intent, and resumes nothing.
-The shared account control is the repair/setup entry point exposed from
-the title bar and from gated action notices.
+The title bar opens the account dashboard. A candidate or recovery-needed row
+offers **Complete setup**, which opens the existing activation and recovery
+ceremony; gated action notices continue to lead to that ceremony.
+
+### Account dashboard and multiple local identities
+
+AUTH-03 stores the durable registry at `identity/accounts/index.json`. The
+registry preserves the legacy root account, added local candidates, their
+public identities and fingerprints, optional local profiles, signer summaries,
+recovery and retirement states, and the active account reference plus a
+monotonic generation. New identities are created once through a journaled
+staging-to-partition rename and remain `CandidateLocal` with NIP-49 protection
+needed until explicit setup completes.
+
+The GPUI account dashboard is the always-reachable desktop home for add local,
+complete setup, switch, lock or unlock, sign out, forget this device, and the
+future retirement entry point. Switch verifies the destination custody before
+a crash-resumable registry commit. The selected account generation advances on
+selection and lifecycle changes, and signing revalidates the account reference,
+identity, lifecycle, and generation immediately before using the partitioned
+`identity.secret`. A stale token or locked, signed-out, or forgotten selection
+is refused.
+
+Lock leaves the active selection in place but makes its signer unavailable.
+Unlock revalidates custody. Sign out clears the active selection without
+deleting the account. Forget this device is a journaled local purge and states
+that relay or peer events and an external NIP-49 file remain. Retirement is a
+separate signed-policy operation and stays unavailable until that policy
+ships. Remote signer enrollment remains deferred to OMEGA-AUTH-04, omega#179.
+
+Draft prompts and audience/community room state are partitioned by public
+identity. Their owning stores delete and verify those partitions during
+forget-device. Decrypted cache, wallet state, relay state, signer sessions, and
+device grants do not yet have owner purge hooks; they remain visible,
+retryable partial failures rather than being treated as deleted.
 
 ### Activation and recovery ceremony
 

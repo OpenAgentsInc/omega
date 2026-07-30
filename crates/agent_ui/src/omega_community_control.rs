@@ -30,7 +30,7 @@ use std::{
 };
 
 use db::kvp::KeyValueStore;
-use gpui::{App, AppContext as _, Global, TaskExt as _};
+use gpui::{App, AppContext as _, Global, Task, TaskExt as _};
 use nostr::{Event, JsonUtil as _, PublicKey};
 use omega_audience::Audience;
 use omega_community::{
@@ -46,6 +46,7 @@ use omega_identity::{
 use sha2::{Digest as _, Sha256};
 use util::ResultExt as _;
 
+use crate::account_scope::AccountScope;
 use crate::omega_audience_control::{forget_roster, thread_audience};
 use crate::thread_metadata_store::ThreadId;
 
@@ -63,6 +64,7 @@ const REFRESH_INTERVAL_SECONDS: u64 = 30;
 /// The rooms this profile is in, hydrated from the key-value store once.
 #[derive(Default)]
 struct OmegaCommunity {
+    scope: Option<AccountScope>,
     /// `None` until the first read, so a launch that never opens a thread pays
     /// nothing for a feature nobody on this machine has joined.
     rooms: Option<Rc<JoinedRooms>>,
@@ -76,81 +78,179 @@ struct OmegaCommunity {
 
 impl Global for OmegaCommunity {}
 
+pub fn purge_account(identity: &PublicIdentity, cx: &App) -> Task<anyhow::Result<()>> {
+    let store = KeyValueStore::global(cx);
+    let namespace = AccountScope::namespace_for_identity(NAMESPACE, identity);
+    cx.background_spawn(async move {
+        let scoped = store.scoped(&namespace);
+        scoped.delete_all().await?;
+        anyhow::ensure!(
+            scoped.read(ROOMS_KEY)?.is_none() && scoped.read(RECORDS_KEY)?.is_none(),
+            "the account community records remained after purge"
+        );
+        Ok(())
+    })
+}
+
+pub fn purge_room_state(identity: &PublicIdentity, cx: &App) -> Task<anyhow::Result<()>> {
+    let community = purge_account(identity, cx);
+    let audience = crate::omega_audience_control::purge_account(identity, cx);
+    cx.background_spawn(async move {
+        community.await?;
+        audience.await
+    })
+}
+
+fn account_scope(cx: &mut App) -> AccountScope {
+    let scope = AccountScope::observed();
+    let state = cx.default_global::<OmegaCommunity>();
+    if state.scope.as_ref() != Some(&scope) {
+        state.scope = Some(scope.clone());
+        state.rooms = None;
+        state.outbox = None;
+        state.records = None;
+        state.deliveries.clear();
+        state.refreshes.clear();
+        state.refreshed_at.clear();
+        state.identity = None;
+    }
+    scope
+}
+
+fn read_scoped_or_migrate(
+    scope: &AccountScope,
+    key: &'static str,
+    target_key: String,
+    cx: &App,
+) -> Option<String> {
+    let store = KeyValueStore::global(cx);
+    let namespace = scope.namespace(NAMESPACE);
+    if let Some(value) = store
+        .scoped(&namespace)
+        .read(&target_key)
+        .log_err()
+        .flatten()
+    {
+        return Some(value);
+    }
+    let value = store.scoped(NAMESPACE).read(key).log_err().flatten()?;
+    let migration_store = store;
+    let migration_scope = scope.clone();
+    let migration_value = value.clone();
+    cx.background_spawn(async move {
+        migration_scope.ensure_current()?;
+        let target = migration_store.scoped(&namespace);
+        target
+            .write(target_key.clone(), migration_value.clone())
+            .await?;
+        if let Err(stale) = migration_scope.ensure_current() {
+            if migration_scope.is_purge_barrier_active()? {
+                target.delete_all().await?;
+            }
+            return Err(stale);
+        }
+        anyhow::ensure!(
+            target.read(&target_key)?.as_deref() == Some(migration_value.as_str()),
+            "the migrated community value could not be read back"
+        );
+        migration_store
+            .scoped(NAMESPACE)
+            .delete(key.to_string())
+            .await
+    })
+    .detach_and_log_err(cx);
+    Some(value)
+}
+
 fn rooms(cx: &mut App) -> Rc<JoinedRooms> {
+    let scope = account_scope(cx);
     if let Some(rooms) = cx.default_global::<OmegaCommunity>().rooms.clone() {
         return rooms;
     }
 
-    let stored: JoinedRooms = KeyValueStore::global(cx)
-        .scoped(NAMESPACE)
-        .read(ROOMS_KEY)
-        .log_err()
-        .flatten()
-        .and_then(|raw| serde_json::from_str(&raw).log_err())
-        .unwrap_or_default();
+    let stored: JoinedRooms =
+        read_scoped_or_migrate(&scope, ROOMS_KEY, scope.profile_key(ROOMS_KEY), cx)
+            .and_then(|raw| serde_json::from_str(&raw).log_err())
+            .unwrap_or_default();
 
     let stored = Rc::new(stored);
     cx.default_global::<OmegaCommunity>().rooms = Some(stored.clone());
     stored
 }
 
-fn persist_value<T: serde::Serialize>(key: &'static str, value: &T, cx: &App) {
+fn persist_value<T: serde::Serialize>(
+    scope: AccountScope,
+    key: &'static str,
+    pending: bool,
+    value: &T,
+    cx: &App,
+) {
     let store = KeyValueStore::global(cx);
+    let namespace = scope.namespace(NAMESPACE);
+    let key = if pending {
+        scope.pending_key(key)
+    } else {
+        scope.profile_key(key)
+    };
     let Some(payload) = serde_json::to_string(value).log_err() else {
         return;
     };
     cx.background_spawn(async move {
-        store
-            .scoped(NAMESPACE)
-            .write(key.to_string(), payload)
-            .await
+        scope.ensure_current()?;
+        store.scoped(&namespace).write(key, payload).await?;
+        if let Err(stale) = scope.ensure_current() {
+            if scope.is_purge_barrier_active()? {
+                store.scoped(&namespace).delete_all().await?;
+            }
+            return Err(stale);
+        }
+        Ok(())
     })
     .detach_and_log_err(cx);
 }
 
 fn outbox(cx: &mut App) -> Rc<Outbox> {
+    let scope = account_scope(cx);
     if let Some(outbox) = cx.default_global::<OmegaCommunity>().outbox.clone() {
         return outbox;
     }
 
-    let stored: Outbox = KeyValueStore::global(cx)
-        .scoped(NAMESPACE)
-        .read(OUTBOX_KEY)
-        .log_err()
-        .flatten()
-        .and_then(|raw| serde_json::from_str(&raw).log_err())
-        .unwrap_or_default();
+    let stored: Outbox =
+        read_scoped_or_migrate(&scope, OUTBOX_KEY, scope.pending_key(OUTBOX_KEY), cx)
+            .and_then(|raw| serde_json::from_str(&raw).log_err())
+            .unwrap_or_default();
     let stored = Rc::new(stored);
     cx.default_global::<OmegaCommunity>().outbox = Some(stored.clone());
     stored
 }
 
 fn records(cx: &mut App) -> Rc<BTreeMap<String, Vec<Event>>> {
+    let scope = account_scope(cx);
     if let Some(records) = cx.default_global::<OmegaCommunity>().records.clone() {
         return records;
     }
 
-    let stored: BTreeMap<String, Vec<Event>> = KeyValueStore::global(cx)
-        .scoped(NAMESPACE)
-        .read(RECORDS_KEY)
-        .log_err()
-        .flatten()
-        .and_then(|raw| serde_json::from_str(&raw).log_err())
-        .unwrap_or_default();
+    let stored: BTreeMap<String, Vec<Event>> =
+        read_scoped_or_migrate(&scope, RECORDS_KEY, scope.profile_key(RECORDS_KEY), cx)
+            .and_then(|raw| serde_json::from_str(&raw).log_err())
+            .unwrap_or_default();
     let stored = Rc::new(stored);
     cx.default_global::<OmegaCommunity>().records = Some(stored.clone());
     stored
 }
 
 fn identity(cx: &mut App) -> Option<PublicIdentity> {
+    let scope = account_scope(cx);
     if let Some(identity) = cx.default_global::<OmegaCommunity>().identity.clone() {
         return identity;
     }
 
-    let identity = IdentityService::system(*app_identity::CHANNEL)
-        .inspect()
-        .log_err()
-        .and_then(|custody| custody.identity);
+    let identity = scope.identity().or_else(|| {
+        IdentityService::system(*app_identity::CHANNEL)
+            .inspect()
+            .log_err()
+            .and_then(|custody| custody.identity)
+    });
 
     cx.default_global::<OmegaCommunity>().identity = Some(identity.clone());
     identity
@@ -310,7 +410,7 @@ fn join(invitation: Invitation, cx: &mut App) -> String {
         }
         outcome => {
             cx.default_global::<OmegaCommunity>().rooms = Some(rooms.clone());
-            persist_value(ROOMS_KEY, &*rooms, cx);
+            persist_value(account_scope(cx), ROOMS_KEY, false, &*rooms, cx);
             // The roster is rebuilt from the rooms, so the composer's cached
             // copy has to be dropped or the room a person just joined does not
             // appear until the next launch.
@@ -346,7 +446,7 @@ fn leave(thread_id: ThreadId, cx: &mut App) -> String {
     }
 
     cx.default_global::<OmegaCommunity>().rooms = Some(rooms.clone());
-    persist_value(ROOMS_KEY, &*rooms, cx);
+    persist_value(account_scope(cx), ROOMS_KEY, false, &*rooms, cx);
     forget_roster(cx);
 
     format!(
@@ -587,10 +687,11 @@ fn cache_verified_records(
         room_records.drain(..room_records.len() - MAX_RECORDS_PER_ROOM);
     }
     cx.default_global::<OmegaCommunity>().records = Some(records.clone());
-    persist_value(RECORDS_KEY, &*records, cx);
+    persist_value(account_scope(cx), RECORDS_KEY, false, &*records, cx);
 }
 
 fn refresh_room(repository: ForgeRepository, cx: &mut App) {
+    let scope = account_scope(cx);
     let coordinate = repository.coordinate().to_string();
     let state = cx.default_global::<OmegaCommunity>();
     if state.refreshes.contains(&coordinate)
@@ -605,12 +706,18 @@ fn refresh_room(repository: ForgeRepository, cx: &mut App) {
     state.refreshed_at.insert(coordinate.clone(), now());
     let relay_urls = repository.relays().to_vec();
     let query_coordinate = coordinate.clone();
+    let query_scope = scope.clone();
     let query = cx.background_spawn(async move {
-        omega_effectd::query_community_events(relay_urls, &query_coordinate)
+        let events = omega_effectd::query_community_events(relay_urls, &query_coordinate)?;
+        query_scope.ensure_current()?;
+        Ok::<_, anyhow::Error>(events)
     });
     cx.spawn(async move |cx| -> anyhow::Result<()> {
         let result = query.await;
         cx.update(|cx| {
+            if cx.default_global::<OmegaCommunity>().scope.as_ref() != Some(&scope) {
+                return;
+            }
             cx.default_global::<OmegaCommunity>()
                 .refreshes
                 .remove(&coordinate);
@@ -632,6 +739,7 @@ fn refresh_room(repository: ForgeRepository, cx: &mut App) {
 }
 
 fn start_delivery(event_id: nostr::EventId, event: Event, relay_urls: Vec<String>, cx: &mut App) {
+    let scope = account_scope(cx);
     let event_id_hex = event_id.to_hex();
     if !cx
         .default_global::<OmegaCommunity>()
@@ -651,22 +759,40 @@ fn start_delivery(event_id: nostr::EventId, event: Event, relay_urls: Vec<String
         }
     };
     let store = KeyValueStore::global(cx);
+    let namespace = scope.namespace(NAMESPACE);
+    let outbox_key = scope.pending_key(OUTBOX_KEY);
 
     cx.spawn(async move |cx| -> anyhow::Result<()> {
         let initial_store = store.clone();
+        let initial_scope = scope.clone();
+        let initial_key = outbox_key.clone();
+        let initial_namespace = namespace.clone();
         if let Err(error) = cx
             .background_spawn(async move {
+                initial_scope.ensure_current()?;
                 initial_store
-                    .scoped(NAMESPACE)
-                    .write(OUTBOX_KEY.to_string(), initial_payload)
-                    .await
+                    .scoped(&initial_namespace)
+                    .write(initial_key, initial_payload)
+                    .await?;
+                if let Err(stale) = initial_scope.ensure_current() {
+                    if initial_scope.is_purge_barrier_active()? {
+                        initial_store
+                            .scoped(&initial_namespace)
+                            .delete_all()
+                            .await?;
+                    }
+                    return Err(stale);
+                }
+                Ok(())
             })
             .await
         {
             cx.update(|cx| {
-                cx.default_global::<OmegaCommunity>()
-                    .deliveries
-                    .remove(&event_id_hex);
+                if cx.default_global::<OmegaCommunity>().scope.as_ref() == Some(&scope) {
+                    cx.default_global::<OmegaCommunity>()
+                        .deliveries
+                        .remove(&event_id_hex);
+                }
             });
             return Err(error);
         }
@@ -674,9 +800,12 @@ fn start_delivery(event_id: nostr::EventId, event: Event, relay_urls: Vec<String
         loop {
             let attempt_event = event.clone();
             let attempt_relays = relay_urls.clone();
+            let attempt_scope = scope.clone();
             let result = cx
                 .background_spawn(async move {
+                    attempt_scope.ensure_current()?;
                     omega_effectd::publish_community_event(attempt_relays, &attempt_event)
+                        .map_err(anyhow::Error::from)
                 })
                 .await;
             let outcome = match result {
@@ -685,7 +814,10 @@ fn start_delivery(event_id: nostr::EventId, event: Event, relay_urls: Vec<String
                     message: error.to_string(),
                 },
             };
-            let (should_retry, payload) = cx.update(|cx| {
+            let updated = cx.update(|cx| {
+                if cx.default_global::<OmegaCommunity>().scope.as_ref() != Some(&scope) {
+                    return None;
+                }
                 let mut outbox = outbox(cx);
                 let outbox_mut = Rc::make_mut(&mut outbox);
                 let should_retry = match outbox_mut.record_attempt(event_id, &outcome, now()) {
@@ -700,8 +832,11 @@ fn start_delivery(event_id: nostr::EventId, event: Event, relay_urls: Vec<String
                 };
                 cx.default_global::<OmegaCommunity>().outbox = Some(outbox.clone());
                 cx.refresh_windows();
-                (should_retry, serde_json::to_string(&*outbox))
+                Some((should_retry, serde_json::to_string(&*outbox)))
             });
+            let Some((should_retry, payload)) = updated else {
+                return Ok(());
+            };
             let payload = match payload {
                 Ok(payload) => payload,
                 Err(error) => {
@@ -714,19 +849,35 @@ fn start_delivery(event_id: nostr::EventId, event: Event, relay_urls: Vec<String
                 }
             };
             let attempt_store = store.clone();
+            let persist_scope = scope.clone();
+            let persist_key = outbox_key.clone();
+            let persist_namespace = namespace.clone();
             if let Err(error) = cx
                 .background_spawn(async move {
+                    persist_scope.ensure_current()?;
                     attempt_store
-                        .scoped(NAMESPACE)
-                        .write(OUTBOX_KEY.to_string(), payload)
-                        .await
+                        .scoped(&persist_namespace)
+                        .write(persist_key, payload)
+                        .await?;
+                    if let Err(stale) = persist_scope.ensure_current() {
+                        if persist_scope.is_purge_barrier_active()? {
+                            attempt_store
+                                .scoped(&persist_namespace)
+                                .delete_all()
+                                .await?;
+                        }
+                        return Err(stale);
+                    }
+                    Ok(())
                 })
                 .await
             {
                 cx.update(|cx| {
-                    cx.default_global::<OmegaCommunity>()
-                        .deliveries
-                        .remove(&event_id_hex);
+                    if cx.default_global::<OmegaCommunity>().scope.as_ref() == Some(&scope) {
+                        cx.default_global::<OmegaCommunity>()
+                            .deliveries
+                            .remove(&event_id_hex);
+                    }
                 });
                 return Err(error);
             }
@@ -737,9 +888,11 @@ fn start_delivery(event_id: nostr::EventId, event: Event, relay_urls: Vec<String
             backoff = backoff.saturating_mul(2).min(Duration::from_secs(8));
         }
         cx.update(|cx| {
-            cx.default_global::<OmegaCommunity>()
-                .deliveries
-                .remove(&event_id_hex);
+            if cx.default_global::<OmegaCommunity>().scope.as_ref() == Some(&scope) {
+                cx.default_global::<OmegaCommunity>()
+                    .deliveries
+                    .remove(&event_id_hex);
+            }
         });
         Ok(())
     })

@@ -38,15 +38,17 @@
 use std::rc::Rc;
 
 use db::kvp::KeyValueStore;
-use gpui::{AnyElement, App, Global};
+use gpui::{AnyElement, App, Global, Task, TaskExt as _};
 use omega_audience::{
     Audience, AudienceBook, AudienceId, AudienceRoster, Reach, SELECTION_MENU_HEADER,
     SWITCHING_DOES_NOT_MOVE_A_THREAD, THREAD_IS_NOT_IN_THE_SELECTION, ThreadAudience,
     ThreadOpening, audience_for_opening,
 };
+use omega_identity::PublicIdentity;
 use ui::{Button, ContextMenu, ContextMenuEntry, PopoverMenu, Tooltip, Window, prelude::*};
 use util::ResultExt as _;
 
+use crate::account_scope::AccountScope;
 use crate::thread_metadata_store::ThreadId;
 
 /// Where the audience record lives in the key-value store.
@@ -88,6 +90,7 @@ struct OmegaAudience {
 /// pointer; by value it would copy every binding twice a frame.
 #[derive(Clone)]
 struct Loaded {
+    scope: AccountScope,
     roster: Rc<AudienceRoster>,
     selected: AudienceId,
     book: Rc<AudienceBook<String>>,
@@ -95,21 +98,67 @@ struct Loaded {
 
 impl Global for OmegaAudience {}
 
+fn read_scoped_or_migrate(
+    scope: &AccountScope,
+    key: &'static str,
+    target_key: String,
+    cx: &App,
+) -> Option<String> {
+    let store = KeyValueStore::global(cx);
+    let namespace = scope.namespace(NAMESPACE);
+    if let Some(value) = store
+        .scoped(&namespace)
+        .read(&target_key)
+        .log_err()
+        .flatten()
+    {
+        return Some(value);
+    }
+    let value = store.scoped(NAMESPACE).read(key).log_err().flatten()?;
+    let migration_store = store;
+    let migration_scope = scope.clone();
+    let migration_value = value.clone();
+    cx.background_spawn(async move {
+        migration_scope.ensure_current()?;
+        let target = migration_store.scoped(&namespace);
+        target
+            .write(target_key.clone(), migration_value.clone())
+            .await?;
+        if let Err(stale) = migration_scope.ensure_current() {
+            if migration_scope.is_purge_barrier_active()? {
+                target.delete_all().await?;
+            }
+            return Err(stale);
+        }
+        anyhow::ensure!(
+            target.read(&target_key)?.as_deref() == Some(migration_value.as_str()),
+            "the migrated audience value could not be read back"
+        );
+        migration_store
+            .scoped(NAMESPACE)
+            .delete(key.to_string())
+            .await
+    })
+    .detach_and_log_err(cx);
+    Some(value)
+}
+
 /// Everything the control needs, hydrated from the key-value store once.
 fn loaded(cx: &mut App) -> Loaded {
-    if let Some(loaded) = cx.default_global::<OmegaAudience>().loaded.clone() {
+    let scope = AccountScope::observed();
+    if let Some(loaded) = cx
+        .default_global::<OmegaAudience>()
+        .loaded
+        .clone()
+        .filter(|loaded| loaded.scope == scope)
+    {
         return loaded;
     }
 
-    let store = KeyValueStore::global(cx);
-    let scoped = store.scoped(NAMESPACE);
-
-    let book: AudienceBook<String> = scoped
-        .read(BOOK_KEY)
-        .log_err()
-        .flatten()
-        .and_then(|raw| serde_json::from_str(&raw).log_err())
-        .unwrap_or_default();
+    let book: AudienceBook<String> =
+        read_scoped_or_migrate(&scope, BOOK_KEY, scope.profile_key(BOOK_KEY), cx)
+            .and_then(|raw| serde_json::from_str(&raw).log_err())
+            .unwrap_or_default();
 
     // `OMEGA-DELTA-0113`, omega#108. The rooms this profile has joined, then
     // the fixture if the environment asked for it. Real places first: the
@@ -130,15 +179,14 @@ fn loaded(cx: &mut App) -> Loaded {
     // to Local rather than staying pointed at it. Leaving a community and
     // finding the composer still offering to start threads in it would be a
     // control describing a door that is not there.
-    let selected = scoped
-        .read(SELECTION_KEY)
-        .log_err()
-        .flatten()
-        .map(|raw| AudienceId::from_key(&raw))
-        .filter(|id| roster.resolve(id).is_some())
-        .unwrap_or_else(AudienceId::local);
+    let selected =
+        read_scoped_or_migrate(&scope, SELECTION_KEY, scope.pending_key(SELECTION_KEY), cx)
+            .map(|raw| AudienceId::from_key(&raw))
+            .filter(|id| roster.resolve(id).is_some())
+            .unwrap_or_else(AudienceId::local);
 
     let loaded = Loaded {
+        scope,
         roster: Rc::new(roster),
         selected,
         book: Rc::new(book),
@@ -164,6 +212,20 @@ pub fn forget_roster(cx: &mut App) {
     cx.refresh_windows();
 }
 
+pub fn purge_account(identity: &PublicIdentity, cx: &App) -> Task<anyhow::Result<()>> {
+    let store = KeyValueStore::global(cx);
+    let namespace = AccountScope::namespace_for_identity(NAMESPACE, identity);
+    cx.background_spawn(async move {
+        let scoped = store.scoped(&namespace);
+        scoped.delete_all().await?;
+        anyhow::ensure!(
+            scoped.read(BOOK_KEY)?.is_none(),
+            "the account audience records remained after purge"
+        );
+        Ok(())
+    })
+}
+
 /// The fixture audience, when the environment asks for it.
 ///
 /// Reads the variable and decides nothing. What an absent, empty, `0`, `1` or
@@ -173,28 +235,42 @@ fn preview_audience() -> Option<Audience> {
     omega_audience::preview_audience(std::env::var(PREVIEW_ENV_VAR).ok().as_deref())
 }
 
-fn persist_book(book: &AudienceBook<String>, cx: &App) {
+fn persist_book(scope: AccountScope, book: &AudienceBook<String>, cx: &App) {
     let store = KeyValueStore::global(cx);
+    let namespace = scope.namespace(NAMESPACE);
+    let key = scope.profile_key(BOOK_KEY);
     let Some(payload) = serde_json::to_string(book).log_err() else {
         return;
     };
     cx.background_spawn(async move {
-        store
-            .scoped(NAMESPACE)
-            .write(BOOK_KEY.to_string(), payload)
-            .await
+        scope.ensure_current()?;
+        store.scoped(&namespace).write(key, payload).await?;
+        if let Err(stale) = scope.ensure_current() {
+            if scope.is_purge_barrier_active()? {
+                store.scoped(&namespace).delete_all().await?;
+            }
+            return Err(stale);
+        }
+        Ok(())
     })
     .detach_and_log_err(cx);
 }
 
-fn persist_selection(selected: &AudienceId, cx: &App) {
+fn persist_selection(scope: AccountScope, selected: &AudienceId, cx: &App) {
     let store = KeyValueStore::global(cx);
+    let namespace = scope.namespace(NAMESPACE);
+    let key = scope.pending_key(SELECTION_KEY);
     let payload = selected.as_key().to_string();
     cx.background_spawn(async move {
-        store
-            .scoped(NAMESPACE)
-            .write(SELECTION_KEY.to_string(), payload)
-            .await
+        scope.ensure_current()?;
+        store.scoped(&namespace).write(key, payload).await?;
+        if let Err(stale) = scope.ensure_current() {
+            if scope.is_purge_barrier_active()? {
+                store.scoped(&namespace).delete_all().await?;
+            }
+            return Err(stale);
+        }
+        Ok(())
     })
     .detach_and_log_err(cx);
 }
@@ -242,7 +318,7 @@ pub fn record_thread_opening(thread_id: ThreadId, opening: ThreadOpening, cx: &m
         return;
     }
 
-    persist_book(&loaded.book, cx);
+    persist_book(loaded.scope.clone(), &loaded.book, cx);
     cx.default_global::<OmegaAudience>().loaded = Some(loaded);
 }
 
@@ -280,7 +356,7 @@ pub fn select_audience(audience: AudienceId, cx: &mut App) {
         return;
     }
     loaded.selected = audience;
-    persist_selection(&loaded.selected, cx);
+    persist_selection(loaded.scope.clone(), &loaded.selected, cx);
     cx.default_global::<OmegaAudience>().loaded = Some(loaded);
     cx.refresh_windows();
 }

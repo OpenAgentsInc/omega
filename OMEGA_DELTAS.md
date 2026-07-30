@@ -8543,3 +8543,41 @@ startup recheck — survives unchanged behind that dropdown.
   `omega_identity`; one-shot owner tests in `omega_actions`; candidate,
   activation, and cancellation presentation tests in `onboarding`; and the
   `OMEGA-DELTA-0193` source assertions in `crates/omega_deltas`.
+
+### OMEGA-DELTA-0194 — Account selection is durable, partitioned, and explicit
+
+- **Origin:** OMEGA-AUTH-03, omega#178. Extends the candidate and recovery
+  model from `OMEGA-DELTA-0192` and `OMEGA-DELTA-0193` to multiple local
+  identities.
+- **One account home.** **Omega Identity** in the title bar opens a responsive
+  account dashboard showing each public fingerprint, optional local profile,
+  signer kind and availability, recovery state, and last successful signer
+  use. Add local identity, complete setup, switch, lock or unlock, sign out,
+  forget this device, and retire identity are distinct controls. A new local
+  identity is a file-backed `CandidateLocal` with recovery needed; **Complete
+  setup** returns to the existing NIP-49 activation ceremony. Retirement stays
+  unavailable until its signed policy is implemented and is never presented as
+  local deletion. Remote signers remain deferred to OMEGA-AUTH-04, omega#179.
+- **Selection is generation-fenced.** The durable registry is
+  `identity/accounts/index.json`. It preserves the legacy root account and
+  stores added accounts below deterministic per-account directories under
+  `identity/accounts/`. Switching uses a crash-resumable transaction and
+  monotonically advances the active generation. Signing validates the selected
+  account reference, public identity, lifecycle, and generation immediately
+  before use; stale selection tokens are refused.
+- **Local lifecycle has exact effects.** Lock makes the active local signer
+  unavailable until explicit unlock. Sign out clears the active selection
+  without deleting custody. Forget this device starts a durable purge journal
+  and never claims to retract relay or peer events or delete an external NIP-49
+  file. Draft and room-state owners verify their own per-public-key deletion.
+  Targets without an owning purge hook remain named partial failures and can be
+  retried instead of being rounded up to success.
+- **File custody only.** Every local account secret remains an `identity.secret`
+  file: the migrated account may remain at `identity/identity.secret`, while
+  added accounts use their per-account directory. This delta enables no macOS
+  Keychain, Secure Enclave, Windows credential vault, Linux secret service,
+  Android keystore, encrypted application vault, or native enclave path.
+- **Enforced by:** registry migration, add, switching, generation, lifecycle,
+  and purge tests in `omega_identity`; per-public-key draft and room-state
+  tests in `agent_ui`; dashboard action and purge-result tests in `account_ui`;
+  and the `OMEGA-DELTA-0194` source assertions in `crates/omega_deltas`.

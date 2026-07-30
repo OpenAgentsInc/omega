@@ -1,0 +1,29 @@
+[package]
+name = "account_ui"
+version = "0.1.0"
+edition.workspace = true
+publish.workspace = true
+license = "GPL-3.0-or-later"
+
+[lints]
+workspace = true
+
+[lib]
+path = "account_ui.rs"
+doctest = false
+
+[dependencies]
+agent_ui.workspace = true
+anyhow.workspace = true
+app_identity.workspace = true
+chrono.workspace = true
+gpui.workspace = true
+omega_actions.workspace = true
+omega_identity.workspace = true
+ui.workspace = true
+util.workspace = true
+workspace.workspace = true
+zlog.workspace = true
+
+[dev-dependencies]
+gpui = { workspace = true, features = ["test-support"] }

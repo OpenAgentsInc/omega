@@ -12,6 +12,11 @@ Unix.
 The Nostr signing secret is stored separately as
 `identity/identity.secret` below the channel-specific application data
 directory. It uses the same atomic-write and owner-only permission rules.
+AUTH-03 preserves that path for the migrated root account. Additional local
+accounts use the same file-only format at
+`identity/accounts/<account-directory>/identity.secret`; the directory name is
+deterministically derived from the opaque account reference and is not a
+secret.
 
 The identity directory also contains public-safe authentication metadata:
 
@@ -26,6 +31,20 @@ The identity directory also contains public-safe authentication metadata:
 
 These metadata records do not make the secret file encrypted and do not grant
 relay, group, hosted-account, or action authority.
+
+The multi-account registry is `identity/accounts/index.json`. It contains only
+public identity, lifecycle, signer summary, recovery state, optional local
+profile, storage locator, and the active account reference with its monotonic
+generation. `identity/accounts/switch.transaction.json`, add transaction
+journals, and per-account purge journals make interrupted mutations resumable
+without placing secret material in the registry.
+
+Drafts and community/audience room state are stored under public-key-derived
+namespaces. Forget this device asks those owning stores to delete and verify
+their own account partitions. Unsupported decrypted-cache, wallet, relay,
+signer-session, and device-grant purge targets remain explicit retryable
+partial failures; the purge journal does not claim success while any target is
+unverified.
 
 The public authentication glossary and target schemas are frozen in
 [Omega Nostr authentication contract](nostr-authentication-contract.md).
@@ -46,10 +65,13 @@ directory. Omega must never log or render their contents. Unix ownership and
 mode checks ship today; equivalent Windows ACL assurance remains an explicit
 platform-verification requirement.
 
-AUTH-01 and AUTH-02 deliberately keep this file-backed design. AUTH-02 writes
+AUTH-01 through AUTH-03 deliberately keep this file-backed design. AUTH-02 writes
 the NIP-49 `ncryptsec` artifact to the directory explicitly selected by the
 person and keeps passwords only in zeroizing memory for the operation. It does
 not introduce an encrypted application vault or an account-reset password.
+AUTH-03 does not move either the migrated or partitioned `identity.secret`
+files into native storage. Remote signer custody remains deferred to
+OMEGA-AUTH-04 (omega#179).
 
 These packets do not enable or
 probe the macOS Keychain, Secure Enclave, Windows credential vault, Linux

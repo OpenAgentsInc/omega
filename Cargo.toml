@@ -1,6 +1,7 @@
 [workspace]
 resolver = "2"
 members = [
+    "crates/account_ui",
     "crates/acp_thread",
     "crates/acp_tools",
     "crates/action_log",
@@ -382,6 +383,7 @@ agent_computer_ui = { path = "crates/agent_computer_ui" }
 workroom_receipts = { path = "crates/workroom_receipts" }
 workroom_ui = { path = "crates/workroom_ui" }
 onboarding = { path = "crates/onboarding" }
+account_ui = { path = "crates/account_ui" }
 openai_subscribed = { path = "crates/openai_subscribed" }
 opencode = { path = "crates/opencode" }
 open_ai = { path = "crates/open_ai" }

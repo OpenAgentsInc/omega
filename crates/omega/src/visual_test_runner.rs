@@ -979,6 +979,7 @@ fn run_visual_tests(project_path: PathBuf, update_baseline: bool) -> Result<()> 
         command_palette::init(cx);
         editor::init(cx);
         title_bar::init(cx);
+        account_ui::init(cx);
         project_panel::init(cx);
         terminal_view::init(cx);
         search::init(cx);

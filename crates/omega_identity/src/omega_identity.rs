@@ -7,6 +7,7 @@
 //! ```
 
 mod account_activation;
+mod accounts;
 mod authentication;
 mod contract;
 mod custody;
@@ -18,6 +19,7 @@ mod recovery_artifact;
 mod secret;
 
 pub use account_activation::*;
+pub use accounts::*;
 pub use authentication::*;
 pub use contract::*;
 pub use custody::*;

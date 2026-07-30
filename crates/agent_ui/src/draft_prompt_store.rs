@@ -14,24 +14,37 @@ use anyhow::Context as _;
 use db::kvp::KeyValueStore;
 use gpui::{App, AppContext as _, Entity, Task};
 use itertools::Itertools;
+use omega_identity::PublicIdentity;
 use project::AgentId;
 use ui::SharedString;
 use util::ResultExt as _;
 use workspace::Workspace;
 
 use crate::AgentPanel;
+use crate::account_scope::AccountScope;
 use crate::thread_metadata_store::ThreadId;
 
 const NAMESPACE: &str = "agent_draft_prompts";
 
+// Unpartitioned draft rows predate account provenance. They intentionally stay
+// unread rather than being guessed into whichever account happens to open first.
+
 /// Maximum length (in characters) of a draft label rendered in the sidebar.
 const MAX_LABEL_CHARS: usize = 250;
 
-pub fn read(thread_id: ThreadId, cx: &App) -> Option<Vec<acp::ContentBlock>> {
+pub fn purge_account(identity: &PublicIdentity, cx: &App) -> Task<anyhow::Result<()>> {
     let kvp = KeyValueStore::global(cx);
+    let namespace = AccountScope::namespace_for_identity(NAMESPACE, identity);
+    cx.background_spawn(async move { kvp.scoped(&namespace).delete_all().await })
+}
+
+pub fn read(thread_id: ThreadId, cx: &App) -> Option<Vec<acp::ContentBlock>> {
+    let scope = AccountScope::observed();
+    let kvp = KeyValueStore::global(cx);
+    let namespace = scope.namespace(NAMESPACE);
     let raw = kvp
-        .scoped(NAMESPACE)
-        .read(&thread_id.to_key_string())
+        .scoped(&namespace)
+        .read(&scope.profile_key(&thread_id.to_key_string()))
         .log_err()
         .flatten()?;
     serde_json::from_str(&raw).log_err()
@@ -42,19 +55,36 @@ pub fn write(
     prompt: &[acp::ContentBlock],
     cx: &App,
 ) -> Task<anyhow::Result<()>> {
+    let scope = AccountScope::observed();
     let kvp = KeyValueStore::global(cx);
-    let key = thread_id.to_key_string();
+    let namespace = scope.namespace(NAMESPACE);
+    let key = scope.profile_key(&thread_id.to_key_string());
     let payload = match serde_json::to_string(prompt).context("serializing draft prompt") {
         Ok(payload) => payload,
         Err(err) => return Task::ready(Err(err)),
     };
-    cx.background_spawn(async move { kvp.scoped(NAMESPACE).write(key, payload).await })
+    cx.background_spawn(async move {
+        scope.ensure_current()?;
+        kvp.scoped(&namespace).write(key, payload).await?;
+        if let Err(stale) = scope.ensure_current() {
+            if scope.is_purge_barrier_active()? {
+                kvp.scoped(&namespace).delete_all().await?;
+            }
+            return Err(stale);
+        }
+        Ok(())
+    })
 }
 
 pub fn delete(thread_id: ThreadId, cx: &App) -> Task<anyhow::Result<()>> {
+    let scope = AccountScope::observed();
     let kvp = KeyValueStore::global(cx);
-    let key = thread_id.to_key_string();
-    cx.background_spawn(async move { kvp.scoped(NAMESPACE).delete(key).await })
+    let namespace = scope.namespace(NAMESPACE);
+    let key = scope.profile_key(&thread_id.to_key_string());
+    cx.background_spawn(async move {
+        scope.ensure_current()?;
+        kvp.scoped(&namespace).delete(key).await
+    })
 }
 
 pub fn draft_has_user_content<'a>(

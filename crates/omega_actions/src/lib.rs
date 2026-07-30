@@ -270,6 +270,8 @@ actions!(
         /// `ctrl-p`).
         #[action(deprecated_aliases = ["zed::OpenEditorOnboarding"])]
         OpenEditorOnboarding,
+        /// Opens the local Nostr account dashboard.
+        OpenIdentityDashboard,
     ]
 );
 
@@ -1164,7 +1166,7 @@ mod tests {
 
     use super::{
         IdentityActivationEventError, IdentityActivationEvents, IdentityActivationOutcome,
-        OpenEditorOnboarding, OpenOnboarding, dev::ResetOnboarding,
+        OpenEditorOnboarding, OpenIdentityDashboard, OpenOnboarding, dev::ResetOnboarding,
     };
     use gpui::{Action, TestAppContext};
     use omega_identity::{
@@ -1196,6 +1198,7 @@ mod tests {
     fn onboarding_actions_use_omega_product_namespace() {
         assert_eq!(OpenOnboarding.name(), "omega::OpenOnboarding");
         assert_eq!(OpenEditorOnboarding.name(), "omega::OpenEditorOnboarding");
+        assert_eq!(OpenIdentityDashboard.name(), "omega::OpenIdentityDashboard");
         assert_eq!(ResetOnboarding.name(), "dev::ResetOnboarding");
     }
 

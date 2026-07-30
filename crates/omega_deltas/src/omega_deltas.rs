@@ -182,6 +182,7 @@ pub const ENFORCED_DELTAS: &[&str] = &[
     "OMEGA-DELTA-0191",
     "OMEGA-DELTA-0192",
     "OMEGA-DELTA-0193",
+    "OMEGA-DELTA-0194",
 ];
 
 /// The concise product contract adjacent to the delta registry.
@@ -1230,6 +1231,12 @@ pub const OMEGA_ACTIONS_PATH: &str = "crates/omega_actions/src/lib.rs";
 
 /// OMEGA-DELTA-0192. The always-reachable desktop account entry.
 pub const TITLE_BAR_PATH: &str = "crates/title_bar/src/title_bar.rs";
+
+/// OMEGA-DELTA-0194. The durable multi-account registry and its desktop home.
+pub const IDENTITY_ACCOUNT_REGISTRY_PATH: &str = "crates/omega_identity/src/accounts.rs";
+pub const ACCOUNT_UI_PATH: &str = "crates/account_ui/account_ui.rs";
+pub const ACCOUNT_SCOPE_PATH: &str = "crates/agent_ui/src/account_scope.rs";
+pub const DRAFT_PROMPT_STORE_PATH: &str = "crates/agent_ui/src/draft_prompt_store.rs";
 
 /// OMEGA-DELTA-0192. The hosted-account link gate.
 pub const WORKROOM_PANEL_PATH: &str = "crates/workroom_ui/src/panel.rs";
@@ -3767,14 +3774,14 @@ mod tests {
     /// OMEGA-DELTA-0010. The title-bar identity entry stays local instead of
     /// invoking the inherited hosted-account sign-in flow.
     #[test]
-    fn title_bar_identity_entry_opens_onboarding() {
+    fn title_bar_identity_entry_opens_local_identity_home() {
         let path = repository_path("crates/title_bar/src/title_bar.rs");
         let source = std::fs::read_to_string(&path)
             .unwrap_or_else(|error| panic!("cannot read {}: {error}", path.display()));
         assert!(
             source.contains("Button::new(\"omega_identity\", \"Omega Identity\")")
-                && source.contains("dispatch_action(OpenOnboarding.boxed_clone()"),
-            "OMEGA-DELTA-0010: the title-bar identity entry must dispatch local Omega onboarding"
+                && source.contains("dispatch_action(OpenIdentityDashboard.boxed_clone()"),
+            "OMEGA-DELTA-0010: the title-bar identity entry must dispatch the local Omega identity home"
         );
         assert!(
             !source.contains("Button::new(\"sign_in\", \"Sign In\")")
@@ -14626,7 +14633,7 @@ mod tests {
 
         let delivery_body = body_of(&indented, "start_delivery");
         let persist = delivery_body
-            .find(".write(OUTBOX_KEY.to_string(), initial_payload)")
+            .find(".write(initial_key, initial_payload)")
             .unwrap_or_else(|| {
                 panic!(
                     "OMEGA-DELTA-0113: `start_delivery` in {} no longer persists \
@@ -19393,7 +19400,6 @@ mod tests {
         let custody_path = repository_path(IDENTITY_CUSTODY_PATH);
         let custody = without_comments(&read_repository_file(IDENTITY_CUSTODY_PATH));
         for constructor in [
-            "pub fn system(",
             "pub fn for_channel_data_root(",
             "pub(crate) fn for_disposable_proof(",
         ] {
@@ -19409,6 +19415,17 @@ mod tests {
                 custody_path.display()
             );
         }
+        let system = method_body(
+            &custody,
+            "pub fn system(",
+            &custody_path,
+            "The system constructor must delegate to the explicitly file-backed data-root constructor.",
+        );
+        assert!(
+            system.contains("Self::for_channel_data_root("),
+            "OMEGA-DELTA-0141: `pub fn system(` in {} no longer delegates to explicitly file-backed custody.",
+            custody_path.display()
+        );
 
         let secret_path = repository_path("crates/omega_identity/src/secret.rs");
         let secret = without_comments(&read_repository_file("crates/omega_identity/src/secret.rs"));
@@ -24026,7 +24043,7 @@ mod tests {
         let user_menu = function_body(&title_bar, "render_user_menu_button")
             .expect("OMEGA-DELTA-0192: title bar lost its user menu");
         assert!(
-            user_menu.contains(".action(\"Omega Identity\", OpenOnboarding.boxed_clone())"),
+            user_menu.contains(".action(\"Omega Identity\", OpenIdentityDashboard.boxed_clone())"),
             "OMEGA-DELTA-0192: Omega Identity is not always reachable from the user menu"
         );
 
@@ -24147,6 +24164,89 @@ mod tests {
                     && documentation.contains("Windows credential vault"),
                 "OMEGA-DELTA-0193: {path} lost the file-only, no-native-vault boundary"
             );
+        }
+    }
+
+    /// OMEGA-DELTA-0194. Multiple local identities remain file-backed,
+    /// generation-fenced, and explicit about partial device-local deletion.
+    #[test]
+    fn multiple_local_accounts_are_partitioned_and_lifecycle_explicit() {
+        let registry = read_repository_file(IDENTITY_ACCOUNT_REGISTRY_PATH);
+        for required in [
+            "pub struct AccountRegistryService",
+            "pub fn add_local_account",
+            "pub fn switch_account",
+            "pub fn lock_active",
+            "pub fn unlock_active",
+            "pub fn sign_out",
+            "pub fn begin_forget",
+            "pub fn record_purge_target_result",
+            "StaleSelection",
+            "accounts_root().join(\"index.json\")",
+            "accounts_root().join(\"switch.transaction.json\")",
+            "FileSecretStore::new(root.join(\"identity.secret\"))",
+        ] {
+            assert!(
+                registry.contains(required),
+                "OMEGA-DELTA-0194: multi-account registry lost `{required}`"
+            );
+        }
+
+        let dashboard = read_repository_file(ACCOUNT_UI_PATH);
+        for required in [
+            "Add local identity",
+            "Complete setup",
+            "Switch to identity",
+            "Lock signer",
+            "Unlock signer",
+            "Sign out",
+            "Forget this device",
+            "Retire identity",
+            "Signed policy required",
+            "Events held by relays or peers remain",
+            "An external NIP-49 recovery file is not deleted",
+            "No owning subsystem purge hook is available",
+            "OpenIdentityDashboard",
+            "OpenOnboarding",
+        ] {
+            assert!(
+                dashboard.contains(required),
+                "OMEGA-DELTA-0194: account dashboard lost `{required}`"
+            );
+        }
+
+        let account_scope = read_repository_file(ACCOUNT_SCOPE_PATH);
+        let drafts = read_repository_file(DRAFT_PROMPT_STORE_PATH);
+        let communities = read_repository_file(COMMUNITY_CONTROL_PATH);
+        let audiences = read_repository_file(AUDIENCE_CONTROL_PATH);
+        assert!(
+            account_scope.contains("namespace_for_identity")
+                && drafts.contains("pub fn purge_account")
+                && communities.contains("pub fn purge_room_state")
+                && audiences.contains("pub fn purge_account"),
+            "OMEGA-DELTA-0194: public-key partition owners lost their purge hooks"
+        );
+
+        for path in [
+            IDENTITY_AUTHENTICATION_DOCUMENT_PATH,
+            RUNTIME_CREDENTIAL_STORAGE_DOCUMENT_PATH,
+            APPLICATION_IDENTITY_DOCUMENT_PATH,
+        ] {
+            let documentation = read_repository_file(path);
+            let normalized = normalize_prose(&documentation);
+            for required in [
+                "identity/accounts/index.json",
+                "identity.secret",
+                "monotonic generation",
+                "retryable partial",
+                "Remote signer",
+                "Secure Enclave",
+            ] {
+                assert!(
+                    normalized.contains(required),
+                    "OMEGA-DELTA-0194: {path} lost `{required}`"
+                );
+            }
         }
     }
 }

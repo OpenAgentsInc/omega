@@ -51,7 +51,7 @@ use update_version::UpdateVersion;
 use util::ResultExt;
 use workspace::{AccessibleMode, MultiWorkspace, Workspace, notifications::NotifyTaskExt as _};
 
-use omega_actions::OpenOnboarding;
+use omega_actions::OpenIdentityDashboard;
 
 pub use onboarding_banner::restore_banner;
 
@@ -976,7 +976,7 @@ impl TitleBar {
             .label_size(LabelSize::Small)
             .tab_index(0isize)
             .on_click(|_, window, cx| {
-                window.dispatch_action(OpenOnboarding.boxed_clone(), cx);
+                window.dispatch_action(OpenIdentityDashboard.boxed_clone(), cx);
             })
     }
 
@@ -1098,7 +1098,7 @@ impl TitleBar {
                         )
                         .separator()
                     })
-                    .action("Omega Identity", OpenOnboarding.boxed_clone())
+                    .action("Omega Identity", OpenIdentityDashboard.boxed_clone())
                     .separator()
                     .map(|this| {
                         let mut this = this.header("Organization");

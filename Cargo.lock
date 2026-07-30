@@ -93,6 +93,23 @@ dependencies = [
 ]
 
 [[package]]
+name = "account_ui"
+version = "0.1.0"
+dependencies = [
+ "agent_ui",
+ "anyhow",
+ "app_identity",
+ "chrono",
+ "gpui",
+ "omega_actions",
+ "omega_identity",
+ "ui",
+ "util",
+ "workspace",
+ "zlog",
+]
+
+[[package]]
 name = "acp_thread"
 version = "0.1.0"
 dependencies = [
@@ -10771,6 +10788,7 @@ dependencies = [
 name = "omega"
 version = "0.2.0"
 dependencies = [
+ "account_ui",
  "acp_thread",
  "acp_tools",
  "action_log",

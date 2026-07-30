@@ -19,16 +19,16 @@ use thiserror::Error;
 use zeroize::Zeroizing;
 
 use crate::{
-    AccountRef, AdmittedSigningRequest, CompletionRecord, ContractError, CustodyConflict,
-    CustodyConflictReason, CustodyResult, CustodyState, DurableIdentityActionDecision,
-    DurableIdentityActionDescriptor, GiftWrappedPrivateMessage, HeldIdentityAction,
-    IDENTITY_ACCOUNT_SCHEMA, IDENTITY_ACCOUNT_SCHEMA_VERSION, IdentityAccountRecord,
-    IdentityActionAuthorization, IdentityActivationInspection, IdentityActivationRequired,
-    IdentityActivationState, IdentityCandidateOrigin, IdentityInspection, IdentityManifest,
-    IdentityRef, ImportedSecret, KeyringLocator, NostrPublicKeyHex, OwnerAttestationRequest,
-    OwnerAttestationResult, PendingIdentityOperation, PendingIdentityTransaction,
-    PrivateMessageRequest, PublicIdentity, PublicStoreError, ReceiptRef, SigningResult,
-    UnwrappedPrivateMessage,
+    AccountRef, AccountRegistryService, AccountSelectionToken, AdmittedSigningRequest,
+    CompletionRecord, ContractError, CustodyConflict, CustodyConflictReason, CustodyResult,
+    CustodyState, DurableIdentityActionDecision, DurableIdentityActionDescriptor,
+    GiftWrappedPrivateMessage, HeldIdentityAction, IDENTITY_ACCOUNT_SCHEMA,
+    IDENTITY_ACCOUNT_SCHEMA_VERSION, IdentityAccountRecord, IdentityActionAuthorization,
+    IdentityActivationInspection, IdentityActivationRequired, IdentityActivationState,
+    IdentityCandidateOrigin, IdentityInspection, IdentityManifest, IdentityRef, ImportedSecret,
+    KeyringLocator, NostrPublicKeyHex, OwnerAttestationRequest, OwnerAttestationResult,
+    PendingIdentityOperation, PendingIdentityTransaction, PrivateMessageRequest, PublicIdentity,
+    PublicStoreError, ReceiptRef, SigningResult, UnwrappedPrivateMessage,
     mutation_lock::{IdentityMutationGuard, MutationLockError},
     proof::{IDENTITY_PROOF_KEYRING_ACCOUNT, IDENTITY_PROOF_KEYRING_SERVICE, ProofCrashBoundary},
     public_store::{
@@ -135,17 +135,14 @@ pub struct IdentityService {
     store: Arc<dyn SecretStore>,
     generator: Arc<dyn SecretGenerator>,
     proof_crash_boundary: Option<ProofCrashBoundary>,
+    selection_data_root: Option<PathBuf>,
+    selection_token: Option<AccountSelectionToken>,
+    selection_required: bool,
 }
 
 impl IdentityService {
     pub fn system(channel: AppChannel) -> Self {
-        let identity_root = paths::data_dir().join("identity");
-        Self::new(
-            channel,
-            CustodyPaths::for_data_root(identity_root.clone()),
-            Arc::new(FileSecretStore::new(identity_root.join("identity.secret"))),
-            Arc::new(SystemSecretGenerator),
-        )
+        Self::for_channel_data_root(channel, paths::data_dir().to_path_buf())
     }
 
     /// Build custody against the standard data root for `channel`.
@@ -159,7 +156,56 @@ impl IdentityService {
 
     /// Build custody against an explicit channel data root (parent of `identity/`).
     pub fn for_channel_data_root(channel: AppChannel, data_root: PathBuf) -> Self {
-        let identity_root = data_root.join("identity");
+        let registry = AccountRegistryService::for_channel_data_root(channel, data_root.clone());
+        let resolved = registry.active_storage().ok();
+        let (identity_root, selection_token) = resolved
+            .map(|(root, token)| (root, Some(token)))
+            .unwrap_or_else(|| {
+                let root = if registry.has_durable_registry() {
+                    data_root
+                        .join("identity")
+                        .join("accounts")
+                        .join("unavailable")
+                } else {
+                    data_root.join("identity")
+                };
+                (root, None)
+            });
+        let mut service = Self::new(
+            channel,
+            CustodyPaths::for_data_root(identity_root.clone()),
+            Arc::new(FileSecretStore::new(identity_root.join("identity.secret"))),
+            Arc::new(SystemSecretGenerator),
+        );
+        service.selection_data_root = Some(data_root);
+        service.selection_token = selection_token;
+        service.selection_required = true;
+        service
+    }
+
+    /// Build custody for one account partition under an explicit channel data root.
+    ///
+    /// The partition name is derived only from the public account reference. Secret
+    /// material remains in that partition's file store.
+    pub fn for_account_data_root(
+        channel: AppChannel,
+        data_root: PathBuf,
+        account_ref: &AccountRef,
+    ) -> Self {
+        let directory_name = hex::encode(Sha256::digest(account_ref.as_str().as_bytes()));
+        let identity_root = data_root
+            .join("identity")
+            .join("accounts")
+            .join(directory_name);
+        Self::new(
+            channel,
+            CustodyPaths::for_data_root(identity_root.clone()),
+            Arc::new(FileSecretStore::new(identity_root.join("identity.secret"))),
+            Arc::new(SystemSecretGenerator),
+        )
+    }
+
+    pub(crate) fn for_identity_root(channel: AppChannel, identity_root: PathBuf) -> Self {
         Self::new(
             channel,
             CustodyPaths::for_data_root(identity_root.clone()),
@@ -183,6 +229,9 @@ impl IdentityService {
             store: Arc::new(FileSecretStore::new(identity_root.join("identity.secret"))),
             generator: Arc::new(SystemSecretGenerator),
             proof_crash_boundary: crash_boundary,
+            selection_data_root: None,
+            selection_token: None,
+            selection_required: false,
         }
     }
 
@@ -247,6 +296,7 @@ impl IdentityService {
     }
 
     pub fn create(&self, receipt_ref: ReceiptRef) -> Result<CustodyResult, CustodyError> {
+        self.require_account_selection_available_for_mutation()?;
         let _mutation_guard = IdentityMutationGuard::acquire(&self.locator)?;
         self.require_no_reset_locked()?;
         if let Some(result) = self.ready_idempotent_result_locked(&receipt_ref, None)? {
@@ -280,6 +330,7 @@ impl IdentityService {
     /// silent pick the screen promised not to make, so an empty store is a
     /// refusal here rather than a new key.
     pub fn adopt_custodied(&self, receipt_ref: ReceiptRef) -> Result<CustodyResult, CustodyError> {
+        self.require_account_selection_available_for_mutation()?;
         let _mutation_guard = IdentityMutationGuard::acquire(&self.locator)?;
         self.require_no_reset_locked()?;
         if let Some(result) = self.ready_idempotent_result_locked(&receipt_ref, None)? {
@@ -433,6 +484,7 @@ impl IdentityService {
         request_ref: ReceiptRef,
         expires_at: u64,
     ) -> Result<DurableIdentityActionDecision, CustodyError> {
+        self.require_current_account_selection()?;
         let now = unix_time_now();
         let _mutation_guard = IdentityMutationGuard::acquire(&self.locator)?;
         self.require_no_reset_locked()?;
@@ -475,6 +527,7 @@ impl IdentityService {
         &self,
         descriptor: DurableIdentityActionDescriptor,
     ) -> Result<DurableIdentityActionDecision, CustodyError> {
+        self.require_current_account_selection()?;
         let now = unix_time_now();
         descriptor
             .validate(now)
@@ -573,6 +626,7 @@ impl IdentityService {
         &self,
         expected: &HeldIdentityAction,
     ) -> Result<IdentityAccountRecord, CustodyError> {
+        self.require_current_account_selection()?;
         let _mutation_guard = IdentityMutationGuard::acquire(&self.locator)?;
         let now = unix_time_now();
         let mut account = self.require_matching_activation_locked(expected, now)?;
@@ -604,6 +658,7 @@ impl IdentityService {
         &self,
         expected: &HeldIdentityAction,
     ) -> Result<IdentityActionAuthorization, CustodyError> {
+        self.require_active_account_selection()?;
         let _mutation_guard = IdentityMutationGuard::acquire(&self.locator)?;
         let now = unix_time_now();
         self.require_no_reset_locked()?;
@@ -1066,6 +1121,7 @@ impl IdentityService {
         if request.purpose != crate::SigningPurpose::NostrEvent {
             return Err(CustodyError::SigningFailed);
         }
+        self.require_active_account_selection()?;
         let _mutation_guard = IdentityMutationGuard::acquire(&self.locator)?;
         self.require_no_reset_locked()?;
         let resolved = self.resolve_locked();
@@ -1091,19 +1147,23 @@ impl IdentityService {
             .try_as_json()
             .map_err(|_| CustodyError::SigningFailed)?;
 
-        Ok(SigningResult {
+        let result = SigningResult {
             request_ref: request.request_ref.clone(),
             identity,
             event_id: event.id.to_hex(),
             signature: event.sig.to_string(),
             signed_event_json,
-        })
+        };
+        drop(_mutation_guard);
+        self.record_successful_signer_use()?;
+        Ok(result)
     }
 
     pub fn sign_owner_attestation(
         &self,
         request: &OwnerAttestationRequest,
     ) -> Result<OwnerAttestationResult, CustodyError> {
+        self.require_active_account_selection()?;
         let _mutation_guard = IdentityMutationGuard::acquire(&self.locator)?;
         self.require_no_reset_locked()?;
         let resolved = self.resolve_locked();
@@ -1168,12 +1228,15 @@ impl IdentityService {
             request.conditions.clone(),
             signature,
         ];
-        Ok(OwnerAttestationResult {
+        let result = OwnerAttestationResult {
             request_ref: request.request_ref.clone(),
             identity,
             agent_public_key_hex: request.agent_public_key_hex.clone(),
             auth_tag,
-        })
+        };
+        drop(_mutation_guard);
+        self.record_successful_signer_use()?;
+        Ok(result)
     }
 
     pub fn sign_nip44_encrypted_to_self(
@@ -1183,6 +1246,7 @@ impl IdentityService {
         if request.purpose != crate::SigningPurpose::Nip44EncryptedSelfEvent {
             return Err(CustodyError::SigningFailed);
         }
+        self.require_active_account_selection()?;
         let _mutation_guard = IdentityMutationGuard::acquire(&self.locator)?;
         self.require_no_reset_locked()?;
         let resolved = self.resolve_locked();
@@ -1216,13 +1280,16 @@ impl IdentityService {
         let signed_event_json = event
             .try_as_json()
             .map_err(|_| CustodyError::SigningFailed)?;
-        Ok(SigningResult {
+        let result = SigningResult {
             request_ref: request.request_ref.clone(),
             identity,
             event_id: event.id.to_hex(),
             signature: event.sig.to_string(),
             signed_event_json,
-        })
+        };
+        drop(_mutation_guard);
+        self.record_successful_signer_use()?;
+        Ok(result)
     }
 
     pub fn decrypt_nip44_from(
@@ -1233,6 +1300,7 @@ impl IdentityService {
         if ciphertext.len() > 1_048_576 {
             return Err(CustodyError::SigningFailed);
         }
+        self.require_active_account_selection()?;
         let _mutation_guard = IdentityMutationGuard::acquire(&self.locator)?;
         self.require_no_reset_locked()?;
         let resolved = self.resolve_locked();
@@ -1263,6 +1331,7 @@ impl IdentityService {
         &self,
         request: &PrivateMessageRequest,
     ) -> Result<Vec<GiftWrappedPrivateMessage>, CustodyError> {
+        self.require_active_account_selection()?;
         let _mutation_guard = IdentityMutationGuard::acquire(&self.locator)?;
         self.require_no_reset_locked()?;
         let resolved = self.resolve_locked();
@@ -1300,6 +1369,8 @@ impl IdentityService {
                     .map_err(|_| CustodyError::SigningFailed)?,
             });
         }
+        drop(_mutation_guard);
+        self.record_successful_signer_use()?;
         Ok(wrapped)
     }
 
@@ -1310,6 +1381,7 @@ impl IdentityService {
         if gift_wrap_event_json.len() > 1_048_576 {
             return Err(CustodyError::SigningFailed);
         }
+        self.require_active_account_selection()?;
         let _mutation_guard = IdentityMutationGuard::acquire(&self.locator)?;
         self.require_no_reset_locked()?;
         let resolved = self.resolve_locked();
@@ -1430,6 +1502,16 @@ impl IdentityService {
                 .map_err(|_| CustodyError::ResetFailed)?
             || self
                 .paths
+                .backup_value_path
+                .try_exists()
+                .map_err(|_| CustodyError::ResetFailed)?
+            || self
+                .paths
+                .backup_nudge_dismissed_path
+                .try_exists()
+                .map_err(|_| CustodyError::ResetFailed)?
+            || self
+                .paths
                 .account_path
                 .try_exists()
                 .map_err(|_| CustodyError::ResetFailed)?
@@ -1463,7 +1545,86 @@ impl IdentityService {
             store,
             generator,
             proof_crash_boundary: None,
+            selection_data_root: None,
+            selection_token: None,
+            selection_required: false,
         }
+    }
+
+    fn require_current_account_selection(&self) -> Result<(), CustodyError> {
+        if !self.selection_required {
+            return Ok(());
+        }
+        let data_root = self
+            .selection_data_root
+            .as_ref()
+            .ok_or(CustodyError::StaleAccountSelection)?;
+        let token = self
+            .selection_token
+            .as_ref()
+            .ok_or(CustodyError::StaleAccountSelection)?;
+        AccountRegistryService::for_channel_data_root(self.channel, data_root.clone())
+            .validate_selection(token)
+            .map_err(|_| CustodyError::StaleAccountSelection)
+    }
+
+    fn require_account_selection_available_for_mutation(&self) -> Result<(), CustodyError> {
+        if !self.selection_required || self.selection_token.is_some() {
+            return Ok(());
+        }
+        let data_root = self
+            .selection_data_root
+            .as_ref()
+            .ok_or(CustodyError::StaleAccountSelection)?;
+        if AccountRegistryService::for_channel_data_root(self.channel, data_root.clone())
+            .has_durable_registry()
+        {
+            return Err(CustodyError::StaleAccountSelection);
+        }
+        Ok(())
+    }
+
+    fn require_active_account_selection(&self) -> Result<(), CustodyError> {
+        if !self.selection_required {
+            return Ok(());
+        }
+        let data_root = self
+            .selection_data_root
+            .as_ref()
+            .ok_or(CustodyError::StaleAccountSelection)?;
+        let token = self
+            .selection_token
+            .as_ref()
+            .ok_or(CustodyError::StaleAccountSelection)?;
+        AccountRegistryService::for_channel_data_root(self.channel, data_root.clone())
+            .validate_signing_selection(token)
+            .map_err(|_| CustodyError::StaleAccountSelection)
+    }
+
+    pub fn validate_account_selection(&self) -> Result<(), CustodyError> {
+        self.require_active_account_selection()
+    }
+
+    pub fn validate_current_account_selection(&self) -> Result<(), CustodyError> {
+        self.require_current_account_selection()
+    }
+
+    fn record_successful_signer_use(&self) -> Result<(), CustodyError> {
+        if !self.selection_required {
+            return Ok(());
+        }
+        let data_root = self
+            .selection_data_root
+            .as_ref()
+            .ok_or(CustodyError::StaleAccountSelection)?;
+        let token = self
+            .selection_token
+            .as_ref()
+            .ok_or(CustodyError::StaleAccountSelection)?;
+        AccountRegistryService::for_channel_data_root(self.channel, data_root.clone())
+            .record_signer_use(token, unix_time_now())
+            .map(|_| ())
+            .map_err(|_| CustodyError::StaleAccountSelection)
     }
 
     fn require_no_reset_locked(&self) -> Result<(), CustodyError> {
@@ -1996,6 +2157,10 @@ impl IdentityService {
             .map_err(|_| CustodyState::ResetFailed)?;
         remove_public_document(&self.paths.recovery_protection_path)
             .map_err(|_| CustodyState::ResetFailed)?;
+        remove_public_document(&self.paths.backup_value_path)
+            .map_err(|_| CustodyState::ResetFailed)?;
+        remove_public_document(&self.paths.backup_nudge_dismissed_path)
+            .map_err(|_| CustodyState::ResetFailed)?;
         remove_public_document(&self.paths.account_path).map_err(|_| CustodyState::ResetFailed)?;
         remove_public_document(&self.paths.held_identity_action_path)
             .map_err(|_| CustodyState::ResetFailed)?;
@@ -2514,6 +2679,8 @@ pub enum CustodyError {
     ActivationInProgress,
     #[error("the durable identity action intent is stale")]
     StaleActivationIntent,
+    #[error("the selected account changed; retry with the active account")]
+    StaleAccountSelection,
     #[error("the durable identity action intent was already consumed")]
     ActivationIntentConsumed,
     #[error(transparent)]
@@ -4618,7 +4785,15 @@ mod tests {
                     .expect("valid recovery password"),
             )
             .expect("protect identity recovery");
+        service
+            .record_backup_value_accrued(BackupValueKind::ChannelPost)
+            .expect("record backup value");
+        service
+            .dismiss_backup_nudge()
+            .expect("dismiss backup nudge");
         assert!(service.paths.recovery_protection_path.exists());
+        assert!(service.paths.backup_value_path.exists());
+        assert!(service.paths.backup_nudge_dismissed_path.exists());
         let wrong_identity = SecretKeyMaterial::from_bytes(Zeroizing::new([2; 32]))
             .expect("valid different secret")
             .public_identity()
@@ -4654,6 +4829,8 @@ mod tests {
             CustodyState::RelaunchRequired
         );
         assert!(!service.paths.recovery_protection_path.exists());
+        assert!(!service.paths.backup_value_path.exists());
+        assert!(!service.paths.backup_nudge_dismissed_path.exists());
         assert_eq!(
             service
                 .acknowledge_relaunch()

@@ -820,6 +820,7 @@ fn main() {
         language_tools::init(cx);
         notifications::init(app_state.client.clone(), app_state.user_store.clone(), cx);
         git_ui::init(cx);
+        account_ui::init(cx);
         onboarding::init(cx);
         settings_ui::init(cx);
         json_schema_store::init(cx);
