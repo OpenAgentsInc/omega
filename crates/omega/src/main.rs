@@ -23,7 +23,7 @@ use crashes::InitCrashHandler;
 use db::kvp::{GlobalKeyValueStore, KeyValueStore};
 use extension::ExtensionHostProxy;
 use fs::{Fs, RealFs};
-use futures::{StreamExt, channel::oneshot};
+use futures::{FutureExt, StreamExt, channel::oneshot};
 use git::GitHostingProviderRegistry;
 use git_ui::clone::clone_and_open;
 use gpui::{
@@ -992,11 +992,22 @@ fn main() {
             }),
         };
 
+        let (first_window_tx, first_window_rx) = oneshot::channel::<()>();
+        let first_window_tx = Rc::new(RefCell::new(Some(first_window_tx)));
+        let first_window_subscription = cx.observe_new::<MultiWorkspace>(move |_, _, _| {
+            if let Some(tx) = first_window_tx.borrow_mut().take() {
+                tx.send(()).ok();
+            }
+        });
+
+        let restore_finished = cx.background_spawn(restore_task).shared();
+
         cx.spawn({
             let db = workspace::WorkspaceDb::global(cx);
             let fs = app_state.fs.clone();
+            let restore_finished = restore_finished.clone();
             async move |_cx| {
-                restore_task.await;
+                restore_finished.await;
                 db.garbage_collect_workspaces(
                     fs.as_ref(),
                     &current_session_id,
@@ -1012,7 +1023,16 @@ fn main() {
         component_preview::init(app_state.clone(), cx);
 
         cx.spawn(async move |cx| {
+            let _first_window_subscription = first_window_subscription;
+            let first_window_placed = first_window_rx.shared();
             while let Some(urls) = open_rx.next().await {
+                // On a macOS cold launch, `omega <path>` arrives here after startup
+                // already began restoring the session. Wait for a restored window
+                // before matching so this request does not spawn a redundant window.
+                futures::select_biased! {
+                    _ = restore_finished.clone() => {}
+                    _ = first_window_placed.clone() => {}
+                }
                 cx.update(|cx| {
                     if let Some(request) = OpenRequest::parse(urls, cx).log_err() {
                         handle_open_request(request, app_state.clone(), cx);
