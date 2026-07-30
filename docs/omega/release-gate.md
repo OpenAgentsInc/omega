@@ -35,3 +35,101 @@ Regenerate: build the candidate with `script/bundle-omega-rc`, then run `script/
 | `distribution` | owner-assisted-pending | — | When the public download page exists, confirm page identity, version, platform, artifact digest, signature/notarization state, release notes, and the installed binary agree with this receipt's candidate binding. |
 | `independent-review` | owner-assisted-pending | — | Have a reviewer who did not produce the candidate repeat the held-out journey and record the verdict against this receipt's candidate digest. |
 
+
+---
+
+# Owner review ledger and agent handoff — 2026-07-30
+
+The owner is reviewing rc28 live. This section is the complete, self-contained
+ledger of every owner feedback item and in-flight process so a fresh agent can
+pick up any lane cold if the current agents die (session limits / crashes).
+Coordinating-session state as of 2026-07-30 ~13:45 CDT. Verify current truth
+against `gh issue list -R OpenAgentsInc/omega` and `git log origin/main`
+before acting — several items below may have landed since this was written.
+
+## Standing owner laws (apply to ALL current and future UI work)
+
+1. **Drawn implies working.** A visible control has an admitted action, a
+   loaded dependency, and a visible result. Enabled-looking no-ops are
+   defects. (Origin: single-experience plan §2.5; enforced by the growing
+   crawl gate below.)
+2. **No exposition in the UI, anywhere.** Never render explanatory sentences
+   about internal mechanics ("The executor is free to change until…",
+   "route selected when sent"). Controls are labeled, not narrated. One-word
+   tooltips acceptable. (Owner, 2026-07-30, verbatim: "never include that
+   level of exposition in the UI ANYWHERE and if there's anything like it,
+   remove it.")
+3. **Statuses are colors/icons, never words.** Sidebar lifecycle states show
+   a colored dot/icon only (running/waiting/failed/completed/cancelled);
+   a one-word tooltip is the maximum copy.
+4. **Escape closes every modal/auxiliary window** (settings, pair phone, any
+   future modal). The crawl gate asserts this per surface.
+5. **No screen between `+` and a blinking cursor.** New thread lands in a
+   focused composer; executor choice is the composer dropdown (omega#165).
+6. **Version copy is short.** Footer: `v0.2.0` (stable), `v0.2.0 bNN`
+   (preview; NN = the RC counter, one increment per build of a version),
+   `v0.2.0 dev` (dev). Full sha/channel live only in the release record,
+   About, and copy-system-specs.
+
+## Feedback item ledger
+
+State legend: LANDED (verified on main) · IN-FLIGHT (an agent holds it — verify
+before duplicating) · OPEN (nobody holds it).
+
+### Review batch 1 (agent: outline/thinking/version)
+| # | Item | Spec | State |
+|---|---|---|---|
+| 1 | Delete the thread Outline right sidebar entirely | Remove `crates/agent_ui/src/thread_outline.rs` + all wiring (rail/menu/keymap/actions/scenes). Deletion discipline: keymap strips in the same commit (`keymaps_name_no_deleted_action` guards the startup panic), extend `REMOVED_FILES` + `FORBIDDEN_KEYMAP_NAMESPACES`, delta entry (owner direction 2026-07-30), delete its ~14 visual baselines (most of the documented pre-existing red scenes are outline scenes — the known-red list shrinks), update proof docs. Scope: the AGENT THREAD outline pane only — NOT the workbench Plan surface, NOT the buffer outline. | IN-FLIGHT |
+| 2 | `Open Thread as Markdown` emits trailing empty `<thinking></thinking>` | Exporter must never emit empty thinking blocks. Regression test: exported markdown for a thread with empty/absent thinking contains no empty `<thinking>` tags. | IN-FLIGHT |
+| 3 | Footer version too long (`v0.2.0+preview.<fullsha>`) | Implement law 6 above. Reuse the RC counter in `script/bundle-omega-rc` as the build number (rc28 → `b28`); stamp via env→compiled constant like `ZED_COMMIT_SHA`. Update `.github/ISSUE_TEMPLATE/10_bug_report.yml` + `11_crash_report.yml` version-field hints, `docs/src/alpha-feedback.md`, and the release-gate `version-truth` OCR row (keep it binding version+build to the release record). | IN-FLIGHT |
+
+### Review batch 2 (agent: exposition/status sweep)
+| # | Item | Spec | State |
+|---|---|---|---|
+| 4 | Record the no-exposition law | Product-contract/delta note, mechanically citable. | IN-FLIGHT |
+| 5 | Kill the executor-dropdown tooltip essay | "This conversation will run on Omega Agent. The executor is free to change…" — delete, no replacement copy. | IN-FLIGHT |
+| 6 | Remove the routing-mode dropdown entirely | The second composer dropdown ("Run this new conversation on" → Automatic/Omega). Routing stays automatic (OMEGA-DELTA-0179 behavior unchanged); only the selector + its state/actions die. Amend 0184's row inventory if pinned. | IN-FLIGHT |
+| 7 | Remove "Omega router ready · route selected when sent" | Plus sweep the composer/empty states for any similar "ready — X when Y" status sentences. | IN-FLIGHT |
+| 8 | Sidebar statuses → color/icon only | Law 3. Amend the 0181 check if it pins label text. Keep existing color semantics. | IN-FLIGHT |
+| 9 | Remove "Owner unverified — legacy thread" sidebar annotation | The legacy-ambiguity fact stays internal (from omega#152 versioned owner metadata); no sidebar copy. | IN-FLIGHT |
+| 10 | Settings window closes on Escape | `crates/settings_ui`; test if harness allows. | IN-FLIGHT |
+
+### Review batch 3 (agent: channels/backup/pair-phone)
+| # | Item | Spec | State |
+|---|---|---|---|
+| 11 | Pair phone closes on Escape | Same modal law; the sidebar-footer pairing surface. | IN-FLIGHT |
+| 12 | Dedicated `omega-alpha-feedback` NIP-29 channel | Currently "Alpha feedback" wrongly adapts the `openagents-public` group. Create the new channel on the owned relay (check NIP-29 creation semantics; relay runbook: openagents repo `docs/ops/2026-07-24-owned-nostr-relay-deploy.md`; unmanaged groups may auto-create on first signed message — verify LIVE with a test identity before hardcoding). Hardcode it in `crates/agent_ui/fixtures/tester-channel-registry.v1.json` + the bundled pinned fallback (omega#156 work). KEEP `openagents-public` listed — sidebar shows BOTH. Amend the 0182 check. If creation truly needs an admin key, do everything else and record the one-step admin action in NEEDS_OWNER. | IN-FLIGHT |
+| 13 | Channel rows styled like the thread list | No blue link text; same color/weight/size/hover as recent threads. | IN-FLIGHT |
+| 14 | Delete the stray "Live" text under Tester channels | | IN-FLIGHT |
+| 15 | Backup-key notice click opens a real surface | The omega#164 nudge (OMEGA-DELTA-0183) is an enabled no-op. Minimal honest v1: modal revealing the nsec via the identity custody path, copy button, ONE short warning line, Dismiss. Regression test the click produces a surface. | IN-FLIGHT |
+
+### ZEDREMOVE (its own agent, two phases)
+| # | Item | Spec | State |
+|---|---|---|---|
+| 16a | Visible-Zed purge (phase 1) | The `/zed/` settings path shown in UI → Omega-branded path with startup MIGRATION (copy old→new, prefer new, never destroy old silently; delta records semantics). Sweep visible strings via `script/omega-brand-gate.json` classifications; clean zed-industries links + "Zed version" fields in the issue templates; add `OMEGA_`-prefixed env vars taking precedence over `ZED_*` (bundle scripts set both). | IN-FLIGHT |
+| 16b | Crate rename (phase 2) | `crates/zed` → `crates/omega`, `zed_actions` → `omega_actions`, `script/zed-local` renamed. CRITICAL: action namespaces in keymaps must keep resolving (verify whether palette display is already `omega::` via the macro before assuming rename is internal-only); every omega_deltas source-literal check naming `crates/zed/...` paths updates in the same commit; Cargo workspace members/default-members/dependents/scripts/CI/docs all move together. COORDINATE: do not push while the #162 epic is mid-batch — land after #162 closes, or file the deferral. | IN-FLIGHT (phase 2 gated on #162) |
+
+### QA process (its own agent)
+| # | Item | Spec | State |
+|---|---|---|---|
+| 17 | Control-crawl gate | Hermetic-runner harness: enumerate every interactive element per scene via the semantic tree; activate each (pointer AND keyboard); FAIL on zero observable consequence unless a registered exemption names a reason. Menu entries individually activated (catches the display-only `ContextMenuEntry.action` trap structurally). Escape-dismissal asserted for every modal opened. Checked-in crawl registry; new surface without registration fails a delta check. Wire: full crawl into `script/omega-release-gate` as a new automated row; core-scene crawl into `cargo test`. Copy lint for multi-sentence tooltips/status strings (law 2) with an allowlist file. Process doc `docs/src/qa-process.md` (cadence, ownership, severity ladder from `docs/src/alpha-feedback.md`, the same-commit registration law). Mutation proof: a deliberate no-op control must fail the crawl. First run against main: fix or file everything it catches. | IN-FLIGHT |
+
+## Landed earlier in this review cycle (context, do not redo)
+- omega#165 composer executor dropdown replacing the full-screen chooser (`10637aa422`); title flush-left (`8371806042`); manifest version 0.2.0 (`a954971025`); workbench revision-spam reconcile (`7dcc27e1e8`); Sarah voice barge-in drop fix (`bc968334ac`); adapter-death honest failure (`fd9f21ff48`); #166 keyboard trap + #168 Sarah no-op (`04e629a77f`); #167/#169/#170 (`04df6e7674`); #161 mode-split removal (`5823eb686b`); #164 background identity (`562319fb4f`); rc28 notarized + published + on openagents.com/download (Cloud Run `00303-44b`).
+- omega#171 (accessibility tree): CLOSED not-planned by owner; revisit before beta launch.
+
+## Open issues map (verify live before acting)
+- #151–#156, #160 — close on the owner-assisted rows above + owner verdict.
+- #162 — crate-deletion epic, batches landing (kept pending explicit owner cut: file_finder, go_to_line/cursor position, language_tools LSP logs, acp_tools).
+- #163 — proof inversion; dispatch AFTER #162 closes (gate-as-tripwire, refusal-log-empty proof rows, per-surface drawn-implies-working delta checks, docs de-moding).
+- #172 — composer menu anchor; needs an installed repro via the landed `omega.composer.executor-menu.popup` position probe; queue behind #162 (build contention).
+- Server residuals (openagents repo): relay auto-admission of fresh background identities for tester rooms; Sarah gateway accepting first-seen identities (recorded on omega#164).
+- NEEDS_OWNER: Reduce Motion toggle for the strict reduced-motion cell; a throwaway hosted identity / scratch GEMINI_API_KEY for paid-path cells (recorded in workspace NEEDS_OWNER.md, `7e0c296aef`).
+- B-roll capture for Episode 263 (coordinating-session task): shot list in the openagents session ledger; capture from the installed rc28+ build to `~/Desktop/Sarah/263/broll/`.
+
+## Handoff protocol for a fresh agent
+1. `gh issue list -R OpenAgentsInc/omega --state open` + `git log origin/main -20` — establish what actually landed; IN-FLIGHT items above may be done or half-done. Search main's history for the item's keywords before starting.
+2. Claim by commenting on omega#160 (the review thread) with the item numbers you take.
+3. Fresh worktree off origin/main per item batch; never touch the primary checkout at `~/work/omega` (frequently dirty with another lane's live work); rebase over concurrent pushes and re-run `cargo test -p omega_deltas` + touched-crate tests after every rebase.
+4. Delta discipline: entry + check + test change together; never weaken a check to pass. Keymap edits ride the same commit as any action/crate deletion.
+5. Land = pushed to origin/main + issue comment (+ close where acceptance is met) + worktree removed.
