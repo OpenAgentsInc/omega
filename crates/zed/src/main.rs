@@ -709,7 +709,6 @@ fn main() {
         AppState::set_global(app_state.clone(), cx);
 
         auto_update::init(client.clone(), cx);
-        auto_update_ui::init(cx);
         reliability::init(client.clone(), app_state.workspace_store.clone(), cx);
         extension_host::init(
             extension_host_proxy.clone(),
@@ -771,16 +770,12 @@ fn main() {
         );
         zed::watch_user_agents_md(app_state.fs.clone(), cx);
 
-        repl::init(app_state.fs.clone(), cx);
         cx.observe_new(zed::disconnected_overlay::DisconnectedOverlay::register)
             .detach();
 
         load_embedded_fonts(cx);
 
         editor::init(cx);
-        image_viewer::init(cx);
-        repl::notebook::init(cx);
-        diagnostics::init(cx);
 
         audio::init(cx);
         workspace::init(app_state.clone(), cx);
@@ -798,11 +793,8 @@ fn main() {
 
         go_to_line::init(cx);
         file_finder::init(cx);
-        tab_switcher::init(cx);
-        outline::init(cx);
         project_symbols::init(cx);
         project_panel::init(cx);
-        outline_panel::init(cx);
         snippets_ui::init(cx);
         channel::init(&app_state.client.clone(), app_state.user_store.clone(), cx);
         search::init(cx);
@@ -829,9 +821,6 @@ fn main() {
         notifications::init(app_state.client.clone(), app_state.user_store.clone(), cx);
         git_ui::init(cx);
         feedback::init(cx);
-        markdown_preview::init(cx);
-        csv_preview::init(cx);
-        svg_preview::init(cx);
         onboarding::init(cx);
         settings_ui::init(cx);
         keymap_editor::init(cx);

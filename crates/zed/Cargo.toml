@@ -27,8 +27,6 @@ test-support = [
     "project/test-support",
     "editor/test-support",
     "terminal_view/test-support",
-    "image_viewer/test-support",
-    "repl/test-support",
     "title_bar/test-support",
 ]
 visual-tests = [
@@ -45,7 +43,6 @@ visual-tests = [
     "project/test-support",
     "editor/test-support",
     "terminal_view/test-support",
-    "image_viewer/test-support",
     "clock/test-support",
     "acp_thread/test-support",
     "action_log/test-support",
@@ -82,7 +79,6 @@ assets.workspace = true
 async-channel.workspace = true
 audio.workspace = true
 auto_update.workspace = true
-auto_update_ui.workspace = true
 breadcrumbs.workspace = true
 chrono.workspace = true
 channel.workspace = true
@@ -98,7 +94,6 @@ copilot.workspace = true
 copilot_chat.workspace = true
 copilot_ui.workspace = true
 crashes.workspace = true
-csv_preview.workspace = true
 db.workspace = true
 debug_adapter_extension.workspace = true
 agent_computer_ui.workspace = true
@@ -109,7 +104,6 @@ omega_workbench_harness = { workspace = true, features = ["gpui-support"], optio
 omega_workbench_state = { workspace = true, optional = true }
 omega_workdir.workspace = true
 omega_zero_base.workspace = true
-diagnostics.workspace = true
 editor.workspace = true
 encoding_selector.workspace = true
 env_logger.workspace = true
@@ -141,7 +135,6 @@ gpui_tokio.workspace = true
 rayon.workspace = true
 
 http_client.workspace = true
-image_viewer.workspace = true
 input_latency_ui.workspace = true
 inspector_ui.workspace = true
 install_cli.workspace = true
@@ -160,7 +153,6 @@ line_ending_selector.workspace = true
 log.workspace = true
 lsp_locations.workspace = true
 markdown.workspace = true
-markdown_preview.workspace = true
 menu.workspace = true
 migrator.workspace = true
 miniprofiler_ui.workspace = true
@@ -168,8 +160,6 @@ mimalloc = { version = "0.1", optional = true }
 node_runtime.workspace = true
 notifications.workspace = true
 onboarding.workspace = true
-outline.workspace = true
-outline_panel.workspace = true
 parking_lot.workspace = true
 paths.workspace = true
 picker.workspace = true
@@ -182,7 +172,6 @@ proto.workspace = true
 release_channel.workspace = true
 remote_connection.workspace = true
 remote.workspace = true
-repl.workspace = true
 reqwest.workspace = true
 reqwest_client.workspace = true
 rope.workspace = true
@@ -198,9 +187,7 @@ shellexpand.workspace = true
 smol.workspace = true
 snippet_provider.workspace = true
 snippets_ui.workspace = true
-svg_preview.workspace = true
 sysinfo.workspace = true
-tab_switcher.workspace = true
 task.workspace = true
 telemetry.workspace = true
 telemetry_events.workspace = true
@@ -267,7 +254,6 @@ remote_server.workspace = true
 remote_connection = { workspace = true, features = ["test-support"] }
 editor = { workspace = true, features = ["test-support"] }
 gpui = { workspace = true, features = ["input-latency-histogram", "test-support"] }
-image_viewer = { workspace = true, features = ["test-support"] }
 itertools.workspace = true
 language = { workspace = true, features = ["test-support"] }
 pretty_assertions.workspace = true
@@ -280,7 +266,6 @@ image.workspace = true
 agent_ui = { workspace = true, features = ["test-support"] }
 onboarding = { workspace = true, features = ["test-support"] }
 search = { workspace = true, features = ["test-support"] }
-repl = { workspace = true, features = ["test-support"] }
 
 
 

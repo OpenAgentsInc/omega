@@ -51,7 +51,6 @@ use migrate::{MigrationBanner, MigrationEvent, MigrationNotification, MigrationT
 use migrator::migrate_keymap;
 use onboarding::{await_identity_ready, multibuffer_hint::MultibufferHint};
 pub use open_listener::*;
-use outline_panel::OutlinePanel;
 use paths::{
     local_debug_file_relative_path, local_settings_file_relative_path,
     local_tasks_file_relative_path,
@@ -1274,14 +1273,6 @@ fn register_actions(
         )
         .register_action(
             |workspace: &mut Workspace,
-             _: &outline_panel::ToggleFocus,
-             window: &mut Window,
-             cx: &mut Context<Workspace>| {
-                workspace.toggle_panel_focus::<OutlinePanel>(window, cx);
-            },
-        )
-        .register_action(
-            |workspace: &mut Workspace,
              _: &terminal_panel::ToggleFocus,
              window: &mut Window,
              cx: &mut Context<Workspace>| {
@@ -1474,8 +1465,6 @@ fn initialize_pane(
             let quick_action_bar =
                 cx.new(|cx| QuickActionBar::new(buffer_search_bar, workspace, cx));
             toolbar.add_item(quick_action_bar, window, cx);
-            let diagnostic_editor_controls = cx.new(|_| diagnostics::ToolbarControls::new());
-            toolbar.add_item(diagnostic_editor_controls, window, cx);
             let project_search_bar = cx.new(|_| ProjectSearchBar::new());
             toolbar.add_item(project_search_bar, window, cx);
             let lsp_log_item = cx.new(|_| LspLogToolbarItemView::new());
@@ -1509,8 +1498,6 @@ fn initialize_pane(
             toolbar.add_item(agent_diff_toolbar, window, cx);
             let basedpyright_banner = cx.new(|cx| BasedPyrightBanner::new(workspace, cx));
             toolbar.add_item(basedpyright_banner, window, cx);
-            let image_view_toolbar = cx.new(|_| image_viewer::ImageViewToolbarControls::new());
-            toolbar.add_item(image_view_toolbar, window, cx);
         })
     });
 }
@@ -5585,15 +5572,17 @@ mod tests {
 
         // From the Atom keymap
         use workspace::ActivatePreviousPane;
-        // From the JetBrains keymap
-        use diagnostics::Deploy;
+        // From the JetBrains keymap. This used to be `diagnostics::Deploy`
+        // on `cmd-6`/`alt-6`; the diagnostics panel was deleted (omega#162),
+        // so the overlay is proven through the file finder toggle instead.
+        use file_finder::Toggle as FileFinderToggle;
 
         window
             .update(cx, |_, _, cx| {
                 workspace.update(cx, |workspace, cx| {
                     workspace.register_action(|_, _: &ActionA, _window, _cx| {});
                     workspace.register_action(|_, _: &ActionB, _window, _cx| {});
-                    workspace.register_action(|_, _: &Deploy, _window, _cx| {});
+                    workspace.register_action(|_, _: &FileFinderToggle, _window, _cx| {});
                     cx.notify();
                 });
             })
@@ -5672,7 +5661,7 @@ mod tests {
 
         cx.background_executor.run_until_parked();
 
-        assert_key_bindings_for(window.into(), cx, vec![("6", &Deploy)], line!());
+        assert_key_bindings_for(window.into(), cx, vec![("e", &FileFinderToggle)], line!());
     }
 
     #[gpui::test]
@@ -5746,11 +5735,9 @@ mod tests {
                 "command_palette",
                 "context_server",
                 "copilot",
-                "csv",
                 "debug_panel",
                 "debugger",
                 "dev",
-                "diagnostics",
                 "editor",
                 "encoding_selector",
                 "feedback",
@@ -5764,7 +5751,6 @@ mod tests {
                 "go_to_line",
                 "highlights_tree_view",
                 "icon_theme_selector",
-                "image_viewer",
                 "inline_assistant",
                 "journal",
                 "keymap_editor",
@@ -5782,7 +5768,6 @@ mod tests {
                 "omega_predict_onboarding",
                 "onboarding",
                 "outline",
-                "outline_panel",
                 "pane",
                 "panel",
                 "picker",
@@ -5791,7 +5776,6 @@ mod tests {
                 "project_symbols",
                 "projects",
                 "remote_debug",
-                "repl",
                 "search",
                 "settings_editor",
                 "settings_profile_selector",
@@ -5800,7 +5784,6 @@ mod tests {
                 "stash_picker",
                 "svg",
                 "syntax_tree_view",
-                "tab_switcher",
                 "task",
                 "terminal",
                 "terminal_panel",
@@ -5999,7 +5982,6 @@ mod tests {
             editor::init(cx);
             git_ui::init(cx);
             project_panel::init(cx);
-            outline_panel::init(cx);
             terminal_view::init(cx);
             copilot_chat::init(
                 app_state.fs.clone(),
@@ -6007,7 +5989,6 @@ mod tests {
                 copilot_chat::CopilotChatConfiguration::default(),
                 cx,
             );
-            image_viewer::init(cx);
             language_model::init(cx);
             client::RefreshLlmTokenListener::register(
                 app_state.client.clone(),
@@ -6032,8 +6013,6 @@ mod tests {
                 cx,
             );
 
-            repl::init(app_state.fs.clone(), cx);
-            repl::notebook::init(cx);
             project::debugger::breakpoint_store::BreakpointStore::init(
                 &app_state.client.clone().into(),
             );

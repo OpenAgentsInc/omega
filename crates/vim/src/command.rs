@@ -1662,8 +1662,6 @@ fn generate_commands(_: &App) -> Vec<VimCommand> {
         VimCommand::new(("bf", "irst"), workspace::ActivateItem(0)),
         VimCommand::new(("br", "ewind"), workspace::ActivateItem(0)),
         VimCommand::new(("bl", "ast"), workspace::ActivateLastItem),
-        VimCommand::str(("buffers", ""), "tab_switcher::ToggleAll"),
-        VimCommand::str(("ls", ""), "tab_switcher::ToggleAll"),
         VimCommand::new(("new", ""), workspace::NewFileSplitHorizontal),
         VimCommand::new(("vne", "w"), workspace::NewFileSplitVertical),
         VimCommand::new(("tabn", "ext"), workspace::ActivateNextItem::default()).count(),
@@ -1700,7 +1698,6 @@ fn generate_commands(_: &App) -> Vec<VimCommand> {
         .bang(workspace::CloseInactiveTabsAndPanes {
             save_intent: Some(SaveIntent::Skip),
         }),
-        VimCommand::str(("cl", "ist"), "diagnostics::Deploy"),
         VimCommand::new(("cc", ""), editor::actions::Hover),
         VimCommand::new(("ll", ""), editor::actions::Hover),
         VimCommand::new(("cn", "ext"), editor::actions::GoToDiagnostic::default())

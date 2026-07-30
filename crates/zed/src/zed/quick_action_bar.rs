@@ -1,6 +1,3 @@
-mod preview;
-mod repl_menu;
-
 use agent_settings::AgentSettings;
 use editor::actions::{
     AddSelectionAbove, AddSelectionBelow, CodeActionSource, DuplicateLineDown, GoToDiagnostic,
@@ -39,7 +36,7 @@ pub struct QuickActionBar {
     show: bool,
     toggle_selections_handle: PopoverMenuHandle<ContextMenu>,
     toggle_settings_handle: PopoverMenuHandle<ContextMenu>,
-    workspace: WeakEntity<Workspace>,
+    _workspace: WeakEntity<Workspace>,
 }
 
 impl QuickActionBar {
@@ -70,7 +67,7 @@ impl QuickActionBar {
             show: true,
             toggle_selections_handle: Default::default(),
             toggle_settings_handle: Default::default(),
-            workspace: workspace.weak_handle(),
+            _workspace: workspace.weak_handle(),
         };
         this.apply_settings(cx);
         cx.observe_global::<SettingsStore>(|this, cx| this.apply_settings(cx))
@@ -675,8 +672,6 @@ impl Render for QuickActionBar {
         h_flex()
             .id("quick action bar")
             .gap(DynamicSpacing::Base01.rems(cx))
-            .children(self.render_repl_menu(cx))
-            .children(self.render_preview_button(cx))
             .children(search_button)
             .when(
                 AgentSettings::get_global(cx).enabled(cx) && AgentSettings::get_global(cx).button,

@@ -22,8 +22,8 @@
       "ctrl-^": ["workspace::MoveItemToPane", { "destination": 5 }],
       "ctrl-&": ["workspace::MoveItemToPane", { "destination": 6 }],
       "ctrl-*": ["workspace::MoveItemToPane", { "destination": 7 }],
-      "ctrl-(": ["workspace::MoveItemToPane", { "destination": 8 }],
-    },
+      "ctrl-(": ["workspace::MoveItemToPane", { "destination": 8 }]
+    }
   },
   {
     "context": "Editor",
@@ -51,26 +51,24 @@
       "cmd-k cmd-u": "editor::ConvertToUpperCase",
       "cmd-k cmd-l": "editor::ConvertToLowerCase",
       "cmd-shift-j": "editor::JoinLines",
-      "shift-alt-m": "markdown::OpenPreviewToTheSide",
       "ctrl-backspace": ["editor::DeleteToPreviousWordStart", { "ignore_newlines": false, "ignore_brackets": false }],
       "ctrl-delete": ["editor::DeleteToNextWordEnd", { "ignore_newlines": false, "ignore_brackets": false }],
       "ctrl-right": "editor::MoveToNextSubwordEnd",
       "ctrl-left": "editor::MoveToPreviousSubwordStart",
       "ctrl-shift-right": "editor::SelectToNextSubwordEnd",
-      "ctrl-shift-left": "editor::SelectToPreviousSubwordStart",
-    },
+      "ctrl-shift-left": "editor::SelectToPreviousSubwordStart"
+    }
   },
   {
     "context": "Editor && mode == full",
     "bindings": {
-      "cmd-r": "outline::Toggle",
-    },
+    }
   },
   {
     "context": "Editor && !agent_diff",
     "bindings": {
-      "cmd-k cmd-z": "git::Restore",
-    },
+      "cmd-k cmd-z": "git::Restore"
+    }
   },
   {
     "context": "Pane",
@@ -85,8 +83,8 @@
       "cmd-6": ["pane::ActivateItem", 5],
       "cmd-7": ["pane::ActivateItem", 6],
       "cmd-8": ["pane::ActivateItem", 7],
-      "cmd-9": "pane::ActivateLastItem",
-    },
+      "cmd-9": "pane::ActivateLastItem"
+    }
   },
   {
     "context": "Workspace",
@@ -95,7 +93,7 @@
       "cmd-t": "file_finder::Toggle",
       "shift-cmd-r": "project_symbols::Toggle",
       // Currently busted: https://github.com/zed-industries/feedback/issues/898
-      "ctrl-0": "project_panel::ToggleFocus",
-    },
-  },
+      "ctrl-0": "project_panel::ToggleFocus"
+    }
+  }
 ]

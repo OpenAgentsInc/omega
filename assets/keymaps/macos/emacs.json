@@ -6,8 +6,8 @@
   {
     "context": "!GitPanel",
     "bindings": {
-      "ctrl-g": "menu::Cancel",
-    },
+      "ctrl-g": "menu::Cancel"
+    }
   },
   {
     // Workaround to avoid falling back to default bindings.
@@ -16,7 +16,7 @@
     "context": "Editor",
     "bindings": {
       "ctrl-g": null, // currently activates `go_to_line::Toggle` when there is nothing to cancel
-    },
+    }
   },
   {
     "context": "Editor",
@@ -80,7 +80,7 @@
       "ctrl-r": "buffer_search::Deploy", // isearch-backward
       "alt-^": "editor::JoinLines", // join-line
       "alt-q": "editor::Rewrap", // fill-paragraph
-    },
+    }
   },
   {
     "context": "Editor && selection_mode", // region selection
@@ -116,22 +116,22 @@
       "alt->": "editor::SelectToEnd",
       "ctrl-home": "editor::SelectToBeginning",
       "ctrl-end": "editor::SelectToEnd",
-      "ctrl-g": "editor::Cancel",
-    },
+      "ctrl-g": "editor::Cancel"
+    }
   },
   {
     "context": "Editor && (showing_code_actions || showing_completions)",
     "bindings": {
       "ctrl-p": "editor::ContextMenuPrevious",
-      "ctrl-n": "editor::ContextMenuNext",
-    },
+      "ctrl-n": "editor::ContextMenuNext"
+    }
   },
   {
     "context": "Editor && showing_signature_help && !showing_completions",
     "bindings": {
       "ctrl-p": "editor::SignatureHelpPrevious",
-      "ctrl-n": "editor::SignatureHelpNext",
-    },
+      "ctrl-n": "editor::SignatureHelpNext"
+    }
   },
   // Example setting for using emacs-style tab
   // (i.e. indent the current line / selection or perform symbol completion depending on context)
@@ -145,8 +145,6 @@
     "context": "Workspace",
     "bindings": {
       "alt-x": "command_palette::Toggle", // execute-extended-command
-      "ctrl-x b": "tab_switcher::Toggle", // switch-to-buffer
-      "ctrl-x ctrl-b": "tab_switcher::Toggle", // list-buffers
       // "ctrl-x ctrl-c": "workspace::CloseWindow" // in case you only want to exit the current Omega instance
       "ctrl-x ctrl-c": "omega::Quit", // save-buffers-kill-terminal
       "ctrl-x 5 0": "workspace::CloseWindow", // delete-frame
@@ -162,7 +160,7 @@
       "ctrl-x ctrl-s": "workspace::Save", // save-buffer
       "ctrl-x ctrl-w": "workspace::SaveAs", // write-file
       "ctrl-x s": "workspace::SaveAll", // save-some-buffers
-    },
+    }
   },
   {
     // Workaround to enable using native emacs from the Omega terminal.
@@ -183,21 +181,21 @@
       "ctrl-x ctrl-s": null, // save-buffer
       "ctrl-x ctrl-w": null, // write-file
       "ctrl-x s": null, // save-some-buffers
-    },
+    }
   },
   {
     "context": "BufferSearchBar > Editor",
     "bindings": {
       "ctrl-s": "search::SelectNextMatch",
       "ctrl-r": "search::SelectPreviousMatch",
-      "ctrl-g": "buffer_search::Dismiss",
-    },
+      "ctrl-g": "buffer_search::Dismiss"
+    }
   },
   {
     "context": "Pane",
     "bindings": {
       "ctrl-alt-left": "pane::GoBack",
-      "ctrl-alt-right": "pane::GoForward",
-    },
-  },
+      "ctrl-alt-right": "pane::GoForward"
+    }
+  }
 ]

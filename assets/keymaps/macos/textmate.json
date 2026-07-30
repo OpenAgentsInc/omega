@@ -1,8 +1,8 @@
 [
   {
     "bindings": {
-      "cmd-alt-tab": "project_panel::ToggleFocus",
-    },
+      "cmd-alt-tab": "project_panel::ToggleFocus"
+    }
   },
   {
     "context": "Editor && mode == full",
@@ -13,9 +13,8 @@
       "cmd-j": "editor::ScrollCursorCenter",
       "cmd-enter": "editor::NewlineBelow",
       "cmd-alt-enter": "editor::NewlineAbove",
-      "cmd-shift-l": "editor::SelectLine",
-      "cmd-shift-t": "outline::Toggle",
-    },
+      "cmd-shift-l": "editor::SelectLine"
+    }
   },
   {
     "context": "Editor",
@@ -40,30 +39,30 @@
       "ctrl-u": "editor::ConvertToUpperCase",
       "ctrl-shift-u": "editor::ConvertToLowerCase",
       "ctrl-alt-u": "editor::ConvertToUpperCamelCase",
-      "ctrl-_": "editor::ConvertToSnakeCase",
-    },
+      "ctrl-_": "editor::ConvertToSnakeCase"
+    }
   },
   {
     "context": "BufferSearchBar",
     "bindings": {
       "ctrl-s": "search::SelectNextMatch",
-      "ctrl-shift-s": "search::SelectPreviousMatch",
-    },
+      "ctrl-shift-s": "search::SelectPreviousMatch"
+    }
   },
   {
     "context": "Workspace",
     "bindings": {
       "cmd-alt-ctrl-d": "workspace::ToggleLeftDock",
       "cmd-t": "file_finder::Toggle",
-      "cmd-shift-t": "project_symbols::Toggle",
-    },
+      "cmd-shift-t": "project_symbols::Toggle"
+    }
   },
   {
     "context": "Pane",
     "bindings": {
       "alt-cmd-r": "search::ToggleRegex",
-      "ctrl-tab": "project_panel::ToggleFocus",
-    },
+      "ctrl-tab": "project_panel::ToggleFocus"
+    }
   },
   {
     "context": "ProjectPanel",
@@ -74,11 +73,11 @@
       "return": "project_panel::Rename",
       "cmd-c": "project_panel::Copy",
       "cmd-v": "project_panel::Paste",
-      "cmd-alt-c": "project_panel::CopyPath",
-    },
+      "cmd-alt-c": "project_panel::CopyPath"
+    }
   },
   {
     "context": "Dock",
-    "bindings": {},
-  },
+    "bindings": {}
+  }
 ]

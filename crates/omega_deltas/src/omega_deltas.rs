@@ -1290,12 +1290,22 @@ pub const REMOVED_FILES: &[&str] = &[
     "crates/edit_prediction_ui/Cargo.toml",
     "crates/tasks_ui/Cargo.toml",
     "crates/zeta_prompt/Cargo.toml",
+    "crates/auto_update_ui/Cargo.toml",
     "crates/call/Cargo.toml",
+    "crates/csv_preview/Cargo.toml",
     "crates/dev_container/Cargo.toml",
+    "crates/diagnostics/Cargo.toml",
+    "crates/image_viewer/Cargo.toml",
     "crates/livekit_api/Cargo.toml",
     "crates/livekit_client/Cargo.toml",
+    "crates/markdown_preview/Cargo.toml",
+    "crates/outline/Cargo.toml",
+    "crates/outline_panel/Cargo.toml",
     "crates/recent_projects/Cargo.toml",
+    "crates/repl/Cargo.toml",
     "crates/sidebar/Cargo.toml",
+    "crates/svg_preview/Cargo.toml",
+    "crates/tab_switcher/Cargo.toml",
 ];
 
 /// Strings that must not appear anywhere under `crates/`.
@@ -1331,6 +1341,29 @@ pub const FORBIDDEN_KEYMAP_NAMESPACES: &[(&str, &str)] = &[
     // these two exact actions were declared by the deleted `sidebar` crate.
     ("OMEGA-DELTA-0186", "agents_sidebar::NewThreadInGroup"),
     ("OMEGA-DELTA-0186", "agents_sidebar::ToggleThreadHistory"),
+    // Preview / diagnostics / outline / repl / tab-switcher batch (omega#162).
+    ("OMEGA-DELTA-0186", "diagnostics::"),
+    ("OMEGA-DELTA-0186", "outline_panel::"),
+    // `outline::Toggle` is still declared in `zed_actions` (breadcrumbs /
+    // buffer_search reference the type), but the buffer-outline picker crate
+    // that handled it is gone — a binding is a dead key. Quoted so the
+    // contains-check does not also hit the kept
+    // `omega_thread_outline::ToggleOutline` binding (substring trap).
+    ("OMEGA-DELTA-0186", "\"outline::Toggle\""),
+    ("OMEGA-DELTA-0186", "tab_switcher::"),
+    ("OMEGA-DELTA-0186", "image_viewer::"),
+    ("OMEGA-DELTA-0186", "repl::"),
+    ("OMEGA-DELTA-0186", "csv_preview::"),
+    ("OMEGA-DELTA-0186", "svg_preview::"),
+    ("OMEGA-DELTA-0186", "markdown_preview::"),
+    // Preview open actions live in `zed_actions` under short namespaces shared
+    // with kept markdown rendering (`markdown::Copy`), so forbid the exact
+    // dead open actions rather than the whole `markdown::` prefix. SVG and
+    // notebook actions only served the deleted preview/repl crates.
+    ("OMEGA-DELTA-0186", "markdown::OpenPreview"),
+    ("OMEGA-DELTA-0186", "markdown::OpenPreviewToTheSide"),
+    ("OMEGA-DELTA-0186", "svg::"),
+    ("OMEGA-DELTA-0186", "notebook::"),
 ];
 
 /// OMEGA-DELTA-0186. The editor crates omega#162 deleted from the build graph.
@@ -1342,21 +1375,31 @@ pub const FORBIDDEN_KEYMAP_NAMESPACES: &[(&str, &str)] = &[
 /// lands; an entry is never removed without an owner decision to revive the
 /// surface.
 pub const REMOVED_EDITOR_CRATES: &[&str] = &[
+    "auto_update_ui",
+    "call",
     "codestral",
+    "csv_preview",
     "dap_adapters",
     "debugger_tools",
     "debugger_ui",
+    "dev_container",
+    "diagnostics",
     "edit_prediction",
     "edit_prediction_cli",
     "edit_prediction_context",
     "edit_prediction_metrics",
     "edit_prediction_ui",
-    "call",
-    "dev_container",
+    "image_viewer",
     "livekit_api",
     "livekit_client",
+    "markdown_preview",
+    "outline",
+    "outline_panel",
     "recent_projects",
+    "repl",
     "sidebar",
+    "svg_preview",
+    "tab_switcher",
     "tasks_ui",
     "zeta_prompt",
 ];
@@ -3130,7 +3173,6 @@ pub const EPISODE_FORK_COPIES_PREFIXES: &[&str] =
 pub const ZERO_BASE_HIDDEN_KEYMAP_NAMESPACES: &[&str] = &[
     "git::",
     "git_panel::",
-    "outline_panel::",
     "pane::",
     "project_panel::",
     "search::",

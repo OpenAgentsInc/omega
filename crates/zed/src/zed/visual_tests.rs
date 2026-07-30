@@ -58,9 +58,7 @@ pub fn init_visual_test(cx: &mut VisualTestAppContext) -> Arc<AppState> {
         command_palette::init(cx);
         editor::init(cx);
         project_panel::init(cx);
-        outline_panel::init(cx);
         terminal_view::init(cx);
-        image_viewer::init(cx);
         search::init(cx);
         lsp_locations::init(cx);
         cx.set_global(workspace::PaneSearchBarCallbacks {

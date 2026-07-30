@@ -18,7 +18,6 @@ members = [
     "crates/audio",
     "crates/auto_update",
     "crates/auto_update_helper",
-    "crates/auto_update_ui",
     "crates/aws_http_client",
     "crates/bedrock",
     "crates/benchmarks",
@@ -41,12 +40,10 @@ members = [
     "crates/copilot_chat",
     "crates/crashes",
     "crates/credentials_provider",
-    "crates/csv_preview",
     "crates/dap",
     "crates/db",
     "crates/debug_adapter_extension",
     "crates/deepseek",
-    "crates/diagnostics",
     "crates/docs_preprocessor",
     "crates/edit_prediction_types",
     "crates/editor",
@@ -93,7 +90,6 @@ members = [
     "crates/http_client_tls",
     "crates/http_proxy",
     "crates/icons",
-    "crates/image_viewer",
     "crates/input_latency_ui",
     "crates/inspector_ui",
     "crates/install_cli",
@@ -117,7 +113,6 @@ members = [
     "crates/lsp",
     "crates/lsp_locations",
     "crates/markdown",
-    "crates/markdown_preview",
     "crates/mermaid_render",
     "crates/media",
     "crates/menu",
@@ -160,8 +155,6 @@ members = [
     "crates/open_ai",
     "crates/open_path_prompt",
     "crates/open_router",
-    "crates/outline",
-    "crates/outline_panel",
     "crates/panel",
     "crates/path",
     "crates/paths",
@@ -182,7 +175,6 @@ members = [
     "crates/remote",
     "crates/remote_connection",
     "crates/remote_server",
-    "crates/repl",
     "crates/reqwest_client",
     "crates/rope",
     "crates/rpc",
@@ -205,10 +197,8 @@ members = [
     "crates/sqlez_macros",
     "crates/streaming_diff",
     "crates/sum_tree",
-    "crates/svg_preview",
     "crates/system_specs",
     "crates/syntax_theme",
-    "crates/tab_switcher",
     "crates/task",
     "crates/telemetry",
     "crates/telemetry_events",
@@ -294,7 +284,6 @@ askpass = { path = "crates/askpass" }
 assets = { path = "crates/assets" }
 audio = { path = "crates/audio" }
 auto_update = { path = "crates/auto_update" }
-auto_update_ui = { path = "crates/auto_update_ui" }
 aws_http_client = { path = "crates/aws_http_client" }
 bedrock = { path = "crates/bedrock" }
 breadcrumbs = { path = "crates/breadcrumbs" }
@@ -320,13 +309,11 @@ copilot_ui = { path = "crates/copilot_ui" }
 crashes = { path = "crates/crashes" }
 credentials_provider = { path = "crates/credentials_provider" }
 crossbeam = "0.8.4"
-csv_preview = { path = "crates/csv_preview"}
 dap = { path = "crates/dap" }
 db = { path = "crates/db" }
 debug_adapter_extension = { path = "crates/debug_adapter_extension" }
 deepseek = { path = "crates/deepseek" }
 derive_refineable = { path = "crates/refineable/derive_refineable" }
-diagnostics = { path = "crates/diagnostics" }
 dialoguer = { version = "0.12", default-features = false }
 editor = { path = "crates/editor" }
 encoding_selector = { path = "crates/encoding_selector" }
@@ -366,7 +353,6 @@ http_client = { path = "crates/http_client" }
 http_client_tls = { path = "crates/http_client_tls" }
 http_proxy = { path = "crates/http_proxy" }
 icons = { path = "crates/icons" }
-image_viewer = { path = "crates/image_viewer" }
 edit_prediction_types = { path = "crates/edit_prediction_types" }
 input_latency_ui = { path = "crates/input_latency_ui" }
 inspector_ui = { path = "crates/inspector_ui" }
@@ -391,9 +377,7 @@ lmstudio = { path = "crates/lmstudio" }
 lsp = { path = "crates/lsp" }
 lsp_locations = { path = "crates/lsp_locations" }
 markdown = { path = "crates/markdown" }
-markdown_preview = { path = "crates/markdown_preview" }
 mermaid_render = { path = "crates/mermaid_render" }
-svg_preview = { path = "crates/svg_preview" }
 media = { path = "crates/media" }
 menu = { path = "crates/menu" }
 mime = "0.3.17"
@@ -435,8 +419,6 @@ opencode = { path = "crates/opencode" }
 open_ai = { path = "crates/open_ai" }
 open_path_prompt = { path = "crates/open_path_prompt" }
 open_router = { path = "crates/open_router", features = ["schemars"] }
-outline = { path = "crates/outline" }
-outline_panel = { path = "crates/outline_panel" }
 panel = { path = "crates/panel" }
 paths = { path = "crates/paths" }
 path = { path = "crates/path" }
@@ -456,7 +438,6 @@ release_channel = { path = "crates/release_channel" }
 remote = { path = "crates/remote" }
 remote_connection = { path = "crates/remote_connection" }
 remote_server = { path = "crates/remote_server" }
-repl = { path = "crates/repl" }
 reqwest_client = { path = "crates/reqwest_client" }
 rodio = { git = "https://github.com/RustAudio/rodio", rev = "e50e726ddd0292f6ef9de0dda6b90af4ed1fb66a", features = ["wav", "playback", "wav_output", "recording"] }
 rope = { path = "crates/rope" }
@@ -480,7 +461,6 @@ streaming_diff = { path = "crates/streaming_diff" }
 sum_tree = { path = "crates/sum_tree" }
 system_specs = { path = "crates/system_specs" }
 syntax_theme = { path = "crates/syntax_theme" }
-tab_switcher = { path = "crates/tab_switcher" }
 task = { path = "crates/task" }
 telemetry = { path = "crates/telemetry" }
 telemetry_events = { path = "crates/telemetry_events" }
@@ -1068,7 +1048,6 @@ command_palette = { codegen-units = 1 }
 command_palette_hooks = { codegen-units = 1 }
 feature_flags = { codegen-units = 1 }
 file_icons = { codegen-units = 1 }
-image_viewer = { codegen-units = 1 }
 install_cli = { codegen-units = 1 }
 journal = { codegen-units = 1 }
 json_schema_store = { codegen-units = 1 }
@@ -1077,7 +1056,6 @@ lmstudio = { codegen-units = 1 }
 menu = { codegen-units = 1 }
 notifications = { codegen-units = 1 }
 ollama = { codegen-units = 1 }
-outline = { codegen-units = 1 }
 paths = { codegen-units = 1 }
 prettier = { codegen-units = 1 }
 project_symbols = { codegen-units = 1 }
