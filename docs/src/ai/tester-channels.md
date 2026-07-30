@@ -6,11 +6,16 @@ description: Use Omega's public alpha feedback channel safely, understand its id
 # Tester Channels
 
 Omega's sidebar opens **Tester channels** on a clean profile. The bundled alpha
-currently contains one destination, **Alpha feedback · #alpha-feedback**, on the
-NIP-29 group `openagents-public`, served by `wss://relay.openagents.com`.
+lists two destinations on `wss://relay.openagents.com`:
+
+- **Alpha feedback · #alpha-feedback** on the dedicated NIP-29 group
+  `omega-alpha-feedback`
+- **Agent Chat · #agent-chat** on the public group `openagents-public`
+
 The versioned registry is bundled and pins the relay identity, but it is not an
 independently signed registry. Omega accepts the HTTPS deployment manifest only
-when every operational field still matches that bundled contract.
+when every operational field of `openagents-public` still matches that bundled
+contract; `omega-alpha-feedback` is always client-hardcoded.
 
 ## Public Identity and Privacy {#public-identity-and-privacy}
 

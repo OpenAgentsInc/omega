@@ -273,26 +273,37 @@ impl ChannelRegistry {
 
     pub fn from_compatible_tester_manifest(json: &str) -> Result<Self> {
         let bundled = bundled_tester_registry()?;
-        let bundled_channel = bundled
+        // The live deployment publishes one Agent Chat manifest. Other
+        // destinations in the bundle are client-hardcoded and are never derived
+        // from that remote. Match the remote group against the bundle, validate
+        // operational fields, then return the full multi-destination bundle.
+        let remote = Self::from_agent_chat_manifest(json)?;
+        let remote_channel = remote
             .channels
             .first()
-            .ok_or_else(|| anyhow!("the bundled tester registry did not describe a channel"))?;
-        let mut adapted = Self::from_agent_chat_manifest(json)?;
-        adapted.content_revision = bundled.content_revision.clone();
-        let channel = adapted
-            .channels
-            .first_mut()
             .ok_or_else(|| anyhow!("the tester manifest did not describe a channel"))?;
-        // The deployment manifest has no product-facing destination fields.
-        // Only those two fields come from the bundle; every operational field
-        // must still agree before remote bytes can replace the launch contract.
-        channel.channel_id = bundled_channel.channel_id.clone();
-        channel.display_name = bundled_channel.display_name.clone();
+        let public = bundled
+            .channels
+            .iter()
+            .find(|channel| channel.group_id == remote_channel.group_id)
+            .ok_or_else(|| {
+                anyhow!("the bundled tester registry has no channel for the live deployment group")
+            })?;
         ensure!(
-            adapted == bundled,
-            "the tester manifest does not match the bundled alpha feedback contract"
+            remote_channel.relay_url == public.relay_url
+                && remote_channel.group_id == public.group_id
+                && remote_channel.accepted_kinds == public.accepted_kinds
+                && remote_channel.group_state_kinds == public.group_state_kinds
+                && remote_channel.moderation_kinds == public.moderation_kinds
+                && remote_channel.expected_relay_self_pubkey == public.expected_relay_self_pubkey
+                && remote_channel.relay_trust == public.relay_trust
+                && remote_channel.limits == public.limits
+                && remote_channel.profile_version == public.profile_version
+                && remote_channel.rich_content_profile_version
+                    == public.rich_content_profile_version,
+            "the tester manifest does not match the bundled public channel contract"
         );
-        Ok(adapted)
+        Ok(bundled)
     }
 }
 
@@ -644,32 +655,54 @@ mod tests {
     }
 
     #[test]
-    fn bundled_tester_registry_pins_the_exact_alpha_feedback_destination() {
+    fn bundled_tester_registry_pins_alpha_feedback_and_openagents_public() {
         let registry = bundled_tester_registry().expect("bundled tester registry");
-        assert_eq!(registry.channels.len(), 1);
+        assert_eq!(registry.channels.len(), 2);
         assert_eq!(
             registry.content_revision.as_deref(),
-            Some("omega.alpha-feedback.1")
+            Some("omega.alpha-feedback.2")
         );
-        let channel = &registry.channels[0];
-        assert_eq!(channel.channel_id, "alpha-feedback");
-        assert_eq!(channel.display_name, "Alpha feedback");
-        assert_eq!(channel.relay_url, "wss://relay.openagents.com");
-        assert_eq!(channel.group_id, "openagents-public");
-        assert_eq!(channel.relay_trust, RelayTrust::Pinned);
+        let alpha = &registry.channels[0];
+        assert_eq!(alpha.channel_id, "alpha-feedback");
+        assert_eq!(alpha.display_name, "Alpha feedback");
+        assert_eq!(alpha.relay_url, "wss://relay.openagents.com");
+        assert_eq!(alpha.group_id, "omega-alpha-feedback");
+        assert_eq!(alpha.relay_trust, RelayTrust::Pinned);
         assert_eq!(
-            channel.expected_relay_self_pubkey.as_deref(),
+            alpha.expected_relay_self_pubkey.as_deref(),
+            Some("e841147f262799821bbaa2930fcca982a575458f0e043e064a26ed8aba2046ed")
+        );
+        let public = &registry.channels[1];
+        assert_eq!(public.channel_id, "agent-chat");
+        assert_eq!(public.display_name, "Agent Chat");
+        assert_eq!(public.group_id, "openagents-public");
+        assert_eq!(public.relay_trust, RelayTrust::Pinned);
+        assert_eq!(
+            public.expected_relay_self_pubkey.as_deref(),
             Some("e841147f262799821bbaa2930fcca982a575458f0e043e064a26ed8aba2046ed")
         );
     }
 
     #[test]
-    fn compatible_manifest_adapts_to_the_bundled_tester_identity() {
+    fn compatible_manifest_keeps_the_full_bundled_tester_registry() {
         let registry = ChannelRegistry::from_compatible_tester_manifest(COMPATIBLE_TESTER_MANIFEST)
             .expect("compatible tester manifest");
         assert_eq!(
             registry,
             bundled_tester_registry().expect("bundled tester registry")
+        );
+        assert_eq!(registry.channels.len(), 2);
+        assert!(
+            registry
+                .channels
+                .iter()
+                .any(|channel| channel.group_id == "omega-alpha-feedback")
+        );
+        assert!(
+            registry
+                .channels
+                .iter()
+                .any(|channel| channel.group_id == "openagents-public")
         );
     }
 

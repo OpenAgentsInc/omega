@@ -8081,12 +8081,21 @@ startup recheck — survives unchanged behind that dropdown.
   destination has a composer and report action. The legacy activity preview
   and relay subscription remain readers; signing and publication live in a
   separate sealed writer boundary.
-- **A clean launch retains one exact destination.** Omega decodes a bundled,
-  versioned registry before it attempts the published-manifest refresh. The
-  bundle pins the canonical WSS relay, `openagents-public` group, relay-self
-  public key, accepted and moderation kinds, and all size limits. A remote
-  manifest may refresh it only when every operational field matches. Drift or
-  an unavailable HTTPS endpoint leaves the bundled destination visible.
+- **Amended 2026-07-30 (rc28 review batch 3).** A clean launch lists **two**
+  destinations from the bundled registry (`contentRevision`
+  `omega.alpha-feedback.2`): **Alpha feedback · #alpha-feedback** on the
+  dedicated NIP-29 group `omega-alpha-feedback`, and **Agent Chat ·
+  #agent-chat** on `openagents-public`. Both pin the same canonical WSS relay
+  and relay-self public key. The remote Agent Chat manifest may only clear the
+  refresh path when every operational field of the `openagents-public` channel
+  still matches; `omega-alpha-feedback` is never derived from remote bytes.
+  Channel rows in the sidebar use the same `ListItem` styling as recent
+  threads (no blue link text); lifecycle words such as "Live" are not drawn
+  under the channel name.
+- **A clean launch retains the exact bundled destinations.** Omega decodes a
+  bundled, versioned registry before it attempts the published-manifest
+  refresh. Drift or an unavailable HTTPS endpoint leaves the bundled
+  destinations visible.
 - **The identity service owns the secret.** The writer provisions and signs
   through `omega_identity::IdentityService`; agent UI receives only the signed
   event. It verifies the event and its exact `h` binding before publication.
@@ -8150,15 +8159,21 @@ startup recheck — survives unchanged behind that dropdown.
   resolves to "do not nudge". The sidebar polls the durable status on a slow
   cadence instead of holding channels into the three subsystems where value
   accrues, and the poll dies with the panel.
+- **Amended 2026-07-30 (rc28 review batch 3 / omega#164 follow-up).** The
+  nudge is no longer an enabled no-op. Clicking it opens a minimal honest
+  backup surface: the bech32 `nsec` via
+  `IdentityService::export_nsec_for_backup` (zeroized on drop; not a generic
+  renderer `get_nsec` RPC), a Copy control, one short warning line, and
+  Dismiss. Escape closes the surface (standing law 4), as it does the pair-
+  phone surface beside it. The durable dismiss control on the row still
+  persists and keeps the nudge gone across restarts.
 - **Enforced by:** `the_backup_nudge_arms_on_value_and_stays_quiet` in
-  `crates/omega_deltas`, and
-  `backup_nudge_arms_on_first_value_and_stays_dismissed` in
-  `crates/omega_identity`.
-- **What this does not cover.** The backup *surface* itself: the recovery
-  artifact export lives in the identity section, which zero base does not
-  reach, so the nudge currently informs without a one-click route to the
-  export control. Making that control reachable in the product surface is its
-  own bounded decision, not a reason to grow this row into a screen.
+  `crates/omega_deltas`,
+  `backup_nudge_arms_on_first_value_and_stays_dismissed` and
+  `export_nsec_for_backup_returns_a_bech32_nsec_for_a_ready_identity` in
+  `crates/omega_identity`, and
+  `test_backup_nudge_click_opens_a_surface_and_escape_closes_pair_phone` in
+  `agent_ui`.
 
 ### OMEGA-DELTA-0184 — The composer executor dropdown is the new-conversation front door
 

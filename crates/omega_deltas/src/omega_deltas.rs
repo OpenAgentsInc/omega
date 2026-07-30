@@ -17303,7 +17303,8 @@ mod tests {
             registry.contains("pub fn bundled_tester_registry")
                 && registry
                     .contains("include_str!(\"../fixtures/tester-channel-registry.v1.json\")")
-                && registry.contains("adapted == bundled"),
+                && registry.contains("from_compatible_tester_manifest")
+                && registry.contains("openagents-public"),
             "OMEGA-DELTA-0130: the bundled tester registry or its fail-closed \
              compatibility comparison is gone."
         );
@@ -20370,10 +20371,11 @@ mod tests {
         for required in [
             "public_channels.destinations()",
             "\"omega-public-channel-{}\"",
-            ".tab_index(index as isize)",
+            "ListItem::new",
             ".on_key_down(cx.listener",
             ".aria_label(accessible_label)",
             "select_public_channel",
+            "LabelSize::Small",
         ] {
             assert!(
                 destinations.contains(required),
@@ -22613,8 +22615,8 @@ mod tests {
         for required in [
             "pub fn bundled_tester_registry",
             "from_compatible_tester_manifest",
-            "adapted == bundled",
-            "omega.alpha-feedback.1",
+            "omega-alpha-feedback",
+            "openagents-public",
             "include_str!(\"../fixtures/tester-channel-registry.v1.json\")",
         ] {
             assert!(
@@ -22626,10 +22628,13 @@ mod tests {
         let fixture = read_repository_file(PUBLIC_CHANNEL_REGISTRY_FIXTURE_PATH);
         for pinned in [
             "openagents.public_channel_registry.v1",
-            "omega.alpha-feedback.1",
+            "omega.alpha-feedback.2",
             "alpha-feedback",
             "Alpha feedback",
+            "agent-chat",
+            "Agent Chat",
             "wss://relay.openagents.com",
+            "omega-alpha-feedback",
             "openagents-public",
             "e841147f262799821bbaa2930fcca982a575458f0e043e064a26ed8aba2046ed",
             "1984",
@@ -22643,8 +22648,8 @@ mod tests {
         }
         assert_eq!(
             fixture.matches("\"channelId\"").count(),
-            1,
-            "OMEGA-DELTA-0182: the launch contract currently promises exactly one real tester destination"
+            2,
+            "OMEGA-DELTA-0182: the launch contract promises exactly two tester destinations"
         );
 
         let sidebar = read_repository_file(SIDEBAR_PATH);
@@ -22663,13 +22668,25 @@ mod tests {
         for required in [
             "bundled_tester_registry()",
             "from_compatible_tester_manifest",
-            "Using the bundled Alpha feedback destination; live details could not be refreshed.",
+            "Using the bundled tester channels; live details could not be refreshed.",
+            // Channel rows match thread-list styling (no blue Button link text).
+            "ListItem::new(ElementId::Name(",
+            "omega-public-channel-",
+            "LabelSize::Small",
         ] {
             assert!(
                 panel.contains(required),
                 "OMEGA-DELTA-0182: Agent Panel lost bundled-first behavior `{required}`"
             );
         }
+        // Stray lifecycle words under Tester channels are gone (item 14 / law 3).
+        let channel_destinations = function_body(&panel, "render_public_channel_destinations")
+            .expect("OMEGA-DELTA-0182: channel destination renderer is gone");
+        assert!(
+            !channel_destinations.contains("lifecycle.label()")
+                && !channel_destinations.contains("\"Live\""),
+            "OMEGA-DELTA-0182: tester channel rows still draw lifecycle words like Live"
+        );
 
         let publisher_source = read_repository_file(PUBLIC_CHANNEL_PUBLISH_PATH);
         let publisher = outside_the_tests(&publisher_source);
@@ -22787,6 +22804,10 @@ mod tests {
             nudge.contains("dismiss_identity_backup_nudge"),
             "OMEGA-DELTA-0183: the sidebar nudge lost its dismiss control."
         );
+        assert!(
+            nudge.contains("open_identity_backup_surface"),
+            "OMEGA-DELTA-0183: the sidebar nudge click no longer opens a surface."
+        );
         let dismiss = function_body(&panel, "dismiss_identity_backup_nudge")
             .expect("OMEGA-DELTA-0183: the dismiss handler is gone");
         assert!(
@@ -22799,6 +22820,29 @@ mod tests {
         assert!(
             poll.contains("backup_nudge_status()") && poll.contains("should_offer_backup()"),
             "OMEGA-DELTA-0183: the sidebar no longer reads the durable status."
+        );
+        let surface = function_body(&panel, "render_identity_backup_surface")
+            .expect("OMEGA-DELTA-0183: the backup surface renderer is gone");
+        for required in [
+            "identity-backup-surface",
+            "Copy",
+            "Dismiss",
+            "Anyone with this key controls your Omega identity.",
+        ] {
+            assert!(
+                surface.contains(required),
+                "OMEGA-DELTA-0183: backup surface lost `{required}`"
+            );
+        }
+        assert!(
+            panel.contains("export_nsec_for_backup")
+                && panel.contains("dismiss_auxiliary_surfaces"),
+            "OMEGA-DELTA-0183: backup export or Escape dismissal is gone"
+        );
+        let custody = read_repository_file(IDENTITY_CUSTODY_PATH);
+        assert!(
+            custody.contains("pub fn export_nsec_for_backup("),
+            "OMEGA-DELTA-0183: custody lost export_nsec_for_backup"
         );
 
         // The three value events, each recording through the custody seam.
