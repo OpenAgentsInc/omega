@@ -730,16 +730,28 @@ pub struct ConversationView {
     /// omega#117. Holding the task is what makes this a debounce: assigning a
     /// new one drops the old, and dropping a GPUI task cancels it.
     pending_executor_rebuild: Option<Task<()>>,
+    /// The physical executor session created after Omega accepts its first turn.
+    ///
+    /// Holding the task keeps session creation alive while the logical router
+    /// composer remains usable. Direct Agent conversations never use it.
+    deferred_omega_session: Option<Task<()>>,
+    /// A one-shot route constraint for the first physical session.
+    ///
+    /// This control exists only while a new Omega conversation is logically
+    /// ready and has no thread, so it cannot retarget an existing transcript.
+    omega_route_override: NewConversationRouteOverride,
+    /// The frozen decision shown while its physical executor session starts.
+    omega_route_summary: Option<SharedString>,
     /// Messages a person sent while the executor was still connecting.
     ///
     /// `OMEGA-DELTA-0170`. Enter always accepts: each press moves the
-    /// composer's text here, in order, and the pending turns are drawn in the
+    /// composer's typed content here, in order, and the pending turns are drawn in the
     /// chat with a spinner. The whole list is dispatched — exactly once, via
     /// [`ConversationView::dispatch_pending_connect_messages`] — the moment a
     /// session exists. It deliberately lives on this view rather than on
     /// `ServerState::Loading`, so a connection that terminally fails carries
     /// the text into `LoadError` instead of dropping it with the state.
-    pending_connect_messages: Vec<String>,
+    pending_connect_messages: Vec<PendingConnectMessage>,
     /// When settings change, use this to see if the theme has changed (which
     /// causes mermaid diagrams to re-render).
     last_theme_id: Option<String>,
@@ -1082,11 +1094,125 @@ enum ServerState {
     Connected(ConnectedServerState),
 }
 
+struct PendingConnectMessage {
+    text: String,
+    content: Vec<acp::ContentBlock>,
+}
+
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) enum ConversationPreparation {
     Loading,
+    RouterReady,
     Ready { session_id: String },
     SetupRequired { reason: SharedString },
+}
+
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+enum NewConversationRouteOverride {
+    #[default]
+    Automatic,
+    NativeLoop,
+    ExactExternal {
+        agent_id: String,
+        label: SharedString,
+    },
+}
+
+impl NewConversationRouteOverride {
+    fn label(&self) -> SharedString {
+        match self {
+            Self::Automatic => "Automatic".into(),
+            Self::NativeLoop => "Omega".into(),
+            Self::ExactExternal { label, .. } => label.clone(),
+        }
+    }
+
+    fn router_value(&self) -> omega_front_door::router::ExecutorOverride {
+        use omega_front_door::router::ExecutorOverride;
+
+        match self {
+            Self::Automatic => ExecutorOverride::Auto,
+            Self::NativeLoop => ExecutorOverride::Native,
+            Self::ExactExternal { agent_id, .. } => {
+                ExecutorOverride::ExactExternal(agent_id.clone())
+            }
+        }
+    }
+}
+
+pub(crate) fn visible_omega_route_decision(
+    decision: &omega_front_door::RouteDecision,
+) -> SharedString {
+    use omega_front_door::router::{ExecutorOverride, RouteFallback};
+
+    let route_override = decision
+        .inputs
+        .as_ref()
+        .map_or("not recorded".to_owned(), |inputs| {
+            match &inputs.executor_override {
+                ExecutorOverride::Auto => "automatic".to_owned(),
+                ExecutorOverride::Native => "Omega".to_owned(),
+                ExecutorOverride::ExactExternal(agent_id) => format!("exact {agent_id}"),
+            }
+        });
+    let fallback = match &decision.fallback {
+        Some(RouteFallback::NativeForGeneralReasoning) => "Omega for general reasoning",
+        Some(RouteFallback::NativeAfterExternalUnavailable) => {
+            "Omega after external executor became unavailable"
+        }
+        None => "none",
+    };
+    format!(
+        "Route: {} · override: {route_override} · fallback: {fallback}",
+        decision.summary()
+    )
+    .into()
+}
+
+fn omega_task_requirements(
+    initial_content: Option<&AgentInitialContent>,
+) -> omega_front_door::router::TaskRequirements {
+    match initial_content {
+        Some(AgentInitialContent::ContentBlock { blocks, .. }) => {
+            omega_task_requirements_for_blocks(blocks)
+        }
+        Some(AgentInitialContent::ThreadSummary { .. })
+        | Some(AgentInitialContent::FromExternalSource(_))
+        | None => omega_task_requirements_for_blocks(&[]),
+    }
+}
+
+fn omega_task_requirements_for_blocks(
+    blocks: &[acp::ContentBlock],
+) -> omega_front_door::router::TaskRequirements {
+    use omega_front_door::router::{TaskKind, TaskRequirements};
+
+    TaskRequirements::new(
+        if blocks.iter().any(|block| {
+            matches!(
+                block,
+                acp::ContentBlock::Resource(_) | acp::ContentBlock::ResourceLink(_)
+            )
+        }) {
+            TaskKind::RepositoryWork
+        } else {
+            TaskKind::GeneralReasoning
+        },
+    )
+}
+
+fn omega_initial_content_has_request(content: &AgentInitialContent) -> bool {
+    match content {
+        AgentInitialContent::ContentBlock { blocks, .. } => {
+            blocks.iter().any(|block| match block {
+                acp::ContentBlock::Text(text) => !text.text.trim().is_empty(),
+                _ => true,
+            })
+        }
+        AgentInitialContent::ThreadSummary { .. } | AgentInitialContent::FromExternalSource(_) => {
+            true
+        }
+    }
 }
 
 // current -> Entity
@@ -1309,6 +1435,9 @@ impl ConversationView {
             loading_composer: None,
             vim_mode_indicator,
             pending_executor_rebuild: None,
+            deferred_omega_session: None,
+            omega_route_override: NewConversationRouteOverride::Automatic,
+            omega_route_summary: None,
             pending_connect_messages: Vec::new(),
             last_theme_id: Some(cx.theme().id.clone()),
             draft_prompt_persist_task: None,
@@ -1545,17 +1674,141 @@ impl ConversationView {
     /// next Enter — behave exactly as they would in a connected thread. The
     /// owner, on the refusal this replaces: "never block user from hitting
     /// enter, if not connected just show a loading thing in the chat."
-    fn submit_while_connecting(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+    fn submit_while_connecting(&mut self, window: &mut Window, cx: &mut Context<Self>) -> bool {
         let loading_composer = self.loading_composer(window, cx);
         let text = loading_composer.read(cx).text(cx);
         if text.trim().is_empty() {
-            return;
+            return false;
         }
+        let content = vec![acp::ContentBlock::Text(acp::TextContent::new(text.clone()))];
         loading_composer.update(cx, |editor, cx| {
             editor.set_text("", window, cx);
         });
-        self.pending_connect_messages.push(text);
+        self.pending_connect_messages
+            .push(PendingConnectMessage { text, content });
         cx.notify();
+        true
+    }
+
+    fn submit_before_session(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if !self.submit_while_connecting(window, cx) {
+            return;
+        }
+        if matches!(
+            self.preparation_state(cx),
+            ConversationPreparation::RouterReady
+        ) {
+            self.start_deferred_omega_session(window, cx);
+        }
+    }
+
+    fn start_deferred_omega_session(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if self.deferred_omega_session.is_some() || self.root_session_id.is_some() {
+            return;
+        }
+        let Some(connected) = self.as_connected() else {
+            return;
+        };
+        if !connected.auth_state.is_ok() || connected.active_view().is_some() {
+            return;
+        }
+
+        let connection = connected.connection.clone();
+        let conversation = connected.conversation.clone();
+        let project = self.project.clone();
+        let work_dirs = self.desired_work_dirs.clone();
+        let task_requirements = self.pending_connect_messages.first().map_or_else(
+            || omega_task_requirements(None),
+            |message| omega_task_requirements_for_blocks(&message.content),
+        );
+        let Some(router) = connection
+            .clone()
+            .downcast::<crate::omega_router::OmegaAgentConnection>()
+        else {
+            self.handle_load_error(
+                LoadError::Other(
+                    "Omega's router disconnected before it could choose an executor".into(),
+                ),
+                window,
+                cx,
+            );
+            return;
+        };
+        let decision = match router
+            .prepare_next_session(task_requirements, self.omega_route_override.router_value())
+        {
+            Ok(decision) => decision,
+            Err(error) => {
+                self.handle_load_error(
+                    LoadError::Other(
+                        format!("Omega could not prepare the first route: {error:#}").into(),
+                    ),
+                    window,
+                    cx,
+                );
+                return;
+            }
+        };
+        self.omega_route_summary = Some(visible_omega_route_decision(&decision));
+        cx.notify();
+        let session = connection
+            .clone()
+            .new_session(project, work_dirs.clone(), cx);
+
+        self.deferred_omega_session = Some(cx.spawn_in(window, async move |this, cx| {
+            let result = match session.await {
+                Err(error) => match error.downcast::<AuthRequired>() {
+                    Ok(error) => {
+                        cx.update(|window, cx| {
+                            Self::handle_auth_required(this.clone(), error, connection, window, cx)
+                        })
+                        .log_err();
+                        return;
+                    }
+                    Err(error) => Err(error),
+                },
+                Ok(thread) => Ok(thread),
+            };
+
+            this.update_in(cx, |this, window, cx| match result {
+                Ok(thread) => {
+                    thread.update(cx, |thread, cx| {
+                        thread.set_work_dirs(work_dirs, cx);
+                    });
+                    this.clear_resolved_request_elicitations_for_connection(&connection, cx);
+                    let session_id = thread.read(cx).session_id().clone();
+                    conversation.update(cx, |conversation, cx| {
+                        conversation.register_thread(thread.clone(), cx);
+                    });
+                    let current =
+                        this.new_thread_view(thread, conversation, false, None, window, cx);
+                    let was_focused = this.focus_handle.contains_focused(window, cx);
+                    this.hand_loading_draft_over(&current, window, cx);
+                    if was_focused {
+                        current
+                            .read(cx)
+                            .message_editor
+                            .focus_handle(cx)
+                            .focus(window, cx);
+                    }
+
+                    this.root_session_id = Some(session_id.clone());
+                    if let Some(connected) = this.as_connected_mut() {
+                        connected.active_id = Some(session_id.clone());
+                        connected.threads.insert(session_id, current.clone());
+                    }
+                    cx.emit(StateChange);
+                    cx.emit(AcpServerViewEvent::ActiveThreadChanged);
+                    cx.emit(RootThreadUpdated);
+                    this.dispatch_pending_connect_messages(&current, window, cx);
+                    cx.notify();
+                }
+                Err(error) => {
+                    this.handle_load_error(LoadError::Other(error.to_string().into()), window, cx)
+                }
+            })
+            .log_err();
+        }));
     }
 
     /// Send everything a person submitted while the executor was connecting,
@@ -1587,9 +1840,8 @@ impl ConversationView {
         window.defer(cx, move |window, cx| {
             thread_view
                 .update(cx, |thread_view, cx| {
-                    for text in pending {
-                        let content = vec![acp::ContentBlock::Text(acp::TextContent::new(text))];
-                        thread_view.add_to_queue(content, Vec::new(), window, cx);
+                    for message in pending {
+                        thread_view.add_to_queue(message.content, Vec::new(), window, cx);
                     }
                     let is_generating = thread_view.thread.read(cx).status() != ThreadStatus::Idle;
                     if let Some(entry) = thread_view.message_queue.try_fast_track(is_generating) {
@@ -1666,6 +1918,8 @@ impl ConversationView {
     }
 
     fn rebuild_onto_new_executor(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.deferred_omega_session.take();
+        self.omega_route_summary = None;
         // omega#117. Landing back where you started costs nothing.
         //
         // Cycling four executors and stopping on the one already attached is
@@ -1765,6 +2019,8 @@ impl ConversationView {
     }
 
     fn reset(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.deferred_omega_session.take();
+        self.omega_route_summary = None;
         let (resume_session_id, work_dirs, title) = self
             .root_thread_view()
             .map(|thread_view| {
@@ -1843,6 +2099,13 @@ impl ConversationView {
             };
         }
         let initial_work_dirs = work_dirs.unwrap_or_else(|| project.read(cx).default_path_list(cx));
+        let has_initial_request = initial_content
+            .as_ref()
+            .is_some_and(omega_initial_content_has_request);
+        let is_new_omega =
+            resume_session_id.is_none() && matches!(&connection_key, Agent::NativeAgent);
+        let defer_omega_session = is_new_omega && !has_initial_request;
+        let prepare_initial_omega_route = is_new_omega && has_initial_request;
 
         let connection_entry = connection_store.update(cx, |store, cx| {
             store.request_connection(connection_key, agent.clone(), cx)
@@ -1905,6 +2168,79 @@ impl ConversationView {
                 side = side,
                 thread_location = thread_location
             );
+
+            if defer_omega_session {
+                this.update_in(cx, |this, window, cx| {
+                    let request_elicitation_subscription =
+                        Self::request_elicitation_subscription(&connection, cx);
+                    this.set_server_state(
+                        ServerState::Connected(ConnectedServerState {
+                            connection,
+                            auth_state: AuthState::Ok,
+                            active_id: None,
+                            right_pane_session_id: None,
+                            threads: HashMap::default(),
+                            conversation: cx.new(|_cx| Conversation::default()),
+                            _connection_entry_subscription: connection_entry_subscription,
+                            _request_elicitation_subscription: request_elicitation_subscription,
+                        }),
+                        cx,
+                    );
+                    if !this.pending_connect_messages.is_empty() {
+                        this.start_deferred_omega_session(window, cx);
+                    }
+                })
+                .log_err();
+                return;
+            }
+
+            if prepare_initial_omega_route {
+                let Some(router) = connection
+                    .clone()
+                    .downcast::<crate::omega_router::OmegaAgentConnection>()
+                else {
+                    this.update_in(cx, |this, window, cx| {
+                        this.handle_load_error(
+                            LoadError::Other(
+                                "Omega's router disconnected before it could choose an executor"
+                                    .into(),
+                            ),
+                            window,
+                            cx,
+                        );
+                    })
+                    .log_err();
+                    return;
+                };
+                let decision = router.prepare_next_session(
+                    omega_task_requirements(initial_content.as_ref()),
+                    omega_front_door::router::ExecutorOverride::Auto,
+                );
+                match decision {
+                    Ok(decision) => {
+                        this.update(cx, |this, cx| {
+                            this.omega_route_summary =
+                                Some(visible_omega_route_decision(&decision));
+                            cx.notify();
+                        })
+                        .log_err();
+                    }
+                    Err(error) => {
+                        this.update_in(cx, |this, window, cx| {
+                            this.handle_load_error(
+                                LoadError::Other(
+                                    format!("Omega could not prepare the first route: {error:#}")
+                                        .into(),
+                                ),
+                                window,
+                                cx,
+                            );
+                        })
+                        .log_err();
+                        return;
+                    }
+                }
+            }
 
             let session_work_dirs =
                 match this.read_with(cx, |this, _cx| this.desired_work_dirs.clone()) {
@@ -2409,6 +2745,12 @@ impl ConversationView {
                 ConversationPreparation::SetupRequired {
                     reason: "This agent requires authentication before creating a session".into(),
                 }
+            }
+            ServerState::Connected(connected)
+                if connected.active_view().is_none()
+                    && matches!(&self.connection_key, Agent::NativeAgent) =>
+            {
+                ConversationPreparation::RouterReady
             }
             ServerState::Connected(_) => {
                 let Some(thread) = self.root_thread(cx) else {
@@ -3698,16 +4040,105 @@ impl ConversationView {
     /// provider's controls on the right. `OMEGA-DELTA-0175` adds the Vim mode
     /// readout to the left in both states; the connecting label itself still
     /// disappears when the connection lands.
+    fn render_omega_route_override(&self, cx: &mut Context<Self>) -> AnyElement {
+        use crate::omega_executor_selector::{SelectableExecutor, ready_here};
+
+        let selected = self.omega_route_override.clone();
+        let selected_label = selected.label();
+        let weak_self = cx.entity().downgrade();
+        let choices = ready_here()
+            .into_iter()
+            .filter_map(|choice| match choice {
+                SelectableExecutor::Omega | SelectableExecutor::Exo => None,
+                SelectableExecutor::Codex
+                | SelectableExecutor::Claude
+                | SelectableExecutor::Grok => Some(NewConversationRouteOverride::ExactExternal {
+                    agent_id: choice.adapter_id()?.to_string(),
+                    label: choice.selector_name().into(),
+                }),
+            })
+            .collect::<Vec<_>>();
+
+        PopoverMenu::new("omega-new-conversation-route-override")
+            .trigger_with_tooltip(
+                Button::new(
+                    "omega-new-conversation-route-override-trigger",
+                    selected_label,
+                )
+                .label_size(LabelSize::XSmall)
+                .color(Color::Muted)
+                .end_icon(
+                    Icon::new(IconName::ChevronDown)
+                        .size(IconSize::XSmall)
+                        .color(Color::Muted),
+                ),
+                Tooltip::text("Override Omega's automatic route for this new conversation only"),
+            )
+            .anchor(gpui::Anchor::BottomLeft)
+            .menu(move |window, cx| {
+                let selected = selected.clone();
+                let weak_self = weak_self.clone();
+                let choices = choices.clone();
+                Some(ContextMenu::build(
+                    window,
+                    cx,
+                    move |mut menu, _window, _cx| {
+                        menu = menu.header("Run this new conversation on");
+                        for choice in std::iter::once(NewConversationRouteOverride::Automatic)
+                            .chain(std::iter::once(NewConversationRouteOverride::NativeLoop))
+                            .chain(choices)
+                        {
+                            let is_selected = choice == selected;
+                            let weak_self = weak_self.clone();
+                            let label = choice.label();
+                            menu.push_item(
+                                ContextMenuEntry::new(label)
+                                    .toggleable(IconPosition::End, is_selected)
+                                    .handler(move |_window, cx| {
+                                        weak_self
+                                            .update(cx, |this, cx| {
+                                                if this.omega_route_override_is_editable() {
+                                                    this.omega_route_override = choice.clone();
+                                                    cx.notify();
+                                                }
+                                            })
+                                            .log_err();
+                                    }),
+                            );
+                        }
+                        menu.key_context("OmegaNewConversationRouteOverride")
+                    },
+                ))
+            })
+            .into_any_element()
+    }
+
+    fn omega_route_override_is_editable(&self) -> bool {
+        self.omega_route_summary.is_none()
+            && self.deferred_omega_session.is_none()
+            && self.root_session_id.is_none()
+    }
+
     fn render_loading_composer(
         &mut self,
+        router_ready: bool,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> AnyElement {
         let editor = self.loading_composer(window, cx);
-        let status = self
-            .loading_status
-            .clone()
-            .unwrap_or_else(|| "Connecting…".into());
+        let status = if let Some(route_summary) = &self.omega_route_summary {
+            route_summary.clone()
+        } else if router_ready {
+            if self.deferred_omega_session.is_some() {
+                "Choosing an executor and creating its session…".into()
+            } else {
+                "Omega router ready · route selected when sent".into()
+            }
+        } else {
+            self.loading_status
+                .clone()
+                .unwrap_or_else(|| "Connecting…".into())
+        };
         let max_content_width = AgentSettings::get_global(cx).max_content_width;
         let pending_turns = self.render_pending_connect_messages(false, cx);
 
@@ -3717,7 +4148,7 @@ impl ConversationView {
             .size_full()
             .justify_end()
             .on_action(cx.listener(|this, _: &Chat, window, cx| {
-                this.submit_while_connecting(window, cx);
+                this.submit_before_session(window, cx);
             }))
             .children(pending_turns)
             .child(
@@ -3737,6 +4168,7 @@ impl ConversationView {
                         .gap_2()
                         .child(
                             v_flex()
+                                .debug_selector(|| "omega.workbench.composer".into())
                                 .w_full()
                                 .min_h_0()
                                 .min_h(rems_from_px(96.))
@@ -3768,6 +4200,13 @@ impl ConversationView {
                                         .when(omega_zero_base::is_active(), |this| {
                                             this.child(self.vim_mode_indicator.clone())
                                         })
+                                        .when(
+                                            router_ready
+                                                && self.omega_route_override_is_editable(),
+                                            |this| {
+                                            this.child(self.render_omega_route_override(cx))
+                                            },
+                                        )
                                         .child(
                                             Label::new(status)
                                                 .size(LabelSize::Small)
@@ -3785,12 +4224,14 @@ impl ConversationView {
                                     h_flex().min_w_0().child(
                                         IconButton::new("send-message", IconName::Send)
                                             .style(ButtonStyle::Filled)
-                                            .tooltip(Tooltip::text(
-                                                "Sends when the executor connects — the \
-                                                     message shows in the chat until then",
-                                            ))
+                                            .tooltip(Tooltip::text(if router_ready {
+                                                "Choose the route, create its exact session, and send"
+                                            } else {
+                                                "Sends when the executor connects — the message \
+                                                 shows in the chat until then"
+                                            }))
                                             .on_click(cx.listener(|this, _, window, cx| {
-                                                this.submit_while_connecting(window, cx);
+                                                this.submit_before_session(window, cx);
                                             })),
                                     ),
                                 ),
@@ -3836,7 +4277,7 @@ impl ConversationView {
                         .min_w_0()
                         .gap_2()
                         .children(self.pending_connect_messages.iter().map(|message| {
-                            let text = SharedString::from(message.trim().to_string());
+                            let text = SharedString::from(message.text.trim().to_string());
                             v_flex()
                                 .w_full()
                                 .min_w_0()
@@ -4685,13 +5126,18 @@ impl Render for ConversationView {
         // Built before the match rather than inside it: drawing it needs
         // `&mut self`, and the match holds `&self.server_state` across every
         // arm.
-        let loading_composer = matches!(self.server_state, ServerState::Loading { .. })
-            .then(|| self.render_loading_composer(window, cx));
+        let router_ready = matches!(
+            self.preparation_state(cx),
+            ConversationPreparation::RouterReady
+        );
+        let mut pre_session_composer = (matches!(self.server_state, ServerState::Loading { .. })
+            || router_ready)
+            .then(|| self.render_loading_composer(router_ready, window, cx));
 
         let content = match &self.server_state {
-            ServerState::Loading { .. } => {
-                loading_composer.unwrap_or_else(|| div().into_any_element())
-            }
+            ServerState::Loading { .. } => pre_session_composer
+                .take()
+                .unwrap_or_else(|| div().into_any_element()),
             ServerState::LoadError { error: e, .. } => v_flex()
                 .flex_1()
                 .size_full()
@@ -4750,8 +5196,14 @@ impl Render for ConversationView {
                         view.clone().into_any_element()
                     }
                 } else {
-                    debug_panic!("This state should never be reached");
-                    div().into_any_element()
+                    if router_ready {
+                        pre_session_composer
+                            .take()
+                            .unwrap_or_else(|| div().into_any_element())
+                    } else {
+                        debug_panic!("connected agent has no active session");
+                        div().into_any_element()
+                    }
                 }
             }
         };
@@ -5029,6 +5481,39 @@ pub(crate) mod tests {
 
     use super::*;
 
+    struct RouterTestServer {
+        native: StubAgentConnection,
+        journal_path: PathBuf,
+    }
+
+    impl AgentServer for RouterTestServer {
+        fn logo(&self) -> ui::IconName {
+            ui::IconName::OmegaAgent
+        }
+
+        fn agent_id(&self) -> AgentId {
+            agent::OMEGA_AGENT_ID.clone()
+        }
+
+        fn connect(
+            &self,
+            _delegate: AgentServerDelegate,
+            _project: Entity<Project>,
+            _cx: &mut App,
+        ) -> Task<Result<Rc<dyn AgentConnection>>> {
+            let native: Rc<dyn AgentConnection> = Rc::new(self.native.clone());
+            let router = crate::omega_router::OmegaAgentConnection::new(
+                native,
+                crate::omega_router::RouteJournal::at(self.journal_path.clone()),
+            );
+            Task::ready(Ok(Rc::new(router)))
+        }
+
+        fn into_any(self: Rc<Self>) -> Rc<dyn Any> {
+            self
+        }
+    }
+
     #[test]
     fn direct_owner_ignores_a_stale_router_selection() {
         let stale = Some(crate::omega_executor_selector::SelectableExecutor::Grok);
@@ -5042,6 +5527,75 @@ pub(crate) mod tests {
             None
         );
         assert_eq!(routed_executor_for_owner(&Agent::NativeAgent, stale), stale);
+    }
+
+    #[test]
+    fn omega_requirements_come_from_typed_context_not_prompt_words() {
+        use omega_front_door::router::TaskKind;
+
+        let conversational = AgentInitialContent::ContentBlock {
+            blocks: vec![acp::ContentBlock::Text(acp::TextContent::new(
+                "edit every repository file".to_string(),
+            ))],
+            auto_submit: false,
+        };
+        assert_eq!(
+            omega_task_requirements(Some(&conversational)).kind,
+            TaskKind::GeneralReasoning,
+            "repository-sounding words are not repository context"
+        );
+        assert!(omega_initial_content_has_request(&conversational));
+
+        let empty_draft = AgentInitialContent::ContentBlock {
+            blocks: Vec::new(),
+            auto_submit: false,
+        };
+        assert!(
+            !omega_initial_content_has_request(&empty_draft),
+            "an empty restored draft must not freeze Automatic before the user can choose an override"
+        );
+        let blank_draft = AgentInitialContent::ContentBlock {
+            blocks: vec![acp::ContentBlock::Text(acp::TextContent::new(
+                "  \n".to_owned(),
+            ))],
+            auto_submit: false,
+        };
+        assert!(
+            !omega_initial_content_has_request(&blank_draft),
+            "a serialized blank text block is still an empty restored draft"
+        );
+
+        let repository = AgentInitialContent::ContentBlock {
+            blocks: vec![acp::ContentBlock::ResourceLink(acp::ResourceLink::new(
+                "src/main.rs",
+                "file:///workspace/src/main.rs",
+            ))],
+            auto_submit: false,
+        };
+        assert_eq!(
+            omega_task_requirements(Some(&repository)).kind,
+            TaskKind::RepositoryWork,
+            "a typed file reference is repository context regardless of its prose"
+        );
+        assert_eq!(
+            omega_task_requirements(None).kind,
+            TaskKind::GeneralReasoning,
+            "an open project is not itself a first-request task requirement"
+        );
+    }
+
+    #[test]
+    fn new_conversation_override_keeps_the_exact_external_id() {
+        use omega_front_door::router::ExecutorOverride;
+
+        let selection = NewConversationRouteOverride::ExactExternal {
+            agent_id: "claude-acp".to_owned(),
+            label: "Claude Code".into(),
+        };
+        assert_eq!(
+            selection.router_value(),
+            ExecutorOverride::ExactExternal("claude-acp".to_owned())
+        );
     }
 
     #[test]
@@ -7233,6 +7787,21 @@ pub(crate) mod tests {
         initial_content: Option<AgentInitialContent>,
         cx: &mut TestAppContext,
     ) -> (Entity<ConversationView>, &mut VisualTestContext) {
+        setup_conversation_view_for_agent_without_settling(
+            agent,
+            Agent::Custom { id: "Test".into() },
+            initial_content,
+            cx,
+        )
+        .await
+    }
+
+    async fn setup_conversation_view_for_agent_without_settling(
+        agent: impl AgentServer + 'static,
+        agent_key: Agent,
+        initial_content: Option<AgentInitialContent>,
+        cx: &mut TestAppContext,
+    ) -> (Entity<ConversationView>, &mut VisualTestContext) {
         let fs = FakeFs::new(cx.executor());
         // A project with no worktrees names the home directory as its working
         // directory (`Project::default_path_list`), and a session now opens
@@ -7248,8 +7817,6 @@ pub(crate) mod tests {
         let thread_store = cx.update(|_window, cx| cx.new(|cx| ThreadStore::new(cx)));
         let connection_store =
             cx.update(|_window, cx| cx.new(|cx| AgentConnectionStore::new(project.clone(), cx)));
-
-        let agent_key = Agent::Custom { id: "Test".into() };
 
         let conversation_view = cx.update(|window, cx| {
             cx.new(|cx| {
@@ -7321,8 +7888,11 @@ pub(crate) mod tests {
                  staying behind a refusal"
             );
             assert_eq!(
-                this.pending_connect_messages,
-                vec!["hi".to_string()],
+                this.pending_connect_messages
+                    .iter()
+                    .map(|message| message.text.as_str())
+                    .collect::<Vec<_>>(),
+                vec!["hi"],
                 "the accepted message must be held as a pending turn"
             );
 
@@ -7331,8 +7901,11 @@ pub(crate) mod tests {
             });
             this.submit_while_connecting(window, cx);
             assert_eq!(
-                this.pending_connect_messages,
-                vec!["hi".to_string(), "and a second one".to_string()],
+                this.pending_connect_messages
+                    .iter()
+                    .map(|message| message.text.as_str())
+                    .collect::<Vec<_>>(),
+                vec!["hi", "and a second one"],
                 "several Enters while connecting must queue in order"
             );
             assert!(
@@ -7384,6 +7957,109 @@ pub(crate) mod tests {
         );
     }
 
+    /// omega#153. Omega's router is a usable logical destination before an
+    /// executor session exists. The first accepted turn is what crosses that
+    /// boundary; connecting the router alone must not create a hidden session.
+    #[gpui::test]
+    async fn omega_defers_physical_session_creation_until_the_first_turn(cx: &mut TestAppContext) {
+        init_test(cx);
+
+        let directory = tempfile::tempdir().expect("temporary route journal directory");
+        let (conversation_view, cx) = setup_conversation_view_for_agent_without_settling(
+            RouterTestServer {
+                native: StubAgentConnection::new(),
+                journal_path: directory.path().join("routes.json"),
+            },
+            Agent::NativeAgent,
+            None,
+            cx,
+        )
+        .await;
+        cx.run_until_parked();
+
+        conversation_view.read_with(cx, |this, cx| {
+            assert_eq!(
+                this.preparation_state(cx),
+                ConversationPreparation::RouterReady,
+                "connecting Omega should prepare its logical router"
+            );
+            assert!(
+                this.root_session_id.is_none() && this.active_thread().is_none(),
+                "router readiness must not manufacture a physical executor session"
+            );
+        });
+
+        conversation_view.update_in(cx, |this, window, cx| {
+            let editor = this.loading_composer(window, cx);
+            editor.update(cx, |editor, cx| {
+                editor.set_text("explain this design", window, cx)
+            });
+            this.submit_before_session(window, cx);
+
+            assert_eq!(
+                this.pending_connect_messages
+                    .iter()
+                    .map(|message| message.text.as_str())
+                    .collect::<Vec<_>>(),
+                vec!["explain this design"],
+                "the first turn must be accepted before session creation completes"
+            );
+            assert!(
+                this.root_session_id.is_none(),
+                "session creation is asynchronous, so the accepted text must not depend on it"
+            );
+            assert!(
+                this.omega_route_summary.is_some() && !this.omega_route_override_is_editable(),
+                "the visible override must freeze as soon as the first route is recorded"
+            );
+        });
+        cx.run_until_parked();
+
+        let thread_view = active_thread(&conversation_view, cx);
+        assert_eq!(
+            user_message_markdown(&thread_view, cx),
+            vec!["## User\n\nexplain this design\n\n".to_string()],
+            "the accepted first turn must dispatch once into the selected executor session"
+        );
+        conversation_view.read_with(cx, |this, cx| {
+            assert!(matches!(
+                this.preparation_state(cx),
+                ConversationPreparation::Ready { .. }
+            ));
+            assert!(this.pending_connect_messages.is_empty());
+        });
+    }
+
+    /// omega#153. Direct Agent is deliberately not a logical router: its
+    /// readiness continues to mean that the selected executor made a real
+    /// session, preserving the mode contract while Omega changes.
+    #[gpui::test]
+    async fn direct_agent_still_creates_its_session_during_preparation(cx: &mut TestAppContext) {
+        init_test(cx);
+
+        let (conversation_view, cx) = setup_conversation_view_for_agent_without_settling(
+            StubAgentServer::new(StubAgentConnection::new()),
+            Agent::Custom {
+                id: "direct-agent".into(),
+            },
+            None,
+            cx,
+        )
+        .await;
+        cx.run_until_parked();
+
+        conversation_view.read_with(cx, |this, cx| {
+            assert!(matches!(
+                this.preparation_state(cx),
+                ConversationPreparation::Ready { .. }
+            ));
+            assert!(
+                this.root_session_id.is_some() && this.active_thread().is_some(),
+                "Direct Agent readiness must retain its physical-session proof"
+            );
+        });
+    }
+
     /// `OMEGA-DELTA-0170`, the failure half. A message sent while connecting
     /// survives a terminal connection failure — the text is preserved and
     /// surfaced, never dropped — and a retry that succeeds dispatches it.
@@ -7410,8 +8086,11 @@ pub(crate) mod tests {
                 "the connection must have terminally failed for this test to mean anything"
             );
             assert_eq!(
-                this.pending_connect_messages,
-                vec!["the task statement".to_string()],
+                this.pending_connect_messages
+                    .iter()
+                    .map(|message| message.text.as_str())
+                    .collect::<Vec<_>>(),
+                vec!["the task statement"],
                 "a terminal connection failure must preserve the submitted text, \
                  not drop it with the connection"
             );

@@ -98,9 +98,10 @@ a conversation. "Engine lane" is a lane in `omega-effectd`. Avoid "lane" bare
 where "executor" is meant.
 
 **Omega Agent** — the router. It owns routing, disclosure and receipts, and
-owns **no execution**. A thread the router creates carries the *executor's*
-connection, not the router's, so a thread never discloses the router as its
-executor.
+owns **no execution**. It prepares a logical conversation first, then uses the
+first submitted request and a live readiness snapshot to choose one exact
+executor. The physical session belongs to that executor and never migrates to
+another executor underneath the transcript.
 
 ### Thread, conversation, session, turn
 
@@ -222,12 +223,22 @@ executor actually doing the work.
 
 The new-conversation boundary always shows the three modes in that order. Each
 row has exactly one readiness state: **Ready**, **Setup required**,
-**Temporarily unavailable**, or **Not supported in this build**. Ready requires
-both a connection and a created session, represented by a
-receipt bound to the exact target and session. Registration, binary discovery,
-or path detection is not readiness. The receipt is volatile; ownership is
-restored from the agent identity already persisted with the thread rather than
-a second mode column.
+**Temporarily unavailable**, or **Not supported in this build**. Direct Ready
+requires a connection and a created session bound to the exact target. Omega
+Ready requires a connected router with a typed executor-readiness inventory;
+its physical executor session is deliberately deferred until the first request
+provides the routing inputs. Registration, binary discovery, warming, or path
+detection alone is not readiness. The preparation receipt is volatile;
+ownership is restored from the agent identity already persisted with the
+thread rather than a second mode column.
+
+An Omega route is chosen once per conversation. Its durable receipt contains a
+policy version, normalized first-request requirements, a stable exact executor
+inventory, the decision and reason, and any explicit new-conversation override
+or pre-decision fallback. Automatic routing admits the native loop and ordinary
+ACP executors only; an engine lane still requires the explicit Full Auto
+authority boundary. After selection, an unavailable executor is a named hard
+failure, never permission to substitute another executor or replay a request.
 
 New metadata writes preserve the exact conversation owner under the v1 owner
 contract. Older rows remain explicitly legacy: a historical native-null row is

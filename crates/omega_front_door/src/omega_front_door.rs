@@ -24,9 +24,10 @@ pub use send_during_turn::{
 };
 
 pub use router::{
-    EngineLane, EngineReadiness, EngineUnreachable, ExecutorPin, LaneState,
-    RESERVED_RECORD_CHARACTERS, RouteDecision, RouteInputs, RouteReason, lane_ref_is_recordable,
-    route, select_lane,
+    EngineLane, EngineReadiness, EngineUnreachable, ExecutorCandidate, ExecutorOverride,
+    ExecutorPin, ExecutorReadiness, ExecutorTarget, LaneState, RESERVED_RECORD_CHARACTERS,
+    ROUTING_POLICY_VERSION, RouteDecision, RouteFallback, RouteInputs, RouteReason,
+    RouteUnavailable, TaskKind, TaskRequirements, lane_ref_is_recordable, route, select_lane,
 };
 
 // -------------------------------------------------------------------------
@@ -221,7 +222,13 @@ impl ConversationTarget {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct PreparationReceipt {
     target: ConversationTarget,
-    session_id: String,
+    proof: PreparationProof,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum PreparationProof {
+    SessionCreated { session_id: String },
+    OmegaRouterConnected,
 }
 
 impl PreparationReceipt {
@@ -231,12 +238,41 @@ impl PreparationReceipt {
         session_id: impl Into<String>,
     ) -> Option<Self> {
         let session_id = session_id.into();
-        (!session_id.trim().is_empty()).then_some(Self { target, session_id })
+        (!session_id.trim().is_empty()).then_some(Self {
+            target,
+            proof: PreparationProof::SessionCreated { session_id },
+        })
     }
 
     #[must_use]
     pub fn proves(&self, target: &ConversationTarget, session_id: &str) -> bool {
-        self.target == *target && self.session_id == session_id
+        self.target == *target
+            && matches!(
+                &self.proof,
+                PreparationProof::SessionCreated {
+                    session_id: proved_session_id,
+                } if proved_session_id == session_id
+            )
+    }
+
+    /// Proof that Omega's router and executor inventory are connected.
+    ///
+    /// Omega cannot create the physical executor session until the first
+    /// request supplies its structured requirements. Direct Agent keeps using
+    /// [`after_session_created`](Self::after_session_created), so this receipt
+    /// cannot weaken its physical-session readiness gate.
+    #[must_use]
+    pub fn after_omega_router_connected() -> Self {
+        Self {
+            target: ConversationTarget::OmegaAgent,
+            proof: PreparationProof::OmegaRouterConnected,
+        }
+    }
+
+    #[must_use]
+    pub fn proves_omega_router_connected(&self) -> bool {
+        self.target == ConversationTarget::OmegaAgent
+            && self.proof == PreparationProof::OmegaRouterConnected
     }
 }
 

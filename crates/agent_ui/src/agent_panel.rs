@@ -2643,19 +2643,6 @@ impl AgentPanel {
         }
     }
 
-    fn prepared_omega_session_id(&self, cx: &App) -> Option<String> {
-        let draft = self.draft_thread.as_ref()?;
-        if !matches!(draft.read(cx).agent_key(), Agent::NativeAgent) {
-            return None;
-        }
-        match draft.read(cx).preparation_state(cx) {
-            ConversationPreparation::Ready { session_id } => Some(session_id),
-            ConversationPreparation::Loading | ConversationPreparation::SetupRequired { .. } => {
-                None
-            }
-        }
-    }
-
     fn new_conversation_mode_rows(&self, cx: &App) -> [NewConversationModeRow; 3] {
         let project = self.new_conversation_project_label(cx);
         let direct_target = match &self.selected_agent {
@@ -2704,9 +2691,11 @@ impl AgentPanel {
                         };
                     }
                     match draft.read(cx).preparation_state(cx) {
-                        ConversationPreparation::Loading => ModeReadiness::TemporarilyUnavailable {
-                            reason: format!("Connecting to {}…", target.executor_label()),
-                        },
+                        ConversationPreparation::Loading | ConversationPreparation::RouterReady => {
+                            ModeReadiness::TemporarilyUnavailable {
+                                reason: format!("Connecting to {}…", target.executor_label()),
+                            }
+                        }
                         ConversationPreparation::Ready { session_id } => {
                             PreparationReceipt::after_session_created(target.clone(), session_id)
                                 .map_or_else(
@@ -2744,7 +2733,10 @@ impl AgentPanel {
                 }
                 match draft.read(cx).preparation_state(cx) {
                     ConversationPreparation::Loading => ModeReadiness::TemporarilyUnavailable {
-                        reason: "Creating an Omega session…".into(),
+                        reason: "Connecting the Omega router…".into(),
+                    },
+                    ConversationPreparation::RouterReady => ModeReadiness::Ready {
+                        receipt: PreparationReceipt::after_omega_router_connected(),
                     },
                     ConversationPreparation::Ready { session_id } => {
                         PreparationReceipt::after_session_created(omega_target.clone(), session_id)
@@ -2859,15 +2851,20 @@ impl AgentPanel {
     ) {
         match target {
             ConversationTarget::OmegaAgent => {
-                let Some(session_id) = self.prepared_omega_session_id(cx) else {
-                    return;
-                };
-                if !receipt.proves(&ConversationTarget::OmegaAgent, &session_id) {
-                    return;
-                }
                 let Some(draft) = self.draft_thread.clone() else {
                     return;
                 };
+                let receipt_is_live = match draft.read(cx).preparation_state(cx) {
+                    ConversationPreparation::RouterReady => receipt.proves_omega_router_connected(),
+                    ConversationPreparation::Ready { session_id } => {
+                        receipt.proves(&ConversationTarget::OmegaAgent, &session_id)
+                    }
+                    ConversationPreparation::Loading
+                    | ConversationPreparation::SetupRequired { .. } => false,
+                };
+                if !receipt_is_live {
+                    return;
+                }
                 self.showing_new_conversation_front_door = false;
                 self.set_base_view(
                     BaseView::AgentThread {
@@ -16736,7 +16733,7 @@ mod tests {
         });
         cx.run_until_parked();
 
-        let (prepared_entity, prepared_session) = panel.read_with(&cx, |panel, cx| {
+        let prepared_entity = panel.read_with(&cx, |panel, cx| {
             let rows = panel.new_conversation_mode_rows(cx);
             assert_eq!(
                 rows.iter().map(|row| row.mode).collect::<Vec<_>>(),
@@ -16762,12 +16759,11 @@ mod tests {
                 .draft_thread
                 .as_ref()
                 .expect("the front door should retain one prepared Omega conversation");
-            (
-                draft.entity_id(),
-                panel
-                    .prepared_omega_session_id(cx)
-                    .expect("Ready must carry the prepared session"),
-            )
+            assert_eq!(
+                draft.read(cx).preparation_state(cx),
+                ConversationPreparation::RouterReady
+            );
+            draft.entity_id()
         });
         assert_eq!(prepared_entity, keyboard_prepared.entity_id());
 
@@ -16799,8 +16795,8 @@ mod tests {
                 .expect("keyboard activation should claim the prepared conversation");
             assert_eq!(active.entity_id(), prepared_entity);
             assert_eq!(
-                panel.prepared_omega_session_id(cx).as_deref(),
-                Some(prepared_session.as_str())
+                active.read(cx).preparation_state(cx),
+                ConversationPreparation::RouterReady
             );
         });
 
@@ -16810,10 +16806,16 @@ mod tests {
             panel.new_thread(&NewThread, window, cx);
         });
         cx.run_until_parked();
-        let pointer_session = panel.read_with(&cx, |panel, cx| {
-            panel
-                .prepared_omega_session_id(cx)
-                .expect("pointer activation must also begin with a real session")
+        panel.read_with(&cx, |panel, cx| {
+            assert_eq!(
+                panel
+                    .draft_thread
+                    .as_ref()
+                    .expect("pointer activation starts from the logical Omega draft")
+                    .read(cx)
+                    .preparation_state(cx),
+                ConversationPreparation::RouterReady
+            );
         });
         let omega_bounds = cx
             .debug_bounds("omega.new-conversation.mode.omega-agent")
@@ -16828,16 +16830,8 @@ mod tests {
             assert_eq!(active.entity_id(), pointer_prepared.entity_id());
             assert_ne!(active.entity_id(), prepared_entity);
             assert_eq!(
-                active
-                    .read(cx)
-                    .active_thread()
-                    .expect("the claimed conversation should retain its session")
-                    .read(cx)
-                    .thread
-                    .read(cx)
-                    .session_id()
-                    .to_string(),
-                pointer_session
+                active.read(cx).preparation_state(cx),
+                ConversationPreparation::RouterReady
             );
             assert!(!panel.showing_new_conversation_front_door);
         });
@@ -21807,7 +21801,12 @@ mod tests {
                 .retained_threads
                 .get(&background_id)
                 .expect("background thread should remain retained");
-            assert!(background.read(cx).has_user_submitted_prompt(cx));
+            let background = background.read(cx);
+            assert!(
+                background.has_user_submitted_prompt(cx),
+                "background state: {:?}",
+                background.preparation_state(cx)
+            );
         });
         assert!(panel.update_in(&mut cx, |panel, window, cx| {
             panel.reveal_omega_thread(background_id, window, cx)

@@ -2030,7 +2030,6 @@ impl Focusable for MessageEditor {
 impl Render for MessageEditor {
     fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         div()
-            .debug_selector(|| "omega.workbench.composer".into())
             .key_context("MessageEditor")
             .on_action(cx.listener(Self::chat))
             .on_action(cx.listener(Self::send_immediately))

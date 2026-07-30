@@ -235,68 +235,362 @@ impl EngineReadiness {
 /// this router made — which is omega#78's falsifier, stated as a type.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct RouteInputs {
-    /// What the user pinned for this thread, if anything.
-    pub pin: Option<ExecutorPin>,
-    /// What the engine last said about itself.
-    pub engine: EngineReadiness,
-    /// The external ACP agent connected for this thread, if one is.
-    ///
-    /// `None` means no external agent is connected — not that none is
-    /// configured. A pin to an external agent that is not connected fails
-    /// closed rather than waiting.
-    pub external_acp: Option<String>,
-    /// The executor registered to serve engine lanes, if one is.
-    ///
-    /// Separate from [`engine`](Self::engine) on purpose, because they are two
-    /// different facts. The engine answering `get_capacity` says a lane exists;
-    /// this says Omega has something to hand the turn to. In this build they
-    /// come apart: engine lanes are started by a person on the Full Auto
-    /// surface and driven by the host bridge, not through
-    /// `AgentConnection::prompt`, so the router can *decide* an engine-lane
-    /// route it cannot itself dispatch. Modelling that as an input keeps the
-    /// gap a stated fallback with a reason instead of a panic or a silent
-    /// substitution.
-    pub engine_lane: Option<String>,
+    pub policy_version: u16,
+    pub task_requirements: TaskRequirements,
+    pub candidates: Vec<ExecutorCandidate>,
+    pub executor_override: ExecutorOverride,
+    legacy_pin: Option<ExecutorPin>,
+    legacy_engine: EngineReadiness,
+    legacy_external_acp: Option<String>,
+    legacy_engine_lane: Option<String>,
+}
+
+pub const ROUTING_POLICY_VERSION: u16 = 2;
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TaskKind {
+    GeneralReasoning,
+    RepositoryWork,
+}
+
+impl TaskKind {
+    const fn token(self) -> &'static str {
+        match self {
+            Self::GeneralReasoning => "general_reasoning",
+            Self::RepositoryWork => "repository_work",
+        }
+    }
+
+    fn parse(token: &str) -> Option<Self> {
+        match token {
+            "general_reasoning" => Some(Self::GeneralReasoning),
+            "repository_work" => Some(Self::RepositoryWork),
+            _ => None,
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct TaskRequirements {
+    pub policy_version: u16,
+    pub kind: TaskKind,
+}
+
+impl TaskRequirements {
+    #[must_use]
+    pub const fn new(kind: TaskKind) -> Self {
+        Self {
+            policy_version: ROUTING_POLICY_VERSION,
+            kind,
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ExecutorTarget {
+    pub class: ExecutorClass,
+    pub agent_id: String,
+}
+
+impl ExecutorTarget {
+    #[must_use]
+    pub fn new(class: ExecutorClass, agent_id: impl Into<String>) -> Self {
+        Self {
+            class,
+            agent_id: agent_id.into(),
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ExecutorReadiness {
+    Ready,
+    Busy,
+    Unavailable,
+}
+
+impl ExecutorReadiness {
+    const fn token(self) -> &'static str {
+        match self {
+            Self::Ready => "ready",
+            Self::Busy => "busy",
+            Self::Unavailable => "unavailable",
+        }
+    }
+
+    fn parse(token: &str) -> Option<Self> {
+        match token {
+            "ready" => Some(Self::Ready),
+            "busy" => Some(Self::Busy),
+            "unavailable" => Some(Self::Unavailable),
+            _ => None,
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ExecutorCandidate {
+    pub target: ExecutorTarget,
+    pub readiness: ExecutorReadiness,
+}
+
+impl ExecutorCandidate {
+    #[must_use]
+    pub fn new(target: ExecutorTarget, readiness: ExecutorReadiness) -> Self {
+        Self { target, readiness }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ExecutorOverride {
+    Auto,
+    Native,
+    ExactExternal(String),
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum RouteFallback {
+    NativeForGeneralReasoning,
+    NativeAfterExternalUnavailable,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum RouteUnavailable {
+    UnsupportedPolicy,
+    NativeUnavailable,
+    ExactExecutorUnavailable(ExecutorTarget),
+    NoReadyExecutor,
 }
 
 impl RouteInputs {
     /// The inputs of a machine with no engine and no external agent.
     #[must_use]
-    pub const fn native_only() -> Self {
+    pub fn native_only() -> Self {
         Self {
-            pin: None,
-            engine: EngineReadiness::Unreachable(EngineUnreachable::NotRunning),
-            external_acp: None,
-            engine_lane: None,
+            policy_version: ROUTING_POLICY_VERSION,
+            task_requirements: TaskRequirements::new(TaskKind::GeneralReasoning),
+            candidates: vec![ExecutorCandidate::new(
+                ExecutorTarget::new(ExecutorClass::NativeLoop, "omega-agent"),
+                ExecutorReadiness::Ready,
+            )],
+            executor_override: ExecutorOverride::Auto,
+            legacy_pin: None,
+            legacy_engine: EngineReadiness::Unreachable(EngineUnreachable::NotRunning),
+            legacy_external_acp: None,
+            legacy_engine_lane: None,
         }
+    }
+
+    #[must_use]
+    pub fn new(
+        task_requirements: TaskRequirements,
+        candidates: Vec<ExecutorCandidate>,
+        executor_override: ExecutorOverride,
+    ) -> Self {
+        let mut inputs = Self {
+            policy_version: ROUTING_POLICY_VERSION,
+            task_requirements,
+            candidates,
+            executor_override,
+            legacy_pin: None,
+            legacy_engine: EngineReadiness::Unreachable(EngineUnreachable::NotRunning),
+            legacy_external_acp: None,
+            legacy_engine_lane: None,
+        };
+        inputs.normalize_candidates();
+        inputs
     }
 
     /// The same inputs with a pin set.
     #[must_use]
     pub fn pinned(mut self, pin: ExecutorPin) -> Self {
-        self.pin = Some(pin);
+        self.legacy_pin = Some(pin);
         self
     }
 
     /// The same inputs with an engine answer.
     #[must_use]
     pub fn with_engine(mut self, engine: EngineReadiness) -> Self {
-        self.engine = engine;
+        self.legacy_engine = engine;
         self
     }
 
     /// The same inputs with an external ACP agent connected.
     #[must_use]
     pub fn with_external_acp(mut self, agent_id: impl Into<String>) -> Self {
-        self.external_acp = Some(agent_id.into());
+        let agent_id = agent_id.into();
+        self.legacy_external_acp = Some(agent_id.clone());
+        self.candidates.push(ExecutorCandidate::new(
+            ExecutorTarget::new(ExecutorClass::ExternalAcp, agent_id),
+            ExecutorReadiness::Ready,
+        ));
         self
     }
 
     /// The same inputs with an executor registered for engine lanes.
     #[must_use]
     pub fn with_engine_lane(mut self, agent_id: impl Into<String>) -> Self {
-        self.engine_lane = Some(agent_id.into());
+        let agent_id = agent_id.into();
+        self.legacy_engine_lane = Some(agent_id.clone());
+        self.candidates.push(ExecutorCandidate::new(
+            ExecutorTarget::new(ExecutorClass::EngineLane, agent_id),
+            ExecutorReadiness::Ready,
+        ));
         self
+    }
+
+    fn durable_clone(&self) -> Self {
+        let mut inputs = self.clone();
+        inputs.normalize_candidates();
+        inputs.legacy_pin = None;
+        inputs.legacy_engine = EngineReadiness::Unreachable(EngineUnreachable::NotRunning);
+        inputs.legacy_external_acp = None;
+        inputs.legacy_engine_lane = None;
+        inputs
+    }
+
+    fn normalize_candidates(&mut self) {
+        self.candidates.sort_by(|left, right| {
+            executor_class_rank(left.target.class)
+                .cmp(&executor_class_rank(right.target.class))
+                .then_with(|| left.target.agent_id.cmp(&right.target.agent_id))
+                .then_with(|| {
+                    executor_readiness_rank(left.readiness)
+                        .cmp(&executor_readiness_rank(right.readiness))
+                })
+        });
+        let mut normalized: Vec<ExecutorCandidate> = Vec::new();
+        for candidate in self.candidates.drain(..) {
+            if let Some(existing) = normalized
+                .last_mut()
+                .filter(|existing| existing.target == candidate.target)
+            {
+                if executor_readiness_rank(candidate.readiness)
+                    > executor_readiness_rank(existing.readiness)
+                {
+                    existing.readiness = candidate.readiness;
+                }
+            } else {
+                normalized.push(candidate);
+            }
+        }
+        self.candidates = normalized;
+    }
+
+    #[must_use]
+    pub fn canonical_record(&self) -> String {
+        let normalized = self.durable_clone();
+        let candidates = normalized
+            .candidates
+            .iter()
+            .map(|candidate| {
+                format!(
+                    "{}@{}@{}",
+                    candidate.target.class.token(),
+                    encode_field(&candidate.target.agent_id),
+                    candidate.readiness.token()
+                )
+            })
+            .collect::<Vec<_>>()
+            .join(",");
+        let executor_override = match &normalized.executor_override {
+            ExecutorOverride::Auto => "auto".to_owned(),
+            ExecutorOverride::Native => "native".to_owned(),
+            ExecutorOverride::ExactExternal(agent_id) => {
+                format!("external@{}", encode_field(agent_id))
+            }
+        };
+        format!(
+            "policy={};requirements={}@{};candidates={candidates};override={executor_override}",
+            normalized.policy_version,
+            normalized.task_requirements.policy_version,
+            normalized.task_requirements.kind.token(),
+        )
+    }
+
+    #[must_use]
+    pub fn parse_canonical_record(record: &str) -> Option<Self> {
+        let mut policy_version = None;
+        let mut task_requirements = None;
+        let mut candidates = None;
+        let mut executor_override = None;
+        for field in record.split(';') {
+            let (key, value) = field.split_once('=')?;
+            match key {
+                "policy" if policy_version.is_none() => policy_version = value.parse().ok(),
+                "requirements" if task_requirements.is_none() => {
+                    let (policy, kind) = value.split_once('@')?;
+                    task_requirements = Some(TaskRequirements {
+                        policy_version: policy.parse().ok()?,
+                        kind: TaskKind::parse(kind)?,
+                    });
+                }
+                "candidates" if candidates.is_none() => {
+                    let mut parsed = Vec::new();
+                    if !value.is_empty() {
+                        for candidate in value.split(',') {
+                            let mut parts = candidate.split('@');
+                            let class_token = parts.next()?;
+                            let class = *ExecutorClass::all()
+                                .iter()
+                                .find(|class| class.token() == class_token)?;
+                            let agent_id = decode_field(parts.next()?)?;
+                            let readiness = ExecutorReadiness::parse(parts.next()?)?;
+                            if parts.next().is_some() {
+                                return None;
+                            }
+                            parsed.push(ExecutorCandidate::new(
+                                ExecutorTarget::new(class, agent_id),
+                                readiness,
+                            ));
+                        }
+                    }
+                    candidates = Some(parsed);
+                }
+                "override" if executor_override.is_none() => {
+                    executor_override = Some(match value {
+                        "auto" => ExecutorOverride::Auto,
+                        "native" => ExecutorOverride::Native,
+                        value => {
+                            let (kind, agent_id) = value.split_once('@')?;
+                            if kind != "external" {
+                                return None;
+                            }
+                            ExecutorOverride::ExactExternal(decode_field(agent_id)?)
+                        }
+                    });
+                }
+                _ => return None,
+            }
+        }
+        let mut inputs = Self {
+            policy_version: policy_version?,
+            task_requirements: task_requirements?,
+            candidates: candidates?,
+            executor_override: executor_override?,
+            legacy_pin: None,
+            legacy_engine: EngineReadiness::Unreachable(EngineUnreachable::NotRunning),
+            legacy_external_acp: None,
+            legacy_engine_lane: None,
+        };
+        inputs.normalize_candidates();
+        Some(inputs)
+    }
+}
+
+const fn executor_class_rank(class: ExecutorClass) -> u8 {
+    match class {
+        ExecutorClass::NativeLoop => 0,
+        ExecutorClass::ExternalAcp => 1,
+        ExecutorClass::EngineLane => 2,
+    }
+}
+
+const fn executor_readiness_rank(readiness: ExecutorReadiness) -> u8 {
+    match readiness {
+        ExecutorReadiness::Ready => 0,
+        ExecutorReadiness::Busy => 1,
+        ExecutorReadiness::Unavailable => 2,
     }
 }
 
@@ -310,6 +604,10 @@ impl RouteInputs {
 /// explained to them is the same defect class as a handoff with no system note.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum RouteReason {
+    GeneralReasoning,
+    RepositoryWork,
+    OverrideHonored,
+    OverrideUnavailable,
     /// Nothing was pinned and no external agent was connected, so the thread
     /// ran on the native loop. See the module docs on owner gate 8.
     UnpinnedDefault,
@@ -348,6 +646,10 @@ impl RouteReason {
     #[must_use]
     pub const fn token(self) -> &'static str {
         match self {
+            Self::GeneralReasoning => "general_reasoning",
+            Self::RepositoryWork => "repository_work",
+            Self::OverrideHonored => "override_honored",
+            Self::OverrideUnavailable => "override_unavailable",
             Self::UnpinnedDefault => "unpinned_default",
             Self::DetectedExternalAcp => "detected_external_acp",
             Self::PinHonored => "pin_honored",
@@ -365,6 +667,10 @@ impl RouteReason {
     #[must_use]
     pub const fn all() -> &'static [Self] {
         &[
+            Self::GeneralReasoning,
+            Self::RepositoryWork,
+            Self::OverrideHonored,
+            Self::OverrideUnavailable,
             Self::UnpinnedDefault,
             Self::DetectedExternalAcp,
             Self::PinHonored,
@@ -394,7 +700,13 @@ impl RouteReason {
     #[must_use]
     pub const fn is_fallback(self) -> bool {
         match self {
-            Self::UnpinnedDefault | Self::DetectedExternalAcp | Self::PinHonored => false,
+            Self::GeneralReasoning
+            | Self::RepositoryWork
+            | Self::OverrideHonored
+            | Self::OverrideUnavailable
+            | Self::UnpinnedDefault
+            | Self::DetectedExternalAcp
+            | Self::PinHonored => false,
             Self::EngineUnreachable
             | Self::EngineAtCapacity
             | Self::EngineHasNoReadyLane
@@ -413,6 +725,10 @@ impl RouteReason {
     #[must_use]
     pub const fn phrase(self) -> &'static str {
         match self {
+            Self::GeneralReasoning => "general reasoning",
+            Self::RepositoryWork => "repository work",
+            Self::OverrideHonored => "explicit executor override",
+            Self::OverrideUnavailable => "explicit executor override unavailable",
             Self::UnpinnedDefault => "unpinned",
             Self::DetectedExternalAcp => "detected",
             Self::PinHonored => "pinned",
@@ -446,6 +762,7 @@ impl RouteReason {
 pub struct RouteDecision {
     /// The class the turn was dispatched to.
     pub chosen: ExecutorClass,
+    pub executor_id: Option<String>,
     /// Why.
     pub reason: RouteReason,
     /// What was pinned when the decision was made, if anything. Kept even when
@@ -457,6 +774,9 @@ pub struct RouteDecision {
     /// `Some` exactly when [`chosen`](Self::chosen) is
     /// [`ExecutorClass::EngineLane`].
     pub lane_ref: Option<String>,
+    pub inputs: Option<RouteInputs>,
+    pub fallback: Option<RouteFallback>,
+    pub hard_unavailable: Option<RouteUnavailable>,
 }
 
 /// Characters the canonical record escapes, and the escape character itself.
@@ -466,7 +786,7 @@ pub struct RouteDecision {
 /// escaped too, which is what makes the encoding a bijection rather than merely
 /// a substitution — without it, a literal `%3B` in a lane reference and an
 /// escaped `;` would decode to the same thing.
-pub const RESERVED_RECORD_CHARACTERS: &[char] = &['%', ';', '=', '@'];
+pub const RESERVED_RECORD_CHARACTERS: &[char] = &['%', ';', '=', '@', ','];
 
 /// Write one field of the canonical record.
 ///
@@ -482,6 +802,7 @@ pub fn encode_field(value: &str) -> String {
             ';' => encoded.push_str("%3B"),
             '=' => encoded.push_str("%3D"),
             '@' => encoded.push_str("%40"),
+            ',' => encoded.push_str("%2C"),
             other => encoded.push(other),
         }
     }
@@ -508,6 +829,7 @@ pub fn decode_field(value: &str) -> Option<String> {
             "3B" => decoded.push(';'),
             "3D" => decoded.push('='),
             "40" => decoded.push('@'),
+            "2C" => decoded.push(','),
             _ => return None,
         }
     }
@@ -530,10 +852,24 @@ impl RouteDecision {
     fn native(reason: RouteReason, pin: Option<ExecutorPin>) -> Self {
         Self {
             chosen: ExecutorClass::NativeLoop,
+            executor_id: None,
             reason,
             pin,
             lane_ref: None,
+            inputs: None,
+            fallback: None,
+            hard_unavailable: None,
         }
+    }
+
+    #[must_use]
+    pub fn dispatch_target(&self) -> Option<ExecutorTarget> {
+        if self.hard_unavailable.is_some() {
+            return None;
+        }
+        self.executor_id
+            .as_ref()
+            .map(|agent_id| ExecutorTarget::new(self.chosen, agent_id.clone()))
     }
 
     /// Whether this decision is internally consistent.
@@ -544,6 +880,12 @@ impl RouteDecision {
     /// one that ran.
     #[must_use]
     pub fn is_coherent(&self) -> bool {
+        if self.inputs.is_some() {
+            let Some(inputs) = self.inputs.as_ref() else {
+                return false;
+            };
+            return route_current(inputs) == *self;
+        }
         let lane_matches_class = match self.chosen {
             ExecutorClass::EngineLane => {
                 self.lane_ref.as_deref().is_some_and(lane_ref_is_recordable)
@@ -597,10 +939,41 @@ impl RouteDecision {
             Some(lane_ref) => encode_field(lane_ref),
             None => String::new(),
         };
-        format!(
+        let legacy = format!(
             "chosen={};reason={};pin={pin};lane={lane}",
             self.chosen.token(),
             self.reason.token(),
+        );
+        let Some(inputs) = &self.inputs else {
+            return legacy;
+        };
+        let executor_id = self
+            .executor_id
+            .as_deref()
+            .map(encode_field)
+            .unwrap_or_default();
+        let fallback = match self.fallback {
+            Some(RouteFallback::NativeForGeneralReasoning) => "native_for_general_reasoning",
+            Some(RouteFallback::NativeAfterExternalUnavailable) => {
+                "native_after_external_unavailable"
+            }
+            None => "",
+        };
+        let unavailable = match &self.hard_unavailable {
+            Some(RouteUnavailable::UnsupportedPolicy) => "unsupported_policy".to_owned(),
+            Some(RouteUnavailable::NativeUnavailable) => "native_unavailable".to_owned(),
+            Some(RouteUnavailable::NoReadyExecutor) => "no_ready_executor".to_owned(),
+            Some(RouteUnavailable::ExactExecutorUnavailable(target)) => format!(
+                "exact@{}@{}",
+                target.class.token(),
+                encode_field(&target.agent_id)
+            ),
+            None => String::new(),
+        };
+        format!(
+            "{legacy};executor={executor_id};inputs={};fallback={fallback};unavailable={}",
+            encode_field(&inputs.canonical_record()),
+            encode_field(&unavailable),
         )
     }
 
@@ -617,6 +990,10 @@ impl RouteDecision {
         let mut reason = None;
         let mut pin = None;
         let mut lane = None;
+        let mut executor_id = None;
+        let mut inputs = None;
+        let mut fallback = None;
+        let mut unavailable = None;
         let mut keys = 0usize;
         for field in record.split(';') {
             let (key, value) = field.split_once('=')?;
@@ -644,17 +1021,69 @@ impl RouteDecision {
                         Some(decode_field(value)?)
                     });
                 }
+                "executor" if executor_id.is_none() => {
+                    executor_id = Some(if value.is_empty() {
+                        None
+                    } else {
+                        Some(decode_field(value)?)
+                    });
+                }
+                "inputs" if inputs.is_none() => {
+                    inputs = Some(RouteInputs::parse_canonical_record(&decode_field(value)?)?);
+                }
+                "fallback" if fallback.is_none() => {
+                    fallback = Some(match value {
+                        "" => None,
+                        "native_for_general_reasoning" => {
+                            Some(RouteFallback::NativeForGeneralReasoning)
+                        }
+                        "native_after_external_unavailable" => {
+                            Some(RouteFallback::NativeAfterExternalUnavailable)
+                        }
+                        _ => return None,
+                    });
+                }
+                "unavailable" if unavailable.is_none() => {
+                    let value = decode_field(value)?;
+                    unavailable = Some(match value.as_str() {
+                        "" => None,
+                        "unsupported_policy" => Some(RouteUnavailable::UnsupportedPolicy),
+                        "native_unavailable" => Some(RouteUnavailable::NativeUnavailable),
+                        "no_ready_executor" => Some(RouteUnavailable::NoReadyExecutor),
+                        value => {
+                            let mut parts = value.split('@');
+                            if parts.next()? != "exact" {
+                                return None;
+                            }
+                            let class_token = parts.next()?;
+                            let class = *ExecutorClass::all()
+                                .iter()
+                                .find(|class| class.token() == class_token)?;
+                            let agent_id = decode_field(parts.next()?)?;
+                            if parts.next().is_some() {
+                                return None;
+                            }
+                            Some(RouteUnavailable::ExactExecutorUnavailable(
+                                ExecutorTarget::new(class, agent_id),
+                            ))
+                        }
+                    });
+                }
                 _ => return None,
             }
         }
-        if keys != 4 {
+        if keys != 4 && keys != 8 {
             return None;
         }
         let decision = Self {
             chosen: chosen?,
+            executor_id: if keys == 8 { executor_id? } else { None },
             reason: reason?,
             pin: pin?,
             lane_ref: lane?,
+            inputs: if keys == 8 { Some(inputs?) } else { None },
+            fallback: if keys == 8 { fallback? } else { None },
+            hard_unavailable: if keys == 8 { unavailable? } else { None },
         };
         decision.is_coherent().then_some(decision)
     }
@@ -677,6 +1106,38 @@ impl RouteDecision {
             }
         }
         line
+    }
+
+    #[must_use]
+    pub fn disclosure_label(&self) -> String {
+        self.executor_id
+            .clone()
+            .unwrap_or_else(|| self.chosen.token().to_owned())
+    }
+
+    #[must_use]
+    pub fn summary(&self) -> String {
+        if let Some(unavailable) = &self.hard_unavailable {
+            let reason = match unavailable {
+                RouteUnavailable::UnsupportedPolicy => "routing policy is unsupported".to_owned(),
+                RouteUnavailable::NativeUnavailable => "native executor is unavailable".to_owned(),
+                RouteUnavailable::NoReadyExecutor => "no executor is ready".to_owned(),
+                RouteUnavailable::ExactExecutorUnavailable(target) => {
+                    format!("exact executor {} is unavailable", target.agent_id)
+                }
+            };
+            return format!("{} ({reason})", self.disclosure_label());
+        }
+        let reason = match self.fallback {
+            Some(RouteFallback::NativeForGeneralReasoning) => {
+                "general reasoning on the native executor"
+            }
+            Some(RouteFallback::NativeAfterExternalUnavailable) => {
+                "repository work; external executors unavailable, using native"
+            }
+            None => self.reason.phrase(),
+        };
+        format!("{} ({reason})", self.disclosure_label())
     }
 }
 
@@ -716,7 +1177,10 @@ pub fn select_lane(lanes: &[EngineLane], pinned: Option<&str>) -> Option<String>
 /// The whole routing law. Pure: same inputs, same decision, every time.
 #[must_use]
 pub fn route(inputs: &RouteInputs) -> RouteDecision {
-    let Some(pin) = inputs.pin.clone() else {
+    if inputs.legacy_pin.is_none() {
+        return route_current(inputs);
+    }
+    let Some(pin) = inputs.legacy_pin.clone() else {
         // OMEGA-DELTA-0150. A new chat is always Omega. External executors may
         // be attached and warmed behind the router, but detection is not
         // authority to hand them the person's conversation.
@@ -728,25 +1192,33 @@ pub fn route(inputs: &RouteInputs) -> RouteDecision {
         // fail-closed target, so it is available whenever Omega is running.
         ExecutorClass::NativeLoop => RouteDecision {
             chosen: ExecutorClass::NativeLoop,
+            executor_id: None,
             reason: RouteReason::PinHonored,
             pin: Some(pin),
             lane_ref: None,
+            inputs: None,
+            fallback: None,
+            hard_unavailable: None,
         },
 
         ExecutorClass::ExternalAcp => {
-            if inputs.external_acp.is_some() {
+            if inputs.legacy_external_acp.is_some() {
                 RouteDecision {
                     chosen: ExecutorClass::ExternalAcp,
+                    executor_id: None,
                     reason: RouteReason::PinHonored,
                     pin: Some(pin),
                     lane_ref: None,
+                    inputs: None,
+                    fallback: None,
+                    hard_unavailable: None,
                 }
             } else {
                 RouteDecision::native(RouteReason::ExternalAcpUnavailable, Some(pin))
             }
         }
 
-        ExecutorClass::EngineLane => match &inputs.engine {
+        ExecutorClass::EngineLane => match &inputs.legacy_engine {
             // Engine down. Fail closed to the native loop, and say which way it
             // was down: `EngineUnreachable` is one reason, but the cause it
             // carries is what an operator needs.
@@ -768,14 +1240,18 @@ pub fn route(inputs: &RouteInputs) -> RouteDecision {
                     // The lane exists and the engine says it is ready. Whether
                     // Omega can hand a turn to it is a separate fact, checked
                     // last so an operator hears about the engine first.
-                    Some(_) if inputs.engine_lane.is_none() => {
+                    Some(_) if inputs.legacy_engine_lane.is_none() => {
                         RouteDecision::native(RouteReason::EngineLaneNotConnected, Some(pin))
                     }
                     Some(lane_ref) => RouteDecision {
                         chosen: ExecutorClass::EngineLane,
+                        executor_id: None,
                         reason: RouteReason::PinHonored,
                         pin: Some(pin),
                         lane_ref: Some(lane_ref),
+                        inputs: None,
+                        fallback: None,
+                        hard_unavailable: None,
                     },
                     None if pin.lane_ref.is_some() => {
                         RouteDecision::native(RouteReason::PinnedLaneUnavailable, Some(pin))
@@ -787,9 +1263,264 @@ pub fn route(inputs: &RouteInputs) -> RouteDecision {
     }
 }
 
+fn route_current(inputs: &RouteInputs) -> RouteDecision {
+    let inputs = &inputs.durable_clone();
+    let unavailable =
+        |unavailable: RouteUnavailable, class: ExecutorClass, agent_id: Option<String>| {
+            RouteDecision {
+                chosen: class,
+                executor_id: agent_id,
+                reason: if matches!(unavailable, RouteUnavailable::ExactExecutorUnavailable(_)) {
+                    RouteReason::OverrideUnavailable
+                } else {
+                    RouteReason::RepositoryWork
+                },
+                pin: None,
+                lane_ref: None,
+                inputs: Some(inputs.durable_clone()),
+                fallback: None,
+                hard_unavailable: Some(unavailable),
+            }
+        };
+    if inputs.policy_version != ROUTING_POLICY_VERSION
+        || inputs.task_requirements.policy_version != ROUTING_POLICY_VERSION
+    {
+        return unavailable(
+            RouteUnavailable::UnsupportedPolicy,
+            ExecutorClass::NativeLoop,
+            None,
+        );
+    }
+
+    let ready_native = || {
+        inputs.candidates.iter().find(|candidate| {
+            candidate.target.class == ExecutorClass::NativeLoop
+                && candidate.readiness == ExecutorReadiness::Ready
+        })
+    };
+    let decision = |candidate: &ExecutorCandidate,
+                    reason: RouteReason,
+                    fallback: Option<RouteFallback>| RouteDecision {
+        chosen: candidate.target.class,
+        executor_id: Some(candidate.target.agent_id.clone()),
+        reason,
+        pin: None,
+        lane_ref: None,
+        inputs: Some(inputs.durable_clone()),
+        fallback,
+        hard_unavailable: None,
+    };
+
+    match &inputs.executor_override {
+        ExecutorOverride::Native => match ready_native() {
+            Some(candidate) => decision(candidate, RouteReason::OverrideHonored, None),
+            None => unavailable(
+                RouteUnavailable::NativeUnavailable,
+                ExecutorClass::NativeLoop,
+                None,
+            ),
+        },
+        ExecutorOverride::ExactExternal(agent_id) => {
+            let target = ExecutorTarget::new(ExecutorClass::ExternalAcp, agent_id.clone());
+            match inputs
+                .candidates
+                .iter()
+                .find(|candidate| candidate.target == target)
+            {
+                Some(candidate) if candidate.readiness == ExecutorReadiness::Ready => {
+                    decision(candidate, RouteReason::OverrideHonored, None)
+                }
+                _ => unavailable(
+                    RouteUnavailable::ExactExecutorUnavailable(target),
+                    ExecutorClass::ExternalAcp,
+                    Some(agent_id.clone()),
+                ),
+            }
+        }
+        ExecutorOverride::Auto => match inputs.task_requirements.kind {
+            TaskKind::GeneralReasoning => match ready_native() {
+                Some(candidate) => decision(candidate, RouteReason::GeneralReasoning, None),
+                None => unavailable(
+                    RouteUnavailable::NativeUnavailable,
+                    ExecutorClass::NativeLoop,
+                    None,
+                ),
+            },
+            TaskKind::RepositoryWork => {
+                if let Some(candidate) = inputs.candidates.iter().find(|candidate| {
+                    candidate.target.class == ExecutorClass::ExternalAcp
+                        && candidate.readiness == ExecutorReadiness::Ready
+                }) {
+                    decision(candidate, RouteReason::RepositoryWork, None)
+                } else if let Some(candidate) = ready_native() {
+                    decision(
+                        candidate,
+                        RouteReason::RepositoryWork,
+                        Some(RouteFallback::NativeAfterExternalUnavailable),
+                    )
+                } else {
+                    unavailable(
+                        RouteUnavailable::NoReadyExecutor,
+                        ExecutorClass::NativeLoop,
+                        None,
+                    )
+                }
+            }
+        },
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn candidate(
+        class: ExecutorClass,
+        agent_id: &str,
+        readiness: ExecutorReadiness,
+    ) -> ExecutorCandidate {
+        ExecutorCandidate::new(ExecutorTarget::new(class, agent_id), readiness)
+    }
+
+    #[test]
+    fn current_routing_is_invariant_under_candidate_permutation() {
+        let candidates = vec![
+            candidate(ExecutorClass::ExternalAcp, "zeta", ExecutorReadiness::Ready),
+            candidate(
+                ExecutorClass::NativeLoop,
+                "omega-agent",
+                ExecutorReadiness::Ready,
+            ),
+            candidate(
+                ExecutorClass::ExternalAcp,
+                "alpha",
+                ExecutorReadiness::Ready,
+            ),
+        ];
+        let first = RouteInputs::new(
+            TaskRequirements::new(TaskKind::RepositoryWork),
+            candidates.clone(),
+            ExecutorOverride::Auto,
+        );
+        let mut reversed = candidates;
+        reversed.reverse();
+        let second = RouteInputs::new(
+            TaskRequirements::new(TaskKind::RepositoryWork),
+            reversed,
+            ExecutorOverride::Auto,
+        );
+
+        assert_eq!(first.canonical_record(), second.canonical_record());
+        assert_eq!(route(&first), route(&second));
+        assert_eq!(route(&first).executor_id.as_deref(), Some("alpha"));
+    }
+
+    #[test]
+    fn duplicate_exact_candidates_are_deduplicated_fail_closed() {
+        let inputs = RouteInputs::new(
+            TaskRequirements::new(TaskKind::RepositoryWork),
+            vec![
+                candidate(
+                    ExecutorClass::ExternalAcp,
+                    "codex-acp",
+                    ExecutorReadiness::Ready,
+                ),
+                candidate(
+                    ExecutorClass::ExternalAcp,
+                    "codex-acp",
+                    ExecutorReadiness::Unavailable,
+                ),
+            ],
+            ExecutorOverride::ExactExternal("codex-acp".to_owned()),
+        );
+
+        assert_eq!(inputs.candidates.len(), 1);
+        assert_eq!(
+            inputs.candidates[0].readiness,
+            ExecutorReadiness::Unavailable
+        );
+        assert!(route(&inputs).dispatch_target().is_none());
+    }
+
+    #[test]
+    fn an_unknown_policy_version_is_hard_unavailable() {
+        let mut inputs = RouteInputs::native_only();
+        inputs.policy_version = ROUTING_POLICY_VERSION + 1;
+
+        assert_eq!(
+            route(&inputs).hard_unavailable,
+            Some(RouteUnavailable::UnsupportedPolicy)
+        );
+    }
+
+    #[test]
+    fn an_unavailable_exact_override_never_substitutes_native() {
+        let inputs = RouteInputs::new(
+            TaskRequirements::new(TaskKind::RepositoryWork),
+            vec![candidate(
+                ExecutorClass::NativeLoop,
+                "omega-agent",
+                ExecutorReadiness::Ready,
+            )],
+            ExecutorOverride::ExactExternal("claude-acp".to_owned()),
+        );
+        let decision = route(&inputs);
+
+        assert!(decision.dispatch_target().is_none());
+        assert_eq!(decision.reason, RouteReason::OverrideUnavailable);
+        assert_eq!(decision.executor_id.as_deref(), Some("claude-acp"));
+    }
+
+    #[test]
+    fn auto_routing_never_selects_an_engine_lane() {
+        let inputs = RouteInputs::new(
+            TaskRequirements::new(TaskKind::RepositoryWork),
+            vec![
+                candidate(
+                    ExecutorClass::EngineLane,
+                    "lane-1",
+                    ExecutorReadiness::Ready,
+                ),
+                candidate(
+                    ExecutorClass::NativeLoop,
+                    "omega-agent",
+                    ExecutorReadiness::Ready,
+                ),
+            ],
+            ExecutorOverride::Auto,
+        );
+
+        assert_eq!(route(&inputs).chosen, ExecutorClass::NativeLoop);
+    }
+
+    #[test]
+    fn current_inputs_have_stable_canonical_bytes() {
+        let inputs = RouteInputs::new(
+            TaskRequirements::new(TaskKind::RepositoryWork),
+            vec![
+                candidate(
+                    ExecutorClass::ExternalAcp,
+                    "codex,acp",
+                    ExecutorReadiness::Ready,
+                ),
+                candidate(
+                    ExecutorClass::NativeLoop,
+                    "omega-agent",
+                    ExecutorReadiness::Ready,
+                ),
+            ],
+            ExecutorOverride::ExactExternal("codex,acp".to_owned()),
+        );
+
+        assert_eq!(
+            inputs.canonical_record(),
+            "policy=2;requirements=2@repository_work;candidates=native_loop@omega-agent@ready,external_acp@codex%2Cacp@ready;override=external@codex%2Cacp"
+        );
+        assert_eq!(
+            RouteInputs::parse_canonical_record(&inputs.canonical_record()),
+            Some(inputs)
+        );
+    }
 
     fn ready_engine() -> EngineReadiness {
         EngineReadiness::Answered {
@@ -897,7 +1628,7 @@ mod tests {
             .with_engine_lane("codex-local");
         let decision = route(&nothing_attached);
         assert_eq!(decision.chosen, ExecutorClass::NativeLoop);
-        assert_eq!(decision.reason, RouteReason::UnpinnedDefault);
+        assert_eq!(decision.reason, RouteReason::GeneralReasoning);
         assert!(decision.is_coherent());
     }
 
@@ -908,7 +1639,7 @@ mod tests {
         let decision = route(&RouteInputs::native_only().with_external_acp("codex-acp"));
 
         assert_eq!(decision.chosen, ExecutorClass::NativeLoop);
-        assert_eq!(decision.reason, RouteReason::UnpinnedDefault);
+        assert_eq!(decision.reason, RouteReason::GeneralReasoning);
         assert!(decision.pin.is_none(), "nothing pinned it");
         assert!(decision.lane_ref.is_none());
         assert!(decision.is_coherent());
@@ -1126,11 +1857,15 @@ mod tests {
 
         let expected = RouteDecision {
             chosen: ExecutorClass::EngineLane,
+            executor_id: None,
             reason: RouteReason::PinHonored,
             pin: Some(pin.clone()),
             // Lexicographically smallest available lane. `codex-local` sorts
             // after it but is busy; `harness:opencode` sorts after it too.
             lane_ref: Some("acp:cursor-agent".to_owned()),
+            inputs: None,
+            fallback: None,
+            hard_unavailable: None,
         };
 
         for lanes in permutations {
@@ -1218,12 +1953,16 @@ mod tests {
                     (None, Some("codex-local".to_owned())),
                     (Some("codex-acp".to_owned()), Some("codex-local".to_owned())),
                 ] {
-                    let inputs = RouteInputs {
-                        pin: pin.clone(),
-                        engine: engine.clone(),
-                        external_acp: external,
-                        engine_lane,
-                    };
+                    let mut inputs = RouteInputs::native_only().with_engine(engine.clone());
+                    if let Some(external) = external {
+                        inputs = inputs.with_external_acp(external);
+                    }
+                    if let Some(engine_lane) = engine_lane {
+                        inputs = inputs.with_engine_lane(engine_lane);
+                    }
+                    if let Some(pin) = pin.clone() {
+                        inputs = inputs.pinned(pin);
+                    }
                     let decision = route(&inputs);
                     assert!(decision.is_coherent(), "{decision:?} from {inputs:?}");
 
@@ -1241,10 +1980,17 @@ mod tests {
         }
 
         // Every reason the current law emits has to appear.
-        for reason in RouteReason::all()
-            .iter()
-            .filter(|reason| **reason != RouteReason::DetectedExternalAcp)
-        {
+        for reason in RouteReason::all().iter().filter(|reason| {
+            !matches!(
+                **reason,
+                RouteReason::GeneralReasoning
+                    | RouteReason::RepositoryWork
+                    | RouteReason::OverrideHonored
+                    | RouteReason::OverrideUnavailable
+                    | RouteReason::UnpinnedDefault
+                    | RouteReason::DetectedExternalAcp
+            )
+        }) {
             assert!(
                 seen_reasons.contains(reason),
                 "no input in this suite produced {}; the round-trip check is \
@@ -1256,9 +2002,13 @@ mod tests {
         // OMEGA-DELTA-0150 keeps the retired reason readable for old journals.
         let legacy = RouteDecision {
             chosen: ExecutorClass::ExternalAcp,
+            executor_id: None,
             reason: RouteReason::DetectedExternalAcp,
             pin: None,
             lane_ref: None,
+            inputs: None,
+            fallback: None,
+            hard_unavailable: None,
         };
         assert_eq!(
             RouteDecision::parse_canonical_record(&legacy.canonical_record()),
@@ -1462,7 +2212,7 @@ mod tests {
         // external agent is a route the router could not previously make and
         // therefore had no way to explain.
         assert_eq!(
-            count, 10,
+            count, 14,
             "the reason set changed. Every reason is a thing the router can \
              tell a user; adding one is a deliberate edit, and removing one \
              means a route it used to explain is now unexplained."

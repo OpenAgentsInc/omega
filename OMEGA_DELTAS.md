@@ -7803,3 +7803,46 @@ current image build does not decode it inline.
   external actions; plus the archive remote-delete ownership helper test. The
   shared-project refusal remains an explicit fail-closed source policy pending
   installed lifecycle proof.
+
+### OMEGA-DELTA-0179 — Omega routes the first request to one exact ready executor
+
+- **Supersedes OMEGA-DELTA-0029's native fallback and OMEGA-DELTA-0150's
+  unpinned-native law.** Omega Agent prepares a logical conversation and a
+  typed executor inventory before it creates a physical executor session. The
+  normalized first request is therefore an input to the routing law instead of
+  text that arrives after routing has already happened.
+- **The input and decision are records.** A versioned `RouteInputs` contains
+  normalized task requirements, a stably ordered inventory of exact executor
+  identities and readiness, and an optional exact new-conversation override.
+  The pure route law returns one exact identity, class, reason, and any bounded
+  pre-decision fallback or hard refusal. Discovery order, clocks, randomness,
+  process globals, and model calls are outside that law.
+- **The first automatic candidate set is deliberately narrow.** Omega may
+  automatically choose its native loop or a ready ordinary ACP executor. An
+  engine lane is Full Auto authority and still requires its separate explicit
+  human gesture; reporting engine capacity does not admit it as an automatic
+  chat candidate.
+- **An override is a one-conversation gesture.** It wins over automatic
+  routing, names an exact executor rather than only a class, and is consumed by
+  the new conversation. It cannot retarget a transcript or leak to the next
+  conversation. An unavailable override is a named refusal, not permission to
+  run elsewhere.
+- **Persistence precedes dispatch.** Omega durably writes the complete inputs
+  and decision under a router-generated dispatch reference before calling an
+  executor. After the executor mints a session id, the journal binds that id to
+  the same receipt. A failed write blocks the send. Restore reads the recorded
+  decision and never recomputes it from current readiness.
+- **A selected executor is immutable.** If it disappears before or during a
+  send, load, resume, retry, cancellation, or a later turn, the error names the
+  exact executor. Missing or corrupt route state also fails visibly. Neither
+  case silently substitutes the native loop or replays a request whose tools
+  may already have produced effects.
+- **Disclosure is part of the dispatch boundary.** Before the first request can
+  reach an executor, the thread shows the exact selection, task-requirement
+  summary, reason, override or automatic mode, and fallback or refusal. Zero
+  base and the ordinary thread surface read the same typed durable receipt.
+- **Enforced by:** deterministic routing and canonical-record tests in
+  `omega_front_door`; journal restart, exact multi-ACP dispatch, and
+  disappearance tests in `agent_ui`; source contracts in `omega_deltas`; and
+  the installed positive and negative routing receipts owned by the strict
+  installed gate.

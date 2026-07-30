@@ -57,13 +57,10 @@
 //! # 4. The served agent is the router, and it can never reach an engine lane
 //!
 //! [`served_route`] calls [`omega_front_door::route`] — the same routing law an
-//! in-app thread is decided by — with a pin of `None`. A pin is the only door
-//! to an engine lane, an engine lane *is* Full Auto authority, and setting one
-//! requires an `omega_front_door::PinGesture`, every variant of which is a
-//! visible control a person operates. There is no variant for "an external host
-//! asked", so the served surface cannot take a pin, and
-//! `a_served_session_can_never_reach_an_engine_lane` proves the consequence
-//! against every engine state the router can be shown.
+//! in-app thread is decided by — with a native-only candidate inventory. An
+//! engine lane *is* Full Auto authority, so the served surface has no way to
+//! place one in its routing inputs. `a_served_session_can_never_reach_an_engine_lane`
+//! proves that structural exclusion.
 //!
 //! # Where the socket lives
 //!
@@ -86,10 +83,7 @@ use std::io::{BufRead, BufReader, Write};
 use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr, TcpListener, TcpStream};
 
 use agent_client_protocol::schema::v1::{AGENT_METHOD_NAMES, CLIENT_METHOD_NAMES};
-use omega_front_door::{
-    EngineReadiness, EngineUnreachable, ExecutorDisclosure, RouteDecision, RouteInputs,
-    SessionOrigin, route,
-};
+use omega_front_door::{ExecutorDisclosure, RouteDecision, RouteInputs, SessionOrigin, route};
 use serde_json::{Value, json};
 
 // -------------------------------------------------------------------------
@@ -526,21 +520,11 @@ pub const AUTH_METHODS: &[&str] = &[];
 
 /// The routing inputs a served session is decided from.
 ///
-/// The pin is `None` and there is no way to make it anything else from this
-/// crate: setting a pin requires an `omega_front_door::PinGesture`, and no
-/// variant of that enum is reachable over a socket. The engine is reported
-/// unreachable because the served surface does not hold the supervisor's
-/// answer — and it does not matter, which
-/// `a_served_session_can_never_reach_an_engine_lane` proves by showing the
-/// decision is identical for every engine state.
+/// The inventory contains only the native executor. Nothing received over the
+/// socket can add an external candidate, exact override, or engine authority.
 #[must_use]
 pub fn served_inputs() -> RouteInputs {
-    RouteInputs {
-        pin: None,
-        engine: EngineReadiness::Unreachable(EngineUnreachable::NotRunning),
-        external_acp: None,
-        engine_lane: None,
-    }
+    RouteInputs::native_only()
 }
 
 /// The route decision a served session gets.
@@ -1045,8 +1029,8 @@ mod tests {
         InitializeResponse, NewSessionResponse, PromptResponse, SessionNotification, StopReason,
     };
     use omega_front_door::{
-        EXECUTOR_DISCLOSURE_FIELDS, EngineLane, ExecutorClass, FULL_AUTO_AFFORDANCES, Ingress,
-        LaneState, PinGesture, RouteReason, SESSION_ORIGIN_FIELDS,
+        EXECUTOR_DISCLOSURE_FIELDS, ExecutorClass, FULL_AUTO_AFFORDANCES, Ingress, PinGesture,
+        RouteReason, SESSION_ORIGIN_FIELDS,
     };
     use std::collections::BTreeSet;
     use std::io::{BufRead, BufReader, Write};
@@ -1216,52 +1200,26 @@ mod tests {
     ///
     /// This is owner gate 8 at the socket. A pin is the only door to an engine
     /// lane, setting one requires a `PinGesture`, and no variant of that enum
-    /// is reachable from a socket. The consequence is checked against every
-    /// engine state the router can be shown, so "at capacity" or "no lanes" is
-    /// not what is doing the work.
+    /// is reachable from a socket. The consequence is checked in the candidate
+    /// inventory itself, before the pure routing law can select anything.
     #[test]
     fn a_served_session_can_never_reach_an_engine_lane() {
         let decision = served_route();
         assert_eq!(decision.chosen, ExecutorClass::NativeLoop);
-        assert_eq!(decision.reason, RouteReason::UnpinnedDefault);
+        assert_eq!(decision.reason, RouteReason::GeneralReasoning);
         assert!(decision.is_coherent());
 
-        for engine in [
-            EngineReadiness::Unreachable(EngineUnreachable::NotRunning),
-            EngineReadiness::Unreachable(EngineUnreachable::Timeout),
-            EngineReadiness::Unreachable(EngineUnreachable::ProtocolError),
-            EngineReadiness::Answered {
-                active_run_count: 0,
-                active_run_limit: 8,
-                lanes: vec![
-                    EngineLane::new("claude-local", LaneState::Available),
-                    EngineLane::new("codex-local", LaneState::Available),
-                ],
-            },
-        ] {
-            let inputs = RouteInputs {
-                engine,
-                external_acp: Some("codex-acp".to_owned()),
-                engine_lane: Some("codex-local".to_owned()),
-                ..served_inputs()
-            };
-            // OMEGA-DELTA-0055. This used to assert `NativeLoop`, and the
-            // property it is named for is about engine lanes. An unpinned
-            // thread now runs on an attached external ACP agent, which is not
-            // Full Auto authority and is not reachable from anything a socket
-            // can say — the connection is made at startup from what is
-            // installed. The engine lane is what the socket must never reach,
-            // and that is what is asserted.
-            let decided = route(&inputs);
-            assert_ne!(
-                decided.chosen,
-                ExecutorClass::EngineLane,
-                "a served session reached an engine lane. Nothing over the \
-                 socket may take a pin, and a pin is the only door to Full \
-                 Auto authority."
-            );
-            assert!(decided.lane_ref.is_none());
-        }
+        let inputs = served_inputs();
+        assert!(
+            inputs
+                .candidates
+                .iter()
+                .all(|candidate| candidate.target.class != ExecutorClass::EngineLane),
+            "the served surface must not admit an engine candidate"
+        );
+        let decided = route(&inputs);
+        assert_ne!(decided.chosen, ExecutorClass::EngineLane);
+        assert!(decided.lane_ref.is_none());
     }
 
     /// The disclosure crosses the wire as a record with exactly the fields the
@@ -1301,7 +1259,7 @@ mod tests {
         assert_eq!(disclosure["agent_id"], SERVED_AGENT_ID);
         assert!(disclosure["provider"].is_null());
         assert!(disclosure["model"].is_null());
-        assert_eq!(disclosure["route"], "unpinned_default");
+        assert_eq!(disclosure["route"], "general_reasoning");
         assert_eq!(origin["ingress"], "loopback_acp");
         assert_eq!(origin["host_name"], "Zed");
         assert_eq!(origin["authenticated"], false);

@@ -11,10 +11,23 @@ uses models configured through [LLM Providers](./llm-providers.md), and
 integrates with Omega's project, editor, terminal, and review surfaces.
 
 The new-conversation front door prepares one Omega Agent conversation and
-shows it as Ready only after its connection creates a real session. Selecting
-the row reveals that same prepared conversation. Its persisted owner remains
-Omega Agent even when the router later discloses Codex, Claude, or an engine
-lane as the executor for a turn.
+shows it as Ready once its router has a live, recorded executor inventory.
+Selecting the row reveals that same prepared conversation. The first submitted
+request supplies the task requirements for one deterministic route; only then
+does the selected executor create its session. Its persisted owner remains
+Omega Agent even when the route receipt names a different concrete executor.
+
+An automatic route may select Omega's native loop or a ready ordinary ACP
+agent. Full Auto engine lanes still require their own explicit human authority
+and are not automatic chat candidates. A new-conversation override wins over
+automatic routing, is consumed by that conversation, and cannot retarget an
+existing transcript.
+
+Before the first request is dispatched, Omega durably records the normalized
+task requirements, the exact readiness snapshot, the policy version, the
+selected executor, the reason, and any override or fallback. The thread shows
+that receipt. If the selected executor disappears, Omega names it and stops;
+it never retries the request on another executor.
 
 Use Omega Agent when you want the agent to:
 

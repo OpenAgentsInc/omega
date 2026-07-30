@@ -1784,6 +1784,7 @@ async fn open_zero_base_project(app_state: &Arc<AppState>, cx: &mut AsyncApp) ->
 pub(crate) struct OmegaSend {
     text: String,
     transcript: Option<PathBuf>,
+    route_receipt: Option<PathBuf>,
     quit: bool,
     timeout: std::time::Duration,
 }
@@ -1795,6 +1796,7 @@ fn read_omega_send_from_command_line(args: &Args) {
     let _ = OMEGA_SEND.set(args.omega_send.clone().map(|text| OmegaSend {
         text,
         transcript: args.omega_send_transcript.clone(),
+        route_receipt: args.omega_route_receipt.clone(),
         quit: args.omega_quit_after_send,
         timeout: std::time::Duration::from_secs(args.omega_send_timeout_secs),
     }));
@@ -1899,6 +1901,19 @@ async fn run_omega_send(send: &OmegaSend, deadline: Instant, cx: &mut AsyncApp) 
         std::fs::write(path, transcript)
             .with_context(|| format!("writing the transcript to {}", path.display()))?;
         log::info!("OMEGA-DELTA-0093: transcript written to {}", path.display());
+    }
+    if let Some(path) = &send.route_receipt {
+        let receipt = cx.update(|cx| {
+            let session_id = thread.read(cx).session_id();
+            agent_ui::omega_router::recorded_route_receipt(session_id)
+        });
+        let receipt = receipt.context("the completed Omega turn has no durable route receipt")?;
+        std::fs::write(path, receipt.canonical_record())
+            .with_context(|| format!("writing the route receipt to {}", path.display()))?;
+        log::info!(
+            "OMEGA-DELTA-0179: route receipt written to {}",
+            path.display()
+        );
     }
     Ok(())
 }
@@ -2108,6 +2123,10 @@ struct Args {
     /// tells the two apart without a screen capture.
     #[arg(long, value_name = "PATH", requires = "omega_send")]
     omega_send_transcript: Option<PathBuf>,
+
+    /// Writes the thread's durable route receipt here once the turn settles.
+    #[arg(long, value_name = "PATH", requires = "omega_send")]
+    omega_route_receipt: Option<PathBuf>,
 
     /// Quits when the turn started by --omega-send settles.
     ///

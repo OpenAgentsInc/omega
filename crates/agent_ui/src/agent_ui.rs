@@ -597,7 +597,12 @@ impl Agent {
                 // operator reads. The choice is made here rather than inside
                 // the router, because the router is not allowed to read the
                 // environment — see `RouteJournal::data_dir_path`.
-                if std::env::var("ZED_STATELESS").is_ok() {
+                if cfg!(any(test, feature = "test-support")) {
+                    std::env::temp_dir().join(format!(
+                        "omega-route-journal-test-{}.json",
+                        uuid::Uuid::new_v4()
+                    ))
+                } else if std::env::var("ZED_STATELESS").is_ok() {
                     std::env::temp_dir()
                         .join(format!("omega-route-journal-{}.json", std::process::id()))
                 } else {

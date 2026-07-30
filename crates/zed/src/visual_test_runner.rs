@@ -10463,17 +10463,17 @@ fn run_omega_agent_visual_tests_inner(
                 panel.activate_prepared_omega_for_tests(window, cx)
             })
         })
-        .context("Failed to activate the prepared Omega session")?;
+        .context("Failed to activate the prepared Omega router")?;
     anyhow::ensure!(
         activated,
-        "the front door did not reach Ready with an actual Omega session"
+        "the front door did not reach Ready with a connected Omega router"
     );
     cx.run_until_parked();
 
     let thread_id = cx
         .read(|cx| panel.read(cx).active_thread_id(cx))
         .ok_or_else(|| {
-            anyhow::anyhow!("activating Omega did not claim the prepared projectless session")
+            anyhow::anyhow!("activating Omega did not claim the prepared projectless conversation")
         })?;
 
     // The keystrokes go into this window through GPUI's own dispatch, so
@@ -10481,20 +10481,28 @@ fn run_omega_agent_visual_tests_inner(
     cx.simulate_input(workspace_window.into(), "route this thread on purpose");
     cx.run_until_parked();
 
-    let typed = cx
-        .read(|cx| {
-            panel
-                .read(cx)
-                .active_thread_view_for_tests()
-                .and_then(|conversation| conversation.read(cx).root_thread_view())
-                .map(|view| view.read(cx).message_editor.read(cx).text(cx))
-        })
-        .unwrap_or_default();
+    let typed = cx.read(|cx| {
+        panel
+            .read(cx)
+            .active_thread_view_for_tests()
+            .is_some_and(|conversation| {
+                conversation.read(cx).has_unsubmitted_or_pending_content(cx)
+            })
+    });
     anyhow::ensure!(
-        typed.contains("route this thread on purpose"),
-        "typing on the front door did not reach the thread's composer; the \
-         editor holds {typed:?}"
+        typed,
+        "typing on the front door did not reach the logical router composer"
     );
+    if capture_sealed_front_door {
+        let snapshot = cx.debug_render_snapshot(workspace_window.into())?;
+        let mut probe = SemanticProbe::new(&snapshot);
+        probe.require_accessible(
+            "omega-new-conversation-route-override-trigger",
+            "Button",
+            "Automatic",
+        )?;
+        record_workbench_semantic_checks("omega_front_door_typing", probe.into_checks());
+    }
 
     let typing = if capture_sealed_front_door {
         anyhow::ensure!(
@@ -10521,6 +10529,30 @@ fn run_omega_agent_visual_tests_inner(
     ]) {
         return finish_omega_agent_visual_tests(workspace_window, cx, &[front_door, typing]);
     }
+
+    cx.update_window(workspace_window.into(), |_, window, cx| {
+        window.dispatch_action(Box::new(zed_actions::agent::Chat), cx);
+    })
+    .context("Failed to dispatch the projectless conversation's first turn")?;
+    cx.run_until_parked();
+    anyhow::ensure!(
+        cx.read(|cx| {
+            panel
+                .read(cx)
+                .active_thread_view_for_tests()
+                .is_some_and(|conversation| conversation.read(cx).root_thread_view().is_some())
+        }),
+        "the first accepted turn did not create its routed physical executor session"
+    );
+    let route_receipt_line = cx
+        .read(|cx| omega_route_receipt_line(&panel, cx))
+        .ok_or_else(|| anyhow::anyhow!("the routed thread has no durable route receipt"))?;
+    cx.set_debug_accessibility_active(workspace_window.into(), true)?;
+    let snapshot = cx.debug_render_snapshot(workspace_window.into())?;
+    let mut probe = SemanticProbe::new(&snapshot);
+    probe.require_accessible("omega-route-receipt", "Status", &route_receipt_line)?;
+    probe.require_absent("omega-new-conversation-route-override-trigger")?;
+    record_workbench_semantic_checks("omega_executor_disclosure_native", probe.into_checks());
 
     // Zoom the panel for the disclosure captures. The executor line is long by
     // design — class, agent, model, run, and route reason — and a dock-width
@@ -10910,6 +10942,47 @@ fn run_omega_agent_visual_tests_inner(
 #[cfg(all(target_os = "macos", feature = "visual-tests"))]
 fn omega_executor_line(panel: &Entity<agent_ui::AgentPanel>, cx: &App) -> Option<String> {
     Some(omega_executor_record(panel, cx)?.label())
+}
+
+#[cfg(all(target_os = "macos", feature = "visual-tests"))]
+fn omega_route_receipt_line(panel: &Entity<agent_ui::AgentPanel>, cx: &App) -> Option<String> {
+    use omega_front_door::router::{ExecutorOverride, RouteFallback};
+
+    let session_id = panel
+        .read(cx)
+        .active_thread_view_for_tests()?
+        .read(cx)
+        .root_thread_view()?
+        .read(cx)
+        .thread
+        .read(cx)
+        .session_id()
+        .clone();
+    let receipt = agent_ui::omega_router::recorded_route_receipt(&session_id)?;
+    let route_override =
+        receipt
+            .decision
+            .inputs
+            .as_ref()
+            .map_or("not recorded".to_owned(), |inputs| {
+                match &inputs.executor_override {
+                    ExecutorOverride::Auto => "automatic".to_owned(),
+                    ExecutorOverride::Native => "Omega".to_owned(),
+                    ExecutorOverride::ExactExternal(agent_id) => format!("exact {agent_id}"),
+                }
+            });
+    let fallback = match &receipt.decision.fallback {
+        Some(RouteFallback::NativeForGeneralReasoning) => "Omega for general reasoning",
+        Some(RouteFallback::NativeAfterExternalUnavailable) => {
+            "Omega after external executor became unavailable"
+        }
+        None => "none",
+    };
+    Some(format!(
+        "Receipt {} · Route: {} · override: {route_override} · fallback: {fallback}",
+        receipt.dispatch_ref,
+        receipt.decision.summary()
+    ))
 }
 
 /// The executor *record* the agent panel's active thread would render from.

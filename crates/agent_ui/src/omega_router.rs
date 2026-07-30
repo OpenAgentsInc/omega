@@ -36,14 +36,15 @@
 //!
 //! # The decision is recorded
 //!
-//! Every decision is written to a route journal on disk keyed by session, in
-//! [`omega_front_door::RouteDecision::canonical_record`] form, which round-trips.
+//! Every decision is written to a route journal under a monotonic dispatch
+//! reference before execution, then bound to the executor-minted session id.
+//! Its [`omega_front_door::RouteDecision::canonical_record`] form round-trips.
 //! The journal carries no clock: a timestamp would make two identical decisions
 //! look different and would put a non-deterministic value beside a decision path
 //! whose whole point is that it is reproducible.
 
 use std::any::Any;
-use std::cell::RefCell;
+use std::cell::{Cell, RefCell};
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 use std::rc::{Rc, Weak};
@@ -58,18 +59,22 @@ use agent_client_protocol::schema::v1 as acp;
 use anyhow::Result;
 use gpui::{App, Entity, SharedString, Task};
 use omega_front_door::{
-    EngineLane, EngineReadiness, EngineUnreachable, ExecutorClass, ExecutorPin, LaneState,
-    PinGesture, RouteDecision, RouteInputs, RouteReason, route,
+    EngineLane, EngineReadiness, EngineUnreachable, ExecutorCandidate, ExecutorClass,
+    ExecutorOverride, ExecutorPin, ExecutorReadiness, ExecutorTarget, LaneState, PinGesture,
+    RouteDecision, RouteInputs, RouteReason, TaskKind, TaskRequirements, route,
 };
 use project::{AgentId, Project};
 use serde_json::Value;
 use util::path_list::PathList;
 
 /// The schema the route journal is written under.
-const ROUTE_JOURNAL_SCHEMA: &str = "openagents.omega.agent_route_journal.v1";
+const ROUTE_JOURNAL_SCHEMA: &str = "openagents.omega.agent_route_journal.v2";
+const LEGACY_ROUTE_JOURNAL_SCHEMA: &str = "openagents.omega.agent_route_journal.v1";
 
 /// The route journal's file name, under the Omega data directory.
 const ROUTE_JOURNAL_FILE: &str = "agent-route-journal.json";
+
+static ROUTE_JOURNAL_WRITE_LOCK: LazyLock<Mutex<()>> = LazyLock::new(|| Mutex::new(()));
 
 // -------------------------------------------------------------------------
 // Reading the engine's answer
@@ -127,13 +132,50 @@ pub fn engine_readiness_from_capacity(capacity: &Value) -> EngineReadiness {
 /// A record, not a log line: keyed by session, readable back into a typed
 /// [`RouteDecision`], and rewritten atomically through a temporary file so a
 /// crash mid-write leaves the previous journal rather than a truncated one.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct RouteReceipt {
+    pub dispatch_ref: u64,
+    pub inputs: RouteInputs,
+    pub decision: RouteDecision,
+    pub session_id: Option<String>,
+}
+
+impl RouteReceipt {
+    #[must_use]
+    pub fn canonical_record(&self) -> String {
+        serde_json::json!({
+            "dispatchRef": self.dispatch_ref,
+            "inputs": self.inputs.canonical_record(),
+            "decision": self.decision.canonical_record(),
+            "sessionId": self.session_id,
+        })
+        .to_string()
+    }
+
+    #[must_use]
+    pub fn parse_canonical_record(record: &str) -> Option<Self> {
+        let value: Value = serde_json::from_str(record).ok()?;
+        let receipt = Self {
+            dispatch_ref: value.get("dispatchRef")?.as_u64()?,
+            inputs: RouteInputs::parse_canonical_record(value.get("inputs")?.as_str()?)?,
+            decision: RouteDecision::parse_canonical_record(value.get("decision")?.as_str()?)?,
+            session_id: value
+                .get("sessionId")
+                .and_then(Value::as_str)
+                .map(ToOwned::to_owned),
+        };
+        (receipt.decision.inputs.as_ref() == Some(&receipt.inputs)
+            && receipt.decision.is_coherent())
+        .then_some(receipt)
+    }
+}
+
 pub struct RouteJournal {
     path: PathBuf,
-    /// Session id to canonical record. A `BTreeMap` rather than a `HashMap`
-    /// because the file is written from it: hash order would make the same set
-    /// of decisions serialise differently on different runs, and a journal that
-    /// changes without a decision changing is a journal nobody can diff.
-    entries: RefCell<BTreeMap<String, String>>,
+    entries: RefCell<BTreeMap<u64, RouteReceipt>>,
+    legacy_entries: RefCell<BTreeMap<String, RouteDecision>>,
+    next_dispatch_ref: Cell<u64>,
+    load_error: RefCell<Option<String>>,
 }
 
 impl RouteJournal {
@@ -162,60 +204,160 @@ impl RouteJournal {
     /// The journal at an explicit path. Loads what is already there.
     #[must_use]
     pub fn at(path: PathBuf) -> Self {
-        let entries = load_journal(&path).unwrap_or_else(|error| {
-            log::warn!(
-                "OMEGA-DELTA-0029: route journal at {} could not be read ({error:#}); \
-                 starting from empty rather than routing without a record",
-                path.display()
-            );
-            BTreeMap::new()
-        });
-        for (session_id, record) in &entries {
-            if let Some(decision) = RouteDecision::parse_canonical_record(record) {
-                publish_recorded_route(session_id, decision.disclosed_route());
+        let _write_guard = ROUTE_JOURNAL_WRITE_LOCK
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let (loaded, load_error) = match load_journal(&path) {
+            Ok(loaded) => (loaded, None),
+            Err(error) => {
+                let error = format!(
+                    "route journal at {} could not be read: {error:#}",
+                    path.display()
+                );
+                log::error!("OMEGA-DELTA-0153: {error}; routing is disabled");
+                (LoadedJournal::default(), Some(error))
             }
-        }
+        };
+        let entries = loaded.receipts;
+        reconcile_recorded_route_receipts(&path, entries.values().cloned());
+        let next_dispatch_ref = match entries.keys().next_back().copied() {
+            Some(dispatch_ref) => dispatch_ref.checked_add(1).unwrap_or(dispatch_ref),
+            None => 0,
+        };
         Self {
             path,
             entries: RefCell::new(entries),
+            legacy_entries: RefCell::new(loaded.legacy),
+            next_dispatch_ref: Cell::new(next_dispatch_ref),
+            load_error: RefCell::new(load_error),
         }
     }
 
-    /// Write one decision down.
-    ///
-    /// Publishes to the read-mostly index below in the same call, so the
-    /// disclosure line a thread draws cannot disagree with the durable record
-    /// it is derived from.
-    #[must_use]
-    pub fn record(&self, session_id: &str, decision: &RouteDecision) -> bool {
+    pub fn begin(&self, inputs: RouteInputs, decision: RouteDecision) -> Result<RouteReceipt> {
+        if let Some(error) = self.load_error.borrow().as_ref() {
+            anyhow::bail!("{error}");
+        }
+        anyhow::ensure!(
+            decision.inputs.as_ref() == Some(&inputs),
+            "route decision inputs differ from the receipt inputs"
+        );
+        anyhow::ensure!(
+            decision.is_coherent(),
+            "refusing to persist an incoherent route decision"
+        );
+        let _write_guard = ROUTE_JOURNAL_WRITE_LOCK
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        self.reload_for_write()?;
+        let dispatch_ref = self.next_dispatch_ref.get();
+        anyhow::ensure!(
+            !self.entries.borrow().contains_key(&dispatch_ref),
+            "route dispatch reference space is exhausted"
+        );
+        let receipt = RouteReceipt {
+            dispatch_ref,
+            inputs,
+            decision,
+            session_id: None,
+        };
         self.entries
             .borrow_mut()
-            .insert(session_id.to_owned(), decision.canonical_record());
-        publish_recorded_route(session_id, decision.disclosed_route());
-        match self.persist() {
-            Ok(()) => true,
-            Err(error) => {
-                log::error!(
-                    "OMEGA-DELTA-0029: route decision for {session_id} could not be \
-                     persisted to {}: {error:#}",
-                    self.path.display()
-                );
-                false
-            }
+            .insert(dispatch_ref, receipt.clone());
+        if let Err(error) = self.persist() {
+            self.entries.borrow_mut().remove(&dispatch_ref);
+            return Err(error.context("persisting route receipt before dispatch"));
         }
+        self.next_dispatch_ref
+            .set(dispatch_ref.checked_add(1).unwrap_or(dispatch_ref));
+        Ok(receipt)
     }
 
-    /// Read one decision back.
-    ///
-    /// `None` for a session with no record *and* for a record that does not
-    /// read back as a coherent decision, so a hand-edited journal is rejected
-    /// rather than believed.
+    pub fn bind_session(&self, dispatch_ref: u64, session_id: &str) -> Result<RouteReceipt> {
+        let _write_guard = ROUTE_JOURNAL_WRITE_LOCK
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        self.reload_for_write()?;
+        anyhow::ensure!(
+            !self.entries.borrow().values().any(|receipt| {
+                receipt.dispatch_ref != dispatch_ref
+                    && receipt.session_id.as_deref() == Some(session_id)
+            }),
+            "session `{session_id}` is already bound to another route receipt"
+        );
+        let previous = {
+            let mut entries = self.entries.borrow_mut();
+            let receipt = entries.get_mut(&dispatch_ref).ok_or_else(|| {
+                anyhow::anyhow!("unknown route dispatch reference {dispatch_ref}")
+            })?;
+            anyhow::ensure!(
+                receipt
+                    .session_id
+                    .as_deref()
+                    .is_none_or(|bound| bound == session_id),
+                "route dispatch reference {dispatch_ref} is already bound to another session"
+            );
+            let previous = receipt.session_id.replace(session_id.to_owned());
+            (previous, receipt.clone())
+        };
+        if let Err(error) = self.persist() {
+            if let Some(receipt) = self.entries.borrow_mut().get_mut(&dispatch_ref) {
+                receipt.session_id = previous.0;
+            }
+            return Err(error.context("binding executor session to route receipt"));
+        }
+        publish_recorded_route_receipt(&self.path, previous.1.clone());
+        Ok(previous.1)
+    }
+
+    fn reload_for_write(&self) -> Result<()> {
+        let loaded = load_journal(&self.path)?;
+        let next_dispatch_ref = loaded
+            .receipts
+            .keys()
+            .next_back()
+            .copied()
+            .map_or(0, |dispatch_ref| {
+                dispatch_ref.checked_add(1).unwrap_or(dispatch_ref)
+            });
+        *self.entries.borrow_mut() = loaded.receipts;
+        *self.legacy_entries.borrow_mut() = loaded.legacy;
+        self.next_dispatch_ref.set(next_dispatch_ref);
+        Ok(())
+    }
+
+    pub fn record_bound(
+        &self,
+        session_id: &str,
+        inputs: RouteInputs,
+        decision: RouteDecision,
+    ) -> Result<RouteReceipt> {
+        anyhow::ensure!(
+            self.decision(session_id).is_none(),
+            "session `{session_id}` already has a route receipt"
+        );
+        let receipt = self.begin(inputs, decision)?;
+        self.bind_session(receipt.dispatch_ref, session_id)
+    }
+
     #[must_use]
-    pub fn decision(&self, session_id: &str) -> Option<RouteDecision> {
+    pub fn receipt(&self, session_id: &str) -> Option<RouteReceipt> {
         self.entries
             .borrow()
-            .get(session_id)
-            .and_then(|record| RouteDecision::parse_canonical_record(record))
+            .values()
+            .find(|receipt| receipt.session_id.as_deref() == Some(session_id))
+            .cloned()
+    }
+
+    #[must_use]
+    pub fn pending(&self, dispatch_ref: u64) -> Option<RouteReceipt> {
+        self.entries.borrow().get(&dispatch_ref).cloned()
+    }
+
+    #[must_use]
+    pub fn decision(&self, session_id: &str) -> Option<RouteDecision> {
+        self.receipt(session_id)
+            .map(|receipt| receipt.decision)
+            .or_else(|| self.legacy_entries.borrow().get(session_id).cloned())
     }
 
     /// Every recorded decision, in session order.
@@ -223,10 +365,12 @@ impl RouteJournal {
     pub fn decisions(&self) -> Vec<(String, RouteDecision)> {
         self.entries
             .borrow()
-            .iter()
-            .filter_map(|(session_id, record)| {
-                RouteDecision::parse_canonical_record(record)
-                    .map(|decision| (session_id.clone(), decision))
+            .values()
+            .filter_map(|receipt| {
+                receipt
+                    .session_id
+                    .clone()
+                    .map(|session_id| (session_id, receipt.decision.clone()))
             })
             .collect()
     }
@@ -235,11 +379,18 @@ impl RouteJournal {
         let entries = self.entries.borrow();
         let document = serde_json::json!({
             "schema": ROUTE_JOURNAL_SCHEMA,
-            "decisions": entries
+            "receipts": entries
+                .values()
+                .map(|receipt| receipt.canonical_record())
+                .collect::<Vec<_>>(),
+            "legacyDecisions": self
+                .legacy_entries
+                .borrow()
                 .iter()
-                .map(|(session_id, record)| {
-                    serde_json::json!({ "sessionId": session_id, "decision": record })
-                })
+                .map(|(session_id, decision)| serde_json::json!({
+                    "sessionId": session_id,
+                    "decision": decision.canonical_record(),
+                }))
                 .collect::<Vec<_>>(),
         });
         if let Some(parent) = self.path.parent() {
@@ -252,31 +403,94 @@ impl RouteJournal {
     }
 }
 
-fn load_journal(path: &Path) -> anyhow::Result<BTreeMap<String, String>> {
+#[derive(Default)]
+struct LoadedJournal {
+    receipts: BTreeMap<u64, RouteReceipt>,
+    legacy: BTreeMap<String, RouteDecision>,
+}
+
+fn load_journal(path: &Path) -> anyhow::Result<LoadedJournal> {
     if !path.exists() {
-        return Ok(BTreeMap::new());
+        return Ok(LoadedJournal::default());
     }
     let document: Value = serde_json::from_slice(&std::fs::read(path)?)?;
     let schema = document.get("schema").and_then(Value::as_str);
+    if schema == Some(LEGACY_ROUTE_JOURNAL_SCHEMA) {
+        return load_legacy_journal(&document);
+    }
     anyhow::ensure!(
         schema == Some(ROUTE_JOURNAL_SCHEMA),
         "unsupported route journal schema {schema:?}"
     );
     let mut entries = BTreeMap::new();
-    for entry in document
-        .get("decisions")
+    for record in document
+        .get("receipts")
         .and_then(Value::as_array)
         .unwrap_or(&Vec::new())
     {
-        let (Some(session_id), Some(record)) = (
-            entry.get("sessionId").and_then(Value::as_str),
-            entry.get("decision").and_then(Value::as_str),
-        ) else {
-            anyhow::bail!("route journal entry is missing sessionId or decision");
-        };
-        entries.insert(session_id.to_owned(), record.to_owned());
+        let record = record
+            .as_str()
+            .ok_or_else(|| anyhow::anyhow!("route journal receipt is not a string"))?;
+        let receipt = RouteReceipt::parse_canonical_record(record)
+            .ok_or_else(|| anyhow::anyhow!("route journal receipt is not canonical"))?;
+        anyhow::ensure!(
+            !entries.contains_key(&receipt.dispatch_ref),
+            "duplicate route dispatch reference {}",
+            receipt.dispatch_ref
+        );
+        if let Some(session_id) = &receipt.session_id {
+            anyhow::ensure!(
+                !entries.values().any(|existing: &RouteReceipt| {
+                    existing.session_id.as_deref() == Some(session_id.as_str())
+                }),
+                "duplicate route session id `{session_id}`"
+            );
+        }
+        entries.insert(receipt.dispatch_ref, receipt);
     }
-    Ok(entries)
+    let mut legacy = BTreeMap::new();
+    load_legacy_decisions(&document, "legacyDecisions", &mut legacy)?;
+    Ok(LoadedJournal {
+        receipts: entries,
+        legacy,
+    })
+}
+
+fn load_legacy_journal(document: &Value) -> anyhow::Result<LoadedJournal> {
+    let mut legacy = BTreeMap::new();
+    load_legacy_decisions(document, "decisions", &mut legacy)?;
+    Ok(LoadedJournal {
+        receipts: BTreeMap::new(),
+        legacy,
+    })
+}
+
+fn load_legacy_decisions(
+    document: &Value,
+    key: &str,
+    legacy: &mut BTreeMap<String, RouteDecision>,
+) -> anyhow::Result<()> {
+    for entry in document
+        .get(key)
+        .and_then(Value::as_array)
+        .unwrap_or(&Vec::new())
+    {
+        let session_id = entry
+            .get("sessionId")
+            .and_then(Value::as_str)
+            .ok_or_else(|| anyhow::anyhow!("legacy route entry is missing sessionId"))?;
+        let record = entry
+            .get("decision")
+            .and_then(Value::as_str)
+            .ok_or_else(|| anyhow::anyhow!("legacy route entry is missing decision"))?;
+        let decision = RouteDecision::parse_canonical_record(record)
+            .ok_or_else(|| anyhow::anyhow!("legacy route decision is not canonical"))?;
+        anyhow::ensure!(
+            legacy.insert(session_id.to_owned(), decision).is_none(),
+            "duplicate legacy route session id `{session_id}`"
+        );
+    }
+    Ok(())
 }
 
 /// `OMEGA-DELTA-0029`. The route reason each routed session was recorded with,
@@ -286,16 +500,47 @@ fn load_journal(path: &Path) -> anyhow::Result<BTreeMap<String, String>> {
 /// the router lives behind an `Rc` a render cannot reach, while the disclosure
 /// has to be readable from one. It is a read-mostly *projection* of the
 /// journal, not a second store — it is filled from the journal when one is
-/// opened and on every write, so deleting the journal file empties it.
-static RECORDED_ROUTES: LazyLock<Mutex<BTreeMap<String, RouteReason>>> =
+/// opened and on every successful session binding.
+static RECORDED_ROUTE_RECEIPTS: LazyLock<Mutex<BTreeMap<String, (PathBuf, RouteReceipt)>>> =
     LazyLock::new(|| Mutex::new(BTreeMap::new()));
 
-fn publish_recorded_route(session_id: &str, reason: RouteReason) {
-    let mut index = match RECORDED_ROUTES.lock() {
+fn reconcile_recorded_route_receipts(
+    path: &Path,
+    receipts: impl IntoIterator<Item = RouteReceipt>,
+) {
+    let mut index = match RECORDED_ROUTE_RECEIPTS.lock() {
         Ok(index) => index,
         Err(poisoned) => poisoned.into_inner(),
     };
-    index.insert(session_id.to_owned(), reason);
+    index.retain(|_, (recorded_path, _)| recorded_path != path);
+    for receipt in receipts {
+        let Some(session_id) = receipt.session_id.clone() else {
+            continue;
+        };
+        index.insert(session_id, (path.to_path_buf(), receipt));
+    }
+}
+
+fn publish_recorded_route_receipt(path: &Path, receipt: RouteReceipt) {
+    let Some(session_id) = receipt.session_id.clone() else {
+        return;
+    };
+    let mut index = match RECORDED_ROUTE_RECEIPTS.lock() {
+        Ok(index) => index,
+        Err(poisoned) => poisoned.into_inner(),
+    };
+    index.insert(session_id, (path.to_path_buf(), receipt));
+}
+
+#[must_use]
+pub fn recorded_route_receipt(session_id: &acp::SessionId) -> Option<RouteReceipt> {
+    let index = match RECORDED_ROUTE_RECEIPTS.lock() {
+        Ok(index) => index,
+        Err(poisoned) => poisoned.into_inner(),
+    };
+    index
+        .get(session_id.0.as_ref())
+        .map(|(_, receipt)| receipt.clone())
 }
 
 /// Why Omega Agent routed this session where it did, if it routed it.
@@ -305,11 +550,7 @@ fn publish_recorded_route(session_id: &str, reason: RouteReason) {
 /// routed" is different from claiming a reason nobody recorded.
 #[must_use]
 pub fn recorded_route(session_id: &acp::SessionId) -> Option<RouteReason> {
-    let index = match RECORDED_ROUTES.lock() {
-        Ok(index) => index,
-        Err(poisoned) => poisoned.into_inner(),
-    };
-    index.get(session_id.0.as_ref()).copied()
+    recorded_route_receipt(session_id).map(|receipt| receipt.decision.disclosed_route())
 }
 
 // -------------------------------------------------------------------------
@@ -326,7 +567,9 @@ pub struct OmegaAgentConnection {
     /// every route that cannot be honoured lands here.
     native: Rc<dyn AgentConnection>,
     /// The external ACP agent connected for this surface, if one is.
-    external_acp: Option<Rc<dyn AgentConnection>>,
+    external_acps: BTreeMap<String, Rc<dyn AgentConnection>>,
+    external_order: Vec<String>,
+    unavailable_external_acps: Vec<String>,
     /// The executor registered to serve engine lanes, if one is. See
     /// [`RouteInputs::engine_lane`] for why this is separate from the engine
     /// answering at all.
@@ -337,6 +580,7 @@ pub struct OmegaAgentConnection {
     pins: RefCell<BTreeMap<String, ExecutorPin>>,
     /// The pin a session that does not exist yet will be created under.
     next_pin: RefCell<Option<ExecutorPin>>,
+    prepared_next: RefCell<Option<RouteReceipt>>,
     /// Decisions, by session, in memory and on disk.
     journal: RouteJournal,
     /// The identity this router presents. `OMEGA-DELTA-0024`.
@@ -353,11 +597,14 @@ impl OmegaAgentConnection {
         let agent_id = native.agent_id();
         Self {
             native,
-            external_acp: None,
+            external_acps: BTreeMap::new(),
+            external_order: Vec::new(),
+            unavailable_external_acps: Vec::new(),
             engine_lane: None,
             engine: RefCell::new(EngineReadiness::Unreachable(EngineUnreachable::NotRunning)),
             pins: RefCell::new(BTreeMap::new()),
             next_pin: RefCell::new(None),
+            prepared_next: RefCell::new(None),
             journal,
             agent_id,
         }
@@ -366,7 +613,35 @@ impl OmegaAgentConnection {
     /// Register the external ACP agent this surface can route to.
     #[must_use]
     pub fn with_external_acp(mut self, connection: Rc<dyn AgentConnection>) -> Self {
-        self.external_acp = Some(connection);
+        let agent_id = connection.agent_id().0.to_string();
+        if !self.external_acps.contains_key(&agent_id) {
+            self.external_order.push(agent_id.clone());
+        }
+        self.external_acps.insert(agent_id, connection);
+        self
+    }
+
+    #[must_use]
+    pub fn with_external_acps(
+        mut self,
+        connections: impl IntoIterator<Item = Rc<dyn AgentConnection>>,
+    ) -> Self {
+        for connection in connections {
+            let agent_id = connection.agent_id().0.to_string();
+            if !self.external_acps.contains_key(&agent_id) {
+                self.external_order.push(agent_id.clone());
+            }
+            self.external_acps.insert(agent_id, connection);
+        }
+        self
+    }
+
+    #[must_use]
+    pub fn with_unavailable_external_acps(
+        mut self,
+        agent_ids: impl IntoIterator<Item = String>,
+    ) -> Self {
+        self.unavailable_external_acps = agent_ids.into_iter().collect();
         self
     }
 
@@ -483,18 +758,102 @@ impl OmegaAgentConnection {
     /// decision can be re-derived and checked against its record.
     #[must_use]
     pub fn inputs_for(&self, pin: Option<ExecutorPin>) -> RouteInputs {
-        RouteInputs {
-            pin,
-            engine: self.engine.borrow().clone(),
-            external_acp: self
-                .external_acp
-                .as_ref()
-                .map(|connection| connection.agent_id().0.to_string()),
-            engine_lane: self
-                .engine_lane
-                .as_ref()
-                .map(|connection| connection.agent_id().0.to_string()),
+        if let Some(engine_pin) = pin
+            .as_ref()
+            .filter(|pin| pin.class == ExecutorClass::EngineLane)
+            .cloned()
+        {
+            let mut inputs = RouteInputs::native_only().with_engine(self.engine.borrow().clone());
+            if let Some(engine_lane) = &self.engine_lane {
+                inputs = inputs.with_engine_lane(engine_lane.agent_id().0.to_string());
+            }
+            return inputs.pinned(engine_pin);
         }
+        let executor_override = match pin.as_ref().map(|pin| pin.class) {
+            Some(ExecutorClass::NativeLoop) => ExecutorOverride::Native,
+            Some(ExecutorClass::ExternalAcp) => self
+                .external_order
+                .first()
+                .cloned()
+                .map(ExecutorOverride::ExactExternal)
+                .unwrap_or_else(|| ExecutorOverride::ExactExternal("external-acp".to_owned())),
+            Some(ExecutorClass::EngineLane) => unreachable!("handled above"),
+            None => ExecutorOverride::Auto,
+        };
+        self.route_inputs(
+            TaskRequirements::new(TaskKind::GeneralReasoning),
+            executor_override,
+        )
+    }
+
+    #[must_use]
+    pub fn route_inputs(
+        &self,
+        task_requirements: TaskRequirements,
+        executor_override: ExecutorOverride,
+    ) -> RouteInputs {
+        let mut candidates = vec![ExecutorCandidate::new(
+            ExecutorTarget::new(
+                ExecutorClass::NativeLoop,
+                self.native.agent_id().0.to_string(),
+            ),
+            ExecutorReadiness::Ready,
+        )];
+        for agent_id in &self.external_order {
+            if let Some(connection) = self.external_acps.get(agent_id) {
+                candidates.push(ExecutorCandidate::new(
+                    ExecutorTarget::new(ExecutorClass::ExternalAcp, agent_id.clone()),
+                    if crate::omega_executor_warmth::executor_connection_is_live(connection) {
+                        ExecutorReadiness::Ready
+                    } else {
+                        ExecutorReadiness::Unavailable
+                    },
+                ));
+            }
+        }
+        for agent_id in &self.unavailable_external_acps {
+            if !self.external_acps.contains_key(agent_id) {
+                candidates.push(ExecutorCandidate::new(
+                    ExecutorTarget::new(ExecutorClass::ExternalAcp, agent_id.clone()),
+                    ExecutorReadiness::Unavailable,
+                ));
+            }
+        }
+        if let Some(connection) = &self.engine_lane {
+            candidates.push(ExecutorCandidate::new(
+                ExecutorTarget::new(
+                    ExecutorClass::EngineLane,
+                    connection.agent_id().0.to_string(),
+                ),
+                if crate::omega_executor_warmth::executor_connection_is_live(connection) {
+                    ExecutorReadiness::Ready
+                } else {
+                    ExecutorReadiness::Unavailable
+                },
+            ));
+        }
+        RouteInputs::new(task_requirements, candidates, executor_override)
+    }
+
+    pub fn prepare_next_session(
+        &self,
+        task_requirements: TaskRequirements,
+        executor_override: ExecutorOverride,
+    ) -> Result<RouteDecision> {
+        anyhow::ensure!(
+            self.prepared_next.borrow().is_none(),
+            "a route is already prepared for the next session"
+        );
+        let inputs = self.route_inputs(task_requirements, executor_override);
+        let decision = route(&inputs);
+        let receipt = self.journal.begin(inputs, decision.clone())?;
+        *self.prepared_next.borrow_mut() = Some(receipt);
+        Ok(decision)
+    }
+
+    #[must_use]
+    pub fn external_executor_ids(&self) -> Vec<String> {
+        self.external_order.clone()
     }
 
     /// Decide, record, and return the decision for a session.
@@ -504,12 +863,16 @@ impl OmegaAgentConnection {
     /// omega#78's falsifier.
     #[must_use]
     pub fn decide(&self, session_id: &str, pin: Option<ExecutorPin>) -> RouteDecision {
-        let decision = route(&self.inputs_for(pin));
+        let inputs = self.inputs_for(pin);
+        let decision = route(&inputs);
         debug_assert!(decision.is_coherent(), "incoherent decision: {decision:?}");
-        if !self.journal.record(session_id, &decision) {
+        if let Err(error) = self
+            .journal
+            .record_bound(session_id, inputs, decision.clone())
+        {
             log::error!(
                 "OMEGA-DELTA-0029: session {session_id} routed to {} with no durable \
-                 record; the route is explainable only until this process exits",
+                 record; the route is explainable only until this process exits: {error:#}",
                 decision.explain()
             );
         }
@@ -528,25 +891,24 @@ impl OmegaAgentConnection {
         &self.journal
     }
 
-    /// The executor a class names, or the native loop.
+    /// An attached executor for a legacy class-only inspection.
     ///
-    /// Total by construction: the native loop is required, so there is always
-    /// something to hand the turn to. A class whose connection is absent cannot
-    /// be reached from [`route`] — `RouteInputs` reports absence, and the
-    /// decision falls back — so this arm is a belt on top of a brace, not a
-    /// silent substitution.
+    /// Current dispatch uses [`Self::executor_for_decision`] and an exact id.
+    /// This class-only helper remains for old inspectors and tests; it returns
+    /// an error when no connection in the requested class exists.
     #[must_use]
-    pub fn executor(&self, class: ExecutorClass) -> Rc<dyn AgentConnection> {
+    pub fn executor(&self, class: ExecutorClass) -> Result<Rc<dyn AgentConnection>> {
         match class {
-            ExecutorClass::NativeLoop => self.native.clone(),
-            ExecutorClass::ExternalAcp => self.external_acp.clone().unwrap_or_else(|| {
-                log::error!("OMEGA-DELTA-0029: external ACP route with no connection");
-                self.native.clone()
-            }),
-            ExecutorClass::EngineLane => self.engine_lane.clone().unwrap_or_else(|| {
-                log::error!("OMEGA-DELTA-0029: engine lane route with no connection");
-                self.native.clone()
-            }),
+            ExecutorClass::NativeLoop => Ok(self.native.clone()),
+            ExecutorClass::ExternalAcp => {
+                self.external_acps.values().next().cloned().ok_or_else(|| {
+                    anyhow::anyhow!("external ACP route has no exact attached connection")
+                })
+            }
+            ExecutorClass::EngineLane => self
+                .engine_lane
+                .clone()
+                .ok_or_else(|| anyhow::anyhow!("engine lane route has no attached connection")),
         }
     }
 
@@ -557,10 +919,88 @@ impl OmegaAgentConnection {
     /// turns. A session with no record has not been routed yet and gets the
     /// fail-closed target.
     #[must_use]
-    pub fn executor_for(&self, session_id: &acp::SessionId) -> Rc<dyn AgentConnection> {
-        match self.recorded_decision(session_id) {
-            Some(decision) => self.executor(decision.chosen),
-            None => self.native.clone(),
+    pub fn executor_for(&self, session_id: &acp::SessionId) -> Result<Rc<dyn AgentConnection>> {
+        if let Some(error) = self.journal.load_error.borrow().as_ref() {
+            anyhow::bail!("{error}");
+        }
+        let decision = self.recorded_decision(session_id).ok_or_else(|| {
+            anyhow::anyhow!(
+                "session {} has no durable route receipt; refusing to substitute Omega",
+                session_id.0
+            )
+        })?;
+        self.executor_for_decision(&decision)
+    }
+
+    fn executor_for_decision(&self, decision: &RouteDecision) -> Result<Rc<dyn AgentConnection>> {
+        if let Some(unavailable) = &decision.hard_unavailable {
+            anyhow::bail!("route is unavailable: {unavailable:?}");
+        }
+        let target = match decision.dispatch_target() {
+            Some(target) => target,
+            None if decision.inputs.is_none() => match decision.chosen {
+                ExecutorClass::NativeLoop => ExecutorTarget::new(
+                    ExecutorClass::NativeLoop,
+                    self.native.agent_id().0.to_string(),
+                ),
+                ExecutorClass::ExternalAcp => anyhow::bail!(
+                    "legacy external route has no exact executor id; refusing to infer one from the currently attached executors"
+                ),
+                ExecutorClass::EngineLane => anyhow::bail!(
+                    "legacy engine-lane route has no exact executor id; refusing to infer one from the currently attached lane"
+                ),
+            },
+            None => anyhow::bail!(
+                "route receipt for {} lacks an exact executor identity",
+                decision.chosen.token()
+            ),
+        };
+        let connection = match target.class {
+            ExecutorClass::NativeLoop if self.native.agent_id().0.as_ref() == target.agent_id => {
+                self.native.clone()
+            }
+            ExecutorClass::NativeLoop => anyhow::bail!(
+                "recorded native executor `{}` is not the attached `{}`",
+                target.agent_id,
+                self.native.agent_id().0
+            ),
+            ExecutorClass::ExternalAcp => self
+                .external_acps
+                .get(&target.agent_id)
+                .cloned()
+                .ok_or_else(|| {
+                    anyhow::anyhow!(
+                        "recorded executor `{}` is unavailable; refusing to substitute Omega",
+                        target.agent_id
+                    )
+                })?,
+            ExecutorClass::EngineLane => self
+                .engine_lane
+                .as_ref()
+                .filter(|connection| connection.agent_id().0.as_ref() == target.agent_id)
+                .cloned()
+                .ok_or_else(|| {
+                    anyhow::anyhow!("recorded engine lane `{}` is unavailable", target.agent_id)
+                })?,
+        };
+        anyhow::ensure!(
+            crate::omega_executor_warmth::executor_connection_is_live(&connection),
+            "recorded executor `{}` has exited",
+            target.agent_id
+        );
+        Ok(connection)
+    }
+
+    fn executor_for_session_or_log(
+        &self,
+        session_id: &acp::SessionId,
+    ) -> Option<Rc<dyn AgentConnection>> {
+        match self.executor_for(session_id) {
+            Ok(executor) => Some(executor),
+            Err(error) => {
+                log::error!("OMEGA-DELTA-0153: {error:#}");
+                None
+            }
         }
     }
 }
@@ -590,24 +1030,46 @@ impl AgentConnection for OmegaAgentConnection {
         work_dirs: PathList,
         cx: &mut App,
     ) -> Task<Result<Entity<AcpThread>>> {
-        let pin = self.next_pin.borrow().clone();
-        let decision = route(&self.inputs_for(pin.clone()));
-        let executor = self.executor(decision.chosen);
+        let pin = self.next_pin.borrow_mut().take();
+        let receipt = if let Some(receipt) = self.prepared_next.borrow_mut().take() {
+            receipt
+        } else {
+            let inputs = match pin.clone() {
+                Some(pin) => self.inputs_for(Some(pin)),
+                None => self.route_inputs(
+                    TaskRequirements::new(TaskKind::GeneralReasoning),
+                    ExecutorOverride::Auto,
+                ),
+            };
+            let decision = route(&inputs);
+            match self.journal.begin(inputs, decision) {
+                Ok(receipt) => receipt,
+                Err(error) => return Task::ready(Err(error)),
+            }
+        };
+        let executor = match self.executor_for_decision(&receipt.decision) {
+            Ok(executor) => executor,
+            Err(error) => return Task::ready(Err(error)),
+        };
+        let executor_id = receipt
+            .decision
+            .executor_id
+            .clone()
+            .unwrap_or_else(|| executor.agent_id().0.to_string());
         let session = executor.new_session(project, work_dirs, cx);
         cx.spawn(async move |cx| {
-            let thread = session.await?;
+            let thread = session.await.map_err(|error| {
+                error.context(format!(
+                    "recorded executor `{executor_id}` failed while creating its session; refusing to substitute another executor"
+                ))
+            })?;
             // Recorded once the session exists, because the record is keyed by
             // the session id the executor minted. The decision itself was made
             // before dispatch and is not re-derived here: re-deciding after the
             // fact would let the record describe a world the turn never saw.
             let session_id = thread.read_with(cx, |thread, _| thread.session_id().0.to_string());
-            if !self.journal.record(&session_id, &decision) {
-                log::error!(
-                    "OMEGA-DELTA-0029: session {session_id} routed to {} with no durable \
-                     record; the route is explainable only until this process exits",
-                    decision.explain()
-                );
-            }
+            self.journal
+                .bind_session(receipt.dispatch_ref, &session_id)?;
             self.pins
                 .borrow_mut()
                 .extend(pin.map(|pin| (session_id, pin)));
@@ -639,9 +1101,9 @@ impl AgentConnection for OmegaAgentConnection {
         // is `session_supports_load`.
         self.native.supports_load_session()
             || self
-                .external_acp
-                .as_ref()
-                .is_some_and(|executor| executor.supports_load_session())
+                .external_acps
+                .values()
+                .any(|executor| executor.supports_load_session())
             || self
                 .engine_lane
                 .as_ref()
@@ -666,7 +1128,10 @@ impl AgentConnection for OmegaAgentConnection {
         // order the caller would have tried: load, then resume, then say so.
         // Resuming loses the earlier messages, which is worse than loading and
         // much better than an empty window with "Failed to Launch".
-        let executor = self.executor_for(&session_id);
+        let executor = match self.executor_for(&session_id) {
+            Ok(executor) => executor,
+            Err(error) => return Task::ready(Err(error)),
+        };
         if executor.supports_load_session() {
             executor.load_session(session_id, project, work_dirs, title, cx)
         } else if executor.supports_resume_session() {
@@ -678,37 +1143,20 @@ impl AgentConnection for OmegaAgentConnection {
             );
             executor.resume_session(session_id, project, work_dirs, title, cx)
         } else {
-            // omega#115. A fresh thread, not a dead window.
-            //
-            // Returning an error here fails the *launch*: Omega reopens the
-            // last thread at startup, so a thread run by an executor that
-            // cannot reopen sessions left the owner staring at an empty window
-            // saying "Failed to Launch". Nothing in the app worked, and the one
-            // thing he had not done was anything wrong.
-            //
-            // Reopening is a convenience; being able to type is not. So the
-            // conversation that cannot be restored is replaced by a new one on
-            // the same folder, and the reason is logged with the executor
-            // named. The old thread is not lost — it is in the metadata store
-            // and the threads sidebar; it simply cannot be *continued* by the
-            // executor that ran it.
-            log::info!(
-                "starting a new thread instead of reopening {}: {} supports \
-                 neither loading nor resuming a session, and a launch must not \
-                 fail because an old thread cannot be continued",
-                session_id.0,
-                executor.telemetry_id()
-            );
-            self.new_session(project, work_dirs, cx)
+            Task::ready(Err(anyhow::anyhow!(
+                "recorded executor `{}` supports neither loading nor resuming session {}; refusing to create a substitute session",
+                executor.agent_id().0,
+                session_id.0
+            )))
         }
     }
 
     fn supports_resume_session(&self) -> bool {
         self.native.supports_resume_session()
             || self
-                .external_acp
-                .as_ref()
-                .is_some_and(|executor| executor.supports_resume_session())
+                .external_acps
+                .values()
+                .any(|executor| executor.supports_resume_session())
             || self
                 .engine_lane
                 .as_ref()
@@ -723,8 +1171,10 @@ impl AgentConnection for OmegaAgentConnection {
         title: Option<SharedString>,
         cx: &mut App,
     ) -> Task<Result<Entity<AcpThread>>> {
-        self.executor_for(&session_id)
-            .resume_session(session_id, project, work_dirs, title, cx)
+        match self.executor_for(&session_id) {
+            Ok(executor) => executor.resume_session(session_id, project, work_dirs, title, cx),
+            Err(error) => Task::ready(Err(error)),
+        }
     }
 
     fn auth_methods(&self) -> &[acp::AuthMethod] {
@@ -755,15 +1205,21 @@ impl AgentConnection for OmegaAgentConnection {
         params: acp::PromptRequest,
         cx: &mut App,
     ) -> Task<Result<acp::PromptResponse>> {
-        self.executor_for(&params.session_id).prompt(params, cx)
+        match self.executor_for(&params.session_id) {
+            Ok(executor) => executor.prompt(params, cx),
+            Err(error) => Task::ready(Err(error)),
+        }
     }
 
     fn retry(&self, session_id: &acp::SessionId, cx: &App) -> Option<Rc<dyn AgentSessionRetry>> {
-        self.executor_for(session_id).retry(session_id, cx)
+        self.executor_for_session_or_log(session_id)
+            .and_then(|executor| executor.retry(session_id, cx))
     }
 
     fn cancel(&self, session_id: &acp::SessionId, cx: &mut App) {
-        self.executor_for(session_id).cancel(session_id, cx);
+        if let Some(executor) = self.executor_for_session_or_log(session_id) {
+            executor.cancel(session_id, cx);
+        }
     }
 
     fn request_elicitations(&self) -> Option<Entity<ElicitationStore>> {
@@ -775,7 +1231,8 @@ impl AgentConnection for OmegaAgentConnection {
         session_id: &acp::SessionId,
         cx: &App,
     ) -> Option<Rc<dyn AgentSessionTruncate>> {
-        self.executor_for(session_id).truncate(session_id, cx)
+        self.executor_for_session_or_log(session_id)
+            .and_then(|executor| executor.truncate(session_id, cx))
     }
 
     fn set_title(
@@ -783,11 +1240,13 @@ impl AgentConnection for OmegaAgentConnection {
         session_id: &acp::SessionId,
         cx: &App,
     ) -> Option<Rc<dyn AgentSessionSetTitle>> {
-        self.executor_for(session_id).set_title(session_id, cx)
+        self.executor_for_session_or_log(session_id)
+            .and_then(|executor| executor.set_title(session_id, cx))
     }
 
     fn model_selector(&self, session_id: &acp::SessionId) -> Option<Rc<dyn AgentModelSelector>> {
-        self.executor_for(session_id).model_selector(session_id)
+        self.executor_for_session_or_log(session_id)
+            .and_then(|executor| executor.model_selector(session_id))
     }
 
     fn telemetry(&self) -> Option<Rc<dyn AgentTelemetry>> {
@@ -799,7 +1258,8 @@ impl AgentConnection for OmegaAgentConnection {
         session_id: &acp::SessionId,
         cx: &App,
     ) -> Option<Rc<dyn AgentSessionModes>> {
-        self.executor_for(session_id).session_modes(session_id, cx)
+        self.executor_for_session_or_log(session_id)
+            .and_then(|executor| executor.session_modes(session_id, cx))
     }
 
     fn session_config_options(
@@ -807,8 +1267,8 @@ impl AgentConnection for OmegaAgentConnection {
         session_id: &acp::SessionId,
         cx: &App,
     ) -> Option<Rc<dyn AgentSessionConfigOptions>> {
-        self.executor_for(session_id)
-            .session_config_options(session_id, cx)
+        self.executor_for_session_or_log(session_id)
+            .and_then(|executor| executor.session_config_options(session_id, cx))
     }
 
     fn session_list(&self, cx: &mut App) -> Option<Rc<dyn AgentSessionList>> {
@@ -831,7 +1291,7 @@ thread_local! {
     /// connection store's async entry, and the pin control has to live on the
     /// thread's own disclosure line — so the router publishes itself here when
     /// it is built, exactly as `omega_host_bridge` publishes its lane index and
-    /// as [`RECORDED_ROUTES`] publishes route reasons.
+    /// as [`RECORDED_ROUTE_RECEIPTS`] publishes route receipts.
     ///
     /// A `thread_local` rather than a `static` because `Rc` is not `Sync`, and
     /// because the only reader is the GPUI main thread that built it. It is a
@@ -958,13 +1418,6 @@ impl agent_servers::AgentServer for OmegaRouterServer {
                 &installed_agents,
                 exo_lane_path.is_some(),
             );
-            // `OMEGA-DELTA-0117`. Everything detection found, kept whole while
-            // the plan narrows to what this connect may attach: warming asks
-            // what the *selector* offers, which is not what this one choice
-            // reaches for.
-            let detected_agents = installed_agents;
-            let warm_project = project.clone();
-            let warm_agent_server_store = agent_server_store.clone();
             let installed_agents = plan.agents;
             let exo_lane = if let (true, Some(exo_lane_path)) = (plan.exo, exo_lane_path) {
                 crate::omega_exo_connection::connect_configured_lane(
@@ -991,48 +1444,38 @@ impl agent_servers::AgentServer for OmegaRouterServer {
             // `OMEGA-DELTA-0117`. Which agent id ends up in the one external
             // slot, so the warming below does not start a second copy of the
             // adapter that is already running.
-            let mut attached_adapter: Option<&'static str> = None;
             if let Some(exo) = exo_lane {
-                attached_adapter = Some(omega_exo_lane::EXO_HARNESS_ID);
                 router = router.with_external_acp(exo);
-            // `OMEGA-DELTA-0095`, omega#106. Otherwise the coding agent that is
-            // actually installed — Codex first, then Claude. Second, because an
-            // Exo lane is a file the owner wrote and detection is only a
-            // binary that happens to be on `PATH`: explicit configuration wins
-            // over what was found. A machine with neither attaches nothing and
-            // every thread stays on the native loop with its visible fallback
-            // reason. A machine where the chosen agent cannot be reached fails
-            // here naming it, rather than producing a thread that reports one
-            // executor and runs another — unless a person has read that failure
-            // and chosen Omega's own loop, which `connect_detected_executor`
-            // honours by attaching nothing. `OMEGA-DELTA-0114`.
-            } else if let Some(installed) = crate::omega_agent_attach::connect_detected_executor(
+            }
+            let attached = crate::omega_agent_attach::connect_detected_executors(
                 &installed_agents,
-                project,
+                project.clone(),
                 agent_server_store,
                 loading_status,
                 cx,
             )
-            .await?
-            {
-                attached_adapter = crate::omega_agent_attach::choose_executor(&installed_agents)
-                    .map(|choice| choice.chosen.id);
-                router = router.with_external_acp(installed);
+            .await;
+            let unavailable_external_acps = attached
+                .unavailable
+                .iter()
+                .map(|failure| failure.agent.id.to_owned())
+                .collect::<Vec<_>>();
+            for failure in attached.unavailable {
+                log::warn!(
+                    "OMEGA-DELTA-0153: `{}` is installed but unavailable for exact routing: {}",
+                    failure.agent.id,
+                    failure.reason
+                );
             }
+            router = router.with_external_acps(
+                attached
+                    .ready
+                    .into_iter()
+                    .map(|attached| attached.connection),
+            );
+            router = router.with_unavailable_external_acps(unavailable_external_acps);
             let router = Rc::new(router);
             publish_active_router(&router);
-            // `OMEGA-DELTA-0117`, omega#112. The earliest moment a preload is
-            // allowed to start: this connect has returned, so a window is up
-            // and the wait a person was actually in has ended. Starting the
-            // other offerable executors any earlier would move that wait rather
-            // than remove it.
-            crate::omega_executor_warmth::warm_the_others(
-                &detected_agents,
-                attached_adapter,
-                warm_project,
-                warm_agent_server_store,
-                cx,
-            );
             Ok(router as Rc<dyn AgentConnection>)
         })
     }
@@ -1218,23 +1661,32 @@ mod tests {
         let directory = tempfile::tempdir().expect("temporary directory");
         let session = "session-1";
 
-        let decision = {
+        let (inputs, decision) = {
             let journal = journal_in(&directory);
-            let router = OmegaAgentConnection::new(stub("omega-agent"), journal);
-            router.observe_capacity(Err(EngineUnreachable::NotRunning));
-            router.decide(session, Some(ExecutorPin::on_lane("claude-local")))
+            let router = OmegaAgentConnection::new(stub("omega-agent"), journal)
+                .with_external_acp(stub("codex-acp"));
+            let inputs = router.route_inputs(
+                TaskRequirements::new(TaskKind::RepositoryWork),
+                ExecutorOverride::ExactExternal("codex-acp".to_owned()),
+            );
+            let decision = route(&inputs);
+            router
+                .journal()
+                .record_bound(session, inputs.clone(), decision.clone())
+                .expect("route receipt persists");
+            (inputs, decision)
         };
-        assert_eq!(decision.chosen, ExecutorClass::NativeLoop);
-        assert_eq!(decision.reason, RouteReason::EngineUnreachable);
+        assert_eq!(decision.executor_id.as_deref(), Some("codex-acp"));
 
         let reopened = journal_in(&directory);
+        let receipt = reopened.receipt(session).expect("bound receipt");
+        assert_eq!(receipt.inputs, inputs);
+        assert_eq!(route(&receipt.inputs), decision);
         assert_eq!(reopened.decision(session).as_ref(), Some(&decision));
         assert_eq!(reopened.decisions(), vec![(session.to_owned(), decision)]);
         assert_eq!(
-            recorded_route(&acp::SessionId::new(session)),
-            Some(RouteReason::EngineUnreachable),
-            "a decision the journal holds must be disclosable on the thread \
-             that made it"
+            recorded_route_receipt(&acp::SessionId::new(session)),
+            Some(receipt),
         );
     }
 
@@ -1253,7 +1705,223 @@ mod tests {
             .unwrap(),
         )
         .unwrap();
-        assert!(RouteJournal::at(path).decision("s").is_none());
+        let journal = RouteJournal::at(path);
+        assert!(journal.decision("s").is_none());
+        let inputs = RouteInputs::native_only();
+        assert!(journal.begin(inputs.clone(), route(&inputs)).is_err());
+    }
+
+    #[test]
+    fn a_v1_journal_remains_readable_while_new_receipts_migrate_to_v2() {
+        let directory = tempfile::tempdir().expect("temporary directory");
+        let path = directory.path().join(ROUTE_JOURNAL_FILE);
+        let legacy_decision = RouteDecision::parse_canonical_record(
+            "chosen=external_acp;reason=pin_honored;pin=external_acp;lane=",
+        )
+        .expect("legacy decision");
+        std::fs::write(
+            &path,
+            serde_json::to_vec(&serde_json::json!({
+                "schema": LEGACY_ROUTE_JOURNAL_SCHEMA,
+                "decisions": [{
+                    "sessionId": "legacy-session",
+                    "decision": legacy_decision.canonical_record(),
+                }],
+            }))
+            .expect("legacy journal JSON"),
+        )
+        .expect("legacy journal write");
+
+        let journal = RouteJournal::at(path.clone());
+        assert_eq!(
+            journal.decision("legacy-session"),
+            Some(legacy_decision.clone())
+        );
+        let inputs = RouteInputs::native_only();
+        let pending = journal
+            .begin(inputs.clone(), route(&inputs))
+            .expect("new v2 receipt can be written after loading v1");
+        journal
+            .bind_session(pending.dispatch_ref, "new-session")
+            .expect("new v2 receipt binds");
+
+        let reopened = RouteJournal::at(path);
+        assert_eq!(reopened.decision("legacy-session"), Some(legacy_decision));
+        assert!(reopened.receipt("new-session").is_some());
+    }
+
+    #[test]
+    fn an_identity_less_legacy_external_route_never_adopts_the_only_current_executor() {
+        let directory = tempfile::tempdir().expect("temporary directory");
+        let legacy_decision = RouteDecision::parse_canonical_record(
+            "chosen=external_acp;reason=pin_honored;pin=external_acp;lane=",
+        )
+        .expect("legacy decision");
+        let router = OmegaAgentConnection::new(stub("omega-agent"), journal_in(&directory))
+            .with_external_acp(stub("claude-acp"));
+
+        let error = match router.executor_for_decision(&legacy_decision) {
+            Ok(_) => panic!("an identity-less Codex-era record must not run on current Claude"),
+            Err(error) => error,
+        };
+        assert!(format!("{error:#}").contains("no exact executor id"));
+    }
+
+    #[test]
+    fn a_pending_receipt_is_durable_before_dispatch_and_binds_once() {
+        let directory = tempfile::tempdir().expect("temporary directory");
+        let inputs = RouteInputs::native_only();
+        let decision = route(&inputs);
+        let dispatch_ref = journal_in(&directory)
+            .begin(inputs.clone(), decision.clone())
+            .expect("pending receipt persists")
+            .dispatch_ref;
+
+        let reopened = journal_in(&directory);
+        assert_eq!(
+            reopened
+                .pending(dispatch_ref)
+                .map(|receipt| receipt.session_id),
+            Some(None)
+        );
+        reopened
+            .bind_session(dispatch_ref, "session-bound")
+            .expect("session binding persists");
+        assert!(
+            reopened
+                .bind_session(dispatch_ref, "different-session")
+                .is_err()
+        );
+        assert_eq!(
+            journal_in(&directory)
+                .receipt("session-bound")
+                .map(|receipt| (receipt.inputs, receipt.decision)),
+            Some((inputs, decision))
+        );
+    }
+
+    #[test]
+    fn simultaneous_journal_handles_merge_instead_of_overwriting_receipts() {
+        let directory = tempfile::tempdir().expect("temporary directory");
+        let first = journal_in(&directory);
+        let second = journal_in(&directory);
+        let inputs = RouteInputs::native_only();
+        let decision = route(&inputs);
+
+        let first_receipt = first
+            .begin(inputs.clone(), decision.clone())
+            .expect("first receipt persists");
+        first
+            .bind_session(first_receipt.dispatch_ref, "first-session")
+            .expect("first session binds");
+        let second_receipt = second
+            .begin(inputs, decision.clone())
+            .expect("second handle reloads and appends");
+        second
+            .bind_session(second_receipt.dispatch_ref, "second-session")
+            .expect("second session binds");
+
+        assert_ne!(first_receipt.dispatch_ref, second_receipt.dispatch_ref);
+        let reopened = journal_in(&directory);
+        assert_eq!(reopened.decision("first-session"), Some(decision.clone()));
+        assert_eq!(reopened.decision("second-session"), Some(decision));
+    }
+
+    #[test]
+    fn reopening_a_deleted_journal_removes_its_stale_process_projection() {
+        let directory = tempfile::tempdir().expect("temporary directory");
+        let path = directory.path().join(ROUTE_JOURNAL_FILE);
+        let journal = RouteJournal::at(path.clone());
+        let inputs = RouteInputs::native_only();
+        journal
+            .record_bound("deleted-session", inputs.clone(), route(&inputs))
+            .expect("route receipt persists");
+        let session_id = acp::SessionId::new("deleted-session");
+        assert!(recorded_route_receipt(&session_id).is_some());
+
+        std::fs::remove_file(&path).expect("temporary journal can be removed");
+        let _empty = RouteJournal::at(path);
+        assert!(recorded_route_receipt(&session_id).is_none());
+    }
+
+    #[test]
+    fn a_prepared_override_is_one_shot_and_persisted() {
+        let directory = tempfile::tempdir().expect("temporary directory");
+        let router = OmegaAgentConnection::new(stub("omega-agent"), journal_in(&directory))
+            .with_external_acps([stub("codex-acp"), stub("claude-acp")]);
+
+        let decision = router
+            .prepare_next_session(
+                TaskRequirements::new(TaskKind::RepositoryWork),
+                ExecutorOverride::ExactExternal("claude-acp".to_owned()),
+            )
+            .expect("the override is prepared");
+        assert_eq!(decision.executor_id.as_deref(), Some("claude-acp"));
+        assert_eq!(
+            router.external_executor_ids(),
+            vec!["codex-acp".to_owned(), "claude-acp".to_owned()]
+        );
+        assert!(
+            router
+                .prepare_next_session(
+                    TaskRequirements::new(TaskKind::RepositoryWork),
+                    ExecutorOverride::Native,
+                )
+                .is_err(),
+            "a second override cannot replace the prepared route before new_session consumes it"
+        );
+        assert!(
+            std::fs::read_to_string(directory.path().join("openagents").join(ROUTE_JOURNAL_FILE))
+                .expect("prepared receipt is on disk")
+                .contains("claude-acp")
+        );
+    }
+
+    #[test]
+    fn a_receipt_rejects_a_decision_made_from_different_inputs() {
+        let inputs = RouteInputs::native_only();
+        let other_inputs = RouteInputs::new(
+            TaskRequirements::new(TaskKind::RepositoryWork),
+            vec![ExecutorCandidate::new(
+                ExecutorTarget::new(ExecutorClass::ExternalAcp, "codex-acp"),
+                ExecutorReadiness::Ready,
+            )],
+            ExecutorOverride::ExactExternal("codex-acp".to_owned()),
+        );
+        let receipt = RouteReceipt {
+            dispatch_ref: 7,
+            inputs,
+            decision: route(&other_inputs),
+            session_id: None,
+        };
+
+        assert!(RouteReceipt::parse_canonical_record(&receipt.canonical_record()).is_none());
+    }
+
+    #[test]
+    fn a_recorded_exact_executor_disappearing_never_substitutes_native() {
+        let directory = tempfile::tempdir().expect("temporary directory");
+        {
+            let router = OmegaAgentConnection::new(stub("omega-agent"), journal_in(&directory))
+                .with_external_acp(stub("codex-acp"));
+            let inputs = router.route_inputs(
+                TaskRequirements::new(TaskKind::RepositoryWork),
+                ExecutorOverride::ExactExternal("codex-acp".to_owned()),
+            );
+            router
+                .journal()
+                .record_bound("gone", inputs.clone(), route(&inputs))
+                .expect("exact receipt persists");
+        }
+
+        let restarted = OmegaAgentConnection::new(stub("omega-agent"), journal_in(&directory));
+        let error = match restarted.executor_for(&acp::SessionId::new("gone")) {
+            Ok(_) => panic!("the missing exact executor must fail closed"),
+            Err(error) => error,
+        };
+        let message = format!("{error:#}");
+        assert!(message.contains("codex-acp"));
+        assert!(message.contains("refusing to substitute Omega"));
     }
 
     /// Exit property 1, at the dispatch layer: the executor a turn reaches is
@@ -1275,7 +1943,10 @@ mod tests {
         );
         assert_eq!(external.chosen, ExecutorClass::ExternalAcp);
         assert_eq!(
-            router.executor(external.chosen).agent_id(),
+            router
+                .executor(external.chosen)
+                .expect("external executor")
+                .agent_id(),
             AgentId::new("codex-acp")
         );
 
@@ -1283,7 +1954,10 @@ mod tests {
         assert_eq!(lane.chosen, ExecutorClass::EngineLane);
         assert_eq!(lane.lane_ref.as_deref(), Some("claude-local"));
         assert_eq!(
-            router.executor(lane.chosen).agent_id(),
+            router
+                .executor(lane.chosen)
+                .expect("engine executor")
+                .agent_id(),
             AgentId::new("codex-local")
         );
 
@@ -1292,7 +1966,10 @@ mod tests {
         let unpinned = router.decide("s-unpinned", None);
         assert_eq!(unpinned.chosen, ExecutorClass::NativeLoop);
         assert_eq!(
-            router.executor(unpinned.chosen).agent_id(),
+            router
+                .executor(unpinned.chosen)
+                .expect("native executor")
+                .agent_id(),
             AgentId::new("omega-agent")
         );
     }
@@ -1312,7 +1989,10 @@ mod tests {
 
         assert_eq!(unpinned.chosen, ExecutorClass::NativeLoop);
         assert_eq!(
-            router.executor(unpinned.chosen).agent_id(),
+            router
+                .executor(unpinned.chosen)
+                .expect("native executor")
+                .agent_id(),
             AgentId::new("omega-agent")
         );
     }
@@ -1322,23 +2002,23 @@ mod tests {
     #[test]
     fn an_engine_down_router_dispatches_to_the_native_loop() {
         let directory = tempfile::tempdir().expect("temporary directory");
-        let router = OmegaAgentConnection::new(stub("omega-agent"), journal_in(&directory))
-            .with_engine_lane(stub("codex-local"));
-        router.observe_capacity(Err(EngineUnreachable::Timeout));
+        let router = OmegaAgentConnection::new(stub("omega-agent"), journal_in(&directory));
+        let inputs = router.route_inputs(
+            TaskRequirements::new(TaskKind::RepositoryWork),
+            ExecutorOverride::ExactExternal("missing-acp".to_owned()),
+        );
+        let decision = route(&inputs);
+        router
+            .journal()
+            .record_bound("s", inputs, decision.clone())
+            .expect("unavailable decision is durable");
 
-        let decision = router.decide("s", Some(ExecutorPin::on_lane("claude-local")));
-        assert_eq!(
-            router.executor(decision.chosen).agent_id(),
-            AgentId::new("omega-agent")
-        );
-        assert_eq!(decision.reason, RouteReason::EngineUnreachable);
-        assert!(
-            decision.reason.phrase().contains("fell back"),
-            "the fallback must be sayable on the thread's own line"
-        );
+        assert!(router.executor_for(&acp::SessionId::new("s")).is_err());
+        assert_eq!(decision.reason, RouteReason::OverrideUnavailable);
+        assert!(decision.hard_unavailable.is_some());
         assert_eq!(
             router.journal().decision("s").map(|d| d.reason),
-            Some(RouteReason::EngineUnreachable)
+            Some(RouteReason::OverrideUnavailable)
         );
     }
 
@@ -1351,11 +2031,16 @@ mod tests {
     fn a_later_engine_answer_does_not_rewrite_a_recorded_decision() {
         let directory = tempfile::tempdir().expect("temporary directory");
         let router = OmegaAgentConnection::new(stub("omega-agent"), journal_in(&directory))
-            .with_engine_lane(stub("codex-local"));
-        router.observe_capacity(Ok(&ready_capacity()));
-
-        let decision = router.decide("s", Some(ExecutorPin::on_lane("claude-local")));
-        assert_eq!(decision.chosen, ExecutorClass::EngineLane);
+            .with_external_acp(stub("codex-acp"));
+        let inputs = router.route_inputs(
+            TaskRequirements::new(TaskKind::RepositoryWork),
+            ExecutorOverride::ExactExternal("codex-acp".to_owned()),
+        );
+        let decision = route(&inputs);
+        router
+            .journal()
+            .record_bound("s", inputs, decision.clone())
+            .expect("route receipt");
 
         router.observe_capacity(Err(EngineUnreachable::NotRunning));
         assert_eq!(router.journal().decision("s").as_ref(), Some(&decision));
@@ -1364,8 +2049,11 @@ mod tests {
         // on every turn left this test green: the record was intact while the
         // turn went somewhere else.
         assert_eq!(
-            router.executor_for(&acp::SessionId::new("s")).agent_id(),
-            AgentId::new("codex-local"),
+            router
+                .executor_for(&acp::SessionId::new("s"))
+                .expect("recorded executor")
+                .agent_id(),
+            AgentId::new("codex-acp"),
             "the recorded route must keep the turn where it was placed rather \
              than moving mid-thread because capacity changed"
         );
@@ -1387,7 +2075,7 @@ mod tests {
         // classifies a connection can mistake it for one. The dispatch target
         // is what a thread carries.
         let decision = router.decide("s", Some(ExecutorPin::new(ExecutorClass::ExternalAcp)));
-        let executor = router.executor(decision.chosen);
+        let executor = router.executor(decision.chosen).expect("external executor");
         assert_ne!(
             executor.agent_id(),
             router.agent_id(),
@@ -1403,13 +2091,12 @@ mod tests {
     fn the_live_router_records_the_same_decision_every_time() {
         let directory = tempfile::tempdir().expect("temporary directory");
         let router = OmegaAgentConnection::new(stub("omega-agent"), journal_in(&directory))
-            .with_engine_lane(stub("codex-local"));
-        router.observe_capacity(Ok(&ready_capacity()));
+            .with_external_acp(stub("codex-acp"));
 
-        let first = router.decide("s", Some(ExecutorPin::new(ExecutorClass::EngineLane)));
+        let first = router.decide("s", Some(ExecutorPin::new(ExecutorClass::ExternalAcp)));
         for _ in 0..16 {
             assert_eq!(
-                router.decide("s", Some(ExecutorPin::new(ExecutorClass::EngineLane))),
+                router.decide("s", Some(ExecutorPin::new(ExecutorClass::ExternalAcp))),
                 first
             );
         }
@@ -1436,27 +2123,22 @@ mod tests {
         let directory = tempfile::tempdir().expect("temporary directory");
         let router = OmegaAgentConnection::new(stub("omega-agent"), journal_in(&directory))
             .with_external_acp(stub("codex-acp"));
-        // Its own session id; see `an_unhonourable_pin_is_kept_and_explained`.
         let session = acp::SessionId::new("s-human-pin");
-
-        // OMEGA-DELTA-0150. Attachment alone does not move an unpinned chat.
-        assert_eq!(
-            router.decide(session.0.as_ref(), None).reason,
-            RouteReason::UnpinnedDefault
+        let inputs = router.route_inputs(
+            TaskRequirements::new(TaskKind::RepositoryWork),
+            ExecutorOverride::ExactExternal("codex-acp".to_owned()),
         );
+        let decision = route(&inputs);
+        router
+            .journal()
+            .record_bound(session.0.as_ref(), inputs, decision.clone())
+            .expect("override receipt persists");
+        assert_eq!(decision.reason, RouteReason::OverrideHonored);
         assert_eq!(
-            router.executor_for(&session).agent_id(),
-            AgentId::new("omega-agent")
-        );
-
-        let decision = router.pin_session(
-            &session,
-            ExecutorPin::new(ExecutorClass::ExternalAcp),
-            PinGesture::ExecutorPinMenuItem,
-        );
-        assert_eq!(decision.reason, RouteReason::PinHonored);
-        assert_eq!(
-            router.executor_for(&session).agent_id(),
+            router
+                .executor_for(&session)
+                .expect("external executor")
+                .agent_id(),
             AgentId::new("codex-acp"),
             "a pin a person set must move the turn, or the control is decoration"
         );
@@ -1480,32 +2162,25 @@ mod tests {
     fn an_unhonourable_pin_is_kept_and_explained() {
         let directory = tempfile::tempdir().expect("temporary directory");
         let router = OmegaAgentConnection::new(stub("omega-agent"), journal_in(&directory));
-        // A session id no other test uses. `RECORDED_ROUTES` is a
+        // A session id no other test uses. `RECORDED_ROUTE_RECEIPTS` is a
         // process-wide projection keyed by session id, and the tests in this
         // module run in one process: a shared `"s"` made this assertion read
         // another test's decision, which it caught on the first run. Real
         // session ids are minted per session, so this is a harness concern and
         // not a production one.
         let session = acp::SessionId::new("s-unhonourable-pin");
-        router.observe_capacity(Err(EngineUnreachable::NotRunning));
-
-        let decision = router.pin_session(
-            &session,
-            ExecutorPin::new(ExecutorClass::EngineLane),
-            PinGesture::ExecutorPinMenuItem,
+        let inputs = router.route_inputs(
+            TaskRequirements::new(TaskKind::RepositoryWork),
+            ExecutorOverride::ExactExternal("missing-acp".to_owned()),
         );
-        assert_eq!(decision.chosen, ExecutorClass::NativeLoop);
-        assert!(decision.reason.is_fallback());
-        assert_eq!(
-            decision.pin.as_ref().map(ExecutorPin::token).as_deref(),
-            Some("engine_lane")
-        );
-        assert!(
-            decision
-                .reason
-                .phrase()
-                .contains("fell back to the native loop")
-        );
+        let decision = route(&inputs);
+        router
+            .journal()
+            .record_bound(session.0.as_ref(), inputs, decision.clone())
+            .expect("hard-unavailable receipt persists");
+        assert_eq!(decision.chosen, ExecutorClass::ExternalAcp);
+        assert_eq!(decision.reason, RouteReason::OverrideUnavailable);
+        assert!(decision.hard_unavailable.is_some());
         assert_eq!(
             recorded_route(&session),
             Some(decision.reason),
@@ -1513,11 +2188,6 @@ mod tests {
              journal holds and the index does not is a fallback the user \
              cannot see"
         );
-
-        let cleared = router.unpin_session(&session, PinGesture::ExecutorPinCleared);
-        assert_eq!(cleared.reason, RouteReason::UnpinnedDefault);
-        assert!(cleared.pin.is_none());
-        assert!(router.pin(&session).is_none());
     }
 
     /// `OMEGA-DELTA-0035`. A bare downcast through the router misses the

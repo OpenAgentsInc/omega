@@ -4671,6 +4671,7 @@ impl ThreadView {
                     .gap_2()
                     .child(
                         v_flex()
+                            .debug_selector(|| "omega.workbench.composer".into())
                             .relative()
                             .w_full()
                             .min_h_0()
@@ -13590,8 +13591,9 @@ impl ThreadView {
     /// provider controls, transient turn state, and send.
     ///
     /// `OMEGA-DELTA-0149` removes executor-selection chrome from this row.
-    /// Routing still reads the typed `omega_front_door::ExecutorDisclosure`;
-    /// this presentation no longer offers or labels an executor choice.
+    /// The executor disclosure remains visible, but it is a record rather than
+    /// a control: changing a route after a conversation starts would retarget
+    /// an existing thread.
     ///
     /// Flash / Pro is the model-tier dropdown for Omega's hosted lanes:
     /// Flash → `google/gemini-3.6-flash`, Pro → `openagents/kimi-k3`.
@@ -13611,6 +13613,8 @@ impl ThreadView {
     /// the three — is still reachable by a pin and by nothing else.
     fn render_zero_base_executor_bar(&self, cx: &mut Context<Self>) -> AnyElement {
         let exo = self.exo_connection(cx);
+        let disclosure = self.executor_disclosure(cx);
+        let route_receipt = self.omega_route_receipt_label(cx);
         let inspector_open = self.exo_inspector_expanded;
         let turn_phase = exo.as_ref().map(|exo| exo.turn().phase);
         let turn_running = self.thread.read(cx).status() != ThreadStatus::Idle;
@@ -13628,6 +13632,25 @@ impl ThreadView {
                     .gap_1()
                     .when(self.owns_shared_vim_indicator(cx), |this| {
                         this.child(self.vim_mode_indicator.clone())
+                    })
+                    .child(
+                        Label::new(disclosure.label())
+                            .size(LabelSize::XSmall)
+                            .color(Color::Muted),
+                    )
+                    .when_some(route_receipt, |this, route_receipt| {
+                        let accessibility_label = route_receipt.clone();
+                        this.child(
+                            div()
+                                .id("omega-route-receipt")
+                                .role(gpui::Role::Status)
+                                .aria_label(accessibility_label)
+                                .child(
+                                    Label::new(route_receipt)
+                                        .size(LabelSize::XSmall)
+                                        .color(Color::Muted),
+                                ),
+                        )
                     })
                     // omega#99. The turn's own state, only while there is a
                     // turn. Permanent chrome that says "idle" at a person all
@@ -13973,6 +13996,7 @@ impl ThreadView {
         if let Some(exo) = self.exo_connection(cx) {
             return self.render_exo_header(exo, cx);
         }
+        let route_receipt = self.omega_route_receipt_label(cx);
 
         h_flex()
             .w_full()
@@ -13987,12 +14011,43 @@ impl ThreadView {
                     .color(Color::Muted),
             )
             .child(
-                Label::new(disclosure.label())
-                    .size(LabelSize::XSmall)
-                    .color(Color::Muted),
+                v_flex()
+                    .min_w_0()
+                    .child(
+                        Label::new(disclosure.label())
+                            .size(LabelSize::XSmall)
+                            .color(Color::Muted),
+                    )
+                    .when_some(route_receipt, |this, route_receipt| {
+                        let accessibility_label = route_receipt.clone();
+                        this.child(
+                            div()
+                                .id("omega-route-receipt")
+                                .role(gpui::Role::Status)
+                                .aria_label(accessibility_label)
+                                .child(
+                                    Label::new(route_receipt)
+                                        .size(LabelSize::XSmall)
+                                        .color(Color::Muted),
+                                ),
+                        )
+                    }),
             )
             .child(div().flex_1())
             .into_any_element()
+    }
+
+    fn omega_route_receipt_label(&self, cx: &App) -> Option<SharedString> {
+        let session_id = self.thread.read(cx).session_id().clone();
+        let receipt = crate::omega_router::recorded_route_receipt(&session_id)?;
+        Some(
+            format!(
+                "Receipt {} · {}",
+                receipt.dispatch_ref,
+                crate::conversation_view::visible_omega_route_decision(&receipt.decision)
+            )
+            .into(),
+        )
     }
 }
 
@@ -14406,12 +14461,7 @@ impl Render for ThreadView {
             // OMEGA-DELTA-0021. Before anything the thread produced.
             //
             // omega#99. Zero base draws the same record in the composer bar
-            // instead — see `render_zero_base_executor_bar`. The disclosure is
-            // *moved*, never dropped: a turn that does not name its executor is
-            // omega#77's falsifier, and it stays the falsifier in a mode whose
-            // whole purpose is to show one executor working. What changes is
-            // where a person reads it, which is now beside the model they are
-            // about to send to rather than a screen away from it.
+            // instead — see `render_zero_base_executor_bar`.
             .when(!omega_zero_base::is_active(), |this| {
                 this.child(self.render_executor_disclosure(cx))
             })

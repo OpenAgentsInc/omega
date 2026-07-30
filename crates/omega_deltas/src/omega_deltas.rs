@@ -167,6 +167,7 @@ pub const ENFORCED_DELTAS: &[&str] = &[
     "OMEGA-DELTA-0176",
     "OMEGA-DELTA-0177",
     "OMEGA-DELTA-0178",
+    "OMEGA-DELTA-0179",
 ];
 
 /// The concise product contract adjacent to the delta registry.
@@ -1240,6 +1241,8 @@ pub const ROUTER_DELEGATION_MARKERS: &[&str] = &[
     "self.native",
     "self.executor(",
     "self.executor_for(",
+    "self.executor_for_decision(",
+    "self.executor_for_session_or_log(",
     "self.agent_id",
     "executor.new_session",
 ];
@@ -5630,8 +5633,15 @@ mod tests {
             let full = repository_path(path);
             let source = std::fs::read_to_string(&full)
                 .unwrap_or_else(|error| panic!("cannot read {}: {error}", full.display()));
+            let reaches_current_route = if path == ROUTE_DECISION_PATH {
+                source.contains("pub fn route(inputs: &RouteInputs) -> RouteDecision")
+                    && source.contains("fn route_current(inputs: &RouteInputs) -> RouteDecision")
+            } else {
+                source.contains("pub fn prepare_next_session(")
+                    && source.contains("let decision = route(&inputs);")
+            };
             assert!(
-                source.contains("pub fn route(") || source.contains("route(&self.inputs_for("),
+                reaches_current_route,
                 "OMEGA-DELTA-0029: {path} does not look like part of the \
                  routing path any more; the scan below would be vacuous."
             );
@@ -5753,18 +5763,45 @@ mod tests {
             found,
             [
                 ("chosen", "ExecutorClass"),
+                ("executor_id", "Option<String>"),
                 ("reason", "RouteReason"),
                 ("pin", "Option<ExecutorPin>"),
                 ("lane_ref", "Option<String>"),
+                ("inputs", "Option<RouteInputs>"),
+                ("fallback", "Option<RouteFallback>"),
+                ("hard_unavailable", "Option<RouteUnavailable>"),
             ],
             "OMEGA-DELTA-0029: RouteDecision holds different parts than the \
-             ones recorded. A rendered explanation stored as a field is the \
-             failure this exists for."
+             versioned eight-part route receipt. Exact identity, the complete \
+             inputs, fallback, and hard-unavailable outcome are required; a \
+             rendered explanation stored as a field is still forbidden."
+        );
+        let input_fields = struct_fields(&source, "RouteInputs");
+        let found_inputs: Vec<(&str, &str)> = input_fields
+            .iter()
+            .map(|(name, type_name)| (name.as_str(), type_name.as_str()))
+            .collect();
+        assert_eq!(
+            found_inputs,
+            [
+                ("policy_version", "u16"),
+                ("task_requirements", "TaskRequirements"),
+                ("candidates", "Vec<ExecutorCandidate>"),
+                ("executor_override", "ExecutorOverride"),
+                ("legacy_pin", "Option<ExecutorPin>"),
+                ("legacy_engine", "EngineReadiness"),
+                ("legacy_external_acp", "Option<String>"),
+                ("legacy_engine_lane", "Option<String>"),
+            ],
+            "OMEGA-DELTA-0029: RouteInputs no longer records the versioned task, \
+             exact candidate inventory, override, and bounded legacy migration state."
         );
         for required in [
             "pub fn canonical_record(&self) -> String",
             "pub fn parse_canonical_record(record: &str) -> Option<Self>",
             "pub fn is_coherent(&self) -> bool",
+            "encode_field(&inputs.canonical_record())",
+            "RouteInputs::parse_canonical_record(&decode_field(value)?)",
         ] {
             assert!(
                 source.contains(required),
@@ -5801,6 +5838,17 @@ mod tests {
             source.contains("Label::new(disclosure.label())"),
             "OMEGA-DELTA-0021: the executor line must be rendered from the \
              disclosure record in {}, not from a stored or hand-built string.",
+            path.display()
+        );
+        assert!(
+            source.contains("fn omega_route_receipt_label(")
+                && source.contains("recorded_route_receipt(")
+                && source.matches("id(\"omega-route-receipt\")").count() >= 2
+                && source.matches("role(gpui::Role::Status)").count() >= 2
+                && source.matches(".when_some(route_receipt").count() >= 2,
+            "OMEGA-DELTA-0179: {} must keep the durable route receipt visible \
+             after the physical session replaces the loading composer, in both \
+             ordinary and zero-base thread surfaces.",
             path.display()
         );
 
@@ -6894,18 +6942,6 @@ mod tests {
             factory_path.display()
         );
 
-        let panel_path = repository_path(AGENT_PANEL_PATH);
-        let panel = std::fs::read_to_string(&panel_path)
-            .unwrap_or_else(|error| panic!("cannot read {}: {error}", panel_path.display()));
-        assert!(
-            panel.contains("observe_capacity(Ok(capacity))") && panel.contains("get_capacity()"),
-            "OMEGA-DELTA-0035: {} no longer feeds the engine's framed \
-             get_capacity answer into the router. Without it every engine-lane \
-             pin is decided against a default of \"not running\" whatever \
-             omega-effectd is actually doing.",
-            panel_path.display()
-        );
-
         let disclosure_path = repository_path(THREAD_VIEW_PATH);
         let disclosure = std::fs::read_to_string(&disclosure_path)
             .unwrap_or_else(|error| panic!("cannot read {}: {error}", disclosure_path.display()));
@@ -6928,10 +6964,12 @@ mod tests {
         let law = std::fs::read_to_string(&router_path)
             .unwrap_or_else(|error| panic!("cannot read {}: {error}", router_path.display()));
         assert!(
-            law.contains("if inputs.external_acp.is_some() {"),
-            "OMEGA-DELTA-0035: {} no longer routes an unpinned thread to an \
-             attached external agent, and the pin control that used to be the \
-             only door is gone. Together that makes the Exo lane unreachable.",
+            law.contains("fn route_current(inputs: &RouteInputs) -> RouteDecision")
+                && law.contains("ExecutorOverride::Auto")
+                && law.contains("TaskKind::RepositoryWork")
+                && law.contains("candidate.target.class == ExecutorClass::ExternalAcp"),
+            "OMEGA-DELTA-0035: {} no longer has the typed automatic path from \
+             repository work to an exact ready external executor.",
             router_path.display()
         );
     }
@@ -9494,7 +9532,7 @@ mod tests {
         let law_path = repository_path(ROUTE_DECISION_PATH);
         let law = std::fs::read_to_string(&law_path)
             .unwrap_or_else(|error| panic!("cannot read {}: {error}", law_path.display()));
-        let rule = function_body(&law, "route").unwrap_or_else(|| {
+        let rule = function_body(&law, "route_current").unwrap_or_else(|| {
             panic!(
                 "OMEGA-DELTA-0055: cannot find the routing law in {}",
                 law_path.display()
@@ -9506,20 +9544,14 @@ mod tests {
              to be the real one, so the checks below would pass without reading \
              it"
         );
-        // Scoped to the *unpinned* branch, and the scoping is load-bearing.
-        // `if inputs.external_acp.is_some() {` also appears in the arm that
-        // honours an `ExternalAcp` pin, so a check against the whole function
-        // stayed green with the automatic arm deleted — observed directly while
-        // falsifying this test. The branch is what the delta is about.
+        // The automatic arm is the only model-selected path. Exact overrides
+        // are separately bounded to native or external identities.
         let unpinned = rule
-            .split_once("let Some(pin) = inputs.pin.clone() else {")
+            .split_once("ExecutorOverride::Auto =>")
             .map(|(_, rest)| rest)
             .unwrap_or_default();
-        let unpinned = unpinned
-            .split_once("\n    };")
-            .map_or(unpinned, |(body, _)| body);
         assert!(
-            unpinned.len() > 200 && unpinned.len() < rule.len(),
+            unpinned.len() > 300 && unpinned.len() < rule.len(),
             "OMEGA-DELTA-0055: the unpinned branch read from {} is not a \
              plausible branch, so the checks below would be testing the whole \
              function or nothing",
@@ -9836,6 +9868,14 @@ mod tests {
              focus.",
             startup_path.display()
         );
+        assert!(
+            startup.contains("omega_route_receipt: Option<PathBuf>")
+                && startup.contains("requires = \"omega_send\""),
+            "OMEGA-DELTA-0179: {} no longer exposes a route-receipt artifact \
+             beside the unattended production send, so installed routing \
+             evidence cannot name the exact executor that handled the turn.",
+            startup_path.display()
+        );
         // Commented out is not called. The first spelling of this check was
         // `startup.contains("drive_omega_send(cx).await;")`, and prefixing the
         // line with `//` left it green — observed directly while falsifying
@@ -9872,6 +9912,14 @@ mod tests {
         assert!(
             driver.contains("panel.omega_send_first_message("),
             "OMEGA-DELTA-0093: {} no longer sends through the panel.",
+            startup_path.display()
+        );
+        assert!(
+            driver.contains("recorded_route_receipt(session_id)")
+                && driver.contains("canonical_record()"),
+            "OMEGA-DELTA-0179: the unattended send in {} no longer writes the \
+             durable canonical route receipt recorded before executor \
+             dispatch.",
             startup_path.display()
         );
         for bypass in [
@@ -10351,8 +10399,12 @@ mod tests {
             }
         }
         assert!(
-            source.contains("pin: None,"),
-            "OMEGA-DELTA-0041: the served route inputs no longer pin nothing.              If this moved, the check above is watching the wrong thing."
+            source.contains("pub fn served_inputs() -> RouteInputs")
+                && source.contains("RouteInputs::native_only()"),
+            "OMEGA-DELTA-0041: the served route inputs are no longer the \
+             native-only candidate inventory. If this moved, the pin scan \
+             above would no longer prove the served surface cannot select an \
+             external or engine executor."
         );
     }
 
@@ -13039,10 +13091,13 @@ mod tests {
         let router = std::fs::read_to_string(&router_path)
             .unwrap_or_else(|error| panic!("cannot read {}: {error}", router_path.display()));
         assert!(
-            router.contains("omega_agent_attach::connect_detected_executor")
-                && router.contains("with_external_acp(installed)"),
-            "OMEGA-DELTA-0095: {} no longer registers the installed coding \
-             agent behind Omega's router for deliberate internal use.",
+            router.contains("omega_agent_attach::connect_detected_executors")
+                && router.contains("with_external_acps(")
+                && router.contains("with_unavailable_external_acps("),
+            "OMEGA-DELTA-0095: {} no longer registers every exact ready coding \
+             agent and every exact unavailable identity behind Omega's router. \
+             A one-slot attach cannot implement deterministic selection among \
+             the installed inventory.",
             router_path.display()
         );
 
@@ -13278,13 +13333,13 @@ mod tests {
         );
         assert!(
             router.contains(&without_whitespace(
-                "crate::omega_agent_attach::connect_detected_executor(
+                "crate::omega_agent_attach::connect_detected_executors(
                     &installed_agents,
-                    project,
+                    project.clone(),
                     agent_server_store,
                     loading_status,
                     cx,
-                )"
+                ).await"
             )),
             "OMEGA-DELTA-0114: {} takes the loading-status channel and does not \
              give it to the attach. A channel taken and dropped is worse than \
@@ -13567,8 +13622,8 @@ mod tests {
         );
     }
 
-    /// OMEGA-DELTA-0117. The preload starts after a connection exists, and
-    /// nowhere else.
+    /// OMEGA-DELTA-0117. Selection inventory attachment replaces speculative
+    /// post-connect warming.
     ///
     /// The owner's first condition on this feature was *when*: "after the window
     /// is usable, not before — a preload that delays first paint has moved the
@@ -13608,40 +13663,18 @@ mod tests {
 
         assert_eq!(
             callers,
-            vec![WARM_TRIGGER_CALLER_PATH.to_owned()],
-            "OMEGA-DELTA-0117: `{WARM_TRIGGER_FN}` is called from somewhere other \
-             than the router's connect in {WARM_TRIGGER_CALLER_PATH}. Every other \
-             site runs before a connection exists — startup, panel construction, \
-             a first render — and a preload there spends a person's first paint \
-             on adapters they have not asked for, which moves the wait rather \
-             than removing it."
+            Vec::<String>::new(),
+            "OMEGA-DELTA-0117: `{WARM_TRIGGER_FN}` is still called. #153 attaches \
+             the complete exact executor inventory during router connection, so \
+             a second post-connect warming pass would start or retain duplicate \
+             adapters outside the inventory whose readiness was recorded."
         );
-
-        let router_path = repository_path(WARM_TRIGGER_CALLER_PATH);
-        let router = read_repository_file(WARM_TRIGGER_CALLER_PATH);
-        let connect = code_of(body_of(&router, "connect"));
-        let published = connect.find(WARM_TRIGGER_FOLLOWS).unwrap_or_else(|| {
-            panic!(
-                "OMEGA-DELTA-0117: `{WARM_TRIGGER_FOLLOWS}` is gone from \
-                 `connect` in {}, so there is nothing left to say the preload \
-                 starts after the connection was finished.",
-                router_path.display()
-            )
-        });
-        let triggered = connect.find(WARM_TRIGGER_FN).unwrap_or_else(|| {
-            panic!(
-                "OMEGA-DELTA-0117: `connect` in {} no longer warms anything, so \
-                 every switch pays a full adapter start again.",
-                router_path.display()
-            )
-        });
+        let router = code_of(&read_repository_file(WARM_TRIGGER_CALLER_PATH));
         assert!(
-            triggered > published,
-            "OMEGA-DELTA-0117: the preload in {} starts before the connection it \
-             follows is published. Ahead of that line it is racing the connect a \
-             person is waiting on for the same npm, the same registry, and the \
-             same CPU.",
-            router_path.display()
+            router.contains("connect_detected_executors(")
+                && router.contains("with_external_acps("),
+            "OMEGA-DELTA-0117: the old warm trigger is gone but the router does \
+             not replace it with complete exact-inventory attachment."
         );
     }
 
@@ -16068,9 +16101,12 @@ mod tests {
              state the owner was looking at when they asked for one.",
         );
         assert!(
-            view.contains("self.render_loading_composer(window, cx)"),
-            "OMEGA-DELTA-0122: {} builds the loading composer and never draws \
-             it. An element nothing renders is the same as no element.",
+            view.contains("self.render_loading_composer(router_ready, window, cx)")
+                && view.contains("ConversationPreparation::RouterReady")
+                && view.contains("pre_session_composer"),
+            "OMEGA-DELTA-0122: {} no longer draws the same pre-session composer \
+             while the connection loads and while Omega's router is ready but \
+             the first-request executor session is deliberately deferred.",
             view_path.display()
         );
         assert!(
@@ -20941,13 +20977,13 @@ mod tests {
         );
         assert!(
             composer
-                .matches("this.submit_while_connecting(window, cx);")
+                .matches("this.submit_before_session(window, cx);")
                 .count()
                 >= 2,
             "OMEGA-DELTA-0170: the loading composer in {} no longer routes both \
-             `Chat` and the Send click into `submit_while_connecting`. Enter \
-             must always accept, and a live Enter beside a dead button makes \
-             two claims about one state.",
+             `Chat` and the Send click into `submit_before_session`. That helper \
+             must both accept ordinary connecting messages and create Omega's \
+             deferred exact session from the first submitted request.",
             view_path.display()
         );
         assert!(
@@ -20967,11 +21003,27 @@ mod tests {
             "Then Enter while connecting has nowhere to put the message.",
         );
         assert!(
-            submit.contains("self.pending_connect_messages.push(text);")
+            submit.contains(".push(PendingConnectMessage { text, content });")
+                && submit.contains("acp::ContentBlock::Text")
                 && submit.contains("editor.set_text(\"\", window, cx);"),
             "OMEGA-DELTA-0170: `submit_while_connecting` in {} no longer moves \
-             the text out of the composer and into the pending queue. Either \
-             half missing is a lost or duplicated message.",
+             the exact text block out of the composer and into the pending \
+             queue. Either half missing is a lost or duplicated message.",
+            view_path.display()
+        );
+        let submit_before_session = method_body(
+            &view,
+            "fn submit_before_session(",
+            &view_path,
+            "Then the pre-session composer cannot cross Omega's RouterReady boundary.",
+        );
+        assert!(
+            submit_before_session.contains("self.submit_while_connecting(window, cx)")
+                && submit_before_session.contains("ConversationPreparation::RouterReady")
+                && submit_before_session.contains("self.start_deferred_omega_session(window, cx)"),
+            "OMEGA-DELTA-0170: `submit_before_session` in {} no longer preserves \
+             ordinary pending-message acceptance while making the first Omega \
+             send create its routed physical session.",
             view_path.display()
         );
 
@@ -21955,6 +22007,8 @@ mod tests {
             "RevealPreparedConversation",
             "pub struct PreparationReceipt",
             "pub fn proves(&self, target: &ConversationTarget, session_id: &str)",
+            "pub fn after_omega_router_connected() -> Self",
+            "pub fn proves_omega_router_connected(&self) -> bool",
         ] {
             assert!(
                 core.contains(required),
@@ -21973,6 +22027,7 @@ mod tests {
         for required in [
             "pub(crate) enum ConversationPreparation",
             "Loading",
+            "RouterReady",
             "Ready { session_id: String }",
             "SetupRequired { reason: SharedString }",
             "reason: error.to_string().into()",
@@ -21991,8 +22046,8 @@ mod tests {
         let activation = function_body(&panel, "activate_new_conversation_target")
             .expect("OMEGA-DELTA-0177: typed target activation is gone");
         for required in [
-            "receipt.proves",
-            "prepared_omega_session_id",
+            "receipt.proves_omega_router_connected()",
+            "receipt.proves(&ConversationTarget::OmegaAgent, &session_id)",
             "conversation_view: draft",
         ] {
             assert!(
@@ -22004,6 +22059,18 @@ mod tests {
             !activation.contains("reset_onto_new_executor")
                 && !activation.contains("rebuild_onto_new_executor"),
             "OMEGA-DELTA-0177: creation-time selection retargets an existing transcript"
+        );
+        let submit = function_body(&conversation, "submit_before_session")
+            .expect("OMEGA-DELTA-0177: deferred Omega submit boundary is gone");
+        assert!(
+            submit.contains("ConversationPreparation::RouterReady")
+                && submit.contains("start_deferred_omega_session"),
+            "OMEGA-DELTA-0177: RouterReady no longer defers physical session \
+             creation until the first submitted request"
+        );
+        assert!(
+            conversation.contains("omega_defers_physical_session_creation_until_the_first_turn"),
+            "OMEGA-DELTA-0177: the RouterReady-to-first-turn GPUI regression test is gone"
         );
 
         let metadata = read_repository_file("crates/agent_ui/src/thread_metadata_store.rs");
@@ -22023,15 +22090,20 @@ mod tests {
             ),
             (
                 "docs/omega/taxonomy.md",
-                "receipt bound to the exact target and session",
+                "Direct Ready requires a connection and a created session bound to the exact target",
+            ),
+            (
+                "docs/omega/taxonomy.md",
+                "Omega Ready requires a connected router with a typed executor-readiness inventory",
             ),
             (
                 "docs/omega/taxonomy.md",
                 "No timestamp, installed-agent match, or route journal upgrades a legacy row",
             ),
         ] {
+            let document = read_repository_file(path);
             assert!(
-                read_repository_file(path).contains(required),
+                without_whitespace(&document).contains(&without_whitespace(required)),
                 "OMEGA-DELTA-0177: {path} lost `{required}`"
             );
         }

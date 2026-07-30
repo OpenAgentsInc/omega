@@ -462,6 +462,19 @@ fn has_exited(connection: &Rc<dyn AgentConnection>) -> bool {
         .is_none_or(|acp| acp.agent_server_process_has_exited())
 }
 
+/// Whether a connected executor is still usable by the router.
+///
+/// Adapter-backed connections expose process liveness. In-process and remote
+/// connections do not own an adapter process, so their successfully attached
+/// handle remains the readiness fact the router can inspect.
+#[must_use]
+pub fn executor_connection_is_live(connection: &Rc<dyn AgentConnection>) -> bool {
+    connection
+        .clone()
+        .downcast::<agent_servers::AcpConnection>()
+        .is_none_or(|acp| !acp.agent_server_process_has_exited())
+}
+
 /// End the adapter process behind a connection nobody is going to be given.
 fn end(connection: &Rc<dyn AgentConnection>) {
     if let Some(acp) = connection
@@ -475,6 +488,8 @@ fn end(connection: &Rc<dyn AgentConnection>) {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use acp_thread::StubAgentConnection;
+    use project::AgentId;
 
     const EVERYTHING: &[SelectableExecutor] = &[
         SelectableExecutor::Omega,
@@ -483,6 +498,14 @@ mod tests {
         SelectableExecutor::Claude,
         SelectableExecutor::Grok,
     ];
+
+    #[test]
+    fn a_non_process_executor_connection_is_live_after_attachment() {
+        let connection: Rc<dyn AgentConnection> =
+            Rc::new(StubAgentConnection::new().with_agent_id(AgentId::new("remote-executor")));
+
+        assert!(executor_connection_is_live(&connection));
+    }
 
     /// `OMEGA-DELTA-0107`, held from the other side. Warming is exactly the
     /// convenience that would reach for an `exo serve`.

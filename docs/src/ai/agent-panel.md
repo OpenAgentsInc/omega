@@ -169,9 +169,11 @@ three permanent rows in this order: **Direct Agent**, **Omega Agent**, and
 
 Before a send, every row names its mode, exact agent or router selection,
 folder, and one of four readiness states: **Ready**, **Setup required**,
-**Temporarily unavailable**, or **Not supported in this build**. Ready is shown
-only after the named target has connected and created a session. Enter/Space
-and pointer activation use the same selection path, and unavailable rows do not
+**Temporarily unavailable**, or **Not supported in this build**. A Direct Agent
+is Ready only after that exact agent creates its session. Omega Agent is Ready
+when its router has a live executor inventory; its first submitted request then
+selects one exact executor and creates that executor's session. Enter/Space and
+pointer activation use the same selection path, and unavailable rows do not
 create another kind of conversation.
 
 If Omega needs authentication or setup fails, its row says **Setup required**
@@ -185,6 +187,17 @@ the exact ACP id. Neither path probes with one session and creates another.
 Direct setup and authentication errors reveal that same external-agent view,
 with its native controls. Sarah remains visible with its honest unavailable
 state. Starting another mode never retargets an existing transcript.
+
+For a new Omega Agent conversation, **Automatic** derives normalized task
+requirements from the first request and deterministically chooses between the
+native loop and ready ordinary ACP agents. You can instead choose one exact
+executor before sending; that one-conversation override is recorded and takes
+priority. Engine lanes remain under the separate Full Auto gesture. The route
+line appears before dispatch and includes the exact executor, reason, override,
+and fallback. The full readiness inputs remain in the durable receipt. Once
+selected, the executor is immutable for the conversation. If it becomes
+unavailable, the send fails visibly by name
+and is never replayed through another agent.
 
 Use {#action agent::NewTerminalThread} for a terminal thread. The generic new
 thread action no longer repeats the last terminal choice.

@@ -341,6 +341,42 @@ pub struct ExecutorChoice<'a> {
     pub passed_over: Vec<&'a DetectedAgent>,
 }
 
+/// One exact ACP executor that is connected and ready to create sessions.
+#[derive(Clone)]
+pub struct AttachedExecutor {
+    pub agent: DetectedAgent,
+    pub connection: Rc<dyn AgentConnection>,
+}
+
+/// Why one detected executor is not in the router's live inventory.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ExecutorAttachmentFailure {
+    pub agent: DetectedAgent,
+    pub reason: String,
+}
+
+/// The complete result of attaching the detected executors Omega can drive.
+///
+/// A failed adapter does not erase the adapters that did connect. It remains
+/// in `unavailable`, by exact id and with its bounded failure, so routing can
+/// record the readiness snapshot it actually saw instead of silently treating
+/// the executor as if it had never been installed.
+#[derive(Default)]
+pub struct AttachedExecutorInventory {
+    pub ready: Vec<AttachedExecutor>,
+    pub unavailable: Vec<ExecutorAttachmentFailure>,
+}
+
+/// Every detected executor Omega can drive, in the router's stable priority
+/// order and with duplicate ids removed.
+#[must_use]
+pub fn drivable_agents(detected: &[DetectedAgent]) -> Vec<DetectedAgent> {
+    DRIVABLE_AGENT_IDS
+        .iter()
+        .filter_map(|id| detected.iter().find(|agent| agent.id == *id).cloned())
+        .collect()
+}
+
 /// The agent a thread's turns should execute on, given what is installed.
 ///
 /// `None` means nothing drivable is installed. It does not mean "an error
@@ -501,6 +537,79 @@ pub async fn connect_detected_executor(
             Err(error)
         }
     }
+}
+
+/// Connect every installed coding-agent adapter the router may select.
+///
+/// Starts cold adapters concurrently. Three independent bounded npm starts
+/// must cost at most the slowest bound, not the sum of all three bounds. Warm
+/// connections are claimed first and participate in the same exact-id result.
+///
+/// The returned vectors are in [`DRIVABLE_AGENT_IDS`] order regardless of the
+/// order in which adapter handshakes finish. That ordering is part of the
+/// router input and therefore cannot depend on scheduler timing.
+pub async fn connect_detected_executors(
+    detected: &[DetectedAgent],
+    project: Entity<Project>,
+    agent_server_store: WeakEntity<AgentServerStore>,
+    loading_status: Option<watch::Sender<Option<String>>>,
+    cx: &mut AsyncApp,
+) -> AttachedExecutorInventory {
+    let agents = drivable_agents(detected);
+    if agents.is_empty() || omegas_own_loop_chosen() {
+        return AttachedExecutorInventory::default();
+    }
+
+    let mut progress = Progress(loading_status);
+    progress.say(format!(
+        "Connecting {} installed coding agent{}",
+        agents.len(),
+        if agents.len() == 1 { "" } else { "s" }
+    ));
+
+    let mut ready = Vec::new();
+    let mut starts = Vec::new();
+    for agent in agents {
+        if let Some(connection) = crate::omega_executor_warmth::take_warm(agent.id, &project, cx) {
+            ready.push(AttachedExecutor { agent, connection });
+            continue;
+        }
+
+        let project = project.clone();
+        let agent_server_store = agent_server_store.clone();
+        let task = cx.spawn({
+            let agent = agent.clone();
+            async move |cx| start_adapter_silently(&agent, project, agent_server_store, cx).await
+        });
+        starts.push((agent, task));
+    }
+
+    let mut unavailable = Vec::new();
+    for (agent, start) in starts {
+        match start.await {
+            Ok(connection) => ready.push(AttachedExecutor { agent, connection }),
+            Err(error) => unavailable.push(ExecutorAttachmentFailure {
+                agent,
+                reason: format!("{error:#}"),
+            }),
+        }
+    }
+    progress.clear();
+
+    ready.sort_by_key(|attached| {
+        DRIVABLE_AGENT_IDS
+            .iter()
+            .position(|id| *id == attached.agent.id)
+            .unwrap_or(usize::MAX)
+    });
+    unavailable.sort_by_key(|failure| {
+        DRIVABLE_AGENT_IDS
+            .iter()
+            .position(|id| *id == failure.agent.id)
+            .unwrap_or(usize::MAX)
+    });
+
+    AttachedExecutorInventory { ready, unavailable }
 }
 
 /// Start `agent`'s adapter with nothing said and nothing recorded.
@@ -779,6 +888,33 @@ mod tests {
             "this function takes detection's order as given; the Codex-first \
              rule lives in omega_agent_detect::CANDIDATES, and detect_on_path \
              is what guarantees the slice arrives in it"
+        );
+    }
+
+    #[test]
+    fn the_multi_attach_inventory_has_stable_exact_ids() {
+        let detected = vec![claude(), copilot(), codex(), claude()];
+
+        assert_eq!(
+            drivable_agents(&detected)
+                .iter()
+                .map(|agent| agent.id)
+                .collect::<Vec<_>>(),
+            vec!["codex-acp", "claude-acp"],
+            "scheduler order, PATH order, and duplicate observations must not change the exact router inventory"
+        );
+    }
+
+    #[test]
+    fn every_drivable_detected_agent_is_kept_for_routing() {
+        let installed = vec![detected("grok", "Grok"), claude(), codex(), copilot()];
+
+        assert_eq!(
+            drivable_agents(&installed)
+                .iter()
+                .map(|agent| agent.id)
+                .collect::<Vec<_>>(),
+            vec!["codex-acp", "claude-acp", "grok"],
         );
     }
 
