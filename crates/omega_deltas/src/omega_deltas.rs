@@ -22254,6 +22254,31 @@ mod tests {
             "OMEGA-DELTA-0180: Sarah navigation restored a legacy dock-panel path"
         );
 
+        // omega#168. `ContextMenuEntry::action` alone is only the keybinding
+        // display and the keyboard dispatch path — the pointer click runs the
+        // entry handler, whose default is a no-op. The `+` menu's Sarah row
+        // shipped that way in rc27 and clicked into nothing on every profile.
+        // The row must carry a live click handler that routes to the same
+        // Sarah admission path the action reaches.
+        let stripped_panel = without_comments(&panel);
+        let sarah_entry = stripped_panel
+            .split_once("ContextMenuEntry::new(\"Sarah voice…\")")
+            .map(|(_, rest)| rest)
+            .and_then(|rest| rest.split_once("\"Full Auto\""))
+            .map(|(entry, _)| entry)
+            .expect("OMEGA-DELTA-0180: cannot isolate the new-thread menu's Sarah entry");
+        for required in [
+            ".action(Box::new(OpenSarahAdmission))",
+            ".handler(",
+            "ConversationTarget::Sarah",
+        ] {
+            assert!(
+                sarah_entry.contains(required),
+                "OMEGA-DELTA-0180: the new-thread menu's Sarah entry lost `{required}` — \
+                 without a click handler the enabled row is a silent no-op (omega#168)"
+            );
+        }
+
         let menus = read_repository_file("crates/zed/src/zed/app_menus.rs");
         assert!(menus.contains("Sarah voice…"));
         assert!(menus.contains("agent_ui::OpenSarahAdmission"));

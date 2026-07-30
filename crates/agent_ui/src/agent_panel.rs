@@ -9272,10 +9272,39 @@ impl AgentPanel {
                                 }),
                         )
                         .item(
+                            // omega#168. `ContextMenuEntry::action` only
+                            // names the action (keybinding display and the
+                            // keyboard dispatch path); a pointer click runs
+                            // the entry's handler, whose default is a no-op.
+                            // Without an explicit handler this row rendered
+                            // enabled and clicked into nothing — a silent
+                            // no-op on every profile. The handler routes
+                            // through the same panel path the action reaches,
+                            // so click and keybinding cannot diverge.
                             ContextMenuEntry::new("Sarah voice…")
                                 .action(Box::new(OpenSarahAdmission))
                                 .icon(IconName::OmegaAgent)
-                                .icon_color(Color::Accent),
+                                .icon_color(Color::Accent)
+                                .handler({
+                                    let workspace = workspace.clone();
+                                    move |window, cx| {
+                                        if let Some(workspace) = workspace.upgrade() {
+                                            workspace.update(cx, |workspace, cx| {
+                                                if let Some(panel) =
+                                                    workspace.panel::<AgentPanel>(cx)
+                                                {
+                                                    panel.update(cx, |panel, cx| {
+                                                        panel.compose_on_executor(
+                                                            ConversationTarget::Sarah,
+                                                            window,
+                                                            cx,
+                                                        );
+                                                    });
+                                                }
+                                            });
+                                        }
+                                    }
+                                }),
                         )
                         .when(!omega_zero_base::is_active(), |menu| {
                             menu.item(
@@ -17965,6 +17994,215 @@ mod tests {
         });
     }
 
+    /// omega#168. The `+` menu's "Sarah voice…" row shipped in rc27 with only
+    /// `.action(...)`, which names the keybinding and the keyboard dispatch
+    /// path — a pointer click runs the entry handler, whose default is a
+    /// no-op. The enabled row clicked into nothing on every profile. A click
+    /// on the row must open the Sarah admission surface, exactly like the
+    /// `agent::OpenSarahAdmission` action does.
+    #[gpui::test]
+    async fn clicking_sarah_voice_in_the_new_thread_menu_opens_the_admission_surface(
+        cx: &mut TestAppContext,
+    ) {
+        let (panel, mut cx) = setup_visible_panel(cx).await;
+
+        panel.update_in(&mut cx, |panel, window, cx| {
+            panel.toggle_new_thread_menu(&ToggleNewThreadMenu, window, cx);
+        });
+        cx.run_until_parked();
+
+        panel.read_with(&cx, |panel, _cx| {
+            assert!(
+                panel.new_thread_menu_handle.is_deployed(),
+                "the `+` new-thread menu must deploy"
+            );
+            assert!(
+                !panel.showing_sarah_admission,
+                "opening the menu alone must not open the admission surface"
+            );
+        });
+
+        let sarah_bounds = cx
+            .debug_bounds("MENU_ITEM-Sarah voice…")
+            .expect("the new-thread menu always offers the Sarah voice row");
+        cx.simulate_click(sarah_bounds.center(), Modifiers::default());
+        cx.run_until_parked();
+
+        panel.read_with(&cx, |panel, _cx| {
+            assert!(
+                panel.showing_sarah_admission,
+                "omega#168: clicking the enabled Sarah voice row must open the \
+                 admission surface, never be a silent no-op"
+            );
+        });
+    }
+
+    /// A direct-agent connection whose `new_session` holds until the test
+    /// releases it, then fails with `AuthRequired` — the clean-profile shape
+    /// of Codex/Claude/grok with no credentials, timed so the loading
+    /// composer has already taken the keyboard before the auth card lands.
+    #[derive(Clone)]
+    struct GatedAuthRequiredConnection {
+        agent_id: AgentId,
+        auth_method: acp::AuthMethod,
+        release: Arc<Mutex<Option<futures::channel::oneshot::Receiver<()>>>>,
+    }
+
+    impl GatedAuthRequiredConnection {
+        fn new(agent_id: &str, release: futures::channel::oneshot::Receiver<()>) -> Self {
+            Self {
+                agent_id: AgentId::new(agent_id),
+                auth_method: acp::AuthMethod::Agent(acp::AuthMethodAgent::new(
+                    "test-login",
+                    "Test Login",
+                )),
+                release: Arc::new(Mutex::new(Some(release))),
+            }
+        }
+    }
+
+    impl AgentConnection for GatedAuthRequiredConnection {
+        fn agent_id(&self) -> AgentId {
+            self.agent_id.clone()
+        }
+
+        fn telemetry_id(&self) -> SharedString {
+            "gated-auth-required".into()
+        }
+
+        fn new_session(
+            self: Rc<Self>,
+            _project: Entity<Project>,
+            _work_dirs: PathList,
+            cx: &mut App,
+        ) -> Task<Result<Entity<AcpThread>>> {
+            let release = self
+                .release
+                .lock()
+                .take()
+                .expect("this stub connects exactly once");
+            cx.spawn(async move |_cx| {
+                release.await.ok();
+                Err(acp_thread::AuthRequired::new()
+                    .with_description("Sign in to continue".to_string())
+                    .into())
+            })
+        }
+
+        fn auth_methods(&self) -> &[acp::AuthMethod] {
+            std::slice::from_ref(&self.auth_method)
+        }
+
+        fn authenticate(&self, _method_id: acp::AuthMethodId, _cx: &mut App) -> Task<Result<()>> {
+            Task::ready(Ok(()))
+        }
+
+        fn prompt(
+            &self,
+            _params: acp::PromptRequest,
+            _cx: &mut App,
+        ) -> Task<Result<acp::PromptResponse>> {
+            unimplemented!()
+        }
+
+        fn cancel(&self, _session_id: &acp::SessionId, _cx: &mut App) {}
+
+        fn into_any(self: Rc<Self>) -> Rc<dyn Any> {
+            self
+        }
+    }
+
+    /// omega#166. Selecting a credential-less direct agent (Codex, Claude
+    /// Agent, grok) lands on the honest auth-required card — but rc27 left
+    /// window focus on the loading composer's editor, which the auth card no
+    /// longer paints. With focus on an unpainted element the window has no
+    /// focused dispatch path at all: the command palette, New Thread, and
+    /// every other workspace binding go dead, and a keyboard-only user is
+    /// trapped with only pointer escapes. Entering the auth-required state
+    /// must keep focus alive inside the conversation view so every workspace
+    /// keybinding stays reachable.
+    #[gpui::test]
+    async fn direct_agent_auth_required_card_keeps_keyboard_focus_alive(cx: &mut TestAppContext) {
+        let (panel, mut cx) = setup_visible_panel(cx).await;
+
+        let (release_auth_failure, release_rx) = futures::channel::oneshot::channel();
+        let connection = GatedAuthRequiredConnection::new("grok-build", release_rx);
+        let direct_agent = Agent::Custom {
+            id: AgentId::new("grok-build"),
+        };
+        let target = ConversationTarget::DirectAgent {
+            agent_id: DirectAgentId::new("grok-build").expect("valid id"),
+        };
+
+        panel.update_in(&mut cx, |panel, window, cx| {
+            panel.connection_store.update(cx, |store, cx| {
+                store.restart_connection(
+                    direct_agent.clone(),
+                    Rc::new(StubAgentServer::new(connection)),
+                    cx,
+                );
+            });
+            panel.compose_on_executor(target, window, cx);
+        });
+        cx.run_until_parked();
+
+        // While the executor connects, the loading composer owns the
+        // keyboard — the state the person is typing in when the auth
+        // failure lands.
+        let conversation_view = panel.read_with(&cx, |panel, _cx| {
+            panel
+                .active_conversation_view()
+                .expect("the direct draft is the active conversation")
+                .clone()
+        });
+        panel.update_in(&mut cx, |panel, window, cx| {
+            assert!(
+                panel.focus_handle(cx).contains_focused(window, cx),
+                "the loading composer must hold focus inside the panel before \
+                 the auth card lands"
+            );
+        });
+
+        release_auth_failure.send(()).ok();
+        cx.run_until_parked();
+
+        conversation_view.read_with(&cx, |view, cx| {
+            assert!(
+                view.as_connected().is_some(),
+                "AuthRequired lands in Connected + Unauthenticated"
+            );
+            assert!(
+                matches!(
+                    view.preparation_state(cx),
+                    ConversationPreparation::SetupRequired { .. }
+                ),
+                "the auth card reports SetupRequired"
+            );
+        });
+
+        // The regression: rc27 left the window with no focused dispatch
+        // path here, so ⌘⇧P and every other workspace binding were dead.
+        panel.update_in(&mut cx, |panel, window, cx| {
+            assert!(
+                window.focused(cx).is_some(),
+                "omega#166: the auth-required card must never leave the window \
+                 without a focused dispatch path — that kills every keybinding"
+            );
+            assert!(
+                panel.focus_handle(cx).contains_focused(window, cx),
+                "omega#166: focus must stay inside the panel on the auth card \
+                 so workspace keybindings (palette, New Thread) stay reachable"
+            );
+        });
+        conversation_view.update_in(&mut cx, |view, window, cx| {
+            assert!(
+                view.focus_handle(cx).is_focused(window),
+                "omega#166: the conversation view's root handle reclaims focus \
+                 when its composer leaves the tree"
+            );
+        });
+    }
+
     #[gpui::test]
     async fn sarah_admission_action_renders_fail_closed_and_exact_terms(cx: &mut TestAppContext) {
         use crate::composer_voice::{
@@ -18475,9 +18713,8 @@ mod tests {
         let direct_server = Rc::new(StubAgentServer::new(
             SessionTrackingConnection::new().with_agent_id("grok-build"),
         ));
-        let direct_id = AgentId::new("grok-build");
         let direct_agent = Agent::Custom {
-            id: direct_id.clone(),
+            id: AgentId::new("grok-build"),
         };
         let direct_target = ConversationTarget::DirectAgent {
             agent_id: DirectAgentId::new("grok-build").expect("valid id"),

@@ -7945,6 +7945,13 @@ startup recheck — survives unchanged behind that dropdown.
   OMEGA-DELTA-0177.** The permanent Sarah row, the Thread menu, and the
   toolbar `+` menu now open one Sarah admission surface inside Agent Panel.
   They do not open the legacy Sarah dock panel and do not start the microphone.
+- **Every named entry point actually opens the surface** (omega#168). A
+  `ContextMenuEntry` with only `.action(...)` names the keybinding and the
+  keyboard dispatch path; the pointer click runs the entry handler, whose
+  default is a no-op — rc27 shipped the `+` menu's Sarah row that way and it
+  clicked into nothing on every profile. The row must carry a live click
+  handler that routes through the same panel admission path the action
+  reaches, so click and keybinding cannot diverge.
 - **Admission truth precedes audio.** A dependency-neutral workspace
   projection carries the effective rate in msat per million tokens, credit
   hold, remaining credit, maximum duration, cohort reference, transcript

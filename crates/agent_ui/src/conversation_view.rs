@@ -2700,18 +2700,21 @@ impl ConversationView {
                 pending_auth_method: None,
                 description,
             };
+            // omega#166. The auth card replaces whatever composer held the
+            // keyboard — the connected thread's message editor, or the
+            // loading composer a brand-new direct-agent draft focuses on
+            // creation. If focus is left on an editor that the next frame no
+            // longer paints, the window has no focused dispatch path at all:
+            // the command palette, New Thread, and every other workspace
+            // binding go dead, and a keyboard-only user is trapped on the
+            // auth card with only pointer escapes. So whenever focus was
+            // anywhere inside this conversation view, it moves to the view's
+            // own root handle, which every state — including the auth card —
+            // keeps in the tree via `track_focus`.
+            let focus_was_inside = this.focus_handle.contains_focused(window, cx);
             if let Some(connected) = this.as_connected_mut() {
                 connected.auth_state = auth_state;
                 cx.emit(StateChange);
-                if let Some(view) = connected.active_view()
-                    && view
-                        .read(cx)
-                        .message_editor
-                        .focus_handle(cx)
-                        .is_focused(window)
-                {
-                    this.focus_handle.focus(window, cx)
-                }
             } else {
                 let request_elicitation_subscription =
                     Self::request_elicitation_subscription(&connection, cx);
@@ -2729,21 +2732,22 @@ impl ConversationView {
                     cx,
                 );
             }
+            if focus_was_inside {
+                this.focus_handle.focus(window, cx);
+            }
             cx.notify();
         })
         .ok();
     }
 
     fn handle_load_error(&mut self, err: LoadError, window: &mut Window, cx: &mut Context<Self>) {
-        if let Some(view) = self.root_thread_view() {
-            if view
-                .read(cx)
-                .message_editor
-                .focus_handle(cx)
-                .is_focused(window)
-            {
-                self.focus_handle.focus(window, cx)
-            }
+        // omega#166, same trap as `handle_auth_required`: the load-error card
+        // also drops the composer, so focus left on a no-longer-painted
+        // editor (message editor or the loading composer) would kill every
+        // workspace keybinding. Reclaim it onto the view's root handle, which
+        // the error state keeps in the tree.
+        if self.focus_handle.contains_focused(window, cx) {
+            self.focus_handle.focus(window, cx);
         }
         self.emit_load_error_telemetry(&err);
         self.set_server_state(ServerState::LoadError { error: err }, cx);
