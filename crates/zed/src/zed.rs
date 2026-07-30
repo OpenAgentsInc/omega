@@ -1481,8 +1481,6 @@ fn initialize_pane(
             toolbar.add_item(project_search_bar, window, cx);
             let lsp_log_item = cx.new(|_| LspLogToolbarItemView::new());
             toolbar.add_item(lsp_log_item, window, cx);
-            let dap_log_item = cx.new(|_| debugger_tools::DapLogToolbarItemView::new());
-            toolbar.add_item(dap_log_item, window, cx);
             let acp_tools_item = cx.new(|_| acp_tools::AcpToolsToolbarItemView::new());
             toolbar.add_item(acp_tools_item, window, cx);
             let telemetry_log_item =
@@ -2492,6 +2490,95 @@ fn open_project_tasks_file(
     }
 }
 
+/// Inserts `new_task` (pretty-printed JSON object text) at the end of the top-level JSON
+/// array in the editor's buffer, creating the array if the buffer has none, and moves the
+/// cursor to the inserted task. The edit is left unsaved so callers decide whether to persist it.
+///
+/// Moved here from the deleted `tasks_ui` crate (omega#162): the worktree-setup
+/// example below is its one remaining caller.
+fn insert_task_json_into_editor(
+    editor: &mut Editor,
+    new_task: String,
+    window: &mut Window,
+    cx: &mut Context<Editor>,
+) -> anyhow::Result<()> {
+    use editor::{MultiBufferOffset, ToPoint as _};
+    use std::sync::LazyLock;
+    use tree_sitter::{Query, StreamingIterator as _};
+
+    static LAST_ITEM_QUERY: LazyLock<Query> = LazyLock::new(|| {
+        Query::new(
+            &tree_sitter_json::LANGUAGE.into(),
+            "(document (array (object) @object))", // TODO: use "." anchor to only match last object
+        )
+        .expect("Failed to create LAST_ITEM_QUERY")
+    });
+    static EMPTY_ARRAY_QUERY: LazyLock<Query> = LazyLock::new(|| {
+        Query::new(
+            &tree_sitter_json::LANGUAGE.into(),
+            "(document (array) @array)",
+        )
+        .expect("Failed to create EMPTY_ARRAY_QUERY")
+    });
+
+    let content = editor.text(cx);
+    let mut parser = tree_sitter::Parser::new();
+    parser.set_language(&tree_sitter_json::LANGUAGE.into())?;
+    let mut cursor = tree_sitter::QueryCursor::new();
+    let syntax_tree = parser
+        .parse(&content, None)
+        .context("could not parse tasks file")?;
+    let mut matches = cursor.matches(
+        &LAST_ITEM_QUERY,
+        syntax_tree.root_node(),
+        content.as_bytes(),
+    );
+
+    let mut last_offset = None;
+    while let Some(mat) = matches.next() {
+        if let Some(pos) = mat.captures.first().map(|m| m.node.byte_range().end) {
+            last_offset = Some(MultiBufferOffset(pos))
+        }
+    }
+    let mut edits = Vec::new();
+    let mut cursor_position = MultiBufferOffset(0);
+
+    if let Some(pos) = last_offset {
+        edits.push((pos..pos, format!(",\n{new_task}")));
+        cursor_position = pos + ",\n  ".len();
+    } else {
+        let mut matches = cursor.matches(
+            &EMPTY_ARRAY_QUERY,
+            syntax_tree.root_node(),
+            content.as_bytes(),
+        );
+
+        if let Some(mat) = matches.next() {
+            if let Some(pos) = mat.captures.first().map(|m| m.node.byte_range().end - 1) {
+                edits.push((
+                    MultiBufferOffset(pos)..MultiBufferOffset(pos),
+                    format!("\n{new_task}\n"),
+                ));
+                cursor_position = MultiBufferOffset(pos) + "\n  ".len();
+            }
+        } else {
+            edits.push((
+                MultiBufferOffset(0)..MultiBufferOffset(0),
+                format!("[\n{}\n]", new_task),
+            ));
+            cursor_position = MultiBufferOffset("[\n  ".len());
+        }
+    }
+    editor.transact(window, cx, |editor, window, cx| {
+        editor.edit(edits, cx);
+        let snapshot = editor.buffer().read(cx).read(cx);
+        let point = cursor_position.to_point(&snapshot);
+        drop(snapshot);
+        editor.go_to_singleton_buffer_point(point, window, cx);
+    });
+    Ok(())
+}
+
 fn open_worktree_setup_tasks_file(
     workspace: &mut Workspace,
     _: &zed_actions::OpenWorktreeSetupTasks,
@@ -2530,7 +2617,7 @@ fn open_worktree_setup_tasks_file(
             if text.contains("create_worktree") || text.contains("create_git_worktree") {
                 return anyhow::Ok(());
             }
-            tasks_ui::insert_task_json_into_editor(
+            insert_task_json_into_editor(
                 editor,
                 WORKTREE_SETUP_TASK_EXAMPLE.to_string(),
                 window,
@@ -5360,8 +5447,11 @@ mod tests {
         use workspace::ActivatePreviousPane;
         // From the JetBrains keymap
         use workspace::ActivatePreviousItem;
-        // From the VSCode keymap
-        use debugger_ui::Start;
+        // From the VSCode keymap. This used to be `debugger_ui::Start` on
+        // `f5`; the debugger was deleted (omega#162), so the overlay is now
+        // proven through its workspace-scoped Open Chat binding, which
+        // survives it.
+        use zed_actions::assistant::ToggleFocus as OpenChat;
 
         app_state
             .fs
@@ -5471,7 +5561,7 @@ mod tests {
         window
             .update(cx, |_, _, cx| {
                 workspace.update(cx, |workspace, cx| {
-                    workspace.register_action(|_, _: &Start, _window, _cx| {});
+                    workspace.register_action(|_, _: &OpenChat, _window, _cx| {});
                     cx.notify();
                 });
             })
@@ -5481,7 +5571,11 @@ mod tests {
         assert_key_bindings_for(
             window.into(),
             cx,
-            vec![("backspace", &ActionB), ("f5", &Start)],
+            // `assert_key_bindings_for` matches on the key alone: the VSCode
+            // overlay binds Open Chat on ctrl-cmd-i (macOS) / ctrl-alt-i, and
+            // the default keymap's own binding is ctrl-cmd-a, so the `i` key
+            // only resolves once the overlay is live.
+            vec![("backspace", &ActionB), ("i", &OpenChat)],
             line!(),
         );
     }
@@ -5636,26 +5730,28 @@ mod tests {
                 .collect::<Vec<_>>();
             assert_eq!(actions_without_namespace, Vec::<&str>::new());
 
+            // Reconciled with the registered inventory during omega#162: each
+            // crate-deletion batch removes the namespaces whose declaring
+            // crate died and keeps the ones that outlive it in `zed_actions`
+            // or a kept crate (`debugger` survives in `editor`/`zed_actions`
+            // declarations, for example, even though the debugger is gone).
             let expected_namespaces = vec![
                 "action",
-                "activity_indicator",
                 "agent",
+                "agent_computer",
                 "agents_sidebar",
                 "app_menu",
                 "assistant",
                 "assistant2",
                 "auto_update",
-                "branch_picker",
                 "bedrock",
+                "branch_picker",
                 "branches",
                 "buffer_search",
-                "channel_modal",
                 "cli",
                 "client",
                 "collab",
-                "collab_panel",
                 "command_palette",
-                "console",
                 "context_server",
                 "copilot",
                 "csv",
@@ -5668,6 +5764,7 @@ mod tests {
                 "encoding_selector",
                 "feedback",
                 "file_finder",
+                "full_auto_panel",
                 "git",
                 "git_graph",
                 "git_onboarding",
@@ -5682,14 +5779,16 @@ mod tests {
                 "keymap_editor",
                 "keystroke_input",
                 "language_selector",
-                "welcome",
                 "line_ending_selector",
                 "lsp_tool",
                 "markdown",
                 "menu",
                 "multi_workspace",
-                "new_process_modal",
                 "notebook",
+                "omega",
+                "omega_predict_onboarding",
+                "omega_thread_outline",
+                "omega_workbench",
                 "onboarding",
                 "outline",
                 "outline_panel",
@@ -5720,14 +5819,15 @@ mod tests {
                 "theme_selector",
                 "toast",
                 "toolchain",
-                "variable_list",
                 "vim",
+                "welcome",
                 "window",
+                "workroom",
                 "workspace",
                 "worktree_picker",
                 "zed",
                 "zed_actions",
-                "omega_predict_onboarding",
+                "zed_predict_onboarding",
                 "zeta",
             ];
             assert_eq!(
@@ -5946,12 +6046,10 @@ mod tests {
 
             repl::init(app_state.fs.clone(), cx);
             repl::notebook::init(cx);
-            tasks_ui::init(cx);
             project::debugger::breakpoint_store::BreakpointStore::init(
                 &app_state.client.clone().into(),
             );
             project::debugger::dap_store::DapStore::init(&app_state.client.clone().into(), cx);
-            debugger_ui::init(cx);
             omega_effectd::init_openagents_session(cx);
             omega_effectd::init_openagents_binding(cx);
             omega_effectd::init_with_host_handler(

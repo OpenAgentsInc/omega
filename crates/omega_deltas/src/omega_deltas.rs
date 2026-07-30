@@ -174,6 +174,7 @@ pub const ENFORCED_DELTAS: &[&str] = &[
     "OMEGA-DELTA-0183",
     "OMEGA-DELTA-0184",
     "OMEGA-DELTA-0185",
+    "OMEGA-DELTA-0186",
 ];
 
 /// The concise product contract adjacent to the delta registry.
@@ -1274,6 +1275,13 @@ pub const REMOVED_FILES: &[&str] = &[
     // OMEGA-DELTA-0012
     "crates/collab_ui/src/collab_panel.rs",
     "crates/collab/Cargo.toml",
+    // OMEGA-DELTA-0186. The editor crate set deleted by omega#162. One entry
+    // per crate root: a rebase that revives any file inside one of these
+    // crates has to bring the manifest back with it.
+    "crates/dap_adapters/Cargo.toml",
+    "crates/debugger_tools/Cargo.toml",
+    "crates/debugger_ui/Cargo.toml",
+    "crates/tasks_ui/Cargo.toml",
 ];
 
 /// Strings that must not appear anywhere under `crates/`.
@@ -1291,7 +1299,25 @@ pub const REMOVED_FILES: &[&str] = &[
 pub const FORBIDDEN_KEYMAP_NAMESPACES: &[(&str, &str)] = &[
     ("OMEGA-DELTA-0012", "collab_panel::"),
     ("OMEGA-DELTA-0012", "channel_modal::"),
+    // OMEGA-DELTA-0186. Namespaces declared by crates the omega#162 removal
+    // deleted. Their actions no longer resolve, so a binding is a startup
+    // panic, not a dead key.
+    ("OMEGA-DELTA-0186", "debugger::"),
+    ("OMEGA-DELTA-0186", "console::"),
+    ("OMEGA-DELTA-0186", "variable_list::"),
+    ("OMEGA-DELTA-0186", "new_process_modal::"),
 ];
+
+/// OMEGA-DELTA-0186. The editor crates omega#162 deleted from the build graph.
+///
+/// The single-experience plan removes the full-editor surfaces around the one
+/// Zero Base surface. Each name here is a crate directory that must not exist,
+/// a workspace member that must not be listed, and a workspace dependency
+/// that must not be declared. The list grows batch by batch as the removal
+/// lands; an entry is never removed without an owner decision to revive the
+/// surface.
+pub const REMOVED_EDITOR_CRATES: &[&str] =
+    &["dap_adapters", "debugger_tools", "debugger_ui", "tasks_ui"];
 
 /// A keybinding Omega adds, checked by presence, scope, and resolvability.
 ///
@@ -3055,8 +3081,11 @@ pub const EPISODE_FORK_COPIES_PREFIXES: &[&str] =
 /// still names it panics Omega at startup — which is the failure this list
 /// exists to make loud, and the reason it is checked against the shipped keymap
 /// files rather than against a memory of them.
+/// Amended by OMEGA-DELTA-0186: omega#162 deletes the hidden editor surfaces
+/// outright, so a namespace leaves this list in the same commit that deletes
+/// its crate and moves it to `FORBIDDEN_KEYMAP_NAMESPACES` — hidden-but-bound
+/// and deleted-and-forbidden are mutually exclusive states.
 pub const ZERO_BASE_HIDDEN_KEYMAP_NAMESPACES: &[&str] = &[
-    "debugger::",
     "git::",
     "git_panel::",
     "outline_panel::",
@@ -3452,14 +3481,19 @@ mod tests {
     }
 
     /// OMEGA-DELTA-0007. Terminating a debug session must not ask first.
+    ///
+    /// Amended by OMEGA-DELTA-0186: omega#162 deleted the debugger outright,
+    /// so the terminate confirmation cannot return without the whole crate
+    /// returning. The check is now that the crate stays deleted, which is the
+    /// only state in which the original policy holds vacuously and forever.
     #[test]
     fn debug_terminate_never_prompts() {
-        let path = repository_path("crates/debugger_ui/src/debugger_panel.rs");
-        let source = std::fs::read_to_string(&path).expect("debugger panel is readable");
+        let path = repository_path("crates/debugger_ui");
         assert!(
-            !source.contains("Are you sure you want to terminate it?"),
-            "OMEGA-DELTA-0007: the debug-session terminate confirmation has \
-             returned to {}",
+            !path.exists(),
+            "OMEGA-DELTA-0007/0186: the debugger crate has come back at {}. \
+             If it is ever deliberately revived, its terminate flow must not \
+             prompt; see OMEGA_DELTAS.md.",
             path.display()
         );
     }
@@ -3611,22 +3645,47 @@ mod tests {
     /// binding naming an action whose crate is gone panics before any window
     /// opens. The workspace still compiles, which is exactly why this needs
     /// its own check rather than trusting the build.
+    ///
+    /// Extended by OMEGA-DELTA-0186 to every keymap asset, not just the three
+    /// defaults: a base keymap (VSCode, JetBrains, …) is loaded the moment a
+    /// person selects it in settings, and a deleted action in one of those is
+    /// the same startup panic on a delay.
     #[test]
     fn keymaps_name_no_deleted_action() {
         let mut offenders: Vec<String> = Vec::new();
-        for keymap in [
-            "assets/keymaps/default-macos.json",
-            "assets/keymaps/default-linux.json",
-            "assets/keymaps/default-windows.json",
-        ] {
-            let path = repository_path(keymap);
+        let mut keymaps: Vec<std::path::PathBuf> = Vec::new();
+        let mut stack = vec![repository_path("assets/keymaps")];
+        while let Some(directory) = stack.pop() {
+            let entries =
+                std::fs::read_dir(&directory).expect("the keymap asset directory is readable");
+            for entry in entries.flatten() {
+                let path = entry.path();
+                if path.is_dir() {
+                    stack.push(path);
+                } else if path
+                    .extension()
+                    .is_some_and(|extension| extension == "json")
+                {
+                    keymaps.push(path);
+                }
+            }
+        }
+        assert!(
+            keymaps.len() >= 10,
+            "the keymap walk found only {} files; the assets moved or the walk broke",
+            keymaps.len()
+        );
+        for path in keymaps {
             let Ok(source) = std::fs::read_to_string(&path) else {
-                offenders.push(format!("{keymap} is unreadable"));
+                offenders.push(format!("{} is unreadable", path.display()));
                 continue;
             };
             for (delta, namespace) in FORBIDDEN_KEYMAP_NAMESPACES {
                 if source.contains(namespace) {
-                    offenders.push(format!("{delta}: {namespace:?} still bound in {keymap}"));
+                    offenders.push(format!(
+                        "{delta}: {namespace:?} still bound in {}",
+                        path.display()
+                    ));
                 }
             }
         }
@@ -3634,6 +3693,39 @@ mod tests {
             offenders.is_empty(),
             "a deleted crate left keybindings behind, which panics Omega at \
              startup:\n{}",
+            offenders.join("\n")
+        );
+    }
+
+    /// OMEGA-DELTA-0186. The editor crates omega#162 removed stay removed.
+    ///
+    /// Three surfaces would each let one silently return: the crate directory
+    /// (a rebase reviving files), the workspace member list, and the
+    /// workspace dependency table (either of which would put it back on the
+    /// build graph). All three are checked per crate.
+    #[test]
+    fn removed_editor_crates_stay_removed() {
+        let manifest = std::fs::read_to_string(repository_path("Cargo.toml"))
+            .expect("the workspace manifest is readable");
+        let mut offenders: Vec<String> = Vec::new();
+        for name in REMOVED_EDITOR_CRATES {
+            let root = repository_path(&format!("crates/{name}"));
+            if root.exists() {
+                offenders.push(format!("crates/{name} exists again"));
+            }
+            let member = format!("\"crates/{name}\"");
+            if manifest.contains(&member) {
+                offenders.push(format!("{name} is a workspace member again"));
+            }
+            let dependency = format!("{name} = {{ path = \"crates/{name}\" }}");
+            if manifest.contains(&dependency) {
+                offenders.push(format!("{name} is a workspace dependency again"));
+            }
+        }
+        assert!(
+            offenders.is_empty(),
+            "OMEGA-DELTA-0186: omega#162 deleted these crates, and they have \
+             come back:\n{}",
             offenders.join("\n")
         );
     }

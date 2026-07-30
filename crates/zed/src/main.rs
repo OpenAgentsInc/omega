@@ -639,13 +639,11 @@ fn main() {
         zed::init(cx);
         #[cfg(target_os = "macos")]
         project::Project::init(&client, cx);
-        debugger_ui::init(cx);
         omega_effectd::init_openagents_session(cx);
         omega_effectd::init_openagents_binding(cx);
         omega_effectd::init_with_host_handler(Some(agent_ui::omega_effectd_host_handler(cx)), cx);
         agent_computer_ui::init(cx);
         workroom_ui::init(cx);
-        debugger_tools::init(cx);
         client::init(&client, cx);
         feature_flags::FeatureFlagStore::init(cx);
 
@@ -711,7 +709,6 @@ fn main() {
         AppState::set_global(app_state.clone(), cx);
 
         auto_update::init(client.clone(), cx);
-        dap_adapters::init(cx);
         auto_update_ui::init(cx);
         reliability::init(client.clone(), app_state.workspace_store.clone(), cx);
         extension_host::init(
@@ -808,7 +805,6 @@ fn main() {
         project_symbols::init(cx);
         project_panel::init(cx);
         outline_panel::init(cx);
-        tasks_ui::init(cx);
         snippets_ui::init(cx);
         channel::init(&app_state.client.clone(), app_state.user_store.clone(), cx);
         search::init(cx);

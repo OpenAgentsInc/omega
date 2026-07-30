@@ -583,10 +583,6 @@
         "class": "fork_seam",
         "reason": "Windows shell variable the terminal integration sets and then reads back to detect that the init command has started. The name IS the handshake; renaming one side without the other breaks startup detection."
       },
-      "Couldn't get project path for .zed/debug.json in active worktree": {
-        "class": "fork_seam",
-        "reason": "Names the inherited `.zed/` project configuration folder, which Omega still reads debug configurations out of."
-      },
       "Failed to read crates/zed/Cargo.toml": {
         "class": "fork_seam",
         "reason": "Build-script message naming the `zed` crate by its directory. The crate name is an inherited identifier; renaming the crate is a separate change with its own blast radius, and this message would be wrong either way if only the sentence moved."

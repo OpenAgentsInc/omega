@@ -173,6 +173,11 @@ cargo test -p omega_deltas
   unreachable in Omega. Deleting it would mean surgery on the shutdown path for
   no behavioural change.
 - **Enforced by:** `debug_terminate_never_prompts`.
+- **Amended by OMEGA-DELTA-0186 (omega#162):** the debugger crates
+  (`debugger_ui`, `debugger_tools`, `dap_adapters`) were deleted outright, so
+  the terminate confirmation cannot return without the whole surface
+  returning. The check now asserts `crates/debugger_ui` stays deleted; the
+  original no-prompt policy binds any future deliberate revival.
 
 ### OMEGA-DELTA-0008 — No Zed subscription or hosted-plan copy
 
@@ -8244,3 +8249,35 @@ startup recheck — survives unchanged behind that dropdown.
   `the_sealed_baselines_and_the_installed_release_gate_hold` in
   `crates/omega_deltas`, the per-scene seal ensures in the visual test
   runner, and the generated gate report at `docs/omega/release-gate.md`.
+
+### OMEGA-DELTA-0186 — The removed editor crates stay removed
+
+- **Upstream Zed:** ships the full editor around every surface: debugger,
+  task modals, repl, panels, pickers, previews, and the rest of the
+  full-editor crate set.
+- **Omega:** omega#162 deletes the full-editor-only crate set from the build
+  graph, per the single-experience plan (sections 5–6) — the product is one
+  agent thread and the controls that operate it, and `omega#161` already made
+  that the only surface. Each deleted crate is recorded in
+  `REMOVED_EDITOR_CRATES`; its crate directory, workspace-member entry, and
+  workspace-dependency entry must all stay gone. Namespaces whose declaring
+  crate died move to `FORBIDDEN_KEYMAP_NAMESPACES` in the same commit that
+  deletes the crate, because the built-in keymap is unwrapped at startup and a
+  binding naming a deleted action is a process-killing panic that the build
+  cannot catch (`0.2.0-rc6` shipped exactly that failure).
+- **Keep set:** `vim` (owner decision 2026-07-29), `editor`, `workspace`,
+  `project`, `project_panel`, `git_ui`, `search`, `terminal`/`terminal_view`,
+  `title_bar`, `command_palette`, `settings_ui`, `onboarding`, `markdown`,
+  `buffer_search`, `notifications`, plus the owner-leaning keeps `file_finder`,
+  `go_to_line`, `language_tools`, and `acp_tools`, pending explicit owner cuts.
+- **Why:** the owner's single-experience direction: the editor around the
+  thread is surface Omega does not sell, roughly 18% of the build graph, and
+  every hidden-but-compiled surface is one key press or one rebase away from
+  returning.
+- **Also amends:** `OMEGA-DELTA-0007` (debugger deleted, not just unprompted),
+  `OMEGA-DELTA-0048` (a namespace leaves `ZERO_BASE_HIDDEN_KEYMAP_NAMESPACES`
+  in the commit that deletes its crate and forbids its bindings), and
+  `keymaps_name_no_deleted_action` now scans every keymap asset, base keymaps
+  included, not only the three defaults.
+- **Enforced by:** `removed_editor_crates_stay_removed` and
+  `keymaps_name_no_deleted_action` in `crates/omega_deltas`.
