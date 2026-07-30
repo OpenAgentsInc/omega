@@ -3,6 +3,19 @@ description: Zed is crashing or freezing or hanging.
 type: Crash
 labels: "state:needs triage"
 body:
+  - type: markdown
+    attributes:
+      value: |
+        Alpha triage ownership, severity definitions, response expectations, and privacy/log guidance live in [Alpha Feedback](https://github.com/OpenAgentsInc/omega/blob/main/docs/src/alpha-feedback.md).
+  - type: input
+    id: omega_version
+    attributes:
+      label: Omega version and commit
+      description: |
+        The exact build this report binds to. Paste the version string from the sidebar footer (the Settings row), or run `omega: copy system specs into clipboard` from the command palette and paste the version line.
+      placeholder: "v0.2.0+preview.1a2b3c4d (installed candidate) or v0.2.0+dev.1a2b3c4d (source build)"
+    validations:
+      required: true
   - type: textarea
     attributes:
       label: Reproduction steps

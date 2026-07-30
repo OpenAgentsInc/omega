@@ -7,6 +7,7 @@
   - [Update](./update.md)
   - [Uninstall](./uninstall.md)
 - [Troubleshooting](./troubleshooting.md)
+- [Alpha Feedback](./alpha-feedback.md)
 
 # Working with Code
 
