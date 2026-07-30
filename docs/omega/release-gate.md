@@ -44,9 +44,20 @@ Regenerate: build the candidate with `script/bundle-omega-rc`, then run `script/
 The owner is reviewing rc28 live. This section is the complete, self-contained
 ledger of every owner feedback item and in-flight process so a fresh agent can
 pick up any lane cold if the current agents die (session limits / crashes).
-Coordinating-session state as of 2026-07-30 ~13:45 CDT. Verify current truth
-against `gh issue list -R OpenAgentsInc/omega` and `git log origin/main`
-before acting — several items below may have landed since this was written.
+
+**Coordinating-session state as of 2026-07-30 ~14:30 CDT (Grok cold-start
+resume):** review batches 1–3 and the QA crawl scaffold are **LANDED** on
+`origin/main`. ZEDREMOVE remains **OPEN** (owner-gated; not started this run).
+Verify current truth against `gh issue list -R OpenAgentsInc/omega` and
+`git log origin/main` before acting.
+
+| Land | SHA | Delta / note |
+| --- | --- | --- |
+| Item 17 QA crawl scaffold | `9b10652f19` | OMEGA-DELTA-0187 |
+| #162 preview/outline/repl batch | `9098f72404` | extends 0186 |
+| Batch 1 items 1–3 | `4c9b485511` | OMEGA-DELTA-0188 |
+| Batch 3 items 11–15 | `806ed31257` | amends 0182/0183 |
+| Batch 2 items 4–10 | `9c3f4d0086` | OMEGA-DELTA-0189 |
 
 ## Standing owner laws (apply to ALL current and future UI work)
 
@@ -98,17 +109,17 @@ before duplicating) · OPEN (nobody holds it).
 ### Review batch 3 (agent: channels/backup/pair-phone)
 | # | Item | Spec | State |
 |---|---|---|---|
-| 11 | Pair phone closes on Escape | Same modal law; the sidebar-footer pairing surface. | IN-FLIGHT |
-| 12 | Dedicated `omega-alpha-feedback` NIP-29 channel | Currently "Alpha feedback" wrongly adapts the `openagents-public` group. Create the new channel on the owned relay (check NIP-29 creation semantics; relay runbook: openagents repo `docs/ops/2026-07-24-owned-nostr-relay-deploy.md`; unmanaged groups may auto-create on first signed message — verify LIVE with a test identity before hardcoding). Hardcode it in `crates/agent_ui/fixtures/tester-channel-registry.v1.json` + the bundled pinned fallback (omega#156 work). KEEP `openagents-public` listed — sidebar shows BOTH. Amend the 0182 check. If creation truly needs an admin key, do everything else and record the one-step admin action in NEEDS_OWNER. | IN-FLIGHT |
-| 13 | Channel rows styled like the thread list | No blue link text; same color/weight/size/hover as recent threads. | IN-FLIGHT |
-| 14 | Delete the stray "Live" text under Tester channels | | IN-FLIGHT |
-| 15 | Backup-key notice click opens a real surface | The omega#164 nudge (OMEGA-DELTA-0183) is an enabled no-op. Minimal honest v1: modal revealing the nsec via the identity custody path, copy button, ONE short warning line, Dismiss. Regression test the click produces a surface. | IN-FLIGHT |
+| 11 | Pair phone closes on Escape | Same modal law; the sidebar-footer pairing surface. | LANDED (`806ed31257`) |
+| 12 | Dedicated `omega-alpha-feedback` NIP-29 channel | Currently "Alpha feedback" wrongly adapts the `openagents-public` group. Create the new channel on the owned relay (check NIP-29 creation semantics; relay runbook: openagents repo `docs/ops/2026-07-24-owned-nostr-relay-deploy.md`; unmanaged groups may auto-create on first signed message — verify LIVE with a test identity before hardcoding). Hardcode it in `crates/agent_ui/fixtures/tester-channel-registry.v1.json` + the bundled pinned fallback (omega#156 work). KEEP `openagents-public` listed — sidebar shows BOTH. Amend the 0182 check. If creation truly needs an admin key, do everything else and record the one-step admin action in NEEDS_OWNER. | LANDED client hardcode (`806ed31257`); **relay group creation remains NEEDS_OWNER** (see `docs/omega/NEEDS_OWNER.md`) |
+| 13 | Channel rows styled like the thread list | No blue link text; same color/weight/size/hover as recent threads. | LANDED (`806ed31257`) |
+| 14 | Delete the stray "Live" text under Tester channels | | LANDED (`806ed31257`) |
+| 15 | Backup-key notice click opens a real surface | The omega#164 nudge (OMEGA-DELTA-0183) is an enabled no-op. Minimal honest v1: modal revealing the nsec via the identity custody path, copy button, ONE short warning line, Dismiss. Regression test the click produces a surface. | LANDED (`806ed31257`; amends OMEGA-DELTA-0183) |
 
 ### ZEDREMOVE (its own agent, two phases)
 | # | Item | Spec | State |
 |---|---|---|---|
-| 16a | Visible-Zed purge (phase 1) | The `/zed/` settings path shown in UI → Omega-branded path with startup MIGRATION (copy old→new, prefer new, never destroy old silently; delta records semantics). Sweep visible strings via `script/omega-brand-gate.json` classifications; clean zed-industries links + "Zed version" fields in the issue templates; add `OMEGA_`-prefixed env vars taking precedence over `ZED_*` (bundle scripts set both). | IN-FLIGHT |
-| 16b | Crate rename (phase 2) | `crates/zed` → `crates/omega`, `zed_actions` → `omega_actions`, `script/zed-local` renamed. CRITICAL: action namespaces in keymaps must keep resolving (verify whether palette display is already `omega::` via the macro before assuming rename is internal-only); every omega_deltas source-literal check naming `crates/zed/...` paths updates in the same commit; Cargo workspace members/default-members/dependents/scripts/CI/docs all move together. COORDINATE: do not push while the #162 epic is mid-batch — land after #162 closes, or file the deferral. | IN-FLIGHT (phase 2 gated on #162) |
+| 16a | Visible-Zed purge (phase 1) | The `/zed/` settings path shown in UI → Omega-branded path with startup MIGRATION (copy old→new, prefer new, never destroy old silently; delta records semantics). Sweep visible strings via `script/omega-brand-gate.json` classifications; clean zed-industries links + "Zed version" fields in the issue templates; add `OMEGA_`-prefixed env vars taking precedence over `ZED_*` (bundle scripts set both). | OPEN (owner-gated; cancelled mid-start in prior session) |
+| 16b | Crate rename (phase 2) | `crates/zed` → `crates/omega`, `zed_actions` → `omega_actions`, `script/zed-local` renamed. CRITICAL: action namespaces in keymaps must keep resolving (verify whether palette display is already `omega::` via the macro before assuming rename is internal-only); every omega_deltas source-literal check naming `crates/zed/...` paths updates in the same commit; Cargo workspace members/default-members/dependents/scripts/CI/docs all move together. COORDINATE: do not push while the #162 epic is mid-batch — land after #162 closes, or file the deferral. | OPEN (gated on #162 close + owner task) |
 
 ### QA process (its own agent)
 | # | Item | Spec | State |
@@ -120,13 +131,15 @@ before duplicating) · OPEN (nobody holds it).
 - omega#171 (accessibility tree): CLOSED not-planned by owner; revisit before beta launch.
 
 ## Open issues map (verify live before acting)
-- #151–#156, #160 — close on the owner-assisted rows above + owner verdict.
-- #162 — crate-deletion epic, batches landing (kept pending explicit owner cut: file_finder, go_to_line/cursor position, language_tools LSP logs, acp_tools).
+- #151–#156, #160 — close on the owner-assisted rows above + owner verdict. Code review batches 1–3 + QA scaffold are landed; owner-assisted gate rows and live channel proof remain.
+- #162 — crate-deletion epic continuing. Latest batch `9098f72404` deleted previews, diagnostics panel, buffer outline/outline_panel, repl, tab_switcher, auto_update_ui. **Still owner-kept:** file_finder, go_to_line/cursor position, language_tools LSP logs, acp_tools. Long tail remains (selectors, project_symbols, extensions_ui, etc.).
 - #163 — proof inversion; dispatch AFTER #162 closes (gate-as-tripwire, refusal-log-empty proof rows, per-surface drawn-implies-working delta checks, docs de-moding).
 - #172 — composer menu anchor; needs an installed repro via the landed `omega.composer.executor-menu.popup` position probe; queue behind #162 (build contention).
-- Server residuals (openagents repo): relay auto-admission of fresh background identities for tester rooms; Sarah gateway accepting first-seen identities (recorded on omega#164).
-- NEEDS_OWNER: Reduce Motion toggle for the strict reduced-motion cell; a throwaway hosted identity / scratch GEMINI_API_KEY for paid-path cells (recorded in workspace NEEDS_OWNER.md, `7e0c296aef`).
+- #173 — PR that landed Batch 3 (merged).
+- Server residuals (openagents repo): relay auto-admission of fresh background identities for tester rooms; Sarah gateway accepting first-seen identities (recorded on omega#164); **create/confirm NIP-29 group `omega-alpha-feedback`** on the owned relay.
+- NEEDS_OWNER: Reduce Motion toggle for the strict reduced-motion cell; a throwaway hosted identity / scratch GEMINI_API_KEY for paid-path cells; live `omega-alpha-feedback` group creation (recorded in `docs/omega/NEEDS_OWNER.md`).
 - B-roll capture for Episode 263 (coordinating-session task): shot list in the openagents session ledger; capture from the installed rc28+ build to `~/Desktop/Sarah/263/broll/`.
+- ZEDREMOVE items 16a/16b — OPEN, owner-tasked separately.
 
 ## Handoff protocol for a fresh agent
 1. `gh issue list -R OpenAgentsInc/omega --state open` + `git log origin/main -20` — establish what actually landed; IN-FLIGHT items above may be done or half-done. Search main's history for the item's keywords before starting.
