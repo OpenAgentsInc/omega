@@ -43,7 +43,6 @@ use assets::Assets;
 use node_runtime::{NodeBinaryOptions, NodeRuntime};
 use parking_lot::Mutex;
 use project::{project_settings::ProjectSettings, trusted_worktrees};
-use recent_projects::{RemoteSettings, open_remote_project};
 use release_channel::{AppCommitSha, AppVersion, ReleaseChannel};
 use session::{AppSession, Session};
 use settings::{BaseKeymap, Settings, SettingsStore, watch_config_file};
@@ -66,6 +65,7 @@ use workspace::{
     AppState, MultiWorkspace, SerializedWorkspaceLocation, SessionWorkspace, Toast,
     WorkspaceSettings, WorkspaceStore, notifications::NotificationId, restore_multiworkspace,
 };
+use zed::remote_connections::{RemoteSettings, open_remote_project};
 use zed::{
     OpenListener, OpenRequest, RawOpenRequest, app_menus, build_window_options,
     derive_paths_with_position, handle_cli_connection, handle_keymap_file_changes,
@@ -772,8 +772,8 @@ fn main() {
         zed::watch_user_agents_md(app_state.fs.clone(), cx);
 
         repl::init(app_state.fs.clone(), cx);
-        recent_projects::init(cx);
-        dev_container::init(cx);
+        cx.observe_new(zed::disconnected_overlay::DisconnectedOverlay::register)
+            .detach();
 
         load_embedded_fonts(cx);
 
@@ -826,7 +826,6 @@ fn main() {
         theme_selector::init(cx);
         settings_profile_selector::init(cx);
         language_tools::init(cx);
-        call::init(app_state.client.clone(), app_state.user_store.clone(), cx);
         notifications::init(app_state.client.clone(), app_state.user_store.clone(), cx);
         git_ui::init(cx);
         feedback::init(cx);
@@ -1309,7 +1308,6 @@ fn dispatch_open_request(request: OpenRequest, app_state: Arc<AppState>, cx: &mu
     }
 
     let mut task = None;
-    let dev_container = request.dev_container;
     if !request.open_paths.is_empty() || !request.diff_paths.is_empty() {
         let app_state = app_state.clone();
         let base_open_options = zed::open_options_for_request(
@@ -1326,7 +1324,6 @@ fn dispatch_open_request(request: OpenRequest, app_state: Arc<AppState>, cx: &mu
                 request.diff_all,
                 app_state,
                 workspace::OpenOptions {
-                    open_in_dev_container: dev_container,
                     ..base_open_options
                 },
                 cx,

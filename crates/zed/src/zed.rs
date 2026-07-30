@@ -1,4 +1,5 @@
 mod app_menus;
+pub mod disconnected_overlay;
 #[cfg(target_os = "macos")]
 pub(crate) mod mac_only_instance;
 mod migrate;
@@ -6,6 +7,7 @@ mod migrate;
 mod open_listener;
 mod open_url_modal;
 mod quick_action_bar;
+pub mod remote_connections;
 pub mod remote_debug;
 pub mod telemetry_log;
 #[cfg(all(target_os = "macos", feature = "visual-tests"))]
@@ -19,6 +21,7 @@ use anyhow::Context as _;
 pub use app_menus::*;
 use assets::Assets;
 
+use self::remote_connections::open_remote_project;
 use breadcrumbs::Breadcrumbs;
 use client::zed_urls;
 use collections::VecDeque;
@@ -56,7 +59,6 @@ use paths::{
 use project::{DirectoryLister, DisableAiSettings, ProjectItem};
 use project_panel::ProjectPanel;
 use quick_action_bar::QuickActionBar;
-use recent_projects::open_remote_project;
 use release_channel::{AppCommitSha, AppVersion, ReleaseChannel};
 use rope::Rope;
 use search::project_search::ProjectSearchBar;
@@ -1405,8 +1407,6 @@ fn register_actions(
             }
         });
     }
-
-    workspace.register_action(sidebar::dump_workspace_info);
 
     #[cfg(debug_assertions)]
     workspace.register_action(|workspace, _: &ShowWorkspaceError, _, cx| {
@@ -5790,7 +5790,6 @@ mod tests {
                 "project_search",
                 "project_symbols",
                 "projects",
-                "recent_projects",
                 "remote_debug",
                 "repl",
                 "search",
@@ -5993,7 +5992,6 @@ mod tests {
             theme_settings::init(theme::LoadThemes::JustBase, cx);
             audio::init(cx);
             channel::init(&app_state.client, app_state.user_store.clone(), cx);
-            call::init(app_state.client.clone(), app_state.user_store.clone(), cx);
             notifications::init(app_state.client.clone(), app_state.user_store.clone(), cx);
             workspace::init(app_state.clone(), cx);
             release_channel::init(Version::new(0, 0, 0), cx);

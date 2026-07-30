@@ -1289,6 +1289,12 @@ pub const REMOVED_FILES: &[&str] = &[
     "crates/edit_prediction_ui/Cargo.toml",
     "crates/tasks_ui/Cargo.toml",
     "crates/zeta_prompt/Cargo.toml",
+    "crates/call/Cargo.toml",
+    "crates/dev_container/Cargo.toml",
+    "crates/livekit_api/Cargo.toml",
+    "crates/livekit_client/Cargo.toml",
+    "crates/recent_projects/Cargo.toml",
+    "crates/sidebar/Cargo.toml",
 ];
 
 /// Strings that must not appear anywhere under `crates/`.
@@ -1315,6 +1321,15 @@ pub const FORBIDDEN_KEYMAP_NAMESPACES: &[(&str, &str)] = &[
     ("OMEGA-DELTA-0186", "new_process_modal::"),
     ("OMEGA-DELTA-0186", "edit_prediction::"),
     ("OMEGA-DELTA-0186", "zeta::"),
+    ("OMEGA-DELTA-0186", "recent_projects::"),
+    // The `projects::` actions survive in `zed_actions`, but every handler
+    // died with `recent_projects`/`dev_container`, so a binding is a dead key
+    // wearing a working keystroke.
+    ("OMEGA-DELTA-0186", "projects::"),
+    // `agents_sidebar::` itself is alive (the Agent Panel threads sidebar);
+    // these two exact actions were declared by the deleted `sidebar` crate.
+    ("OMEGA-DELTA-0186", "agents_sidebar::NewThreadInGroup"),
+    ("OMEGA-DELTA-0186", "agents_sidebar::ToggleThreadHistory"),
 ];
 
 /// OMEGA-DELTA-0186. The editor crates omega#162 deleted from the build graph.
@@ -1335,6 +1350,12 @@ pub const REMOVED_EDITOR_CRATES: &[&str] = &[
     "edit_prediction_context",
     "edit_prediction_metrics",
     "edit_prediction_ui",
+    "call",
+    "dev_container",
+    "livekit_api",
+    "livekit_client",
+    "recent_projects",
+    "sidebar",
     "tasks_ui",
     "zeta_prompt",
 ];

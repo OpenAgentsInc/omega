@@ -1212,8 +1212,6 @@
       "shift-g": "menu::SelectLast",
       "/": "agents_sidebar::FocusSidebarFilter",
       "d d": "agent::RemoveSelectedThread",
-      "o": "agents_sidebar::NewThreadInGroup",
-      "shift-o": "agents_sidebar::NewThreadInGroup",
       "] p": "multi_workspace::NextProject",
       "[ p": "multi_workspace::PreviousProject",
       "z a": "editor::ToggleFold",

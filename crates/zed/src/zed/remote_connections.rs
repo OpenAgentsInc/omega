@@ -23,26 +23,24 @@ use workspace::{
     find_existing_workspace,
 };
 
-pub use remote_connection::{
-    RemoteClientDelegate, RemoteConnectionModal, RemoteConnectionPrompt, SshConnectionHeader,
-    connect,
-};
+pub use remote_connection::{RemoteClientDelegate, RemoteConnectionModal};
 
 #[derive(RegisterSetting)]
 pub struct RemoteSettings {
     pub ssh_connections: ExtendingVec<SshConnection>,
+    // The WSL and ssh-config pickers died with the `recent_projects` crate
+    // (omega#162); the fields stay because they mirror the registered
+    // settings-schema shape, not because anything reads them here.
+    #[allow(dead_code)]
     pub wsl_connections: ExtendingVec<WslConnection>,
     /// Whether to read ~/.ssh/config for ssh connection sources.
+    #[allow(dead_code)]
     pub read_ssh_config: bool,
 }
 
 impl RemoteSettings {
     pub fn ssh_connections(&self) -> impl Iterator<Item = SshConnection> + use<> {
         self.ssh_connections.clone().0.into_iter()
-    }
-
-    pub fn wsl_connections(&self) -> impl Iterator<Item = WslConnection> + use<> {
-        self.wsl_connections.clone().0.into_iter()
     }
 
     pub fn fill_connection_options_from_settings(&self, options: &mut SshConnectionOptions) {
@@ -996,7 +994,6 @@ mod tests {
     fn init_test(cx: &mut TestAppContext) -> Arc<AppState> {
         cx.update(|cx| {
             let state = AppState::test(cx);
-            crate::init(cx);
             editor::init(cx);
             state
         })

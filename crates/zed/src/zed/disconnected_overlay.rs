@@ -7,7 +7,7 @@ use workspace::{
     ModalView, MultiWorkspace, OpenOptions, Workspace, notifications::DetachAndPromptErr,
 };
 
-use crate::open_remote_project;
+use crate::zed::remote_connections::open_remote_project;
 
 enum Host {
     CollabGuestProject,

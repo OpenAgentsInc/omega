@@ -670,15 +670,8 @@
       "f6": "workspace::FocusNextPart",
       "shift-f6": "workspace::FocusPreviousPart",
       "ctrl-f6": "workspace::FocusNextPart",
-      "alt-open": "projects::OpenRecent",
       // Change the default action on `menu::Confirm` by setting the parameter
-      // "alt-ctrl-o": ["projects::OpenRecent", { "create_new_window": true }],
-      "alt-ctrl-o": "projects::OpenRecent",
-      "ctrl-r": "projects::OpenRecent",
-      "alt-shift-open": ["projects::OpenRemote", { "from_existing_connection": false }],
       // Change to open path modal for existing remote connection by setting the parameter
-      // "alt-ctrl-shift-o": ["projects::OpenRemote", { "from_existing_connection": true }],
-      "alt-ctrl-shift-o": ["projects::OpenRemote", { "from_existing_connection": false }],
       "alt-ctrl-shift-b": "branches::OpenRecent",
       "alt-ctrl-shift-w": "git::Worktree",
       "alt-shift-enter": "toast::RunAction",
@@ -763,12 +756,10 @@
     "context": "ThreadsSidebar",
     "use_key_equivalents": true,
     "bindings": {
-      "ctrl-n": "agents_sidebar::NewThreadInGroup",
       "left": "menu::SelectParent",
       "right": "menu::SelectChild",
       "enter": "menu::Confirm",
       "ctrl-f": "agents_sidebar::FocusSidebarFilter",
-      "ctrl-g": "agents_sidebar::ToggleThreadHistory",
       "shift-backspace": "agent::ArchiveSelectedThread",
       "ctrl-backspace": "agent::RemoveSelectedThread",
       "ctrl-tab": "agents_sidebar::ToggleThreadSwitcher",
@@ -1140,16 +1131,6 @@
     "bindings": {
       "ctrl-p": "file_finder::Toggle",
       "ctrl-shift-i": "search::ToggleIncludeIgnored",
-    },
-  },
-  {
-    "context": "RecentProjects || (RecentProjects > Picker > Editor)",
-    "bindings": {
-      "ctrl-k": "recent_projects::ToggleActionsMenu",
-      "ctrl-k ctrl-o": "workspace::Open",
-      "ctrl-shift-a": "workspace::AddFolderToProject",
-      "shift-backspace": "recent_projects::RemoveSelected",
-      "ctrl-shift-enter": "recent_projects::AddToWorkspace",
     },
   },
   {

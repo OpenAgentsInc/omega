@@ -673,11 +673,7 @@
       "shift-f6": "workspace::FocusPreviousPart",
       "ctrl-f6": "workspace::FocusNextPart",
       // Change the default action on `menu::Confirm` by setting the parameter
-      // "ctrl-alt-o": ["projects::OpenRecent", { "create_new_window": true }],
-      "ctrl-r": "projects::OpenRecent",
       // Change to open path modal for existing remote connection by setting the parameter
-      // "ctrl-shift-alt-o": ["projects::OpenRemote", { "from_existing_connection": true }],
-      "ctrl-shift-alt-o": ["projects::OpenRemote", { "from_existing_connection": false }],
       "shift-alt-b": "branches::OpenRecent",
       "shift-alt-w": "git::Worktree",
       "shift-alt-enter": "toast::RunAction",
@@ -755,12 +751,10 @@
     "context": "ThreadsSidebar",
     "use_key_equivalents": true,
     "bindings": {
-      "ctrl-n": "agents_sidebar::NewThreadInGroup",
       "left": "menu::SelectParent",
       "right": "menu::SelectChild",
       "enter": "menu::Confirm",
       "ctrl-f": "agents_sidebar::FocusSidebarFilter",
-      "ctrl-g": "agents_sidebar::ToggleThreadHistory",
       "shift-backspace": "agent::ArchiveSelectedThread",
       "ctrl-backspace": "agent::RemoveSelectedThread",
       "ctrl-tab": "agents_sidebar::ToggleThreadSwitcher",
@@ -1143,17 +1137,6 @@
     "bindings": {
       "ctrl-p": "file_finder::Toggle",
       "ctrl-shift-i": "search::ToggleIncludeIgnored",
-    },
-  },
-  {
-    "context": "RecentProjects || (RecentProjects > Picker > Editor)",
-    "use_key_equivalents": true,
-    "bindings": {
-      "ctrl-k": "recent_projects::ToggleActionsMenu",
-      "ctrl-k ctrl-o": "workspace::Open",
-      "ctrl-shift-a": "workspace::AddFolderToProject",
-      "shift-backspace": "recent_projects::RemoveSelected",
-      "ctrl-shift-enter": "recent_projects::AddToWorkspace",
     },
   },
   {

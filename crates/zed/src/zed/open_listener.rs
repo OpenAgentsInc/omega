@@ -11,11 +11,11 @@ use futures::channel::mpsc::{UnboundedReceiver, UnboundedSender};
 use futures::channel::{mpsc, oneshot};
 use futures::future;
 
+use crate::zed::remote_connections::{RemoteSettings, navigate_to_positions, open_remote_project};
 use futures::{FutureExt, StreamExt};
 use git_ui::{file_diff_view::FileDiffView, multi_diff_view::MultiDiffView};
 use gpui::{App, AsyncApp, Global, TaskExt, WindowHandle};
 use onboarding::await_identity_ready;
-use recent_projects::{RemoteSettings, navigate_to_positions, open_remote_project};
 use release_channel::ReleaseChannel;
 use remote::{RemoteConnectionOptions, WslConnectionOptions};
 use settings::Settings;
@@ -37,7 +37,6 @@ pub struct OpenRequest {
     pub open_paths: Vec<String>,
     pub diff_paths: Vec<[String; 2]>,
     pub diff_all: bool,
-    pub dev_container: bool,
     pub open_channel_notes: Vec<(u64, Option<String>)>,
     pub join_channel: Option<u64>,
     pub remote_connection: Option<RemoteConnectionOptions>,
@@ -135,7 +134,6 @@ impl OpenRequest {
 
         this.diff_paths = request.diff_paths;
         this.diff_all = request.diff_all;
-        this.dev_container = request.dev_container;
         this.open_behavior = request.open_behavior;
         if let Some(wsl) = request.wsl {
             let (user, distro_name) = if let Some((user, distro)) = wsl.split_once('@') {
@@ -393,7 +391,6 @@ pub struct RawOpenRequest {
     pub urls: Vec<String>,
     pub diff_paths: Vec<[String; 2]>,
     pub diff_all: bool,
-    pub dev_container: bool,
     pub wsl: Option<String>,
     pub open_behavior: Option<cli::OpenBehavior>,
 }
@@ -601,7 +598,6 @@ pub async fn handle_cli_connection(
                 mut open_behavior,
                 env,
                 user_data_dir: _,
-                dev_container,
                 cwd,
             } => {
                 if !urls.is_empty() {
@@ -611,7 +607,6 @@ pub async fn handle_cli_connection(
                                 urls,
                                 diff_paths,
                                 diff_all,
-                                dev_container,
                                 wsl,
                                 open_behavior: Some(open_behavior),
                             },
@@ -668,7 +663,6 @@ pub async fn handle_cli_connection(
                     open_behavior,
                     responses.as_ref(),
                     wait,
-                    dev_container,
                     app_state.clone(),
                     env,
                     cwd,
@@ -847,7 +841,6 @@ async fn open_workspaces(
     open_behavior: cli::OpenBehavior,
     responses: &dyn CliResponseSink,
     wait: bool,
-    dev_container: bool,
     app_state: Arc<AppState>,
     env: Option<collections::HashMap<String, String>>,
     cwd: Option<PathBuf>,
@@ -894,7 +887,6 @@ async fn open_workspaces(
         let open_options = workspace::OpenOptions {
             wait,
             env: env.clone(),
-            open_in_dev_container: dev_container,
             ..base_open_options
         };
 
@@ -2288,128 +2280,6 @@ mod tests {
             .unwrap();
     }
 
-    #[gpui::test]
-    async fn test_dev_container_flag_opens_modal(cx: &mut TestAppContext) {
-        let app_state = init_test(cx);
-        cx.update(|cx| recent_projects::init(cx));
-
-        app_state
-            .fs
-            .as_fake()
-            .insert_tree(
-                path!("/project"),
-                json!({
-                    ".devcontainer": {
-                        "devcontainer.json": "{}"
-                    },
-                    "src": {
-                        "main.rs": "fn main() {}"
-                    }
-                }),
-            )
-            .await;
-
-        let errored = cx
-            .spawn({
-                let app_state = app_state.clone();
-                |mut cx| async move {
-                    let response_sink = DiscardResponseSink;
-                    open_local_workspace(
-                        vec![path!("/project").to_owned()],
-                        vec![],
-                        false,
-                        workspace::OpenOptions {
-                            open_in_dev_container: true,
-                            ..Default::default()
-                        },
-                        None,
-                        &response_sink,
-                        &app_state,
-                        &mut cx,
-                    )
-                    .await
-                }
-            })
-            .await;
-
-        assert!(!errored);
-        cx.run_until_parked();
-
-        let multi_workspace = cx.update(|cx| cx.windows()[0].downcast::<MultiWorkspace>().unwrap());
-        multi_workspace
-            .update(cx, |multi_workspace, _, cx| {
-                let flag = multi_workspace.workspace().read(cx).open_in_dev_container();
-                assert!(
-                    !flag,
-                    "open_in_dev_container flag should be consumed by suggest_on_worktree_updated"
-                );
-            })
-            .unwrap();
-    }
-
-    #[gpui::test]
-    async fn test_dev_container_flag_cleared_without_config(cx: &mut TestAppContext) {
-        let app_state = init_test(cx);
-        cx.update(|cx| recent_projects::init(cx));
-
-        app_state
-            .fs
-            .as_fake()
-            .insert_tree(
-                path!("/project"),
-                json!({
-                    "src": {
-                        "main.rs": "fn main() {}"
-                    }
-                }),
-            )
-            .await;
-
-        let errored = cx
-            .spawn({
-                let app_state = app_state.clone();
-                |mut cx| async move {
-                    let response_sink = DiscardResponseSink;
-                    open_local_workspace(
-                        vec![path!("/project").to_owned()],
-                        vec![],
-                        false,
-                        workspace::OpenOptions {
-                            open_in_dev_container: true,
-                            ..Default::default()
-                        },
-                        None,
-                        &response_sink,
-                        &app_state,
-                        &mut cx,
-                    )
-                    .await
-                }
-            })
-            .await;
-
-        assert!(!errored);
-
-        // Let any pending worktree scan events and updates settle.
-        cx.run_until_parked();
-
-        // With no .devcontainer config, the flag should be cleared once the
-        // worktree scan completes, rather than persisting on the workspace.
-        let multi_workspace = cx.update(|cx| cx.windows()[0].downcast::<MultiWorkspace>().unwrap());
-        multi_workspace
-            .update(cx, |multi_workspace, _, cx| {
-                let flag = multi_workspace
-                    .workspace()
-                    .read(cx)
-                    .open_in_dev_container();
-                assert!(
-                    !flag,
-                    "open_in_dev_container flag should be cleared when no devcontainer config exists"
-                );
-            })
-            .unwrap();
-    }
-
     fn make_cli_open_request(paths: Vec<String>, open_behavior: cli::OpenBehavior) -> CliRequest {
         CliRequest::Open {
             paths,
@@ -2421,7 +2291,6 @@ mod tests {
             open_behavior,
             env: None,
             user_data_dir: None,
-            dev_container: false,
             cwd: None,
         }
     }
@@ -2440,7 +2309,6 @@ mod tests {
             open_behavior,
             env: None,
             user_data_dir: None,
-            dev_container: false,
             cwd: None,
         }
     }
