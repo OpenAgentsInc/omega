@@ -20,10 +20,11 @@ different build.
 
 The zero-refusal sweep is anchored to `omega_zero_base::refusal` in
 `crates/omega_zero_base/src/omega_zero_base.rs`: every refused action logs one
-sentence ending "Start Omega with --full-editor for the editor." via
-`report_refusal` in `crates/zed/src/omega_zero_base_ui.rs`. A flag-free launch
-that reaches the composer without dispatching a single refused action must
-leave a log with zero such sentences.
+sentence ("... is not part of Omega, which shows one agent thread and the
+controls that operate it.") via `report_refusal` in
+`crates/zed/src/omega_zero_base_ui.rs`. A flag-free launch that reaches the
+composer without dispatching a single refused action must leave a log with
+zero such sentences.
 
 Usage:
     script/omega-release-gate [--dmg PATH] [--release-record PATH]
@@ -62,7 +63,9 @@ ROOT = Path(__file__).resolve().parent.parent
 #: the log line but still fails closed if the sentence shape changes: the
 #: OMEGA-DELTA-0185 check in `crates/omega_deltas` holds this file and the
 #: refusal source in agreement.
-REFUSAL_MARKERS = ("is off in zero base", "--full-editor for the editor")
+#: omega#161 removed the mode split, so the shipped refusal names the action
+#: and the product with no mode vocabulary and no flag to point at.
+REFUSAL_MARKERS = ("is not part of Omega", "controls that operate it")
 
 #: OCR phrases that prove the flag-free launch reached the shipped composer
 #: front door (OMEGA-DELTA-0184: the composer executor dropdown is the
@@ -396,9 +399,9 @@ def sweep_refusals(log_text: str) -> int:
 def self_test() -> int:
     """Prove the sweep can fire and the receipt binding refuses tampering."""
     fired = sweep_refusals(
-        "2026-07-30T00:00:00Z INFO some::module: workspace::NewFile is off in "
-        "zero base, which shows one Exo thread and nothing else. Start Omega "
-        "with --full-editor for the editor.\n"
+        "2026-07-30T00:00:00Z INFO some::module: workspace::NewFile is not "
+        "part of Omega, which shows one agent thread and the controls that "
+        "operate it.\n"
     )
     if fired != 1:
         print("self-test: the refusal sweep cannot fire", file=sys.stderr)

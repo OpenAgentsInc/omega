@@ -22857,19 +22857,20 @@ mod tests {
         // to the sentence `omega_zero_base::refusal` actually produces. Hold
         // both sides in agreement so the sweep cannot rot into scanning for a
         // sentence the product no longer says.
+        // omega#161 removed the mode split, so the sentence names the action
+        // and the product — no mode vocabulary, no flag to point at. The pin
+        // moved with it; the sweep and the source must keep agreeing.
         let zero_base = read_repository_file(ZERO_BASE_MODE_PATH);
         assert!(
-            zero_base.contains("pub const MODE_NAME: &str = \"zero base\";")
-                && zero_base.contains("pub const FULL_EDITOR_FLAG: &str = \"--full-editor\";")
-                && zero_base.contains("is off in {MODE_NAME}")
-                && zero_base.contains("{FULL_EDITOR_FLAG} for the editor."),
+            zero_base.contains("is not part of Omega")
+                && zero_base.contains("the controls that operate it."),
             "OMEGA-DELTA-0185: the refusal sentence in {ZERO_BASE_MODE_PATH} \
              changed shape. Update REFUSAL_MARKERS in script/omega-release-gate \
              and this check together, or the installed zero-refusal sweep scans \
              for a sentence the product no longer says."
         );
         let gate = read_repository_file("script/omega-release-gate");
-        for fragment in ["is off in zero base", "--full-editor for the editor"] {
+        for fragment in ["is not part of Omega", "controls that operate it"] {
             assert!(
                 gate.contains(fragment),
                 "OMEGA-DELTA-0185: script/omega-release-gate lost the refusal \

@@ -8212,10 +8212,11 @@ startup recheck — survives unchanged behind that dropdown.
   unsealed window when the call order changes. The six committed baselines
   under `crates/zed/test_fixtures/visual_tests/` must exist non-empty.
 - **The Exo-lane `omega_zero_base_wide` / `omega_zero_base_narrow` baselines
-  photograph the pre-seal transitional form** (active zero base under a
-  zoomed panel, `seal()` never called on that path) and require a live
-  `exo acp` runtime to re-record. They are not evidence for the sealed
-  surface; the six sealed scenes are.
+  photograph the unsealed harness form** (the surface under a zoomed panel,
+  `seal()` never called on that runner path — since omega#161 an arrangement
+  only proof harnesses can produce) and require a live `exo acp` runtime to
+  re-record. They are not evidence for the sealed surface; the six sealed
+  scenes are.
 - **The installed-candidate release gate is scripted, not heroic.**
   `script/omega-release-gate` runs the Episode 263 gap-analysis section 7
   matrix against the packaged candidate from `script/bundle-omega-rc`,
@@ -8228,11 +8229,12 @@ startup recheck — survives unchanged behind that dropdown.
   `blocked` with the reason. No row is ever fabricated.
 - **The zero-refusal sweep is bound to the refusal sentence.** The harness
   scans the clean-profile log for the sentence
-  `omega_zero_base::refusal` produces ("… is off in zero base …
-  Start Omega with --full-editor for the editor.") and the flag-free journey
-  must log zero of them. The delta test holds the harness fragments and the
-  `crates/omega_zero_base` source in agreement so the sweep cannot rot into
-  scanning for a sentence the product no longer says.
+  `omega_zero_base::refusal` produces — since omega#161: "… is not part of
+  Omega, which shows one agent thread and the controls that operate it." —
+  and the flag-free journey must log zero of them. The delta test holds the
+  harness fragments and the `crates/omega_zero_base` source in agreement so
+  the sweep cannot rot into scanning for a sentence the product no longer
+  says.
 - **Why:** omega#158 — the alpha cut needs the sealed render photographed and
   the release gate runnable on every packaged candidate; the manual checklist
   does not survive contact with a real release cadence, and GitHub-hosted CI
