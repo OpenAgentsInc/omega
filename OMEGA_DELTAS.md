@@ -8318,10 +8318,11 @@ startup recheck — survives unchanged behind that dropdown.
   `docs/omega/control-crawl-copy-allowlist.json`. Process cadence, ownership,
   severity, and the same-commit registration law live in
   `docs/src/qa-process.md`.
-- **Scaffold coverage (this land):** the synthetic proving scene in
-  `crates/omega_control_crawl` is `complete`. Sealed front-door, Sarah,
-  tester-channel, settings, pair-phone, composer-executor menu, and
-  application-menu surfaces are registered as `pending-expansion` so the
+- **Coverage:** the synthetic proving scene in `crates/omega_control_crawl` is
+  `complete`. `OMEGA-DELTA-0191` completes the source-backed activity-rail,
+  new-thread-menu, thread-header-menu, and application-menu inventories.
+  Sealed front-door, Sarah, tester-channel, settings, pair-phone, and
+  composer-executor menu remain registered as `pending-expansion` so the
   delta check knows they exist; expanding each to a full semantic-tree crawl
   is follow-up work, not a silent omission.
 - **Mutation proof:** `deliberate_noop_control_fails_the_crawl` injects an
@@ -8438,3 +8439,32 @@ startup recheck — survives unchanged behind that dropdown.
   brand-gate inventory that scans `crates/omega` rather than the deleted path;
   issue-template content reviewed in this change.
 
+### OMEGA-DELTA-0191 — Refusals fail proofs and drawn controls have loaded actions
+
+- **Upstream Zed:** action refusal is an ordinary dispatch outcome, and no
+  product-wide proof binds rendered controls to the handlers loaded by the
+  shipped startup path.
+- **Omega:** the action gate remains installed only as a tripwire. Every
+  product refusal advances a process counter. The visual-proof runner and
+  `--omega-send` smoke driver fail when that counter advances, even if the
+  underlying scene or turn otherwise succeeds. The seeded counter test proves
+  one refusal is rejected. The visual runner also drops the stale legacy
+  multi-workspace-sidebar scenes whose deleted crate prevented the proof
+  executable from compiling.
+- **Drawn implies working:** the activity rail, Agent Panel `+` menu, thread
+  header menu, and application menu each have an exact source-backed control
+  inventory. Every control on the one application surface must dispatch an
+  admitted action, and the check pins the handler or dependency initialization
+  that the shipped path loads. Adding a row without extending its inventory,
+  admitting its action, and loading its handler fails the delta suite.
+- **One product shape:** “Zero Base” remains only in legacy crate and check
+  names. The taxonomy and crate documentation state that the flag-free surface
+  is Omega itself, with no second application mode or escape hatch.
+- **Enforced by:** `proof_processes_fail_on_any_logged_refusal`,
+  `drawn_activity_rail_controls_are_admitted_and_loaded`,
+  `drawn_new_thread_menu_controls_are_admitted_and_loaded`,
+  `drawn_header_menu_controls_are_admitted_and_loaded`,
+  `drawn_application_menu_controls_are_admitted_and_loaded`, and
+  `zero_base_is_only_a_legacy_implementation_name` in
+  `crates/omega_deltas`, plus
+  `a_seeded_refusal_trips_the_proof_counter` in `crates/omega_zero_base`.

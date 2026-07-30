@@ -5576,7 +5576,7 @@ mod tests {
         // From the JetBrains keymap. This used to be `diagnostics::Deploy`
         // on `cmd-6`/`alt-6`; the diagnostics panel was deleted (omega#162),
         // so the overlay is proven through the file finder toggle instead.
-        use file_finder::Toggle as FileFinderToggle;
+        use workspace::ToggleFileFinder as FileFinderToggle;
 
         window
             .update(cx, |_, _, cx| {
@@ -5662,7 +5662,12 @@ mod tests {
 
         cx.background_executor.run_until_parked();
 
-        assert_key_bindings_for(window.into(), cx, vec![("e", &FileFinderToggle)], line!());
+        assert_key_bindings_for(
+            window.into(),
+            cx,
+            vec![("e", &FileFinderToggle::default())],
+            line!(),
+        );
     }
 
     #[gpui::test]

@@ -54,10 +54,10 @@ use crate::{
 };
 use crate::{
     AgentDiffPane, ConversationView, CopyThreadToClipboard, Follow, LoadThreadFromClipboard,
-    NewTerminalThread, NewThread, OpenActiveThreadAsMarkdown, OpenAgentDiff, OpenSarahAdmission,
-    ResetFastModeWarnings, ResetTrialEndUpsell, ResetTrialUpsell, ShowAllSidebarThreadMetadata,
-    ShowThreadMetadata, ToggleComposerExecutorMenu, ToggleNewThreadMenu, ToggleOptionsMenu,
-    ToggleThreadsSidebar,
+    NewOmegaAgentThread, NewTerminalThread, NewThread, OpenActiveThreadAsMarkdown, OpenAgentDiff,
+    OpenSarahAdmission, RegenerateThreadTitle, ResetFastModeWarnings, ResetTrialEndUpsell,
+    ResetTrialUpsell, ShowAllSidebarThreadMetadata, ShowThreadMetadata, ToggleComposerExecutorMenu,
+    ToggleNewThreadMenu, ToggleOptionsMenu, ToggleThreadsSidebar,
     conversation_view::{
         AcpThreadViewEvent, ConversationPreparation, RootThreadUpdated, ThreadView,
         reset_fast_mode_warnings,
@@ -546,6 +546,29 @@ pub fn init(cx: &mut App) {
                         });
                         workspace.focus_panel::<AgentPanel>(window, cx);
                     }
+                })
+                .register_action(|workspace, _: &NewOmegaAgentThread, window, cx| {
+                    if let Some(panel) = workspace.panel::<AgentPanel>(cx) {
+                        panel.update(cx, |panel, cx| {
+                            panel.compose_on_executor(ConversationTarget::OmegaAgent, window, cx);
+                        });
+                        workspace.focus_panel::<AgentPanel>(window, cx);
+                    }
+                })
+                .register_action(|workspace, _: &RegenerateThreadTitle, _window, cx| {
+                    let Some(panel) = workspace.panel::<AgentPanel>(cx) else {
+                        return;
+                    };
+                    let Some(conversation_view) =
+                        panel.read(cx).active_conversation_view().cloned()
+                    else {
+                        return;
+                    };
+                    AgentPanel::handle_regenerate_thread_title(
+                        conversation_view,
+                        workspace.weak_handle(),
+                        cx,
+                    );
                 })
                 .register_action(|workspace, _: &OpenSarahAdmission, window, cx| {
                     if let Some(panel) = workspace.panel::<AgentPanel>(cx) {
@@ -5027,7 +5050,7 @@ impl AgentPanel {
     /// visually absent is still reachable, and a reachable surface that returns
     /// silently is indistinguishable from a broken one.
     fn refuse_in_zero_base(&self, action_name: &str, cx: &mut Context<Self>) {
-        let sentence = omega_zero_base::refusal(action_name);
+        let sentence = omega_zero_base::record_refusal(action_name);
         log::info!("{sentence}");
         if let Some(workspace) = self.workspace.upgrade() {
             workspace.update(cx, |workspace, cx| {
@@ -8843,22 +8866,7 @@ impl AgentPanel {
             .and_then(|md| md.content())
             .is_some();
 
-        // OMEGA-DELTA-0125. Does this window have the editor's extension
-        // surface to send a click to?
-        //
-        // The owner, on a live build: *"literally nothing in this top right
-        // menu does anything when i click on it. if its easy to reenable those
-        // things to actually work, do it, otherwise hide the menu."* Four
-        // entries used to reach the refused `omega` namespace. Settings now
-        // opens its own visible window and its three navigation actions are
-        // admitted individually. Extensions still belongs to the full editor,
-        // so that is the only entry this seal guard hides.
-        //
-        // The seal, not the mode: before it the ordinary workspace still
-        // renders, and these entries work there exactly as upstream.
         let offers_editor_surfaces = !omega_zero_base::is_sealed();
-
-        let workspace = self.workspace.clone();
 
         PopoverMenu::new("agent-options-menu")
             .trigger_with_tooltip(
@@ -8885,36 +8893,17 @@ impl AgentPanel {
 
                             if let Some(conversation_view) = conversation_view.as_ref() {
                                 if can_regenerate_thread_title {
-                                    menu = menu.entry("Regenerate Thread Title", None, {
-                                        let conversation_view = conversation_view.clone();
-                                        let workspace = workspace.clone();
-                                        move |_, cx| {
-                                            Self::handle_regenerate_thread_title(
-                                                conversation_view.clone(),
-                                                workspace.clone(),
-                                                cx,
-                                            );
-                                        }
-                                    });
+                                    menu = menu.action(
+                                        "Regenerate Thread Title",
+                                        Box::new(RegenerateThreadTitle),
+                                    );
                                 }
 
-                                let root_thread_view =
-                                    conversation_view.read(cx).root_thread_view();
-                                if let Some(thread_view) = root_thread_view {
-                                    let workspace = workspace.clone();
-                                    menu = menu.entry("Open Thread as Markdown", None, {
-                                        move |window, cx| {
-                                            if let Some(workspace) = workspace.upgrade() {
-                                                thread_view.update(cx, |thread_view, cx| {
-                                                    thread_view
-                                                        .open_thread_as_markdown(
-                                                            workspace, window, cx,
-                                                        )
-                                                        .detach_and_log_err(cx);
-                                                });
-                                            }
-                                        }
-                                    });
+                                if conversation_view.read(cx).root_thread_view().is_some() {
+                                    menu = menu.action(
+                                        "Open Thread as Markdown",
+                                        Box::new(OpenActiveThreadAsMarkdown),
+                                    );
                                 }
 
                                 menu = menu.separator();
@@ -8948,53 +8937,16 @@ impl AgentPanel {
 
                             if project_agents_md_path.is_some() || global_agents_md_loaded {
                                 if global_agents_md_loaded {
-                                    let workspace = workspace.clone();
-
-                                    menu = menu.custom_entry(
-                                        |_window, _cx| {
-                                            h_flex()
-                                                .w_full()
-                                                .gap_1()
-                                                .child(Label::new("Open Global Rules"))
-                                                .child(
-                                                    Label::new("(AGENTS.md)")
-                                                        .color(Color::Muted)
-                                                        .size(LabelSize::Small),
-                                                )
-                                                .into_any_element()
-                                        },
-                                        move |window, cx| {
-                                            workspace
-                                                .update(cx, |workspace, cx| {
-                                                    open_global_rules(workspace, window, cx);
-                                                })
-                                                .log_err();
-                                        },
+                                    menu = menu.action(
+                                        "Open Global Rules (AGENTS.md)",
+                                        Box::new(OpenGlobalAgentsMdRules),
                                     );
                                 }
 
                                 if project_agents_md_path.is_some() {
-                                    let workspace = workspace.clone();
-                                    menu = menu.custom_entry(
-                                        |_window, _cx| {
-                                            h_flex()
-                                                .w_full()
-                                                .gap_1()
-                                                .child(Label::new("Open Project Rules"))
-                                                .child(
-                                                    Label::new("(AGENTS.md)")
-                                                        .color(Color::Muted)
-                                                        .size(LabelSize::Small),
-                                                )
-                                                .into_any_element()
-                                        },
-                                        move |window, cx| {
-                                            workspace
-                                                .update(cx, |workspace, cx| {
-                                                    open_project_rules(workspace, window, cx);
-                                                })
-                                                .log_err();
-                                        },
+                                    menu = menu.action(
+                                        "Open Project Rules (AGENTS.md)",
+                                        Box::new(OpenProjectAgentsMdRules),
                                     );
                                 }
                             }
@@ -9012,17 +8964,6 @@ impl AgentPanel {
 
                         menu = menu.action("Settings", Box::new(OpenSettings));
 
-                        // OMEGA-DELTA-0118. The entry names the action that
-                        // works in the mode this window is in.
-                        //
-                        // It used to name `multi_workspace::ToggleWorkspaceSidebar`
-                        // in both, and in zero base that namespace is refused
-                        // at dispatch — a control that is drawn and denied,
-                        // which is the failure `OMEGA-DELTA-0053` names. The
-                        // editor keeps the workspace sidebar, which is the
-                        // project switcher and is the right answer there;
-                        // zero base has no `MultiWorkspace` surface and gets
-                        // this panel's own.
                         menu = menu.separator().action(
                             "Toggle Threads Sidebar",
                             if omega_zero_base::is_active() {
@@ -9348,9 +9289,6 @@ impl AgentPanel {
         let new_thread_menu_builder: Rc<
             dyn Fn(&mut Window, &mut App) -> Option<Entity<ContextMenu>>,
         > = {
-            let selected_agent = self.selected_agent.clone();
-            let is_agent_selected = move |agent: Agent| selected_agent == agent;
-
             let workspace = self.workspace.clone();
             let is_via_collab = workspace
                 .update(cx, |workspace, cx| {
@@ -9373,31 +9311,11 @@ impl AgentPanel {
                     menu.context(focus_handle.clone())
                         .item(
                             ContextMenuEntry::new("Omega Agent")
-                                .when(
-                                    !showing_terminal && is_agent_selected(Agent::NativeAgent),
-                                    |this| this.action(Box::new(NewThread)),
-                                )
+                                .action(Box::new(NewOmegaAgentThread))
                                 .icon(IconName::OmegaAgent)
                                 .icon_color(Color::Muted)
-                                .handler({
-                                    let workspace = workspace.clone();
-                                    move |window, cx| {
-                                        if let Some(workspace) = workspace.upgrade() {
-                                            workspace.update(cx, |workspace, cx| {
-                                                if let Some(panel) =
-                                                    workspace.panel::<AgentPanel>(cx)
-                                                {
-                                                    panel.update(cx, |panel, cx| {
-                                                        panel.compose_on_executor(
-                                                            ConversationTarget::OmegaAgent,
-                                                            window,
-                                                            cx,
-                                                        );
-                                                    });
-                                                }
-                                            });
-                                        }
-                                    }
+                                .handler(move |window, cx| {
+                                    window.dispatch_action(Box::new(NewOmegaAgentThread), cx);
                                 }),
                         )
                         .item(
@@ -9414,25 +9332,8 @@ impl AgentPanel {
                                 .action(Box::new(OpenSarahAdmission))
                                 .icon(IconName::OmegaAgent)
                                 .icon_color(Color::Accent)
-                                .handler({
-                                    let workspace = workspace.clone();
-                                    move |window, cx| {
-                                        if let Some(workspace) = workspace.upgrade() {
-                                            workspace.update(cx, |workspace, cx| {
-                                                if let Some(panel) =
-                                                    workspace.panel::<AgentPanel>(cx)
-                                                {
-                                                    panel.update(cx, |panel, cx| {
-                                                        panel.compose_on_executor(
-                                                            ConversationTarget::Sarah,
-                                                            window,
-                                                            cx,
-                                                        );
-                                                    });
-                                                }
-                                            });
-                                        }
-                                    }
+                                .handler(move |window, cx| {
+                                    window.dispatch_action(Box::new(OpenSarahAdmission), cx);
                                 }),
                         )
                         .when(!omega_zero_base::is_active(), |menu| {
@@ -9463,32 +9364,11 @@ impl AgentPanel {
                         .when(supports_terminal, |menu| {
                             menu.item(
                                 ContextMenuEntry::new("Terminal")
-                                    .when(showing_terminal, |this| this.action(Box::new(NewThread)))
-                                    .when(!showing_terminal, |this| {
-                                        this.action(Box::new(NewTerminalThread))
-                                    })
+                                    .action(Box::new(NewTerminalThread))
                                     .icon(IconName::Terminal)
                                     .icon_color(Color::Muted)
-                                    .handler({
-                                        let workspace = workspace.clone();
-                                        move |window, cx| {
-                                            if let Some(workspace) = workspace.upgrade() {
-                                                workspace.update(cx, |workspace, cx| {
-                                                    if let Some(panel) =
-                                                        workspace.panel::<AgentPanel>(cx)
-                                                    {
-                                                        panel.update(cx, |panel, cx| {
-                                                            panel.new_terminal(
-                                                                Some(workspace),
-                                                                AgentThreadSource::AgentPanel,
-                                                                window,
-                                                                cx,
-                                                            );
-                                                        });
-                                                    }
-                                                });
-                                            }
-                                        }
+                                    .handler(move |window, cx| {
+                                        window.dispatch_action(Box::new(NewTerminalThread), cx);
                                     }),
                             )
                         })
@@ -9553,37 +9433,20 @@ impl AgentPanel {
                                 }
 
                                 entry = entry
-                                    .when(
-                                        unavailable_reason.is_none()
-                                            && !showing_terminal
-                                            && is_agent_selected(Agent::Custom {
-                                                id: item.id.clone(),
-                                            }),
-                                        |this| this.action(Box::new(NewThread)),
-                                    )
+                                    .action(Box::new(NewExternalAgentThread {
+                                        agent: item.id.clone(),
+                                    }))
                                     .icon_color(Color::Muted)
                                     .disabled(unavailable_reason.is_some())
                                     .handler({
-                                        let workspace = workspace.clone();
                                         let agent_id = item.id.clone();
                                         move |window, cx| {
-                                            if let Some(workspace) = workspace.upgrade() {
-                                                workspace.update(cx, |workspace, cx| {
-                                                    if let Some(panel) =
-                                                        workspace.panel::<AgentPanel>(cx)
-                                                    {
-                                                        panel.update(cx, |panel, cx| {
-                                                            panel.new_external_agent_thread(
-                                                                &NewExternalAgentThread {
-                                                                    agent: agent_id.clone(),
-                                                                },
-                                                                window,
-                                                                cx,
-                                                            );
-                                                        });
-                                                    }
-                                                });
-                                            }
+                                            window.dispatch_action(
+                                                Box::new(NewExternalAgentThread {
+                                                    agent: agent_id.clone(),
+                                                }),
+                                                cx,
+                                            );
                                         }
                                     });
 
@@ -9595,6 +9458,7 @@ impl AgentPanel {
                         .separator()
                         .item(
                             ContextMenuEntry::new("Add More Agents")
+                                .action(Box::new(omega_actions::AcpRegistry))
                                 .icon(IconName::Plus)
                                 .icon_color(Color::Muted)
                                 .handler({

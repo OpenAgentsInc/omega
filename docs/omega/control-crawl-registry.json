@@ -11,6 +11,30 @@
       "coverage": "pointer+keyboard activate; menu entries individual; escape dismissal; mutation proof"
     },
     {
+      "id": "activity-rail",
+      "kind": "toolbar",
+      "status": "complete",
+      "crate": "agent_ui",
+      "description": "The six work-surface controls generated from WorkSurface::FALLBACK_ORDER.",
+      "coverage": "OMEGA-DELTA-0191 exact inventory; admitted action; registered handler; shipped panel dependency ordering"
+    },
+    {
+      "id": "new-thread-menu",
+      "kind": "menu",
+      "status": "complete",
+      "crate": "agent_ui",
+      "description": "The Agent Panel + menu for Omega, Sarah, terminal, external agents, and agent installation.",
+      "coverage": "OMEGA-DELTA-0191 exact row inventory; declared action equals pointer dispatch; admitted action; shipped handler"
+    },
+    {
+      "id": "thread-header-menu",
+      "kind": "menu",
+      "status": "complete",
+      "crate": "agent_ui",
+      "description": "The Agent Panel thread-header menu, including conditional thread, rules, authentication, and settings entries.",
+      "coverage": "OMEGA-DELTA-0125 exact label census plus OMEGA-DELTA-0191 admission and shipped-handler checks"
+    },
+    {
       "id": "omega-front-door",
       "kind": "hermetic-scene",
       "status": "pending-expansion",
@@ -55,9 +79,10 @@
     {
       "id": "application-menu",
       "kind": "menu",
-      "status": "pending-expansion",
-      "description": "Application menu honesty currently owner-assisted in the release gate; crawl should absorb it.",
-      "follow_up": "Replace menu-honesty owner row incrementally as entries become crawlable."
+      "status": "complete",
+      "crate": "omega",
+      "description": "The six-menu application menu and its recursive submenu/action inventory.",
+      "coverage": "recursive exact contract test in app_menus plus OMEGA-DELTA-0176/0191 admission and shipped-init checks"
     }
   ],
   "exemptions": []

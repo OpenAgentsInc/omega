@@ -8,32 +8,33 @@
 //! owns is the action inventory: which namespaces and actions the surface
 //! admits, and the one sentence a refused action answers with.
 //!
-//! # Why the crate survives the mode
+//! # Why the legacy implementation name survives
 //!
 //! The admitted set is consulted by the palette filter, the dispatch gate, and
 //! every crate that needs to know whether a control belongs on the surface.
 //! One list, one authority, checked by `crates/omega_deltas` — that job did
-//! not end when the mode did.
+//! not end when the launch-mode split did.
 //!
-//! # What the surface does
+//! # What the tripwire does
 //!
 //! Two mechanisms, and the distinction decides what breaks:
 //!
 //! - **Not rendered.** The editor panels, the status-bar items and the Full
 //!   Auto entry are never built. Cheapest, and on its own the most dangerous:
 //!   the capability behind an unrendered surface is still one key press away.
-//! - **Disabled.** Everything outside [`ADMITTED_NAMESPACES`] and
+//! - **Refused and reported.** Everything outside [`ADMITTED_NAMESPACES`] and
 //!   [`ADMITTED_ACTIONS`] is refused at dispatch with [`refusal`] — one
-//!   sentence that names the action. Never a silent no-op.
+//!   sentence that names the action. Visual proofs and `--omega-send` then
+//!   fail the run. Never a silent no-op or an accepted refusal.
 //!
-//! Deletion of the editor crates behind the gate is omega#162's separate,
-//! subsequent work. Until it lands, an unresolvable key binding still panics
-//! Omega before any window opens, so this surface deletes no action and edits
-//! no keymap file.
+//! omega#162 deleted the legacy editor crates behind the gate. An unresolvable
+//! built-in key binding can still panic Omega before any window opens, so crate
+//! deletion, keymap cleanup, and the admitted-action inventory remain one
+//! mechanically checked contract.
 
 #![deny(missing_docs)]
 
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 
 /// The command-line flag that used to name this surface, as a person types it.
 ///
@@ -53,6 +54,13 @@ pub const FLAG: &str = "--zero-base";
 /// startup with omega#161. Proof harnesses that build their own windows call
 /// [`seal`] themselves when a scene photographs the sealed surface.
 static SEALED: AtomicBool = AtomicBool::new(false);
+
+/// Number of action refusals logged by this process.
+///
+/// Visual proofs and `--omega-send` smoke runs read this counter and fail when
+/// it advances. Keeping the counter beside the refusal sentence prevents a
+/// logging-site-specific sweep from missing a newly added refusal path.
+static LOGGED_REFUSALS: AtomicU64 = AtomicU64::new(0);
 
 /// The namespaces zero base admits.
 ///
@@ -453,6 +461,28 @@ pub fn refusal(action_name: &str) -> String {
     )
 }
 
+/// Record one refused action and return its canonical log sentence.
+///
+/// Product logging sites call this instead of [`refusal`] directly so proof
+/// processes can treat any refusal as a failed run without scraping log text.
+#[must_use]
+pub fn record_refusal(action_name: &str) -> String {
+    LOGGED_REFUSALS.fetch_add(1, Ordering::SeqCst);
+    refusal(action_name)
+}
+
+/// Return the number of refused actions logged by this process.
+#[must_use]
+pub fn logged_refusal_count() -> u64 {
+    LOGGED_REFUSALS.load(Ordering::SeqCst)
+}
+
+/// Whether a proof run observed the required empty refusal log.
+#[must_use]
+pub const fn proof_is_refusal_free(logged_refusals: u64) -> bool {
+    logged_refusals == 0
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -483,6 +513,19 @@ mod tests {
             "sealing twice is the same as sealing once, and nothing unseals \
              inside a process"
         );
+    }
+
+    #[test]
+    fn a_seeded_refusal_trips_the_proof_counter() {
+        let before = logged_refusal_count();
+        let sentence = record_refusal("seeded::Refusal");
+        let logged_refusals = logged_refusal_count().saturating_sub(before);
+
+        assert_eq!(logged_refusals, 1);
+        assert!(!proof_is_refusal_free(logged_refusals));
+        assert!(sentence.contains("seeded::Refusal"));
+        assert!(sentence.contains("is not part of Omega"));
+        assert!(sentence.contains("controls that operate it"));
     }
 
     #[test]
