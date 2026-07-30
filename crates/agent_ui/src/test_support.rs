@@ -7416,6 +7416,30 @@ mod workbench_front_door_tests {
         let front_door = AgentWorkbenchFrontDoor::mount(scene.clone(), cx)
             .await
             .expect("unavailable scene should mount");
+        // omega#170. With no folder open, every unavailable rail surface must
+        // carry the actionable no-project reason. Terminal used to keep a
+        // clobbered "This surface is no longer available" because the reason
+        // repair pass skips Terminal, which read as a retired surface rather
+        // than one waiting on a project.
+        for surface in [
+            omega_workbench_state::WorkSurface::Files,
+            omega_workbench_state::WorkSurface::Search,
+            omega_workbench_state::WorkSurface::Git,
+            omega_workbench_state::WorkSurface::Terminal,
+        ] {
+            let capability = front_door
+                .capability(surface, cx)
+                .expect("every rail surface has a typed capability");
+            assert_eq!(
+                capability
+                    .availability
+                    .reason()
+                    .map(|reason| reason.as_ref()),
+                Some("Open a project to use this surface"),
+                "{surface:?} must name the no-project reason, not a retirement"
+            );
+        }
+
         let before = front_door.projection(cx);
         front_door.focus_workspace_root(cx);
         assert!(

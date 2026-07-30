@@ -371,12 +371,33 @@ impl GoogleLanguageModel {
                 });
             }
 
-            Err(LanguageModelCompletionError::Other(anyhow::anyhow!(
-                "{}",
-                hosted_sign_in_failure_message(hosted_blocker.as_ref())
-            )))
+            Err(hosted_sign_in_completion_error(hosted_blocker.as_ref()))
         }
         .boxed()
+    }
+}
+
+/// The typed completion error for a hosted lane that could not sign in.
+///
+/// omega#170. A non-retryable blocker used to be flattened into
+/// `LanguageModelCompletionError::Other`, and `Other` is in the generic
+/// retry bucket — so the callout said "Retrying will not change the answer"
+/// and then immediately scheduled "Attempt 1 of 2". `is_retryable()` is the
+/// single authority: a terminal refusal becomes a `PermissionError`, which
+/// the turn's retry policy never retries and whose exact message still
+/// reaches the callout.
+fn hosted_sign_in_completion_error(
+    blocker: Option<&HostedSessionBlocker>,
+) -> LanguageModelCompletionError {
+    match blocker {
+        Some(blocker) if !blocker.is_retryable() => LanguageModelCompletionError::PermissionError {
+            provider: PROVIDER_NAME,
+            message: hosted_sign_in_failure_message(Some(blocker)),
+        },
+        blocker => LanguageModelCompletionError::Other(anyhow::anyhow!(
+            "{}",
+            hosted_sign_in_failure_message(blocker)
+        )),
     }
 }
 
@@ -538,6 +559,32 @@ mod tests {
         assert!(!message.contains("Send the message again"));
         assert!(!message.contains("sign-in was not completed"));
         assert!(message.contains(GEMINI_API_KEY_VAR_NAME));
+    }
+
+    /// omega#170. The message above says retrying is futile, so the error
+    /// class must agree: a terminal refusal is a `PermissionError` (never
+    /// retried), while a retryable blocker stays in the retried bucket.
+    #[test]
+    fn a_terminal_hosted_refusal_is_not_scheduled_for_retry() {
+        let error = hosted_sign_in_completion_error(Some(&HostedSessionBlocker::ProofRejected {
+            status: 401,
+        }));
+        match &error {
+            LanguageModelCompletionError::PermissionError { message, .. } => {
+                assert!(message.contains("not admitted"));
+            }
+            other => panic!(
+                "a non-retryable blocker must map to PermissionError so the \
+                 turn does not retry what its own copy calls futile, got {other:?}"
+            ),
+        }
+
+        let retryable =
+            hosted_sign_in_completion_error(Some(&HostedSessionBlocker::ServiceUnreachable));
+        assert!(
+            matches!(retryable, LanguageModelCompletionError::Other(_)),
+            "a retryable blocker keeps the retried mapping, got {retryable:?}"
+        );
     }
 
     #[test]

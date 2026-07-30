@@ -1298,11 +1298,10 @@ pub async fn get_git_committer(cx: &AsyncApp) -> GitCommitter {
 
     let git_binary_path =
         if cfg!(target_os = "macos") && option_env!("ZED_BUNDLE").as_deref() == Some("true") {
-            cx.update(|cx| {
-                cx.path_for_auxiliary_executable("git")
-                    .context("could not find git binary path")
-                    .log_err()
-            })
+            // omega#170. The Omega bundle carries no auxiliary git; falling
+            // back to PATH git below is the supported path and not worth an
+            // ERROR line in every launch's log.
+            cx.update(|cx| cx.path_for_auxiliary_executable("git").ok())
         } else {
             None
         };

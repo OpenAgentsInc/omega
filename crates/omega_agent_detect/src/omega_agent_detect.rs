@@ -141,6 +141,47 @@ pub fn preferred(detected: &[DetectedAgent]) -> Option<&DetectedAgent> {
     detected.iter().find(|agent| agent.id == "codex-acp")
 }
 
+/// Whether a configured launch program would resolve when spawned.
+///
+/// omega#169. The executor menu rendered a settings-declared custom agent as
+/// a normal enabled row because the settings store answers **configured**,
+/// not **present** — the row then failed honestly with exit 127 only after
+/// the person selected it. This answers presence for an arbitrary configured
+/// command the same way the spawning shell will:
+///
+/// - an absolute program is checked as that file,
+/// - a bare name is searched on `path_var`,
+/// - a relative program with a separator is assumed present, because it
+///   resolves against the launch directory and this check cannot know that
+///   directory. Claiming absence it cannot verify would dim a workable row,
+///   which is the same dishonesty in the other direction.
+pub fn command_resolves(program: &Path, path_var: &str) -> bool {
+    if program.is_absolute() {
+        is_executable_file(program)
+    } else if program.components().count() > 1 {
+        true
+    } else {
+        program
+            .to_str()
+            .is_some_and(|name| lookup(name, path_var).is_some())
+    }
+}
+
+/// [`command_resolves`] against the process's own `PATH`.
+///
+/// A missing `PATH` resolves nothing, matching [`detect_from_env`]: guessing
+/// directories would make the empty case unreachable, and the empty case is
+/// exactly the stripped-PATH launch that surfaced omega#169.
+pub fn command_resolves_from_env(program: &Path) -> bool {
+    if program.is_absolute() || program.components().count() > 1 {
+        return command_resolves(program, "");
+    }
+    match std::env::var("PATH") {
+        Ok(path_var) => command_resolves(program, &path_var),
+        Err(_) => false,
+    }
+}
+
 /// Find `binary` on `path_var`, returning the first executable match.
 ///
 /// Empty entries are skipped. POSIX reads an empty `PATH` entry as the current
@@ -280,6 +321,39 @@ mod tests {
             preferred(&detected).is_none(),
             "with Codex absent the first message must not be silently routed to \
              a different agent"
+        );
+    }
+
+    #[test]
+    fn a_bare_command_resolves_only_when_it_is_on_the_path() {
+        let directory = tempfile::tempdir().expect("a temporary directory");
+        write_executable(directory.path(), "grok");
+        let path_var = directory.path().to_string_lossy().to_string();
+
+        assert!(command_resolves(Path::new("grok"), &path_var));
+        assert!(
+            !command_resolves(Path::new("grok"), ""),
+            "omega#169: a configured agent whose command is not on PATH is \
+             not present, however firmly the settings store believes in it"
+        );
+        assert!(!command_resolves(Path::new("absent-agent"), &path_var));
+    }
+
+    #[test]
+    fn an_absolute_command_resolves_only_as_that_file() {
+        let directory = tempfile::tempdir().expect("a temporary directory");
+        let binary = write_executable(directory.path(), "grok");
+
+        assert!(command_resolves(&binary, ""));
+        assert!(!command_resolves(&directory.path().join("absent"), ""));
+    }
+
+    #[test]
+    fn a_relative_command_with_a_separator_is_assumed_present() {
+        assert!(
+            command_resolves(Path::new("./agents/grok"), ""),
+            "presence relative to an unknown launch directory cannot be \
+             verified, and a false absence would dim a workable row"
         );
     }
 

@@ -246,9 +246,15 @@ fn build_menu(
         // The install path for everything the disabled rows name.
         menu = menu.separator();
         menu.push_item(
-            ContextMenuEntry::new("Add More Agents…").handler(move |window, cx| {
-                window.dispatch_action(Box::new(zed_actions::AcpRegistry), cx);
-            }),
+            ContextMenuEntry::new("Add More Agents…")
+                // omega#170. This entry doubles as the deployed popup's
+                // position probe, because "the menu opened" and "the menu
+                // opened at its trigger" once diverged: the pre-first-send
+                // composer deployed this menu at the window's bottom-left.
+                .debug_selector("omega.composer.executor-menu.popup")
+                .handler(move |window, cx| {
+                    window.dispatch_action(Box::new(zed_actions::AcpRegistry), cx);
+                }),
         );
 
         menu.key_context("OmegaComposerExecutorMenu")

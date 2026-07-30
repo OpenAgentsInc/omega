@@ -471,14 +471,18 @@ fn main() {
     let git_hosting_provider_registry = Arc::new(GitHostingProviderRegistry::new());
     let git_binary_path =
         if cfg!(target_os = "macos") && option_env!("ZED_BUNDLE").as_deref() == Some("true") {
-            app.path_for_auxiliary_executable("git")
-                .context("could not find git binary path")
-                .log_err()
+            // omega#170. The Omega bundle does not package an auxiliary git,
+            // so this lookup fails on every launch of the shipped app and the
+            // PATH fallback below is the ordinary, fully supported path. That
+            // is a quiet fact, not an ERROR: it used to be the first red line
+            // in every clean-profile log a tester attached.
+            app.path_for_auxiliary_executable("git").ok()
         } else {
             None
         };
-    if let Some(git_binary_path) = &git_binary_path {
-        log::info!("Using git binary path: {:?}", git_binary_path);
+    match &git_binary_path {
+        Some(git_binary_path) => log::info!("Using git binary path: {:?}", git_binary_path),
+        None => log::info!("No bundled git; using git from PATH"),
     }
 
     let fs = Arc::new(RealFs::new(git_binary_path, app.background_executor()));

@@ -2363,11 +2363,13 @@ impl WorkbenchShell {
         let available_surfaces = thread.available_surfaces.clone();
         let mut capabilities = capabilities_for_surfaces(&available_surfaces);
         for (surface, capability) in &mut capabilities {
-            if !available_surfaces.contains(surface) {
-                capability.availability = SurfaceAvailability::Unavailable {
-                    reason: "This surface is no longer available".into(),
-                };
-            }
+            // omega#170. `capabilities_for_surfaces` already marked every
+            // absent surface unavailable with a per-surface reason a person
+            // can act on. A pass here used to re-stamp all of them with
+            // "This surface is no longer available" — and because the
+            // phase-repair pass below deliberately skips Terminal, Terminal's
+            // tooltip kept that wrong-shaped reason while Files/Search/Git
+            // got theirs repaired. Only the badge is carried over.
             capability.badge = self
                 .capabilities
                 .get(surface)

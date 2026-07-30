@@ -247,10 +247,24 @@ impl OpenAgentsLanguageModel {
                 });
             }
 
-            Err(LanguageModelCompletionError::Other(anyhow::anyhow!(
-                "{}",
-                hosted_sign_in_failure_message(hosted_blocker.as_ref())
-            )))
+            // omega#170. A non-retryable blocker (a rejected sign-in proof)
+            // must not land in `Other`, whose generic retry bucket schedules
+            // "Attempt 1 of 2" under a message that says retrying is futile.
+            // `is_retryable()` is the single authority; the terminal case
+            // becomes a `PermissionError`, which is never retried and keeps
+            // the exact reason in the callout.
+            Err(match hosted_blocker.as_ref() {
+                Some(blocker) if !blocker.is_retryable() => {
+                    LanguageModelCompletionError::PermissionError {
+                        provider: PROVIDER_NAME,
+                        message: hosted_sign_in_failure_message(Some(blocker)),
+                    }
+                }
+                blocker => LanguageModelCompletionError::Other(anyhow::anyhow!(
+                    "{}",
+                    hosted_sign_in_failure_message(blocker)
+                )),
+            })
         });
 
         async move { Ok(future.await?.boxed()) }.boxed()

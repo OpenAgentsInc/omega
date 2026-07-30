@@ -1024,8 +1024,17 @@ impl AcpConnection {
 
         let wait_task = cx.spawn({
             let sessions = sessions.clone();
+            let agent_name = agent_id.0.clone();
             async move |cx| {
                 let load_error = status_fut.await?;
+                // A dead adapter must leave a line in the log. An installed
+                // pass killed an agent server mid-turn and the log recorded
+                // nothing at all (omega#167): the only trace was the UI card,
+                // which a tester report cannot attach.
+                log::error!(
+                    "agent server '{agent_name}' terminated ({session_count} open session(s)): {load_error}",
+                    session_count = sessions.borrow().len(),
+                );
                 emit_load_error_to_all_sessions(&sessions, load_error, cx);
                 anyhow::Ok(())
             }

@@ -1,4 +1,4 @@
-use anyhow::{Result, anyhow};
+use anyhow::Result;
 use credentials_provider::CredentialsProvider;
 use futures::future::Shared;
 use gpui::{App, Context, Entity, SharedString, Task, Window};
@@ -77,6 +77,13 @@ impl LanguageModelProvider for OpenAiSubscribedProvider {
         if self.is_authenticated(cx) {
             return Task::ready(Ok(()));
         }
+        // omega#170. "No stored subscription credentials" is exactly what
+        // `CredentialsNotFound` names, and the startup authenticate-all sweep
+        // deliberately ignores that variant. Returning it as a bare error
+        // (`AuthenticateError::Other`) made every clean-profile launch log
+        // "ERROR Failed to authenticate provider: ChatGPT Subscription:
+        // Sign in…" with no user action anywhere near it. The sign-in wording
+        // still reaches people through the provider's configuration surface.
         let load_task: Option<Shared<_>> = self.state.read(cx).load_task();
         if let Some(load_task) = load_task {
             let weak_state = self.state.downgrade();
@@ -88,17 +95,11 @@ impl LanguageModelProvider for OpenAiSubscribedProvider {
                 if is_auth {
                     Ok(())
                 } else {
-                    Err(anyhow!(
-                        "Sign in with your ChatGPT Plus or Pro subscription to use this provider."
-                    )
-                    .into())
+                    Err(AuthenticateError::CredentialsNotFound)
                 }
             })
         } else {
-            Task::ready(Err(anyhow!(
-                "Sign in with your ChatGPT Plus or Pro subscription to use this provider."
-            )
-            .into()))
+            Task::ready(Err(AuthenticateError::CredentialsNotFound))
         }
     }
 
@@ -275,6 +276,33 @@ mod tests {
             result.is_ok(),
             "authenticate should succeed after load completes with valid credentials"
         );
+    }
+
+    /// omega#170. A clean profile has no stored subscription, and the startup
+    /// sweep authenticates every provider with no user action. That absence
+    /// must come back as `CredentialsNotFound` — the variant the sweep
+    /// silently ignores — not as a bare error that puts "ERROR Failed to
+    /// authenticate provider: ChatGPT Subscription" in every launch log.
+    #[gpui::test]
+    async fn test_missing_credentials_are_credentials_not_found(cx: &mut TestAppContext) {
+        let creds_provider = Arc::new(FakeCredentialsProvider::new());
+        let http_client = FakeHttpClient::create(|_| async {
+            Ok(http_client::Response::builder()
+                .status(200)
+                .body(http_client::AsyncBody::default())?)
+        });
+
+        let provider =
+            cx.update(|cx| OpenAiSubscribedProvider::new(http_client, creds_provider, cx));
+        let auth_task = cx.update(|cx| provider.authenticate(cx));
+        cx.run_until_parked();
+
+        match auth_task.await {
+            Err(AuthenticateError::CredentialsNotFound) => {}
+            other => {
+                panic!("a signed-out clean profile must report CredentialsNotFound, got {other:?}")
+            }
+        }
     }
 
     struct FakeCredentialsProvider {

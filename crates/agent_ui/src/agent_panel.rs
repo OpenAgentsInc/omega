@@ -3452,6 +3452,14 @@ impl AgentPanel {
         });
 
         let installed: Vec<AgentId> = agent_server_store.external_agents().cloned().collect();
+        // The configured launch commands, for the omega#169 presence check
+        // below. The store deliberately owns no presence fact for an
+        // owner-named custom binary, so the readiness computation asks the
+        // settings for the command and the filesystem for the answer.
+        let agent_server_settings = cx
+            .global::<settings::SettingsStore>()
+            .get::<project::agent_server_store::AllAgentServersSettings>(None)
+            .clone();
         let direct_row = |agent_id: &AgentId, label: SharedString| -> Option<ComposerExecutorRow> {
             let target_id = DirectAgentId::new(agent_id.as_ref())?;
             let target = ConversationTarget::DirectAgent {
@@ -3467,6 +3475,23 @@ impl AgentPanel {
                 || self.draft_thread.as_ref().is_some_and(|draft| {
                     matches!(draft.read(cx).agent_key(), Agent::Custom { id } if id == agent_id)
                 });
+            // omega#169. `installed` proves configuration, not presence: a
+            // settings-declared custom agent whose command is absent from
+            // PATH used to render as a normal enabled row and fail with exit
+            // 127 only after the person selected it. Presence is asked of
+            // the filesystem, the way the spawn will ask it. A row already
+            // carrying a live conversation is exempt — a running agent is
+            // better proof of presence than any PATH scan.
+            let unresolved_custom_command = (!is_current
+                && matches!(
+                    agent_server_store.agent_source(agent_id),
+                    Some(project::agent_server_store::ExternalAgentSource::Custom)
+                ))
+            .then(|| agent_server_settings.get(agent_id.as_ref()))
+            .flatten()
+            .and_then(|settings| settings.command())
+            .map(|command| command.path.clone())
+            .filter(|program| !omega_agent_detect::command_resolves_from_env(program));
             let readiness = if via_collab {
                 ModeReadiness::NotSupportedInBuild {
                     reason: "Direct agents are not supported in shared projects".into(),
@@ -3474,6 +3499,14 @@ impl AgentPanel {
             } else if !is_available {
                 ModeReadiness::SetupRequired {
                     reason: "Not installed — use Add More Agents".into(),
+                    action: ModeSetupAction::AddAcpAgent,
+                }
+            } else if let Some(program) = unresolved_custom_command {
+                ModeReadiness::SetupRequired {
+                    reason: format!(
+                        "`{}` was not found on PATH — use Add More Agents",
+                        program.display()
+                    ),
                     action: ModeSetupAction::AddAcpAgent,
                 }
             } else {
@@ -17973,6 +18006,136 @@ mod tests {
             assert_eq!(
                 active.read(cx).preparation_state(cx),
                 ConversationPreparation::RouterReady
+            );
+        });
+    }
+
+    /// omega#170. The pre-first-send composer used to deploy the executor
+    /// dropdown at the window's bottom-left corner instead of at its
+    /// "Omega Agent" trigger. The popup must open anchored to the trigger in
+    /// the very first composer state, before any message has been sent.
+    #[gpui::test]
+    async fn the_executor_menu_opens_at_its_trigger_before_the_first_send(cx: &mut TestAppContext) {
+        let (panel, mut cx) = setup_visible_panel(cx).await;
+        let _prepared =
+            install_prepared_omega_for_test(&panel, SessionTrackingConnection::new(), &mut cx);
+
+        panel.update_in(&mut cx, |panel, window, cx| {
+            panel.new_thread(&NewThread, window, cx);
+        });
+        // Deliberately no frame between entering the composer state and the
+        // toggle: the defect fired when the menu was opened before the fresh
+        // composer's trigger had ever recorded its bounds.
+        cx.dispatch_action(ToggleComposerExecutorMenu);
+        cx.run_until_parked();
+
+        let trigger = cx
+            .debug_render_snapshot()
+            .bounds("omega.composer.executor-menu")
+            .expect("the executor dropdown trigger renders in the pre-first-send composer");
+
+        let popup = cx
+            .debug_render_snapshot()
+            .bounds("omega.composer.executor-menu.popup")
+            .expect("the toggled executor menu popup renders");
+
+        let horizontal_gap = (popup.right() - trigger.right())
+            .abs()
+            .min((popup.left() - trigger.left()).abs());
+        let vertical_gap = (popup.bottom() - trigger.top())
+            .abs()
+            .min((popup.top() - trigger.bottom()).abs());
+        assert!(
+            horizontal_gap <= px(64.) && vertical_gap <= px(64.),
+            "the executor menu must open at its trigger, not at a window \
+             corner: trigger {trigger:?}, popup {popup:?}"
+        );
+    }
+
+    /// omega#169. A settings-declared custom agent whose command does not
+    /// resolve used to render as a normal enabled row, because the install
+    /// registry answers *configured* rather than *present*; selecting it
+    /// failed honestly with exit 127 but only after the fact. The row must
+    /// carry the setup-required truth up front.
+    #[gpui::test]
+    async fn a_configured_custom_agent_with_an_absent_command_is_setup_required(
+        cx: &mut TestAppContext,
+    ) {
+        use project::agent_server_store::{
+            AgentServerCommand, AllAgentServersSettings, CustomAgentServerSettings,
+        };
+
+        let (panel, mut cx) = setup_visible_panel(cx).await;
+
+        let bin_dir = tempfile::tempdir().expect("a temporary directory");
+        let present_binary = bin_dir.path().join("present-agent");
+        std::fs::write(&present_binary, "#!/bin/sh\n").expect("the fixture binary is written");
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt as _;
+            std::fs::set_permissions(&present_binary, std::fs::Permissions::from_mode(0o755))
+                .expect("the fixture binary is executable");
+        }
+
+        let custom = |path: PathBuf| CustomAgentServerSettings::Custom {
+            command: AgentServerCommand {
+                path,
+                args: Vec::new(),
+                env: None,
+            },
+            default_mode: None,
+            default_config_options: Default::default(),
+            favorite_config_option_values: Default::default(),
+        };
+        cx.update(|_, cx| {
+            let mut settings = AllAgentServersSettings::default();
+            settings.insert(
+                "grok".to_owned(),
+                custom(PathBuf::from("omega-169-definitely-absent-binary")),
+            );
+            settings.insert("present-agent".to_owned(), custom(present_binary.clone()));
+            AllAgentServersSettings::override_global(settings, cx);
+        });
+        cx.run_until_parked();
+
+        panel.read_with(&cx, |panel, cx| {
+            let rows = panel.composer_executor_rows(cx);
+            let row_for = |id: &str| {
+                rows.iter()
+                    .find(|row| {
+                        matches!(
+                            &row.target,
+                            ConversationTarget::DirectAgent { agent_id } if agent_id.as_str() == id
+                        )
+                    })
+                    .unwrap_or_else(|| panic!("a configured agent `{id}` must keep its row"))
+            };
+
+            let absent = row_for("grok");
+            assert!(
+                !absent.is_selectable(),
+                "a configured agent whose command is absent must not render \
+                 as an enabled row that can only fail with exit 127"
+            );
+            match &absent.readiness {
+                ModeReadiness::SetupRequired { reason, action } => {
+                    assert_eq!(*action, ModeSetupAction::AddAcpAgent);
+                    assert!(
+                        reason.contains("omega-169-definitely-absent-binary")
+                            && reason.contains("Add More Agents"),
+                        "the reason must name the missing command and the \
+                         setup path, got: {reason}"
+                    );
+                }
+                other => panic!("expected SetupRequired for the absent command, got {other:?}"),
+            }
+
+            let present = row_for("present-agent");
+            assert!(
+                present.is_selectable(),
+                "a custom agent whose command resolves stays selectable; \
+                 got {:?}",
+                present.readiness
             );
         });
     }

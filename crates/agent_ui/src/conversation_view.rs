@@ -3120,22 +3120,36 @@ impl ConversationView {
                 }
             }
             AcpThreadEvent::LoadError(error) => {
-                if let Some(view) = self.root_thread_view() {
-                    if view
-                        .read(cx)
-                        .message_editor
-                        .focus_handle(cx)
-                        .is_focused(window)
-                    {
-                        self.focus_handle.focus(window, cx)
-                    }
+                // omega#167. A load error on a live thread means the agent
+                // server died under a conversation the person can already
+                // see. Replacing the whole connected state with
+                // `ServerState::LoadError` here wiped the streamed transcript
+                // from view and left the sidebar row opening nothing, because
+                // the row navigates into `ConnectedServerState::threads` and
+                // that map had just been dropped. Keep the connected state:
+                // the transcript stays, the sidebar row keeps opening it, and
+                // the failure lands in the affected thread as an error card.
+                // Load-time failures (no thread view yet) still take the
+                // `LoadError` surface below.
+                if let Some(view) = self.thread_view(&session_id) {
+                    view.update(cx, |view, cx| {
+                        view.handle_thread_error(
+                            ThreadError::Other {
+                                message: format!(
+                                    "The agent server quit while this conversation was open: \
+                                     {error}. The transcript above is preserved; start a new \
+                                     conversation to relaunch the agent."
+                                )
+                                .into(),
+                                acp_error_code: None,
+                            },
+                            cx,
+                        );
+                    });
+                    cx.notify();
+                    return;
                 }
-                self.set_server_state(
-                    ServerState::LoadError {
-                        error: error.clone(),
-                    },
-                    cx,
-                );
+                self.handle_load_error(error.clone(), window, cx);
             }
             AcpThreadEvent::TitleUpdated => {
                 let override_title = ThreadMetadataStore::try_global(cx).and_then(|store| {
@@ -4507,7 +4521,7 @@ impl ConversationView {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> AnyElement {
-        let (title, message, action_slot): (_, SharedString, _) = match e {
+        let (title, message, action_slot): (_, SharedString, Vec<AnyElement>) = match e {
             LoadError::Unsupported {
                 command: path,
                 current_version,
@@ -4518,7 +4532,7 @@ impl ConversationView {
             LoadError::FailedToInstall(msg) => (
                 "Failed to Install",
                 msg.into(),
-                Some(self.create_copy_button(msg.to_string()).into_any_element()),
+                vec![self.create_copy_button(msg.to_string()).into_any_element()],
             ),
             LoadError::Exited { status, stderr } => {
                 let mut message = format!("Server exited with status {status}");
@@ -4526,10 +4540,25 @@ impl ConversationView {
                     message.push_str("\n");
                     message.push_str(stderr);
                 };
-                let action_slot = stderr
+                // omega#169. Exit 127 is the shell reporting that the
+                // configured command does not exist, so the failure is a
+                // setup problem and the card owes the reader the setup
+                // action, not just an honest exit status.
+                let setup_action = (status.code() == Some(127)).then(|| {
+                    Button::new("load-error-add-more-agents", "Add More Agents")
+                        .on_click(|_, window, cx| {
+                            window.dispatch_action(Box::new(zed_actions::AcpRegistry), cx)
+                        })
+                        .into_any_element()
+                });
+                let copy_action = stderr
                     .is_some()
                     .then(|| self.create_copy_button(message.clone()).into_any_element());
-                ("Failed to Launch", message.into(), action_slot)
+                (
+                    "Failed to Launch",
+                    message.into(),
+                    setup_action.into_iter().chain(copy_action).collect(),
+                )
             }
             // Nothing failed to launch. The agent started fine and does not
             // have this conversation any more, which is ordinary once a thread
@@ -4557,7 +4586,7 @@ impl ConversationView {
             LoadError::Other(msg) => (
                 "Failed to Launch",
                 msg.into(),
-                Some(self.create_copy_button(msg.to_string()).into_any_element()),
+                vec![self.create_copy_button(msg.to_string()).into_any_element()],
             ),
         };
 
@@ -6764,7 +6793,7 @@ pub(crate) mod tests {
     }
 
     #[gpui::test]
-    async fn test_acp_server_exit_transitions_conversation_to_load_error_without_panic(
+    async fn test_acp_server_exit_keeps_transcript_and_appends_thread_error(
         cx: &mut TestAppContext,
     ) {
         init_test(cx);
@@ -6778,16 +6807,36 @@ pub(crate) mod tests {
         server.simulate_server_exit();
         cx.run_until_parked();
 
-        conversation_view.read_with(cx, |view, _cx| {
+        // omega#167. This used to assert a transition to
+        // `ServerState::LoadError`, which is exactly the defect: replacing the
+        // connected state dropped `ConnectedServerState::threads`, so the
+        // streamed transcript vanished and the sidebar row opened nothing.
+        conversation_view.read_with(cx, |view, cx| {
             assert!(
-                matches!(view.server_state, ServerState::LoadError { .. }),
-                "Conversation should transition to LoadError when an ACP thread exits"
+                matches!(view.server_state, ServerState::Connected(_)),
+                "a server exit on a live thread must keep the connected state: \
+                 the transcript and the sidebar row's target live there"
+            );
+            let thread_view = view
+                .active_thread()
+                .expect("the thread view must survive the server exit");
+            let error = thread_view
+                .read(cx)
+                .thread_error
+                .as_ref()
+                .expect("the failure must land in the affected thread as an error card");
+            assert!(
+                matches!(
+                    error,
+                    ThreadError::Other { message, .. } if message.contains("agent server quit")
+                ),
+                "the error card must name the server exit, got: {error:?}"
             );
         });
         assert_eq!(
             close_session_count.load(std::sync::atomic::Ordering::SeqCst),
-            1,
-            "ConversationView should close the ACP session after a thread exit"
+            0,
+            "the retained transcript's session must not be torn down when the server dies"
         );
     }
 
