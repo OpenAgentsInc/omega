@@ -22814,6 +22814,11 @@ mod tests {
                 "OMEGA-DELTA-0182: report event lost exact tag input `{required}`"
             );
         }
+        assert!(
+            publisher_source
+                .contains("two_account_send_receive_report_moderation_and_outage_are_hermetic"),
+            "OMEGA-DELTA-0182: the deterministic two-account acceptance proof is gone"
+        );
 
         let view = read_repository_file(PUBLIC_CHANNEL_VIEW_PATH);
         for required in [
@@ -22846,6 +22851,19 @@ mod tests {
             assert!(
                 visual.contains(required),
                 "OMEGA-DELTA-0182: visual acceptance lost `{required}`"
+            );
+        }
+
+        let gate = read_repository_file("script/omega-release-gate");
+        for required in [
+            "script/omega-tester-channel-proof",
+            "hermetic-two-account-simulation",
+            "\"channels-send-receive\"",
+            "\"automated-pass\"",
+        ] {
+            assert!(
+                gate.contains(required),
+                "OMEGA-DELTA-0182: the automated release-gate proof lost `{required}`"
             );
         }
     }

@@ -401,6 +401,12 @@ mod tests {
     use super::*;
     use app_identity::AppChannel;
     use nostr::{EventBuilder, Keys, Kind, Tag, Timestamp};
+    use serde_json::{Value, json};
+
+    use crate::omega_public_channel_relay::{
+        RelayAdmissionLimits, RelayCommand, RelayGapReason, RelayInput, RelayLifecycle,
+        RelaySession, RelaySessionConfig,
+    };
 
     fn descriptor() -> ChannelDescriptor {
         crate::omega_public_channels::bundled_tester_registry()
@@ -418,6 +424,91 @@ mod tests {
             .sign_with_keys(keys)
             .expect("signed fixture event");
         serde_json::from_str(&event.as_json()).expect("event record")
+    }
+
+    fn relay_config(
+        descriptor: &ChannelDescriptor,
+        relay_self_public_key: String,
+    ) -> RelaySessionConfig {
+        RelaySessionConfig {
+            relay_url: descriptor.relay_url.clone(),
+            group_id: descriptor.group_id.clone(),
+            accepted_kinds: descriptor.accepted_kinds.clone(),
+            group_state_kinds: descriptor.group_state_kinds.clone(),
+            moderation_kinds: descriptor.moderation_kinds.clone(),
+            expected_relay_self_pubkey: Some(relay_self_public_key),
+            history_page_size: descriptor.limits.history_page_size,
+            limits: RelayAdmissionLimits {
+                content_bytes: descriptor.limits.content_bytes,
+                event_bytes: descriptor.limits.event_bytes,
+                future_skew_seconds: descriptor.limits.future_skew_seconds,
+                max_age_seconds: descriptor.limits.max_age_seconds,
+                tags: descriptor.limits.tags,
+            },
+        }
+    }
+
+    fn sent_frames(commands: &[RelayCommand]) -> Vec<Value> {
+        commands
+            .iter()
+            .filter_map(|command| match command {
+                RelayCommand::SendText(text) => serde_json::from_str(text).ok(),
+                RelayCommand::Connect { .. } | RelayCommand::ScheduleReconnect { .. } => None,
+            })
+            .collect()
+    }
+
+    fn subscription_for(frames: &[Value], filter_name: &str) -> String {
+        frames
+            .iter()
+            .find(|frame| {
+                frame
+                    .get(2)
+                    .and_then(|filter| filter.get(filter_name))
+                    .is_some()
+            })
+            .and_then(|frame| frame.get(1))
+            .and_then(Value::as_str)
+            .expect("subscription")
+            .to_string()
+    }
+
+    fn start_reader(
+        descriptor: &ChannelDescriptor,
+        relay_self_public_key: String,
+        message: &NostrEventRecord,
+        relay_state: &NostrEventRecord,
+        now_ms: u64,
+    ) -> (RelaySession, String) {
+        let mut session = RelaySession::new(relay_config(descriptor, relay_self_public_key));
+        assert!(matches!(
+            session
+                .apply(RelayInput::ConnectRequested { now_ms })
+                .as_slice(),
+            [RelayCommand::Connect { .. }]
+        ));
+        let frames = sent_frames(&session.apply(RelayInput::Connected { now_ms }));
+        let history_subscription = subscription_for(&frames, "#h");
+        let state_subscription = subscription_for(&frames, "#d");
+        session.apply(RelayInput::TextFrame {
+            text: json!(["EVENT", history_subscription, message]).to_string(),
+            now_ms,
+        });
+        session.apply(RelayInput::TextFrame {
+            text: json!(["EVENT", state_subscription, relay_state]).to_string(),
+            now_ms,
+        });
+        session.apply(RelayInput::TextFrame {
+            text: json!(["EOSE", history_subscription]).to_string(),
+            now_ms,
+        });
+        session.apply(RelayInput::TextFrame {
+            text: json!(["EOSE", state_subscription]).to_string(),
+            now_ms,
+        });
+        assert_eq!(session.snapshot().lifecycle, RelayLifecycle::Current);
+        assert!(session.snapshot().metadata_trusted);
+        (session, history_subscription)
     }
 
     #[test]
@@ -553,5 +644,142 @@ mod tests {
         assert!(result.is_err());
         assert_eq!(attempts.len(), MAX_PUBLISH_ATTEMPTS);
         assert_eq!(attempts[0], attempts[1]);
+    }
+
+    #[test]
+    fn two_account_send_receive_report_moderation_and_outage_are_hermetic() {
+        let directory = tempfile::tempdir().expect("acceptance identities");
+        let sender_service = IdentityService::for_channel_data_root(
+            AppChannel::Dev,
+            directory.path().join("sender"),
+        );
+        let receiver_service = IdentityService::for_channel_data_root(
+            AppChannel::Dev,
+            directory.path().join("receiver"),
+        );
+        let mut descriptor = descriptor();
+        let relay_self = Keys::generate();
+        descriptor.expected_relay_self_pubkey = Some(relay_self.public_key().to_hex());
+
+        let signed_message = sign_write(
+            &sender_service,
+            &descriptor,
+            PublicChannelWrite::Message {
+                content: "simulated installed-candidate feedback".to_string(),
+            },
+            &[],
+        )
+        .expect("first account signs its message");
+        let mut published = Vec::new();
+        publish_signed_write_with(&descriptor, &signed_message, |relay_url, event| {
+            assert_eq!(relay_url, descriptor.relay_url);
+            published.push(event.as_json());
+            Ok(())
+        })
+        .expect("simulated relay accepts the message");
+        let message: NostrEventRecord =
+            serde_json::from_str(&published[0]).expect("published message record");
+
+        let created_at =
+            u64::try_from(message.created_at).expect("message timestamp is non-negative");
+        let now_ms = created_at.saturating_mul(1_000);
+        let relay_state_event = EventBuilder::new(Kind::Custom(39001), "")
+            .custom_created_at(Timestamp::from_secs(created_at))
+            .tag(Tag::parse(["d", descriptor.group_id.as_str()]).expect("group-state tag"))
+            .sign_with_keys(&relay_self)
+            .expect("signed relay state");
+        let relay_state: NostrEventRecord =
+            serde_json::from_str(&relay_state_event.as_json()).expect("relay state record");
+
+        let (mut sender_reader, sender_history) = start_reader(
+            &descriptor,
+            relay_self.public_key().to_hex(),
+            &message,
+            &relay_state,
+            now_ms,
+        );
+        let (mut receiver_reader, receiver_history) = start_reader(
+            &descriptor,
+            relay_self.public_key().to_hex(),
+            &message,
+            &relay_state,
+            now_ms,
+        );
+        let received_message = receiver_reader
+            .snapshot()
+            .events
+            .into_iter()
+            .find(|event| event.id == message.id)
+            .expect("second account receives the first account's message");
+        assert_eq!(
+            received_message.public_key,
+            signed_message.author_public_key
+        );
+
+        let signed_report = sign_write(
+            &receiver_service,
+            &descriptor,
+            PublicChannelWrite::Report {
+                event_id: message.id.clone(),
+                author_public_key: message.public_key.clone(),
+            },
+            &receiver_reader.snapshot().events,
+        )
+        .expect("second account signs a report of the verified message");
+        assert_ne!(
+            signed_report.author_public_key, signed_message.author_public_key,
+            "the acceptance proof must use two isolated identities"
+        );
+        publish_signed_write_with(&descriptor, &signed_report, |relay_url, event| {
+            assert_eq!(relay_url, descriptor.relay_url);
+            published.push(event.as_json());
+            Ok(())
+        })
+        .expect("simulated relay accepts the report");
+        let report: NostrEventRecord =
+            serde_json::from_str(&published[1]).expect("published report record");
+        assert!(report.content.is_empty());
+        assert_eq!(report.tag_values("e").next(), Some(message.id.as_str()));
+        assert_eq!(
+            report.tag_values("p").next(),
+            Some(message.public_key.as_str())
+        );
+
+        let moderation_event = EventBuilder::new(Kind::Custom(9005), "")
+            .custom_created_at(Timestamp::from_secs(created_at))
+            .tags(vec![
+                Tag::parse(["h", descriptor.group_id.as_str()]).expect("moderation group tag"),
+                Tag::parse(["e", message.id.as_str()]).expect("moderation event tag"),
+            ])
+            .sign_with_keys(&relay_self)
+            .expect("signed moderation event");
+        let moderation: NostrEventRecord =
+            serde_json::from_str(&moderation_event.as_json()).expect("moderation record");
+        for (session, history_subscription) in [
+            (&mut sender_reader, sender_history.as_str()),
+            (&mut receiver_reader, receiver_history.as_str()),
+        ] {
+            for event in [&report, &moderation] {
+                session.apply(RelayInput::TextFrame {
+                    text: json!(["EVENT", history_subscription, event]).to_string(),
+                    now_ms,
+                });
+            }
+        }
+        let current = receiver_reader.snapshot();
+        assert!(current.events.iter().any(|event| event.id == report.id));
+        assert!(current.events.iter().any(|event| event.id == moderation.id));
+
+        let reconnect = receiver_reader.apply(RelayInput::Disconnected {
+            now_ms: now_ms.saturating_add(1),
+        });
+        let stale = receiver_reader.snapshot();
+        assert_eq!(stale.lifecycle, RelayLifecycle::Stale);
+        assert_eq!(stale.gap_reason, Some(RelayGapReason::RelayUnavailable));
+        assert_eq!(stale.events, current.events);
+        assert!(matches!(
+            reconnect.as_slice(),
+            [RelayCommand::ScheduleReconnect { .. }]
+        ));
     }
 }

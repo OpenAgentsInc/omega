@@ -1,0 +1,9 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+repository_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+cd "$repository_root"
+
+cargo test -p agent_ui \
+  omega_public_channel_publish::tests::two_account_send_receive_report_moderation_and_outage_are_hermetic \
+  -- --exact

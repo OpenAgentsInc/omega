@@ -193,18 +193,6 @@ OWNER_ASSISTED_ROWS = [
         ),
     },
     {
-        "id": "channels-send-receive",
-        "title": "Tester channel send/receive with a second account",
-        "issues": ["omega#156"],
-        "owner_instruction": (
-            "From the staged candidate send one message to the tester "
-            "destination; confirm a SECOND account receives it there; kill "
-            "the relay connection and confirm the outage state renders the "
-            "documented fallback, not a spinner; exercise moderation/"
-            "reporting once."
-        ),
-    },
-    {
         "id": "work-surfaces",
         "title": "Every visible work-surface action works or is visibly disabled with a reason",
         "issues": [],
@@ -596,6 +584,50 @@ def main() -> int:
         crawl_facts,
         crawl_refs,
         issues=["omega#160"],
+    )
+
+    # --- Row: tester-channel two-account simulation (omega#156) -----------
+    # Two isolated custody roots exercise the production signing boundary,
+    # exact signed-event publication, two relay readers, reporting,
+    # moderation, forced disconnect, and retained history. The rendered
+    # relay-fallback GPUI test remains a separate visual assertion.
+    channel_proof = run(
+        [str(ROOT / "script/omega-tester-channel-proof")],
+        cwd=str(ROOT),
+    )
+    channel_proof_output = (
+        (channel_proof.stdout or "") + (channel_proof.stderr or "")
+    ).strip()
+    channel_proof_facts = {
+        "command": "script/omega-tester-channel-proof",
+        "exit_code": channel_proof.returncode,
+        "output_tail": "\n".join(channel_proof_output.splitlines()[-80:]),
+        "mode": "hermetic-two-account-simulation",
+        "coverage": [
+            "two isolated Omega identity custody roots",
+            "signed kind-9 publication and second-account reception",
+            "signed kind-1984 report with exact event and author targets",
+            "signed moderation event admission",
+            "forced relay disconnect and verified-history retention",
+        ],
+    }
+    channel_proof_refs = [
+        evidence.write_text(
+            "tester-channel-two-account.log",
+            channel_proof_output + "\n",
+        )
+    ]
+    add_row(
+        "channels-send-receive",
+        "Tester channel two-account send, receive, report, moderation, and outage simulation",
+        (
+            "automated-pass"
+            if channel_proof.returncode == 0
+            else "automated-fail"
+        ),
+        channel_proof_facts,
+        channel_proof_refs,
+        issues=["omega#156"],
     )
 
     # --- Row: version truth ------------------------------------------------

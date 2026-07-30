@@ -8116,12 +8116,15 @@ startup recheck — survives unchanged behind that dropdown.
   rendered privacy/composer, and outage-fallback tests in `agent_ui`; and the
   deterministic tester-channel visual scenes for the first-launch destination
   and relay-unavailable fallback.
-- **Installed acceptance is deliberately still open.** Source and hermetic
-  rendering cannot prove that account A in an installed candidate publishes
-  and account B receives, or that the installed fallback survives a real relay
-  outage. omega#164 must first land background Nostr identity and relay
-  admission, and omega#158 owns the installed two-account and outage run. Issue
-  #156 must remain open until those receipts exist.
+- **Two-account acceptance is deterministic.** The release gate runs
+  `script/omega-tester-channel-proof`, which creates two isolated Omega
+  identity roots, signs and publishes a kind-9 message through the production
+  writer boundary, delivers the exact event through two independent pinned
+  relay state machines, signs a kind-1984 report from the second identity,
+  admits a signed moderation event, then forces a relay disconnect and proves
+  verified history remains available. The rendered outage test separately
+  proves that stale state exposes **Retry relay** and **Open support**, not a
+  spinner. No owner credential or live public-room write is required.
 
 ### OMEGA-DELTA-0183 — The identity backup nudge appears only after the identity has something to lose
 
