@@ -48,7 +48,7 @@ fn shell_source_files_have_no_zed_product_copy() {
     let workspace_root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
     let paths = [
         "crates/workspace/src/welcome.rs",
-        "crates/zed/src/zed/app_menus.rs",
+        "crates/omega/src/zed/app_menus.rs",
     ];
 
     for relative in paths {

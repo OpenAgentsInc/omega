@@ -323,7 +323,7 @@ records, transaction/reset journals, and recovery-protection records.
 ## Application icon family
 
 Package icons are derived from the pinned OpenAgents Desktop icon under
-`crates/zed/resources/icon_family/`. Regenerate with
+`crates/omega/resources/icon_family/`. Regenerate with
 `script/generate-omega-icon-family`.
 
 Channel badges are deferred. Stable, RC, Nightly, and Dev currently reuse the
@@ -331,7 +331,7 @@ same unbadged OpenAgents icon until OpenAgents approves distinct channel
 artwork.
 
 Digest and dimension checks live in the `app_identity` icon-family tests and
-`crates/zed/resources/icon_family/manifest.json`.
+`crates/omega/resources/icon_family/manifest.json`.
 
 ## Zed production service isolation
 

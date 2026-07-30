@@ -316,7 +316,7 @@ source_roots = (
     ROOT / "crates/omega_identity/src",
     ROOT / "crates/onboarding/src",
     ROOT / "crates/workspace/src",
-    ROOT / "crates/zed/src",
+    ROOT / "crates/omega/src",
 )
 source_paths: list[Path] = []
 for source_root in source_roots:
@@ -368,7 +368,7 @@ if re.search(r"\b(?:serde::)?Serialize\b", code_only(secret_source)):
 renderer_roots = (
     ROOT / "crates/onboarding/src",
     ROOT / "crates/workspace/src",
-    ROOT / "crates/zed/src",
+    ROOT / "crates/omega/src",
 )
 secret_identifier = r"(?:mnemonic|nsec|private_key|secret_key|seed)"
 for path, source in production_sources:

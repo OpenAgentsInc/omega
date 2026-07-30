@@ -114,6 +114,7 @@ use settings::{
     update_settings_file,
 };
 
+use omega_actions::{Spawn, feedback::FileBugReport, theme::ToggleMode};
 use sqlez::{
     bindable::{Bind, Column, StaticColumnCount},
     statement::Statement,
@@ -158,7 +159,6 @@ pub use workspace_settings::{
     RestoreOnStartupBehavior, StatusBarSettings, TabBarSettings, WorkspaceSettings,
     observe_accessible_mode,
 };
-use zed_actions::{Spawn, feedback::FileBugReport, theme::ToggleMode};
 
 use crate::persistence::{
     SerializedAxis,
@@ -9212,7 +9212,7 @@ impl Render for Workspace {
         // editor around it is **not rendered** rather than covered.
         //
         // The mode used to hide the editor by zooming the agent panel over it,
-        // and the comment in `crates/zed/src/zed.rs` said so: "Zooming is what
+        // and the comment in `crates/omega/src/zed.rs` said so: "Zooming is what
         // takes the editor pane and the tab bar off the screen". It was one
         // control away from being false. Pressing the sidebar toggle released
         // the zoom and revealed the whole editor — the welcome surface, the
@@ -17393,9 +17393,9 @@ mod tests {
 
     #[gpui::test]
     async fn test_toggle_theme_mode_persists_and_updates_active_theme(cx: &mut TestAppContext) {
+        use omega_actions::theme::ToggleMode;
         use settings::{DEFAULT_DARK_THEME, DEFAULT_LIGHT_THEME, ThemeName, ThemeSelection};
         use theme::SystemAppearance;
-        use zed_actions::theme::ToggleMode;
 
         init_test(cx);
 

@@ -153,7 +153,7 @@ uuid.workspace = true
 vim.workspace = true
 watch.workspace = true
 workspace.workspace = true
-zed_actions.workspace = true
+omega_actions.workspace = true
 image.workspace = true
 reqwest_client = { workspace = true, optional = true }
 

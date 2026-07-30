@@ -8,7 +8,9 @@ use git::repository::DEFAULT_WORKTREE_DIRECTORY;
 use gpui::{AsyncApp, BorrowAppContext, Context, Entity, EventEmitter, Subscription, Task};
 use lsp::{DEFAULT_LSP_REQUEST_TIMEOUT_SECS, LanguageServerName};
 use paths::{
-    EDITORCONFIG_NAME, local_debug_file_relative_path, local_settings_file_relative_path,
+    EDITORCONFIG_NAME, legacy_local_debug_file_relative_path,
+    legacy_local_settings_file_relative_path, legacy_local_tasks_file_relative_path,
+    local_debug_file_relative_path, local_settings_file_relative_path,
     local_tasks_file_relative_path, local_vscode_launch_file_relative_path,
     local_vscode_tasks_file_relative_path, task_file_name,
 };
@@ -1162,14 +1164,18 @@ impl SettingsObserver {
 
         let mut settings_contents = Vec::new();
         for (path, _, change) in changes.iter() {
-            let (settings_dir, kind) = if path.ends_with(local_settings_file_relative_path()) {
+            let (settings_dir, kind) = if path.ends_with(local_settings_file_relative_path())
+                || path.ends_with(legacy_local_settings_file_relative_path())
+            {
                 let settings_dir = path
                     .ancestors()
                     .nth(local_settings_file_relative_path().components().count())
                     .unwrap()
                     .into();
                 (settings_dir, LocalSettingsKind::Settings)
-            } else if path.ends_with(local_tasks_file_relative_path()) {
+            } else if path.ends_with(local_tasks_file_relative_path())
+                || path.ends_with(legacy_local_tasks_file_relative_path())
+            {
                 let settings_dir = path
                     .ancestors()
                     .nth(
@@ -1193,7 +1199,9 @@ impl SettingsObserver {
                     .unwrap()
                     .into();
                 (settings_dir, LocalSettingsKind::Tasks)
-            } else if path.ends_with(local_debug_file_relative_path()) {
+            } else if path.ends_with(local_debug_file_relative_path())
+                || path.ends_with(legacy_local_debug_file_relative_path())
+            {
                 let settings_dir = path
                     .ancestors()
                     .nth(

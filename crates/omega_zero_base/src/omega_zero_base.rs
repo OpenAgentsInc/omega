@@ -46,7 +46,7 @@ pub const FLAG: &str = "--zero-base";
 /// Has the surface taken the window over yet?
 ///
 /// `OMEGA-DELTA-0053`. Written once, at process start, by
-/// `crates/zed/src/main.rs`. The seal used to wait for the identity gate's
+/// `crates/omega/src/main.rs`. The seal used to wait for the identity gate's
 /// centre-pane onboarding to be answered; omega#164 removed that page and
 /// provisions the Nostr identity silently in the background, so there is
 /// nothing left that needs the unsealed editor chrome and the seal moved to
@@ -402,7 +402,7 @@ pub fn is_active() -> bool {
 /// The surface owns the window. One-way for the life of the process.
 ///
 /// `OMEGA-DELTA-0053`, amended by omega#161. Called once at process start by
-/// `crates/zed/src/main.rs`, before any window opens, so the editor chrome is
+/// `crates/omega/src/main.rs`, before any window opens, so the editor chrome is
 /// never drawn — not even for a frame. The seal used to wait for
 /// `OMEGA-DELTA-0040`'s centre-pane identity onboarding; omega#164 deleted
 /// that page, so nothing renders in the centre before the thread and sealing

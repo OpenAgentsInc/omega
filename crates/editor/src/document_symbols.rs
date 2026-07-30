@@ -335,11 +335,11 @@ mod tests {
     use futures::StreamExt as _;
     use gpui::{App, TestAppContext};
     use multi_buffer::ToPoint;
+    use omega_actions::editor::MoveDown;
     use settings::{DocumentSymbols, SettingsStore};
     use text::Point;
     use util::path;
     use workspace::item::{Item, ItemEvent};
-    use zed_actions::editor::MoveDown;
 
     use crate::{
         Editor, LSP_REQUEST_DEBOUNCE_TIMEOUT,

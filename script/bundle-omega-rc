@@ -685,7 +685,7 @@ collect_icon_digests_json() {
 import json
 from pathlib import Path
 
-manifest_path = Path("crates/zed/resources/icon_family/manifest.json")
+manifest_path = Path("crates/omega/resources/icon_family/manifest.json")
 manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
 outputs = {
     relative: {"sha256": record["sha256"], "format": record["format"]}
@@ -718,11 +718,11 @@ for source, packaged in (
 icons = {}
 for source, packaged in (
     (
-        Path("crates/zed/resources/icon_family/source/openagents-icon.icns"),
+        Path("crates/omega/resources/icon_family/source/openagents-icon.icns"),
         "Contents/Resources/openagents-icon.icns",
     ),
     (
-        Path("crates/zed/resources/Document.icns"),
+        Path("crates/omega/resources/Document.icns"),
         "Contents/Resources/Document.icns",
     ),
 ):
@@ -1115,18 +1115,18 @@ restore_channel_and_version() {
   (
     cd "${ROOT}"
     if [[ -f "${_OMEGA_RC_CHANNEL_BACKUP_FILE:-}" ]]; then
-      cp "${_OMEGA_RC_CHANNEL_BACKUP_FILE}" crates/zed/RELEASE_CHANNEL
+      cp "${_OMEGA_RC_CHANNEL_BACKUP_FILE}" crates/omega/RELEASE_CHANNEL
       rm -f "${_OMEGA_RC_CHANNEL_BACKUP_FILE}"
     fi
     if [[ -f "${_OMEGA_RC_CARGO_BACKUP_FILE:-}" ]]; then
-      cp "${_OMEGA_RC_CARGO_BACKUP_FILE}" crates/zed/Cargo.toml
+      cp "${_OMEGA_RC_CARGO_BACKUP_FILE}" crates/omega/Cargo.toml
       rm -f "${_OMEGA_RC_CARGO_BACKUP_FILE}"
     fi
     if [[ -f "${_OMEGA_RC_LOCK_BACKUP_FILE:-}" ]]; then
       cp "${_OMEGA_RC_LOCK_BACKUP_FILE}" Cargo.lock
       rm -f "${_OMEGA_RC_LOCK_BACKUP_FILE}"
     fi
-    rm -f crates/zed/Cargo.toml.backup
+    rm -f crates/omega/Cargo.toml.backup
   )
 }
 
@@ -1134,15 +1134,15 @@ set_channel_and_version() {
   _OMEGA_RC_CHANNEL_BACKUP_FILE="$(mktemp)"
   _OMEGA_RC_CARGO_BACKUP_FILE="$(mktemp)"
   _OMEGA_RC_LOCK_BACKUP_FILE="$(mktemp)"
-  cp crates/zed/RELEASE_CHANNEL "${_OMEGA_RC_CHANNEL_BACKUP_FILE}"
-  cp crates/zed/Cargo.toml "${_OMEGA_RC_CARGO_BACKUP_FILE}"
+  cp crates/omega/RELEASE_CHANNEL "${_OMEGA_RC_CHANNEL_BACKUP_FILE}"
+  cp crates/omega/Cargo.toml "${_OMEGA_RC_CARGO_BACKUP_FILE}"
   cp Cargo.lock "${_OMEGA_RC_LOCK_BACKUP_FILE}"
 
-  printf '%s\n' "${OMEGA_RC_CHANNEL}" > crates/zed/RELEASE_CHANNEL
+  printf '%s\n' "${OMEGA_RC_CHANNEL}" > crates/omega/RELEASE_CHANNEL
   python3 - <<PY
 import re
 from pathlib import Path
-cargo = Path("crates/zed/Cargo.toml")
+cargo = Path("crates/omega/Cargo.toml")
 text = cargo.read_text(encoding="utf-8")
 text2, count = re.subn(
     r'(?m)^version = "[^"]+"',
@@ -1151,7 +1151,7 @@ text2, count = re.subn(
     count=1,
 )
 if count != 1:
-    raise SystemExit("failed to set crates/zed/Cargo.toml version")
+    raise SystemExit("failed to set crates/omega/Cargo.toml version")
 cargo.write_text(text2, encoding="utf-8")
 PY
   export ZED_RELEASE_CHANNEL="${OMEGA_RC_CHANNEL}"
@@ -1272,7 +1272,7 @@ cargo build --locked --release --package zed --package cli --package omega_ident
 cargo build --locked --release --package remote_server --target "${TARGET_TRIPLE}"
 
 echo "Creating application bundle"
-pushd crates/zed >/dev/null
+pushd crates/omega >/dev/null
 cp Cargo.toml Cargo.toml.backup
 sed \
   -i.backup \
@@ -1287,7 +1287,7 @@ mv Cargo.toml.backup Cargo.toml
 rm -f Cargo.toml.backup
 popd >/dev/null
 
-document_icon_source="crates/zed/resources/Document.icns"
+document_icon_source="crates/omega/resources/Document.icns"
 document_icon_target="${app_path}/Contents/Resources/Document.icns"
 if [[ -f "${document_icon_source}" ]]; then
   mkdir -p "$(dirname "${document_icon_target}")"
@@ -1307,7 +1307,7 @@ verify_packaged_brand "${app_path}"
 # Strip associated-domains entitlement: it requires an Omega-owned profile.
 entitlements_path="${OUTPUT_DIR}/omega-rc.entitlements"
 sed '/com.apple.developer.associated-domains/,+1d' \
-  crates/zed/resources/zed.entitlements > "${entitlements_path}"
+  crates/omega/resources/zed.entitlements > "${entitlements_path}"
 effectd_node_entitlements_path="${OUTPUT_DIR}/omega-effectd-node.entitlements"
 plutil -create xml1 "${effectd_node_entitlements_path}"
 plutil -insert 'com\.apple\.security\.cs\.allow-jit' -bool true \

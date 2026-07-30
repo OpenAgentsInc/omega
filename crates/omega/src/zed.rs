@@ -88,6 +88,10 @@ use uuid::Uuid;
 use vim_mode_setting::VimModeSetting;
 use workspace::notifications::{NotificationId, dismiss_app_notification, show_app_notification};
 
+use omega_actions::{
+    About, GetMerch, OpenAccountSettings, OpenAppUrl, OpenBrowser, OpenDocs, OpenProjectTasks,
+    OpenServerSettings, OpenSettingsFile, OpenStatusPage, Quit, Restart,
+};
 use workspace::{
     AppState, MultiWorkspace, NewFile, NewWindow, OpenLog, Panel, Toast, Workspace,
     WorkspaceSettings, create_and_open_local_file,
@@ -97,10 +101,6 @@ use workspace::{
     CloseIntent, CloseProject, CloseWindow, RestoreBanner, with_active_or_new_workspace,
 };
 use workspace::{Pane, notifications::DetachAndPromptErr};
-use zed_actions::{
-    About, GetMerch, OpenAccountSettings, OpenAppUrl, OpenBrowser, OpenDocs, OpenProjectTasks,
-    OpenServerSettings, OpenSettingsFile, OpenStatusPage, Quit, Restart,
-};
 
 const DOCS_URL: &str = app_identity::PRODUCT_DOCS_URL;
 const STATUS_URL: &str = "https://www.openagents.com/";
@@ -242,7 +242,7 @@ pub fn init(cx: &mut App) {
         });
     }
 
-    cx.on_action(|_: &zed_actions::OpenLicenses, cx| {
+    cx.on_action(|_: &omega_actions::OpenLicenses, cx| {
         with_active_or_new_workspace(cx, |workspace, window, cx| {
             workspace.reveal_zero_base_center_for_user_open(window, cx);
             open_bundled_file(
@@ -255,7 +255,7 @@ pub fn init(cx: &mut App) {
             );
         });
     })
-    .on_action(|&zed_actions::OpenKeymapFile, cx| {
+    .on_action(|&omega_actions::OpenKeymapFile, cx| {
         with_active_or_new_workspace(cx, |_, window, cx| {
             open_settings_file(
                 paths::keymap_file(),
@@ -324,7 +324,7 @@ pub fn init(cx: &mut App) {
             );
         });
     })
-    .on_action(|_: &zed_actions::OpenDefaultKeymap, cx| {
+    .on_action(|_: &omega_actions::OpenDefaultKeymap, cx| {
         with_active_or_new_workspace(cx, |workspace, window, cx| {
             open_bundled_file(
                 workspace,
@@ -1084,7 +1084,7 @@ fn register_actions(
             })
             .detach_and_log_err(cx);
         })
-        .register_action(|workspace, action: &zed_actions::OpenRemote, window, cx| {
+        .register_action(|workspace, action: &omega_actions::OpenRemote, window, cx| {
             if !action.from_existing_connection {
                 cx.propagate();
                 return;
@@ -1126,7 +1126,7 @@ fn register_actions(
         })
         .register_action({
             let fs = app_state.fs.clone();
-            move |_, action: &zed_actions::IncreaseUiFontSize, _window, cx| {
+            move |_, action: &omega_actions::IncreaseUiFontSize, _window, cx| {
                 if action.persist {
                     update_settings_file(fs.clone(), cx, move |settings, cx| {
                         let ui_font_size = ThemeSettings::get_global(cx).ui_font_size(cx) + px(1.0);
@@ -1142,7 +1142,7 @@ fn register_actions(
         })
         .register_action({
             let fs = app_state.fs.clone();
-            move |_, action: &zed_actions::DecreaseUiFontSize, _window, cx| {
+            move |_, action: &omega_actions::DecreaseUiFontSize, _window, cx| {
                 if action.persist {
                     update_settings_file(fs.clone(), cx, move |settings, cx| {
                         let ui_font_size = ThemeSettings::get_global(cx).ui_font_size(cx) - px(1.0);
@@ -1158,7 +1158,7 @@ fn register_actions(
         })
         .register_action({
             let fs = app_state.fs.clone();
-            move |_, action: &zed_actions::ResetUiFontSize, _window, cx| {
+            move |_, action: &omega_actions::ResetUiFontSize, _window, cx| {
                 if action.persist {
                     update_settings_file(fs.clone(), cx, move |settings, _| {
                         settings.theme.ui_font_size = None;
@@ -1170,7 +1170,7 @@ fn register_actions(
         })
         .register_action({
             let fs = app_state.fs.clone();
-            move |_, action: &zed_actions::IncreaseBufferFontSize, _window, cx| {
+            move |_, action: &omega_actions::IncreaseBufferFontSize, _window, cx| {
                 if action.persist {
                     update_settings_file(fs.clone(), cx, move |settings, cx| {
                         let buffer_font_size =
@@ -1187,7 +1187,7 @@ fn register_actions(
         })
         .register_action({
             let fs = app_state.fs.clone();
-            move |_, action: &zed_actions::DecreaseBufferFontSize, _window, cx| {
+            move |_, action: &omega_actions::DecreaseBufferFontSize, _window, cx| {
                 if action.persist {
                     update_settings_file(fs.clone(), cx, move |settings, cx| {
                         let buffer_font_size =
@@ -1204,7 +1204,7 @@ fn register_actions(
         })
         .register_action({
             let fs = app_state.fs.clone();
-            move |_, action: &zed_actions::ResetBufferFontSize, _window, cx| {
+            move |_, action: &omega_actions::ResetBufferFontSize, _window, cx| {
                 if action.persist {
                     update_settings_file(fs.clone(), cx, move |settings, _| {
                         settings.theme.buffer_font_size = None;
@@ -1216,7 +1216,7 @@ fn register_actions(
         })
         .register_action({
             let fs = app_state.fs.clone();
-            move |_, action: &zed_actions::ResetAllZoom, _window, cx| {
+            move |_, action: &omega_actions::ResetAllZoom, _window, cx| {
                 if action.persist {
                     update_settings_file(fs.clone(), cx, move |settings, _| {
                         settings.theme.ui_font_size = None;
@@ -1265,7 +1265,7 @@ fn register_actions(
         .register_action(open_project_debug_tasks_file)
         .register_action(
             |workspace: &mut Workspace,
-             _: &zed_actions::project_panel::ToggleFocus,
+             _: &omega_actions::project_panel::ToggleFocus,
              window: &mut Window,
              cx: &mut Context<Workspace>| {
                 workspace.toggle_panel_focus::<ProjectPanel>(window, cx);
@@ -1993,7 +1993,7 @@ fn notify_settings_errors(result: settings::SettingsParseResult, is_user: bool, 
                             .primary_icon(IconName::Settings)
                             .primary_on_click(|window, cx| {
                                 window.dispatch_action(
-                                    zed_actions::OpenSettingsFile.boxed_clone(),
+                                    omega_actions::OpenSettingsFile.boxed_clone(),
                                     cx,
                                 );
                                 cx.emit(DismissEvent);
@@ -2028,7 +2028,8 @@ fn notify_settings_errors(result: settings::SettingsParseResult, is_user: bool, 
                         .primary_message("Open Settings File")
                         .primary_icon(IconName::Settings)
                         .primary_on_click(|window, cx| {
-                            window.dispatch_action(zed_actions::OpenSettingsFile.boxed_clone(), cx);
+                            window
+                                .dispatch_action(omega_actions::OpenSettingsFile.boxed_clone(), cx);
                             cx.emit(DismissEvent);
                         })
                     })
@@ -2271,7 +2272,7 @@ fn show_keymap_file_json_error(
                 .primary_message("Open Keymap File")
                 .primary_icon(IconName::Settings)
                 .primary_on_click(|window, cx| {
-                    window.dispatch_action(zed_actions::OpenKeymapFile.boxed_clone(), cx);
+                    window.dispatch_action(omega_actions::OpenKeymapFile.boxed_clone(), cx);
                     cx.emit(DismissEvent);
                 })
         })
@@ -2288,7 +2289,7 @@ fn show_keymap_file_load_error(
         error_message,
         "Open Keymap File".into(),
         |window, cx| {
-            window.dispatch_action(zed_actions::OpenKeymapFile.boxed_clone(), cx);
+            window.dispatch_action(omega_actions::OpenKeymapFile.boxed_clone(), cx);
             cx.emit(DismissEvent);
         },
         cx,
@@ -2560,7 +2561,7 @@ fn insert_task_json_into_editor(
 
 fn open_worktree_setup_tasks_file(
     workspace: &mut Workspace,
-    _: &zed_actions::OpenWorktreeSetupTasks,
+    _: &omega_actions::OpenWorktreeSetupTasks,
     window: &mut Window,
     cx: &mut Context<Workspace>,
 ) {
@@ -2609,7 +2610,7 @@ fn open_worktree_setup_tasks_file(
 
 fn open_project_debug_tasks_file(
     workspace: &mut Workspace,
-    _: &zed_actions::OpenProjectDebugTasks,
+    _: &omega_actions::OpenProjectDebugTasks,
     window: &mut Window,
     cx: &mut Context<Workspace>,
 ) {
@@ -5430,7 +5431,7 @@ mod tests {
         // `f5`; the debugger was deleted (omega#162), so the overlay is now
         // proven through its workspace-scoped Open Chat binding, which
         // survives it.
-        use zed_actions::assistant::ToggleFocus as OpenChat;
+        use omega_actions::assistant::ToggleFocus as OpenChat;
 
         app_state
             .fs
@@ -5713,8 +5714,8 @@ mod tests {
 
             // Reconciled with the registered inventory during omega#162: each
             // crate-deletion batch removes the namespaces whose declaring
-            // crate died and keeps the ones that outlive it in `zed_actions`
-            // or a kept crate (`debugger` survives in `editor`/`zed_actions`
+            // crate died and keeps the ones that outlive it in `omega_actions`
+            // or a kept crate (`debugger` survives in `editor`/`omega_actions`
             // declarations, for example, even though the debugger is gone).
             let expected_namespaces = vec![
                 "action",
@@ -5798,7 +5799,7 @@ mod tests {
                 "workspace",
                 "worktree_picker",
                 "zed",
-                "zed_actions",
+                "omega_actions",
                 "zed_predict_onboarding",
             ];
             assert_eq!(
@@ -6261,7 +6262,7 @@ mod tests {
         // User-defined bindings to AI actions should also be filtered.
         let user_binding = KeyBinding::new(
             "ctrl-enter",
-            zed_actions::assistant::InlineAssist { prompt: None },
+            omega_actions::assistant::InlineAssist { prompt: None },
             None,
         );
         cx.update(|cx| reload_keymaps(cx, vec![user_binding]));

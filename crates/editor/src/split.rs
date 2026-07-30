@@ -42,7 +42,7 @@ use crate::{
     actions::{DisableBreakpoint, EditLogBreakpoint, EnableBreakpoint, ToggleBreakpoint},
     display_map::Companion,
 };
-use zed_actions::{OpenSettingsAt, assistant::InlineAssist};
+use omega_actions::{OpenSettingsAt, assistant::InlineAssist};
 
 pub(crate) fn patches_for_lhs_range(
     rhs_snapshot: &MultiBufferSnapshot,

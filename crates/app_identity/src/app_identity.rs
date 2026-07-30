@@ -33,10 +33,15 @@ pub const PRODUCT_FEATURE_REQUEST_URL: &str =
 
 pub static CHANNEL: LazyLock<AppChannel> = LazyLock::new(|| {
     let channel_name = if cfg!(debug_assertions) {
-        env::var("ZED_RELEASE_CHANNEL")
-            .unwrap_or_else(|_| include_str!("../../zed/RELEASE_CHANNEL").trim().to_string())
+        env::var("ZED_RELEASE_CHANNEL").unwrap_or_else(|_| {
+            include_str!("../../omega/RELEASE_CHANNEL")
+                .trim()
+                .to_string()
+        })
     } else {
-        include_str!("../../zed/RELEASE_CHANNEL").trim().to_string()
+        include_str!("../../omega/RELEASE_CHANNEL")
+            .trim()
+            .to_string()
     };
 
     channel_name

@@ -7,7 +7,7 @@ shopt -s extglob
 script/bundle-linux --flatpak
 archive_match="omega(-[a-zA-Z0-9]+)?-linux-$(uname -m)\.tar\.gz"
 archive=$(ls "target/release" | grep -E ${archive_match})
-channel=$(<crates/zed/RELEASE_CHANNEL)
+channel=$(<crates/omega/RELEASE_CHANNEL)
 
 export CHANNEL="$channel"
 export ARCHIVE="$archive"
@@ -44,7 +44,7 @@ else
     exit
 fi
 
-envsubst < "crates/zed/resources/flatpak/manifest-template.json" > "$APP_ID.json"
+envsubst < "crates/omega/resources/flatpak/manifest-template.json" > "$APP_ID.json"
 flatpak-builder --user --install --force-clean build "$APP_ID.json"
 flatpak build-bundle ~/.local/share/flatpak/repo "target/release/$APP_ID.flatpak" "$APP_ID"
 echo "Created 'target/release/$APP_ID.flatpak'"

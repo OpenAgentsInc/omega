@@ -1,7 +1,7 @@
 //! Which directory a thread should be able to see.
 //!
 //! `OMEGA-DELTA-0054`, omega#100. Zero base opened no project. The comment in
-//! `crates/zed/src/zed.rs` said so plainly — "no project is opened, so there is
+//! `crates/omega/src/zed.rs` said so plainly — "no project is opened, so there is
 //! no buffer for them to show" — and the consequence was not a missing buffer.
 //! It was that the workspace had no worktrees, so `grep`, `find_path`,
 //! `list_directory`, `read_file` and `terminal` all had nothing to operate on.

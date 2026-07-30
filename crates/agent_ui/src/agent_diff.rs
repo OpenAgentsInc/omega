@@ -23,6 +23,7 @@ use gpui::{
 
 use language::{Buffer, Capability, OffsetRangeExt, Point};
 use multi_buffer::PathKey;
+use omega_actions::assistant::ToggleFocus;
 use omega_workbench_state::RepositoryBinding;
 use parking_lot::RwLock;
 use project::{Project, ProjectItem, ProjectPath, WorktreeId};
@@ -41,7 +42,6 @@ use workspace::{
     item::{ItemEvent, SaveOptions, TabContentParams, TabTooltipContent},
     searchable::SearchableItemHandle,
 };
-use zed_actions::assistant::ToggleFocus;
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct AgentDiffCheckpoint {

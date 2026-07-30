@@ -19,6 +19,7 @@ use gpui::{
     WeakEntity, Window, actions, rems,
 };
 use language::{BufferSnapshot, Point};
+use omega_actions::search::ToggleIncludeIgnored;
 use open_path_prompt::{
     OpenPathPrompt,
     file_finder_settings::{FileFinderSettings, FileFinderWidth},
@@ -51,7 +52,6 @@ use workspace::{
     ModalView, OpenChannelNotesById, OpenOptions, OpenVisible, SplitDirection, Workspace,
     item::PreviewTabsSettings, notifications::NotifyResultExt, pane,
 };
-use zed_actions::search::ToggleIncludeIgnored;
 
 actions!(
     file_finder,

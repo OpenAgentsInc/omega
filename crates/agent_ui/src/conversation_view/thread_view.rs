@@ -2881,7 +2881,7 @@ impl ThreadView {
 
     fn handle_message_editor_move_up(
         &mut self,
-        _: &zed_actions::editor::MoveUp,
+        _: &omega_actions::editor::MoveUp,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
@@ -5631,8 +5631,8 @@ impl ThreadView {
                         }))
                         .on_click(|_, window, cx| {
                             window.dispatch_action(
-                                Box::new(zed_actions::OpenSettingsAt {
-                                    path: zed_actions::AGENT_SANDBOX_SETTINGS_PATH.to_string(),
+                                Box::new(omega_actions::OpenSettingsAt {
+                                    path: omega_actions::AGENT_SANDBOX_SETTINGS_PATH.to_string(),
                                     target: None,
                                 }),
                                 cx,
@@ -6135,7 +6135,7 @@ impl ThreadView {
     fn render_voice_controls(&self, cx: &mut Context<Self>) -> AnyElement {
         use crate::OpenSarahAdmission;
         use crate::composer_voice::{ComposerVoicePhase, composer_voice_status};
-        use zed_actions::workroom::{EndVoice, ToggleVoiceMute};
+        use omega_actions::workroom::{EndVoice, ToggleVoiceMute};
 
         let status = composer_voice_status(self.workspace.entity_id(), cx)
             .read(cx)
@@ -6382,7 +6382,7 @@ impl ThreadView {
                         .handler({
                             move |window, cx| {
                                 window.dispatch_action(
-                                    zed_actions::agent::AddSelectionToThread.boxed_clone(),
+                                    omega_actions::agent::AddSelectionToThread.boxed_clone(),
                                     cx,
                                 );
                             }
@@ -10075,8 +10075,8 @@ impl ThreadView {
                             .tooltip(Tooltip::text("Configure unicode confusables warning"))
                             .on_click(|_, window, cx| {
                                 window.dispatch_action(
-                                    Box::new(zed_actions::OpenSettingsAt {
-                                        path: zed_actions::AGENT_SANDBOX_SETTINGS_PATH.to_string(),
+                                    Box::new(omega_actions::OpenSettingsAt {
+                                        path: omega_actions::AGENT_SANDBOX_SETTINGS_PATH.to_string(),
                                         target: None,
                                     }),
                                     cx,
@@ -12336,7 +12336,7 @@ impl ThreadView {
             .on_click(cx.listener(|this, _, window, cx| {
                 this.clear_thread_error(cx);
                 window.dispatch_action(
-                    Box::new(zed_actions::OpenSettingsAt {
+                    Box::new(omega_actions::OpenSettingsAt {
                         path: "llm_providers".to_string(),
                         target: None,
                     }),
@@ -12554,7 +12554,7 @@ impl ThreadView {
                     move |_, _, _window, cx| {
                         #[cfg(windows)]
                         _window.dispatch_action(
-                            zed_actions::wsl_actions::OpenWsl::default().boxed_clone(),
+                            omega_actions::wsl_actions::OpenWsl::default().boxed_clone(),
                             cx,
                         );
                         cx.notify();

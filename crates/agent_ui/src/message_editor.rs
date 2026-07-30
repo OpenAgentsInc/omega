@@ -29,6 +29,7 @@ use gpui::{
     TextStyle, WeakEntity,
 };
 use language::{Buffer, language_settings::InlayHintKind};
+use omega_actions::agent::{Chat, PasteRaw};
 use parking_lot::RwLock;
 use project::AgentId;
 use project::{
@@ -43,7 +44,6 @@ use ui::{ContextMenu, prelude::*};
 use util::paths::PathStyle;
 use util::{ResultExt, debug_panic};
 use workspace::{CollaboratorId, Workspace};
-use zed_actions::agent::{Chat, PasteRaw};
 
 pub struct SessionCapabilities {
     prompt_capabilities: acp::PromptCapabilities,

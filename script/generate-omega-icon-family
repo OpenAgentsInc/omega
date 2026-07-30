@@ -18,7 +18,7 @@ from pathlib import Path
 
 from PIL import Image
 
-ROOT = Path("crates/zed/resources")
+ROOT = Path("crates/omega/resources")
 SOURCE_PNG = ROOT / "icon_family/source/openagents-icon.png"
 SOURCE_ICNS = ROOT / "icon_family/source/openagents-icon.icns"
 MANIFEST_PATH = ROOT / "icon_family/manifest.json"

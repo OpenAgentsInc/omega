@@ -27,8 +27,8 @@ pub enum AutomatedChangeKind {
 impl AutomatedChangeKind {
     pub(crate) fn expected_files(&self) -> &'static [&'static str] {
         match self {
-            Self::VersionBump => &["Cargo.lock", "crates/zed/Cargo.toml"],
-            Self::ReleaseChannelUpdate => &["crates/zed/RELEASE_CHANNEL"],
+            Self::VersionBump => &["Cargo.lock", "crates/omega/Cargo.toml"],
+            Self::ReleaseChannelUpdate => &["crates/omega/RELEASE_CHANNEL"],
         }
     }
 

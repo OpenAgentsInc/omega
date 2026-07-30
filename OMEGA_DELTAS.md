@@ -437,7 +437,7 @@ cargo test -p omega_deltas
 
 ### OMEGA-DELTA-0017 — No competitor's name in the packaged `Info.plist`
 
-- **Upstream Zed:** `crates/zed/resources/info/Permissions.plist` and
+- **Upstream Zed:** `crates/omega/resources/info/Permissions.plist` and
   `DocumentTypes.plist` name Zed in thirteen strings — twelve
   `NS*UsageDescription` values and `CFBundleTypeName`.
 - **Omega, before this:** the fork inherited all thirteen verbatim and shipped
@@ -515,13 +515,13 @@ cargo test -p omega_deltas
   app artwork is pinned separately, by the icon-family manifest in the release
   record, not by this gate. The packaged half runs against the macOS bundle
   only, so the Linux `.desktop`, Flatpak, Snap and Windows resources under
-  `crates/zed/resources/` are unchecked. And no name is forbidden unless it is
+  `crates/omega/resources/` are unchecked. And no name is forbidden unless it is
   written down in `script/omega-brand-gate.json`. Rendered review of a
   candidate is still an owner step, not a mechanical one.
 
 ### OMEGA-DELTA-0019 — A window with nothing to restore opens on the agent
 
-- **Upstream Zed:** `restore_or_create_workspace` in `crates/zed/src/main.rs`
+- **Upstream Zed:** `restore_or_create_workspace` in `crates/omega/src/main.rs`
   answers a window with no restorable session by calling
   `Editor::new_file(...)`, so the first thing a new user meets is an empty
   untitled buffer. The only exception is `restore_on_startup: "launchpad"`,
@@ -552,7 +552,7 @@ cargo test -p omega_deltas
 ### OMEGA-DELTA-0020 — Full Auto is a surface of the chat panel, not a panel of its own
 
 - **Omega, before this:** `FullAutoPanel` was a dock panel in its own right,
-  registered in `initialize_panels` in `crates/zed/src/zed.rs`, with
+  registered in `initialize_panels` in `crates/omega/src/zed.rs`, with
   `DockPosition::Right`, a 520px default width, its own Ω dock button
   tooltipped "Full Auto", `activation_priority` 8, and its own
   `full_auto_ui::init` registering `full_auto_panel::ToggleFocus` and
@@ -881,7 +881,7 @@ cargo test -p omega_deltas
   only the roots and file extensions named in the policy, which is how a
   `.py` file in the eval harness kept saying "the Zed agent's" through a
   first pass of this delta. Files outside `scan_roots` — `.github/`,
-  `crates/zed/resources/` — are unread here. And no check looks at a rendered
+  `crates/omega/resources/` — are unread here. And no check looks at a rendered
   pixel, so a label that is correct in source and truncated, mis-cased, or
   absent on screen still passes.
 
@@ -1427,7 +1427,7 @@ cargo test -p omega_deltas
   seven until each was classified — the mechanism working on somebody else's
   concurrent change rather than on a planted one.
 - **What this still does not cover.** The scan reads `crates/` and the embedded
-  assets; `docs/`, `.github/`, `script/` and `crates/zed/resources/` are
+  assets; `docs/`, `.github/`, `script/` and `crates/omega/resources/` are
   outside it, so a Zed sentence in the docs site or a workflow file passes.
   Prose-shape is a heuristic: a one- or two-word label like `name = "zed"` in
   the CLI's clap `#[command]` is not prose and is not seen — that identifier
@@ -1636,7 +1636,7 @@ than it sounds, because the harness omega#81's acceptance sentence names —
   `required_keymap_bindings_resolve` in `crates/omega_deltas`;
   `test_empty_workspace_opens_the_front_door` in `crates/agent_ui`; the rendered
   proofs `omega_front_door_no_project` and `omega_front_door_typing` in
-  `crates/zed/src/visual_test_runner.rs`.
+  `crates/omega/src/visual_test_runner.rs`.
 - **What this does not cover.** A **first-ever** launch lands on the Onboarding
   tab, not on the agent — observed on a packaged build with a fresh
   `--user-data-dir`, where the front door is behind onboarding and the agent
@@ -1713,7 +1713,7 @@ than it sounds, because the harness omega#81's acceptance sentence names —
   `crates/omega_front_door`; the dispatch and journal suite in
   `crates/agent_ui/src/omega_router.rs`; and the rendered proofs
   `omega_executor_disclosure_*` and `omega_route_pin_not_honoured` in
-  `crates/zed/src/visual_test_runner.rs`.
+  `crates/omega/src/visual_test_runner.rs`.
 - **What this does not cover.** No external ACP agent or engine-lane executor is
   registered on the router in this build, so a pin to either fails closed to the
   native loop with `external_acp_unavailable` or `engine_lane_not_connected` —
@@ -2296,7 +2296,7 @@ than it sounds, because the harness omega#81's acceptance sentence names —
   `prompt_open_behavior` and fails on any brand hit or on a command form not
   built from `paths::BINARY_NAME`.
 - **Reachability, and what was actually observed.** `resolve_open_behavior` in
-  `crates/zed/src/zed/open_listener.rs` sends `CliResponse::PromptOpenBehavior`
+  `crates/omega/src/zed/open_listener.rs` sends `CliResponse::PromptOpenBehavior`
   when there are existing windows, the paths are not already in a workspace, at
   least one path is a directory, and the settings file has no
   `cli_default_open_behavior`. omega#93 recorded a *shipped-string* result,
@@ -2439,7 +2439,7 @@ than it sounds, because the harness omega#81's acceptance sentence names —
 - **The mode is read from the process command line, once, and from nowhere
   else.** `crates/omega_zero_base/` reads no settings store, no environment
   variable and no file. The only writer of its entry is the argument parser in
-  `crates/zed/src/main.rs`. A rejected alternative is recorded for each: a
+  `crates/omega/src/main.rs`. A rejected alternative is recorded for each: a
   setting, because a project settings file must not be able to hide
   authority-bearing surfaces (`OMEGA-DELTA-0020` records the same objection
   against a composer mode flag); a release channel, because that is a second
@@ -2559,7 +2559,7 @@ than it sounds, because the harness omega#81's acceptance sentence names —
   what hung the suite, and it is still not something a scene should depend on.
 - **Enforced by:** `a_zero_base_turn_still_names_its_executor` in
   `crates/omega_deltas/`, and the two committed baselines under
-  `crates/zed/test_fixtures/visual_tests/`.
+  `crates/omega/test_fixtures/visual_tests/`.
 - **One token in that check changed with `OMEGA-DELTA-0052`.** The check used to
   require the runner to call `omega_zero_base_ui::install_on_workspace`, which
   put the mode's status-bar control on the captured workspace. That control no
@@ -2772,7 +2772,7 @@ than it sounds, because the harness omega#81's acceptance sentence names —
   `OMEGA-DELTA-0040`'s centre-pane identity onboarding, and omega#164 deleted
   that page: identity is provisioned silently in the background and nothing
   renders in the centre before the thread, so there is no dead end left for a
-  startup seal to create. `crates/zed/src/main.rs` now calls
+  startup seal to create. `crates/omega/src/main.rs` now calls
   `omega_zero_base::seal()` once, before `app.run`, so the editor chrome is
   never drawn — not even for a frame — and `initialize_panels` no longer
   seals. `seal()` lost its mode guard with the mode, and `is_sealed()` reads
@@ -2786,7 +2786,7 @@ than it sounds, because the harness omega#81's acceptance sentence names —
   instead of it.
 - **Omega, before this:** zero base used the zoom. `initialize_panels` opened the
   agent panel, called `set_zoomed(true, ...)` and focused it, and the comment in
-  `crates/zed/src/zed.rs` said what that bought: "Zooming is what takes the
+  `crates/omega/src/zed.rs` said what that bought: "Zooming is what takes the
   editor pane and the tab bar off the screen". It was one control away from
   being false. The owner pressed the sidebar toggle and the zoom was released,
   and Zed's whole welcome surface appeared — "Welcome back to Omega / Your last
@@ -2833,7 +2833,7 @@ than it sounds, because the harness omega#81's acceptance sentence names —
 - **Enforced by:** `the_transitional_sealed_layout_starts_without_the_legacy_editor` in
   `crates/omega_deltas/`, which pins the seal's render sites, the early
   return in the reveal path, and the single startup seal call before
-  `app.run` in `crates/zed/src/main.rs`.
+  `app.run` in `crates/omega/src/main.rs`.
 - **What this does not cover.** This is about what the workspace draws. It says
   nothing about what the thread surface draws inside it — that is
   `OMEGA-DELTA-0049` and `OMEGA-DELTA-0051` — and it does not claim the admitted
@@ -2847,7 +2847,7 @@ than it sounds, because the harness omega#81's acceptance sentence names —
 - **Upstream Zed:** a workspace with no paths has no worktrees, and that is
   correct for an editor. A person opens a folder when they want one.
 - **Omega, before this:** zero base opened no project, and
-  `crates/zed/src/zed.rs` said so in its own comment — "no project is opened, so
+  `crates/omega/src/zed.rs` said so in its own comment — "no project is opened, so
   there is no buffer for them to show". The missing buffer was not the problem.
   The workspace had no worktrees, so `grep`, `find_path`, `list_directory`,
   `read_file` and `terminal` all had nothing to operate on. The owner ran
@@ -3711,7 +3711,7 @@ than it sounds, because the harness omega#81's acceptance sentence names —
   The text lands in the composer through `MessageEditor::set_message` and the
   submit is `ThreadView::send`, the identical function the Enter key reaches, so
   mention resolution, the message queue and the send disposition all still
-  happen. `AcpThread::send` is public and reachable from `crates/zed`, so the
+  happen. `AcpThread::send` is public and reachable from `crates/omega`, so the
   shortest way to make this flag "work" would have been to build a prompt and
   push it at the connection; the check refuses that by name, because a control
   surface that bypasses the production path proves nothing about the production
@@ -5760,7 +5760,7 @@ than merely stated.
   "fixed" by a change that repairs two.
 
 **Cause one: the refusal never reached a screen — and this delta does not own
-it.** `report_refusal` in `crates/zed/src/omega_zero_base_ui.rs` asked the active
+it.** `report_refusal` in `crates/omega/src/omega_zero_base_ui.rs` asked the active
 window for `downcast::<Workspace>()`. **A `Workspace` is never a window root.**
 Every Omega window's root view is `MultiWorkspace`, so the `let ... else`
 returned on every window that has ever existed, the toast was never built, and
@@ -7027,7 +7027,7 @@ ended and then arrived in one piece.
 ### OMEGA-DELTA-0157 — The titlebar view is installed by the shipped binary
 
 `title_bar::init` is called from Omega's own startup sequence in
-`crates/zed/src/main.rs`. It used to be called from `collab_ui::init`, and
+`crates/omega/src/main.rs`. It used to be called from `collab_ui::init`, and
 "Retire Zed collab" deleted that crate with the call inside it. Nothing else
 called it, so `Workspace::titlebar_item` was `None` in every window of every
 mode: no `PlatformTitleBar`, no `WindowControlArea::Drag` region, no
@@ -8229,11 +8229,11 @@ startup recheck — survives unchanged behind that dropdown.
   per scene.** The front-door pair, the Sarah admission pair, and the
   tester-channel pair each carry an explicit `omega_zero_base::is_sealed()`
   ensure at their own capture site in
-  `crates/zed/src/visual_test_runner.rs`. Ordering after the seal call is not
+  `crates/omega/src/visual_test_runner.rs`. Ordering after the seal call is not
   a guarantee: the Sarah pair used to rely on running after the front-door
   seal, which is exactly the arrangement that silently photographs an
   unsealed window when the call order changes. The six committed baselines
-  under `crates/zed/test_fixtures/visual_tests/` must exist non-empty.
+  under `crates/omega/test_fixtures/visual_tests/` must exist non-empty.
 - **The Exo-lane `omega_zero_base_wide` / `omega_zero_base_narrow` baselines
   photograph the unsealed harness form** (the surface under a zoomed panel,
   `seal()` never called on that runner path — since omega#161 an arrangement
@@ -8403,3 +8403,38 @@ startup recheck — survives unchanged behind that dropdown.
   in `crates/omega_deltas`; unit tests on the composer menu constants, the
   threads sidebar (legacy note absent), and
   `settings_window_closes_on_close_window_action` in `crates/settings_ui`.
+
+
+### OMEGA-DELTA-0190 — ZEDREMOVE: Omega paths, env precedence, and crate rename (omega#174)
+
+- **Upstream Zed:** ships as the `zed` package under `crates/zed`, project-local
+  settings in `.zed/`, env vars named `ZED_*`, and issue templates that say
+  "Zed".
+- **Omega:** visible product identity is Omega end-to-end.
+  1. **Project-local settings path.** Canonical folder is `.omega/`
+     (`paths::local_settings_folder_name`). Legacy `.zed/` remains readable
+     (`legacy_local_settings_folder_name` and the dual path matchers in
+     `project_settings` / worktree scan / agent tool permissions). Writes and
+     UI surfaces use `.omega`. Omega **never deletes** a legacy `.zed` tree
+     silently; prefer new when both exist, honor legacy when only legacy
+     exists (copy-on-write style: the next save lands in `.omega`).
+  2. **Env vars.** `OMEGA_*` takes precedence over inherited `ZED_*` for the
+     dual-read helpers in `client` and `zed_env_vars`. Bundle and
+     `script/omega-local` set both during the transition; `script/zed-local`
+     remains a thin compatibility wrapper.
+  3. **Issue templates.** Bug and crash forms ask for Omega version, Omega
+     commands, and Omega logs — not "Zed version".
+  4. **Crate rename.** Application crate `crates/zed` → `crates/omega`
+     (package name `omega`); `crates/zed_actions` → `crates/omega_actions`
+     (package name `omega_actions`). Action **namespaces** were already
+     `omega::` with `zed::` deprecated aliases; keymaps keep resolving.
+     Scripts, brand-gate fragment paths, and `omega_deltas` source-literal
+     checks name `crates/omega/...`.
+- **Why:** owner-directed ZEDREMOVE from the rc28 review (omega#160 items 16a/16b,
+  issue omega#174). A settings path, package name, or template that still says
+  Zed presents the wrong product.
+- **Enforced by:** `paths` unit tests for the dual folder names;
+  `omega_deltas` path literals and workspace membership for the renamed crates;
+  brand-gate inventory that scans `crates/omega` rather than the deleted path;
+  issue-template content reviewed in this change.
+

@@ -73,7 +73,7 @@ ui_input.workspace = true
 url.workspace = true
 util.workspace = true
 uuid.workspace = true
-zed_actions.workspace = true
+omega_actions.workspace = true
 
 [target.'cfg(target_os = "windows")'.dependencies]
 windows.workspace = true

@@ -67,7 +67,7 @@ url.workspace = true
 ui_input.workspace = true
 util.workspace = true
 workspace.workspace = true
-zed_actions.workspace = true
+omega_actions.workspace = true
 zed_credentials_provider.workspace = true
 
 [dev-dependencies]

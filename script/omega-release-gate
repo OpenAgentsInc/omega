@@ -22,7 +22,7 @@ The zero-refusal sweep is anchored to `omega_zero_base::refusal` in
 `crates/omega_zero_base/src/omega_zero_base.rs`: every refused action logs one
 sentence ("... is not part of Omega, which shows one agent thread and the
 controls that operate it.") via `report_refusal` in
-`crates/zed/src/omega_zero_base_ui.rs`. A flag-free launch that reaches the
+`crates/omega/src/omega_zero_base_ui.rs`. A flag-free launch that reaches the
 composer without dispatching a single refused action must leave a log with
 zero such sentences.
 

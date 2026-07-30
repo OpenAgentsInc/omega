@@ -107,7 +107,7 @@ pub fn set_custom_data_dir(dir: &str) -> &'static PathBuf {
     })
 }
 
-/// Returns the path to the configuration directory used by Zed.
+/// Returns the path to the configuration directory used by Omega.
 pub fn config_dir() -> &'static PathBuf {
     CONFIG_DIR.get_or_init(|| {
         if let Some(custom_dir) = CUSTOM_DATA_DIR.get() {
@@ -129,7 +129,7 @@ pub fn config_dir() -> &'static PathBuf {
     })
 }
 
-/// Returns the path to the data directory used by Zed.
+/// Returns the path to the data directory used by Omega.
 pub fn data_dir() -> &'static PathBuf {
     CURRENT_DATA_DIR.get_or_init(|| {
         if let Some(custom_dir) = CUSTOM_DATA_DIR.get() {
@@ -185,7 +185,7 @@ pub fn state_dir() -> &'static PathBuf {
     })
 }
 
-/// Returns the path to the temp directory used by Zed.
+/// Returns the path to the temp directory used by Omega.
 pub fn temp_dir() -> &'static PathBuf {
     static TEMP_DIR: OnceLock<PathBuf> = OnceLock::new();
     TEMP_DIR.get_or_init(|| {
@@ -489,9 +489,31 @@ pub fn devcontainer_dir() -> &'static PathBuf {
     DEVCONTAINER_DIR.get_or_init(|| data_dir().join("devcontainer"))
 }
 
-/// Returns the relative path to a `.zed` folder within a project.
+/// Returns the relative path to a `.omega` folder within a project.
+///
+/// This is the canonical project-local settings folder. The inherited `.zed`
+/// folder remains a compatibility read: see
+/// [`legacy_local_settings_folder_name`] and OMEGA-DELTA-0190.
 pub fn local_settings_folder_name() -> &'static str {
+    ".omega"
+}
+
+/// Returns the relative path to the legacy `.zed` folder within a project.
+///
+/// Projects created before the Omega rename carry their settings here. Omega
+/// still reads it when no `.omega` counterpart exists, and never deletes it,
+/// but every surface that shows or creates a project-settings path uses
+/// `.omega` (OMEGA-DELTA-0190 / omega#174).
+pub fn legacy_local_settings_folder_name() -> &'static str {
     ".zed"
+}
+
+/// Every project-local settings folder name Omega honors, canonical first.
+pub fn local_settings_folder_names() -> [&'static str; 2] {
+    [
+        local_settings_folder_name(),
+        legacy_local_settings_folder_name(),
+    ]
 }
 
 /// Returns the relative path to a `.vscode` folder within a project.
@@ -502,12 +524,28 @@ pub fn local_vscode_folder_name() -> &'static str {
 /// Returns the relative path to a `settings.json` file within a project.
 pub fn local_settings_file_relative_path() -> &'static RelPath {
     static CACHED: LazyLock<&'static RelPath> =
+        LazyLock::new(|| RelPath::from_unix_str(".omega/settings.json").unwrap());
+    *CACHED
+}
+
+/// Returns the relative path to the legacy `.zed/settings.json` file within a
+/// project, still honored when no `.omega/settings.json` exists.
+pub fn legacy_local_settings_file_relative_path() -> &'static RelPath {
+    static CACHED: LazyLock<&'static RelPath> =
         LazyLock::new(|| RelPath::from_unix_str(".zed/settings.json").unwrap());
     *CACHED
 }
 
 /// Returns the relative path to a `tasks.json` file within a project.
 pub fn local_tasks_file_relative_path() -> &'static RelPath {
+    static CACHED: LazyLock<&'static RelPath> =
+        LazyLock::new(|| RelPath::from_unix_str(".omega/tasks.json").unwrap());
+    *CACHED
+}
+
+/// Returns the relative path to the legacy `.zed/tasks.json` file within a
+/// project, still honored alongside the `.omega` one.
+pub fn legacy_local_tasks_file_relative_path() -> &'static RelPath {
     static CACHED: LazyLock<&'static RelPath> =
         LazyLock::new(|| RelPath::from_unix_str(".zed/tasks.json").unwrap());
     *CACHED
@@ -529,8 +567,16 @@ pub fn task_file_name() -> &'static str {
 }
 
 /// Returns the relative path to a `debug.json` file within a project.
-/// .zed/debug.json
+/// `.omega/debug.json`
 pub fn local_debug_file_relative_path() -> &'static RelPath {
+    static CACHED: LazyLock<&'static RelPath> =
+        LazyLock::new(|| RelPath::from_unix_str(".omega/debug.json").unwrap());
+    *CACHED
+}
+
+/// Returns the relative path to the legacy `.zed/debug.json` file within a
+/// project, still honored alongside the `.omega` one.
+pub fn legacy_local_debug_file_relative_path() -> &'static RelPath {
     static CACHED: LazyLock<&'static RelPath> =
         LazyLock::new(|| RelPath::from_unix_str(".zed/debug.json").unwrap());
     *CACHED
@@ -645,6 +691,26 @@ pub fn global_gitignore_path() -> Option<PathBuf> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn local_settings_folder_is_omega_with_zed_legacy() {
+        assert_eq!(local_settings_folder_name(), ".omega");
+        assert_eq!(legacy_local_settings_folder_name(), ".zed");
+        assert_eq!(local_settings_folder_names(), [".omega", ".zed"]);
+        assert_eq!(
+            local_settings_file_relative_path().as_unix_str(),
+            ".omega/settings.json"
+        );
+        assert_eq!(
+            legacy_local_settings_file_relative_path().as_unix_str(),
+            ".zed/settings.json"
+        );
+        // Migration never deletes the legacy path: both names stay distinct.
+        assert_ne!(
+            local_settings_folder_name(),
+            legacy_local_settings_folder_name()
+        );
+    }
 
     #[test]
     fn default_roots_use_the_current_omega_channel() {

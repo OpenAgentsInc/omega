@@ -34,7 +34,7 @@ struct OutputRecord {
 }
 
 fn resources_root() -> PathBuf {
-    PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../zed/resources")
+    PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../omega/resources")
 }
 
 fn sha256_file(path: &std::path::Path) -> String {

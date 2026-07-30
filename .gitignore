@@ -27,7 +27,7 @@
 /assets/*licenses.*
 /crates/collab/seed.json
 /crates/theme/schemas/theme.json
-/crates/zed/resources/flatpak/flatpak-cargo-sources.json
+/crates/omega/resources/flatpak/flatpak-cargo-sources.json
 /crates/project_panel/benches/linux_repo_snapshot.txt
 /dev.zed.Zed*.json
 /node_modules/
@@ -60,8 +60,8 @@ crates/docs_preprocessor/actions.json
 # committed cannot fail, and three lanes in a row reported "no check here looks
 # at a rendered pixel". Only the `omega_*` captures are re-included; the
 # inherited suite keeps upstream's arrangement.
-/crates/zed/test_fixtures/visual_tests/*
-!/crates/zed/test_fixtures/visual_tests/omega_*.png
+/crates/omega/test_fixtures/visual_tests/*
+!/crates/omega/test_fixtures/visual_tests/omega_*.png
 
 # Local documentation audit files
 /december-2025-releases.md

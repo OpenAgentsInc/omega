@@ -27,7 +27,7 @@
     },
     {
       "match": "crates named zed / zed_actions / zed_* (crate and module names only)",
-      "path": "crates/zed",
+      "path": "crates/omega",
       "reason": "Internal crate and module names stay as fork compatibility seams. This entry previously also covered the `zed` ACTION namespace and claimed it was not user-facing product copy; that was wrong. The command palette renders an action's namespace, so `zed: about`, `zed: quit` and `zed: get merch` were product copy and shipped in 0.2.0-rc11. Actions now declare the `omega` namespace (OMEGA-DELTA-0022) and the old `zed::` names survive only as deprecated_aliases, which resolve existing user keymaps and are never shown.",
       "owner": "OpenAgents",
       "disposition": "approved_compatibility",
@@ -51,7 +51,7 @@
     },
     {
       "match": "InstallingZedModal",
-      "path": "crates/zed/src/zed/move_to_applications.rs",
+      "path": "crates/omega/src/zed/move_to_applications.rs",
       "reason": "Internal modal type name; user-visible install copy uses Omega.",
       "owner": "OpenAgents",
       "disposition": "approved_compatibility",
@@ -139,7 +139,7 @@
     },
     {
       "match": "zed:// URL scheme",
-      "path": "crates/zed/src/zed/open_listener.rs",
+      "path": "crates/omega/src/zed/open_listener.rs",
       "reason": "The legacy URL scheme stays resolvable so existing zed:// deep links keep opening. The action that handles it is omega::OpenAppUrl; the scheme string is not a palette label or product copy.",
       "owner": "OpenAgents",
       "disposition": "approved_compatibility",

@@ -850,7 +850,7 @@ The receipt schema is `openagents.omega.workbench-proof.v1`. It records:
 Artifact paths are always relative and cannot contain parent traversal.
 All receipt artifact paths are relative to the command's output root. The
 committed comparison sources remain under
-`crates/zed/test_fixtures/visual_tests` and are copied into the output root
+`crates/omega/test_fixtures/visual_tests` and are copied into the output root
 when they are available. A pixel receipt without a pixel result, a receipt with
 zero semantic checks, or an outcome that disagrees with its semantic,
 whole-window, or named-region checks is invalid.
@@ -888,7 +888,7 @@ cannot fail a filtered proof.
 ## Pixel baselines {#pixel-baselines}
 
 Omega's workbench baselines are committed in
-`crates/zed/test_fixtures/visual_tests`. The default policy requires at least
+`crates/omega/test_fixtures/visual_tests`. The default policy requires at least
 99% matching pixels and permits a per-channel difference of `2`. Each scene can
 declare another policy, but it must include a rationale.
 

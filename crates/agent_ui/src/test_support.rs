@@ -5530,7 +5530,7 @@ mod workbench_front_door_tests {
             front_door.transcript_activation_is_focused(cx),
             "collapsing the revealed tree should return focus to the transcript"
         );
-        front_door.dispatch_action(zed_actions::project_panel::ToggleFocus, cx);
+        front_door.dispatch_action(omega_actions::project_panel::ToggleFocus, cx);
         assert_eq!(
             front_door.mounted_files_panel_entity_id(cx),
             Some(files_panel_id),
@@ -5540,7 +5540,7 @@ mod workbench_front_door_tests {
             front_door.native_files_is_focused(cx),
             "the global ProjectPanel action must reopen and focus Files"
         );
-        front_door.dispatch_action(zed_actions::project_panel::ToggleFocus, cx);
+        front_door.dispatch_action(omega_actions::project_panel::ToggleFocus, cx);
         let snapshot = front_door.snapshot(cx);
         SemanticProbe::new(&snapshot)
             .require_absent(WORKBENCH_DOCK_SELECTOR)
@@ -5549,7 +5549,7 @@ mod workbench_front_door_tests {
             front_door.transcript_activation_is_focused(cx),
             "global ToggleFocus must leave focus in the visible transcript, not the hidden center"
         );
-        front_door.dispatch_action(zed_actions::project_panel::ToggleFocus, cx);
+        front_door.dispatch_action(omega_actions::project_panel::ToggleFocus, cx);
         assert_eq!(
             front_door.mounted_files_panel_entity_id(cx),
             Some(files_panel_id),
@@ -5584,7 +5584,7 @@ mod workbench_front_door_tests {
             front_door.transcript_activation_is_focused(cx),
             "ActivateProjectPanel must leave focus in the transcript without repository authority"
         );
-        front_door.dispatch_action(zed_actions::project_panel::ToggleFocus, cx);
+        front_door.dispatch_action(omega_actions::project_panel::ToggleFocus, cx);
         assert!(
             front_door.transcript_activation_is_focused(cx),
             "ToggleFocus must not focus the unavailable rehomed tree"
@@ -5597,7 +5597,7 @@ mod workbench_front_door_tests {
 
         front_door.set_identity_phase(crate::thread_identity::IdentityPhase::Ready, cx);
         front_door.snapshot(cx);
-        front_door.dispatch_action(zed_actions::project_panel::ToggleFocus, cx);
+        front_door.dispatch_action(omega_actions::project_panel::ToggleFocus, cx);
         front_door
             .focus_and_select_files_path("worktree-1", "src/main.rs", cx)
             .expect("restore the recovered native selection");
@@ -6268,7 +6268,7 @@ mod workbench_front_door_tests {
             "a mutating global ProjectPanel action must be a no-op while Files is loading"
         );
         assert!(front_door.transcript_activation_is_focused(cx));
-        front_door.dispatch_action(zed_actions::project_panel::ToggleFocus, cx);
+        front_door.dispatch_action(omega_actions::project_panel::ToggleFocus, cx);
         SemanticProbe::new(&front_door.snapshot(cx))
             .require_focus(WorkSurfaceId::Files.surface_selector(), true)
             .expect("ToggleFocus may reopen Loading only on its visible status host");
@@ -6283,7 +6283,7 @@ mod workbench_front_door_tests {
             .require_absent(WORKBENCH_DOCK_SELECTOR)
             .expect("Loading CloseActiveDock must collapse the internal Files dock");
         assert!(front_door.transcript_activation_is_focused(cx));
-        front_door.dispatch_action(zed_actions::project_panel::ToggleFocus, cx);
+        front_door.dispatch_action(omega_actions::project_panel::ToggleFocus, cx);
         SemanticProbe::new(&front_door.snapshot(cx))
             .require_focus(WorkSurfaceId::Files.surface_selector(), true)
             .expect("Loading must reopen on its visible status host after internal close");
@@ -6340,7 +6340,7 @@ mod workbench_front_door_tests {
             front_door.transcript_activation_is_focused(cx),
             "ActivateProjectPanel must fail closed while Files is in Error"
         );
-        front_door.dispatch_action(zed_actions::project_panel::ToggleFocus, cx);
+        front_door.dispatch_action(omega_actions::project_panel::ToggleFocus, cx);
         SemanticProbe::new(&front_door.snapshot(cx))
             .require_focus(WorkSurfaceId::Files.surface_selector(), true)
             .expect("ToggleFocus may reopen Error only on its visible status host");
@@ -6355,7 +6355,7 @@ mod workbench_front_door_tests {
             .require_absent(WORKBENCH_DOCK_SELECTOR)
             .expect("Error CloseActiveDock must collapse the internal Files dock");
         assert!(front_door.transcript_activation_is_focused(cx));
-        front_door.dispatch_action(zed_actions::project_panel::ToggleFocus, cx);
+        front_door.dispatch_action(omega_actions::project_panel::ToggleFocus, cx);
         SemanticProbe::new(&front_door.snapshot(cx))
             .require_focus(WorkSurfaceId::Files.surface_selector(), true)
             .expect("Error must reopen on its visible status host after internal close");
@@ -6472,7 +6472,7 @@ mod workbench_front_door_tests {
             Some(project_panel::ProjectPanelScopeState::Unavailable)
         ));
         front_door.activate_files_panel(cx);
-        front_door.dispatch_action(zed_actions::project_panel::ToggleFocus, cx);
+        front_door.dispatch_action(omega_actions::project_panel::ToggleFocus, cx);
         assert!(
             front_door.transcript_activation_is_focused(cx),
             "offline activation routes must leave focus in the visible transcript"
@@ -6483,7 +6483,7 @@ mod workbench_front_door_tests {
 
         front_door.set_identity_phase(crate::thread_identity::IdentityPhase::Ready, cx);
         front_door.snapshot(cx);
-        front_door.dispatch_action(zed_actions::project_panel::ToggleFocus, cx);
+        front_door.dispatch_action(omega_actions::project_panel::ToggleFocus, cx);
         assert_eq!(
             front_door.native_files_selected_path(cx),
             Some(selected_path),

@@ -13,12 +13,12 @@ use gpui::{
     TaskExt, WeakEntity,
 };
 use itertools::Itertools;
+use omega_actions::agent::OpenSettings;
 use ordered_float::OrderedFloat;
 use picker::{Picker, PickerDelegate};
 use settings::SettingsStore;
 use ui::{DocumentationAside, IntoElement, prelude::*};
 use util::ResultExt;
-use zed_actions::agent::OpenSettings;
 
 use crate::ui::{
     ModelSelectorFooter, ModelSelectorHeader, ModelSelectorListItem, documentation_aside_side,

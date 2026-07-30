@@ -335,7 +335,7 @@ mod tests {
     #[test]
     fn test_parse_backtick_spans_single_span() {
         let (text, ranges) = parse_backtick_spans("use `zed` to open").unwrap();
-        assert_eq!(text.as_ref(), "use zed to open");
+        assert_eq!(text.as_ref(), "use omega to open");
         assert_eq!(ranges, vec![4..7]);
     }
 

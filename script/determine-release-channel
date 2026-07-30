@@ -12,7 +12,7 @@ elif [ -z "${GITHUB_REF-}" ]; then
 fi
 
 version=$(script/get-crate-version zed)
-channel=$(cat crates/zed/RELEASE_CHANNEL)
+channel=$(cat crates/omega/RELEASE_CHANNEL)
 echo "Publishing version: ${version} on release channel ${channel}"
 echo "RELEASE_CHANNEL=${channel}" >> $GITHUB_ENV
 echo "RELEASE_VERSION=${version}" >> $GITHUB_ENV

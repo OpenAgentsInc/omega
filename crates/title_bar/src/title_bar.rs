@@ -51,7 +51,7 @@ use update_version::UpdateVersion;
 use util::ResultExt;
 use workspace::{AccessibleMode, MultiWorkspace, Workspace, notifications::NotifyTaskExt as _};
 
-use zed_actions::OpenOnboarding;
+use omega_actions::OpenOnboarding;
 
 pub use onboarding_banner::restore_banner;
 
@@ -831,7 +831,7 @@ impl TitleBar {
                     move |_window, cx| {
                         Tooltip::with_meta(
                             "Worktree",
-                            Some(&zed_actions::git::Worktree),
+                            Some(&omega_actions::git::Worktree),
                             format!("Currently In Use: {}", worktree_label),
                             cx,
                         )
@@ -891,7 +891,7 @@ impl TitleBar {
                         };
                         Tooltip::with_meta(
                             "Branch & Stash",
-                            Some(&zed_actions::git::Branch),
+                            Some(&omega_actions::git::Branch),
                             meta,
                             cx,
                         )
@@ -1152,19 +1152,19 @@ impl TitleBar {
 
                         this.separator()
                     })
-                    .action("Settings", zed_actions::OpenSettings.boxed_clone())
-                    .action("Keymap", Box::new(zed_actions::OpenKeymap))
+                    .action("Settings", omega_actions::OpenSettings.boxed_clone())
+                    .action("Keymap", Box::new(omega_actions::OpenKeymap))
                     .action(
                         "Themes…",
-                        zed_actions::theme_selector::Toggle::default().boxed_clone(),
+                        omega_actions::theme_selector::Toggle::default().boxed_clone(),
                     )
                     .action(
                         "Icon Themes…",
-                        zed_actions::icon_theme_selector::Toggle::default().boxed_clone(),
+                        omega_actions::icon_theme_selector::Toggle::default().boxed_clone(),
                     )
                     .action(
                         "Extensions",
-                        zed_actions::Extensions::default().boxed_clone(),
+                        omega_actions::Extensions::default().boxed_clone(),
                     )
                     .when(ai_enabled, |menu| {
                         menu.separator()

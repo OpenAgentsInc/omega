@@ -84,12 +84,12 @@
     ],
     "_forbidden_path_stems_comment": [
       "A file name is a surface too. The docs page moved from zed-agent.md to",
-      "omega-agent.md, and a content scan cannot see the difference — the",
+      "omega-agent.md, and a content scan cannot see the difference \u2014 the",
       "renamed file says 'Omega Agent' either way. Falsifying this delta found",
       "exactly that hole: restoring the old file name passed every check.",
       "",
       "Matched against the file stem, case-insensitively, so it does not fire",
-      "on crates/zed or on a directory named zed_eval."
+      "on crates/omega or on a directory named zed_eval."
     ],
     "forbidden_path_stems": [
       "zed-agent",
@@ -123,12 +123,12 @@
     "_comment": [
       "Every file in fragment_dir is merged into the packaged Info.plist by",
       "cargo-bundle (osx_info_plist_exts = ['resources/info/*'] in",
-      "crates/zed/Cargo.toml), so the whole directory is scanned rather than a",
+      "crates/omega/Cargo.toml), so the whole directory is scanned rather than a",
       "list of known files. macOS renders NS*UsageDescription values inside its",
       "own system permission dialogs, so a competitor's name here is presented",
       "by the operating system, under our Developer ID signature."
     ],
-    "fragment_dir": "crates/zed/resources/info"
+    "fragment_dir": "crates/omega/resources/info"
   },
   "icons": {
     "_comment": [
@@ -479,7 +479,7 @@
         "class": "zed_product",
         "reason": "Links Zed's own remote-development documentation."
       },
-      "set -eu channel=\"$1\" version=\"$2\" dest=\"$HOME/.local/libexec/zed/$channel\" marker=\"$dest/.zed-wsl-helper-version\" want=\"$channel $version\" # Reuse an exact, already-installed channel+version — but never for the floating # \"latest\" tag (dev builds), which must always re-fetch so they track the most # recent nightly instead of pinning to whatever was downloaded first. if [ \"$version\" != \"latest\" ] && [ \"$(cat \"$marker\" 2>/dev/null || true)\" = \"$want\" ]; then helper=$(find \"$dest\" -type f -path '*/libexec/zed-editor' -print 2>/dev/null | head -n 1 || true) if [ -n \"$helper\" ] && [ -x \"$helper\" ]; then printf 'zed-wsl-helper: %s\\n' \"$helper\" exit 0 fi fi arch=$(uname -m) case \"$arch\" in x86_64 | amd64) arch=\"x86_64\" ;; aarch64 | arm64) arch=\"aarch64\" ;; *) echo \"unsupported WSL architecture for the zed sandbox helper: $arch\" >&2; exit 1 ;; esac url=\"https://cloud.zed.dev/releases/$channel/$version/download?asset=zed&arch=$arch&os=linux&source=zed-wsl-sandbox\" tmp=$(mktemp -d \"${TMPDIR:-/tmp}/zed-wsl-helper-XXXXXX\") trap 'rm -rf \"$tmp\"' EXIT tarball=\"$tmp/zed.tar.gz\" if command -v curl >/dev/null 2>&1; then curl -fL \"$url\" -o \"$tarball\" elif command -v wget >/dev/null 2>&1; then wget -O \"$tarball\" \"$url\" else echo 'neither curl nor wget is available in WSL to download zed' >&2 exit 1 fi mkdir -p \"$tmp/unpacked\" tar -xzf \"$tarball\" -C \"$tmp/unpacked\" helper_src=$(find \"$tmp/unpacked\" -type f -path '*/libexec/zed-editor' -print 2>/dev/null | head -n 1 || true) if [ -z \"$helper_src\" ]; then echo 'the downloaded zed tarball did not contain a libexec/zed-editor binary' >&2 exit 1 fi app=$(dirname \"$(dirname \"$helper_src\")\") # Install atomically: stage the unpacked app next to the destination on the same # filesystem, then swap it into place so a concurrent run never sees (or execs) a # partially-written install. The whole app dir is kept so the binary's bundled # libraries ($ORIGIN/../lib) remain alongside it. mkdir -p \"$(dirname \"$dest\")\" rm -rf \"$dest.new\" \"$dest.old\" cp -a \"$app\" \"$dest.new\" if [ -e \"$dest\" ]; then mv \"$dest\" \"$dest.old\"; fi mv \"$dest.new\" \"$dest\" rm -rf \"$dest.old\" printf '%s' \"$want\" > \"$marker\" helper=$(find \"$dest\" -type f -path '*/libexec/zed-editor' -print 2>/dev/null | head -n 1 || true) if [ -z \"$helper\" ] || [ ! -x \"$helper\" ]; then echo \"the installed zed sandbox helper is missing or not executable under $dest\" >&2 exit 1 fi printf 'zed-wsl-helper: %s\\n' \"$helper\" exit 0": {
+      "set -eu channel=\"$1\" version=\"$2\" dest=\"$HOME/.local/libexec/zed/$channel\" marker=\"$dest/.zed-wsl-helper-version\" want=\"$channel $version\" # Reuse an exact, already-installed channel+version \u2014 but never for the floating # \"latest\" tag (dev builds), which must always re-fetch so they track the most # recent nightly instead of pinning to whatever was downloaded first. if [ \"$version\" != \"latest\" ] && [ \"$(cat \"$marker\" 2>/dev/null || true)\" = \"$want\" ]; then helper=$(find \"$dest\" -type f -path '*/libexec/zed-editor' -print 2>/dev/null | head -n 1 || true) if [ -n \"$helper\" ] && [ -x \"$helper\" ]; then printf 'zed-wsl-helper: %s\\n' \"$helper\" exit 0 fi fi arch=$(uname -m) case \"$arch\" in x86_64 | amd64) arch=\"x86_64\" ;; aarch64 | arm64) arch=\"aarch64\" ;; *) echo \"unsupported WSL architecture for the zed sandbox helper: $arch\" >&2; exit 1 ;; esac url=\"https://cloud.zed.dev/releases/$channel/$version/download?asset=zed&arch=$arch&os=linux&source=zed-wsl-sandbox\" tmp=$(mktemp -d \"${TMPDIR:-/tmp}/zed-wsl-helper-XXXXXX\") trap 'rm -rf \"$tmp\"' EXIT tarball=\"$tmp/zed.tar.gz\" if command -v curl >/dev/null 2>&1; then curl -fL \"$url\" -o \"$tarball\" elif command -v wget >/dev/null 2>&1; then wget -O \"$tarball\" \"$url\" else echo 'neither curl nor wget is available in WSL to download zed' >&2 exit 1 fi mkdir -p \"$tmp/unpacked\" tar -xzf \"$tarball\" -C \"$tmp/unpacked\" helper_src=$(find \"$tmp/unpacked\" -type f -path '*/libexec/zed-editor' -print 2>/dev/null | head -n 1 || true) if [ -z \"$helper_src\" ]; then echo 'the downloaded zed tarball did not contain a libexec/zed-editor binary' >&2 exit 1 fi app=$(dirname \"$(dirname \"$helper_src\")\") # Install atomically: stage the unpacked app next to the destination on the same # filesystem, then swap it into place so a concurrent run never sees (or execs) a # partially-written install. The whole app dir is kept so the binary's bundled # libraries ($ORIGIN/../lib) remain alongside it. mkdir -p \"$(dirname \"$dest\")\" rm -rf \"$dest.new\" \"$dest.old\" cp -a \"$app\" \"$dest.new\" if [ -e \"$dest\" ]; then mv \"$dest\" \"$dest.old\"; fi mv \"$dest.new\" \"$dest\" rm -rf \"$dest.old\" printf '%s' \"$want\" > \"$marker\" helper=$(find \"$dest\" -type f -path '*/libexec/zed-editor' -print 2>/dev/null | head -n 1 || true) if [ -z \"$helper\" ] || [ ! -x \"$helper\" ]; then echo \"the installed zed sandbox helper is missing or not executable under $dest\" >&2 exit 1 fi printf 'zed-wsl-helper: %s\\n' \"$helper\" exit 0": {
         "class": "zed_service",
         "reason": "Downloads Zed's released Linux build from cloud.zed.dev to use as the WSL sandbox helper. The script really does fetch Zed's artifact, so every zed path and URL in it names Zed's product. Whether Omega should depend on that CDN is a runtime question, not a prose one."
       },
@@ -539,7 +539,7 @@
         "class": "zed_product",
         "reason": "Names Zed's own built-in icon theme, which is what the Omega value replaces (OMEGA-DELTA-0028)."
       },
-      "// Upstream Zed ships true, which points the updater at Zed's release feed —": {
+      "// Upstream Zed ships true, which points the updater at Zed's release feed \u2014": {
         "class": "omega_contrast",
         "reason": "Omega-authored comment naming the upstream default and the feed it points at (OMEGA-DELTA-0026)."
       },
@@ -575,10 +575,6 @@
         "class": "fork_seam",
         "reason": "Windows shell variable the terminal integration sets and then reads back to detect that the init command has started. The name IS the handshake; renaming one side without the other breaks startup detection."
       },
-      "Failed to read crates/zed/Cargo.toml": {
-        "class": "fork_seam",
-        "reason": "Build-script message naming the `zed` crate by its directory. The crate name is an inherited identifier; renaming the crate is a separate change with its own blast radius, and this message would be wrong either way if only the sentence moved."
-      },
       "Note: This setting is still experimental. See [this tracking issue](https://github.com/zed-industries/zed/issues/18078)": {
         "class": "zed_product",
         "reason": "Settings-schema note linking Zed's own tracking issue for an upstream experiment Omega inherited. The issue really is on Zed's tracker."
@@ -591,13 +587,9 @@
         "class": "omega_contrast",
         "reason": "Omega-authored --help line naming the legacy `zed://` scheme Omega still accepts alongside its own, so an existing link keeps working."
       },
-      "Version not found in crates/zed/Cargo.toml": {
-        "class": "fork_seam",
-        "reason": "Build-script message naming the `zed` crate by its directory. The crate name is an inherited identifier; renaming the crate is a separate change with its own blast radius, and this message would be wrong either way if only the sentence moved."
-      },
       "Windows only: resolve the `(release channel, version)` of the Linux `zed` to": {
         "class": "zed_product",
-        "reason": "The WSL sandbox helper really is Zed's released Linux build, downloaded from cloud.zed.dev — see the helper script classified above. Substituting Omega would name a binary this path does not fetch."
+        "reason": "The WSL sandbox helper really is Zed's released Linux build, downloaded from cloud.zed.dev \u2014 see the helper script classified above. Substituting Omega would name a binary this path does not fetch."
       },
       "`zed://` scheme kept for compatibility with existing links.": {
         "class": "omega_contrast",
@@ -629,7 +621,7 @@
       },
       "failed to provision a Linux `zed` sandbox helper in {}{}": {
         "class": "zed_product",
-        "reason": "The WSL sandbox helper really is Zed's released Linux build, downloaded from cloud.zed.dev — see the helper script classified above. Substituting Omega would name a binary this path does not fetch."
+        "reason": "The WSL sandbox helper really is Zed's released Linux build, downloaded from cloud.zed.dev \u2014 see the helper script classified above. Substituting Omega would name a binary this path does not fetch."
       },
       "interpreted as input redirection. See zed-industries/zed#55921.": {
         "class": "zed_product",
@@ -641,11 +633,11 @@
       },
       "provision the Linux `zed` sandbox helper": {
         "class": "zed_product",
-        "reason": "The WSL sandbox helper really is Zed's released Linux build, downloaded from cloud.zed.dev — see the helper script classified above. Substituting Omega would name a binary this path does not fetch."
+        "reason": "The WSL sandbox helper really is Zed's released Linux build, downloaded from cloud.zed.dev \u2014 see the helper script classified above. Substituting Omega would name a binary this path does not fetch."
       },
       "the WSL `zed` sandbox helper resolved to {path:?} rather than an absolute path": {
         "class": "zed_product",
-        "reason": "The WSL sandbox helper really is Zed's released Linux build, downloaded from cloud.zed.dev — see the helper script classified above. Substituting Omega would name a binary this path does not fetch."
+        "reason": "The WSL sandbox helper really is Zed's released Linux build, downloaded from cloud.zed.dev \u2014 see the helper script classified above. Substituting Omega would name a binary this path does not fetch."
       },
       "zed build.rs: {lib} not found in pkg-config's path": {
         "class": "fork_seam",

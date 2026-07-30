@@ -59,6 +59,9 @@ use language_model::{
 use menu;
 use multi_buffer::ExcerptBoundaryInfo;
 use notifications::status_toast::StatusToast;
+use omega_actions::{
+    DecreaseBufferFontSize, IncreaseBufferFontSize, ResetBufferFontSize, git_panel::ToggleFocus,
+};
 use panel::PanelHeader;
 use project::git_store::GitAccess;
 use project::{
@@ -98,9 +101,6 @@ use workspace::{
     Item, Workspace,
     dock::{DockPosition, Panel, PanelEvent},
     notifications::{DetachAndPromptErr, NotificationId, NotifyTaskExt},
-};
-use zed_actions::{
-    DecreaseBufferFontSize, IncreaseBufferFontSize, ResetBufferFontSize, git_panel::ToggleFocus,
 };
 
 const GIT_PANEL_KEY: &str = "GitPanel";
@@ -227,7 +227,7 @@ fn git_panel_context_menu(
             .action_disabled_when(
                 repository_scoped,
                 "View Stash",
-                zed_actions::git::ViewStash.boxed_clone(),
+                omega_actions::git::ViewStash.boxed_clone(),
             )
             .separator()
             .action_disabled_when(
@@ -5825,8 +5825,10 @@ impl GitPanel {
                         // generic `CreatePullRequest` action when the toast
                         // button is pressed.
                         this.action("Create Pull Request", move |window, cx| {
-                            window
-                                .dispatch_action(Box::new(zed_actions::git::CreatePullRequest), cx);
+                            window.dispatch_action(
+                                Box::new(omega_actions::git::CreatePullRequest),
+                                cx,
+                            );
                         })
                     }
                     (Toast | ToastWithLog { .. }, true) => this,
@@ -6527,10 +6529,10 @@ impl GitPanel {
                                     .h_full()
                                     .flex_grow_1()
                                     .cursor_text()
-                                    .on_action(|&zed_actions::editor::MoveUp, _, cx| {
+                                    .on_action(|&omega_actions::editor::MoveUp, _, cx| {
                                         cx.stop_propagation();
                                     })
-                                    .on_action(|&zed_actions::editor::MoveDown, _, cx| {
+                                    .on_action(|&omega_actions::editor::MoveDown, _, cx| {
                                         cx.stop_propagation();
                                     })
                                     .child(EditorElement::new(
@@ -8689,7 +8691,7 @@ impl Render for GenerateCommitMessageConfigurationTooltip {
                                 .label_size(LabelSize::Small)
                                 .on_click(|_, window, cx| {
                                     window.dispatch_action(
-                                        zed_actions::OpenSettingsAt {
+                                        omega_actions::OpenSettingsAt {
                                             path: "llm_providers".to_string(),
                                             target: None,
                                         }
@@ -9191,7 +9193,7 @@ impl RenderOnce for PanelRepoFooter {
                 .label_size(LabelSize::Small)
                 .truncate(true)
                 .on_click(|_, window, cx| {
-                    window.dispatch_action(zed_actions::git::Switch.boxed_clone(), cx);
+                    window.dispatch_action(omega_actions::git::Switch.boxed_clone(), cx);
                 });
 
             PopoverMenu::new("popover-button")
@@ -9202,7 +9204,7 @@ impl RenderOnce for PanelRepoFooter {
                 })
                 .trigger_with_tooltip(
                     branch_selector_button,
-                    Tooltip::for_action_title("Switch Branch", &zed_actions::git::Switch),
+                    Tooltip::for_action_title("Switch Branch", &omega_actions::git::Switch),
                 )
                 .anchor(Anchor::BottomLeft)
                 .offset(gpui::Point {

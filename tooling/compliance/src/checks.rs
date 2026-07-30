@@ -709,7 +709,7 @@ mod tests {
                         filename: "Cargo.lock".to_owned(),
                     },
                     CommitFileChange {
-                        filename: "crates/zed/Cargo.toml".to_owned(),
+                        filename: "crates/omega/Cargo.toml".to_owned(),
                     },
                 ],
                 org_members: vec![],
@@ -746,7 +746,7 @@ mod tests {
                     }
                 }),
                 commit_files: vec![CommitFileChange {
-                    filename: "crates/zed/RELEASE_CHANNEL".to_owned(),
+                    filename: "crates/omega/RELEASE_CHANNEL".to_owned(),
                 }],
                 org_members: vec![],
                 commit: make_commit(
@@ -1184,7 +1184,7 @@ mod tests {
     #[tokio::test]
     async fn zippy_version_bump_with_wrong_files_fails() {
         let result = TestScenario::zippy_version_bump()
-            .with_commit_files(vec!["crates/zed/RELEASE_CHANNEL"])
+            .with_commit_files(vec!["crates/omega/RELEASE_CHANNEL"])
             .run_scenario()
             .await;
         assert!(matches!(

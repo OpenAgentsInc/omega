@@ -313,13 +313,15 @@ pub async fn sensitive_settings_kind(
     canonical_worktree_roots: &[PathBuf],
     fs: &dyn Fs,
 ) -> Option<SensitiveSettingsKind> {
-    let local_settings_folder = paths::local_settings_folder_name();
+    let local_settings_folders = paths::local_settings_folder_names();
 
     // Fast path: scan the raw path components before any I/O. Covers the
     // common case where the agent passes a path that literally contains
     // `.zed/` or `.agents/skills/`.
     if path.components().any(|component| {
-        component_matches_ignore_ascii_case(component.as_os_str(), local_settings_folder)
+        local_settings_folders
+            .iter()
+            .any(|folder| component_matches_ignore_ascii_case(component.as_os_str(), folder))
     }) {
         return Some(SensitiveSettingsKind::Local);
     }
@@ -338,7 +340,9 @@ pub async fn sensitive_settings_kind(
             };
 
             if relative.components().any(|component| {
-                component_matches_ignore_ascii_case(component.as_os_str(), local_settings_folder)
+                local_settings_folders.iter().any(|folder| {
+                    component_matches_ignore_ascii_case(component.as_os_str(), folder)
+                })
             }) {
                 return Some(SensitiveSettingsKind::Local);
             }
@@ -651,9 +655,11 @@ pub fn authorize_file_edit(
     // worktree, but we can short-circuit straight to the appropriate
     // SensitiveSettingsKind on these fast paths and skip the async
     // `sensitive_settings_kind` canonicalization step below.
-    let local_settings_folder = paths::local_settings_folder_name();
+    let local_settings_folders = paths::local_settings_folder_names();
     let is_local_settings = path.components().any(|component| {
-        component_matches_ignore_ascii_case(component.as_os_str(), local_settings_folder)
+        local_settings_folders
+            .iter()
+            .any(|folder| component_matches_ignore_ascii_case(component.as_os_str(), folder))
     });
     let is_agents_skills = is_agents_skills_path(path);
 

@@ -17,6 +17,7 @@ use gpui::{
 };
 use language::Capability;
 use multi_buffer::MultiBuffer;
+use omega_actions::git as git_actions;
 use project::{
     Project, ProjectPath,
     git_store::{
@@ -35,7 +36,6 @@ use workspace::{
     item::{Item, ItemEvent, ItemHandle, SaveOptions, TabContentParams},
     searchable::SearchableItemHandle,
 };
-use zed_actions::git as git_actions;
 
 actions!(
     git,
@@ -1032,7 +1032,7 @@ mod tests {
         });
     }
 
-    use zed_actions::git as git_actions;
+    use omega_actions::git as git_actions;
 
     use crate::project_diff::{self, ProjectDiff};
 

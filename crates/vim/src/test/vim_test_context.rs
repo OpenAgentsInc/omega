@@ -28,7 +28,7 @@ impl VimTestContext {
             search::init(cx);
             theme_settings::init(theme::LoadThemes::JustBase, cx);
             settings_ui::init(cx);
-            zed_actions::init();
+            omega_actions::init();
         });
     }
 

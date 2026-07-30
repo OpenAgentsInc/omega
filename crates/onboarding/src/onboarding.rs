@@ -21,6 +21,7 @@ use ui::{
     WithScrollbar as _, prelude::*, rems_from_px,
 };
 
+use omega_actions::{OpenEditorOnboarding, OpenOnboarding, dev::ResetOnboarding};
 pub use workspace::welcome::ShowWelcome;
 use workspace::welcome::WelcomePage;
 use workspace::{
@@ -29,7 +30,6 @@ use workspace::{
     notifications::NotifyResultExt as _,
     register_serializable_item, with_active_or_new_workspace,
 };
-use zed_actions::{OpenEditorOnboarding, OpenOnboarding, dev::ResetOnboarding};
 
 mod base_keymap_picker;
 mod basics_page;

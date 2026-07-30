@@ -67,7 +67,7 @@
 //! Not in a GPUI crate. This crate depends on `omega_front_door` and the pinned
 //! ACP schema and on **no** part of GPUI, and a check in `crates/omega_deltas`
 //! fails if a listener appears in `crates/agent_ui`, `crates/full_auto_ui`, or
-//! `crates/zed`. The lifecycle owner in a shipped build is `omega-effectd`:
+//! `crates/omega`. The lifecycle owner in a shipped build is `omega-effectd`:
 //! [`start_if_enabled`] is called from `crates/omega_effectd`, which is the
 //! supervisor layer, and nowhere else.
 //!

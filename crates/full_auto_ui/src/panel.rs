@@ -25,6 +25,7 @@ use omega_effectd::{
 
 use crate::issue31_delivery::set_issue31_live_reading;
 use crate::issue31_observation::observe_issue31_full_auto;
+use omega_actions::full_auto_panel::ToggleFocus;
 use omega_front_door::LaunchOrigin;
 use serde_json::Value;
 use settings::{NotifyWhenAgentWaiting, Settings as _};
@@ -35,7 +36,6 @@ use workspace::{
     dock::{DockPosition, Panel, PanelEvent},
     notifications::{NotificationId, simple_message_notification::MessageNotification},
 };
-use zed_actions::full_auto_panel::ToggleFocus;
 
 use crate::dispatch::FullAutoDispatch;
 use crate::draft::{
@@ -137,7 +137,7 @@ impl FullAutoPanel {
     /// Build the Full Auto surface.
     ///
     /// `OMEGA-DELTA-0020`. This used to be private, reached only through
-    /// `load` from the dock-panel registration in `crates/zed`. The owner
+    /// `load` from the dock-panel registration in `crates/omega`. The owner
     /// asked for Full Auto to be folded into the Omega chat UI, so the agent
     /// panel constructs it directly and hosts it as one of its surfaces.
     ///

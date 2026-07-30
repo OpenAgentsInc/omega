@@ -199,6 +199,7 @@ use {
         size,
     },
     language_model::{LanguageModelProviderId, LanguageModelRegistry},
+    omega_actions::OpenSettingsAt,
     omega_workbench_harness::{
         CheckStatus, HERMETIC_SCENES, PixelProof, PixelStatus, ProofCheck, ProofLane, ProofOutcome,
         ProofReceipt, RegionPixelProof, ScenePhase, SemanticProbe, WORKBENCH_PLAN_PIXEL_SCENES,
@@ -221,7 +222,6 @@ use {
     terminal_view::terminal_panel::TerminalPanel,
     util::ResultExt as _,
     workspace::{AppState, MultiWorkspace, Workspace, item::Item as _},
-    zed_actions::OpenSettingsAt,
 };
 
 // OMEGA-DELTA-0052, omega#100. The `omega_zero_base_ui` module used to be
@@ -240,7 +240,7 @@ mod constants {
     use std::time::Duration;
 
     /// Baseline images are stored relative to this file
-    pub const BASELINE_DIR: &str = "crates/zed/test_fixtures/visual_tests";
+    pub const BASELINE_DIR: &str = "crates/omega/test_fixtures/visual_tests";
 
     /// Embedded test image (Zed app icon) for visual tests.
     pub const EMBEDDED_TEST_IMAGE: &[u8] = include_bytes!("../resources/app-icon.png");
@@ -4473,7 +4473,7 @@ fn create_workbench_review_disk_fixture(
     let mut main_source = String::new();
     for row in 0..40 {
         match row {
-            0 => main_source.push_str("use omega::old_review;\n"),
+            0 => main_source.push_str("use zed::old_review;\n"),
             20 => main_source.push_str("const REVIEW_MODE: bool = false;\n"),
             35 => main_source.push_str("const STREAM_REVISION: usize = 0;\n"),
             _ => main_source.push_str(&format!("// fixture row {row:02}\n")),
@@ -5840,7 +5840,7 @@ fn seed_standard_workbench_review(
                 [
                     (
                         language::Point::new(0, 0)..language::Point::new(1, 0),
-                        "use omega::review;\n",
+                        "use zed::review;\n",
                     ),
                     (
                         language::Point::new(20, 0)..language::Point::new(21, 0),
@@ -9485,7 +9485,7 @@ fn run_omega_agent_visual_tests_inner(
 
     cx.run_until_parked();
 
-    // The shipped front door, called the way `crates/zed/src/main.rs` calls it
+    // The shipped front door, called the way `crates/omega/src/main.rs` calls it
     // on a window with nothing to restore. Not a hand-rolled approximation of
     // it: `open_front_door` is the entry `OMEGA-DELTA-0019` added, and driving
     // anything else here would photograph a path no user takes.
@@ -9711,7 +9711,7 @@ fn run_omega_agent_visual_tests_inner(
     }
 
     cx.update_window(workspace_window, |_, window, cx| {
-        window.dispatch_action(Box::new(zed_actions::agent::Chat), cx);
+        window.dispatch_action(Box::new(omega_actions::agent::Chat), cx);
     })
     .context("Failed to dispatch the projectless conversation's first turn")?;
     cx.run_until_parked();
@@ -11957,8 +11957,8 @@ fn run_tool_permissions_visual_tests(
 ) -> Result<TestResult> {
     use agent_settings::{AgentSettings, CompiledRegex, ToolPermissions, ToolRules};
     use collections::HashMap;
+    use omega_actions::OpenSettingsAt;
     use settings::ToolPermissionMode;
-    use zed_actions::OpenSettingsAt;
 
     // Set up tool permissions with "hi" as both always_deny and always_allow for terminal
     cx.update(|cx| {

@@ -1,14 +1,14 @@
 use app_identity::PRODUCT_NAME;
 use gpui::{App, Menu, MenuItem, OsAction};
-use zed_actions::Quit;
+use omega_actions::Quit;
 
 pub fn app_menus(_cx: &mut App) -> Vec<Menu> {
     vec![
         Menu::new(PRODUCT_NAME).items([
-            MenuItem::action("About Omega", zed_actions::About),
+            MenuItem::action("About Omega", omega_actions::About),
             MenuItem::separator(),
-            MenuItem::action("Open Settings", zed_actions::OpenSettings),
-            MenuItem::action("Open Legacy Settings", zed_actions::OpenLegacySettings),
+            MenuItem::action("Open Settings", omega_actions::OpenSettings),
+            MenuItem::action("Open Legacy Settings", omega_actions::OpenLegacySettings),
             #[cfg(target_os = "macos")]
             MenuItem::separator(),
             #[cfg(target_os = "macos")]
@@ -40,15 +40,15 @@ pub fn app_menus(_cx: &mut App) -> Vec<Menu> {
         Menu::new("View").items([
             MenuItem::action(
                 "Zoom In",
-                zed_actions::IncreaseBufferFontSize { persist: false },
+                omega_actions::IncreaseBufferFontSize { persist: false },
             ),
             MenuItem::action(
                 "Zoom Out",
-                zed_actions::DecreaseBufferFontSize { persist: false },
+                omega_actions::DecreaseBufferFontSize { persist: false },
             ),
             MenuItem::action(
                 "Reset Zoom",
-                zed_actions::ResetBufferFontSize { persist: false },
+                omega_actions::ResetBufferFontSize { persist: false },
             ),
             MenuItem::separator(),
             MenuItem::action("Toggle Full Screen", super::ToggleFullScreen),
@@ -75,8 +75,8 @@ pub fn app_menus(_cx: &mut App) -> Vec<Menu> {
             MenuItem::separator(),
         ]),
         Menu::new("Help").items([
-            MenuItem::action("Documentation", zed_actions::OpenDocs),
-            MenuItem::action("Open Source Licenses", zed_actions::OpenLicenses),
+            MenuItem::action("Documentation", omega_actions::OpenDocs),
+            MenuItem::action("Open Source Licenses", omega_actions::OpenLicenses),
         ]),
     ]
 }
@@ -134,17 +134,17 @@ mod tests {
         #[cfg(target_os = "macos")]
         let expected = [
             "menu:Omega",
-            "action:Omega/About Omega=omega::About:enabled",
+            "action:Omega/About Omega=zed::About:enabled",
             "separator:Omega",
-            "action:Omega/Open Settings=omega::OpenSettings:enabled",
-            "action:Omega/Open Legacy Settings=omega::OpenLegacySettings:enabled",
+            "action:Omega/Open Settings=zed::OpenSettings:enabled",
+            "action:Omega/Open Legacy Settings=zed::OpenLegacySettings:enabled",
             "separator:Omega",
             "system:Omega/Services",
             "separator:Omega",
-            "action:Omega/Hide Omega=omega::Hide:enabled",
-            "action:Omega/Hide Others=omega::HideOthers:enabled",
+            "action:Omega/Hide Omega=zed::Hide:enabled",
+            "action:Omega/Hide Others=zed::HideOthers:enabled",
             "separator:Omega",
-            "action:Omega/Quit Omega=omega::Quit:enabled",
+            "action:Omega/Quit Omega=zed::Quit:enabled",
             "menu:Edit",
             "action:Edit/Undo=editor::Undo:enabled",
             "action:Edit/Redo=editor::Redo:enabled",
@@ -156,11 +156,11 @@ mod tests {
             "separator:Edit",
             "action:Edit/Find=agent::ToggleSearch:enabled",
             "menu:View",
-            "action:View/Zoom In=omega::IncreaseBufferFontSize:enabled",
-            "action:View/Zoom Out=omega::DecreaseBufferFontSize:enabled",
-            "action:View/Reset Zoom=omega::ResetBufferFontSize:enabled",
+            "action:View/Zoom In=zed::IncreaseBufferFontSize:enabled",
+            "action:View/Zoom Out=zed::DecreaseBufferFontSize:enabled",
+            "action:View/Reset Zoom=zed::ResetBufferFontSize:enabled",
             "separator:View",
-            "action:View/Toggle Full Screen=omega::ToggleFullScreen:enabled",
+            "action:View/Toggle Full Screen=zed::ToggleFullScreen:enabled",
             "action:View/Toggle Threads Sidebar=agent::ToggleThreadsSidebar:enabled",
             "separator:View",
             "menu:View/Workbench",
@@ -176,21 +176,21 @@ mod tests {
             "separator:Thread",
             "action:Thread/Sarah voice…=agent::OpenSarahAdmission:enabled",
             "menu:Window",
-            "action:Window/Minimize=omega::Minimize:enabled",
+            "action:Window/Minimize=zed::Minimize:enabled",
             "separator:Window",
             "menu:Help",
-            "action:Help/Documentation=omega::OpenDocs:enabled",
-            "action:Help/Open Source Licenses=omega::OpenLicenses:enabled",
+            "action:Help/Documentation=zed::OpenDocs:enabled",
+            "action:Help/Open Source Licenses=zed::OpenLicenses:enabled",
         ];
         #[cfg(not(target_os = "macos"))]
         let expected = [
             "menu:Omega",
-            "action:Omega/About Omega=omega::About:enabled",
+            "action:Omega/About Omega=zed::About:enabled",
             "separator:Omega",
-            "action:Omega/Open Settings=omega::OpenSettings:enabled",
-            "action:Omega/Open Legacy Settings=omega::OpenLegacySettings:enabled",
+            "action:Omega/Open Settings=zed::OpenSettings:enabled",
+            "action:Omega/Open Legacy Settings=zed::OpenLegacySettings:enabled",
             "separator:Omega",
-            "action:Omega/Quit Omega=omega::Quit:enabled",
+            "action:Omega/Quit Omega=zed::Quit:enabled",
             "menu:Edit",
             "action:Edit/Undo=editor::Undo:enabled",
             "action:Edit/Redo=editor::Redo:enabled",
@@ -202,11 +202,11 @@ mod tests {
             "separator:Edit",
             "action:Edit/Find=agent::ToggleSearch:enabled",
             "menu:View",
-            "action:View/Zoom In=omega::IncreaseBufferFontSize:enabled",
-            "action:View/Zoom Out=omega::DecreaseBufferFontSize:enabled",
-            "action:View/Reset Zoom=omega::ResetBufferFontSize:enabled",
+            "action:View/Zoom In=zed::IncreaseBufferFontSize:enabled",
+            "action:View/Zoom Out=zed::DecreaseBufferFontSize:enabled",
+            "action:View/Reset Zoom=zed::ResetBufferFontSize:enabled",
             "separator:View",
-            "action:View/Toggle Full Screen=omega::ToggleFullScreen:enabled",
+            "action:View/Toggle Full Screen=zed::ToggleFullScreen:enabled",
             "action:View/Toggle Threads Sidebar=agent::ToggleThreadsSidebar:enabled",
             "separator:View",
             "menu:View/Workbench",
@@ -222,10 +222,10 @@ mod tests {
             "separator:Thread",
             "action:Thread/Sarah voice…=agent::OpenSarahAdmission:enabled",
             "menu:Window",
-            "action:Window/Minimize=omega::Minimize:enabled",
+            "action:Window/Minimize=zed::Minimize:enabled",
             "menu:Help",
-            "action:Help/Documentation=omega::OpenDocs:enabled",
-            "action:Help/Open Source Licenses=omega::OpenLicenses:enabled",
+            "action:Help/Documentation=zed::OpenDocs:enabled",
+            "action:Help/Open Source Licenses=zed::OpenLicenses:enabled",
         ];
         assert_eq!(
             contract,
@@ -236,10 +236,10 @@ mod tests {
         let joined = contract.join("\n");
 
         let action_contract = [
-            ("About Omega", "omega::About"),
-            ("Open Settings", "omega::OpenSettings"),
-            ("Open Legacy Settings", "omega::OpenLegacySettings"),
-            ("Quit Omega", "omega::Quit"),
+            ("About Omega", "zed::About"),
+            ("Open Settings", "zed::OpenSettings"),
+            ("Open Legacy Settings", "zed::OpenLegacySettings"),
+            ("Quit Omega", "zed::Quit"),
             ("Undo", "editor::Undo"),
             ("Redo", "editor::Redo"),
             ("Cut", "editor::Cut"),
@@ -247,10 +247,10 @@ mod tests {
             ("Paste", "editor::Paste"),
             ("Select All", "editor::SelectAll"),
             ("Find", "agent::ToggleSearch"),
-            ("Zoom In", "omega::IncreaseBufferFontSize"),
-            ("Zoom Out", "omega::DecreaseBufferFontSize"),
-            ("Reset Zoom", "omega::ResetBufferFontSize"),
-            ("Toggle Full Screen", "omega::ToggleFullScreen"),
+            ("Zoom In", "zed::IncreaseBufferFontSize"),
+            ("Zoom Out", "zed::DecreaseBufferFontSize"),
+            ("Reset Zoom", "zed::ResetBufferFontSize"),
+            ("Toggle Full Screen", "zed::ToggleFullScreen"),
             ("Toggle Threads Sidebar", "agent::ToggleThreadsSidebar"),
             ("Files", "omega_workbench::SelectFiles"),
             ("Search", "omega_workbench::SelectSearch"),
@@ -261,8 +261,8 @@ mod tests {
             ("New Thread", "agent::NewThread"),
             ("Choose Folder…", "workspace::Open"),
             ("Sarah voice…", "agent::OpenSarahAdmission"),
-            ("Documentation", "omega::OpenDocs"),
-            ("Open Source Licenses", "omega::OpenLicenses"),
+            ("Documentation", "zed::OpenDocs"),
+            ("Open Source Licenses", "zed::OpenLicenses"),
         ];
         for (label, action) in action_contract {
             let needle = format!("/{label}={action}:enabled");

@@ -7,8 +7,8 @@ use gpui::{
     AnyView, DismissEvent, Entity, EntityId, FocusHandle, ManagedView, MouseButton, Subscription,
     Task,
 };
+use omega_actions::toast;
 use ui::{animation::DefaultAnimations, prelude::*};
-use zed_actions::toast;
 
 use crate::Workspace;
 

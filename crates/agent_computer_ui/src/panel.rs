@@ -7,6 +7,7 @@ use gpui::{
     InteractiveElement, IntoElement, ParentElement, Render, SharedString, Styled, Task, WeakEntity,
     Window, div, px,
 };
+use omega_actions::agent_computer::{OpenPanel, StartTurn};
 use omega_effectd::{SharedOmegaEffectdSupervisor, shared_supervisor};
 use serde_json::json;
 use ui::{Button, ButtonStyle, Label, LabelSize, prelude::*};
@@ -14,7 +15,6 @@ use workspace::{
     Workspace,
     dock::{DockPosition, Panel, PanelEvent},
 };
-use zed_actions::agent_computer::{OpenPanel, StartTurn};
 
 use crate::{DEFAULT_CONTROL_PLANE_BASE_URL, DEFAULT_REPO_REF};
 

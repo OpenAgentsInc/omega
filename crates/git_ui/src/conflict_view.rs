@@ -10,6 +10,9 @@ use gpui::{
     Subscription, Task, WeakEntity,
 };
 use language::{Anchor, Buffer, BufferId};
+use omega_actions::agent::{
+    ConflictContent, ResolveConflictedFilesWithAgent, ResolveConflictsWithAgent,
+};
 use project::{
     ConflictRegion, ConflictSet, ConflictSetUpdate, Project,
     git_store::{GitStore, GitStoreEvent, RepositoryEvent},
@@ -19,9 +22,6 @@ use std::{ops::Range, sync::Arc};
 use ui::{ButtonLike, Divider, Tooltip, prelude::*};
 use util::debug_panic;
 use workspace::{HideStatusItem, StatusItemView, Workspace, item::ItemHandle};
-use zed_actions::agent::{
-    ConflictContent, ResolveConflictedFilesWithAgent, ResolveConflictsWithAgent,
-};
 
 pub(crate) struct ConflictAddon {
     buffers: HashMap<BufferId, BufferConflicts>,

@@ -6,6 +6,7 @@ use gpui::{
     Task, UniformListScrollHandle, Window, actions, canvas, div, list, prelude::*, uniform_list,
 };
 use head::Head;
+use omega_actions::editor::{MoveDown, MoveUp};
 use schemars::JsonSchema;
 use serde::Deserialize;
 use std::{
@@ -18,7 +19,6 @@ use ui::{
 use ui_input::ErasedEditorEvent;
 use util::ResultExt;
 use workspace::ModalView;
-use zed_actions::editor::{MoveDown, MoveUp};
 
 mod footer;
 mod head;

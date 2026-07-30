@@ -19,4 +19,4 @@ gpui.workspace = true
 language_model.workspace = true
 smallvec.workspace = true
 ui.workspace = true
-zed_actions.workspace = true
+omega_actions.workspace = true

@@ -2,10 +2,10 @@ use app_identity::{PRODUCT_BUG_REPORT_URL, PRODUCT_FEATURE_REQUEST_URL, PRODUCT_
 use client::telemetry;
 use extension_host::ExtensionStore;
 use gpui::{App, ClipboardItem, PromptLevel, actions};
+use omega_actions::feedback::{EmailOpenAgents, FileBugReport, RequestFeature};
 use system_specs::{CopySystemSpecsIntoClipboard, SystemSpecs};
 use util::ResultExt;
 use workspace::Workspace;
-use zed_actions::feedback::{EmailOpenAgents, FileBugReport, RequestFeature};
 
 actions!(
     omega,

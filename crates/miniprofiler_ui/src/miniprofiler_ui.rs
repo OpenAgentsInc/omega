@@ -14,6 +14,7 @@ use gpui::{
     WindowBounds, WindowOptions, div, prelude::FluentBuilder, profiler, px, relative, size,
     uniform_list,
 };
+use omega_actions::OpenPerformanceProfiler;
 use rpc::{AnyProtoClient, proto};
 use settings::{RegisterSetting, Settings, SettingsContent, SettingsStore};
 use std::any::TypeId;
@@ -26,7 +27,6 @@ use workspace::{
         WithScrollbar, h_flex, v_flex,
     },
 };
-use zed_actions::OpenPerformanceProfiler;
 
 const NANOS_PER_MS: u128 = 1_000_000;
 const VISIBLE_WINDOW_NANOS: u128 = 10 * 1_000_000_000;

@@ -45,7 +45,7 @@ done
 
 export ZED_BUNDLE=true
 
-channel=$(<crates/zed/RELEASE_CHANNEL)
+channel=$(<crates/omega/RELEASE_CHANNEL)
 target_dir="${CARGO_TARGET_DIR:-target}"
 
 version="$(script/get-crate-version zed)"
@@ -167,9 +167,9 @@ cp $(find_libs) "${zed_dir}/lib"
 
 # Icons
 mkdir -p "${zed_dir}/share/icons/hicolor/512x512/apps"
-cp "crates/zed/resources/app-icon$suffix.png" "${zed_dir}/share/icons/hicolor/512x512/apps/omega.png"
+cp "crates/omega/resources/app-icon$suffix.png" "${zed_dir}/share/icons/hicolor/512x512/apps/omega.png"
 mkdir -p "${zed_dir}/share/icons/hicolor/1024x1024/apps"
-cp "crates/zed/resources/app-icon$suffix@2x.png" "${zed_dir}/share/icons/hicolor/1024x1024/apps/omega.png"
+cp "crates/omega/resources/app-icon$suffix@2x.png" "${zed_dir}/share/icons/hicolor/1024x1024/apps/omega.png"
 
 # .desktop
 export DO_STARTUP_NOTIFY="true"
@@ -195,7 +195,7 @@ else
 fi
 
 mkdir -p "${zed_dir}/share/applications"
-envsubst < "crates/zed/resources/zed.desktop.in" > "${zed_dir}/share/applications/$APP_ID.desktop"
+envsubst < "crates/omega/resources/zed.desktop.in" > "${zed_dir}/share/applications/$APP_ID.desktop"
 chmod +x "${zed_dir}/share/applications/$APP_ID.desktop"
 
 # Copy generated licenses so they'll end up in archive too

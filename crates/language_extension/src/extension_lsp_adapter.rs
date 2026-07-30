@@ -204,7 +204,7 @@ impl DynLspInstaller for ExtensionLspAdapter {
                 };
                 let path = self.extension.path_from_extension(command_path);
 
-                // TODO: This should now be done via the `zed::make_file_executable` function in
+                // TODO: This should now be done via the `omega::make_file_executable` function in
                 // Zed extension API, but we're leaving these existing usages in place temporarily
                 // to avoid any compatibility issues between Zed and the extension versions.
                 //

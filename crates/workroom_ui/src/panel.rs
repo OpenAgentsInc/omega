@@ -31,6 +31,14 @@ use gpui::{
     Focusable, Global, InteractiveElement, IntoElement, ParentElement, Render, SharedString,
     Styled, Task, WeakEntity, Window, div, px,
 };
+use omega_actions::{
+    OpenSettingsPage,
+    workroom::{
+        ApproveSarahVoiceCommand, EndVoice, FocusComposer, InterruptTurn, InterruptVoice,
+        OpenPanel, PrepareVoiceAdmission, RejectSarahVoiceCommand, RetryVoice, SendMessage,
+        StartVoice, ToggleVoiceMute,
+    },
+};
 use omega_effectd::{
     BindingProjection, BindingState, Issue31GrantProjection, OpenAgentsBinding,
     SharedOmegaEffectdSupervisor, shared_supervisor, try_openagents_binding,
@@ -44,14 +52,6 @@ use uuid::Uuid;
 use workspace::{
     Save, Workspace,
     dock::{DockPosition, Panel, PanelEvent},
-};
-use zed_actions::{
-    OpenSettingsPage,
-    workroom::{
-        ApproveSarahVoiceCommand, EndVoice, FocusComposer, InterruptTurn, InterruptVoice,
-        OpenPanel, PrepareVoiceAdmission, RejectSarahVoiceCommand, RetryVoice, SendMessage,
-        StartVoice, ToggleVoiceMute,
-    },
 };
 
 use crate::attention::{AttentionMarker, OMEGA_AUTONOMOUS_TICK_ENABLED, empty_room_is_honest};

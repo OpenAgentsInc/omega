@@ -1,7 +1,7 @@
 use gpui::{Action, ClickEvent, FocusHandle, prelude::*};
 use language_model::DisabledReason;
+use omega_actions::agent::ToggleModelSelector;
 use ui::{Chip, ElevationIndex, KeyBinding, ListItem, ListItemSpacing, Tooltip, prelude::*};
-use zed_actions::agent::ToggleModelSelector;
 
 use crate::CycleFavoriteModels;
 

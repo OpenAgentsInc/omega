@@ -21,7 +21,7 @@ use itertools::Itertools;
 use project::{AgentId, ProjectItem};
 use serde::{Deserialize, Serialize};
 
-use zed_actions::{
+use omega_actions::{
     DecreaseBufferFontSize, IncreaseBufferFontSize, ResetBufferFontSize,
     agent::{
         AddSelectionToThread, ConflictContent, LogoutAgent, OpenSettings, ReauthenticateAgent,
@@ -1786,7 +1786,7 @@ const MAX_VISIBLE_SARAH_TRANSCRIPT_ROWS: usize = 100;
 fn render_sarah_voice_artifacts(
     artifacts: &crate::composer_voice::SarahVoiceSessionArtifacts,
 ) -> AnyElement {
-    use zed_actions::workroom::{ApproveSarahVoiceCommand, RejectSarahVoiceCommand};
+    use omega_actions::workroom::{ApproveSarahVoiceCommand, RejectSarahVoiceCommand};
 
     let hidden_transcript_rows = artifacts
         .transcript
@@ -3293,7 +3293,7 @@ impl AgentPanel {
         self.focus_handle.focus(window, cx);
         window.defer(cx, |window, cx| {
             window.dispatch_action(
-                zed_actions::workroom::PrepareVoiceAdmission.boxed_clone(),
+                omega_actions::workroom::PrepareVoiceAdmission.boxed_clone(),
                 cx,
             );
         });
@@ -4983,7 +4983,7 @@ impl AgentPanel {
     /// buffer. Omega answers it with the agent.
     ///
     /// The wait is a bounded poll rather than a subscription because the agent
-    /// panel is added to the dock by an async task in `crates/zed`, this runs
+    /// panel is added to the dock by an async task in `crates/omega`, this runs
     /// from `Workspace::new_local`'s init callback, and `Workspace` emits no
     /// "panel added" event to subscribe to. It gives up after a second instead
     /// of holding a task for the window's lifetime: a window with no agent
@@ -5411,7 +5411,7 @@ impl AgentPanel {
                                 .tooltip(Tooltip::text("Settings"))
                                 .on_click(|_, window, cx| {
                                     window.dispatch_action(
-                                        zed_actions::OpenSettings.boxed_clone(),
+                                        omega_actions::OpenSettings.boxed_clone(),
                                         cx,
                                     );
                                 }),
@@ -5507,7 +5507,7 @@ impl AgentPanel {
                                 )
                                 .on_click(|_, window, cx| {
                                     window.dispatch_action(
-                                        zed_actions::OpenSettings.boxed_clone(),
+                                        omega_actions::OpenSettings.boxed_clone(),
                                         cx,
                                     );
                                 }),
@@ -5538,12 +5538,12 @@ impl AgentPanel {
                                 .color(Color::Muted),
                         )
                         .key_binding(KeyBinding::for_action(
-                            &zed_actions::command_palette::Toggle,
+                            &omega_actions::command_palette::Toggle,
                             cx,
                         ))
                         .on_click(|_, window, cx| {
                             window.dispatch_action(
-                                zed_actions::command_palette::Toggle.boxed_clone(),
+                                omega_actions::command_palette::Toggle.boxed_clone(),
                                 cx,
                             );
                         }),
@@ -6763,8 +6763,8 @@ impl AgentPanel {
         cx: &mut Context<Self>,
     ) {
         window.dispatch_action(
-            Box::new(zed_actions::OpenSettingsAt {
-                path: zed_actions::AGENT_SKILLS_SETTINGS_PATH.to_string(),
+            Box::new(omega_actions::OpenSettingsAt {
+                path: omega_actions::AGENT_SKILLS_SETTINGS_PATH.to_string(),
                 target: None,
             }),
             cx,
@@ -8082,12 +8082,12 @@ impl agent::SiblingThreadHost for AgentPanelSiblingHost {
                 // detached HEAD state — the agent can attach to a branch via
                 // git afterwards.
                 let branch_target = match request.base_ref.as_ref() {
-                    Some(ref_name) => zed_actions::NewWorktreeBranchTarget::ExistingBranch {
+                    Some(ref_name) => omega_actions::NewWorktreeBranchTarget::ExistingBranch {
                         name: ref_name.clone(),
                     },
-                    None => zed_actions::NewWorktreeBranchTarget::CurrentBranch,
+                    None => omega_actions::NewWorktreeBranchTarget::CurrentBranch,
                 };
-                let action = zed_actions::CreateWorktree {
+                let action = omega_actions::CreateWorktree {
                     worktree_name: request.worktree_name.clone(),
                     branch_target,
                 };
@@ -8924,7 +8924,7 @@ impl AgentPanel {
                         if !showing_terminal {
                             menu = menu.header("MCP Servers").action(
                                 "Add Server…",
-                                Box::new(zed_actions::OpenSettingsAt {
+                                Box::new(omega_actions::OpenSettingsAt {
                                     path: "context_servers".to_string(),
                                     target: None,
                                 }),
@@ -8932,9 +8932,9 @@ impl AgentPanel {
                             if offers_editor_surfaces {
                                 menu = menu.action(
                                     "Install New Servers…",
-                                    Box::new(zed_actions::Extensions {
+                                    Box::new(omega_actions::Extensions {
                                         category_filter: Some(
-                                            zed_actions::ExtensionCategoryFilter::ContextServers,
+                                            omega_actions::ExtensionCategoryFilter::ContextServers,
                                         ),
                                         id: None,
                                     }),
@@ -9050,7 +9050,7 @@ impl AgentPanel {
 
     fn render_sarah_admission(&self, cx: &mut Context<Self>) -> AnyElement {
         use crate::composer_voice::SarahVoiceAdmissionProjection;
-        use zed_actions::workroom::{EndVoice, RetryVoice, StartVoice, ToggleVoiceMute};
+        use omega_actions::workroom::{EndVoice, RetryVoice, StartVoice, ToggleVoiceMute};
 
         let projection = self.sarah_voice_admission.read(cx).clone();
         let state_label = match &projection {
@@ -9599,8 +9599,10 @@ impl AgentPanel {
                                 .icon_color(Color::Muted)
                                 .handler({
                                     move |window, cx| {
-                                        window
-                                            .dispatch_action(Box::new(zed_actions::AcpRegistry), cx)
+                                        window.dispatch_action(
+                                            Box::new(omega_actions::AcpRegistry),
+                                            cx,
+                                        )
                                     }
                                 }),
                         )
@@ -13790,7 +13792,7 @@ impl Render for AgentPanel {
                     }),
                 )
                 .on_action(cx.listener(
-                    |this, _: &zed_actions::project_panel::ToggleFocus, window, cx| {
+                    |this, _: &omega_actions::project_panel::ToggleFocus, window, cx| {
                         if this.workbench_files_panel_handed_off {
                             cx.stop_propagation();
                             this.select_work_surface(

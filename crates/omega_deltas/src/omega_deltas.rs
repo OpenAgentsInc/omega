@@ -178,6 +178,7 @@ pub const ENFORCED_DELTAS: &[&str] = &[
     "OMEGA-DELTA-0187",
     "OMEGA-DELTA-0188",
     "OMEGA-DELTA-0189",
+    "OMEGA-DELTA-0190",
 ];
 
 /// The concise product contract adjacent to the delta registry.
@@ -888,7 +889,7 @@ pub const SUBAGENT_TRANSCRIPT_TOOL_NAME: &str = "read_subagent_transcript";
 
 /// OMEGA-DELTA-0036. The uninstall script embedded in the shipped `cli`.
 pub const UNINSTALL_SCRIPT_PATH: &str = "script/uninstall.sh";
-pub const LOCAL_LAUNCHER_PATH: &str = "script/zed-local";
+pub const LOCAL_LAUNCHER_PATH: &str = "script/omega-local";
 
 /// OMEGA-DELTA-0036. Where the removal plan is derived from `paths::`.
 pub const UNINSTALL_PLAN_PATH: &str = "crates/cli/src/uninstall.rs";
@@ -1039,7 +1040,7 @@ pub const SYSTEM_NOTE_REFUSAL: &str =
     "Agent threads do not expose an owner-visible system-note authority.";
 
 /// OMEGA-DELTA-0046. The native Metal proof for the Exo workspace.
-pub const VISUAL_TEST_RUNNER_PATH: &str = "crates/zed/src/visual_test_runner.rs";
+pub const VISUAL_TEST_RUNNER_PATH: &str = "crates/omega/src/visual_test_runner.rs";
 
 /// OMEGA-DELTA-0030. The typed start command sent to `omega-effectd`.
 pub const FULL_AUTO_DISPATCH_PATH: &str = "crates/full_auto_ui/src/dispatch.rs";
@@ -1190,7 +1191,7 @@ pub const EFFECTD_PATH: &str = "crates/omega_effectd/src/omega_effectd.rs";
 pub const NATIVE_AGENT_IDENTITY_PATH: &str = "crates/agent/src/agent.rs";
 
 /// OMEGA-DELTA-0040. The startup path that opens Omega's first window.
-pub const STARTUP_PATH: &str = "crates/zed/src/main.rs";
+pub const STARTUP_PATH: &str = "crates/omega/src/main.rs";
 
 /// OMEGA-DELTA-0040. The explicit editor-setup onboarding page. The first-run
 /// journey was removed by omega#164; this file must never regrow a startup
@@ -1278,7 +1279,7 @@ pub const REMOVED_FILES: &[&str] = &[
     // OMEGA-DELTA-0006
     "crates/extensions_ui/src/extension_suggest.rs",
     "crates/recent_projects/src/dev_container_suggest.rs",
-    "crates/zed/src/zed/move_to_applications.rs",
+    "crates/omega/src/zed/move_to_applications.rs",
     // OMEGA-DELTA-0009
     "crates/workspace/src/security_modal.rs",
     // OMEGA-DELTA-0012
@@ -1345,7 +1346,7 @@ pub const FORBIDDEN_KEYMAP_NAMESPACES: &[(&str, &str)] = &[
     ("OMEGA-DELTA-0186", "edit_prediction::"),
     ("OMEGA-DELTA-0186", "zeta::"),
     ("OMEGA-DELTA-0186", "recent_projects::"),
-    // The `projects::` actions survive in `zed_actions`, but every handler
+    // The `projects::` actions survive in `omega_actions`, but every handler
     // died with `recent_projects`/`dev_container`, so a binding is a dead key
     // wearing a working keystroke.
     ("OMEGA-DELTA-0186", "projects::"),
@@ -1356,7 +1357,7 @@ pub const FORBIDDEN_KEYMAP_NAMESPACES: &[(&str, &str)] = &[
     // Preview / diagnostics / outline / repl / tab-switcher batch (omega#162).
     ("OMEGA-DELTA-0186", "diagnostics::"),
     ("OMEGA-DELTA-0186", "outline_panel::"),
-    // `outline::Toggle` is still declared in `zed_actions` (breadcrumbs /
+    // `outline::Toggle` is still declared in `omega_actions` (breadcrumbs /
     // buffer_search reference the type), but the buffer-outline picker crate
     // that handled it is gone — a binding is a dead key. Quoted so the
     // contains-check does not also match other `outline::` substrings.
@@ -1367,7 +1368,7 @@ pub const FORBIDDEN_KEYMAP_NAMESPACES: &[(&str, &str)] = &[
     ("OMEGA-DELTA-0186", "csv_preview::"),
     ("OMEGA-DELTA-0186", "svg_preview::"),
     ("OMEGA-DELTA-0186", "markdown_preview::"),
-    // Preview open actions live in `zed_actions` under short namespaces shared
+    // Preview open actions live in `omega_actions` under short namespaces shared
     // with kept markdown rendering (`markdown::Copy`), so forbid the exact
     // dead open actions rather than the whole `markdown::` prefix. SVG and
     // notebook actions only served the deleted preview/repl crates.
@@ -1461,7 +1462,7 @@ pub const REQUIRED_KEYMAP_BINDINGS: &[RequiredKeymapBinding] = &[
         keymap: "assets/keymaps/default-macos.json",
         keystroke: "ctrl-cmd-a",
         action: "agent::ToggleFocus",
-        declared_in: "crates/zed_actions/src/lib.rs",
+        declared_in: "crates/omega_actions/src/lib.rs",
     },
 ];
 
@@ -2383,7 +2384,7 @@ pub fn normalize_prose(text: &str) -> String {
 /// Whether `text` reads as a sentence rather than an identifier or a path.
 ///
 /// Three tokens or more, at least two of them plain alphabetic words. This is
-/// the one judgement in the whole derivation: it keeps `crates/zed/src` and
+/// the one judgement in the whole derivation: it keeps `crates/omega/src` and
 /// `X-Zed-Predict-Edits-Mode` out of a registry that would otherwise be mostly
 /// noise. It is deliberately loose — `Zed Plex Sans` is three words and is in
 /// the inventory, classified, rather than quietly filtered away.
@@ -2923,7 +2924,7 @@ pub const ZERO_BASE_MODE_PATH: &str = "crates/omega_zero_base/src/omega_zero_bas
 
 /// OMEGA-DELTA-0048, 0050, 0052. The surface: the palette restriction and the
 /// action gate. It carried the visible way out until `OMEGA-DELTA-0052`.
-pub const ZERO_BASE_UI_PATH: &str = "crates/zed/src/omega_zero_base_ui.rs";
+pub const ZERO_BASE_UI_PATH: &str = "crates/omega/src/omega_zero_base_ui.rs";
 
 /// OMEGA-DELTA-0118. The rows zero base's threads sidebar lists, and the
 /// decision about what happens when the recorded executor is not the current
@@ -2951,7 +2952,7 @@ pub const PUBLIC_CHANNEL_REGISTRY_FIXTURE_PATH: &str =
 
 /// OMEGA-DELTA-0048, 0053. Where panels are added, where zero base skips them,
 /// and where the mode seals the window after the identity gate.
-pub const WORKSPACE_INITIALIZATION_PATH: &str = "crates/zed/src/zed.rs";
+pub const WORKSPACE_INITIALIZATION_PATH: &str = "crates/omega/src/zed.rs";
 
 /// OMEGA-DELTA-0048. The one initializer shared by shipped and proof front doors.
 pub const AGENT_UI_INITIALIZATION_PATH: &str = "crates/agent_ui/src/agent_ui.rs";
@@ -2968,7 +2969,7 @@ pub const WORKSPACE_RENDER_PATH: &str = "crates/workspace/src/workspace.rs";
 pub const WORKDIR_PATH: &str = "crates/omega_workdir/src/omega_workdir.rs";
 
 /// OMEGA-DELTA-0054, 0052. The argument parser and the startup open path.
-pub const STARTUP_OPEN_PATH: &str = "crates/zed/src/main.rs";
+pub const STARTUP_OPEN_PATH: &str = "crates/omega/src/main.rs";
 
 /// OMEGA-DELTA-0048. The palette filter the restriction extends.
 pub const COMMAND_PALETTE_FILTER_PATH: &str =
@@ -3726,7 +3727,7 @@ mod tests {
         for required in [
             "Connect an AI provider",
             "Configure Providers",
-            "zed_actions::agent::OpenSettings",
+            "omega_actions::agent::OpenSettings",
             "Configure edit predictions",
             "Configure Copilot",
         ] {
@@ -4383,7 +4384,7 @@ mod tests {
     #[test]
     fn the_plist_fragment_parser_reaches_real_values() {
         let policy = brand_policy().expect("brand gate policy parses");
-        let path = repository_path("crates/zed/resources/info/Permissions.plist");
+        let path = repository_path("crates/omega/resources/info/Permissions.plist");
         let source = std::fs::read_to_string(&path).expect("Permissions.plist is readable");
         let values = plist_fragment_values(&source);
         let microphone = values
@@ -5200,7 +5201,7 @@ mod tests {
     /// pass if it were added beside the buffer rather than instead of it.
     #[test]
     fn a_fresh_window_opens_on_the_agent() {
-        let path = repository_path("crates/zed/src/main.rs");
+        let path = repository_path("crates/omega/src/main.rs");
         let source = std::fs::read_to_string(&path).expect("zed main is readable");
 
         assert!(
@@ -5239,7 +5240,7 @@ mod tests {
     /// break a user keybinding rather than fail anything.
     #[test]
     fn full_auto_is_folded_into_the_chat_panel() {
-        let zed_path = repository_path("crates/zed/src/zed.rs");
+        let zed_path = repository_path("crates/omega/src/zed.rs");
         let zed = std::fs::read_to_string(&zed_path).expect("zed.rs is readable");
         assert!(
             !zed.contains("FullAutoPanel"),
@@ -5565,7 +5566,7 @@ mod tests {
         assert!(is_prose(
             "Click 'Connect' below to start using Ollama in Omega"
         ));
-        assert!(!is_prose("crates/zed/src/main.rs"));
+        assert!(!is_prose("crates/omega/src/main.rs"));
         assert!(!is_prose("X-Zed-Predict-Edits-Mode"));
         assert!(
             is_prose("Zed Plex Sans"),
@@ -5620,7 +5621,7 @@ mod tests {
             "Zed (Default)",
             "Zed Repository",
             "zed",
-            "crates/zed/src",
+            "crates/omega/src",
             "X-Zed-Predict-Edits-Mode",
             "zed_llm_client",
         ] {
@@ -8719,7 +8720,7 @@ mod tests {
         // one shape now, and the ordering the branch used to carry is the
         // function's own.
         let panels_body = function_body(&panels, "initialize_panels")
-            .expect("OMEGA-DELTA-0048: the panel initializer in crates/zed/src/zed.rs is gone");
+            .expect("OMEGA-DELTA-0048: the panel initializer in crates/omega/src/zed.rs is gone");
         assert!(
             panels_body.contains("agent_ui::initialize_workbench_panels(")
                 && panels_body.find("agent_ui::initialize_workbench_panels(")
@@ -8940,7 +8941,7 @@ mod tests {
 
         for scene in ["omega_zero_base_wide", "omega_zero_base_narrow"] {
             let baseline = repository_path(&format!(
-                "crates/zed/test_fixtures/visual_tests/{scene}.png"
+                "crates/omega/test_fixtures/visual_tests/{scene}.png"
             ));
             let recorded = std::fs::metadata(&baseline).unwrap_or_else(|error| {
                 panic!(
@@ -9557,7 +9558,7 @@ mod tests {
     /// OMEGA-DELTA-0054. A thread that holds file tools has something to point
     /// them at, or says so in one line.
     ///
-    /// Zero base opened no project. `crates/zed/src/zed.rs` said so in its own
+    /// Zero base opened no project. `crates/omega/src/zed.rs` said so in its own
     /// comment — "no project is opened, so there is no buffer for them to show"
     /// — and the consequence was not a missing buffer. The workspace had no
     /// worktrees, so `grep`, `find_path`, `list_directory`, `read_file` and
@@ -10084,7 +10085,7 @@ mod tests {
     /// The flag has to exist, the startup path has to reach the driver, and the
     /// driver has to go through the panel rather than around it. The last is
     /// the one worth a mechanical check: `AcpThread::send` is public and
-    /// reachable from `crates/zed`, so the shortest way to make this flag
+    /// reachable from `crates/omega`, so the shortest way to make this flag
     /// "work" is to build a prompt and push it at the connection — which would
     /// skip the composer, the mention resolution, the queue and the send
     /// disposition, and would prove nothing about the path a person uses. A
@@ -17729,7 +17730,7 @@ mod tests {
             "It is the second hop behind a visible settings entry.",
         );
         assert!(
-            manage_skills.contains("zed_actions::OpenSettingsAt {"),
+            manage_skills.contains("omega_actions::OpenSettingsAt {"),
             "OMEGA-DELTA-0125: `manage_skills` in {} no longer opens the \
              settings window.",
             panel_path.display()
@@ -19568,7 +19569,7 @@ mod tests {
             "ThreadError::AuthenticationFailed { provider }",
             "render_provider_configuration_error(",
             "open_llm_providers_settings_button(Some(provider), cx)",
-            "zed_actions::OpenSettingsAt",
+            "omega_actions::OpenSettingsAt",
             "path: \"llm_providers\".to_string()",
         ] {
             assert!(
@@ -19639,7 +19640,7 @@ mod tests {
         for required in [
             "\"open-omega-settings\"",
             "IconName::Settings",
-            "zed_actions::OpenSettings.boxed_clone()",
+            "omega_actions::OpenSettings.boxed_clone()",
         ] {
             assert!(
                 sidebar.contains(required),
@@ -19691,7 +19692,7 @@ mod tests {
     /// launched with the opt-in flag.
     #[test]
     fn exo_is_opt_in_for_each_launch() {
-        let main = without_comments(&read_repository_file("crates/zed/src/main.rs"));
+        let main = without_comments(&read_repository_file("crates/omega/src/main.rs"));
         for required in [
             "enable_exo: bool",
             "if args.enable_exo",
@@ -19753,17 +19754,17 @@ mod tests {
     /// inherited settings editor is explicitly Legacy Settings.
     #[test]
     fn focused_settings_separates_provider_keys_from_legacy_settings() {
-        let actions = without_comments(&read_repository_file("crates/zed_actions/src/lib.rs"));
+        let actions = without_comments(&read_repository_file("crates/omega_actions/src/lib.rs"));
         assert!(
             actions.contains("OpenLegacySettings"),
             "OMEGA-DELTA-0145: the full inherited editor no longer has a \
              separately named Legacy Settings action."
         );
 
-        let menus = without_comments(&read_repository_file("crates/zed/src/zed/app_menus.rs"));
+        let menus = without_comments(&read_repository_file("crates/omega/src/zed/app_menus.rs"));
         for required in [
-            "\"Open Settings\", zed_actions::OpenSettings",
-            "\"Open Legacy Settings\", zed_actions::OpenLegacySettings",
+            "\"Open Settings\", omega_actions::OpenSettings",
+            "\"Open Legacy Settings\", omega_actions::OpenLegacySettings",
         ] {
             assert!(
                 menus.contains(required),
@@ -19947,7 +19948,7 @@ mod tests {
     /// nobody can move, and every source check about what it renders passes.
     #[test]
     fn omega_installs_the_titlebar_view_it_renders() {
-        let main_path = "crates/zed/src/main.rs";
+        let main_path = "crates/omega/src/main.rs";
         let main = without_comments(&read_repository_file(main_path));
         assert!(
             main.contains("title_bar::init(cx);"),
@@ -21465,7 +21466,7 @@ mod tests {
             "filesystem path open",
         );
         let registry = agent_ui
-            .split_once("_: &zed_actions::AcpRegistry")
+            .split_once("_: &omega_actions::AcpRegistry")
             .and_then(|(_, source)| source.split_once("cx.observe_new(ManageProfilesModal"))
             .map(|(source, _)| source)
             .expect("OMEGA-DELTA-0174: cannot isolate the ACP registry action");
@@ -21776,7 +21777,7 @@ mod tests {
             manifest_path.display()
         );
 
-        let zed = read_repository_file("crates/zed/src/zed.rs");
+        let zed = read_repository_file("crates/omega/src/zed.rs");
         let workspace_setup = zed
             .split_once("cx.observe_new(move |workspace: &mut Workspace")
             .and_then(|(_, source)| source.split_once("fn initialize_pane"))
@@ -21933,7 +21934,7 @@ mod tests {
     /// the two deferred conversation choices state why they cannot be used.
     #[test]
     fn the_default_surface_has_one_honest_menu_contract() {
-        let menus = without_comments(&read_repository_file("crates/zed/src/zed/app_menus.rs"));
+        let menus = without_comments(&read_repository_file("crates/omega/src/zed/app_menus.rs"));
         for forbidden in [
             "Menu::new(\"File\")",
             "Menu::new(\"Selection\")",
@@ -22006,10 +22007,10 @@ mod tests {
             );
         }
 
-        let zed = without_comments(&read_repository_file("crates/zed/src/zed.rs"));
+        let zed = without_comments(&read_repository_file("crates/omega/src/zed.rs"));
         let licenses = zed
-            .split_once("cx.on_action(|_: &zed_actions::OpenLicenses")
-            .and_then(|(_, source)| source.split_once(".on_action(|&zed_actions::OpenKeymapFile"))
+            .split_once("cx.on_action(|_: &omega_actions::OpenLicenses")
+            .and_then(|(_, source)| source.split_once(".on_action(|&omega_actions::OpenKeymapFile"))
             .map(|(source, _)| source)
             .expect("OMEGA-DELTA-0176: cannot isolate OpenLicenses");
         let reveal = licenses
@@ -22028,7 +22029,7 @@ mod tests {
             "Sarah voice…",
             ".action(Box::new(OpenSarahAdmission))",
             ".disabled(unavailable_reason.is_some())",
-            "Box::new(zed_actions::AcpRegistry)",
+            "Box::new(omega_actions::AcpRegistry)",
             "_: &ToggleThreadsSidebar",
             "_: &workbench_shell::SelectFiles",
             "_: &workbench_shell::SelectSearch",
@@ -22471,7 +22472,7 @@ mod tests {
             );
         }
 
-        let menus = read_repository_file("crates/zed/src/zed/app_menus.rs");
+        let menus = read_repository_file("crates/omega/src/zed/app_menus.rs");
         assert!(menus.contains("Sarah voice…"));
         assert!(menus.contains("agent_ui::OpenSarahAdmission"));
         assert!(!menus.contains("Sarah Voice — Voice access is not available yet"));
@@ -22967,7 +22968,7 @@ mod tests {
             "omega-composer-executor-trigger",
             "named_direct_agent_label",
             "Add More Agents…",
-            "zed_actions::AcpRegistry",
+            "omega_actions::AcpRegistry",
             "row.is_selectable()",
         ] {
             assert!(
@@ -23071,7 +23072,7 @@ mod tests {
             "omega_tester_channel_relay_unavailable",
         ] {
             let baseline = repository_path(&format!(
-                "crates/zed/test_fixtures/visual_tests/{scene}.png"
+                "crates/omega/test_fixtures/visual_tests/{scene}.png"
             ));
             let recorded = std::fs::metadata(&baseline).unwrap_or_else(|error| {
                 panic!(

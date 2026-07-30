@@ -393,6 +393,7 @@ dependencies = [
  "editor",
  "futures 0.3.32",
  "gpui",
+ "omega_actions",
  "omega_effectd",
  "serde",
  "serde_json",
@@ -401,7 +402,6 @@ dependencies = [
  "ui",
  "util",
  "workspace",
- "zed_actions",
 ]
 
 [[package]]
@@ -552,6 +552,7 @@ dependencies = [
  "node_runtime",
  "nostr",
  "notifications",
+ "omega_actions",
  "omega_agent_detect",
  "omega_audience",
  "omega_community",
@@ -615,7 +616,6 @@ dependencies = [
  "vim",
  "watch",
  "workspace",
- "zed_actions",
 ]
 
 [[package]]
@@ -648,9 +648,9 @@ version = "0.1.0"
 dependencies = [
  "gpui",
  "language_model",
+ "omega_actions",
  "smallvec",
  "ui",
- "zed_actions",
 ]
 
 [[package]]
@@ -2000,6 +2000,7 @@ dependencies = [
  "lsp",
  "markdown",
  "multi_buffer",
+ "omega_actions",
  "project",
  "prompt_store",
  "rand 0.9.4",
@@ -2010,7 +2011,6 @@ dependencies = [
  "theme_settings",
  "ui",
  "util",
- "zed_actions",
 ]
 
 [[package]]
@@ -3227,6 +3227,7 @@ dependencies = [
  "language",
  "log",
  "menu",
+ "omega_actions",
  "picker",
  "postage",
  "project",
@@ -3239,7 +3240,6 @@ dependencies = [
  "ui",
  "util",
  "workspace",
- "zed_actions",
 ]
 
 [[package]]
@@ -4850,6 +4850,7 @@ dependencies = [
  "markdown",
  "menu",
  "multi_buffer",
+ "omega_actions",
  "ordered-float 2.10.1",
  "parking_lot",
  "pretty_assertions",
@@ -4897,7 +4898,6 @@ dependencies = [
  "uuid",
  "vim_mode_setting",
  "workspace",
- "zed_actions",
  "zlog",
  "ztracing",
 ]
@@ -5475,6 +5475,7 @@ dependencies = [
  "language",
  "log",
  "num-format",
+ "omega_actions",
  "picker",
  "project",
  "release_channel",
@@ -5490,7 +5491,6 @@ dependencies = [
  "util",
  "vim_mode_setting",
  "workspace",
- "zed_actions",
 ]
 
 [[package]]
@@ -5623,11 +5623,11 @@ dependencies = [
  "client",
  "extension_host",
  "gpui",
+ "omega_actions",
  "system_specs",
  "urlencoding",
  "util",
  "workspace",
- "zed_actions",
 ]
 
 [[package]]
@@ -5647,6 +5647,7 @@ dependencies = [
  "gpui",
  "language",
  "menu",
+ "omega_actions",
  "open_path_prompt",
  "picker",
  "picker_preview",
@@ -5662,7 +5663,6 @@ dependencies = [
  "ui",
  "util",
  "workspace",
- "zed_actions",
  "zlog",
 ]
 
@@ -6004,6 +6004,7 @@ dependencies = [
  "gpui",
  "log",
  "nostr",
+ "omega_actions",
  "omega_effectd",
  "omega_front_door",
  "omega_zero_base",
@@ -6019,7 +6020,6 @@ dependencies = [
  "util",
  "workroom_receipts",
  "workspace",
- "zed_actions",
 ]
 
 [[package]]
@@ -6398,6 +6398,7 @@ dependencies = [
  "menu",
  "multi_buffer",
  "notifications",
+ "omega_actions",
  "panel",
  "picker",
  "pretty_assertions",
@@ -6431,7 +6432,6 @@ dependencies = [
  "watch",
  "windows 0.61.3",
  "workspace",
- "zed_actions",
  "zeroize",
  "zlog",
  "ztracing",
@@ -8053,6 +8053,7 @@ dependencies = [
  "fuzzy",
  "gpui",
  "language",
+ "omega_actions",
  "project",
  "serde_json",
  "serde_json_lenient",
@@ -8061,7 +8062,6 @@ dependencies = [
  "util",
  "util_macros",
  "workspace",
- "zed_actions",
 ]
 
 [[package]]
@@ -8442,6 +8442,7 @@ dependencies = [
  "log",
  "menu",
  "notifications",
+ "omega_actions",
  "paths",
  "project",
  "search",
@@ -8458,7 +8459,6 @@ dependencies = [
  "ui_input",
  "util",
  "workspace",
- "zed_actions",
 ]
 
 [[package]]
@@ -8848,6 +8848,7 @@ dependencies = [
  "language",
  "lsp",
  "menu",
+ "omega_actions",
  "project",
  "proto",
  "release_channel",
@@ -8862,7 +8863,6 @@ dependencies = [
  "ui",
  "util",
  "workspace",
- "zed_actions",
  "zlog",
 ]
 
@@ -9927,6 +9927,7 @@ version = "0.1.0"
 dependencies = [
  "command_palette_hooks",
  "gpui",
+ "omega_actions",
  "rpc",
  "serde_json",
  "settings",
@@ -9934,7 +9935,6 @@ dependencies = [
  "theme_settings",
  "util",
  "workspace",
- "zed_actions",
 ]
 
 [[package]]
@@ -10331,13 +10331,13 @@ dependencies = [
  "component",
  "futures-lite 1.13.0",
  "gpui",
+ "omega_actions",
  "rpc",
  "sum_tree",
  "time",
  "ui",
  "util",
  "workspace",
- "zed_actions",
 ]
 
 [[package]]
@@ -11027,6 +11027,174 @@ dependencies = [
 ]
 
 [[package]]
+name = "omega"
+version = "0.2.0"
+dependencies = [
+ "acp_thread",
+ "acp_tools",
+ "action_log",
+ "activity_indicator",
+ "agent",
+ "agent-client-protocol",
+ "agent_computer_ui",
+ "agent_servers",
+ "agent_settings",
+ "agent_skills",
+ "agent_ui",
+ "anyhow",
+ "app_identity",
+ "ashpd",
+ "askpass",
+ "assets",
+ "async-channel 2.5.0",
+ "audio",
+ "auto_update",
+ "breadcrumbs",
+ "channel",
+ "chrono",
+ "clap",
+ "cli",
+ "client",
+ "clock",
+ "collections",
+ "command_palette",
+ "command_palette_hooks",
+ "component",
+ "component_preview",
+ "copilot",
+ "copilot_chat",
+ "copilot_ui",
+ "crashes",
+ "db",
+ "debug_adapter_extension",
+ "editor",
+ "encoding_selector",
+ "env_logger 0.11.8",
+ "etw_tracing",
+ "extension",
+ "extension_host",
+ "extensions_ui",
+ "feature_flags",
+ "feedback",
+ "file_finder",
+ "fs",
+ "futures 0.3.32",
+ "git",
+ "git_hosting_providers",
+ "git_ui",
+ "go_to_line",
+ "gpui",
+ "gpui_platform",
+ "gpui_tokio",
+ "hdrhistogram",
+ "http_client",
+ "image",
+ "input_latency_ui",
+ "inspector_ui",
+ "install_cli",
+ "itertools 0.14.0",
+ "journal",
+ "json_schema_store",
+ "keymap_editor",
+ "language",
+ "language_extension",
+ "language_model",
+ "language_models",
+ "language_onboarding",
+ "language_selector",
+ "language_tools",
+ "languages",
+ "line_ending_selector",
+ "log",
+ "lsp_locations",
+ "markdown",
+ "menu",
+ "migrator",
+ "mimalloc",
+ "miniprofiler_ui",
+ "node_runtime",
+ "notifications",
+ "omega_actions",
+ "omega_effectd",
+ "omega_front_door",
+ "omega_workbench_harness",
+ "omega_workbench_state",
+ "omega_workdir",
+ "omega_zero_base",
+ "onboarding",
+ "parking_lot",
+ "paths",
+ "picker",
+ "pkg-config",
+ "pretty_assertions",
+ "profiling",
+ "project",
+ "project_panel",
+ "project_symbols",
+ "prompt_store",
+ "proto",
+ "rayon",
+ "release_channel",
+ "remote",
+ "remote_connection",
+ "remote_server",
+ "reqwest_client",
+ "rope",
+ "sandbox",
+ "search",
+ "semver",
+ "serde",
+ "serde_json",
+ "session",
+ "settings",
+ "settings_profile_selector",
+ "settings_ui",
+ "shellexpand",
+ "smol",
+ "snippet_provider",
+ "snippets_ui",
+ "sysinfo 0.37.2",
+ "system_specs",
+ "task",
+ "telemetry",
+ "telemetry_events",
+ "tempfile",
+ "terminal_view",
+ "theme",
+ "theme_extension",
+ "theme_selector",
+ "theme_settings",
+ "time",
+ "time_format",
+ "title_bar",
+ "toolchain_selector",
+ "tracing",
+ "tree-sitter",
+ "tree-sitter-json",
+ "ui",
+ "ui_prompt",
+ "url",
+ "urlencoding",
+ "util",
+ "uuid",
+ "vim",
+ "vim_mode_setting",
+ "watch",
+ "web_search",
+ "web_search_providers",
+ "which_key",
+ "windows 0.61.3",
+ "windows_resources",
+ "workroom_ui",
+ "workspace",
+ "zed-reqwest",
+ "zed_env_vars",
+ "zlog",
+ "zlog_settings",
+ "ztracing",
+]
+
+[[package]]
 name = "omega_acp_server"
 version = "0.1.0"
 dependencies = [
@@ -11036,6 +11204,16 @@ dependencies = [
  "omega_front_door",
  "serde_json",
  "smol",
+]
+
+[[package]]
+name = "omega_actions"
+version = "0.1.0"
+dependencies = [
+ "gpui",
+ "schemars 1.0.4",
+ "serde",
+ "util",
 ]
 
 [[package]]
@@ -11260,6 +11438,7 @@ dependencies = [
  "gpui",
  "menu",
  "notifications",
+ "omega_actions",
  "omega_identity",
  "omega_zero_base",
  "paths",
@@ -11280,7 +11459,6 @@ dependencies = [
  "uuid",
  "vim_mode_setting",
  "workspace",
- "zed_actions",
  "zeroize",
  "zlog",
 ]
@@ -12462,6 +12640,7 @@ dependencies = [
  "gpui",
  "language",
  "menu",
+ "omega_actions",
  "project",
  "schemars 1.0.4",
  "serde",
@@ -12473,7 +12652,6 @@ dependencies = [
  "ui_input",
  "util",
  "workspace",
- "zed_actions",
 ]
 
 [[package]]
@@ -12579,6 +12757,7 @@ name = "platform_title_bar"
 version = "0.1.0"
 dependencies = [
  "gpui",
+ "omega_actions",
  "project",
  "settings",
  "smallvec",
@@ -12587,7 +12766,6 @@ dependencies = [
  "ui",
  "windows 0.61.3",
  "workspace",
- "zed_actions",
 ]
 
 [[package]]
@@ -13061,6 +13239,7 @@ dependencies = [
  "markdown",
  "menu",
  "notifications",
+ "omega_actions",
  "pretty_assertions",
  "project",
  "rayon",
@@ -13079,7 +13258,6 @@ dependencies = [
  "util",
  "workspace",
  "worktree",
- "zed_actions",
 ]
 
 [[package]]
@@ -14782,6 +14960,7 @@ dependencies = [
  "lsp",
  "menu",
  "multi_buffer",
+ "omega_actions",
  "picker",
  "picker_preview",
  "pretty_assertions",
@@ -14800,7 +14979,6 @@ dependencies = [
  "util",
  "util_macros",
  "workspace",
- "zed_actions",
  "ztracing",
 ]
 
@@ -15212,6 +15390,7 @@ dependencies = [
  "fuzzy",
  "gpui",
  "menu",
+ "omega_actions",
  "picker",
  "project",
  "serde_json",
@@ -15220,7 +15399,6 @@ dependencies = [
  "theme_settings",
  "ui",
  "workspace",
- "zed_actions",
 ]
 
 [[package]]
@@ -15254,6 +15432,7 @@ dependencies = [
  "language_model",
  "log",
  "menu",
+ "omega_actions",
  "omega_harness",
  "paths",
  "picker",
@@ -15280,7 +15459,6 @@ dependencies = [
  "url",
  "util",
  "workspace",
- "zed_actions",
  "zed_credentials_provider",
 ]
 
@@ -16380,6 +16558,7 @@ dependencies = [
  "gpui",
  "hex",
  "log",
+ "omega_actions",
  "parking_lot",
  "pretty_assertions",
  "proto",
@@ -16390,7 +16569,6 @@ dependencies = [
  "sha2",
  "shellexpand",
  "util",
- "zed_actions",
 ]
 
 [[package]]
@@ -16529,6 +16707,7 @@ dependencies = [
  "language",
  "log",
  "menu",
+ "omega_actions",
  "pretty_assertions",
  "project",
  "regex",
@@ -16549,7 +16728,6 @@ dependencies = [
  "ui",
  "util",
  "workspace",
- "zed_actions",
 ]
 
 [[package]]
@@ -16635,6 +16813,7 @@ dependencies = [
  "fuzzy",
  "gpui",
  "log",
+ "omega_actions",
  "picker",
  "project",
  "serde",
@@ -16646,7 +16825,6 @@ dependencies = [
  "ui",
  "util",
  "workspace",
- "zed_actions",
 ]
 
 [[package]]
@@ -16876,6 +17054,7 @@ dependencies = [
  "gpui",
  "icons",
  "notifications",
+ "omega_actions",
  "omega_zero_base",
  "platform_title_bar",
  "project",
@@ -16892,7 +17071,6 @@ dependencies = [
  "util",
  "windows 0.61.3",
  "workspace",
- "zed_actions",
 ]
 
 [[package]]
@@ -18073,6 +18251,7 @@ dependencies = [
  "menu",
  "multi_buffer",
  "nvim-rs",
+ "omega_actions",
  "parking_lot",
  "perf",
  "picker",
@@ -18097,7 +18276,6 @@ dependencies = [
  "util_macros",
  "vim_mode_setting",
  "workspace",
- "zed_actions",
 ]
 
 [[package]]
@@ -20492,6 +20670,7 @@ dependencies = [
  "futures 0.3.32",
  "gpui",
  "log",
+ "omega_actions",
  "omega_effectd",
  "omega_identity",
  "paths",
@@ -20509,7 +20688,6 @@ dependencies = [
  "util",
  "uuid",
  "workspace",
- "zed_actions",
 ]
 
 [[package]]
@@ -20539,6 +20717,7 @@ dependencies = [
  "markdown",
  "menu",
  "node_runtime",
+ "omega_actions",
  "omega_zero_base",
  "parking_lot",
  "postage",
@@ -20566,7 +20745,6 @@ dependencies = [
  "util",
  "uuid",
  "windows 0.61.3",
- "zed_actions",
  "zlog",
 ]
 
@@ -20997,174 +21175,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "zed"
-version = "0.2.0"
-dependencies = [
- "acp_thread",
- "acp_tools",
- "action_log",
- "activity_indicator",
- "agent",
- "agent-client-protocol",
- "agent_computer_ui",
- "agent_servers",
- "agent_settings",
- "agent_skills",
- "agent_ui",
- "anyhow",
- "app_identity",
- "ashpd",
- "askpass",
- "assets",
- "async-channel 2.5.0",
- "audio",
- "auto_update",
- "breadcrumbs",
- "channel",
- "chrono",
- "clap",
- "cli",
- "client",
- "clock",
- "collections",
- "command_palette",
- "command_palette_hooks",
- "component",
- "component_preview",
- "copilot",
- "copilot_chat",
- "copilot_ui",
- "crashes",
- "db",
- "debug_adapter_extension",
- "editor",
- "encoding_selector",
- "env_logger 0.11.8",
- "etw_tracing",
- "extension",
- "extension_host",
- "extensions_ui",
- "feature_flags",
- "feedback",
- "file_finder",
- "fs",
- "futures 0.3.32",
- "git",
- "git_hosting_providers",
- "git_ui",
- "go_to_line",
- "gpui",
- "gpui_platform",
- "gpui_tokio",
- "hdrhistogram",
- "http_client",
- "image",
- "input_latency_ui",
- "inspector_ui",
- "install_cli",
- "itertools 0.14.0",
- "journal",
- "json_schema_store",
- "keymap_editor",
- "language",
- "language_extension",
- "language_model",
- "language_models",
- "language_onboarding",
- "language_selector",
- "language_tools",
- "languages",
- "line_ending_selector",
- "log",
- "lsp_locations",
- "markdown",
- "menu",
- "migrator",
- "mimalloc",
- "miniprofiler_ui",
- "node_runtime",
- "notifications",
- "omega_effectd",
- "omega_front_door",
- "omega_workbench_harness",
- "omega_workbench_state",
- "omega_workdir",
- "omega_zero_base",
- "onboarding",
- "parking_lot",
- "paths",
- "picker",
- "pkg-config",
- "pretty_assertions",
- "profiling",
- "project",
- "project_panel",
- "project_symbols",
- "prompt_store",
- "proto",
- "rayon",
- "release_channel",
- "remote",
- "remote_connection",
- "remote_server",
- "reqwest_client",
- "rope",
- "sandbox",
- "search",
- "semver",
- "serde",
- "serde_json",
- "session",
- "settings",
- "settings_profile_selector",
- "settings_ui",
- "shellexpand",
- "smol",
- "snippet_provider",
- "snippets_ui",
- "sysinfo 0.37.2",
- "system_specs",
- "task",
- "telemetry",
- "telemetry_events",
- "tempfile",
- "terminal_view",
- "theme",
- "theme_extension",
- "theme_selector",
- "theme_settings",
- "time",
- "time_format",
- "title_bar",
- "toolchain_selector",
- "tracing",
- "tree-sitter",
- "tree-sitter-json",
- "ui",
- "ui_prompt",
- "url",
- "urlencoding",
- "util",
- "uuid",
- "vim",
- "vim_mode_setting",
- "watch",
- "web_search",
- "web_search_providers",
- "which_key",
- "windows 0.61.3",
- "windows_resources",
- "workroom_ui",
- "workspace",
- "zed-reqwest",
- "zed_actions",
- "zed_env_vars",
- "zlog",
- "zlog_settings",
- "ztracing",
-]
-
-[[package]]
 name = "zed-font-kit"
 version = "0.14.1-zed"
 source = "git+https://github.com/zed-industries/font-kit?rev=94b0f28166665e8fd2f53ff6d268a14955c82269#94b0f28166665e8fd2f53ff6d268a14955c82269"
@@ -21269,16 +21279,6 @@ dependencies = [
  "x11rb",
  "xim-ctext",
  "xim-parser",
-]
-
-[[package]]
-name = "zed_actions"
-version = "0.1.0"
-dependencies = [
- "gpui",
- "schemars 1.0.4",
- "serde",
- "util",
 ]
 
 [[package]]

@@ -234,7 +234,7 @@ fn build_menu(
                 // composer deployed this menu at the window's bottom-left.
                 .debug_selector("omega.composer.executor-menu.popup")
                 .handler(move |window, cx| {
-                    window.dispatch_action(Box::new(zed_actions::AcpRegistry), cx);
+                    window.dispatch_action(Box::new(omega_actions::AcpRegistry), cx);
                 }),
         );
 

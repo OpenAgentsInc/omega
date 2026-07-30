@@ -102,7 +102,7 @@ cargo run -p zed --bin zed_visual_test_runner --features visual-tests
 ### Baseline Images
 
 Omega's authoritative baseline images are committed in
-`crates/zed/test_fixtures/visual_tests/`. Not every inherited visual-runner
+`crates/omega/test_fixtures/visual_tests/`. Not every inherited visual-runner
 scene has a committed baseline, so running the lower-level runner without a
 scene filter can report missing inherited baselines.
 
