@@ -57,7 +57,7 @@ enum Command {
         #[arg(long)]
         identity_ref: Option<String>,
     },
-    /// Resume a pending or failed reset (deletes Keychain + public documents).
+    /// Resume a pending or failed reset (deletes secret storage + public documents).
     Resume,
     /// Acknowledge a completed reset after relaunch proof (Absent).
     Acknowledge,

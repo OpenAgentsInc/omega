@@ -52,10 +52,6 @@ EXPECTED_PACKAGES = {
         "version": "0.3.0",
         "checksum": "84790c55b5704b0d35130bf16a4ce22a8e70eb0ea773522557524d9a4852663d",
     },
-    "keyring": {
-        "version": "3.6.3",
-        "checksum": "eebcc3aff044e5944a8fbaf69eb277d11986064cba30c468730e8b9909fb551c",
-    },
     "nostr": {
         "version": "0.44.4",
         "checksum": "98cf5d15d70d1f8f4059e5f79923ac15891eb691d2843d01191e0585fb064d70",
@@ -73,8 +69,9 @@ GATE_REQUIREMENTS = {
         "lost custody",
         "locked custody",
         "symlink and weak-permission custody refusal",
-        "keychain unavailable",
-        "corrupt keychain data",
+        "secret store unavailable",
+        "secret store permission denied or locked",
+        "corrupt secret file",
     ],
     "recovery_scenarios": [
         "offline identity creation",
@@ -363,9 +360,9 @@ def inspect_packaged_app(
     if identity_proof_component.get("protocol") != "openagents.omega.identity-proof.v1":
         raise EvidenceError("identity proof driver protocol is invalid")
     if identity_proof_component.get("keyring_service") != "com.openagents.omega.identity-proof.v1":
-        raise EvidenceError("identity proof driver Keychain service is invalid")
+        raise EvidenceError("identity proof driver logical service locator is invalid")
     if identity_proof_component.get("keyring_account") != "disposable-proof-only":
-        raise EvidenceError("identity proof driver Keychain account is invalid")
+        raise EvidenceError("identity proof driver logical account locator is invalid")
     expected_identity_proof_digest = require_sha256(
         identity_proof_component.get("binary_sha256"),
         "components.identity_proof_driver.binary_sha256",

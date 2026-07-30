@@ -13,6 +13,9 @@ The Nostr signing secret is stored separately as
 `identity/identity.secret` below the channel-specific application data
 directory. It uses the same atomic-write and owner-only permission rules.
 
+The public authentication glossary and target schemas are frozen in
+[Omega Nostr authentication contract](nostr-authentication-contract.md).
+
 Exo is always launched with `EXO_SECRET_BACKEND=file` and an explicit master
 key path. Configuring `apple-keychain` is rejected.
 
@@ -25,7 +28,9 @@ so could trigger the prompt this change removes.
 These files are intentionally not encrypted at rest. This removes unstable
 binary-identity prompts from development and release builds, but it makes the
 security boundary the user's operating-system account and application data
-directory. Omega must never log or render their contents.
+directory. Omega must never log or render their contents. Unix ownership and
+mode checks ship today; equivalent Windows ACL assurance remains an explicit
+platform-verification requirement.
 
 Apple code signing and notarization may use a build-machine signing identity.
 That packaging operation is outside the installed application's runtime and

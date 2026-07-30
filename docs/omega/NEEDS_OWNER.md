@@ -4,7 +4,7 @@ Owner-only steps that agents deliberately leave incomplete. Public-safe; no secr
 
 ## Relay: create `omega-alpha-feedback` NIP-29 group (rc28 review batch 3 / item 12)
 
-**Status:** client hardcodes the destination; live group creation was not performed from this worktree (no interactive admin credentials; Keychain probes skipped by instruction).
+**Status:** client hardcodes the destination; live group creation was not performed from this worktree (no interactive admin credentials or live runtime-credential probes).
 
 **What shipped client-side**
 

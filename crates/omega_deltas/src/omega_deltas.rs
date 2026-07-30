@@ -19373,6 +19373,76 @@ mod tests {
         );
     }
 
+    /// OMEGA-AUTH-00. The target authentication contract keeps cryptographic,
+    /// network, membership, hosted, and action authority independent while the
+    /// shipping runtime remains file-backed.
+    #[test]
+    fn nostr_authentication_contract_is_frozen_against_shipping_truth() {
+        let contract = read_repository_file("crates/omega_identity/src/authentication.rs");
+        for required in [
+            "pub struct PublicPersonIdentity",
+            "pub struct PublicDeviceIdentity",
+            "pub struct PublicAgentIdentity",
+            "pub struct PublicHostedUserIdentity",
+            "pub enum LocalSignerState",
+            "pub enum RelayAuthenticationState",
+            "pub enum GroupAdmissionState",
+            "pub enum HostedAccountLinkState",
+            "pub enum ActionAuthorizationState",
+            "pub struct SigningAuthorizationContext",
+            "pub account_generation: u64",
+            "pub calling_subsystem: SubsystemRef",
+            "pub content_digest: String",
+            "pub user_gesture: UserGesture",
+            "pub expires_at: u64",
+        ] {
+            assert!(
+                contract.contains(required),
+                "OMEGA-AUTH-00: authentication contract lost `{required}`."
+            );
+        }
+
+        let documentation = read_repository_file("docs/omega/nostr-authentication-contract.md");
+        for required in [
+            "identity/identity.secret",
+            "credentials/credentials.json",
+            "Local signer ready",
+            "Relay authenticated",
+            "Group admitted",
+            "Hosted account linked",
+            "Action authorized",
+            "runtime behavior is unchanged",
+        ] {
+            assert!(
+                documentation.contains(required),
+                "OMEGA-AUTH-00: current-state documentation lost `{required}`."
+            );
+        }
+
+        for fixture_path in [
+            "crates/omega_identity/fixtures/omega_authentication_contract_v1.canonical.json",
+            "crates/omega_identity/fixtures/omega_authentication_contract_v1.negative-non-action-evidence.json",
+            "crates/omega_identity/fixtures/omega_authentication_contract_v1.negative-collapsed-principals.json",
+            "crates/omega_identity/fixtures/omega_signing_authorization_context_v1.canonical.json",
+        ] {
+            let fixture = read_repository_file(fixture_path).to_ascii_lowercase();
+            for forbidden in [
+                "nsec1",
+                "private_key",
+                "access_token",
+                "refresh_token",
+                "private_prompt",
+                "decrypted_content",
+                "bearer ",
+            ] {
+                assert!(
+                    !fixture.contains(forbidden),
+                    "OMEGA-AUTH-00: public fixture {fixture_path} contains secret-shaped `{forbidden}`."
+                );
+            }
+        }
+    }
+
     #[test]
     fn macos_runtime_has_no_keychain_credential_calls() {
         let provider =
