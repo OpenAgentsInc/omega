@@ -28,7 +28,7 @@ owner public key, and a 60-second freshness window. It is single-use.
 
 The server returns a short-lived opaque access token for the already configured
 OpenAgents owner account. That token remains in Omega's release-namespaced
-sovereign system-keychain provider. It is never written to settings, the Full
+native credentials file. It is never written to settings, the Full
 Auto registry, host correlation journal, logs, UI state, transcripts, or child
 process environment. Every `resolve_sync_session` reverse-host request
 re-verifies the credential through the existing OpenAgents native auth-session
@@ -39,7 +39,7 @@ unverifiable credentials resolve as `{ available: false }`.
 Legacy OAuth credentials remain readable during migration and can still rotate
 through their refresh token. New background sessions carry no refresh token.
 Disconnect requires server proof that every credential present in the stored
-session was revoked before Omega deletes the local Keychain record.
+session was revoked before Omega deletes the local credentials-file record.
 
 NIP-42 remains the relay-authentication protocol for Nostr WebSocket relays. It
 does not mint an OpenAgents HTTP session; NIP-98 provides that separate,

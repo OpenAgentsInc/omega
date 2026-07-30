@@ -27,12 +27,13 @@ The resulting application executable is named `omega`. Internal crate names,
 legacy `zed://` parsing remain compatibility surfaces. Omega does not register
 itself as the handler for `zed://`.
 
-Unsigned debug builds use channel-local development files for ordinary
-credentials and the development identity key, avoiding repeated operating
-system prompts whenever the executable changes. The identity file has
-owner-only permissions. Set `ZED_DEVELOPMENT_USE_KEYCHAIN=1` when explicitly
-testing Keychain behavior. Non-debug and non-development builds always use the
-system keychain with the channel credential namespace.
+Every release channel uses files below its channel-specific application data
+root for runtime credentials. The Nostr signer secret is
+`identity/identity.secret`; provider and hosted credentials are
+`credentials/credentials.json`. Writes are atomic and use owner-only directory
+and file modes on Unix. The files are not encrypted at rest. See
+[Runtime credential storage](../../omega/runtime-credential-storage.md) and
+the [Nostr authentication contract](../../omega/nostr-authentication-contract.md).
 
 ## Review identity onboarding fixtures
 
@@ -54,11 +55,11 @@ masked import preview contains no private key material.
 
 `omega_identity::IdentityService` is the secure native boundary for creating,
 importing, opening, signing with, inspecting, and resetting an Omega identity.
-It stores one 32-byte Nostr secret in the operating system credential provider
-under the current release channel's `KeyringLocator`. There is no environment,
-plaintext-file, app-data, or auto-generation fallback in packaged builds. The
-unsigned debug `dev` channel uses the documented owner-only development
-identity file instead.
+It stores one 32-byte Nostr secret in the release channel's owner-only
+`identity/identity.secret` file. `KeyringLocator` is a stable version-one
+logical locator name, not a macOS Keychain implementation. On a clean profile,
+the startup coordinator creates this identity silently in the background; it
+does not block the front door on an identity ceremony.
 
 Creation and import are explicit transactions. Omega serializes each mutation
 with a process-global mutex and a channel-scoped cross-process operating-system
@@ -66,7 +67,7 @@ lock, writes the credential, reads it through a fresh credential-provider
 entry, derives its public key, and compares that key with the expected identity.
 Only after that comparison succeeds does it atomically write the public
 manifest and completion record. A mismatch, missing read-back, malformed public
-record, locked provider, or lost credential leaves custody non-ready and denies
+record, inaccessible store, or lost credential leaves custody non-ready and denies
 signing.
 
 The public API accepts zeroizing import and recovery-password wrappers but has
@@ -125,9 +126,8 @@ A lost identity is the narrow exception to the relaunch boundary. In that state
 the public identity is known but the active store has already proven that no
 signing secret is available. The onboarding **Reset identity** action therefore
 completes and acknowledges cleanup in the current process, returning directly
-to first-run identity creation. This is especially relevant after an unsigned
-development build migrates from Keychain to its owner-only development file:
-the old public manifest can outlive the secret in the newly selected store.
+to local identity creation. This is especially relevant when a public manifest
+outlives a deleted, unreadable, or otherwise unavailable secret file.
 
 Ready-state onboarding UI exposes Protect, not Reset. Use the operator CLI for
 an authorized wipe of channel custody:
@@ -191,7 +191,7 @@ Custody resolution follows:
 
 ```text
 reset-failed
-  > keychain-locked
+  > secret-store-locked
   > relaunch-required
   > identity-conflict
   > identity-lost
@@ -200,7 +200,7 @@ reset-failed
   > ready
 ```
 
-System credential and cross-process lock operations are synchronous. GPUI
+Secret-file and cross-process lock operations are synchronous. GPUI
 callers must run them on the background executor and propagate
 `CustodyError` to the onboarding UI instead of blocking the foreground thread.
 
@@ -235,30 +235,22 @@ into Omega's local data directory and represented by an opaque
 `local-avatar:` token. This presentation record has no signing, relay, event
 kind, or publication fields and is never a Nostr kind 0 profile.
 
-### First-launch routing
+### Startup provisioning and explicit setup
 
-Every initial editor surface waits on one process-global identity startup
-coordinator. The coordinator owns one shared background call to
-`inspect_for_process_start`; nested restore, open-request, CLI, file, remote,
-new-window, and new-file paths reuse that result and cannot acknowledge a reset
-marker twice in one process. The operating-system single-instance decision
-happens before this coordinator is installed.
+Every initial editor surface shares one process-global identity startup task.
+The task calls `provision_for_process_start` in the background; nested restore,
+open-request, CLI, file, remote, new-window, and new-file paths reuse its
+result. A clean profile creates a local identity, an unadopted ready secret is
+adopted, and a ready identity is reused without rotating its key. No result
+blocks the editor front door and no onboarding `Finish` action releases a
+startup waiter.
 
-Ready custody releases callers immediately. Every other custody state, and an
-inspection error, opens at most one identity onboarding view and keeps each
-owned launch intent suspended in its original task. The intent, including a CLI
-response sink and wait flag, resumes through its existing dispatch path only
-after the user finishes onboarding. Closing the view does not release callers;
-it permits a later request to reopen the singleton view.
-
-Finish rechecks the live section's durable Ready inspection. First Run writes
-the identity-bound `omega_identity_onboarding_completion_v1` local completion
-record, removes the dedicated bootstrap window, and then releases all waiters.
-A bootstrap-window open failure is a shared terminal error, so current and
-future intents fail instead of hanging or bypassing identity. Merely opening
-onboarding writes no completion flag. The completion record is presentation
-history rather than identity authority: every new Omega process still performs
-the custody/public-manifest startup inspection.
+Named refusal states remain visible through the account and identity repair
+entry points: lost, conflict, incomplete, locked, reset-failed, and
+relaunch-required are not rounded into Ready. They refuse signing until the
+person completes the corresponding repair. The raw-`nsec` backup action is an
+advanced escape hatch, while the value-triggered recovery nudge points to
+encrypted NIP-49 protection.
 
 Editor Onboarding is a separately replayable mode available from the Welcome
 page and the `omega::OpenEditorOnboarding` action (also
@@ -294,7 +286,7 @@ namespaces and the Nostr-only `openagents.omega.nostr_only.v1` profile.
 
 | Reviewed Buzz source                         | SHA-256                                                            | Adapted boundary                                       |
 | -------------------------------------------- | ------------------------------------------------------------------ | ------------------------------------------------------ |
-| `desktop/src-tauri/src/secret_store.rs`      | `2f1d93a3427bd2852001c81a0ad88afb6a614dec8eba78f23bcd56d630cd1ce8` | Keyring probing, read-back checks, serialized mutation |
+| `desktop/src-tauri/src/secret_store.rs`      | `2f1d93a3427bd2852001c81a0ad88afb6a614dec8eba78f23bcd56d630cd1ce8` | Read-back checks and serialized mutation               |
 | `desktop/src-tauri/src/app_state_keyring.rs` | `f4f28872a57ea532dcd7d8f8f4a589b736d86b8bd25a81850c3e782defbd2aa7` | Service scoping, replaced by `app_identity` channels   |
 | `desktop/src-tauri/src/app_state.rs`         | `1ee8b09732b1e39afcaf3450ff674880d5d17e434f8900429239a1f05ca33063` | Public recovery states and read-back ordering          |
 | `desktop/src-tauri/src/commands/identity.rs` | `8ea33e58265b9a62a16dd163cdf37c06d9ad574418b1f02fd3ac295b8b2b290c` | Public identity results and admitted signing           |
@@ -305,7 +297,6 @@ The contract uses exact reviewed native packages:
 | Package             | Version  | Checksum                                                           | License           |
 | ------------------- | -------- | ------------------------------------------------------------------ | ----------------- |
 | `nostr`             | `0.44.4` | `98cf5d15d70d1f8f4059e5f79923ac15891eb691d2843d01191e0585fb064d70` | MIT               |
-| `keyring`           | `3.6.3`  | `eebcc3aff044e5944a8fbaf69eb277d11986064cba30c468730e8b9909fb551c` | MIT OR Apache-2.0 |
 | `atomic-write-file` | `0.3.0`  | `84790c55b5704b0d35130bf16a4ce22a8e70eb0ea773522557524d9a4852663d` | BSD-3-Clause      |
 
 The public contract vector is
@@ -314,11 +305,10 @@ The public contract vector is
 It freezes public-key, npub, public fingerprint, manifest, and admitted-signing
 behavior without containing a private key.
 
-Omega does not adopt Buzz's startup key generation, `BUZZ_PRIVATE_KEY`
-override, plaintext `identity.key` fallback, renderer-visible `get_nsec`
-command, durable use of ephemeral recovery keys, or Spark/wallet profile
-fields. `atomic-write-file` is restricted to public manifests and completion
-records, transaction/reset journals, and recovery-protection records.
+Omega does not adopt Buzz's `BUZZ_PRIVATE_KEY` override, renderer-visible
+`get_nsec` command, durable use of ephemeral recovery keys, or Spark/wallet
+profile fields. Omega's background provisioning may generate a local identity,
+but does so through the journaled native custody boundary.
 
 ## Application icon family
 

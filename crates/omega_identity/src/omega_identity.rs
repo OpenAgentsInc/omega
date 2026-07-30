@@ -6,6 +6,7 @@
 //! use omega_identity::secret::SecretKeyMaterial;
 //! ```
 
+mod authentication;
 mod contract;
 mod custody;
 mod mutation_lock;
@@ -15,6 +16,7 @@ mod recovery;
 mod recovery_artifact;
 mod secret;
 
+pub use authentication::*;
 pub use contract::*;
 pub use custody::*;
 pub use proof::*;

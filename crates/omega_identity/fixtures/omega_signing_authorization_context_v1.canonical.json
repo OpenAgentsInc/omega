@@ -1,0 +1,16 @@
+{
+  "authorization_ref": "proof.action-authorization-1",
+  "account_ref": "account.omega.owner",
+  "account_generation": 7,
+  "signer_ref": "signer.local-native",
+  "calling_subsystem": "subsystem.tester-channels",
+  "purpose": "nostr_event",
+  "event_kind": 9,
+  "resource_ref": "nip29:relay.openagents.com:omega-feedback",
+  "origin": "wss://relay.openagents.com",
+  "content_digest": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+  "capability_ref": "capability.channel-post",
+  "user_gesture": "observed",
+  "issued_at": 1785430800,
+  "expires_at": 1785430860
+}

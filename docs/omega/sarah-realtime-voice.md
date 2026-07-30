@@ -35,7 +35,10 @@ owns the runtime state but is not required to complete the visible journey.
 ## Trust and authentication
 
 Omega first verifies and reuses the normal OpenAgents bearer session in the
-operating system credential provider. It requests admission with:
+native runtime credential provider. That provider currently uses the
+owner-only, unencrypted `credentials/credentials.json` file documented in
+[Runtime credential storage](runtime-credential-storage.md). It requests
+admission with:
 
 ```text
 POST https://openagents.com/api/omega/sarah/voice/admission

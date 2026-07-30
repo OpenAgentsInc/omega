@@ -1,0 +1,22 @@
+[
+  {
+    "domain": "local_signer",
+    "signer_ref": "signer.local-native"
+  },
+  {
+    "domain": "relay_connection",
+    "relay_url": "wss://relay.openagents.com",
+    "auth_event_id": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+    "authenticated_at": 1785430800
+  },
+  {
+    "domain": "group_admission",
+    "group_ref": "nip29:relay.openagents.com:omega-feedback",
+    "authority_ref": "proof.group-admission-1"
+  },
+  {
+    "domain": "hosted_account",
+    "hosted_user_ref": "openagents-user-owner",
+    "proof_ref": "proof.hosted-link-1"
+  }
+]

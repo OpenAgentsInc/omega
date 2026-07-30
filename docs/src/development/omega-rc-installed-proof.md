@@ -106,7 +106,7 @@ installed behavior.
 Each manual gate remains `pending` until a separate attestation is supplied.
 The required inventory includes AssuranceSpec admission; custody, recovery,
 forged-request, and stale-task scenarios (including symlink/weak-permission
-refusal, unavailable or corrupt keychain data, corrupt recovery artifacts,
+refusal, unavailable, permission-denied, or corrupt secret-file data, corrupt recovery artifacts,
 wrong recovery passwords, and signer crashes); installed scans of logs,
 telemetry, clipboard, UI/accessibility tree, diagnostics, and crash output;
 the manual journey; owner observation; independent verification;
@@ -336,17 +336,17 @@ The runner accepts only `/Applications/Omega.app` and the packaged driver
 whose digest is jointly bound by the release record and candidate evidence. It
 also requires the installed driver to pass strict code-signature verification.
 Its temporary roots are internally created with the proof-only prefix, and the
-driver itself fixes the Keychain locator to
+driver itself fixes the version-one logical custody locator to
 `com.openagents.omega.identity-proof.v1` / `disposable-proof-only`.
 
 The matrix covers creation and read-back, process restart, signing,
 same-receipt double creation, distinct-receipt rejection, concurrent creation
 and process start, forged and stale requests, reset and relaunch, and every
-exposed crash checkpoint. It also records explicit deterministic, no-Keychain
+exposed crash checkpoint. It also records explicit deterministic, no-live-store
 simulations for conflict/lost/locked custody, unsafe public stores,
 unavailable/corrupt secure storage, malformed or unadmitted signing requests,
 conflicting recovery selection, late completion, and signer crash. Simulation
-receipts are labeled as such and do not claim live Keychain execution. It
+receipts are labeled as such and do not claim live owner-store execution. It
 resets the disposable entry between live cases and
 fails if final cleanup cannot be proved.
 
@@ -356,7 +356,7 @@ password to the signed driver only through an inherited file descriptor. The
 driver writes a fixed encrypted artifact inside the internally generated proof
 root. The runner exercises recovery protection, wrong-password rejection,
 corrupt-artifact rejection, recovery adoption, and process-restart identity
-continuity before proving final Keychain cleanup. The password, artifact path,
+continuity before proving final secret-file cleanup. The password, artifact path,
 identity, and command output are not retained in the public receipt. Downgrade
 and rollback continuity remains a separate real install-lifecycle observation;
 the disposable recovery case does not stand in for that candidate journey.
@@ -366,7 +366,7 @@ component digests, case states, and hashes of public driver outcomes; it does
 not retain identities, secrets, command output, temporary paths, or error
 details from the driver.
 
-Run the deterministic harness checks without touching Keychain:
+Run the deterministic harness checks without touching the live identity store:
 
 ```sh
 script/run-omega-identity-proof-matrix --self-test

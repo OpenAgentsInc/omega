@@ -4548,18 +4548,15 @@ than merely stated.
 - **Upstream Zed:** first-run onboarding asks for nothing that outlives the
   profile directory. `--user-data-dir` is a complete reset of who you are to
   the app, because there is nothing about you outside it.
-- **Omega:** in packaged builds the signing key lives in the system keychain under
-  `com.openagents.omega.credentials.<channel>`, scoped **per release channel
-  and per user — not per profile**. That scope is deliberate and kept: an
-  identity belongs to a person, not to a directory, and a per-profile identity
-  would mean a second window on the same Mac signed as somebody else.
-- **Amended by `OMEGA-DELTA-0141`:** unsigned debug builds use an
-  owner-readable development file because their executable identity changes on
-  every rebuild and macOS otherwise repeats a password dialog. Packaged builds
-  and explicit Keychain tests keep the scope and custody described here.
+- **Amended by `OMEGA-AUTH-00`:** every channel stores the signing key in
+  `identity/identity.secret` below that channel's application data root. The
+  store uses atomic replacement and owner-only Unix permissions and is not
+  encrypted at rest. `KeyringLocator` is a version-one logical compatibility
+  name, not a macOS Keychain backend. The frozen current-state contract is
+  `docs/omega/nostr-authentication-contract.md`.
 - **What omega#110 reported is the conclusion, not the scope.** A brand-new
-  `--user-data-dir` has no identity files and a keychain that already holds an
-  identity. Custody called that `Incomplete` — the state written for a
+  `--user-data-dir` has no public identity files and a configured secret store
+  that already holds an identity. Custody called that `Incomplete` — the state written for a
   transaction that was interrupted — so onboarding said *"Identity setup needs
   repair: a prior recovery transaction needs the same owner-authorized identity
   candidate"* and offered **Recover identity** as its only control. There was
@@ -4575,7 +4572,7 @@ than merely stated.
   `resolve_locked` resolves a data root with no manifest and a readable secret
   to `CustodyState::Unadopted` when no transaction is on disk, and keeps
   `Incomplete` when one is. Damage is still reported as damage: a planted
-  transaction beside the same keychain entry still resolves to `Incomplete`,
+  transaction beside the same secret-store entry still resolves to `Incomplete`,
   still says "Identity setup needs repair", and adoption over it is refused as
   a conflict rather than overwriting it.
 - **The screen says which, because the owner ruled that it must.** Adopting
@@ -4611,17 +4608,18 @@ than merely stated.
   `every_custody_state_but_ready_holds_the_startup_wait`).
 - **What this does not cover.** **No window has been opened.** Every claim here
   is proved against fabricated state — a temporary data root and a fake secret
-  store — because the live case needs the owner's keychain, and probing it
-  raises a password dialog on their screen. So "a fresh profile reaches a
+  store — so the test cannot disturb the owner's live signing identity. So "a
+  fresh profile reaches a
   composer" is proved as far as the gate: custody resolves to `Ready` after
   adoption, and `Ready` is the predicate the startup wait releases on. The
   pixels between that release and a composer are `OMEGA-DELTA-0019` and
   `OMEGA-DELTA-0040`'s, already covered, and unverified in the same launch as
-  this change. The genuinely-new-user case — a machine whose keychain has never
-  held an Omega identity — is answered the same way: `Absent` still offers
+  this change. The genuinely-new-user case — a channel data root whose secret
+  store has never held an Omega identity — is answered the same way: `Absent`
+  still offers
   **Create identity**, asserted against a fabricated empty store rather than by
-  clearing the owner's keychain. A profile choosing a *different* identity from
-  the custodied one still goes through recovery or reset; there is no one-click
+  deleting the owner's secret file. A profile choosing a *different* identity
+  from the custodied one still goes through recovery or reset; there is no one-click
   "give this profile its own identity", and adding one would be a decision
   about what a profile is, not a bug fix.
 ### OMEGA-DELTA-0114 — The install a person waits on is bounded and named, and the way past it is theirs to take
@@ -6735,23 +6733,18 @@ available to correct or change the directory.
 - **Enforced by:** `the_thread_folder_is_a_persistent_picker_control` in
   `crates/omega_deltas`.
 
-### OMEGA-DELTA-0141 — Unsigned debug identity custody does not summon Keychain
+### OMEGA-DELTA-0141 — Runtime identity custody is local and owner-only
 
-An unsigned `dev` debug build stores its development-only Nostr identity secret
-in an atomic, owner-readable file beside its other development credentials.
-This avoids macOS asking for the login Keychain password again whenever a
-rebuild changes the executable identity.
+Every Omega channel stores its Nostr identity secret in an atomic,
+owner-readable file at `identity/identity.secret` below the channel data root.
+The same 32-byte secret validation and custody reset path applies to
+development, Nightly, RC, stable, and the operator CLI. On Unix, the directory
+uses mode `0700` and the file uses mode `0600`. The file is not encrypted at
+rest; the operating-system user account and data-directory permissions are the
+current security boundary.
 
-The exception is deliberately narrow. Nightly, RC, stable, non-debug builds,
-the operator identity CLI, and a development run with
-`ZED_DEVELOPMENT_USE_KEYCHAIN=1` continue to use the system keychain. The
-development file validates the same 32-byte secret material, is written with
-mode `0600` on Unix, and is removed through the same custody reset path.
-
-- **Enforced by:** `debug_identity_custody_avoids_the_system_keychain` in
-  `crates/omega_deltas`, plus
-  `only_an_unforced_debug_dev_runtime_uses_the_file_store` and
-  `development_file_store_round_trips_and_deletes_a_secret` in
+- **Enforced by:** `identity_custody_is_always_private_local_storage` in
+  `crates/omega_deltas`, plus file-store round-trip and permission tests in
   `crates/omega_identity`.
 
 ### OMEGA-DELTA-0142 — Provider credential errors lead to their solution
@@ -8438,7 +8431,6 @@ startup recheck — survives unchanged behind that dropdown.
   `omega_deltas` path literals and workspace membership for the renamed crates;
   brand-gate inventory that scans `crates/omega` rather than the deleted path;
   issue-template content reviewed in this change.
-
 ### OMEGA-DELTA-0191 — Refusals fail proofs and drawn controls have loaded actions
 
 - **Upstream Zed:** action refusal is an ordinary dispatch outcome, and no

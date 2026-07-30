@@ -1,0 +1,26 @@
+{
+  "schema": "openagents.omega.authentication-contract.v1",
+  "schema_version": 1,
+  "account_ref": "account.omega.owner",
+  "account_generation": 1,
+  "principals": {
+    "person_identity_ref": "omega-nostr-person",
+    "hosted_user_ref": "omega-nostr-person"
+  },
+  "lifecycle": "candidate_existing",
+  "signer": {
+    "signer_ref": "signer.local-native",
+    "kind": "local_native",
+    "availability": "offline",
+    "recovery": "required",
+    "capabilities": []
+  },
+  "states": {
+    "local_signer": "unavailable",
+    "relay_authentication": "not_connected",
+    "group_admission": "unknown",
+    "hosted_account_link": "unlinked",
+    "action_authorization": "not_evaluated"
+  },
+  "evidence": []
+}

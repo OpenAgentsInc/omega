@@ -41,6 +41,26 @@ Beside that stack, and often confused with it:
 
 ## Terms
 
+### Nostr identity and authentication
+
+**Person account** — the human-controlled Nostr identity. It is not a device,
+agent, or OpenAgents hosted-user identifier.
+
+**Device identity** — a key for one enrolled client installation. A device
+grant does not copy or become the person's root secret.
+
+**Agent identity** — a separate Nostr key whose authority comes from a bounded
+owner attestation. An agent does not sign as the person by default.
+
+**Hosted user** — an OpenAgents service-side user reference linked to a person
+account by a public-safe proof. The link is not a local signer or group grant.
+
+Five authentication phrases are deliberately independent: **local signer
+ready**, **relay authenticated**, **group admitted**, **hosted account linked**,
+and **action authorized**. Each answers a different question and none
+substitutes for another. The frozen schemas and evidence requirements are in
+[Omega Nostr authentication contract](nostr-authentication-contract.md).
+
 ### Exo — always say which one
 
 Two unrelated projects. This has already cost a day.

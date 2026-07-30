@@ -1,0 +1,59 @@
+{
+  "schema": "openagents.omega.authentication-contract.v1",
+  "schema_version": 1,
+  "account_ref": "account.omega.owner",
+  "account_generation": 7,
+  "principals": {
+    "person_identity_ref": "omega-nostr-person",
+    "device_identity_ref": "device.macbook-primary",
+    "agent_identity_ref": "agent.omega",
+    "hosted_user_ref": "openagents-user-owner"
+  },
+  "lifecycle": "active",
+  "signer": {
+    "signer_ref": "signer.local-native",
+    "kind": "local_native",
+    "availability": "ready",
+    "recovery": "protected",
+    "capabilities": [
+      "capability.nostr-event",
+      "capability.nip44"
+    ]
+  },
+  "states": {
+    "local_signer": "ready",
+    "relay_authentication": "authenticated",
+    "group_admission": "admitted",
+    "hosted_account_link": "linked",
+    "action_authorization": "authorized"
+  },
+  "evidence": [
+    {
+      "domain": "local_signer",
+      "signer_ref": "signer.local-native"
+    },
+    {
+      "domain": "relay_connection",
+      "relay_url": "wss://relay.openagents.com",
+      "auth_event_id": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "authenticated_at": 1785430800
+    },
+    {
+      "domain": "group_admission",
+      "group_ref": "nip29:relay.openagents.com:omega-feedback",
+      "authority_ref": "proof.group-admission-1"
+    },
+    {
+      "domain": "hosted_account",
+      "hosted_user_ref": "openagents-user-owner",
+      "proof_ref": "proof.hosted-link-1"
+    },
+    {
+      "domain": "action",
+      "authorization_ref": "proof.action-authorization-1",
+      "capability_ref": "capability.channel-post",
+      "issued_at": 1785430800,
+      "expires_at": 1785430860
+    }
+  ]
+}
