@@ -279,19 +279,24 @@ impl GoogleLanguageModel {
         let hosted_grant = self.hosted_grant.clone();
         let hosted_mode = omega_zero_base::is_active();
         let hosted_session_task = if hosted_mode {
-            let session = cx.update(|cx| omega_effectd::openagents_session(cx));
-            Some(cx.spawn(async move |cx| {
-                if let Some(verified) = session.resolve_verified(cx).await {
-                    return (Some(verified), None);
-                }
-                if session.connect(cx).await == omega_effectd::OpenAgentsSessionPhase::Ready {
-                    let verified = session.resolve_verified(cx).await;
-                    let blocker = verified.is_none().then(|| session.blocker()).flatten();
-                    (verified, blocker)
-                } else {
-                    (None, session.blocker())
-                }
-            }))
+            // A process without the session global (proof harnesses, tests)
+            // has no hosted lane at all; the direct-key fallback below is the
+            // only path there. The shipped binary always initializes it.
+            let session = cx.update(|cx| omega_effectd::openagents_session_if_initialized(cx));
+            session.map(|session| {
+                cx.spawn(async move |cx| {
+                    if let Some(verified) = session.resolve_verified(cx).await {
+                        return (Some(verified), None);
+                    }
+                    if session.connect(cx).await == omega_effectd::OpenAgentsSessionPhase::Ready {
+                        let verified = session.resolve_verified(cx).await;
+                        let blocker = verified.is_none().then(|| session.blocker()).flatten();
+                        (verified, blocker)
+                    } else {
+                        (None, session.blocker())
+                    }
+                })
+            })
         } else {
             None
         };
@@ -316,6 +321,7 @@ impl GoogleLanguageModel {
             (api_key, api_url, extra_headers)
         });
 
+        let hosted_lane_exists = hosted_session_task.is_some();
         async move {
             let mut hosted_blocker = None;
             if let Some(hosted_session_task) = hosted_session_task {
@@ -356,7 +362,10 @@ impl GoogleLanguageModel {
                 .map_err(LanguageModelCompletionError::Other);
             }
 
-            if !hosted_mode {
+            if !hosted_mode || !hosted_lane_exists {
+                // No hosted lane in this process (proof harnesses and tests
+                // never initialize the session global), and no direct key:
+                // the terminal no-credentials answer, never a sign-in retry.
                 return Err(LanguageModelCompletionError::NoApiKey {
                     provider: PROVIDER_NAME,
                 });

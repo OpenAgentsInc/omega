@@ -140,6 +140,18 @@ pub fn openagents_session(cx: &App) -> OpenAgentsSession {
     cx.global::<OpenAgentsSessionGlobal>().0.clone()
 }
 
+/// The hosted session, or `None` in a process that never initialized one.
+///
+/// omega#161. The shipped binary always calls [`init_openagents_session`] at
+/// startup, so production reads `Some`. Proof harnesses and tests deliberately
+/// do not: for them hosted OpenAgents compute is structurally unavailable, and
+/// a provider that read the panicking accessor would turn that absence into a
+/// crash or, worse, a live network sign-in from inside a deterministic proof.
+pub fn openagents_session_if_initialized(cx: &App) -> Option<OpenAgentsSession> {
+    cx.try_global::<OpenAgentsSessionGlobal>()
+        .map(|global| global.0.clone())
+}
+
 impl OpenAgentsSession {
     pub fn phase(&self) -> OpenAgentsSessionPhase {
         self.phase.lock().map(|phase| *phase).unwrap_or_default()

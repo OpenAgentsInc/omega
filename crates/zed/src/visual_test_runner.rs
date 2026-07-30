@@ -1007,6 +1007,10 @@ fn run_visual_tests(project_path: PathBuf, update_baseline: bool) -> Result<()> 
             cx,
         );
         language_models::init(app_state.user_store.clone(), app_state.client.clone(), cx);
+        // omega#161. The runner deliberately does NOT initialize the hosted
+        // OpenAgents session global: a proof process must not attempt a live
+        // hosted sign-in, and the providers read the absence as "no hosted
+        // lane in this process" and use their direct-key fallback path.
         git_ui::init(cx);
         project::AgentRegistryStore::init_global(
             cx,
@@ -7427,7 +7431,7 @@ fn configure_workbench_shell_scene(
                     // The streaming edit's diff recomputes asynchronously;
                     // settle at all four expected hunks before proving so the
                     // count assertion reads a finished diff, not a race.
-                    wait_for_workbench_review_hunks(action_log.clone(), active_worktree_id, 4, cx)?;
+                    wait_for_workbench_review_hunks(action_log, active_worktree_id, 4, cx)?;
                     let stale_generation = generation.saturating_add(1);
                     let (stale_rejected, streaming_applied) = cx.update(|cx| {
                         review_pane.update(cx, |pane, cx| {

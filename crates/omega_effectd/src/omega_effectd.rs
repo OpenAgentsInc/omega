@@ -58,7 +58,7 @@ pub use openagents_sarah_voice::{
 };
 pub use openagents_session::{
     OpenAgentsSession, OpenAgentsSessionPhase, VerifiedOpenAgentsSession, init_openagents_session,
-    openagents_session,
+    openagents_session, openagents_session_if_initialized,
 };
 
 pub use protocol::{

@@ -193,19 +193,24 @@ impl OpenAgentsLanguageModel {
         let http_client = self.http_client.clone();
         let hosted_mode = omega_zero_base::is_active();
         let session_task = if hosted_mode {
-            let session = cx.update(|cx| omega_effectd::openagents_session(cx));
-            Some(cx.spawn(async move |cx| {
-                if let Some(verified) = session.resolve_verified(cx).await {
-                    return (Some(verified), None);
-                }
-                if session.connect(cx).await == omega_effectd::OpenAgentsSessionPhase::Ready {
-                    let verified = session.resolve_verified(cx).await;
-                    let blocker = verified.is_none().then(|| session.blocker()).flatten();
-                    (verified, blocker)
-                } else {
-                    (None, session.blocker())
-                }
-            }))
+            // A process without the session global (proof harnesses, tests)
+            // has no hosted lane at all; the direct-key fallback below is the
+            // only path there. The shipped binary always initializes it.
+            let session = cx.update(|cx| omega_effectd::openagents_session_if_initialized(cx));
+            session.map(|session| {
+                cx.spawn(async move |cx| {
+                    if let Some(verified) = session.resolve_verified(cx).await {
+                        return (Some(verified), None);
+                    }
+                    if session.connect(cx).await == omega_effectd::OpenAgentsSessionPhase::Ready {
+                        let verified = session.resolve_verified(cx).await;
+                        let blocker = verified.is_none().then(|| session.blocker()).flatten();
+                        (verified, blocker)
+                    } else {
+                        (None, session.blocker())
+                    }
+                })
+            })
         } else {
             None
         };
