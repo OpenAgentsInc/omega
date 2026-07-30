@@ -8618,3 +8618,41 @@ startup recheck — survives unchanged behind that dropdown.
   relay coordinator and remote signing tests in `omega_signer_broker`; account
   enrollment and lifecycle presentation tests in `account_ui`; and the
   `OMEGA-DELTA-0195` source assertions in `crates/omega_deltas`.
+
+### OMEGA-DELTA-0196 — Relay and hosted authentication remain independent
+
+- **Origin:** OMEGA-AUTH-05, omega#180. Makes the existing NIP-42 and NIP-98
+  paths observable without promoting network or service evidence into general
+  account authority.
+- **Relay receipts are account- and connection-bound.** Every account public
+  key and normalized relay URL has a public-safe receipt tied to a monotonic
+  connection generation. Challenge
+  pending, authenticated, refused, disconnected, and stale remain distinct.
+  Exact relay, challenge, selected account, timestamp, signature,
+  acknowledgement, connection generation, and one-use proof checks fail
+  closed. Public state retains only a digest-derived challenge reference,
+  accepted authentication event id, bounded refusal category, and observation
+  time, never the raw challenge.
+- **Hosted links have a complete lifecycle.** The exact NIP-98 request binds
+  HTTPS URL, method, payload digest, signer, freshness, and a single-use proof.
+  Verification, expiry, rotation, disconnect, revocation, owner-scope refusal,
+  service unavailability, credential-storage failure, and revocation failure
+  are independently visible. The public Omega-key to OpenAgents-user binding
+  contains no bearer and cannot authenticate a relay, join a group, or
+  authorize an arbitrary action.
+- **The account home names authority precisely.** The dashboard keeps
+  **Signer ready**, **Relay authenticated**, **Group admitted**, **Hosted
+  linked**, and **Action authorized** as separate rows. Per-relay receipts and
+  hosted-session controls do not imply one another.
+- **File custody only.** Hosted access and refresh tokens remain in the
+  unencrypted `credentials/credentials.json` file, written atomically with
+  owner-only `0700` directory and `0600` file modes on Unix. This delta enables
+  no macOS Keychain, Secure Enclave, Windows credential vault, Linux secret
+  service, Android keystore, encrypted application vault, native enclave, or
+  hardware-backed credential store.
+- **Enforced by:** exact NIP-42 challenge, generation, acknowledgement, replay,
+  and receipt tests; exact NIP-98 request and one-use proof tests; hosted
+  verification, expiry, rotation, revocation, failure, and public-projection
+  tests in `omega_effectd`; dashboard authority-language and lifecycle tests
+  in `account_ui`; and the `OMEGA-DELTA-0196` source assertions in
+  `crates/omega_deltas`.

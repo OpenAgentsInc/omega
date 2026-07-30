@@ -3,7 +3,7 @@
 Omega does not access the macOS Keychain for application runtime credentials.
 
 The shared credentials provider stores provider API keys, OAuth sessions,
-OpenAgents native-session tokens, and similar byte credentials in
+OpenAgents native-session access and refresh tokens, and similar byte credentials in
 `credentials/credentials.json` below the channel-specific application data
 directory. Records remain release-channel namespaced. Writes use an atomic
 replacement, the directory is mode `0700`, and the file is mode `0600` on
@@ -83,6 +83,26 @@ person's root `nsec` remains in the external signer and never enters Omega.
 These packets do not enable or
 probe the macOS Keychain, Secure Enclave, Windows credential vault, Linux
 secret service, Android keystore, or another native key-vault integration.
+
+AUTH-05 keeps hosted access and refresh tokens in the same unencrypted,
+owner-only `credentials/credentials.json` file. A schema-versioned record
+tracks issued and expiry times so verification and rotation cannot silently
+reuse an expired bearer. The public hosted-session projection contains only a
+public account binding, lifecycle state, timestamps, and public-safe failure
+category. It never contains either token. Disconnect does not report success
+until remote revocation and local credential deletion have reached their
+defined terminal state; storage and revocation failures remain visible and
+retryable.
+
+NIP-42 receipts are public metadata rather than credentials. They contain the
+account public key, normalized relay URL, connection generation, challenge reference, accepted
+authentication event id, state, public-safe refusal category, and observation
+time. They never persist the raw relay challenge or a signing secret, and they
+cannot mint a hosted session.
+
+AUTH-05 also enables no encrypted application vault, native enclave,
+hardware-backed credential store, or native credential integration. File-backed
+storage is the deliberate first-wave boundary.
 
 Apple code signing and notarization may use a build-machine signing identity.
 That packaging operation is outside the installed application's runtime and

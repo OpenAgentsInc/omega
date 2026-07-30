@@ -231,6 +231,7 @@ pub struct OpenAgentsBinding {
     credentials: Arc<dyn CredentialsProvider>,
     http_client: Arc<dyn HttpClient>,
     phase: Arc<Mutex<BindingState>>,
+    session: Option<super::openagents_session::OpenAgentsSession>,
 }
 
 struct OpenAgentsBindingGlobal(OpenAgentsBinding);
@@ -255,7 +256,8 @@ pub fn init_openagents_binding(cx: &mut App) {
         default_binding_data_root(),
         zed_credentials_provider::local_credentials(cx),
         cx.http_client(),
-    );
+    )
+    .with_session(super::openagents_session::openagents_session_if_initialized(cx));
     // Load any existing public record so the visible state is honest at boot.
     let _ = binding.refresh_phase_from_disk();
     cx.set_global(OpenAgentsBindingGlobal(binding));
@@ -281,7 +283,16 @@ impl OpenAgentsBinding {
             credentials,
             http_client,
             phase: Arc::new(Mutex::new(BindingState::Unbound)),
+            session: None,
         }
+    }
+
+    fn with_session(
+        mut self,
+        session: Option<super::openagents_session::OpenAgentsSession>,
+    ) -> Self {
+        self.session = session;
+        self
     }
 
     pub fn data_root(&self) -> &Path {
@@ -375,8 +386,12 @@ impl OpenAgentsBinding {
 
     /// Clear the public relation and isolated binding credentials.
     pub async fn clear(&self, cx: &mut AsyncApp) -> BindingProjection {
-        let _ = self.delete_credential(cx).await;
-        let _ = self.remove_record();
+        if let Err(error) = self.delete_credential(cx).await {
+            log::warn!("could not remove legacy binding credential: {error:#}");
+        }
+        if let Err(error) = self.remove_record() {
+            log::warn!("could not remove public OpenAgents binding: {error:#}");
+        }
         self.set_state(BindingState::Unbound);
         BindingProjection::unbound()
     }
@@ -388,21 +403,31 @@ impl OpenAgentsBinding {
         cx: &mut AsyncApp,
     ) -> Result<BindingProjection> {
         if let Some(authorization) = authorization {
-            omega_identity::IdentityService::system(*app_identity::CHANNEL)
-                .validate_identity_action_authorization(authorization)?;
+            validate_binding_authorization(authorization)?;
         }
-        let session = super::openagents_nostr_auth::mint_openagents_nostr_session_for_identity(
-            &self.http_client,
-            Some(omega_public_key_hex),
-        )
-        .await
-        .map_err(|blocker| {
-            anyhow::anyhow!("OpenAgents binding sign-in failed: {}", blocker.summary())
-        })?;
+        let (openagents_account_id, access_token) = if let Some(authority) = &self.session {
+            if authority.resolve_verified(cx).await.is_none() {
+                authority.connect(cx).await;
+            }
+            let verified = authority.resolve_verified(cx).await.ok_or_else(|| {
+                anyhow!("OpenAgents binding sign-in failed: session was not verified")
+            })?;
+            (verified.owner_user_id, verified.access_token)
+        } else {
+            let minted = super::openagents_nostr_auth::mint_openagents_nostr_session_for_identity(
+                &self.http_client,
+                Some(omega_public_key_hex),
+            )
+            .await
+            .map_err(|blocker| {
+                anyhow::anyhow!("OpenAgents binding sign-in failed: {}", blocker.summary())
+            })?;
+            (minted.user.user_id, minted.access_token)
+        };
         let mut credential = BindingCredential {
             schema_version: 1,
-            openagents_account_id: session.user.user_id,
-            access_token: session.access_token.trim().to_string(),
+            openagents_account_id,
+            access_token: access_token.trim().to_string(),
             refresh_token: None,
         };
 
@@ -414,8 +439,7 @@ impl OpenAgentsBinding {
 
         let scope = self.check_owner_scope(&credential).await;
         if let Some(authorization) = authorization {
-            omega_identity::IdentityService::system(*app_identity::CHANNEL)
-                .validate_identity_action_authorization(authorization)?;
+            validate_binding_authorization(authorization)?;
         }
         let bound_at = now_iso8601();
         let projection = match scope {
@@ -433,13 +457,19 @@ impl OpenAgentsBinding {
                 };
                 record.validate()?;
                 self.write_record(&record)?;
-                self.save_credential(&credential, cx).await?;
+                if self.session.is_none() {
+                    self.save_credential(&credential, cx).await?;
+                }
                 record.projection()
             }
             OwnerScopeDecision::Refused => {
                 // Durable refused relation so the UI stays honest across restarts.
                 // Do not keep tokens for a refused owner-scope account.
-                let _ = self.delete_credential(cx).await;
+                if self.session.is_none() {
+                    if let Err(error) = self.delete_credential(cx).await {
+                        log::warn!("could not remove refused legacy binding credential: {error:#}");
+                    }
+                }
                 let record = BindingRecord {
                     schema: BINDING_RECORD_SCHEMA.to_string(),
                     schema_version: 1,
@@ -490,6 +520,7 @@ impl OpenAgentsBinding {
                 || tokens.access.len() > MAX_ACCESS_TOKEN_BYTES
                 || !tokens.expires_in.is_finite()
                 || tokens.expires_in <= 0.0
+                || tokens.expires_in > 31_536_000.0
             {
                 return Err(anyhow!("OpenAgents binding token rotation was invalid"));
             }
@@ -599,6 +630,34 @@ impl OpenAgentsBinding {
     }
 }
 
+fn validate_binding_authorization(
+    authorization: &omega_identity::IdentityActionAuthorization,
+) -> Result<()> {
+    let registry = omega_identity::AccountRegistryService::for_channel(*app_identity::CHANNEL);
+    let selection = registry.selection_token()?;
+    let dashboard = registry.inspect()?;
+    let active = dashboard
+        .accounts
+        .iter()
+        .find(|account| account.account_ref == selection.account_ref)
+        .ok_or_else(|| anyhow!("active account is unavailable"))?;
+    match active.signer.kind {
+        omega_identity::SignerKind::LocalNative => {
+            omega_identity::IdentityService::system(*app_identity::CHANNEL)
+                .validate_identity_action_authorization(authorization)?;
+        }
+        omega_identity::SignerKind::RemoteNip46 => {
+            let now = SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .context("system clock is before Unix epoch")?
+                .as_secs();
+            registry.validate_remote_identity_action_authorization(authorization, now)?;
+        }
+        _ => return Err(anyhow!("active signer has no hosted binding route")),
+    }
+    Ok(())
+}
+
 /// Apply a pure state-machine transition used by tests and offline recovery.
 pub fn apply_binding_transition(
     current: BindingState,
@@ -687,6 +746,7 @@ mod store {
             credentials: Arc::new(NoopCredentials),
             http_client: Arc::new(NoopHttp),
             phase: Arc::new(Mutex::new(BindingState::Unbound)),
+            session: None,
         };
         binding.write_record(record)
     }
@@ -697,6 +757,7 @@ mod store {
             credentials: Arc::new(NoopCredentials),
             http_client: Arc::new(NoopHttp),
             phase: Arc::new(Mutex::new(BindingState::Unbound)),
+            session: None,
         };
         binding.read_record()
     }

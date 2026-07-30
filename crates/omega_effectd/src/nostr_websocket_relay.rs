@@ -1,5 +1,6 @@
-use std::collections::{BTreeMap, HashSet};
-use std::sync::Arc;
+use std::collections::{BTreeMap, HashSet, VecDeque};
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::{Arc, Mutex, OnceLock};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use async_io::Timer;
@@ -21,7 +22,9 @@ async fn nip59_extract_rumor(
     nip59::extract_rumor(keys, event).await
 }
 use omega_identity::{
-    AdmittedSigningRequest, IdentityService, ReceiptRef, SigningPurpose, UnsignedEventTemplate,
+    AdmittedSigningRequest, IdentityService, NostrPublicKeyHex, ProofRef, ReceiptRef,
+    RelayAuthenticationProjection, RelayAuthenticationReceipt, RelayAuthenticationRefusal,
+    RelayConnectionAuthenticationState, SigningPurpose, UnsignedEventTemplate,
 };
 use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
@@ -49,6 +52,14 @@ const MAX_PENDING_PUBLICATIONS: usize = 4_096;
 const MAX_CACHED_EVENTS: usize = 8_192;
 const MAX_CACHED_CONTENT_BYTES: usize = 16 * 1024 * 1024;
 const MAX_CONTROL_FRAMES_PER_READ: usize = 64;
+const MAX_AUTH_CHALLENGE_BYTES: usize = 4_096;
+const MAX_RECENT_AUTH_PROOFS: usize = 4_096;
+const NIP42_FRESHNESS_WINDOW: u64 = 60;
+
+static RELAY_AUTHENTICATION_RECEIPTS: OnceLock<
+    Mutex<BTreeMap<(String, String), RelayAuthenticationReceipt>>,
+> = OnceLock::new();
+static NEXT_RELAY_CONNECTION_GENERATION: AtomicU64 = AtomicU64::new(1);
 
 #[allow(clippy::disallowed_methods)]
 fn network_timer(duration: Duration) -> Timer {
@@ -87,6 +98,23 @@ enum IncomingMessage {
     TimedOut,
 }
 
+pub fn relay_authentication_projection() -> RelayAuthenticationProjection {
+    let receipts = RELAY_AUTHENTICATION_RECEIPTS
+        .get_or_init(|| Mutex::new(BTreeMap::new()))
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    RelayAuthenticationProjection {
+        relays: receipts.values().cloned().collect(),
+    }
+}
+
+#[derive(Debug, Clone)]
+struct PendingRelayAuthentication {
+    challenge: String,
+    challenge_ref: ProofRef,
+    connection_generation: u64,
+}
+
 /// A bounded, failover-capable NIP-01 relay transport for the Sarah workroom.
 ///
 /// The surrounding effectd protocol is synchronous today, so each operation
@@ -100,11 +128,16 @@ pub struct WebSocketRelayAdapter {
     socket: Option<WebSocketStream<ConnectStream>>,
     custody: RelayCustody,
     owner_public_key_hex: String,
+    owner_public_key: NostrPublicKeyHex,
     sarah_public_key_hex: String,
     community_group_ids: Vec<String>,
     community_public_key_hexes: Vec<String>,
     authenticated: bool,
-    auth_challenge: Option<String>,
+    auth_challenge: Option<PendingRelayAuthentication>,
+    connection_generation: u64,
+    relay_authentication_receipts: BTreeMap<String, RelayAuthenticationReceipt>,
+    recent_auth_event_ids: HashSet<String>,
+    recent_auth_event_order: VecDeque<String>,
     acknowledged_event_id: Option<String>,
     publish_acknowledgements: BTreeMap<String, HashSet<String>>,
     healthy_relays: HashSet<String>,
@@ -227,6 +260,8 @@ impl WebSocketRelayAdapter {
         let community_group_ids = normalized_group_ids(community_group_ids)?;
         let community_public_key_hexes =
             normalized_public_keys(community_public_key_hexes, "community author")?;
+        let owner_public_key = NostrPublicKeyHex::new(&owner_public_key_hex)
+            .map_err(|error| SarahConversationError::InvalidRequest(error.to_string()))?;
         let active_label = relay_urls
             .first()
             .cloned()
@@ -238,11 +273,16 @@ impl WebSocketRelayAdapter {
             socket: None,
             custody,
             owner_public_key_hex,
+            owner_public_key,
             sarah_public_key_hex,
             community_group_ids,
             community_public_key_hexes,
             authenticated: false,
             auth_challenge: None,
+            connection_generation: 0,
+            relay_authentication_receipts: BTreeMap::new(),
+            recent_auth_event_ids: HashSet::new(),
+            recent_auth_event_order: VecDeque::new(),
             acknowledged_event_id: None,
             publish_acknowledgements: BTreeMap::new(),
             healthy_relays: HashSet::new(),
@@ -284,6 +324,68 @@ impl WebSocketRelayAdapter {
         &self.relay_urls
     }
 
+    pub fn relay_authentication_projection(&self) -> RelayAuthenticationProjection {
+        RelayAuthenticationProjection {
+            relays: self
+                .relay_authentication_receipts
+                .values()
+                .cloned()
+                .collect(),
+        }
+    }
+
+    fn record_relay_authentication(
+        &mut self,
+        state: RelayConnectionAuthenticationState,
+        challenge_ref: Option<ProofRef>,
+        auth_event_id: Option<String>,
+        refusal: Option<RelayAuthenticationRefusal>,
+    ) {
+        self.relay_authentication_receipts.insert(
+            self.active_label.clone(),
+            RelayAuthenticationReceipt {
+                relay_url: self.active_label.clone(),
+                account_public_key_hex: self.owner_public_key.clone(),
+                connection_generation: self.connection_generation.max(1),
+                state,
+                challenge_ref,
+                auth_event_id,
+                refusal,
+                observed_at: unix_now().max(1),
+            },
+        );
+        if let Some(receipt) = self
+            .relay_authentication_receipts
+            .get(&self.active_label)
+            .cloned()
+        {
+            let mut receipts = RELAY_AUTHENTICATION_RECEIPTS
+                .get_or_init(|| Mutex::new(BTreeMap::new()))
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner());
+            receipts.insert(
+                (
+                    self.owner_public_key.as_str().to_string(),
+                    self.active_label.clone(),
+                ),
+                receipt,
+            );
+        }
+    }
+
+    fn remember_auth_event(&mut self, event_id: String) -> bool {
+        if !self.recent_auth_event_ids.insert(event_id.clone()) {
+            return false;
+        }
+        self.recent_auth_event_order.push_back(event_id);
+        while self.recent_auth_event_order.len() > MAX_RECENT_AUTH_PROOFS {
+            if let Some(expired) = self.recent_auth_event_order.pop_front() {
+                self.recent_auth_event_ids.remove(&expired);
+            }
+        }
+        true
+    }
+
     fn connect_active(&mut self) -> Result<(), SarahConversationError> {
         self.connect_active_until(Instant::now() + CONNECT_TIMEOUT)
     }
@@ -314,17 +416,35 @@ impl WebSocketRelayAdapter {
             .map_err(|error| SarahConversationError::Relay(error.to_string()))?;
         self.active_label = relay_url;
         self.socket = Some(socket);
+        self.connection_generation =
+            NEXT_RELAY_CONNECTION_GENERATION.fetch_add(1, Ordering::Relaxed);
+        if self.connection_generation == 0 {
+            self.connection_generation =
+                NEXT_RELAY_CONNECTION_GENERATION.fetch_add(1, Ordering::Relaxed);
+        }
         self.authenticated = false;
         self.auth_challenge = None;
         Ok(())
     }
 
     fn disconnect_and_advance(&mut self) {
+        self.close_active_connection();
+        self.gap_state = GapState::Recovering;
+        self.active_relay_index = (self.active_relay_index + 1) % self.relay_urls.len().max(1);
+    }
+
+    fn close_active_connection(&mut self) {
+        if self.connection_generation > 0 {
+            self.record_relay_authentication(
+                RelayConnectionAuthenticationState::Disconnected,
+                None,
+                None,
+                None,
+            );
+        }
         self.socket = None;
         self.authenticated = false;
         self.auth_challenge = None;
-        self.gap_state = GapState::Recovering;
-        self.active_relay_index = (self.active_relay_index + 1) % self.relay_urls.len().max(1);
     }
 
     fn send_json(&mut self, payload: Value) -> Result<(), SarahConversationError> {
@@ -451,16 +571,52 @@ impl WebSocketRelayAdapter {
         }
     }
 
-    fn record_auth_challenge(&mut self, value: &Value) -> bool {
+    fn record_auth_challenge(&mut self, value: &Value) -> Result<bool, SarahConversationError> {
         let Some(array) = value.as_array() else {
-            return false;
+            return Ok(false);
         };
         if array.first().and_then(Value::as_str) != Some("AUTH") {
-            return false;
+            return Ok(false);
         }
-        self.auth_challenge = array.get(1).and_then(Value::as_str).map(str::to_owned);
+        let Some(challenge) = (array.len() == 2)
+            .then(|| array.get(1).and_then(Value::as_str))
+            .flatten()
+            .filter(|challenge| {
+                !challenge.is_empty() && challenge.len() <= MAX_AUTH_CHALLENGE_BYTES
+            })
+        else {
+            self.auth_challenge = None;
+            self.authenticated = false;
+            let challenge_ref = challenge_reference(
+                &self.active_label,
+                self.connection_generation,
+                &value.to_string(),
+            )?;
+            self.record_relay_authentication(
+                RelayConnectionAuthenticationState::Refused,
+                Some(challenge_ref),
+                None,
+                Some(RelayAuthenticationRefusal::MalformedChallenge),
+            );
+            return Err(SarahConversationError::Relay(
+                "relay sent a malformed NIP-42 challenge".into(),
+            ));
+        };
+        let challenge_ref =
+            challenge_reference(&self.active_label, self.connection_generation, challenge)?;
+        self.auth_challenge = Some(PendingRelayAuthentication {
+            challenge: challenge.to_owned(),
+            challenge_ref: challenge_ref.clone(),
+            connection_generation: self.connection_generation,
+        });
         self.authenticated = false;
-        true
+        self.record_relay_authentication(
+            RelayConnectionAuthenticationState::ChallengePending,
+            Some(challenge_ref),
+            None,
+            None,
+        );
+        Ok(true)
     }
 
     fn publish_once(&mut self, event: &Event) -> Result<(), SarahConversationError> {
@@ -480,7 +636,7 @@ impl WebSocketRelayAdapter {
                     ));
                 }
                 IncomingMessage::Json(value) => {
-                    if self.record_auth_challenge(&value) {
+                    if self.record_auth_challenge(&value)? {
                         return Err(SarahConversationError::IdentityRequired);
                     }
                     let Some(array) = value.as_array() else {
@@ -530,7 +686,7 @@ impl WebSocketRelayAdapter {
                     ));
                 }
                 IncomingMessage::Json(value) => {
-                    if self.record_auth_challenge(&value) {
+                    if self.record_auth_challenge(&value)? {
                         return Err(SarahConversationError::IdentityRequired);
                     }
                     let Some(frame) = value.as_array() else {
@@ -657,7 +813,7 @@ impl WebSocketRelayAdapter {
             match self.next_message_until(deadline)? {
                 IncomingMessage::TimedOut => break GapState::Possible,
                 IncomingMessage::Json(value) => {
-                    if self.record_auth_challenge(&value) {
+                    if self.record_auth_challenge(&value)? {
                         return Err(SarahConversationError::IdentityRequired);
                     }
                     let Some(array) = value.as_array() else {
@@ -768,9 +924,15 @@ impl WebSocketRelayAdapter {
     }
 
     fn sign_active_auth_event(&self) -> Result<Event, SarahConversationError> {
-        let challenge = self.auth_challenge.as_deref().ok_or_else(|| {
+        let pending = self.auth_challenge.as_ref().ok_or_else(|| {
             SarahConversationError::Relay("no relay AUTH challenge is pending".into())
         })?;
+        if pending.connection_generation != self.connection_generation {
+            return Err(SarahConversationError::Relay(
+                "relay AUTH challenge belongs to a stale connection".into(),
+            ));
+        }
+        let challenge = pending.challenge.as_str();
         let relay = RelayUrl::parse(&self.active_label)
             .map_err(|error| SarahConversationError::Relay(error.to_string()))?;
         match &self.custody {
@@ -826,28 +988,98 @@ impl WebSocketRelayAdapter {
         auth_event: &Event,
         deadline: Instant,
     ) -> Result<(), SarahConversationError> {
-        let challenge = self.auth_challenge.as_deref().ok_or_else(|| {
+        let pending = self.auth_challenge.clone().ok_or_else(|| {
             SarahConversationError::Relay("no relay AUTH challenge is pending".into())
         })?;
+        if pending.connection_generation != self.connection_generation {
+            self.record_relay_authentication(
+                RelayConnectionAuthenticationState::Stale,
+                Some(pending.challenge_ref),
+                Some(auth_event.id.to_hex()),
+                Some(RelayAuthenticationRefusal::StaleConnection),
+            );
+            return Err(SarahConversationError::Relay(
+                "relay AUTH proof belongs to a stale connection".into(),
+            ));
+        }
         let relay_url = RelayUrl::parse(&self.active_label)
             .map_err(|error| SarahConversationError::Relay(error.to_string()))?;
-        if !nostr::nips::nip42::is_valid_auth_event(auth_event, &relay_url, challenge)
-            || auth_event.verify().is_err()
-        {
+        let event_id = auth_event.id.to_hex();
+        let challenge_ref = pending.challenge_ref.clone();
+        let refusal = validate_nip42_auth_event(
+            auth_event,
+            &relay_url,
+            &pending.challenge,
+            &self.custody_public_key_hex()?,
+            unix_now(),
+        )
+        .err();
+        if let Some(refusal) = refusal {
+            self.record_relay_authentication(
+                RelayConnectionAuthenticationState::Refused,
+                Some(challenge_ref),
+                Some(event_id),
+                Some(refusal),
+            );
             return Err(SarahConversationError::Relay(
                 "NIP-42 auth event failed local validation".into(),
             ));
         }
-        self.send_json_until(json!(["AUTH", auth_event]), deadline)?;
+        if !self.remember_auth_event(event_id.clone()) {
+            self.record_relay_authentication(
+                RelayConnectionAuthenticationState::Refused,
+                Some(challenge_ref),
+                Some(event_id),
+                Some(RelayAuthenticationRefusal::ReplayedProof),
+            );
+            return Err(SarahConversationError::Relay(
+                "NIP-42 auth event was already used".into(),
+            ));
+        }
+        let connection_generation = self.connection_generation;
+        self.auth_challenge = None;
+        if let Err(error) = self.send_json_until(json!(["AUTH", auth_event]), deadline) {
+            self.record_relay_authentication(
+                RelayConnectionAuthenticationState::Refused,
+                Some(challenge_ref),
+                Some(event_id),
+                Some(RelayAuthenticationRefusal::AcknowledgementMissing),
+            );
+            return Err(error);
+        }
         loop {
             let remaining = deadline.saturating_duration_since(Instant::now());
             if remaining.is_zero() {
+                self.record_relay_authentication(
+                    RelayConnectionAuthenticationState::Refused,
+                    Some(challenge_ref),
+                    Some(event_id),
+                    Some(RelayAuthenticationRefusal::AcknowledgementMissing),
+                );
                 return Err(SarahConversationError::Relay(
                     "NIP-42 acknowledgement timed out".into(),
                 ));
             }
-            match self.next_message_until(deadline)? {
+            let incoming = match self.next_message_until(deadline) {
+                Ok(incoming) => incoming,
+                Err(error) => {
+                    self.record_relay_authentication(
+                        RelayConnectionAuthenticationState::Refused,
+                        Some(challenge_ref),
+                        Some(event_id),
+                        Some(RelayAuthenticationRefusal::AcknowledgementMissing),
+                    );
+                    return Err(error);
+                }
+            };
+            match incoming {
                 IncomingMessage::TimedOut => {
+                    self.record_relay_authentication(
+                        RelayConnectionAuthenticationState::Refused,
+                        Some(challenge_ref),
+                        Some(event_id),
+                        Some(RelayAuthenticationRefusal::AcknowledgementMissing),
+                    );
                     return Err(SarahConversationError::Relay(
                         "NIP-42 acknowledgement timed out".into(),
                     ));
@@ -857,20 +1089,55 @@ impl WebSocketRelayAdapter {
                         continue;
                     };
                     if array.first().and_then(Value::as_str) != Some("OK")
-                        || array.get(1).and_then(Value::as_str)
-                            != Some(auth_event.id.to_hex().as_str())
+                        || array.get(1).and_then(Value::as_str) != Some(event_id.as_str())
                     {
                         continue;
                     }
+                    if array.len() != 4
+                        || array.get(2).and_then(Value::as_bool).is_none()
+                        || array.get(3).and_then(Value::as_str).is_none()
+                    {
+                        self.record_relay_authentication(
+                            RelayConnectionAuthenticationState::Refused,
+                            Some(challenge_ref),
+                            Some(event_id),
+                            Some(RelayAuthenticationRefusal::RelayRejected),
+                        );
+                        return Err(SarahConversationError::Relay(
+                            "relay sent a malformed NIP-42 acknowledgement".into(),
+                        ));
+                    }
                     if array.get(2).and_then(Value::as_bool) != Some(true) {
-                        let reason = array
-                            .get(3)
-                            .and_then(Value::as_str)
-                            .unwrap_or("NIP-42 authentication rejected");
-                        return Err(SarahConversationError::Relay(reason.to_string()));
+                        self.record_relay_authentication(
+                            RelayConnectionAuthenticationState::Refused,
+                            Some(challenge_ref),
+                            Some(event_id),
+                            Some(RelayAuthenticationRefusal::RelayRejected),
+                        );
+                        return Err(SarahConversationError::Relay(
+                            "NIP-42 authentication rejected".into(),
+                        ));
+                    }
+                    if self.connection_generation != connection_generation
+                        || self.active_label != relay_url.as_str()
+                    {
+                        self.record_relay_authentication(
+                            RelayConnectionAuthenticationState::Stale,
+                            Some(challenge_ref),
+                            Some(event_id),
+                            Some(RelayAuthenticationRefusal::StaleConnection),
+                        );
+                        return Err(SarahConversationError::Relay(
+                            "NIP-42 acknowledgement belongs to a stale connection".into(),
+                        ));
                     }
                     self.authenticated = true;
-                    self.auth_challenge = None;
+                    self.record_relay_authentication(
+                        RelayConnectionAuthenticationState::Authenticated,
+                        Some(challenge_ref),
+                        Some(event_id),
+                        None,
+                    );
                     return Ok(());
                 }
             }
@@ -1188,8 +1455,8 @@ impl RelayTransport for WebSocketRelayAdapter {
     fn auth_challenge(&self) -> Option<RelayAuthChallenge> {
         self.auth_challenge
             .as_ref()
-            .map(|challenge| RelayAuthChallenge {
-                challenge: challenge.clone(),
+            .map(|pending| RelayAuthChallenge {
+                challenge: pending.challenge.clone(),
                 relay_url: self.active_label.clone(),
             })
     }
@@ -1211,9 +1478,7 @@ impl RelayTransport for WebSocketRelayAdapter {
                 continue;
             }
             if self.socket.is_none() || self.active_label != relay_url {
-                self.socket = None;
-                self.authenticated = false;
-                self.auth_challenge = None;
+                self.close_active_connection();
                 self.active_relay_index = relay_index;
                 if let Err(error) = self.connect_active() {
                     last_error = Some(error);
@@ -1235,9 +1500,7 @@ impl RelayTransport for WebSocketRelayAdapter {
                 Err(error) => {
                     last_error = Some(error);
                     self.healthy_relays.remove(&relay_url);
-                    self.socket = None;
-                    self.authenticated = false;
-                    self.auth_challenge = None;
+                    self.close_active_connection();
                 }
             }
         }
@@ -1323,9 +1586,7 @@ impl RelayTransport for WebSocketRelayAdapter {
                 break;
             }
             if self.socket.is_none() || self.active_label != relay_url {
-                self.socket = None;
-                self.authenticated = false;
-                self.auth_challenge = None;
+                self.close_active_connection();
                 self.active_relay_index = relay_index;
                 if let Err(error) = self.connect_active_until(relay_deadline) {
                     last_error = Some(error);
@@ -1346,9 +1607,7 @@ impl RelayTransport for WebSocketRelayAdapter {
                     last_error = Some(error);
                     query_gap_state = GapState::Possible;
                     self.healthy_relays.remove(&relay_url);
-                    self.socket = None;
-                    self.authenticated = false;
-                    self.auth_challenge = None;
+                    self.close_active_connection();
                 }
             }
         }
@@ -1495,6 +1754,69 @@ fn normalize_relay_url(relay_url: &str) -> Result<String, SarahConversationError
         normalized.pop();
     }
     Ok(normalized)
+}
+
+fn challenge_reference(
+    relay_url: &str,
+    connection_generation: u64,
+    challenge: &str,
+) -> Result<ProofRef, SarahConversationError> {
+    let mut digest = Sha256::new();
+    digest.update(relay_url.as_bytes());
+    digest.update([0]);
+    digest.update(connection_generation.to_be_bytes());
+    digest.update([0]);
+    digest.update(challenge.as_bytes());
+    let digest = format!("{:x}", digest.finalize());
+    ProofRef::new(format!("nip42.{}", &digest[..32]))
+        .map_err(|error| SarahConversationError::Internal(error.to_string()))
+}
+
+fn validate_nip42_auth_event(
+    auth_event: &Event,
+    relay_url: &RelayUrl,
+    challenge: &str,
+    expected_public_key_hex: &str,
+    now: u64,
+) -> Result<(), RelayAuthenticationRefusal> {
+    if auth_event.pubkey.to_hex() != expected_public_key_hex {
+        return Err(RelayAuthenticationRefusal::WrongAccount);
+    }
+    if auth_event.created_at.as_secs().abs_diff(now) > NIP42_FRESHNESS_WINDOW {
+        return Err(RelayAuthenticationRefusal::StaleEvent);
+    }
+
+    let mut relay_tags = 0_usize;
+    let mut challenge_tags = 0_usize;
+    for tag in auth_event.tags.iter() {
+        let values = tag.as_slice();
+        match values.first().map(String::as_str) {
+            Some("relay") => {
+                relay_tags = relay_tags.saturating_add(1);
+                if values.len() != 2
+                    || values.get(1).map(String::as_str) != Some(relay_url.as_str())
+                {
+                    return Err(RelayAuthenticationRefusal::InvalidEvent);
+                }
+            }
+            Some("challenge") => {
+                challenge_tags = challenge_tags.saturating_add(1);
+                if values.len() != 2 || values.get(1).map(String::as_str) != Some(challenge) {
+                    return Err(RelayAuthenticationRefusal::InvalidEvent);
+                }
+            }
+            _ => {}
+        }
+    }
+    if relay_tags != 1 || challenge_tags != 1 {
+        return Err(RelayAuthenticationRefusal::InvalidEvent);
+    }
+    if !nostr::nips::nip42::is_valid_auth_event(auth_event, relay_url, challenge)
+        || auth_event.verify().is_err()
+    {
+        return Err(RelayAuthenticationRefusal::InvalidEvent);
+    }
+    Ok(())
 }
 
 fn begin_authentication_retry(attempted: &mut bool) -> Result<(), SarahConversationError> {
@@ -2661,6 +2983,10 @@ mod tests {
             .is_err()
         );
         assert!(normalize_relay_url("wss://relay.example.com/path").is_ok());
+        assert_eq!(
+            normalize_relay_url("wss://relay.example.com/").expect("normalized root relay"),
+            "wss://relay.example.com"
+        );
         assert!(normalize_relay_url("wss://relay.example.com/?token=secret").is_err());
         assert!(normalize_relay_url("wss://relay.example.com/#fragment").is_err());
         assert_eq!(
@@ -2683,6 +3009,142 @@ mod tests {
             record_control_frame(&mut control_frames).expect("bounded control frame");
         }
         assert!(record_control_frame(&mut control_frames).is_err());
+    }
+
+    #[test]
+    fn nip42_validation_binds_account_tags_signature_and_freshness() {
+        let account_keys = Keys::generate();
+        let other_keys = Keys::generate();
+        let relay_url = RelayUrl::parse("wss://relay.example.com").expect("relay URL");
+        let challenge = "challenge-123";
+        let now = unix_now();
+        let valid = EventBuilder::auth(challenge, relay_url.clone())
+            .custom_created_at(nostr::Timestamp::from_secs(now))
+            .sign_with_keys(&account_keys)
+            .expect("valid auth event");
+        assert_eq!(
+            validate_nip42_auth_event(
+                &valid,
+                &relay_url,
+                challenge,
+                &account_keys.public_key().to_hex(),
+                now,
+            ),
+            Ok(())
+        );
+        assert_eq!(
+            validate_nip42_auth_event(
+                &valid,
+                &relay_url,
+                challenge,
+                &other_keys.public_key().to_hex(),
+                now,
+            ),
+            Err(RelayAuthenticationRefusal::WrongAccount)
+        );
+
+        let stale = EventBuilder::auth(challenge, relay_url.clone())
+            .custom_created_at(nostr::Timestamp::from_secs(
+                now.saturating_sub(NIP42_FRESHNESS_WINDOW + 1),
+            ))
+            .sign_with_keys(&account_keys)
+            .expect("stale auth event");
+        assert_eq!(
+            validate_nip42_auth_event(
+                &stale,
+                &relay_url,
+                challenge,
+                &account_keys.public_key().to_hex(),
+                now,
+            ),
+            Err(RelayAuthenticationRefusal::StaleEvent)
+        );
+
+        let duplicate_challenge = EventBuilder::new(Kind::Authentication, "")
+            .tags(vec![
+                nostr::Tag::parse(["relay", relay_url.as_str()]).expect("relay tag"),
+                nostr::Tag::parse(["challenge", challenge]).expect("challenge tag"),
+                nostr::Tag::parse(["challenge", challenge]).expect("duplicate challenge tag"),
+            ])
+            .custom_created_at(nostr::Timestamp::from_secs(now))
+            .sign_with_keys(&account_keys)
+            .expect("duplicate-tag auth event");
+        assert_eq!(
+            validate_nip42_auth_event(
+                &duplicate_challenge,
+                &relay_url,
+                challenge,
+                &account_keys.public_key().to_hex(),
+                now,
+            ),
+            Err(RelayAuthenticationRefusal::InvalidEvent)
+        );
+    }
+
+    #[test]
+    fn nip42_challenge_projection_never_exposes_the_raw_challenge() {
+        let keys = Keys::generate();
+        let mut relay =
+            WebSocketRelayAdapter::new_for_keys(vec!["wss://relay.example.com/".to_string()], keys)
+                .expect("relay");
+        relay.connection_generation = 3;
+        relay
+            .record_auth_challenge(&json!(["AUTH", "raw-secret-shaped-challenge"]))
+            .expect("valid challenge");
+        let projection = relay.relay_authentication_projection();
+        projection.validate().expect("valid public projection");
+        let encoded = projection.public_json().expect("public projection JSON");
+        assert!(!encoded.contains("raw-secret-shaped-challenge"));
+        assert_eq!(
+            projection.relays[0].state,
+            RelayConnectionAuthenticationState::ChallengePending
+        );
+        assert_eq!(projection.relays[0].connection_generation, 3);
+    }
+
+    #[test]
+    fn nip42_auth_proofs_are_one_use_per_adapter() {
+        let keys = Keys::generate();
+        let mut relay =
+            WebSocketRelayAdapter::new_for_keys(vec!["wss://relay.example.com".to_string()], keys)
+                .expect("relay");
+        let event_id = "a".repeat(64);
+        assert!(relay.remember_auth_event(event_id.clone()));
+        assert!(!relay.remember_auth_event(event_id));
+    }
+
+    #[test]
+    fn relay_authentication_snapshot_keeps_accounts_separate_on_the_same_relay() {
+        let first_keys = Keys::generate();
+        let second_keys = Keys::generate();
+        let relay_url = "wss://account-switch-relay.example.com";
+        let mut first =
+            WebSocketRelayAdapter::new_for_keys(vec![relay_url.to_string()], first_keys.clone())
+                .expect("first account relay");
+        let mut second =
+            WebSocketRelayAdapter::new_for_keys(vec![relay_url.to_string()], second_keys.clone())
+                .expect("second account relay");
+        first.connection_generation = 71;
+        second.connection_generation = 72;
+        first
+            .record_auth_challenge(&json!(["AUTH", "first-account-challenge"]))
+            .expect("first account challenge");
+        second
+            .record_auth_challenge(&json!(["AUTH", "second-account-challenge"]))
+            .expect("second account challenge");
+
+        let snapshot = relay_authentication_projection();
+        let first_selected = snapshot.for_account_public_key_hex(&first_keys.public_key().to_hex());
+        let second_selected =
+            snapshot.for_account_public_key_hex(&second_keys.public_key().to_hex());
+        assert_eq!(first_selected.relays.len(), 1);
+        assert_eq!(second_selected.relays.len(), 1);
+        assert_eq!(first_selected.relays[0].connection_generation, 71);
+        assert_eq!(second_selected.relays[0].connection_generation, 72);
+        assert_ne!(
+            first_selected.relays[0].account_public_key_hex,
+            second_selected.relays[0].account_public_key_hex
+        );
     }
 
     #[test]

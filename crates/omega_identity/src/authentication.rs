@@ -227,6 +227,130 @@ pub enum RelayAuthenticationState {
 
 #[derive(Debug, Copy, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
+pub enum RelayConnectionAuthenticationState {
+    Disconnected,
+    ChallengePending,
+    Authenticated,
+    Refused,
+    Stale,
+}
+
+#[derive(Debug, Copy, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum RelayAuthenticationRefusal {
+    MalformedChallenge,
+    InvalidEvent,
+    WrongAccount,
+    StaleEvent,
+    ReplayedProof,
+    RelayRejected,
+    AcknowledgementMissing,
+    StaleConnection,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct RelayAuthenticationReceipt {
+    pub relay_url: String,
+    pub account_public_key_hex: NostrPublicKeyHex,
+    pub connection_generation: u64,
+    pub state: RelayConnectionAuthenticationState,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub challenge_ref: Option<ProofRef>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub auth_event_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub refusal: Option<RelayAuthenticationRefusal>,
+    pub observed_at: u64,
+}
+
+impl RelayAuthenticationReceipt {
+    pub fn validate(&self) -> Result<(), AuthenticationContractError> {
+        if !is_normalized_relay_url(&self.relay_url)
+            || self.connection_generation == 0
+            || self.observed_at == 0
+        {
+            return Err(AuthenticationContractError::InvalidEvidence);
+        }
+
+        let shape_is_valid = match self.state {
+            RelayConnectionAuthenticationState::Disconnected => {
+                self.challenge_ref.is_none()
+                    && self.auth_event_id.is_none()
+                    && self.refusal.is_none()
+            }
+            RelayConnectionAuthenticationState::ChallengePending => {
+                self.challenge_ref.is_some()
+                    && self.auth_event_id.is_none()
+                    && self.refusal.is_none()
+            }
+            RelayConnectionAuthenticationState::Authenticated => {
+                self.challenge_ref.is_some()
+                    && self.auth_event_id.as_deref().is_some_and(is_lower_hex_64)
+                    && self.refusal.is_none()
+            }
+            RelayConnectionAuthenticationState::Refused => {
+                self.challenge_ref.is_some()
+                    && self.auth_event_id.as_deref().is_none_or(is_lower_hex_64)
+                    && self.refusal.is_some()
+            }
+            RelayConnectionAuthenticationState::Stale => {
+                self.refusal == Some(RelayAuthenticationRefusal::StaleConnection)
+            }
+        };
+        if !shape_is_valid {
+            return Err(AuthenticationContractError::InvalidEvidence);
+        }
+
+        let value =
+            serde_json::to_value(self).map_err(|_| AuthenticationContractError::Serialization)?;
+        reject_secret_shaped_value(&value)
+    }
+
+    pub fn public_json(&self) -> Result<String, AuthenticationContractError> {
+        self.validate()?;
+        serde_json::to_string(self).map_err(|_| AuthenticationContractError::Serialization)
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(deny_unknown_fields)]
+pub struct RelayAuthenticationProjection {
+    #[serde(default)]
+    pub relays: Vec<RelayAuthenticationReceipt>,
+}
+
+impl RelayAuthenticationProjection {
+    pub fn validate(&self) -> Result<(), AuthenticationContractError> {
+        let mut connections = HashSet::new();
+        for receipt in &self.relays {
+            receipt.validate()?;
+            if !connections.insert((&receipt.relay_url, receipt.connection_generation)) {
+                return Err(AuthenticationContractError::InvalidEvidence);
+            }
+        }
+        Ok(())
+    }
+
+    pub fn public_json(&self) -> Result<String, AuthenticationContractError> {
+        self.validate()?;
+        serde_json::to_string(self).map_err(|_| AuthenticationContractError::Serialization)
+    }
+
+    pub fn for_account_public_key_hex(&self, public_key_hex: &str) -> Self {
+        Self {
+            relays: self
+                .relays
+                .iter()
+                .filter(|receipt| receipt.account_public_key_hex.as_str() == public_key_hex)
+                .cloned()
+                .collect(),
+        }
+    }
+}
+
+#[derive(Debug, Copy, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
 pub enum GroupAdmissionState {
     Unknown,
     NotMember,
@@ -480,6 +604,29 @@ fn is_lower_hex_64(value: &str) -> bool {
             .all(|byte| byte.is_ascii_digit() || matches!(byte, b'a'..=b'f'))
 }
 
+fn is_normalized_relay_url(value: &str) -> bool {
+    if value.len() > 2_048 || value.trim() != value || value.chars().any(char::is_control) {
+        return false;
+    }
+    let Ok(parsed) = url::Url::parse(value) else {
+        return false;
+    };
+    if !matches!(parsed.scheme(), "ws" | "wss")
+        || parsed.host_str().is_none()
+        || !parsed.username().is_empty()
+        || parsed.password().is_some()
+        || parsed.query().is_some()
+        || parsed.fragment().is_some()
+    {
+        return false;
+    }
+    let mut normalized = parsed.to_string();
+    if normalized.ends_with('/') {
+        normalized.pop();
+    }
+    normalized == value
+}
+
 fn reject_secret_shaped_value(value: &Value) -> Result<(), AuthenticationContractError> {
     match value {
         Value::Object(entries) => {
@@ -642,6 +789,96 @@ mod tests {
         assert_eq!(
             invalid_digest.validate(),
             Err(AuthenticationContractError::InvalidSigningContext)
+        );
+    }
+
+    #[test]
+    fn relay_authentication_receipts_are_public_safe_and_connection_bound() {
+        let receipt = RelayAuthenticationReceipt {
+            relay_url: "wss://relay.example.com".to_string(),
+            account_public_key_hex: NostrPublicKeyHex::new(
+                "79be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798",
+            )
+            .expect("valid account key"),
+            connection_generation: 7,
+            state: RelayConnectionAuthenticationState::Authenticated,
+            challenge_ref: Some(
+                ProofRef::new("nip42.0123456789abcdef0123456789abcdef")
+                    .expect("portable challenge reference"),
+            ),
+            auth_event_id: Some("a".repeat(64)),
+            refusal: None,
+            observed_at: 1_700_000_000,
+        };
+        receipt.validate().expect("valid relay receipt");
+        let public_json = receipt.public_json().expect("public relay receipt");
+        assert!(!public_json.contains("challenge-value"));
+
+        let duplicate_projection = RelayAuthenticationProjection {
+            relays: vec![receipt.clone(), receipt],
+        };
+        assert_eq!(
+            duplicate_projection.validate(),
+            Err(AuthenticationContractError::InvalidEvidence)
+        );
+    }
+
+    #[test]
+    fn relay_authentication_receipt_state_requires_matching_evidence() {
+        let receipt = RelayAuthenticationReceipt {
+            relay_url: "wss://relay.example.com".to_string(),
+            account_public_key_hex: NostrPublicKeyHex::new(
+                "79be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798",
+            )
+            .expect("valid account key"),
+            connection_generation: 1,
+            state: RelayConnectionAuthenticationState::Authenticated,
+            challenge_ref: None,
+            auth_event_id: Some("a".repeat(64)),
+            refusal: None,
+            observed_at: 1,
+        };
+        assert_eq!(
+            receipt.validate(),
+            Err(AuthenticationContractError::InvalidEvidence)
+        );
+    }
+
+    #[test]
+    fn relay_authentication_projection_filters_exactly_by_account() {
+        let first_key = NostrPublicKeyHex::new(
+            "79be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798",
+        )
+        .expect("valid first account key");
+        let second_key = NostrPublicKeyHex::new(
+            "c6047f9441ed7d6d3045406e95c07cd85c778e4b8cef3ca7abac09b95c709ee5",
+        )
+        .expect("valid second account key");
+        let receipt_for =
+            |account_public_key_hex: NostrPublicKeyHex, generation| RelayAuthenticationReceipt {
+                relay_url: "wss://relay.example.com".to_string(),
+                account_public_key_hex,
+                connection_generation: generation,
+                state: RelayConnectionAuthenticationState::Disconnected,
+                challenge_ref: None,
+                auth_event_id: None,
+                refusal: None,
+                observed_at: generation,
+            };
+        let projection = RelayAuthenticationProjection {
+            relays: vec![
+                receipt_for(first_key, 1),
+                receipt_for(second_key.clone(), 2),
+            ],
+        };
+        let selected = projection.for_account_public_key_hex(second_key.as_str());
+        assert_eq!(selected.relays.len(), 1);
+        assert_eq!(selected.relays[0].account_public_key_hex, second_key);
+        assert!(
+            projection
+                .for_account_public_key_hex("not-an-account-key")
+                .relays
+                .is_empty()
         );
     }
 }

@@ -1,7 +1,7 @@
 # Omega Nostr authentication contract
 
-- Status: AUTH-00 contract frozen; AUTH-01 through AUTH-04 implemented
-- Packets: `OMEGA-AUTH-00`, `OMEGA-AUTH-01`, `OMEGA-AUTH-02`, `OMEGA-AUTH-03`, `OMEGA-AUTH-04`
+- Status: AUTH-00 contract frozen; AUTH-01 through AUTH-05 implemented
+- Packets: `OMEGA-AUTH-00`, `OMEGA-AUTH-01`, `OMEGA-AUTH-02`, `OMEGA-AUTH-03`, `OMEGA-AUTH-04`, `OMEGA-AUTH-05`
 - Source baseline: Omega `0136fca2d11900ddc7982665482ed8cd035391c7`
 - Product plan:
   [Omega Nostr authentication and onboarding](https://github.com/OpenAgentsInc/openagents/blob/7010561549ebb46a37257292a9100f990a4a3356/docs/omega/2026-07-30-omega-nostr-authentication-and-onboarding.md)
@@ -273,3 +273,46 @@ the disposable client secret is deleted on rejection, revocation, or
 disconnect. This wave does not use the macOS Keychain, Secure Enclave, Windows
 credential vault, Linux secret service, Android keystore, encrypted
 application vault, or any other native enclave integration.
+
+## Relay and hosted authentication
+
+AUTH-05 makes relay authentication and hosted account linking observable
+without treating either as general authority.
+
+NIP-42 state is connection-scoped and keyed by the account public key,
+normalized relay URL, and monotonic connection generation. Each public-safe
+receipt reports one of
+disconnected, challenge pending, authenticated, refused, or stale. A receipt
+may include a digest-derived challenge reference, the accepted authentication
+event id, a bounded refusal category, and the observation time. It never
+contains the relay's raw challenge. A challenge and its response may be used
+only once, and a late acknowledgement from a previous connection generation
+cannot authenticate the current connection. The event must bind the exact
+relay, exact challenge, selected account, current connection, signature, and
+fresh timestamp.
+
+The desktop account dashboard filters receipts to the selected account public
+key and presents each relay independently. **Relay
+authenticated** means only that this WebSocket connection accepted its exact
+NIP-42 proof. It does not mean **Signer ready**, **Group admitted**, **Hosted
+linked**, or **Action authorized**.
+
+The OpenAgents hosted flow uses one exact NIP-98 proof for the HTTPS URL,
+method, payload digest, signer, and freshness window. Proof identifiers are
+single-use for the account. The returned session is verified before it is
+stored or exposed as linked. The public session projection distinguishes
+verification, expiry, rotation, disconnect, revocation, owner-scope refusal,
+service unavailability, credential-storage failure, and revocation failure.
+Failures are never rounded up to a linked session.
+
+The public Omega-public-key to OpenAgents-user binding is stored as public-safe
+evidence independently from the bearer credential. That binding proves only
+which hosted user the service associated with the Omega account. It cannot
+admit a NIP-29 group, authenticate a relay, or authorize an arbitrary action.
+
+Hosted access and refresh tokens remain in the owner-only, unencrypted
+`credentials/credentials.json` file below the channel data root. Unix writes
+enforce directory mode `0700` and file mode `0600`. This first wave explicitly
+enables no macOS Keychain, Secure Enclave, Windows credential vault, Linux
+secret service, Android keystore, encrypted application vault, native enclave,
+or hardware-backed secret store.

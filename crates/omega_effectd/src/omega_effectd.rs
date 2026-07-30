@@ -36,6 +36,7 @@ pub use issue31_nostr::*;
 pub use issue31_provider_handoff::*;
 pub use nostr_websocket_relay::{
     WebSocketRelayAdapter, publish_community_event, query_community_events,
+    relay_authentication_projection,
 };
 pub use omega_device_bridge::PROTOCOL as DEVICE_BRIDGE_PROTOCOL;
 pub use omega_device_bridge::{
@@ -47,7 +48,10 @@ pub use omega_device_bridge::{
     ServerConfig as DeviceBridgeServerConfig, ServerFrame as DeviceBridgeServerFrame,
     ServerHandle as DeviceBridgeServerHandle, ThreadState,
 };
-pub use openagents_nostr_auth::HostedSessionBlocker;
+pub use openagents_nostr_auth::{
+    HostedSessionBlocker, Nip98ProofReplayGuard, VerifiedNip98Proof, sign_nip98_request,
+    verify_nip98_authorization,
+};
 pub use openagents_sarah_voice::{
     ManagedSarahVoiceSession, PreparedSarahVoiceAdmission, SARAH_VOICE_ADMISSION_SCHEMA,
     SARAH_VOICE_ADMISSION_URL, SARAH_VOICE_CHALLENGE_PROTOCOL, SARAH_VOICE_DEVICE_HEADER,
@@ -57,8 +61,9 @@ pub use openagents_sarah_voice::{
     SarahVoiceProjectionGap, SarahVoiceSettlementProjection, SarahVoiceSettlementState,
 };
 pub use openagents_session::{
-    OpenAgentsSession, OpenAgentsSessionPhase, VerifiedOpenAgentsSession, init_openagents_session,
-    openagents_session, openagents_session_if_initialized,
+    HostedSessionProjection, HostedSessionState, OpenAgentsSession, OpenAgentsSessionPhase,
+    VerifiedOpenAgentsSession, init_openagents_session, openagents_session,
+    openagents_session_if_initialized,
 };
 
 pub use protocol::{

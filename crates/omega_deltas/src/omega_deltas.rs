@@ -184,6 +184,7 @@ pub const ENFORCED_DELTAS: &[&str] = &[
     "OMEGA-DELTA-0193",
     "OMEGA-DELTA-0194",
     "OMEGA-DELTA-0195",
+    "OMEGA-DELTA-0196",
 ];
 
 /// The concise product contract adjacent to the delta registry.
@@ -1238,6 +1239,10 @@ pub const IDENTITY_ACCOUNT_REGISTRY_PATH: &str = "crates/omega_identity/src/acco
 pub const ACCOUNT_UI_PATH: &str = "crates/account_ui/account_ui.rs";
 pub const NIP46_IDENTITY_PATH: &str = "crates/omega_identity/src/nip46.rs";
 pub const NIP46_BROKER_PATH: &str = "crates/omega_signer_broker/omega_signer_broker.rs";
+pub const NIP42_RELAY_PATH: &str = "crates/omega_effectd/src/nostr_websocket_relay.rs";
+pub const OPENAGENTS_SESSION_PATH: &str = "crates/omega_effectd/src/openagents_session.rs";
+pub const OPENAGENTS_NOSTR_AUTH_PATH: &str = "crates/omega_effectd/src/openagents_nostr_auth.rs";
+pub const OPENAGENTS_BINDING_PATH: &str = "crates/omega_effectd/src/openagents_binding.rs";
 pub const ACCOUNT_SCOPE_PATH: &str = "crates/agent_ui/src/account_scope.rs";
 pub const DRAFT_PROMPT_STORE_PATH: &str = "crates/agent_ui/src/draft_prompt_store.rs";
 
@@ -20424,19 +20429,25 @@ mod tests {
             .expect("OMEGA-DELTA-0159: the background proof is gone");
         let identity = function_body(&proof, "ready_local_identity")
             .expect("OMEGA-DELTA-0159: the consent-aware identity boundary is gone");
-        let inspection = identity
+        let account_identity = function_body(&proof, "ready_account_identity")
+            .expect("OMEGA-DELTA-0159: active-account identity selection is gone");
+        let inspection = account_identity
             .find(".inspect()")
             .expect("OMEGA-DELTA-0159: hosted sign-in stopped inspecting custody");
-        let signing = function_body(&proof, "sign_nip98_post")
+        let signing = function_body(&proof, "sign_nip98_request")
             .expect("OMEGA-DELTA-0159: the signing step is gone");
         assert!(
-            inspection < identity.len()
-                && mint.contains("ready_local_identity()")
+            inspection < account_identity.len()
+                && mint.contains("ready_account_identity()")
                 && mint.contains("sign_nip98_post")
-                && signing.contains(".sign(&AdmittedSigningRequest")
+                && signing.contains("SignerBroker::system()")
+                && signing.contains(".sign(&route, selection, request)")
                 && !identity.contains("provision_unattended")
                 && !identity.contains(".create(")
-                && !identity.contains(".adopt("),
+                && !identity.contains(".adopt(")
+                && !account_identity.contains("provision_unattended")
+                && !account_identity.contains(".create(")
+                && !account_identity.contains(".adopt("),
             "OMEGA-DELTA-0159: {} can create, adopt, or replace an identity \
              while performing automatic hosted sign-in.",
             repository_path("crates/omega_effectd/src/openagents_nostr_auth.rs").display()
@@ -24346,6 +24357,149 @@ mod tests {
                 assert!(
                     normalized.contains(required),
                     "OMEGA-DELTA-0195: {path} lost `{required}`"
+                );
+            }
+        }
+    }
+
+    /// OMEGA-DELTA-0196. Relay and hosted authentication remain exact,
+    /// observable, account-bound, and independent from other authority.
+    #[test]
+    fn relay_and_hosted_authentication_are_visible_without_authority_substitution() {
+        let authentication = read_repository_file("crates/omega_identity/src/authentication.rs");
+        for required in [
+            "pub struct RelayAuthenticationReceipt",
+            "pub struct RelayAuthenticationProjection",
+            "pub enum RelayConnectionAuthenticationState",
+            "pub enum RelayAuthenticationRefusal",
+            "pub connection_generation: u64",
+            "pub account_public_key_hex: NostrPublicKeyHex",
+            "pub challenge_ref: Option<ProofRef>",
+            "pub auth_event_id: Option<String>",
+            "AcknowledgementMissing",
+            "ReplayedProof",
+        ] {
+            assert!(
+                authentication.contains(required),
+                "OMEGA-DELTA-0196: relay receipt contract lost `{required}`"
+            );
+        }
+
+        let relay = read_repository_file(NIP42_RELAY_PATH);
+        for required in [
+            "pub fn relay_authentication_projection()",
+            "NIP42_FRESHNESS_WINDOW",
+            "recent_auth_event_ids",
+            "RelayAuthenticationRefusal::WrongAccount",
+            "RelayAuthenticationRefusal::StaleEvent",
+            "RelayAuthenticationRefusal::ReplayedProof",
+            "RelayAuthenticationRefusal::AcknowledgementMissing",
+            "connection_generation",
+            "account_public_key_hex",
+        ] {
+            assert!(
+                relay.contains(required),
+                "OMEGA-DELTA-0196: NIP-42 runtime lost `{required}`"
+            );
+        }
+
+        let nip98 = read_repository_file(OPENAGENTS_NOSTR_AUTH_PATH);
+        for required in [
+            "pub struct Nip98ProofReplayGuard",
+            "pub fn verify_and_consume",
+            "pub fn verify_nip98_authorization",
+            "NIP98_MAX_CLOCK_SKEW_SECONDS",
+            "expected_url",
+            "expected_method",
+            "expected_payload",
+            "expected_public_key_hex",
+            "ProofAlreadyUsed",
+        ] {
+            assert!(
+                nip98.contains(required),
+                "OMEGA-DELTA-0196: NIP-98 runtime lost `{required}`"
+            );
+        }
+
+        let hosted = read_repository_file(OPENAGENTS_SESSION_PATH);
+        for required in [
+            "pub struct HostedSessionProjection",
+            "pub enum HostedSessionState",
+            "OwnerScopeRefused",
+            "AccountMismatch",
+            "ServiceUnavailable",
+            "StorageFailed",
+            "RevocationFailed",
+            "pub omega_public_key_hex: Option<String>",
+            "pub account_generation: Option<u64>",
+            "fn credential_matches_account",
+            "schema_version: 2",
+            "pub async fn verify_public",
+        ] {
+            assert!(
+                hosted.contains(required),
+                "OMEGA-DELTA-0196: hosted-session runtime lost `{required}`"
+            );
+        }
+
+        let binding = read_repository_file(OPENAGENTS_BINDING_PATH);
+        for required in [
+            "pub struct BindingProjection",
+            "pub omega_public_key_hex: Option<String>",
+            "pub openagents_account_id: Option<String>",
+            "pub fn load_projection",
+            "BINDING_RECORD_FILE",
+            "bytes_look_secret_shaped",
+        ] {
+            assert!(
+                binding.contains(required),
+                "OMEGA-DELTA-0196: public hosted binding lost `{required}`"
+            );
+        }
+
+        let dashboard = read_repository_file(ACCOUNT_UI_PATH);
+        for required in [
+            "Signer ready",
+            "Relay authenticated",
+            "Group admitted",
+            "Hosted linked",
+            "Hosted session",
+            "Action authorized",
+            "Connect hosted",
+            "Verify or rotate",
+            "Disconnect hosted",
+            "hosted_binding_matches",
+            "BindingProjection",
+            "for_account_public_key_hex",
+            "relay_authentication_projection",
+        ] {
+            assert!(
+                dashboard.contains(required),
+                "OMEGA-DELTA-0196: account UI lost `{required}`"
+            );
+        }
+
+        for path in [
+            IDENTITY_AUTHENTICATION_DOCUMENT_PATH,
+            RUNTIME_CREDENTIAL_STORAGE_DOCUMENT_PATH,
+            APPLICATION_IDENTITY_DOCUMENT_PATH,
+        ] {
+            let documentation = normalize_prose(&read_repository_file(path));
+            for required in [
+                "credentials/credentials.json",
+                "unencrypted",
+                "0700",
+                "0600",
+                "Secure Enclave",
+                "Windows credential vault",
+                "Linux secret service",
+                "Android keystore",
+                "encrypted application vault",
+                "native enclave",
+            ] {
+                assert!(
+                    documentation.contains(required),
+                    "OMEGA-DELTA-0196: {path} lost `{required}`"
                 );
             }
         }

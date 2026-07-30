@@ -32,6 +32,40 @@ pub enum OpenAgentsSessionPhase {
     Disconnecting,
 }
 
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum HostedSessionState {
+    #[default]
+    Disconnected,
+    Connecting,
+    Verified,
+    Rotating,
+    Expired,
+    Revoked,
+    OwnerScopeRefused,
+    AccountMismatch,
+    ServiceUnavailable,
+    StorageFailed,
+    RevocationFailed,
+}
+
+#[derive(Clone, Debug, Default, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct HostedSessionProjection {
+    pub state: HostedSessionState,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub owner_user_id: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub omega_public_key_hex: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub account_generation: Option<u64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub issued_at: Option<u64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub expires_at: Option<u64>,
+    pub retryable: bool,
+}
+
 impl OpenAgentsSessionPhase {
     pub fn label(self) -> &'static str {
         match self {
@@ -63,6 +97,7 @@ pub struct OpenAgentsSession {
     /// label. Callers that have to tell a person what to do next need the
     /// specific reason, and reconstructing it from `Unavailable` is impossible.
     blocker: Arc<Mutex<Option<HostedSessionBlocker>>>,
+    projection: Arc<Mutex<HostedSessionProjection>>,
 }
 
 struct OpenAgentsSessionGlobal(OpenAgentsSession);
@@ -77,6 +112,14 @@ struct StoredCredential {
     access_token: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     refresh_token: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    issued_at: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    expires_at: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    omega_public_key_hex: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    account_generation: Option<u64>,
 }
 
 #[derive(Debug, Deserialize, Serialize)]
@@ -133,6 +176,7 @@ pub fn init_openagents_session(cx: &mut App) {
         http_client: cx.http_client(),
         phase: Arc::new(Mutex::new(OpenAgentsSessionPhase::SignedOut)),
         blocker: Arc::default(),
+        projection: Arc::default(),
     }));
 }
 
@@ -162,6 +206,19 @@ impl OpenAgentsSession {
         self.blocker.lock().ok().and_then(|blocker| blocker.clone())
     }
 
+    pub fn projection(&self) -> HostedSessionProjection {
+        self.projection
+            .lock()
+            .map(|projection| projection.clone())
+            .unwrap_or_default()
+    }
+
+    fn set_projection(&self, projection: HostedSessionProjection) {
+        if let Ok(mut current) = self.projection.lock() {
+            *current = projection;
+        }
+    }
+
     fn set_phase(&self, phase: OpenAgentsSessionPhase) {
         if let Ok(mut current) = self.phase.lock() {
             *current = phase;
@@ -182,6 +239,11 @@ impl OpenAgentsSession {
 
     pub async fn connect(&self, cx: &mut AsyncApp) -> OpenAgentsSessionPhase {
         self.set_phase(OpenAgentsSessionPhase::Connecting);
+        self.set_projection(HostedSessionProjection {
+            state: HostedSessionState::Connecting,
+            retryable: true,
+            ..HostedSessionProjection::default()
+        });
         let (phase, blocker) = match self.connect_inner().await {
             Ok(credential) => {
                 if let Err(error) = self.save_credential(&credential, cx).await {
@@ -191,30 +253,99 @@ impl OpenAgentsSession {
                         Some(HostedSessionBlocker::CredentialStorageFailed),
                     )
                 } else {
+                    self.set_projection(projection_for_credential(
+                        HostedSessionState::Verified,
+                        &credential,
+                    ));
                     (OpenAgentsSessionPhase::Ready, None)
                 }
             }
             Err(blocker) => (OpenAgentsSessionPhase::Unavailable, Some(blocker)),
         };
         self.record_blocker(blocker);
+        if phase == OpenAgentsSessionPhase::Unavailable {
+            let blocker = self.blocker();
+            self.set_projection(HostedSessionProjection {
+                state: if blocker.as_ref().is_some_and(|value| {
+                    matches!(value, HostedSessionBlocker::CredentialStorageFailed)
+                }) {
+                    HostedSessionState::StorageFailed
+                } else if blocker.as_ref().is_some_and(|value| {
+                    matches!(value, HostedSessionBlocker::ProofRejected { .. })
+                }) {
+                    HostedSessionState::OwnerScopeRefused
+                } else {
+                    HostedSessionState::ServiceUnavailable
+                },
+                retryable: blocker
+                    .as_ref()
+                    .is_none_or(HostedSessionBlocker::is_retryable),
+                ..HostedSessionProjection::default()
+            });
+        }
         self.set_phase(phase);
         phase
     }
 
     pub async fn disconnect(&self, cx: &mut AsyncApp) -> OpenAgentsSessionPhase {
         self.set_phase(OpenAgentsSessionPhase::Disconnecting);
-        let phase = match self.load_credential(cx).await {
-            Ok(None) => OpenAgentsSessionPhase::SignedOut,
-            Ok(Some(credential)) => match self.revoke_credential(&credential).await {
-                Ok(true) if self.delete_credential(cx).await.is_ok() => {
-                    OpenAgentsSessionPhase::SignedOut
+        let (phase, state) = match self.load_credential(cx).await {
+            Ok(None) => (
+                OpenAgentsSessionPhase::SignedOut,
+                HostedSessionState::Disconnected,
+            ),
+            Ok(Some(credential)) => {
+                let active =
+                    omega_identity::AccountRegistryService::for_channel(*app_identity::CHANNEL)
+                        .selection_token();
+                if !active.as_ref().is_ok_and(|selection| {
+                    credential_matches_account(
+                        &credential,
+                        selection.identity.public_key_hex().as_str(),
+                        selection.generation,
+                    )
+                }) {
+                    (
+                        OpenAgentsSessionPhase::Denied,
+                        HostedSessionState::AccountMismatch,
+                    )
+                } else {
+                    match self.revoke_credential(&credential).await {
+                        Ok(true) if self.delete_credential(cx).await.is_ok() => (
+                            OpenAgentsSessionPhase::SignedOut,
+                            HostedSessionState::Revoked,
+                        ),
+                        Ok(true) => (
+                            OpenAgentsSessionPhase::Unavailable,
+                            HostedSessionState::StorageFailed,
+                        ),
+                        Ok(false) | Err(_) => (
+                            OpenAgentsSessionPhase::Unavailable,
+                            HostedSessionState::RevocationFailed,
+                        ),
+                    }
                 }
-                Ok(true) | Ok(false) | Err(_) => OpenAgentsSessionPhase::Unavailable,
-            },
-            Err(_) => OpenAgentsSessionPhase::Unavailable,
+            }
+            Err(_) => (
+                OpenAgentsSessionPhase::Unavailable,
+                HostedSessionState::StorageFailed,
+            ),
         };
+        self.set_projection(HostedSessionProjection {
+            state,
+            retryable: matches!(
+                state,
+                HostedSessionState::StorageFailed | HostedSessionState::RevocationFailed
+            ),
+            ..HostedSessionProjection::default()
+        });
         self.set_phase(phase);
         phase
+    }
+
+    pub async fn verify_public(&self, cx: &mut AsyncApp) -> HostedSessionProjection {
+        self.resolve_verified(cx).await;
+        self.projection()
     }
 
     pub async fn resolve_verified(&self, cx: &mut AsyncApp) -> Option<VerifiedOpenAgentsSession> {
@@ -222,15 +353,57 @@ impl OpenAgentsSession {
             Ok(Some(credential)) => credential,
             Ok(None) => {
                 self.set_phase(OpenAgentsSessionPhase::SignedOut);
+                self.set_projection(HostedSessionProjection::default());
                 return None;
             }
             Err(error) => {
                 log::error!("hosted OpenAgents credential could not be read: {error:#}");
                 self.record_blocker(Some(HostedSessionBlocker::CredentialStorageFailed));
                 self.set_phase(OpenAgentsSessionPhase::Unavailable);
+                self.set_projection(HostedSessionProjection {
+                    state: HostedSessionState::StorageFailed,
+                    retryable: true,
+                    ..HostedSessionProjection::default()
+                });
                 return None;
             }
         };
+        let active_selection =
+            omega_identity::AccountRegistryService::for_channel(*app_identity::CHANNEL)
+                .selection_token();
+        let matches_active = active_selection.as_ref().is_ok_and(|selection| {
+            credential_matches_account(
+                &credential,
+                selection.identity.public_key_hex().as_str(),
+                selection.generation,
+            )
+        });
+        if !matches_active {
+            self.set_phase(OpenAgentsSessionPhase::Denied);
+            self.set_projection(projection_for_credential(
+                HostedSessionState::AccountMismatch,
+                &credential,
+            ));
+            return None;
+        }
+        if credential
+            .expires_at
+            .is_some_and(|expires_at| expires_at <= unix_time_now())
+            && credential.refresh_token.is_none()
+        {
+            self.set_phase(OpenAgentsSessionPhase::Denied);
+            self.set_projection(projection_for_credential(
+                HostedSessionState::Expired,
+                &credential,
+            ));
+            return None;
+        }
+        if credential.refresh_token.is_some() {
+            self.set_projection(projection_for_credential(
+                HostedSessionState::Rotating,
+                &credential,
+            ));
+        }
         match self.verify_credential(&credential).await {
             VerificationResult::Verified {
                 credential,
@@ -245,6 +418,10 @@ impl OpenAgentsSession {
                 }
                 self.record_blocker(None);
                 self.set_phase(OpenAgentsSessionPhase::Ready);
+                self.set_projection(projection_for_credential(
+                    HostedSessionState::Verified,
+                    &credential,
+                ));
                 Some(VerifiedOpenAgentsSession {
                     base_url: OPENAGENTS_BASE_URL.to_string(),
                     owner_user_id,
@@ -258,11 +435,21 @@ impl OpenAgentsSession {
                     OpenAgentsSessionPhase::Unavailable
                 };
                 self.set_phase(phase);
+                self.set_projection(HostedSessionProjection {
+                    state: HostedSessionState::Revoked,
+                    retryable: false,
+                    ..HostedSessionProjection::default()
+                });
                 None
             }
             VerificationResult::Unavailable => {
                 self.record_blocker(Some(HostedSessionBlocker::SessionNotVerified));
                 self.set_phase(OpenAgentsSessionPhase::Unavailable);
+                self.set_projection(HostedSessionProjection {
+                    state: HostedSessionState::ServiceUnavailable,
+                    retryable: true,
+                    ..HostedSessionProjection::default()
+                });
                 None
             }
         }
@@ -314,11 +501,21 @@ impl OpenAgentsSession {
             .await;
             match issued {
                 Ok(issued) => {
+                    let selection =
+                        omega_identity::AccountRegistryService::for_channel(*app_identity::CHANNEL)
+                            .selection_token()
+                            .ok();
                     let credential = StoredCredential {
-                        schema_version: 1,
+                        schema_version: 2,
                         owner_user_id: None,
                         access_token: issued.access_token,
                         refresh_token: None,
+                        issued_at: None,
+                        expires_at: None,
+                        omega_public_key_hex: selection.as_ref().map(|selection| {
+                            selection.identity.public_key_hex().as_str().to_string()
+                        }),
+                        account_generation: selection.map(|selection| selection.generation),
                     };
                     match self.save_credential(&credential, cx).await {
                         Ok(()) => {
@@ -422,13 +619,29 @@ impl OpenAgentsSession {
     }
 
     async fn connect_inner(&self) -> Result<StoredCredential, HostedSessionBlocker> {
-        let session =
-            super::openagents_nostr_auth::mint_openagents_nostr_session(&self.http_client).await?;
+        let selection = omega_identity::AccountRegistryService::for_channel(*app_identity::CHANNEL)
+            .selection_token()
+            .map_err(|error| HostedSessionBlocker::IdentityUnavailable {
+                custody_state: error.to_string(),
+            })?;
+        let session = super::openagents_nostr_auth::mint_openagents_nostr_session_for_identity(
+            &self.http_client,
+            Some(selection.identity.public_key_hex().as_str()),
+        )
+        .await?;
+        let issued_at = unix_time_now();
+        let expires_at = issued_at
+            .checked_add(session.expires_in)
+            .ok_or(HostedSessionBlocker::ResponseInvalid)?;
         let credential = StoredCredential {
-            schema_version: 1,
+            schema_version: 2,
             owner_user_id: Some(session.user.user_id),
             access_token: session.access_token.trim().to_string(),
             refresh_token: None,
+            issued_at: Some(issued_at),
+            expires_at: Some(expires_at),
+            omega_public_key_hex: Some(selection.identity.public_key_hex().as_str().to_string()),
+            account_generation: Some(selection.generation),
         };
         match self.verify_credential(&credential).await {
             VerificationResult::Verified { credential, .. } => Ok(credential),
@@ -485,11 +698,15 @@ impl OpenAgentsSession {
                 || tokens.access.len() > MAX_ACCESS_TOKEN_BYTES
                 || !tokens.expires_in.is_finite()
                 || tokens.expires_in <= 0.0
+                || tokens.expires_in > 31_536_000.0
             {
                 return VerificationResult::Unavailable;
             }
             verified.access_token = tokens.access.trim().to_string();
             verified.refresh_token = Some(tokens.refresh.trim().to_string());
+            let issued_at = unix_time_now();
+            verified.issued_at = Some(issued_at);
+            verified.expires_at = issued_at.checked_add(tokens.expires_in as u64);
         }
         VerificationResult::Verified {
             credential: verified,
@@ -518,9 +735,9 @@ impl OpenAgentsSession {
         else {
             return Ok(None);
         };
-        let credential: StoredCredential =
+        let mut credential: StoredCredential =
             serde_json::from_slice(&secret).context("OpenAgents stored credential was invalid")?;
-        if credential.schema_version != 1
+        if !matches!(credential.schema_version, 1 | 2)
             || !credential_owner_matches_username(&credential, &username)
             || credential.access_token.trim().is_empty()
             || credential
@@ -531,14 +748,21 @@ impl OpenAgentsSession {
         {
             return Err(anyhow!("OpenAgents stored credential was invalid"));
         }
+        credential.schema_version = 2;
         Ok(Some(credential))
     }
 
     async fn save_credential(&self, credential: &StoredCredential, cx: &AsyncApp) -> Result<()> {
-        if credential
-            .owner_user_id
-            .as_ref()
-            .is_some_and(|owner_user_id| owner_user_id.trim().is_empty())
+        if credential.schema_version != 2
+            || credential
+                .omega_public_key_hex
+                .as_ref()
+                .is_none_or(|public_key| public_key.trim().is_empty())
+            || credential.account_generation.is_none()
+            || credential
+                .owner_user_id
+                .as_ref()
+                .is_some_and(|owner_user_id| owner_user_id.trim().is_empty())
             || credential.access_token.trim().is_empty()
             || credential
                 .refresh_token
@@ -582,7 +806,7 @@ impl OpenAgentsSession {
         }
         let device_ref = format!("omega-device-{}", random_device_component());
         let secret = serde_json::to_vec(&StoredDeviceBinding {
-            schema_version: 1,
+            schema_version: 2,
             device_ref: device_ref.clone(),
         })?;
         self.credentials
@@ -597,6 +821,37 @@ fn credential_username(credential: &StoredCredential) -> &str {
         .owner_user_id
         .as_deref()
         .unwrap_or(OPENAGENTS_CREDENTIAL_USERNAME)
+}
+
+fn projection_for_credential(
+    state: HostedSessionState,
+    credential: &StoredCredential,
+) -> HostedSessionProjection {
+    HostedSessionProjection {
+        state,
+        owner_user_id: credential.owner_user_id.clone(),
+        issued_at: credential.issued_at,
+        expires_at: credential.expires_at,
+        omega_public_key_hex: credential.omega_public_key_hex.clone(),
+        account_generation: credential.account_generation,
+        retryable: false,
+    }
+}
+
+fn credential_matches_account(
+    credential: &StoredCredential,
+    omega_public_key_hex: &str,
+    account_generation: u64,
+) -> bool {
+    credential.omega_public_key_hex.as_deref() == Some(omega_public_key_hex)
+        && credential.account_generation == Some(account_generation)
+}
+
+fn unix_time_now() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|duration| duration.as_secs())
+        .unwrap_or(0)
 }
 
 fn credential_owner_matches_username(credential: &StoredCredential, username: &str) -> bool {
@@ -712,6 +967,10 @@ mod tests {
             owner_user_id: None,
             access_token: "short-lived-session".into(),
             refresh_token: None,
+            issued_at: None,
+            expires_at: None,
+            omega_public_key_hex: None,
+            account_generation: None,
         };
         let stored = serde_json::to_value(&credential).expect("serialize credential");
         assert!(stored.get("ownerUserId").is_none());
@@ -746,5 +1005,35 @@ mod tests {
         assert!(
             !(incomplete.signed_out && incomplete.access_revoked && incomplete.refresh_revoked)
         );
+    }
+
+    #[test]
+    fn hosted_credential_is_bound_to_omega_account_key_and_generation() {
+        let credential = StoredCredential {
+            schema_version: 2,
+            owner_user_id: Some("owner.fixture".to_string()),
+            access_token: "session".to_string(),
+            refresh_token: None,
+            issued_at: Some(100),
+            expires_at: Some(200),
+            omega_public_key_hex: Some("aa".repeat(32)),
+            account_generation: Some(7),
+        };
+        assert!(credential_matches_account(&credential, &"aa".repeat(32), 7));
+        assert!(!credential_matches_account(
+            &credential,
+            &"bb".repeat(32),
+            7
+        ));
+        assert!(!credential_matches_account(
+            &credential,
+            &"aa".repeat(32),
+            8
+        ));
+        let projection =
+            projection_for_credential(HostedSessionState::AccountMismatch, &credential);
+        assert_eq!(projection.state, HostedSessionState::AccountMismatch);
+        assert_eq!(projection.account_generation, Some(7));
+        assert_eq!(projection.omega_public_key_hex, Some("aa".repeat(32)));
     }
 }

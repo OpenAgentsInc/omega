@@ -1,13 +1,18 @@
 use std::{
-    sync::Arc,
+    collections::{BTreeMap, BTreeSet},
+    sync::{Arc, Mutex, OnceLock},
     time::{SystemTime, UNIX_EPOCH},
 };
 
 use base64::Engine as _;
 use http_client::{AsyncBody, HttpClient, Method, Request};
+use nostr::{Event, JsonUtil as _};
 use omega_identity::{
-    AdmittedSigningRequest, CustodyState, IdentityService, PublicIdentity, ReceiptRef,
-    SigningPurpose, UnsignedEventTemplate,
+    AccountRegistryService, AdmittedSigningRequest, CustodyState, IdentityService, PublicIdentity,
+    ReceiptRef, SignerKind, SigningPurpose, UnsignedEventTemplate,
+};
+use omega_signer_broker::{
+    Nip46WebSocketTransport, RemoteSignerMetadata, SignerBroker, SignerRoute,
 };
 use serde::Deserialize;
 use sha2::{Digest as _, Sha256};
@@ -19,6 +24,47 @@ pub const OPENAGENTS_NOSTR_SESSION_URL: &str = "https://openagents.com/api/omega
 const MAX_HTTP_BODY_BYTES: u64 = 64 * 1024;
 const MAX_ACCESS_TOKEN_BYTES: usize = 16 * 1024;
 const NIP98_KIND: u16 = 27_235;
+const NIP98_MAX_CLOCK_SKEW_SECONDS: u64 = 60;
+const MAX_NIP98_ISSUERS: usize = 128;
+
+static NIP98_ISSUANCE_LEDGER: OnceLock<Mutex<BTreeMap<String, u64>>> = OnceLock::new();
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct VerifiedNip98Proof {
+    pub event_id: String,
+    pub public_key_hex: String,
+    pub created_at: u64,
+}
+
+#[derive(Debug, Default)]
+pub struct Nip98ProofReplayGuard {
+    consumed_event_ids: BTreeSet<String>,
+}
+
+impl Nip98ProofReplayGuard {
+    pub fn verify_and_consume(
+        &mut self,
+        authorization: &str,
+        expected_url: &str,
+        expected_method: &str,
+        expected_payload: &[u8],
+        expected_public_key_hex: &str,
+        now: u64,
+    ) -> Result<VerifiedNip98Proof, HostedSessionBlocker> {
+        let proof = verify_nip98_authorization(
+            authorization,
+            expected_url,
+            expected_method,
+            expected_payload,
+            expected_public_key_hex,
+            now,
+        )?;
+        if !self.consumed_event_ids.insert(proof.event_id.clone()) {
+            return Err(HostedSessionBlocker::ProofAlreadyUsed);
+        }
+        Ok(proof)
+    }
+}
 
 /// Why a hosted OpenAgents session could not be obtained, in terms a person
 /// can act on.
@@ -46,6 +92,12 @@ pub enum HostedSessionBlocker {
     IdentityUnavailable { custody_state: String },
     #[error("Omega could not sign the hosted sign-in proof ({reason}).")]
     ProofSigningFailed { reason: String },
+    #[error("The hosted sign-in proof did not pass exact-request validation.")]
+    ProofInvalid,
+    #[error("The hosted sign-in proof was outside the 60-second freshness window.")]
+    ProofExpired,
+    #[error("The hosted sign-in proof was already consumed. Create a fresh proof and retry.")]
+    ProofAlreadyUsed,
     #[error("OpenAgents could not be reached to sign in.")]
     ServiceUnreachable,
     #[error(
@@ -114,6 +166,8 @@ impl HostedSessionBlocker {
             self,
             Self::ServiceUnreachable
                 | Self::ChallengeRateLimited
+                | Self::ProofExpired
+                | Self::ProofAlreadyUsed
                 | Self::VoiceProofExpired
                 | Self::ServiceUnavailable { .. }
                 | Self::VoiceSessionRejected { status: 409 | 429 }
@@ -164,26 +218,114 @@ pub(crate) fn ready_local_identity() -> Result<PublicIdentity, HostedSessionBloc
         })
 }
 
-pub(crate) fn sign_nip98_post(
+pub(crate) fn ready_account_identity() -> Result<PublicIdentity, HostedSessionBlocker> {
+    let registry = AccountRegistryService::for_channel(*app_identity::CHANNEL);
+    let selection =
+        registry
+            .selection_token()
+            .map_err(|error| HostedSessionBlocker::IdentityUnavailable {
+                custody_state: error.to_string(),
+            })?;
+    let dashboard =
+        registry
+            .inspect()
+            .map_err(|error| HostedSessionBlocker::IdentityUnavailable {
+                custody_state: error.to_string(),
+            })?;
+    let active = dashboard
+        .accounts
+        .iter()
+        .find(|account| account.account_ref == selection.account_ref)
+        .ok_or_else(|| HostedSessionBlocker::IdentityUnavailable {
+            custody_state: "the active account is unavailable".to_string(),
+        })?;
+    match active.signer.kind {
+        SignerKind::LocalNative => {
+            let identity = ready_local_identity()?;
+            if identity != selection.identity {
+                return Err(HostedSessionBlocker::IdentityUnavailable {
+                    custody_state: "local identity does not match the active account".to_string(),
+                });
+            }
+            Ok(identity)
+        }
+        SignerKind::RemoteNip46 => {
+            registry
+                .remote_signer_capability(&selection)
+                .map_err(|error| HostedSessionBlocker::IdentityUnavailable {
+                    custody_state: error.to_string(),
+                })?;
+            Ok(selection.identity)
+        }
+        SignerKind::BrowserNip07
+        | SignerKind::AndroidNip55
+        | SignerKind::DeviceGrant
+        | SignerKind::AgentGrant => Err(HostedSessionBlocker::IdentityUnavailable {
+            custody_state: "the active signer has no hosted-auth route".to_string(),
+        }),
+    }
+}
+
+pub(crate) async fn sign_nip98_post(
     url: &str,
     payload: &[u8],
     identity: &PublicIdentity,
 ) -> Result<String, HostedSessionBlocker> {
-    let identity_service = IdentityService::system(*app_identity::CHANNEL);
-    let created_at = SystemTime::now()
+    sign_nip98_request(
+        url,
+        "POST",
+        payload,
+        Some(identity.public_key_hex().as_str()),
+    )
+    .await
+}
+
+pub async fn sign_nip98_request(
+    url: &str,
+    method: &str,
+    payload: &[u8],
+    expected_public_key_hex: Option<&str>,
+) -> Result<String, HostedSessionBlocker> {
+    if !valid_nip98_url(url) || !valid_http_method(method) {
+        return Err(HostedSessionBlocker::ProofSigningFailed {
+            reason: "the request URL or uppercase HTTP method is invalid".to_string(),
+        });
+    }
+    let registry = AccountRegistryService::for_channel(*app_identity::CHANNEL);
+    let selection =
+        registry
+            .selection_token()
+            .map_err(|error| HostedSessionBlocker::IdentityUnavailable {
+                custody_state: error.to_string(),
+            })?;
+    if expected_public_key_hex
+        .is_some_and(|expected| expected != selection.identity.public_key_hex().as_str())
+    {
+        return Err(HostedSessionBlocker::ProofSigningFailed {
+            reason: "the active Omega identity changed before hosted sign-in".to_string(),
+        });
+    }
+    let wall_clock = SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .map_err(|_| HostedSessionBlocker::ProofSigningFailed {
             reason: "the system clock is before the Unix epoch".to_string(),
         })?
         .as_secs();
+    let issuer_ref = format!(
+        "{}:{}:{}",
+        selection.account_ref.as_str(),
+        selection.generation,
+        selection.identity.public_key_hex().as_str()
+    );
+    let created_at = next_nip98_created_at(&issuer_ref, wall_clock)?;
     let payload_hash = format!("{:x}", Sha256::digest(payload));
-    let event = nip98_post_event(url, payload_hash.clone(), created_at);
+    let event = nip98_event(url, method, payload_hash.clone(), created_at);
     let semantic_binding = serde_json::to_vec(&serde_json::json!({
         "url": url,
-        "method": "POST",
+        "method": method.to_uppercase(),
         "payload": payload_hash,
         "createdAt": created_at,
-        "publicKey": identity.public_key_hex().as_str(),
+        "publicKey": selection.identity.public_key_hex().as_str(),
     }))
     .map_err(|error| HostedSessionBlocker::ProofSigningFailed {
         reason: error.to_string(),
@@ -194,13 +336,52 @@ pub(crate) fn sign_nip98_post(
             reason: error.to_string(),
         }
     })?;
-    let signed = identity_service
-        .sign(&AdmittedSigningRequest {
-            request_ref,
-            identity_ref: identity.identity_ref().clone(),
-            purpose: SigningPurpose::NostrEvent,
-            event,
-        })
+    let request = AdmittedSigningRequest {
+        request_ref,
+        identity_ref: selection.identity.identity_ref().clone(),
+        purpose: SigningPurpose::NostrEvent,
+        event,
+    };
+    let dashboard =
+        registry
+            .inspect()
+            .map_err(|error| HostedSessionBlocker::IdentityUnavailable {
+                custody_state: error.to_string(),
+            })?;
+    let active = dashboard
+        .accounts
+        .iter()
+        .find(|account| account.account_ref == selection.account_ref)
+        .ok_or_else(|| HostedSessionBlocker::IdentityUnavailable {
+            custody_state: "the active account is unavailable".to_string(),
+        })?;
+    let route = match active.signer.kind {
+        SignerKind::LocalNative => SignerRoute::Local {
+            identity_service: Arc::new(IdentityService::system(*app_identity::CHANNEL)),
+        },
+        SignerKind::RemoteNip46 => {
+            let capability = registry
+                .remote_signer_capability(&selection)
+                .map_err(|error| HostedSessionBlocker::IdentityUnavailable {
+                    custody_state: error.to_string(),
+                })?;
+            SignerRoute::RemoteNip46 {
+                metadata: RemoteSignerMetadata { capability },
+                transport: Arc::new(Nip46WebSocketTransport::system()),
+            }
+        }
+        SignerKind::BrowserNip07
+        | SignerKind::AndroidNip55
+        | SignerKind::DeviceGrant
+        | SignerKind::AgentGrant => {
+            return Err(HostedSessionBlocker::IdentityUnavailable {
+                custody_state: "the active external signer has no broker route".to_string(),
+            });
+        }
+    };
+    let signed = SignerBroker::system()
+        .sign(&route, selection, request)
+        .await
         .map_err(|error| {
             log::error!("hosted OpenAgents sign-in: signing the proof failed: {error}");
             HostedSessionBlocker::ProofSigningFailed {
@@ -213,17 +394,149 @@ pub(crate) fn sign_nip98_post(
     ))
 }
 
-fn nip98_post_event(url: &str, payload_hash: String, created_at: u64) -> UnsignedEventTemplate {
+fn next_nip98_created_at(issuer_ref: &str, wall_clock: u64) -> Result<u64, HostedSessionBlocker> {
+    let ledger = NIP98_ISSUANCE_LEDGER.get_or_init(|| Mutex::new(BTreeMap::new()));
+    let mut ledger = ledger
+        .lock()
+        .map_err(|_| HostedSessionBlocker::ProofSigningFailed {
+            reason: "the NIP-98 issuance ledger is unavailable".to_string(),
+        })?;
+    let created_at = match ledger.get(issuer_ref).copied() {
+        Some(previous) => previous.saturating_add(1).max(wall_clock),
+        None => wall_clock,
+    };
+    if created_at > wall_clock.saturating_add(NIP98_MAX_CLOCK_SKEW_SECONDS) {
+        return Err(HostedSessionBlocker::ChallengeRateLimited);
+    }
+    if ledger.len() >= MAX_NIP98_ISSUERS && !ledger.contains_key(issuer_ref) {
+        let Some(oldest) = ledger
+            .iter()
+            .min_by_key(|(_, created_at)| **created_at)
+            .map(|(issuer, _)| issuer.clone())
+        else {
+            return Err(HostedSessionBlocker::ProofSigningFailed {
+                reason: "the NIP-98 issuance ledger could not evict an issuer".to_string(),
+            });
+        };
+        ledger.remove(&oldest);
+    }
+    ledger.insert(issuer_ref.to_string(), created_at);
+    Ok(created_at)
+}
+
+fn nip98_event(
+    url: &str,
+    method: &str,
+    payload_hash: String,
+    created_at: u64,
+) -> UnsignedEventTemplate {
     UnsignedEventTemplate {
         created_at,
         kind: NIP98_KIND,
         tags: vec![
             vec!["u".to_string(), url.to_string()],
-            vec!["method".to_string(), "POST".to_string()],
+            vec!["method".to_string(), method.to_uppercase()],
             vec!["payload".to_string(), payload_hash],
         ],
         content: String::new(),
     }
+}
+
+pub fn verify_nip98_authorization(
+    authorization: &str,
+    expected_url: &str,
+    expected_method: &str,
+    expected_payload: &[u8],
+    expected_public_key_hex: &str,
+    now: u64,
+) -> Result<VerifiedNip98Proof, HostedSessionBlocker> {
+    if !valid_nip98_url(expected_url) || !valid_http_method(expected_method) {
+        return Err(HostedSessionBlocker::ProofInvalid);
+    }
+    let encoded = authorization
+        .strip_prefix("Nostr ")
+        .ok_or(HostedSessionBlocker::ProofInvalid)?;
+    let bytes = base64::engine::general_purpose::STANDARD
+        .decode(encoded)
+        .map_err(|_| HostedSessionBlocker::ProofInvalid)?;
+    let event_json = String::from_utf8(bytes).map_err(|_| HostedSessionBlocker::ProofInvalid)?;
+    let event = Event::from_json(event_json).map_err(|_| HostedSessionBlocker::ProofInvalid)?;
+    event
+        .verify()
+        .map_err(|_| HostedSessionBlocker::ProofInvalid)?;
+    if event.kind.as_u16() != NIP98_KIND
+        || !event.content.is_empty()
+        || event.pubkey.to_hex() != expected_public_key_hex
+    {
+        return Err(HostedSessionBlocker::ProofInvalid);
+    }
+    let created_at = event.created_at.as_secs();
+    if created_at.abs_diff(now) > NIP98_MAX_CLOCK_SKEW_SECONDS {
+        return Err(HostedSessionBlocker::ProofExpired);
+    }
+    let expected = [
+        ("u", expected_url.to_string()),
+        ("method", expected_method.to_uppercase()),
+        ("payload", format!("{:x}", Sha256::digest(expected_payload))),
+    ];
+    if event.tags.len() != expected.len() {
+        return Err(HostedSessionBlocker::ProofInvalid);
+    }
+    for (name, value) in expected {
+        let matches = event
+            .tags
+            .iter()
+            .filter(|tag| {
+                let values = tag.as_slice();
+                values.len() == 2 && values[0] == name && values[1] == value
+            })
+            .count();
+        if matches != 1 {
+            return Err(HostedSessionBlocker::ProofInvalid);
+        }
+    }
+    Ok(VerifiedNip98Proof {
+        event_id: event.id.to_hex(),
+        public_key_hex: event.pubkey.to_hex(),
+        created_at,
+    })
+}
+
+fn valid_nip98_url(value: &str) -> bool {
+    let Ok(url) = url::Url::parse(value) else {
+        return false;
+    };
+    matches!(url.scheme(), "http" | "https")
+        && url.host_str().is_some()
+        && url.username().is_empty()
+        && url.password().is_none()
+        && url.fragment().is_none()
+        && url.as_str() == value
+}
+
+fn valid_http_method(value: &str) -> bool {
+    !value.is_empty()
+        && value.bytes().all(|byte| {
+            byte.is_ascii_uppercase()
+                || byte.is_ascii_digit()
+                || matches!(
+                    byte,
+                    b'!' | b'#'
+                        | b'$'
+                        | b'%'
+                        | b'&'
+                        | b'\''
+                        | b'*'
+                        | b'+'
+                        | b'-'
+                        | b'.'
+                        | b'^'
+                        | b'_'
+                        | b'`'
+                        | b'|'
+                        | b'~'
+                )
+        })
 }
 
 #[derive(Debug, Deserialize)]
@@ -240,18 +553,12 @@ pub struct MintedOpenAgentsUser {
     pub user_id: String,
 }
 
-pub async fn mint_openagents_nostr_session(
-    http_client: &Arc<dyn HttpClient>,
-) -> std::result::Result<MintedOpenAgentsSession, HostedSessionBlocker> {
-    mint_openagents_nostr_session_for_identity(http_client, None).await
-}
-
 pub(crate) async fn mint_openagents_nostr_session_for_identity(
     http_client: &Arc<dyn HttpClient>,
     expected_public_key_hex: Option<&str>,
 ) -> std::result::Result<MintedOpenAgentsSession, HostedSessionBlocker> {
     let channel_name = app_identity::CHANNEL.display_name();
-    let identity = ready_local_identity()?;
+    let identity = ready_account_identity()?;
     if expected_public_key_hex
         .is_some_and(|expected| expected != identity.public_key_hex().as_str())
     {
@@ -265,7 +572,7 @@ pub(crate) async fn mint_openagents_nostr_session_for_identity(
         identity.public_key_hex().as_str()
     );
 
-    let authorization = sign_nip98_post(OPENAGENTS_NOSTR_SESSION_URL, &[], &identity)?;
+    let authorization = sign_nip98_post(OPENAGENTS_NOSTR_SESSION_URL, &[], &identity).await?;
     // Empty body on purpose: the NIP-98 `payload` tag is the SHA-256 of the
     // empty byte string. Google Frontend (HTTP/1.1) answers 411 Length Required
     // when a POST has a Content-Type and no Content-Length — which is how
@@ -407,6 +714,9 @@ mod tests {
             HostedSessionBlocker::ProofSigningFailed {
                 reason: "reason".to_string(),
             },
+            HostedSessionBlocker::ProofInvalid,
+            HostedSessionBlocker::ProofExpired,
+            HostedSessionBlocker::ProofAlreadyUsed,
             HostedSessionBlocker::ServiceUnreachable,
             HostedSessionBlocker::ChallengeRateLimited,
             HostedSessionBlocker::ProofRejected { status: 401 },
@@ -450,8 +760,9 @@ mod tests {
     #[test]
     fn nip98_post_has_only_the_exact_url_method_and_payload_tags() {
         let payload_hash = format!("{:x}", Sha256::digest(b"exact request bytes"));
-        let event = nip98_post_event(
+        let event = nip98_event(
             "https://openagents.com/api/omega/sarah/voice/session",
+            "POST",
             payload_hash.clone(),
             1_700_000_000,
         );
@@ -469,6 +780,120 @@ mod tests {
                 vec!["payload".to_string(), payload_hash],
             ]
         );
+    }
+
+    #[test]
+    fn nip98_verifier_binds_exact_request_freshness_signature_and_one_use() {
+        use nostr::{EventBuilder, Keys, Kind, Tag, Timestamp};
+
+        let keys = Keys::generate();
+        let url = "https://openagents.com/api/omega/auth/session";
+        let payload = b"exact bytes";
+        let payload_hash = format!("{:x}", Sha256::digest(payload));
+        let created_at = 1_700_000_000;
+        let event = EventBuilder::new(Kind::from(NIP98_KIND), "")
+            .tags(vec![
+                Tag::parse(["u", url]).expect("url tag"),
+                Tag::parse(["method", "POST"]).expect("method tag"),
+                Tag::parse(["payload", &payload_hash]).expect("payload tag"),
+            ])
+            .custom_created_at(Timestamp::from_secs(created_at))
+            .sign_with_keys(&keys)
+            .expect("signed NIP-98 event");
+        let authorization = format!(
+            "Nostr {}",
+            base64::engine::general_purpose::STANDARD.encode(event.as_json())
+        );
+        let mut guard = Nip98ProofReplayGuard::default();
+        let proof = guard
+            .verify_and_consume(
+                &authorization,
+                url,
+                "POST",
+                payload,
+                &keys.public_key().to_hex(),
+                created_at + 10,
+            )
+            .expect("valid proof");
+        assert_eq!(proof.event_id, event.id.to_hex());
+        assert_eq!(
+            guard.verify_and_consume(
+                &authorization,
+                url,
+                "POST",
+                payload,
+                &keys.public_key().to_hex(),
+                created_at + 10,
+            ),
+            Err(HostedSessionBlocker::ProofAlreadyUsed)
+        );
+        assert_eq!(
+            verify_nip98_authorization(
+                &authorization,
+                url,
+                "POST",
+                b"wrong bytes",
+                &keys.public_key().to_hex(),
+                created_at + 10,
+            ),
+            Err(HostedSessionBlocker::ProofInvalid)
+        );
+        assert_eq!(
+            verify_nip98_authorization(
+                &authorization,
+                url,
+                "POST",
+                payload,
+                &keys.public_key().to_hex(),
+                created_at + 61,
+            ),
+            Err(HostedSessionBlocker::ProofExpired)
+        );
+    }
+
+    #[test]
+    fn nip98_issuance_is_monotonic_for_same_account_generation_and_key() {
+        use nostr::{EventBuilder, Keys, Kind, Tag, Timestamp};
+
+        let issuer = format!("fixture-{}", rand::random::<u64>());
+        let first = next_nip98_created_at(&issuer, 1_700_000_000).expect("first issuance");
+        let second = next_nip98_created_at(&issuer, 1_700_000_000).expect("second issuance");
+        assert_eq!(first, 1_700_000_000);
+        assert_eq!(second, first + 1);
+        let keys = Keys::generate();
+        let make_event = |created_at| {
+            EventBuilder::new(Kind::from(NIP98_KIND), "")
+                .tags(vec![
+                    Tag::parse(["u", OPENAGENTS_NOSTR_SESSION_URL]).expect("url tag"),
+                    Tag::parse(["method", "POST"]).expect("method tag"),
+                    Tag::parse([
+                        "payload",
+                        "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+                    ])
+                    .expect("payload tag"),
+                ])
+                .custom_created_at(Timestamp::from_secs(created_at))
+                .sign_with_keys(&keys)
+                .expect("signed event")
+        };
+        assert_ne!(make_event(first).id, make_event(second).id);
+    }
+
+    #[test]
+    fn nip98_request_target_and_method_are_strict() {
+        assert!(valid_nip98_url(
+            "https://openagents.com/api/omega/auth/session"
+        ));
+        assert!(!valid_nip98_url("not a URL"));
+        assert!(!valid_nip98_url("wss://relay.example"));
+        assert!(!valid_nip98_url(
+            "https://user:secret@openagents.com/session"
+        ));
+        assert!(!valid_nip98_url("https://openagents.com/session#fragment"));
+        assert!(valid_http_method("POST"));
+        assert!(valid_http_method("CUSTOM-METHOD"));
+        assert!(!valid_http_method("post"));
+        assert!(!valid_http_method("POST request"));
     }
 
     /// HTTP 411 is Google Frontend rejecting a POST with no Content-Length.

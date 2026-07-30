@@ -9,7 +9,7 @@ use serde::{Deserialize, Serialize};
 use smol::io::AsyncReadExt as _;
 use url::Url;
 
-use super::openagents_nostr_auth::{HostedSessionBlocker, ready_local_identity, sign_nip98_post};
+use super::openagents_nostr_auth::{HostedSessionBlocker, ready_account_identity, sign_nip98_post};
 
 pub const SARAH_VOICE_NOSTR_CHALLENGE_URL: &str =
     "https://openagents.com/api/omega/sarah/voice/auth/challenge";
@@ -453,7 +453,7 @@ pub(crate) async fn prepare_nostr_sarah_voice_admission(
     for value in [device_ref, thread_ref, session_ref] {
         validate_ref(value)?;
     }
-    let identity = ready_local_identity()?;
+    let identity = ready_account_identity()?;
     let public_key = identity.public_key_hex().as_str();
     let challenge_body = serde_json::to_vec(&ChallengeRequest {
         schema: SARAH_VOICE_CHALLENGE_PROTOCOL,
@@ -499,7 +499,8 @@ pub(crate) async fn prepare_nostr_sarah_voice_admission(
         }),
     })
     .map_err(|_| HostedSessionBlocker::ResponseInvalid)?;
-    let authorization = sign_nip98_post(SARAH_VOICE_ADMISSION_URL, &request_body, &identity)?;
+    let authorization =
+        sign_nip98_post(SARAH_VOICE_ADMISSION_URL, &request_body, &identity).await?;
     let (status, response_body) = send_json_post(
         http_client,
         SARAH_VOICE_ADMISSION_URL,

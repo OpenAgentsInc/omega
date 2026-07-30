@@ -9,13 +9,15 @@ use gpui::{
     IntoElement, PromptLevel, Render, SharedString, Task, Window,
 };
 use omega_actions::{OpenIdentityDashboard, OpenOnboarding, OpenRemoteSignerSetup};
+use omega_effectd::{BindingProjection, BindingState, HostedSessionProjection, HostedSessionState};
 use omega_identity::{
     AccountDashboardEntry, AccountDashboardProjection, AccountLifecycleState, AccountPurgeReport,
     AccountPurgeTarget, AccountPurgeVerification, AccountRef, AccountRegistryService,
     Nip46CapabilityMethod, Nip46ConnectionInput, Nip46InboundEvent, Nip46PairingFence,
     Nip46PairingSession, Nip46PairingUri, Nip46PermissionPreview, Nip46ReportedSigner,
-    Nip46Service, PublicIdentity, ReceiptRef, RecoveryProtectionState, SignerAvailability,
-    SignerKind,
+    Nip46Service, PublicIdentity, ReceiptRef, RecoveryProtectionState,
+    RelayAuthenticationProjection, RelayAuthenticationReceipt, RelayAuthenticationRefusal,
+    RelayConnectionAuthenticationState, SignerAvailability, SignerKind,
 };
 use omega_signer_broker::{Nip46RelayCoordinator, Nip46RelayError};
 use onboarding::secure_input::SecureInput;
@@ -423,6 +425,13 @@ enum AccountOperation {
     DisconnectRemote(AccountRef),
 }
 
+#[derive(Clone, Copy)]
+enum HostedOperation {
+    Connect,
+    Verify,
+    Disconnect,
+}
+
 struct AccountOperationResult {
     projection: AccountDashboardProjection,
     purge_report: Option<AccountPurgeReport>,
@@ -473,6 +482,9 @@ pub struct IdentityDashboard {
     remote_proposal: Option<RemoteSignerProposal>,
     remote_pairing: Option<RemotePairingProgress>,
     remote_final_approval: Option<RemoteFinalApproval>,
+    relay_authentication: RelayAuthenticationProjection,
+    hosted_session: HostedSessionProjection,
+    hosted_binding: BindingProjection,
 }
 
 impl IdentityDashboard {
@@ -491,6 +503,14 @@ impl IdentityDashboard {
         _window: &mut Window,
         cx: &mut App,
     ) -> Entity<Self> {
+        let hosted_session = omega_effectd::openagents_session_if_initialized(cx)
+            .map_or_else(HostedSessionProjection::default, |session| {
+                session.projection()
+            });
+        let hosted_binding = omega_effectd::try_openagents_binding(cx)
+            .map_or_else(BindingProjection::unbound, |binding| {
+                binding.load_projection()
+            });
         let remote_uri_input =
             cx.new(|cx| SecureInput::new("Paste bunker:// connection", "Bunker connection", 1, cx));
         let dashboard = cx.new(|cx| Self {
@@ -507,6 +527,9 @@ impl IdentityDashboard {
             remote_proposal: None,
             remote_pairing: None,
             remote_final_approval: None,
+            relay_authentication: RelayAuthenticationProjection::default(),
+            hosted_session,
+            hosted_binding,
         });
         dashboard.update(cx, |dashboard, cx| dashboard.reload(cx));
         dashboard
@@ -520,7 +543,19 @@ impl IdentityDashboard {
             let result = cx.background_spawn(async move { backend.inspect() }).await;
             this.update(cx, |this, cx| {
                 match result {
-                    Ok(projection) => this.apply_projection(projection),
+                    Ok(projection) => {
+                        this.apply_projection(projection);
+                        this.relay_authentication =
+                            omega_effectd::relay_authentication_projection();
+                        this.hosted_session = omega_effectd::openagents_session_if_initialized(cx)
+                            .map_or_else(HostedSessionProjection::default, |session| {
+                                session.projection()
+                            });
+                        this.hosted_binding = omega_effectd::try_openagents_binding(cx)
+                            .map_or_else(BindingProjection::unbound, |binding| {
+                                binding.load_projection()
+                            });
+                    }
                     Err(error) => {
                         zlog::error!("account dashboard inspection failed: {error}");
                         this.message = Some("Accounts could not be loaded. Try again.".into());
@@ -588,6 +623,51 @@ impl IdentityDashboard {
                         );
                     }
                 }
+                this.busy = false;
+                cx.notify();
+            })
+            .log_err();
+        }));
+        cx.notify();
+    }
+
+    fn run_hosted_operation(&mut self, operation: HostedOperation, cx: &mut Context<Self>) {
+        if self.busy {
+            return;
+        }
+        let Some(session) = omega_effectd::openagents_session_if_initialized(cx) else {
+            self.hosted_session = HostedSessionProjection {
+                state: HostedSessionState::ServiceUnavailable,
+                retryable: true,
+                ..HostedSessionProjection::default()
+            };
+            self.message = Some("The hosted account service is unavailable.".into());
+            cx.notify();
+            return;
+        };
+        self.busy = true;
+        self.message = None;
+        self.task = Some(cx.spawn(async move |this, cx| {
+            match operation {
+                HostedOperation::Connect => {
+                    session.connect(cx).await;
+                }
+                HostedOperation::Verify => {
+                    session.verify_public(cx).await;
+                }
+                HostedOperation::Disconnect => {
+                    session.disconnect(cx).await;
+                }
+            }
+            let projection = session.projection();
+            this.update(cx, |this, cx| {
+                this.hosted_session = projection;
+                this.hosted_binding = omega_effectd::try_openagents_binding(cx)
+                    .map_or_else(BindingProjection::unbound, |binding| {
+                        binding.load_projection()
+                    });
+                this.message =
+                    hosted_operation_message(operation, &this.hosted_session).map(Into::into);
                 this.busy = false;
                 cx.notify();
             })
@@ -1169,6 +1249,8 @@ impl IdentityDashboard {
                 None,
             ))
             .child(Divider::horizontal())
+            .child(self.render_authentication_authority(cx))
+            .child(Divider::horizontal())
             .child(
                 h_flex()
                     .gap_2()
@@ -1268,6 +1350,196 @@ impl IdentityDashboard {
                             .disabled(true)
                             .tooltip(Tooltip::text("Signed policy required")),
                     ),
+            )
+            .into_any_element()
+    }
+
+    fn render_authentication_authority(&self, cx: &mut Context<Self>) -> AnyElement {
+        let hosted_binding_matches_selected = self.hosted_session_binding_matches_selected();
+        let public_binding_matches_selected = self.public_hosted_binding_matches_selected();
+        let public_binding_state = if public_binding_matches_selected {
+            self.hosted_binding.state
+        } else {
+            BindingState::Unbound
+        };
+        let hosted_has_no_binding = self.hosted_session.omega_public_key_hex.is_none()
+            && self.hosted_session.account_generation.is_none();
+        let hosted_state = if hosted_binding_matches_selected || hosted_has_no_binding {
+            self.hosted_session.state
+        } else {
+            HostedSessionState::AccountMismatch
+        };
+        let relay_projection =
+            self.selected_entry()
+                .map_or_else(RelayAuthenticationProjection::default, |account| {
+                    self.relay_authentication
+                        .for_account_public_key_hex(account.identity.public_key_hex().as_str())
+                });
+        let relay_rows = relay_projection
+            .relays
+            .iter()
+            .map(|receipt| {
+                v_flex()
+                    .gap_1()
+                    .child(detail_row(
+                        "Relay authenticated",
+                        relay_authentication_detail(receipt),
+                        relay_authentication_icon(receipt.state),
+                    ))
+                    .child(
+                        Label::new(format!(
+                            "{} · connection {}",
+                            receipt.relay_url, receipt.connection_generation
+                        ))
+                        .color(Color::Muted)
+                        .size(LabelSize::XSmall),
+                    )
+            })
+            .collect::<Vec<_>>();
+
+        v_flex()
+            .gap_2()
+            .child(Label::new("Authentication").size(LabelSize::Small))
+            .child(detail_row(
+                "Signer ready",
+                self.selected_entry().map_or("Unavailable", |account| {
+                    signer_availability_label(account.signer.availability)
+                }),
+                self.selected_entry()
+                    .and_then(|account| signer_availability_icon(account.signer.availability)),
+            ))
+            .when(relay_rows.is_empty(), |this| {
+                this.child(detail_row("Relay authenticated", "No relay receipt", None))
+            })
+            .children(relay_rows)
+            .child(detail_row("Group admitted", "Not established", None))
+            .child(detail_row(
+                "Hosted linked",
+                hosted_binding_label(public_binding_state),
+                hosted_binding_icon(public_binding_state),
+            ))
+            .when(
+                public_binding_matches_selected
+                    && self.hosted_binding.openagents_account_id.is_some(),
+                |this| {
+                    this.child(detail_row(
+                        "Hosted user",
+                        self.hosted_binding
+                            .openagents_account_id
+                            .clone()
+                            .unwrap_or_default(),
+                        None,
+                    ))
+                },
+            )
+            .child(detail_row(
+                "Hosted session",
+                hosted_session_label(hosted_state),
+                hosted_session_icon(hosted_state),
+            ))
+            .when(
+                hosted_binding_matches_selected && self.hosted_session.expires_at.is_some(),
+                |this| {
+                    this.child(detail_row(
+                        "Hosted expiry",
+                        last_signer_use(self.hosted_session.expires_at),
+                        None,
+                    ))
+                },
+            )
+            .child(detail_row("Action authorized", "Per action", None))
+            .child(self.render_hosted_controls(cx, hosted_state))
+            .into_any_element()
+    }
+
+    fn hosted_session_binding_matches_selected(&self) -> bool {
+        let Some(account) = self.selected_entry().filter(|account| account.is_active) else {
+            return false;
+        };
+        let Some(active_generation) = self
+            .projection
+            .as_ref()
+            .map(|projection| projection.active.generation)
+        else {
+            return false;
+        };
+        hosted_binding_matches(
+            &self.hosted_session,
+            account.identity.public_key_hex().as_str(),
+            active_generation,
+        )
+    }
+
+    fn public_hosted_binding_matches_selected(&self) -> bool {
+        let Some(account) = self.selected_entry() else {
+            return false;
+        };
+        self.hosted_binding.omega_public_key_hex.as_deref()
+            == Some(account.identity.public_key_hex().as_str())
+    }
+
+    fn render_hosted_controls(
+        &self,
+        cx: &mut Context<Self>,
+        hosted_state: HostedSessionState,
+    ) -> AnyElement {
+        let is_active = self
+            .selected_entry()
+            .is_some_and(|account| account.is_active);
+        let can_connect = matches!(
+            hosted_state,
+            HostedSessionState::Disconnected
+                | HostedSessionState::Expired
+                | HostedSessionState::Revoked
+                | HostedSessionState::OwnerScopeRefused
+                | HostedSessionState::AccountMismatch
+                | HostedSessionState::ServiceUnavailable
+                | HostedSessionState::StorageFailed
+        );
+        let can_verify = matches!(
+            hosted_state,
+            HostedSessionState::Verified
+                | HostedSessionState::Rotating
+                | HostedSessionState::AccountMismatch
+                | HostedSessionState::ServiceUnavailable
+                | HostedSessionState::StorageFailed
+        );
+        let can_disconnect = !matches!(
+            hosted_state,
+            HostedSessionState::Disconnected | HostedSessionState::Connecting
+        );
+        h_flex()
+            .gap_2()
+            .flex_wrap()
+            .child(
+                Button::new("omega-hosted-connect", "Connect hosted")
+                    .style(ButtonStyle::OutlinedGhost)
+                    .size(ButtonSize::Compact)
+                    .disabled(!is_active || self.busy || !can_connect)
+                    .tooltip(Tooltip::text("Link"))
+                    .on_click(cx.listener(|this, _, _, cx| {
+                        this.run_hosted_operation(HostedOperation::Connect, cx)
+                    })),
+            )
+            .child(
+                Button::new("omega-hosted-verify", "Verify or rotate")
+                    .style(ButtonStyle::OutlinedGhost)
+                    .size(ButtonSize::Compact)
+                    .disabled(!is_active || self.busy || !can_verify)
+                    .tooltip(Tooltip::text("Verify"))
+                    .on_click(cx.listener(|this, _, _, cx| {
+                        this.run_hosted_operation(HostedOperation::Verify, cx)
+                    })),
+            )
+            .child(
+                Button::new("omega-hosted-disconnect", "Disconnect hosted")
+                    .style(ButtonStyle::Tinted(TintColor::Error))
+                    .size(ButtonSize::Compact)
+                    .disabled(!is_active || self.busy || !can_disconnect)
+                    .tooltip(Tooltip::text("Disconnect"))
+                    .on_click(cx.listener(|this, _, _, cx| {
+                        this.run_hosted_operation(HostedOperation::Disconnect, cx)
+                    })),
             )
             .into_any_element()
     }
@@ -1734,6 +2006,140 @@ fn signer_availability_label(availability: SignerAvailability) -> &'static str {
     }
 }
 
+fn relay_authentication_label(state: RelayConnectionAuthenticationState) -> &'static str {
+    match state {
+        RelayConnectionAuthenticationState::Disconnected => "Disconnected",
+        RelayConnectionAuthenticationState::ChallengePending => "Challenge pending",
+        RelayConnectionAuthenticationState::Authenticated => "Authenticated",
+        RelayConnectionAuthenticationState::Refused => "Refused",
+        RelayConnectionAuthenticationState::Stale => "Stale",
+    }
+}
+
+fn relay_refusal_label(refusal: RelayAuthenticationRefusal) -> &'static str {
+    match refusal {
+        RelayAuthenticationRefusal::MalformedChallenge => "Malformed challenge",
+        RelayAuthenticationRefusal::InvalidEvent => "Invalid proof",
+        RelayAuthenticationRefusal::WrongAccount => "Wrong account",
+        RelayAuthenticationRefusal::StaleEvent => "Expired proof",
+        RelayAuthenticationRefusal::ReplayedProof => "Reused proof",
+        RelayAuthenticationRefusal::RelayRejected => "Relay refused",
+        RelayAuthenticationRefusal::StaleConnection => "Old connection",
+        RelayAuthenticationRefusal::AcknowledgementMissing => "No acknowledgement",
+    }
+}
+
+fn relay_authentication_detail(receipt: &RelayAuthenticationReceipt) -> String {
+    receipt.refusal.map_or_else(
+        || relay_authentication_label(receipt.state).to_string(),
+        |refusal| relay_refusal_label(refusal).to_string(),
+    )
+}
+
+fn relay_authentication_icon(state: RelayConnectionAuthenticationState) -> Option<Icon> {
+    let (icon, color) = match state {
+        RelayConnectionAuthenticationState::Authenticated => (IconName::Check, Color::Success),
+        RelayConnectionAuthenticationState::ChallengePending => (IconName::Lock, Color::Warning),
+        RelayConnectionAuthenticationState::Disconnected
+        | RelayConnectionAuthenticationState::Refused
+        | RelayConnectionAuthenticationState::Stale => (IconName::Warning, Color::Error),
+    };
+    Some(Icon::new(icon).size(IconSize::Small).color(color))
+}
+
+fn hosted_session_label(state: HostedSessionState) -> &'static str {
+    match state {
+        HostedSessionState::Disconnected => "Disconnected",
+        HostedSessionState::Connecting => "Verifying",
+        HostedSessionState::Verified => "Verified",
+        HostedSessionState::Rotating => "Rotating",
+        HostedSessionState::Expired => "Expired",
+        HostedSessionState::Revoked => "Revoked",
+        HostedSessionState::OwnerScopeRefused => "Owner refused",
+        HostedSessionState::AccountMismatch => "Account mismatch",
+        HostedSessionState::ServiceUnavailable => "Service unavailable",
+        HostedSessionState::StorageFailed => "Storage failed",
+        HostedSessionState::RevocationFailed => "Revocation failed",
+    }
+}
+
+fn hosted_binding_label(state: BindingState) -> &'static str {
+    match state {
+        BindingState::Unbound => "Unlinked",
+        BindingState::Bound => "Linked",
+        BindingState::Refused => "Owner refused",
+    }
+}
+
+fn hosted_binding_icon(state: BindingState) -> Option<Icon> {
+    let (icon, color) = match state {
+        BindingState::Bound => (IconName::Check, Color::Success),
+        BindingState::Unbound => (IconName::Info, Color::Muted),
+        BindingState::Refused => (IconName::Warning, Color::Error),
+    };
+    Some(Icon::new(icon).size(IconSize::Small).color(color))
+}
+
+fn hosted_session_icon(state: HostedSessionState) -> Option<Icon> {
+    let (icon, color) = match state {
+        HostedSessionState::Verified => (IconName::Check, Color::Success),
+        HostedSessionState::Connecting | HostedSessionState::Rotating => {
+            (IconName::Lock, Color::Warning)
+        }
+        HostedSessionState::Disconnected => (IconName::Info, Color::Muted),
+        HostedSessionState::Expired
+        | HostedSessionState::Revoked
+        | HostedSessionState::OwnerScopeRefused
+        | HostedSessionState::AccountMismatch
+        | HostedSessionState::ServiceUnavailable
+        | HostedSessionState::StorageFailed
+        | HostedSessionState::RevocationFailed => (IconName::Warning, Color::Error),
+    };
+    Some(Icon::new(icon).size(IconSize::Small).color(color))
+}
+
+fn hosted_operation_message(
+    operation: HostedOperation,
+    projection: &HostedSessionProjection,
+) -> Option<&'static str> {
+    match projection.state {
+        HostedSessionState::Disconnected => Some("Hosted account disconnected."),
+        HostedSessionState::Connecting => Some("Hosted account verification is still running."),
+        HostedSessionState::Verified => match operation {
+            HostedOperation::Connect => Some("Hosted account linked and verified."),
+            HostedOperation::Verify => Some("Hosted account verified; tokens rotated if required."),
+            HostedOperation::Disconnect => None,
+        },
+        HostedSessionState::Rotating => Some("Hosted account tokens are rotating."),
+        HostedSessionState::Expired => Some("The hosted session expired. Link it again."),
+        HostedSessionState::Revoked => Some("Hosted credentials were revoked and removed."),
+        HostedSessionState::OwnerScopeRefused => {
+            Some("OpenAgents refused this Omega identity for the requested owner.")
+        }
+        HostedSessionState::AccountMismatch => {
+            Some("The hosted session belongs to a different Omega identity.")
+        }
+        HostedSessionState::ServiceUnavailable => {
+            Some("The hosted account service is unavailable. Try again.")
+        }
+        HostedSessionState::StorageFailed => {
+            Some("Hosted credential storage failed. Check local storage and retry.")
+        }
+        HostedSessionState::RevocationFailed => {
+            Some("Hosted revocation failed. Disconnect again to retry.")
+        }
+    }
+}
+
+fn hosted_binding_matches(
+    projection: &HostedSessionProjection,
+    public_key_hex: &str,
+    account_generation: u64,
+) -> bool {
+    projection.omega_public_key_hex.as_deref() == Some(public_key_hex)
+        && projection.account_generation == Some(account_generation)
+}
+
 fn nip46_method_label(method: Nip46CapabilityMethod) -> &'static str {
     match method {
         Nip46CapabilityMethod::LoginProof => "Login proof",
@@ -1934,5 +2340,76 @@ mod tests {
             AccountOperation::DisconnectRemote(account_ref),
             AccountOperation::DisconnectRemote(_)
         ));
+    }
+
+    #[test]
+    fn authentication_copy_does_not_collapse_authority_domains() {
+        let domains = [
+            "Signer ready",
+            "Relay authenticated",
+            "Group admitted",
+            "Hosted linked",
+            "Action authorized",
+        ];
+        assert_eq!(
+            domains
+                .iter()
+                .copied()
+                .collect::<std::collections::HashSet<_>>()
+                .len(),
+            domains.len()
+        );
+        assert_eq!(
+            relay_authentication_label(RelayConnectionAuthenticationState::Authenticated),
+            "Authenticated"
+        );
+        assert_eq!(
+            relay_refusal_label(RelayAuthenticationRefusal::AcknowledgementMissing),
+            "No acknowledgement"
+        );
+    }
+
+    #[test]
+    fn hosted_projection_must_match_selected_identity_and_generation() {
+        let projection = HostedSessionProjection {
+            state: HostedSessionState::Verified,
+            owner_user_id: Some("openagents-user".to_string()),
+            omega_public_key_hex: Some("omega-public-key".to_string()),
+            account_generation: Some(9),
+            issued_at: Some(100),
+            expires_at: Some(200),
+            retryable: false,
+        };
+        assert!(hosted_binding_matches(&projection, "omega-public-key", 9));
+        assert!(!hosted_binding_matches(
+            &projection,
+            "different-public-key",
+            9
+        ));
+        assert!(!hosted_binding_matches(&projection, "omega-public-key", 10));
+        assert_eq!(
+            hosted_session_label(HostedSessionState::AccountMismatch),
+            "Account mismatch"
+        );
+    }
+
+    #[test]
+    fn hosted_failures_name_retry_actions() {
+        for state in [
+            HostedSessionState::OwnerScopeRefused,
+            HostedSessionState::ServiceUnavailable,
+            HostedSessionState::StorageFailed,
+            HostedSessionState::RevocationFailed,
+        ] {
+            let projection = HostedSessionProjection {
+                state,
+                retryable: true,
+                ..HostedSessionProjection::default()
+            };
+            assert!(
+                hosted_operation_message(HostedOperation::Verify, &projection)
+                    .is_some_and(|message| !message.is_empty())
+            );
+        }
     }
 }

@@ -316,6 +316,37 @@ person's root `nsec` stays in the signer. AUTH-04 does not enable the macOS
 Keychain, Secure Enclave, Windows credential vault, Linux secret service,
 Android keystore, encrypted application vault, or any other native key enclave.
 
+### Relay and hosted authentication state
+
+AUTH-05 adds relay and hosted status to the same account dashboard without
+collapsing their authority into signer readiness. The UI uses five exact
+domains: **Signer ready**, **Relay authenticated**, **Group admitted**,
+**Hosted linked**, and **Action authorized**. A positive state in one row
+cannot satisfy another row.
+
+NIP-42 receipts are per account public key, normalized relay URL, and connection
+generation. The account dashboard filters them to the selected identity. The
+public projection exposes disconnected, challenge pending, authenticated,
+refused, and stale outcomes with a digest-derived challenge reference and
+public-safe refusal category. The raw challenge never enters the projection.
+Wrong relay, challenge, account, timestamp, signature, acknowledgement,
+connection generation, and reused proof are refused.
+
+The OpenAgents link uses an exact URL-, method-, payload-, key-, and
+freshness-bound NIP-98 proof. The dashboard separately exposes verifying,
+linked, expired, rotating, disconnected, revoked, owner-scope refused, service
+unavailable, storage failed, and revocation failed. The public binding names
+only the Omega public identity and OpenAgents user reference; it does not
+contain an access or refresh token and does not imply relay authentication,
+NIP-29 group admission, or action authorization.
+
+Hosted access and refresh tokens stay in the channel-scoped, unencrypted
+`credentials/credentials.json` file. Atomic Unix writes enforce owner-only
+directory mode `0700` and file mode `0600`. This first wave enables no macOS
+Keychain, Secure Enclave, Windows credential vault, Linux secret service,
+Android keystore, encrypted application vault, native enclave, or
+hardware-backed credential store.
+
 ### Activation and recovery ceremony
 
 The desktop identity section inspects one combined activation projection:
