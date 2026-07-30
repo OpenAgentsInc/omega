@@ -36,6 +36,116 @@ Regenerate: build the candidate with `script/bundle-omega-rc`, then run `script/
 | `distribution` | owner-assisted-pending | — | When the public download page exists, confirm page identity, version, platform, artifact digest, signature/notarization state, release notes, and the installed binary agree with this receipt's candidate binding. |
 | `independent-review` | owner-assisted-pending | — | Have a reviewer who did not produce the candidate repeat the held-out journey and record the verdict against this receipt's candidate digest. |
 
+## Omega 0.2.0 Sarah LiveKit cutover plan
+
+**Owner direction, 2026-07-30.** Fold the Sarah promises in
+[`OpenAgents Episode 263`](https://github.com/OpenAgentsInc/openagents/blob/main/docs/transcripts/263.md)
+into the self-hosted LiveKit design in the
+[unified LiveKit teardown](https://github.com/OpenAgentsInc/openagents/blob/main/docs/teardowns/2026-07-30-livekit-armada-buzz-zed-teardown.md).
+This section is an accepted release plan, not evidence that the rc28 candidate
+above contains the new transport. A later candidate must regenerate the table
+and bind every added row to its own source and package digest.
+
+### Release decision
+
+Omega 0.2.0 will not treat the current custom PCM WebSocket as the completed
+Sarah architecture. The release target is:
+
+- the existing editor input-bar voice entry starts an owner-private LiveKit
+  room and explicitly dispatches Sarah;
+- Sarah joins as one named server participant backed by one
+  `gpt-realtime-2.1` session for that exact room execution;
+- an authenticated desktop community room can invite or summon the same
+  `principal.sarah` and Nostr public identity;
+- group members use a server-validated speaking floor so the agent listens to
+  one attributed participant at a time and publishes one answer track that
+  the room can hear;
+- OpenAgents retains admission, membership, capability, credit hold, exact
+  provider usage, proposal/confirmation, settlement, and Nostr-signing
+  authority;
+- self-hosted LiveKit, TURN, Redis, and Sarah Agents workers run on Google
+  Cloud; OpenAI remains the inference provider; and
+- `custom_wss_v1` remains a rollback/control cohort until the LiveKit path is
+  independently green. An active conversation never changes transport
+  silently.
+
+The stable Sarah identity is shared; provider sessions, room context,
+capability profiles, holds, usage, and settlement are not. Every private
+conversation and community room receives a separate generation. Owner-private
+editor memory never enters a community prompt.
+
+### Episode 263 promise mapping
+
+| Spoken promise | Omega 0.2.0 meaning |
+| --- | --- |
+| “Command me, Sarah, acting as your personal lieutenant.” | Sarah remains a first-class desktop executor with one durable identity. “Lieutenant” does not amplify authority: editor and agent-start effects still use the existing typed proposal, confirmation, and receipt boundaries. Community Sarah has no owner-private workspace or command capability. |
+| “requiring voice commands” | Private editor voice and allowlisted desktop room speech use LiveKit media. In a group, “Talk to Sarah” creates a bounded floor lease and selects the exact participant; ambient mixed-room inference is outside 0.2.0. |
+| “and expensive credits” | The UI shows exact price-catalog revision, hold, rate, duration/spend limit, remaining balance, and final charge. Exact OpenAI `response.done` usage drives settlement. Google Cloud and OpenAI budgets remain separate. |
+| “tester channels … in the sidebar” | A supported desktop tester/community channel can create a live room epoch and visibly invite or summon Sarah. Text membership remains NIP-29/OpenAgents authority; LiveKit is media only. |
+
+### In scope for 0.2.0
+
+1. A versioned `livekit_room_v1` admission, participant-grant, explicit
+   dispatch, generation, usage, and settlement contract.
+2. A Google Cloud connectivity canary followed by the admitted self-hosted
+   production candidate: direct UDP, TCP fallback, TURN/TLS, Redis, metrics,
+   rollback, and bounded capacity.
+3. A narrowly scoped `agents-js` Sarah worker using the LiveKit OpenAI
+   Realtime plugin, the admitted model/voice/instructions, exactly one
+   turn-detection owner, current proposal adapter, and exact usage forwarding.
+4. A LiveKit Rust media adapter beneath Omega's existing Sarah controls. One
+   audio layer owns capture, processing, playback, interruption, mute, and
+   cleanup.
+5. A desktop community-room Sarah path with explicit dispatch, visible
+   presence/listening/speaking states, a server-validated speaking floor,
+   signed public-safe Sarah presence/text, and fail-closed identity mapping.
+6. Installed-candidate private and group journeys, cost and failure evidence,
+   independent review, and a proven rollback to stop issuing new LiveKit
+   sessions.
+
+### Explicitly deferred beyond 0.2.0
+
+- OpenAgents Mobile and the LiveKit React Native/Expo client.
+- Cross-device desktop/mobile voice handoff.
+- Untrusted public rooms. The OpenAI per-end-user safety-identifier treatment
+  for one provider session with several speakers needs a documented answer
+  before that expansion.
+- Ambient room mixing, automatic active-speaker switching, resident Sarah in
+  idle rooms, telephony, recording, egress, SIP, and video input.
+- Moving command authority, transcripts, workspace state, raw media, or
+  settlement into LiveKit data, metadata, or Redis.
+
+### Required new release rows
+
+The implementation packet that changes `script/omega-release-gate` must add
+these rows to the generated receipt and committed report. Until both are
+green, `sarah-journey` remains pending and omega#160 cannot close.
+
+| Planned row | Required installed evidence |
+| --- | --- |
+| `sarah-livekit-private` | An eligible desktop user sees exact admission truth, receives `livekit_room_v1`, completes a voice turn, confirms one bounded command, starts an agent thread, interrupts Sarah, survives an allowed media reconnect without opening a second provider generation, ends, and sees the exact final charge. |
+| `sarah-livekit-room` | At least three authenticated desktop participants join one tester/community room, summon Sarah, transfer the explicit floor between two members, hear Sarah's answer, see the same verified Sarah identity, and prove that a non-floor participant and a removed member cannot feed the model. |
+| `sarah-livekit-connectivity` | The packaged client completes direct UDP, TCP fallback, and TURN/TLS journeys against the exact self-hosted Google Cloud candidate. |
+| `sarah-livekit-isolation` | Two Sarah rooms run concurrently with distinct provider generations, context, holds, usage, and settlement; a private editor fact and privileged tool are unavailable in the community room. |
+| `sarah-livekit-failure` | Worker crash, SFU loss, OpenAI disconnect, replayed grant, duplicate participant, membership revocation, and hold exhaustion produce bounded failure, no overlapping billable session, no raw-media retention, and deterministic settlement or an explicit inconclusive receipt. |
+| `sarah-livekit-independent-review` | A reviewer other than the producer repeats the held-out private and group journeys against the exact package and infrastructure revisions. |
+
+### Issue program
+
+The master tracker and seven implementation packets use stable IDs so this
+document remains legible before and after GitHub assigns issue numbers:
+
+| Packet | Repository | Outcome |
+| --- | --- | --- |
+| [`EP263-LK-00`](https://github.com/OpenAgentsInc/openagents/issues/9282) | OpenAgents | Track the complete cross-repository Omega 0.2.0 Sarah LiveKit cutover and block omega#160 until every child and release row is green. |
+| [`EP263-LK-01`](https://github.com/OpenAgentsInc/openagents/issues/9283) | OpenAgents | Add the LiveKit room admission, dispatch, generation, grant, usage, and settlement control plane. |
+| [`EP263-LK-02`](https://github.com/OpenAgentsInc/openagents/issues/9284) | OpenAgents | Operate the self-hosted LiveKit Google Cloud canary and production candidate with TURN, Redis, observability, capacity, and rollback evidence. |
+| [`EP263-LK-03`](https://github.com/OpenAgentsInc/openagents/issues/9285) | OpenAgents | Run Sarah as an `agents-js` worker over OpenAI Realtime while preserving current proposals, exact usage, reconnect, and privacy laws. |
+| [`EP263-LK-04`](https://github.com/OpenAgentsInc/openagents/issues/9286) | OpenAgents | Bind Sarah's Nostr identity to room presence and implement the authenticated group speaking-floor service. |
+| [`EP263-LK-05`](https://github.com/OpenAgentsInc/omega/issues/185) | Omega | Add the LiveKit Rust media transport beneath the existing Sarah voice controls. |
+| [`EP263-LK-06`](https://github.com/OpenAgentsInc/omega/issues/186) | Omega | Let Sarah join authenticated desktop community rooms and talk through the explicit floor. |
+| [`EP263-LK-07`](https://github.com/OpenAgentsInc/omega/issues/187) | Omega | Extend the installed release gate and prove the private, group, connectivity, isolation, failure, and independent-review rows. |
+
 
 ---
 
@@ -131,6 +241,17 @@ before duplicating) · OPEN (nobody holds it).
 - omega#171 (accessibility tree): CLOSED not-planned by owner; revisit before beta launch.
 
 ## Open issues map (verify live before acting)
+- Sarah LiveKit cutover: master
+  [openagents#9282](https://github.com/OpenAgentsInc/openagents/issues/9282);
+  backend/infra children
+  [#9283](https://github.com/OpenAgentsInc/openagents/issues/9283),
+  [#9284](https://github.com/OpenAgentsInc/openagents/issues/9284),
+  [#9285](https://github.com/OpenAgentsInc/openagents/issues/9285), and
+  [#9286](https://github.com/OpenAgentsInc/openagents/issues/9286); Omega
+  desktop/proof children [#185](https://github.com/OpenAgentsInc/omega/issues/185),
+  [#186](https://github.com/OpenAgentsInc/omega/issues/186), and
+  [#187](https://github.com/OpenAgentsInc/omega/issues/187). Mobile is outside
+  0.2.0.
 - #151–#156, #160 — close on the owner-assisted rows above + owner verdict. Code review batches 1–3 + QA scaffold are landed; owner-assisted gate rows and live channel proof remain.
 - #162 — crate-deletion epic continuing. Latest batch `9098f72404` deleted previews, diagnostics panel, buffer outline/outline_panel, repl, tab_switcher, auto_update_ui. **Still owner-kept:** file_finder, go_to_line/cursor position, language_tools LSP logs, acp_tools. Long tail remains (selectors, project_symbols, extensions_ui, etc.).
 - #163 — proof inversion; dispatch AFTER #162 closes (gate-as-tripwire, refusal-log-empty proof rows, per-surface drawn-implies-working delta checks, docs de-moding).
