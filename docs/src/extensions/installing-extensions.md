@@ -7,7 +7,10 @@ description: "Browse, install, and manage extensions from the Zed Extension Gall
 
 Extensions add functionality to Zed, including languages, themes, and AI tools. Browse and install them from the Extension Gallery.
 
-Open the Extension Gallery with {#kb omega::Extensions}, or select "Zed > Extensions" from the menu bar.
+The Extension Gallery is unavailable from Omega's sealed default surface. In
+the transitional full-editor compatibility surface, open it with
+{#kb omega::Extensions} from the command palette. The default Omega application
+menu intentionally does not expose the upstream extension-gallery row.
 
 ## Installation Location
 

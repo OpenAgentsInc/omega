@@ -344,67 +344,24 @@ cargo test -p omega_deltas
 - **Enforced by:** `crates/omega_deltas/src/omega_deltas.rs`,
   `protected_recovery_offers_a_different_action`.
 
-### OMEGA-DELTA-0015 — `cmd-shift-s` opens the Sarah workroom
+### OMEGA-DELTA-0015 — Sarah and Save As no longer borrow the same shortcut
 
-- **Upstream Zed:** binds the chord to `workspace::SaveAs` in all three default
-  keymaps, and has no workroom.
-- **Omega:** all three default keymaps bind `workroom::OpenPanel` —
-  `cmd-shift-s` on macOS, `ctrl-shift-s` on Linux and Windows — in the
-  `Workspace` context section, once each.
-- **Why:** owner direction, 2026-07-25 (omega#69). The action already existed
-  and both focused the panel and marked the room read (OMEGA-SW-06), but no
-  keymap named it, so the workroom was reachable only through the command
-  palette. Opening the workroom must not depend on whether an editor, a
-  terminal, or a panel happens to hold focus — a focus-dependent binding is
-  that issue's stated falsifier.
-- **`Workspace`, not a context-free section — deliberately, and not what the
-  issue's text asked for.** omega#69 said "the top-level section with no
-  context predicate". The binding landed in the `Workspace` section instead,
-  which is the root context of the window tree: it matches from an editor, a
-  terminal, or any panel, so the Exit holds. It is also where every other
-  window-global Omega chord lives — `workspace::Save`, `workspace::NewWindow`,
-  and the `agent::NewThread` binding from `OMEGA-DELTA-0013`. A truly
-  context-free section is where the `menu::` bindings live and would have made
-  this chord fire inside menus and pickers too. The check therefore accepts
-  either no context or a context in `WINDOW_GLOBAL_KEYMAP_CONTEXTS`, and
-  rejects anything narrower.
-- **The Save As trade, stated plainly. A keystroke was taken, not shadowed.**
-  This is what omega#69 asked to confirm before landing. The chord did not go
-  to the workroom because it was free — it was **`workspace::SaveAs` in all
-  three default keymaps** and was overwritten
-  (`default-macos.json:708`, `default-linux.json:651`,
-  `default-windows.json:645` at `7b347cb9a4^`). After this delta:
-  - **macOS and Windows have no default Save As keystroke at all.**
-  - **Linux keeps only `shift-save`**, the hardware `save` media key, which
-    most keyboards do not have.
-  - Emacs-keymap users are unaffected: `ctrl-x ctrl-w` still saves as, in both
-    `macos/emacs.json` and `linux/emacs.json`.
-  - No other base keymap — VS Code, JetBrains, Sublime, Atom, Cursor,
-    TextMate — binds Save As at all, so none of them restores it.
-
-  **The mitigation is the File menu**, not the palette: `Save As…` remains at
-  `crates/zed/src/zed/app_menus.rs:129`, so the cost is discoverability rather
-  than capability. The check asserts that menu item still exists, because if a
-  later cleanup drops it, Save As becomes reachable only by knowing its command
-  name — and this entry would then be recording a mitigation that no longer
-  exists.
-- **Two narrower bindings overlap the chord and keep precedence**, so they are
-  not affected either way: `specific-overrides-macos.json` and
-  `specific-overrides.json` bind it to `picker::ToggleMultiSelect` in context
-  `Picker > Editor`, and `macos/textmate.json` binds `ctrl-shift-s` to
-  `search::SelectPreviousMatch` in `BufferSearchBar` — a different chord from
-  the macOS `cmd-shift-s`.
-- **Why the check is stronger than asserting the string is present.** In
-  `0.2.0-rc6` Omega hard-panicked before any window opened because 27 bindings
-  named actions whose crates had been deleted: the built-in keymap is loaded
-  and unwrapped at startup, and `cargo check --workspace` passes regardless
-  because keymaps are runtime assets. So the check parses each keymap, requires
-  exactly one binding of the chord — a second, narrower one would shadow the
-  global one depending on focus — requires its context to be window-global, and
-  resolves the action name back to a live `actions!` declaration in
-  `crates/zed_actions/src/lib.rs`. Renaming or deleting the action fails here
-  rather than at the owner's next launch.
-- **Enforced by:** `required_keymap_bindings_resolve`.
+- **Superseded contract:** omega#69 temporarily replaced the inherited Save As
+  chord with `workroom::OpenPanel` and kept Save As discoverable through the
+  File menu. The default surface later stopped rendering the workroom panel,
+  so the replacement chord was refused, and the one-surface menu no longer has
+  a File menu.
+- **Omega now:** the three default keymaps bind neither
+  `workroom::OpenPanel` nor `workspace::SaveAs`. The approved application menu
+  intentionally omits Save As. In-place `workspace::Save` remains admitted for
+  the sanctioned revealed editor. Sarah is visibly unavailable until her
+  admitted voice entry has complete cohort, price, and authority truth; that
+  work may assign a shortcut to `workroom::StartVoice` deliberately.
+- **Why:** owner approval on omega#150, 2026-07-29. Retaining a refused Sarah
+  shortcut or claiming a removed File-menu fallback would preserve two lies in
+  the name of a superseded mitigation.
+- **Enforced by:** `the_default_surface_has_one_honest_menu_contract` and the
+  built-in keymap resolution checks in `crates/omega_deltas`.
 
 ### OMEGA-DELTA-0016 — Aiur is dark-only
 
@@ -7721,3 +7678,38 @@ current image build does not decode it inline.
   in `crates/omega_deltas`, the zero-base admission unit test, and focused GPUI
   coverage in `agent_ui` that exercises loading-to-connected entity reuse and
   focused Vim mode changes.
+
+### OMEGA-DELTA-0176 — The application menu exposes only working default-surface paths
+
+- **Upstream Zed:** the native menu bar advertises the full editor product,
+  including File, Selection, Go, Run, Save As, onboarding, and extension paths
+  that Omega's default surface does not currently make honest or useful.
+- **Omega now:** the menu bar has exactly six top-level menus: **Omega**,
+  **Edit**, **View**, **Thread**, **Window**, and **Help**. Their items are the
+  approved default-surface contract. Find opens thread search; View exposes
+  zoom, full screen, the Threads Sidebar, and the six Workbench surfaces;
+  Thread creates a thread or chooses its folder; Help opens documentation and
+  bundled licenses. macOS alone retains Services, Hide, Hide Others, and the
+  automatic Window list, while every platform retains Minimize.
+- **Every enabled row reaches a live path.** The precise `omega::About`,
+  `omega::AcpRegistry`, `omega::OpenDocs`, and `omega::OpenLicenses` actions
+  are admitted without admitting the wider namespace. Opening bundled licenses
+  reveals the sealed center before adding its item. Workspace-level forwarding
+  makes Threads Sidebar and Workbench menu actions work even when focus is in
+  the center; a surface that cannot open reports its reason instead of silently
+  doing nothing.
+- **Unavailable creation modes say why.** Sarah remains visible but disabled
+  as `Sarah Voice — Voice access is not available yet`. Direct-agent rows are
+  disabled with a concrete zero-base, missing-folder, or shared-project reason.
+  **Add More Agents** remains enabled and opens the ACP Registry. These rows can
+  be enabled only when their actual creation paths land.
+- **No borrowed or dead shortcut remains.** Save As is absent from the menu and
+  all three default keymaps. Sarah's former `cmd-shift-s` / `ctrl-shift-s`
+  binding is also absent; issue #154 owns a future deliberate voice shortcut.
+  Menu shortcut actions are resolved against each shipped macOS, Linux, and
+  Windows keymap.
+- **Enforced by:** `the_default_surface_has_one_honest_menu_contract` and
+  `honest_menu_shortcuts_resolve_on_every_platform` in `crates/omega_deltas`,
+  `the_application_menu_is_the_approved_six_menu_contract` in `zed`, the exact
+  zero-base admission unit test, and mounted `agent_ui` coverage that dispatches
+  menu actions while focus is outside Agent Panel.

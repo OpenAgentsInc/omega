@@ -3,43 +3,24 @@
 Omega Agent is the admitted first-party orchestrator identity. Its first
 executor is the inherited native Rust runtime described here; the rename does
 not make the native loop the router, a service identity, or a new run
-authority. The Agent Panel is present in Omega but disabled by default, so it
-does not appear in the Command Palette on a fresh installation.
+authority. The sealed default surface presents it as **Omega Agent** in the
+new-thread menu.
 
 This page explains how to expose the current implementation, what it does, and
 where it fits in Omega's architecture.
 
 ## Open It in Omega Today {#open-it}
 
-The master switch is currently JSON-only. The Settings Editor exposes the
-Agent Panel button, but it does not expose `agent.enabled`.
+Open the new-thread menu and choose **Omega Agent**. No editor-panel switch or
+View-menu path is required on the default surface.
 
-1. Open **Omega → Settings → Open Settings File**.
-2. Add the following settings:
-
-   ```json [settings]
-   {
-     "disable_ai": false,
-     "agent": {
-       "enabled": true,
-       "button": true
-     }
-   }
-   ```
-
-3. Open the Command Palette and run {#action agent::NewThread}, or choose
-   **View → Agent Panel**.
-4. Open the new-thread menu in the panel and choose **Omega Agent**.
-
-`agent.button` only controls the status-bar button. Setting it to `true`
-without also setting `agent.enabled` does not enable the panel.
+The transitional `--full-editor` compatibility surface retains the upstream
+settings-file and panel controls. There, {#action omega::OpenSettingsFile}
+opens the JSON settings file and {#action agent::ToggleFocus} focuses the Agent
+Panel; neither control is advertised by the sealed default application menu.
 
 If a project has `"disable_ai": true` in its project settings, that setting
 also disables the Agent Panel and removes its actions.
-
-> **Note:** This manual settings edit is a current Omega product gap. An
-> enabled product surface should have an Omega-owned setup path instead of
-> requiring you to discover a hidden JSON switch.
 
 ## Configure a Model {#configure-a-model}
 

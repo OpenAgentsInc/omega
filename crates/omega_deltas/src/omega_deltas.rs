@@ -164,6 +164,7 @@ pub const ENFORCED_DELTAS: &[&str] = &[
     "OMEGA-DELTA-0173",
     "OMEGA-DELTA-0174",
     "OMEGA-DELTA-0175",
+    "OMEGA-DELTA-0176",
 ];
 
 /// The concise product contract adjacent to the delta registry.
@@ -1310,19 +1311,9 @@ pub struct RequiredKeymapBinding {
 /// `REQUIRED_KEYMAP_BINDINGS` exists to forbid.
 pub const WINDOW_GLOBAL_KEYMAP_CONTEXTS: &[&str] = &["Workspace"];
 
-/// OMEGA-DELTA-0015. Opening the Sarah workroom must not depend on focus, so
-/// each of these is asserted to live in a window-global section.
-///
-/// Each of these chords was `workspace::SaveAs` upstream. Taking them is a
-/// real trade, and `SAVE_AS_MENU_ITEM` holds the mitigation in place.
+/// Window-global bindings whose scope and declaration are part of an Omega
+/// delta.
 pub const REQUIRED_KEYMAP_BINDINGS: &[RequiredKeymapBinding] = &[
-    RequiredKeymapBinding {
-        delta: "OMEGA-DELTA-0015",
-        keymap: "assets/keymaps/default-macos.json",
-        keystroke: "cmd-shift-s",
-        action: "workroom::OpenPanel",
-        declared_in: "crates/zed_actions/src/lib.rs",
-    },
     // OMEGA-DELTA-0034. `cmd-?` is macOS's reserved Help chord, so the agent
     // panel's toggle was bound to a keystroke Omega cannot win. Checked here
     // rather than only moved, because a rebase that restores upstream's
@@ -1334,33 +1325,7 @@ pub const REQUIRED_KEYMAP_BINDINGS: &[RequiredKeymapBinding] = &[
         action: "agent::ToggleFocus",
         declared_in: "crates/zed_actions/src/lib.rs",
     },
-    RequiredKeymapBinding {
-        delta: "OMEGA-DELTA-0015",
-        keymap: "assets/keymaps/default-linux.json",
-        keystroke: "ctrl-shift-s",
-        action: "workroom::OpenPanel",
-        declared_in: "crates/zed_actions/src/lib.rs",
-    },
-    RequiredKeymapBinding {
-        delta: "OMEGA-DELTA-0015",
-        keymap: "assets/keymaps/default-windows.json",
-        keystroke: "ctrl-shift-s",
-        action: "workroom::OpenPanel",
-        declared_in: "crates/zed_actions/src/lib.rs",
-    },
 ];
-
-/// OMEGA-DELTA-0015. Where Save As went when the workroom took its chord.
-///
-/// `cmd-shift-s` / `ctrl-shift-s` was `workspace::SaveAs` in all three default
-/// keymaps, so macOS and Windows now have no Save As keystroke at all and
-/// Linux keeps only the `shift-save` media key. The File menu is the whole
-/// mitigation. If it goes, Save As is reachable only by knowing its command
-/// name, and this delta is recording a fallback that no longer exists.
-pub const SAVE_AS_MENU_ITEM: (&str, &str) = (
-    "crates/zed/src/zed/app_menus.rs",
-    "MenuItem::action(\"Save As…\", workspace::SaveAs)",
-);
 
 pub const FORBIDDEN_SOURCE_STRINGS: &[(&str, &str)] = &[
     ("OMEGA-DELTA-0008", "Zed\u{27}s hosted models"),
@@ -3744,9 +3709,6 @@ mod tests {
         );
     }
 
-    /// OMEGA-DELTA-0015. The workroom binding exists, is unscoped, and names an
-    /// action that still exists.
-    ///
     /// Presence alone would not be enough. A keymap naming an undeclared action
     /// panics Omega before any window opens and compiles fine, which is how
     /// 0.2.0-rc6 shipped 27 dead bindings, so the action is resolved back to
@@ -3816,19 +3778,6 @@ mod tests {
                  opens — the 0.2.0-rc6 failure."
             );
         }
-
-        let (relative_path, menu_item) = SAVE_AS_MENU_ITEM;
-        let path = repository_path(relative_path);
-        let source = std::fs::read_to_string(&path)
-            .unwrap_or_else(|error| panic!("cannot read {}: {error}", path.display()));
-        assert!(
-            source.contains(menu_item),
-            "OMEGA-DELTA-0015: the workroom binding took the chord that was \
-             workspace::SaveAs in all three default keymaps, leaving the File \
-             menu as the only discoverable Save As on macOS and Windows. That \
-             menu item has gone from {relative_path}, so the trade this delta \
-             recorded is no longer the trade being made."
-        );
     }
 
     /// The action parser has to actually find actions, or the resolvability
@@ -21698,6 +21647,274 @@ mod tests {
                 shell_docs.contains(required),
                 "OMEGA-DELTA-0175: workbench documentation lost `{required}`"
             );
+        }
+    }
+
+    /// OMEGA-DELTA-0176. Every drawn application-menu action is admitted, and
+    /// the two deferred conversation choices state why they cannot be used.
+    #[test]
+    fn the_default_surface_has_one_honest_menu_contract() {
+        let menus = without_comments(&read_repository_file("crates/zed/src/zed/app_menus.rs"));
+        for forbidden in [
+            "Menu::new(\"File\")",
+            "Menu::new(\"Selection\")",
+            "Menu::new(\"Go\")",
+            "Menu::new(\"Run\")",
+            "workspace::SaveAs",
+            "Save As",
+            "search::buffer_search::Deploy::find()",
+        ] {
+            assert!(
+                !menus.contains(forbidden),
+                "OMEGA-DELTA-0176: the application menu retained `{forbidden}`"
+            );
+        }
+        for required in [
+            "Menu::new(PRODUCT_NAME)",
+            "Menu::new(\"Edit\")",
+            "Menu::new(\"View\")",
+            "Menu::new(\"Workbench\")",
+            "Menu::new(\"Thread\")",
+            "Menu::new(\"Window\")",
+            "Menu::new(\"Help\")",
+            "MenuItem::action(\"Find\", agent_ui::ToggleSearch)",
+            "MenuItem::action(\"Toggle Threads Sidebar\", agent_ui::ToggleThreadsSidebar)",
+            "Sarah Voice — Voice access is not available yet",
+            "workroom::StartVoice",
+            ".disabled(true)",
+            "MenuItem::os_submenu(\"Services\", gpui::SystemMenuType::Services)",
+        ] {
+            assert!(
+                menus.contains(required),
+                "OMEGA-DELTA-0176: the approved menu contract lost `{required}`"
+            );
+        }
+
+        for action in [
+            "omega::About",
+            "omega::OpenSettings",
+            "omega::OpenLegacySettings",
+            "omega::Hide",
+            "omega::HideOthers",
+            "omega::Quit",
+            "editor::Undo",
+            "editor::Redo",
+            "editor::Cut",
+            "editor::Copy",
+            "editor::Paste",
+            "editor::SelectAll",
+            "agent::ToggleSearch",
+            "omega::IncreaseBufferFontSize",
+            "omega::DecreaseBufferFontSize",
+            "omega::ResetBufferFontSize",
+            "omega::ToggleFullScreen",
+            "agent::ToggleThreadsSidebar",
+            "omega_workbench::SelectFiles",
+            "omega_workbench::SelectSearch",
+            "omega_workbench::SelectReview",
+            "omega_workbench::SelectGit",
+            "omega_workbench::SelectTerminal",
+            "omega_workbench::SelectPlan",
+            "agent::NewThread",
+            "workspace::Open",
+            "omega::OpenDocs",
+            "omega::OpenLicenses",
+            "omega::AcpRegistry",
+        ] {
+            assert!(
+                omega_zero_base::admits_action(action),
+                "OMEGA-DELTA-0176: drawn action `{action}` is refused"
+            );
+        }
+
+        let zed = without_comments(&read_repository_file("crates/zed/src/zed.rs"));
+        let licenses = zed
+            .split_once("cx.on_action(|_: &zed_actions::OpenLicenses")
+            .and_then(|(_, source)| source.split_once(".on_action(|&zed_actions::OpenKeymapFile"))
+            .map(|(source, _)| source)
+            .expect("OMEGA-DELTA-0176: cannot isolate OpenLicenses");
+        let reveal = licenses
+            .find("workspace.reveal_zero_base_center_for_user_open(window, cx)")
+            .expect("OMEGA-DELTA-0176: licenses do not reveal the center");
+        let open = licenses
+            .find("open_bundled_file(")
+            .expect("OMEGA-DELTA-0176: licenses no longer open their bundled attribution");
+        assert!(
+            reveal < open,
+            "OMEGA-DELTA-0176: licenses open before their destination is visible"
+        );
+
+        let panel = without_comments(&read_repository_file("crates/agent_ui/src/agent_panel.rs"));
+        for required in [
+            "Sarah — Voice access is not available yet",
+            ".action(Box::new(zed_actions::workroom::StartVoice))",
+            "Direct agents are not available in this alpha yet",
+            ".disabled(unavailable_reason.is_some())",
+            "Box::new(zed_actions::AcpRegistry)",
+            "_: &ToggleThreadsSidebar",
+            "_: &workbench_shell::SelectFiles",
+            "_: &workbench_shell::SelectSearch",
+            "_: &workbench_shell::SelectReview",
+            "_: &workbench_shell::SelectGit",
+            "_: &workbench_shell::SelectTerminal",
+            "_: &workbench_shell::SelectPlan",
+            "window.defer(cx, move |window, cx|",
+            "Open a thread to use this surface",
+            "WorkbenchUnavailableToast",
+        ] {
+            assert!(
+                panel.contains(required),
+                "OMEGA-DELTA-0176: new-thread or workbench honesty lost `{required}`"
+            );
+        }
+        assert!(
+            !panel.contains("OpenSarahWorkroomPanel"),
+            "OMEGA-DELTA-0176: Sarah still dispatches the refused workroom panel action"
+        );
+
+        for keymap_path in [
+            "assets/keymaps/default-macos.json",
+            "assets/keymaps/default-linux.json",
+            "assets/keymaps/default-windows.json",
+        ] {
+            let keymap = read_repository_file(keymap_path);
+            for forbidden in ["workroom::OpenPanel", "workspace::SaveAs"] {
+                assert!(
+                    !keymap.contains(forbidden),
+                    "OMEGA-DELTA-0176: {keymap_path} retained dead `{forbidden}`"
+                );
+            }
+        }
+    }
+
+    /// OMEGA-DELTA-0176. Every shortcut drawn by the approved menu resolves in
+    /// each shipped platform keymap to the action that the row dispatches.
+    #[test]
+    fn honest_menu_shortcuts_resolve_on_every_platform() {
+        let platform_contracts: [(&str, &[(&str, &str)]); 3] = [
+            (
+                "assets/keymaps/default-macos.json",
+                &[
+                    ("cmd-,", "omega::OpenSettings"),
+                    ("cmd-q", "omega::Quit"),
+                    ("cmd-z", "editor::Undo"),
+                    ("cmd-shift-z", "editor::Redo"),
+                    ("cmd-x", "editor::Cut"),
+                    ("cmd-c", "editor::Copy"),
+                    ("cmd-v", "editor::Paste"),
+                    ("cmd-a", "editor::SelectAll"),
+                    ("cmd-f", "agent::ToggleSearch"),
+                    ("cmd-=", "omega::IncreaseBufferFontSize"),
+                    ("cmd--", "omega::DecreaseBufferFontSize"),
+                    ("cmd-0", "omega::ResetBufferFontSize"),
+                    ("ctrl-cmd-f", "omega::ToggleFullScreen"),
+                    ("cmd-alt-j", "agent::ToggleThreadsSidebar"),
+                    ("cmd-alt-1", "omega_workbench::SelectFiles"),
+                    ("cmd-alt-2", "omega_workbench::SelectSearch"),
+                    ("cmd-alt-3", "omega_workbench::SelectReview"),
+                    ("cmd-alt-4", "omega_workbench::SelectGit"),
+                    ("cmd-alt-5", "omega_workbench::SelectTerminal"),
+                    ("cmd-alt-6", "omega_workbench::SelectPlan"),
+                    ("cmd-n", "agent::NewThread"),
+                    ("cmd-o", "workspace::Open"),
+                    ("cmd-m", "omega::Minimize"),
+                ],
+            ),
+            (
+                "assets/keymaps/default-linux.json",
+                &[
+                    ("ctrl-,", "omega::OpenSettings"),
+                    ("ctrl-q", "omega::Quit"),
+                    ("ctrl-z", "editor::Undo"),
+                    ("ctrl-shift-z", "editor::Redo"),
+                    ("ctrl-x", "editor::Cut"),
+                    ("ctrl-c", "editor::Copy"),
+                    ("ctrl-v", "editor::Paste"),
+                    ("ctrl-a", "editor::SelectAll"),
+                    ("ctrl-f", "agent::ToggleSearch"),
+                    ("ctrl-=", "omega::IncreaseBufferFontSize"),
+                    ("ctrl--", "omega::DecreaseBufferFontSize"),
+                    ("ctrl-0", "omega::ResetBufferFontSize"),
+                    ("f11", "omega::ToggleFullScreen"),
+                    ("ctrl-alt-j", "agent::ToggleThreadsSidebar"),
+                    ("ctrl-alt-1", "omega_workbench::SelectFiles"),
+                    ("ctrl-alt-2", "omega_workbench::SelectSearch"),
+                    ("ctrl-alt-3", "omega_workbench::SelectReview"),
+                    ("ctrl-alt-4", "omega_workbench::SelectGit"),
+                    ("ctrl-alt-5", "omega_workbench::SelectTerminal"),
+                    ("ctrl-alt-6", "omega_workbench::SelectPlan"),
+                    ("ctrl-n", "agent::NewThread"),
+                    ("ctrl-k ctrl-o", "workspace::Open"),
+                ],
+            ),
+            (
+                "assets/keymaps/default-windows.json",
+                &[
+                    ("ctrl-,", "omega::OpenSettings"),
+                    ("ctrl-q", "omega::Quit"),
+                    ("ctrl-z", "editor::Undo"),
+                    ("ctrl-shift-z", "editor::Redo"),
+                    ("ctrl-x", "editor::Cut"),
+                    ("ctrl-c", "editor::Copy"),
+                    ("ctrl-v", "editor::Paste"),
+                    ("ctrl-a", "editor::SelectAll"),
+                    ("ctrl-f", "agent::ToggleSearch"),
+                    ("ctrl-=", "omega::IncreaseBufferFontSize"),
+                    ("ctrl--", "omega::DecreaseBufferFontSize"),
+                    ("ctrl-0", "omega::ResetBufferFontSize"),
+                    ("f11", "omega::ToggleFullScreen"),
+                    ("ctrl-alt-j", "agent::ToggleThreadsSidebar"),
+                    ("ctrl-alt-1", "omega_workbench::SelectFiles"),
+                    ("ctrl-alt-2", "omega_workbench::SelectSearch"),
+                    ("ctrl-alt-3", "omega_workbench::SelectReview"),
+                    ("ctrl-alt-4", "omega_workbench::SelectGit"),
+                    ("ctrl-alt-5", "omega_workbench::SelectTerminal"),
+                    ("ctrl-alt-6", "omega_workbench::SelectPlan"),
+                    ("ctrl-n", "agent::NewThread"),
+                    ("ctrl-k ctrl-o", "workspace::Open"),
+                ],
+            ),
+        ];
+
+        for (keymap_path, expected_bindings) in platform_contracts {
+            let parsed: serde_json::Value =
+                serde_json::from_str(&strip_jsonc(&read_repository_file(keymap_path)))
+                    .unwrap_or_else(|error| panic!("OMEGA-DELTA-0176: {keymap_path}: {error}"));
+            let sections = parsed
+                .as_array()
+                .unwrap_or_else(|| panic!("OMEGA-DELTA-0176: {keymap_path} is not an array"));
+            let mut resolved = std::collections::BTreeSet::new();
+            for section in sections {
+                let Some(bindings) = section
+                    .get("bindings")
+                    .and_then(serde_json::Value::as_object)
+                else {
+                    continue;
+                };
+                for (keystroke, value) in bindings {
+                    let action = value.as_str().or_else(|| {
+                        value
+                            .as_array()
+                            .and_then(|arguments| arguments.first())
+                            .and_then(serde_json::Value::as_str)
+                    });
+                    if let Some(action) = action {
+                        resolved.insert((keystroke.as_str(), action));
+                    }
+                }
+            }
+
+            for &(keystroke, action) in expected_bindings {
+                assert!(
+                    resolved.contains(&(keystroke, action)),
+                    "OMEGA-DELTA-0176: {keymap_path} does not resolve menu shortcut \
+                     `{keystroke}` to `{action}`"
+                );
+                assert!(
+                    omega_zero_base::admits_action(action),
+                    "OMEGA-DELTA-0176: {keymap_path} resolves `{keystroke}` to refused `{action}`"
+                );
+            }
         }
     }
 }

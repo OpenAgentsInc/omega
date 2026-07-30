@@ -1,319 +1,285 @@
-use app_identity::{PRODUCT_DOCS_URL, PRODUCT_NAME, PRODUCT_REPOSITORY_URL};
+use app_identity::PRODUCT_NAME;
 use gpui::{App, Menu, MenuItem, OsAction};
-use release_channel::ReleaseChannel;
-use terminal_view::terminal_panel;
-use zed_actions::{Quit, Restart, assistant, debug_panel, dev, git_panel, project_panel};
+use zed_actions::{Quit, workroom};
 
-pub fn app_menus(cx: &mut App) -> Vec<Menu> {
-    let mut view_items = vec![
-        MenuItem::action(
-            "Zoom In",
-            zed_actions::IncreaseBufferFontSize { persist: false },
-        ),
-        MenuItem::action(
-            "Zoom Out",
-            zed_actions::DecreaseBufferFontSize { persist: false },
-        ),
-        MenuItem::action(
-            "Reset Zoom",
-            zed_actions::ResetBufferFontSize { persist: false },
-        ),
-        MenuItem::action(
-            "Reset All Zoom",
-            zed_actions::ResetAllZoom { persist: false },
-        ),
-        MenuItem::separator(),
-        MenuItem::action("Toggle Left Dock", workspace::ToggleLeftDock),
-        MenuItem::action("Toggle Right Dock", workspace::ToggleRightDock),
-        MenuItem::action("Toggle Bottom Dock", workspace::ToggleBottomDock),
-        MenuItem::action("Toggle All Docks", workspace::ToggleAllDocks),
-        MenuItem::submenu(Menu {
-            name: "Editor Layout".into(),
-            disabled: false,
-            items: vec![
-                MenuItem::action("Split Up", workspace::SplitUp::default()),
-                MenuItem::action("Split Down", workspace::SplitDown::default()),
-                MenuItem::action("Split Left", workspace::SplitLeft::default()),
-                MenuItem::action("Split Right", workspace::SplitRight::default()),
-            ],
-        }),
-        MenuItem::separator(),
-        MenuItem::action("Project Panel", project_panel::ToggleFocus),
-        MenuItem::action("Outline Panel", outline_panel::ToggleFocus),
-        MenuItem::action("Terminal Panel", terminal_panel::Toggle),
-        MenuItem::action("Debugger Panel", debug_panel::ToggleFocus),
-        MenuItem::action("Agent Panel", assistant::ToggleFocus),
-        MenuItem::action("Git Panel", git_panel::ToggleFocus),
-        MenuItem::separator(),
-        MenuItem::action("Diagnostics", diagnostics::Deploy),
-        MenuItem::separator(),
-    ];
+pub fn app_menus(_cx: &mut App) -> Vec<Menu> {
+    vec![
+        Menu::new(PRODUCT_NAME).items([
+            MenuItem::action("About Omega", zed_actions::About),
+            MenuItem::separator(),
+            MenuItem::action("Open Settings", zed_actions::OpenSettings),
+            MenuItem::action("Open Legacy Settings", zed_actions::OpenLegacySettings),
+            #[cfg(target_os = "macos")]
+            MenuItem::separator(),
+            #[cfg(target_os = "macos")]
+            MenuItem::os_submenu("Services", gpui::SystemMenuType::Services),
+            #[cfg(target_os = "macos")]
+            MenuItem::separator(),
+            #[cfg(target_os = "macos")]
+            MenuItem::action("Hide Omega", super::Hide),
+            #[cfg(target_os = "macos")]
+            MenuItem::action("Hide Others", super::HideOthers),
+            MenuItem::separator(),
+            MenuItem::action("Quit Omega", Quit),
+        ]),
+        Menu::new("Edit").items([
+            MenuItem::os_action("Undo", editor::actions::Undo, OsAction::Undo),
+            MenuItem::os_action("Redo", editor::actions::Redo, OsAction::Redo),
+            MenuItem::separator(),
+            MenuItem::os_action("Cut", editor::actions::Cut, OsAction::Cut),
+            MenuItem::os_action("Copy", editor::actions::Copy, OsAction::Copy),
+            MenuItem::os_action("Paste", editor::actions::Paste, OsAction::Paste),
+            MenuItem::os_action(
+                "Select All",
+                editor::actions::SelectAll,
+                OsAction::SelectAll,
+            ),
+            MenuItem::separator(),
+            MenuItem::action("Find", agent_ui::ToggleSearch),
+        ]),
+        Menu::new("View").items([
+            MenuItem::action(
+                "Zoom In",
+                zed_actions::IncreaseBufferFontSize { persist: false },
+            ),
+            MenuItem::action(
+                "Zoom Out",
+                zed_actions::DecreaseBufferFontSize { persist: false },
+            ),
+            MenuItem::action(
+                "Reset Zoom",
+                zed_actions::ResetBufferFontSize { persist: false },
+            ),
+            MenuItem::separator(),
+            MenuItem::action("Toggle Full Screen", super::ToggleFullScreen),
+            MenuItem::action("Toggle Threads Sidebar", agent_ui::ToggleThreadsSidebar),
+            MenuItem::separator(),
+            MenuItem::submenu(Menu::new("Workbench").items([
+                MenuItem::action("Files", agent_ui::workbench_shell::SelectFiles),
+                MenuItem::action("Search", agent_ui::workbench_shell::SelectSearch),
+                MenuItem::action("Review", agent_ui::workbench_shell::SelectReview),
+                MenuItem::action("Git", agent_ui::workbench_shell::SelectGit),
+                MenuItem::action("Terminal", agent_ui::workbench_shell::SelectTerminal),
+                MenuItem::action("Plan", agent_ui::workbench_shell::SelectPlan),
+            ])),
+        ]),
+        Menu::new("Thread").items([
+            MenuItem::action("New Thread", agent_ui::NewThread),
+            MenuItem::action("Choose Folder…", workspace::Open::default()),
+            MenuItem::separator(),
+            MenuItem::action(
+                "Sarah Voice — Voice access is not available yet",
+                workroom::StartVoice,
+            )
+            .disabled(true),
+        ]),
+        Menu::new("Window").items([
+            MenuItem::action("Minimize", super::Minimize),
+            #[cfg(target_os = "macos")]
+            MenuItem::separator(),
+        ]),
+        Menu::new("Help").items([
+            MenuItem::action("Documentation", zed_actions::OpenDocs),
+            MenuItem::action("Open Source Licenses", zed_actions::OpenLicenses),
+        ]),
+    ]
+}
 
-    if ReleaseChannel::try_global(cx) == Some(ReleaseChannel::Dev) {
-        view_items.push(MenuItem::action(
-            "Toggle GPUI Inspector",
-            dev::ToggleInspector,
-        ));
-        view_items.push(MenuItem::separator());
+#[cfg(test)]
+mod tests {
+    use gpui::{MenuItem, TestAppContext};
+
+    use super::*;
+
+    fn collect_menu_contract(menu: &Menu, parent: &str, found: &mut Vec<String>) {
+        let path = if parent.is_empty() {
+            menu.name.to_string()
+        } else {
+            format!("{parent}/{}", menu.name)
+        };
+        found.push(format!("menu:{path}"));
+        for item in &menu.items {
+            match item {
+                MenuItem::Separator => found.push(format!("separator:{path}")),
+                MenuItem::Submenu(menu) => collect_menu_contract(menu, &path, found),
+                MenuItem::SystemMenu(menu) => {
+                    found.push(format!("system:{path}/{}", menu.name));
+                }
+                MenuItem::Action {
+                    name,
+                    action,
+                    disabled,
+                    ..
+                } => found.push(format!(
+                    "action:{path}/{name}={}:{}",
+                    action.name(),
+                    if *disabled { "disabled" } else { "enabled" }
+                )),
+            }
+        }
     }
 
-    vec![
-        Menu {
-            name: PRODUCT_NAME.into(),
-            disabled: false,
-            items: vec![
-                MenuItem::action("About Omega", zed_actions::About),
-                MenuItem::action("Check for Updates", auto_update::Check),
-                MenuItem::separator(),
-                MenuItem::submenu(Menu::new("Settings").items([
-                    MenuItem::action("Open Settings", zed_actions::OpenSettings),
-                    MenuItem::action("Open Legacy Settings", zed_actions::OpenLegacySettings),
-                    MenuItem::action("Open Settings File", super::OpenSettingsFile),
-                    MenuItem::action("Open Project Settings", zed_actions::OpenProjectSettings),
-                    MenuItem::action("Open Project Settings File", super::OpenProjectSettingsFile),
-                    MenuItem::action("Open Default Settings", super::OpenDefaultSettings),
-                    MenuItem::separator(),
-                    MenuItem::action("Open Keymap", zed_actions::OpenKeymap),
-                    MenuItem::action("Open Keymap File", zed_actions::OpenKeymapFile),
-                    MenuItem::action("Open Default Key Bindings", zed_actions::OpenDefaultKeymap),
-                    MenuItem::separator(),
-                    MenuItem::action(
-                        "Select Theme...",
-                        zed_actions::theme_selector::Toggle::default(),
-                    ),
-                    MenuItem::action(
-                        "Select Icon Theme...",
-                        zed_actions::icon_theme_selector::Toggle::default(),
-                    ),
-                ])),
-                MenuItem::separator(),
-                #[cfg(target_os = "macos")]
-                MenuItem::os_submenu("Services", gpui::SystemMenuType::Services),
-                MenuItem::separator(),
-                MenuItem::action("Extensions", zed_actions::Extensions::default()),
-                #[cfg(not(target_os = "windows"))]
-                MenuItem::action("Install CLI", install_cli::InstallCliBinary),
-                MenuItem::separator(),
-                #[cfg(target_os = "macos")]
-                MenuItem::action("Hide Omega", super::Hide),
-                #[cfg(target_os = "macos")]
-                MenuItem::action("Hide Others", super::HideOthers),
-                #[cfg(target_os = "macos")]
-                MenuItem::action("Show All", super::ShowAll),
-                MenuItem::separator(),
-                MenuItem::action("Restart Omega", Restart),
-                MenuItem::action("Quit Omega", Quit),
-            ],
-        },
-        Menu {
-            name: "File".into(),
-            disabled: false,
-            items: vec![
-                MenuItem::action("New", workspace::NewFile),
-                MenuItem::action("New Window", workspace::NewWindow),
-                MenuItem::separator(),
-                #[cfg(not(target_os = "macos"))]
-                MenuItem::action("Open File...", workspace::OpenFiles),
-                MenuItem::action(
-                    if cfg!(not(target_os = "macos")) {
-                        "Open Folder..."
-                    } else {
-                        "Open…"
-                    },
-                    workspace::Open::default(),
-                ),
-                MenuItem::action("Open Recent…", zed_actions::OpenRecent::default()),
-                MenuItem::action("Open Remote…", zed_actions::OpenRemote::default()),
-                MenuItem::separator(),
-                MenuItem::action("Add Folder to Project…", workspace::AddFolderToProject),
-                MenuItem::separator(),
-                MenuItem::action("Save", workspace::Save { save_intent: None }),
-                MenuItem::action("Save As…", workspace::SaveAs),
-                MenuItem::action("Save All", workspace::SaveAll { save_intent: None }),
-                MenuItem::separator(),
-                MenuItem::action(
-                    "Close Editor",
-                    workspace::CloseActiveItem {
-                        save_intent: None,
-                        close_pinned: true,
-                    },
-                ),
-                MenuItem::action("Close Project", workspace::CloseProject),
-                MenuItem::action("Close Window", workspace::CloseWindow),
-            ],
-        },
-        Menu {
-            name: "Edit".into(),
-            disabled: false,
-            items: vec![
-                MenuItem::os_action("Undo", editor::actions::Undo, OsAction::Undo),
-                MenuItem::os_action("Redo", editor::actions::Redo, OsAction::Redo),
-                MenuItem::separator(),
-                MenuItem::os_action("Cut", editor::actions::Cut, OsAction::Cut),
-                MenuItem::os_action("Copy", editor::actions::Copy, OsAction::Copy),
-                MenuItem::action("Copy and Trim", editor::actions::CopyAndTrim),
-                MenuItem::os_action("Paste", editor::actions::Paste, OsAction::Paste),
-                MenuItem::separator(),
-                MenuItem::action("Find", search::buffer_search::Deploy::find()),
-                MenuItem::action("Find in Project", workspace::DeploySearch::default()),
-                MenuItem::separator(),
-                MenuItem::action(
-                    "Toggle Line Comment",
-                    editor::actions::ToggleComments::default(),
-                ),
-            ],
-        },
-        Menu {
-            name: "Selection".into(),
-            disabled: false,
-            items: vec![
-                MenuItem::os_action(
-                    "Select All",
-                    editor::actions::SelectAll,
-                    OsAction::SelectAll,
-                ),
-                MenuItem::action("Expand Selection", editor::actions::SelectLargerSyntaxNode),
-                MenuItem::action("Shrink Selection", editor::actions::SelectSmallerSyntaxNode),
-                MenuItem::action("Select Next Sibling", editor::actions::SelectNextSyntaxNode),
-                MenuItem::action(
-                    "Select Previous Sibling",
-                    editor::actions::SelectPreviousSyntaxNode,
-                ),
-                MenuItem::separator(),
-                MenuItem::action(
-                    "Add Cursor Above",
-                    editor::actions::AddSelectionAbove {
-                        skip_soft_wrap: true,
-                    },
-                ),
-                MenuItem::action(
-                    "Add Cursor Below",
-                    editor::actions::AddSelectionBelow {
-                        skip_soft_wrap: true,
-                    },
-                ),
-                MenuItem::action(
-                    "Select Next Occurrence",
-                    editor::actions::SelectNext {
-                        replace_newest: false,
-                    },
-                ),
-                MenuItem::action(
-                    "Select Previous Occurrence",
-                    editor::actions::SelectPrevious {
-                        replace_newest: false,
-                    },
-                ),
-                MenuItem::action("Select All Occurrences", editor::actions::SelectAllMatches),
-                MenuItem::separator(),
-                MenuItem::action("Move Line Up", editor::actions::MoveLineUp),
-                MenuItem::action("Move Line Down", editor::actions::MoveLineDown),
-                MenuItem::action("Duplicate Selection", editor::actions::DuplicateLineDown),
-            ],
-        },
-        Menu {
-            name: "View".into(),
-            disabled: false,
-            items: view_items,
-        },
-        Menu {
-            name: "Go".into(),
-            disabled: false,
-            items: vec![
-                MenuItem::action("Back", workspace::GoBack),
-                MenuItem::action("Forward", workspace::GoForward),
-                MenuItem::separator(),
-                MenuItem::action("Command Palette...", zed_actions::command_palette::Toggle),
-                MenuItem::separator(),
-                MenuItem::action("Go to File...", workspace::ToggleFileFinder::default()),
-                // MenuItem::action("Go to Symbol in Project", project_symbols::Toggle),
-                MenuItem::action(
-                    "Go to Symbol in Editor...",
-                    zed_actions::outline::ToggleOutline,
-                ),
-                MenuItem::action("Go to Line/Column...", editor::actions::ToggleGoToLine),
-                MenuItem::separator(),
-                MenuItem::action(
-                    "Go to Definition",
-                    editor::actions::GoToDefinition::default(),
-                ),
-                MenuItem::action("Go to Declaration", editor::actions::GoToDeclaration),
-                MenuItem::action("Go to Type Definition", editor::actions::GoToTypeDefinition),
-                MenuItem::action(
-                    "Find All References",
-                    editor::actions::FindAllReferences::default(),
-                ),
-                MenuItem::separator(),
-                MenuItem::action("Next Problem", editor::actions::GoToDiagnostic::default()),
-                MenuItem::action(
-                    "Previous Problem",
-                    editor::actions::GoToPreviousDiagnostic::default(),
-                ),
-            ],
-        },
-        Menu {
-            name: "Run".into(),
-            disabled: false,
-            items: vec![
-                MenuItem::action(
-                    "Spawn Task",
-                    zed_actions::Spawn::ViaModal {
-                        reveal_target: None,
-                    },
-                ),
-                MenuItem::action("Start Debugger", debugger_ui::Start),
-                MenuItem::separator(),
-                MenuItem::action("Edit tasks.json…", zed_actions::OpenProjectTasks),
-                MenuItem::action("Edit debug.json…", zed_actions::OpenProjectDebugTasks),
-                MenuItem::separator(),
-                MenuItem::action("Continue", debugger_ui::Continue),
-                MenuItem::action("Step Over", debugger_ui::StepOver),
-                MenuItem::action("Step Into", debugger_ui::StepInto),
-                MenuItem::action("Step Out", debugger_ui::StepOut),
-                MenuItem::separator(),
-                MenuItem::action("Toggle Breakpoint", editor::actions::ToggleBreakpoint),
-                MenuItem::action("Edit Breakpoint", editor::actions::EditLogBreakpoint),
-                MenuItem::action("Clear All Breakpoints", debugger_ui::ClearAllBreakpoints),
-            ],
-        },
-        Menu {
-            name: "Window".into(),
-            disabled: false,
-            items: vec![
-                MenuItem::action("Minimize", super::Minimize),
-                MenuItem::action("Zoom", super::Zoom),
-                MenuItem::separator(),
-            ],
-        },
-        Menu {
-            name: "Help".into(),
-            disabled: false,
-            items: vec![
-                MenuItem::action(
-                    "View Release Notes Locally",
-                    auto_update_ui::ViewReleaseNotesLocally,
-                ),
-                MenuItem::action("View Telemetry", zed_actions::OpenTelemetryLog),
-                MenuItem::action("View Dependency Licenses", zed_actions::OpenLicenses),
-                MenuItem::action("Show Welcome", onboarding::ShowWelcome),
-                MenuItem::action("Editor Onboarding", zed_actions::OpenEditorOnboarding),
-                MenuItem::separator(),
-                MenuItem::action("File Bug Report...", zed_actions::feedback::FileBugReport),
-                MenuItem::action("Request Feature...", zed_actions::feedback::RequestFeature),
-                MenuItem::separator(),
-                MenuItem::action(
-                    "Documentation",
-                    super::OpenBrowser {
-                        url: PRODUCT_DOCS_URL.into(),
-                    },
-                ),
-                MenuItem::action(
-                    "Omega Repository",
-                    super::OpenBrowser {
-                        url: PRODUCT_REPOSITORY_URL.into(),
-                    },
-                ),
-            ],
-        },
-    ]
+    #[gpui::test]
+    fn the_application_menu_is_the_approved_six_menu_contract(cx: &mut TestAppContext) {
+        let menus = cx.update(app_menus);
+        assert_eq!(
+            menus
+                .iter()
+                .map(|menu| menu.name.as_ref())
+                .collect::<Vec<_>>(),
+            [PRODUCT_NAME, "Edit", "View", "Thread", "Window", "Help"]
+        );
+
+        let mut contract = Vec::new();
+        for menu in &menus {
+            collect_menu_contract(menu, "", &mut contract);
+        }
+
+        #[cfg(target_os = "macos")]
+        let expected = [
+            "menu:Omega",
+            "action:Omega/About Omega=omega::About:enabled",
+            "separator:Omega",
+            "action:Omega/Open Settings=omega::OpenSettings:enabled",
+            "action:Omega/Open Legacy Settings=omega::OpenLegacySettings:enabled",
+            "separator:Omega",
+            "system:Omega/Services",
+            "separator:Omega",
+            "action:Omega/Hide Omega=omega::Hide:enabled",
+            "action:Omega/Hide Others=omega::HideOthers:enabled",
+            "separator:Omega",
+            "action:Omega/Quit Omega=omega::Quit:enabled",
+            "menu:Edit",
+            "action:Edit/Undo=editor::Undo:enabled",
+            "action:Edit/Redo=editor::Redo:enabled",
+            "separator:Edit",
+            "action:Edit/Cut=editor::Cut:enabled",
+            "action:Edit/Copy=editor::Copy:enabled",
+            "action:Edit/Paste=editor::Paste:enabled",
+            "action:Edit/Select All=editor::SelectAll:enabled",
+            "separator:Edit",
+            "action:Edit/Find=agent::ToggleSearch:enabled",
+            "menu:View",
+            "action:View/Zoom In=omega::IncreaseBufferFontSize:enabled",
+            "action:View/Zoom Out=omega::DecreaseBufferFontSize:enabled",
+            "action:View/Reset Zoom=omega::ResetBufferFontSize:enabled",
+            "separator:View",
+            "action:View/Toggle Full Screen=omega::ToggleFullScreen:enabled",
+            "action:View/Toggle Threads Sidebar=agent::ToggleThreadsSidebar:enabled",
+            "separator:View",
+            "menu:View/Workbench",
+            "action:View/Workbench/Files=omega_workbench::SelectFiles:enabled",
+            "action:View/Workbench/Search=omega_workbench::SelectSearch:enabled",
+            "action:View/Workbench/Review=omega_workbench::SelectReview:enabled",
+            "action:View/Workbench/Git=omega_workbench::SelectGit:enabled",
+            "action:View/Workbench/Terminal=omega_workbench::SelectTerminal:enabled",
+            "action:View/Workbench/Plan=omega_workbench::SelectPlan:enabled",
+            "menu:Thread",
+            "action:Thread/New Thread=agent::NewThread:enabled",
+            "action:Thread/Choose Folder…=workspace::Open:enabled",
+            "separator:Thread",
+            "action:Thread/Sarah Voice — Voice access is not available yet=workroom::StartVoice:disabled",
+            "menu:Window",
+            "action:Window/Minimize=omega::Minimize:enabled",
+            "separator:Window",
+            "menu:Help",
+            "action:Help/Documentation=omega::OpenDocs:enabled",
+            "action:Help/Open Source Licenses=omega::OpenLicenses:enabled",
+        ];
+        #[cfg(not(target_os = "macos"))]
+        let expected = [
+            "menu:Omega",
+            "action:Omega/About Omega=omega::About:enabled",
+            "separator:Omega",
+            "action:Omega/Open Settings=omega::OpenSettings:enabled",
+            "action:Omega/Open Legacy Settings=omega::OpenLegacySettings:enabled",
+            "separator:Omega",
+            "action:Omega/Quit Omega=omega::Quit:enabled",
+            "menu:Edit",
+            "action:Edit/Undo=editor::Undo:enabled",
+            "action:Edit/Redo=editor::Redo:enabled",
+            "separator:Edit",
+            "action:Edit/Cut=editor::Cut:enabled",
+            "action:Edit/Copy=editor::Copy:enabled",
+            "action:Edit/Paste=editor::Paste:enabled",
+            "action:Edit/Select All=editor::SelectAll:enabled",
+            "separator:Edit",
+            "action:Edit/Find=agent::ToggleSearch:enabled",
+            "menu:View",
+            "action:View/Zoom In=omega::IncreaseBufferFontSize:enabled",
+            "action:View/Zoom Out=omega::DecreaseBufferFontSize:enabled",
+            "action:View/Reset Zoom=omega::ResetBufferFontSize:enabled",
+            "separator:View",
+            "action:View/Toggle Full Screen=omega::ToggleFullScreen:enabled",
+            "action:View/Toggle Threads Sidebar=agent::ToggleThreadsSidebar:enabled",
+            "separator:View",
+            "menu:View/Workbench",
+            "action:View/Workbench/Files=omega_workbench::SelectFiles:enabled",
+            "action:View/Workbench/Search=omega_workbench::SelectSearch:enabled",
+            "action:View/Workbench/Review=omega_workbench::SelectReview:enabled",
+            "action:View/Workbench/Git=omega_workbench::SelectGit:enabled",
+            "action:View/Workbench/Terminal=omega_workbench::SelectTerminal:enabled",
+            "action:View/Workbench/Plan=omega_workbench::SelectPlan:enabled",
+            "menu:Thread",
+            "action:Thread/New Thread=agent::NewThread:enabled",
+            "action:Thread/Choose Folder…=workspace::Open:enabled",
+            "separator:Thread",
+            "action:Thread/Sarah Voice — Voice access is not available yet=workroom::StartVoice:disabled",
+            "menu:Window",
+            "action:Window/Minimize=omega::Minimize:enabled",
+            "menu:Help",
+            "action:Help/Documentation=omega::OpenDocs:enabled",
+            "action:Help/Open Source Licenses=omega::OpenLicenses:enabled",
+        ];
+        assert_eq!(
+            contract,
+            expected.map(str::to_string),
+            "the recursive application-menu tree changed"
+        );
+
+        let joined = contract.join("\n");
+
+        let action_contract = [
+            ("About Omega", "omega::About"),
+            ("Open Settings", "omega::OpenSettings"),
+            ("Open Legacy Settings", "omega::OpenLegacySettings"),
+            ("Quit Omega", "omega::Quit"),
+            ("Undo", "editor::Undo"),
+            ("Redo", "editor::Redo"),
+            ("Cut", "editor::Cut"),
+            ("Copy", "editor::Copy"),
+            ("Paste", "editor::Paste"),
+            ("Select All", "editor::SelectAll"),
+            ("Find", "agent::ToggleSearch"),
+            ("Zoom In", "omega::IncreaseBufferFontSize"),
+            ("Zoom Out", "omega::DecreaseBufferFontSize"),
+            ("Reset Zoom", "omega::ResetBufferFontSize"),
+            ("Toggle Full Screen", "omega::ToggleFullScreen"),
+            ("Toggle Threads Sidebar", "agent::ToggleThreadsSidebar"),
+            ("Files", "omega_workbench::SelectFiles"),
+            ("Search", "omega_workbench::SelectSearch"),
+            ("Review", "omega_workbench::SelectReview"),
+            ("Git", "omega_workbench::SelectGit"),
+            ("Terminal", "omega_workbench::SelectTerminal"),
+            ("Plan", "omega_workbench::SelectPlan"),
+            ("New Thread", "agent::NewThread"),
+            ("Choose Folder…", "workspace::Open"),
+            ("Documentation", "omega::OpenDocs"),
+            ("Open Source Licenses", "omega::OpenLicenses"),
+        ];
+        for (label, action) in action_contract {
+            let needle = format!("/{label}={action}:enabled");
+            assert!(
+                joined.contains(&needle),
+                "menu contract lost {needle}\n{joined}"
+            );
+            assert!(
+                omega_zero_base::admits_action(action),
+                "enabled menu action {action} is refused"
+            );
+        }
+        assert!(joined.contains(
+            "/Sarah Voice — Voice access is not available yet=workroom::StartVoice:disabled"
+        ));
+    }
 }

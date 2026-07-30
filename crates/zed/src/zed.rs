@@ -251,6 +251,7 @@ pub fn init(cx: &mut App) {
 
     cx.on_action(|_: &zed_actions::OpenLicenses, cx| {
         with_active_or_new_workspace(cx, |workspace, window, cx| {
+            workspace.reveal_zero_base_center_for_user_open(window, cx);
             open_bundled_file(
                 workspace,
                 asset_str::<Assets>("licenses.md"),

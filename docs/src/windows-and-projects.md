@@ -13,12 +13,12 @@ Use **Panel Layout > Agentic** from the user menu in the title bar (or the {#act
 
 By default, when you open a folder in Zed, it opens as a new project in your current window's threads sidebar rather than creating a new window. This keeps related work together and preserves your agent threads and layout.
 
-| Action             | Result                                    |
-| ------------------ | ----------------------------------------- |
-| File > Open        | Opens in current window (threads sidebar) |
-| File > Open Recent | Opens in current window (threads sidebar) |
-| Drag folder to Zed | Opens in current window (threads sidebar) |
-| `zed ~/project`    | Opens in current window (threads sidebar) |
+| Action                         | Result                                    |
+| ------------------------------ | ----------------------------------------- |
+| Thread > Choose Folder…        | Opens in current window (threads sidebar) |
+| Full editor: Open Recent       | Opens in current window (threads sidebar) |
+| Drag folder to Zed             | Opens in current window (threads sidebar) |
+| `zed ~/project`                | Opens in current window (threads sidebar) |
 
 ## Working with Multiple Projects
 
@@ -37,7 +37,9 @@ Sometimes you want a completely separate window. Here's how:
 
 ### From Open Recent
 
-When using File > Open Recent ({#kb projects::OpenRecent}):
+In the transitional `--full-editor` compatibility surface, use
+{#kb projects::OpenRecent} from the command palette. The `projects` action
+namespace is not available from the sealed default surface.
 
 - **Enter** or **click** opens in the current window (threads sidebar)
 - **Cmd+Enter** or **Cmd+click** (macOS) / **Ctrl+Enter** or **Ctrl+click** (Linux/Windows) opens in a new window
@@ -75,13 +77,13 @@ Options:
 - `existing_window` (default): Open folders in the current window's threads sidebar
 - `new_window`: Open folders in a new window
 
-This setting affects CLI and double-click behavior, not the File > Open menu.
+This setting affects CLI and double-click behavior, not the folder chooser in
+the new-thread menu.
 
 ## Adding Folders to a Project
 
 If you want to add a folder to your current project (not as a separate project in the threads sidebar), you have several options:
 
-- **File menu**: File > Add Folder to Project
 - **Project panel**: Right-click in the project panel and choose "Add Folders to Project"
 - **Open Recent**: Select a recent project and click the "Add Folder to this Project" button
 

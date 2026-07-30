@@ -263,7 +263,10 @@ In Zed:
 
 - **No workspace file format**: There’s no `.code-workspace` equivalent. Opening a folder is your project context.
 
-- **Add Folder to Project**: If you want multiple folders in the same project (like VS Code’s multi-root), use File > Add Folder to Project. This adds another root to your current project’s file tree.
+- **Add Folder to Project**: If you want multiple folders in the same project
+  (like VS Code’s multi-root), right-click in the Project Panel and choose
+  **Add Folders to Project**. This adds another root to your current project's
+  file tree.
 
 - **Per-project settings are optional**: You can add a `.zed/settings.json` file inside a project to override global settings.
 

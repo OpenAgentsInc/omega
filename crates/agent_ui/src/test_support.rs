@@ -1675,6 +1675,33 @@ impl AgentWorkbenchFrontDoor {
         visual.run_until_parked();
     }
 
+    pub fn focus_workspace_root(&self, cx: &TestAppContext) {
+        let mut visual = VisualTestContext::from_window(self.window, cx);
+        self.workspace
+            .update_in(&mut visual, |workspace, window, cx| {
+                workspace.focus_handle(cx).focus(window, cx);
+            });
+        visual.run_until_parked();
+    }
+
+    pub fn agent_panel_contains_focus(&self, cx: &TestAppContext) -> bool {
+        let mut visual = VisualTestContext::from_window(self.window, cx);
+        self.panel.update_in(&mut visual, |panel, window, cx| {
+            panel.focus_handle(cx).contains_focused(window, cx)
+        })
+    }
+
+    pub fn threads_sidebar_open(&self, cx: &TestAppContext) -> bool {
+        self.panel
+            .read_with(cx, |panel, _cx| panel.threads_sidebar_open_for_tests())
+    }
+
+    pub fn workbench_last_error(&self, cx: &TestAppContext) -> Option<SharedString> {
+        self.panel.read_with(cx, |panel, _cx| {
+            panel.workbench_last_error_for_tests().cloned()
+        })
+    }
+
     pub fn return_to_agent_panel_for_capture(&self, cx: &TestAppContext) {
         let mut visual = VisualTestContext::from_window(self.window, cx);
         visual.dispatch_action(workspace::pane::CloseActiveItem::default());
@@ -7377,13 +7404,24 @@ mod workbench_front_door_tests {
             .await
             .expect("unavailable scene should mount");
         let before = front_door.projection(cx);
+        front_door.focus_workspace_root(cx);
+        assert!(
+            !front_door.agent_panel_contains_focus(cx),
+            "unavailable menu action should begin outside AgentPanel"
+        );
         front_door.dispatch_action(crate::workbench_shell::SelectFiles, cx);
         assert_eq!(
             front_door.projection(cx),
             before,
             "unavailable action must not open a fallback"
         );
+        assert_eq!(
+            front_door.workbench_last_error(cx).as_deref(),
+            Some("Open a project to use this surface"),
+            "unavailable action from center focus must preserve its exact reason"
+        );
 
+        front_door.focus_agent_panel(cx);
         front_door.fail_next_host_creation(omega_workbench_state::WorkSurface::Plan, cx);
         front_door.dispatch_action(crate::workbench_shell::SelectPlan, cx);
         let snapshot = front_door.snapshot(cx);
@@ -7407,6 +7445,61 @@ mod workbench_front_door_tests {
         front_door
             .teardown(cx)
             .expect("unavailable workbench should tear down");
+    }
+
+    #[gpui::test]
+    async fn application_menu_actions_forward_from_workspace_focus(cx: &mut TestAppContext) {
+        let scene = scene_with_thread("workbench_menu_workspace_focus", 1200, true);
+        let front_door = AgentWorkbenchFrontDoor::mount(scene, cx)
+            .await
+            .expect("menu forwarding scene should mount");
+
+        let sidebar_was_open = front_door.threads_sidebar_open(cx);
+        front_door.focus_workspace_root(cx);
+        assert!(
+            !front_door.agent_panel_contains_focus(cx),
+            "menu forwarding must be exercised from outside AgentPanel"
+        );
+        front_door.dispatch_action(crate::ToggleThreadsSidebar, cx);
+        assert_ne!(
+            front_door.threads_sidebar_open(cx),
+            sidebar_was_open,
+            "Threads Sidebar menu action did not reach AgentPanel"
+        );
+
+        front_door.focus_workspace_root(cx);
+        front_door.dispatch_action(crate::workbench_shell::SelectFiles, cx);
+        assert_eq!(
+            front_door
+                .projection(cx)
+                .visible_projection()
+                .and_then(|projection| projection.effective_surface),
+            Some(omega_workbench_state::WorkSurface::Files)
+        );
+
+        front_door.focus_workspace_root(cx);
+        front_door.dispatch_action(crate::workbench_shell::SelectGit, cx);
+        assert_eq!(
+            front_door
+                .projection(cx)
+                .visible_projection()
+                .and_then(|projection| projection.effective_surface),
+            Some(omega_workbench_state::WorkSurface::Git)
+        );
+
+        front_door.focus_workspace_root(cx);
+        front_door.dispatch_action(crate::workbench_shell::SelectTerminal, cx);
+        assert_eq!(
+            front_door
+                .projection(cx)
+                .visible_projection()
+                .and_then(|projection| projection.effective_surface),
+            Some(omega_workbench_state::WorkSurface::Terminal)
+        );
+
+        front_door
+            .teardown(cx)
+            .expect("menu forwarding scene should tear down");
     }
 
     #[gpui::test]

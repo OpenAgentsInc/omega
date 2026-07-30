@@ -35,7 +35,6 @@ use zed_actions::{
     },
     full_auto_panel::{OpenLauncher, ToggleFocus as ToggleFullAutoFocus},
     git_panel::ToggleFocus as ToggleGitFocus,
-    workroom::OpenPanel as OpenSarahWorkroomPanel,
 };
 
 use crate::ExpandMessageEditor;
@@ -452,6 +451,21 @@ struct SerializedActiveThread {
     work_dirs: Option<SerializedPathList>,
 }
 
+fn select_workbench_surface_from_workspace(
+    workspace: &mut Workspace,
+    surface: omega_workbench_state::WorkSurface,
+    window: &mut Window,
+    cx: &mut Context<Workspace>,
+) {
+    if let Some(panel) = workspace.panel::<AgentPanel>(cx) {
+        window.defer(cx, move |window, cx| {
+            panel.update(cx, |panel, cx| {
+                panel.select_work_surface(surface, window, cx);
+            });
+        });
+    }
+}
+
 pub fn init(cx: &mut App) {
     cx.observe_new(
         |workspace: &mut Workspace, _window, _cx: &mut Context<Workspace>| {
@@ -476,6 +490,61 @@ pub fn init(cx: &mut App) {
                         });
                         workspace.focus_panel::<AgentPanel>(window, cx);
                     }
+                })
+                .register_action(|workspace, _: &ToggleThreadsSidebar, _window, cx| {
+                    if let Some(panel) = workspace.panel::<AgentPanel>(cx) {
+                        panel.update(cx, |panel, cx| panel.toggle_threads_sidebar(cx));
+                    }
+                })
+                .register_action(|workspace, _: &workbench_shell::SelectFiles, window, cx| {
+                    select_workbench_surface_from_workspace(
+                        workspace,
+                        omega_workbench_state::WorkSurface::Files,
+                        window,
+                        cx,
+                    );
+                })
+                .register_action(|workspace, _: &workbench_shell::SelectSearch, window, cx| {
+                    select_workbench_surface_from_workspace(
+                        workspace,
+                        omega_workbench_state::WorkSurface::Search,
+                        window,
+                        cx,
+                    );
+                })
+                .register_action(|workspace, _: &workbench_shell::SelectReview, window, cx| {
+                    select_workbench_surface_from_workspace(
+                        workspace,
+                        omega_workbench_state::WorkSurface::Review,
+                        window,
+                        cx,
+                    );
+                })
+                .register_action(|workspace, _: &workbench_shell::SelectGit, window, cx| {
+                    select_workbench_surface_from_workspace(
+                        workspace,
+                        omega_workbench_state::WorkSurface::Git,
+                        window,
+                        cx,
+                    );
+                })
+                .register_action(
+                    |workspace, _: &workbench_shell::SelectTerminal, window, cx| {
+                        select_workbench_surface_from_workspace(
+                            workspace,
+                            omega_workbench_state::WorkSurface::Terminal,
+                            window,
+                            cx,
+                        );
+                    },
+                )
+                .register_action(|workspace, _: &workbench_shell::SelectPlan, window, cx| {
+                    select_workbench_surface_from_workspace(
+                        workspace,
+                        omega_workbench_state::WorkSurface::Plan,
+                        window,
+                        cx,
+                    );
                 })
                 // `OMEGA-DELTA-0020`. Both Full Auto actions used to be
                 // answered by `full_auto_ui::init` against a dock panel that
@@ -7646,6 +7715,8 @@ impl AgentPanel {
         // beside it disabled.
         let can_create_entries = true;
         let supports_terminal = self.supports_terminal(cx);
+        let has_open_project = self.has_open_project(cx);
+        let is_zero_base = omega_zero_base::is_active();
         let showing_terminal = matches!(self.visible_surface(), VisibleSurface::Terminal(_));
 
         // `OMEGA-DELTA-0131`. The same accessor a new thread is built from, not
@@ -7680,6 +7751,19 @@ impl AgentPanel {
                     workspace.project().read(cx).is_via_collab()
                 })
                 .unwrap_or_default();
+            let direct_agent_unavailable_reason = if is_zero_base {
+                Some(SharedString::from(
+                    "Direct agents are not available in this alpha yet",
+                ))
+            } else if !has_open_project {
+                Some(SharedString::from("Choose a folder to use direct agents"))
+            } else if is_via_collab {
+                Some(SharedString::from(
+                    "Direct agents are unavailable in shared projects",
+                ))
+            } else {
+                None
+            };
 
             let focus_handle = focus_handle.clone();
             let agent_server_store = agent_server_store;
@@ -7718,24 +7802,12 @@ impl AgentPanel {
                                     }
                                 }),
                         )
-                        // omega#99. Zero base does not render the Full Auto
-                        // entry, and the Agent Computer and Sarah entries go
-                        // with it because their panels are not loaded either.
-                        // Not rendering is only half of it: `open_full_auto`
-                        // below refuses too, and the mode's action gate refuses
-                        // the `full_auto_panel` namespace, because a surface
-                        // that is only visually absent is still one key press
-                        // away.
                         .item(
-                            ContextMenuEntry::new("Sarah")
+                            ContextMenuEntry::new("Sarah — Voice access is not available yet")
+                                .action(Box::new(zed_actions::workroom::StartVoice))
                                 .icon(IconName::OmegaAgent)
                                 .icon_color(Color::Accent)
-                                .handler({
-                                    move |window, cx| {
-                                        window
-                                            .dispatch_action(Box::new(OpenSarahWorkroomPanel), cx);
-                                    }
-                                }),
+                                .disabled(true),
                         )
                         .when(!omega_zero_base::is_active(), |menu| {
                             menu.item(
@@ -7828,7 +7900,17 @@ impl AgentPanel {
                                 menu = menu.separator().header("External Agents");
                             }
                             for item in &agent_items {
-                                let mut entry = ContextMenuEntry::new(item.display_name.clone());
+                                let unavailable_reason = direct_agent_unavailable_reason.clone();
+                                let label = unavailable_reason.as_ref().map_or_else(
+                                    || item.display_name.clone(),
+                                    |reason| {
+                                        SharedString::from(format!(
+                                            "{} — {reason}",
+                                            item.display_name
+                                        ))
+                                    },
+                                );
+                                let mut entry = ContextMenuEntry::new(label);
 
                                 let icon_path =
                                     agent_server_store.agent_icon(&item.id).or_else(|| {
@@ -7846,14 +7928,15 @@ impl AgentPanel {
 
                                 entry = entry
                                     .when(
-                                        !showing_terminal
+                                        unavailable_reason.is_none()
+                                            && !showing_terminal
                                             && is_agent_selected(Agent::Custom {
                                                 id: item.id.clone(),
                                             }),
                                         |this| this.action(Box::new(NewThread)),
                                     )
                                     .icon_color(Color::Muted)
-                                    .disabled(is_via_collab)
+                                    .disabled(unavailable_reason.is_some())
                                     .handler({
                                         let workspace = workspace.clone();
                                         let agent_id = item.id.clone();
@@ -11303,6 +11386,45 @@ impl AgentPanel {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
+        let unavailable_reason = if !self.workbench_shell_enabled {
+            Some(SharedString::from(
+                "Workbench surfaces are available in Omega's default thread view",
+            ))
+        } else {
+            self.workbench_shell
+                .capability(surface)
+                .and_then(|capability| capability.availability.reason().cloned())
+                .or_else(|| {
+                    self.workbench_shell
+                        .capability(surface)
+                        .is_none()
+                        .then(|| SharedString::from("Open a thread to use this surface"))
+                })
+        };
+        if let Some(reason) = unavailable_reason {
+            self.workbench_shell.record_error(reason.clone());
+            let workspace = self.workspace.clone();
+            cx.defer(move |cx| {
+                workspace
+                    .update(cx, |workspace, cx| {
+                        struct WorkbenchUnavailableToast;
+                        workspace.show_toast(
+                            workspace::Toast::new(
+                                workspace::notifications::NotificationId::unique::<
+                                    WorkbenchUnavailableToast,
+                                >(),
+                                reason.to_string(),
+                            )
+                            .autohide(),
+                            cx,
+                        );
+                    })
+                    .log_err();
+            });
+            cx.notify();
+            return;
+        }
+
         let (files_panel, previous_scope, previous_scope_was_unavailable) =
             if surface == omega_workbench_state::WorkSurface::Files {
                 match self.prepare_files_surface(window, cx) {
@@ -12646,6 +12768,14 @@ impl AgentPanel {
 
     pub fn workbench_projection_for_tests(&self) -> &omega_workbench_state::WorkbenchProjection {
         self.workbench_shell.projection()
+    }
+
+    pub fn threads_sidebar_open_for_tests(&self) -> bool {
+        self.sidebar.open
+    }
+
+    pub fn workbench_last_error_for_tests(&self) -> Option<&SharedString> {
+        self.workbench_shell.last_error()
     }
 
     pub fn workbench_identity_for_tests(
