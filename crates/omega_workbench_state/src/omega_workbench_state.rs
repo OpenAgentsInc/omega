@@ -1578,7 +1578,7 @@ mod tests {
         assert_eq!(
             projection
                 .apply(ProjectionTransition::AdoptPersistedSelection {
-                    selection: disk_selection.clone(),
+                    selection: disk_selection,
                 })
                 .expect("adopt the disk selection"),
             TransitionEffect::Applied
