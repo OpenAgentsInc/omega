@@ -2,7 +2,11 @@
 description = "The OpenAgents desktop client and integrated development environment."
 edition.workspace = true
 name = "zed"
-version = "1.14.0"
+# Omega's own release lineage, not upstream Zed's. This is the fallback that
+# AppVersion::load compiles into dev builds (main.rs env!("CARGO_PKG_VERSION"))
+# and the base the RC pipeline (script/bundle-omega-rc set_channel_and_version)
+# rewrites to the current RC semver at package time.
+version = "0.2.0"
 publish.workspace = true
 license = "GPL-3.0-or-later"
 authors = ["OpenAgents <hello@openagents.com>"]
