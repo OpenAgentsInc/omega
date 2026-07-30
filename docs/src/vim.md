@@ -32,6 +32,16 @@ When you first open Zed, you'll see a checkbox on the welcome screen that allows
 
 If you missed this, you can toggle vim mode on or off anytime by opening the command palette and using the workspace command {#action workspace::ToggleVimMode}.
 
+In Omega's default surface, Vim mode applies to both the conversation composer
+and any file opened in the editing surface. The current mode appears at the
+bottom left of the composer, including while an executor is connecting. When
+focus moves between the composer and an open file, the indicator follows the
+focused editor. Saving an open file continues to use {#action workspace::Save}.
+
+The default surface admits the non-Helix editor actions in the shipped Vim
+keymap. Helix-flavored and workspace-management actions remain refused, as does
+the Helix-mode toggle.
+
 > **Note**: This command toggles the following property in your user settings:
 >
 > ```json [settings]

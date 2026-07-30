@@ -7694,3 +7694,30 @@ current image build does not decode it inline.
 - **Enforced by:** `default_surface_center_opens_reveal_before_opening` and the
   amended `transcript_file_links_choose_editing_or_peeking` checks in
   `crates/omega_deltas`, plus focused Workspace URL-routing tests.
+
+### OMEGA-DELTA-0175 — Vim editing and its mode readout belong to the default surface
+
+- **Upstream Zed:** Vim actions run in editors, `workspace::ToggleVimMode`
+  enables them, and `vim::ModeIndicator` lives in the Workspace status bar.
+- **Omega before:** the process-wide zero-base action gate refused the entire
+  `vim` namespace. The rc refusal inventory contains eleven unique actions:
+  `PushFindForward`, `InsertBefore`, `Down`, `InsertLineBelow`, `Substitute`,
+  `PushDelete`, `InsertAfter`, `Number`, `Up`, `PreviousLineStart`, and
+  `InsertLineAbove`. The default surface also removes the Workspace status
+  bar, so enabling Vim would still leave its current mode invisible.
+- **Omega now:** the exact non-Helix editor action set mechanically derived from
+  `assets/keymaps/vim.json` is admitted. Helix-flavored actions and pane, tab,
+  Project Panel, and Workspace management stay refused. The exact
+  `workspace::ToggleVimMode` action is admitted because its control must work
+  while Vim is off; `workspace::Save` remains admitted for a revealed editor.
+- **One readout follows focus.** Workspace initialization constructs one
+  `vim::ModeIndicator` before center editors or Agent Panel. Agent Panel passes
+  that entity into every `ConversationView` and `ThreadView`, and loading plus
+  the active connected composer render it at bottom left. Stored observer
+  subscriptions and a weak callback owner keep its lifetime bounded. Its stable
+  `vim.mode-indicator` debug selector and status label expose the same state to
+  accessibility and UI automation.
+- **Enforced by:** `vim_is_admitted_with_one_shared_default_surface_indicator`
+  in `crates/omega_deltas`, the zero-base admission unit test, and focused GPUI
+  coverage in `agent_ui` that exercises loading-to-connected entity reuse and
+  focused Vim mode changes.

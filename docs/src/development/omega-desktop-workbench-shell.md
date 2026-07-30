@@ -90,6 +90,16 @@ system browser, and `AgentDiff::review_in_active_editor` may advance within the
 editor that is already visible. Intentional read-only file and Markdown peeks
 remain sheets. Closing the final revealed tab restores the agent-only surface.
 
+Vim is part of both sides of that presentation boundary. The zero-base action
+gate admits the exact non-Helix editor action set derived from the shipped Vim
+keymap, plus `workspace::ToggleVimMode` and `workspace::Save`. Helix-flavored
+actions, pane and tab management, Project Panel actions, the rest of the
+Workspace namespace, and `workspace::ToggleHelixMode` remain refused. One
+`vim::ModeIndicator` is created during Workspace initialization, before center
+editors or conversations, and shared with Agent Panel. Loading and connected
+composer bars render that same entity at bottom left; only the active connected
+thread hosts it, so its mode follows focus without producing duplicate readouts.
+
 ### Native Files adapter {#native-files-adapter}
 
 The shared initializer creates the native `ProjectPanel` and initially

@@ -539,8 +539,15 @@ pub fn initialize_workspace(app_state: Arc<AppState>, cx: &mut App) {
                         }
                     }
 
-                    ensure_agent_panel_for_workspace(workspace, source_workspace, window, cx)
-                        .detach_and_log_err(cx);
+                    let vim_mode_indicator = cx.new(|cx| vim::ModeIndicator::new(window, cx));
+                    ensure_agent_panel_for_workspace(
+                        workspace,
+                        source_workspace,
+                        vim_mode_indicator,
+                        window,
+                        cx,
+                    )
+                    .detach_and_log_err(cx);
                 });
             },
         )
@@ -608,8 +615,12 @@ pub fn initialize_workspace(app_state: Arc<AppState>, cx: &mut App) {
         // OMEGA-DELTA-0052, omega#100. It used to draw one control here — the
         // visible way out — and that control is gone with the mode's exit. The
         // status bar in zero base is now empty rather than carrying one button.
+        // One indicator is created at workspace initialization and shared by
+        // the full-editor status bar and every Agent UI conversation.
+        let vim_mode_indicator = cx.new(|cx| vim::ModeIndicator::new(window, cx));
+
         if omega_zero_base::is_active() {
-            let panels_task = initialize_panels(window, cx);
+            let panels_task = initialize_panels(vim_mode_indicator, window, cx);
             workspace.set_panels_task(panels_task);
             register_actions(app_state.clone(), workspace, window, cx);
 
@@ -651,7 +662,6 @@ pub fn initialize_workspace(app_state: Arc<AppState>, cx: &mut App) {
             cx.new(|_| language_selector::ActiveBufferLanguage::new(workspace));
         let active_toolchain_language =
             cx.new(|cx| toolchain_selector::ActiveToolchain::new(workspace, window, cx));
-        let vim_mode_indicator = cx.new(|cx| vim::ModeIndicator::new(window, cx));
         let image_info = cx.new(|_cx| ImageInfo::new(workspace));
 
         let lsp_button_menu_handle = PopoverMenuHandle::default();
@@ -683,12 +693,12 @@ pub fn initialize_workspace(app_state: Arc<AppState>, cx: &mut App) {
             status_bar.add_right_item(active_buffer_language, window, cx);
             status_bar.add_right_item(active_toolchain_language, window, cx);
             status_bar.add_right_item(line_ending_indicator, window, cx);
-            status_bar.add_right_item(vim_mode_indicator, window, cx);
+            status_bar.add_right_item(vim_mode_indicator.clone(), window, cx);
             status_bar.add_right_item(cursor_position, window, cx);
             status_bar.add_right_item(image_info, window, cx);
         });
 
-        let panels_task = initialize_panels(window, cx);
+        let panels_task = initialize_panels(vim_mode_indicator, window, cx);
         workspace.set_panels_task(panels_task);
         register_actions(app_state.clone(), workspace, window, cx);
 
@@ -812,6 +822,7 @@ fn show_software_emulation_warning_if_needed(
 }
 
 pub(crate) fn initialize_panels(
+    vim_mode_indicator: Entity<vim::ModeIndicator>,
     window: &mut Window,
     cx: &mut Context<Workspace>,
 ) -> Task<anyhow::Result<()>> {
@@ -854,9 +865,13 @@ pub(crate) fn initialize_panels(
                 .await
                 .context("failed to initialize the native workbench panels")?;
 
-            initialize_agent_panel(workspace_handle.clone(), cx.clone())
-                .await
-                .log_err();
+            initialize_agent_panel(
+                workspace_handle.clone(),
+                vim_mode_indicator.clone(),
+                cx.clone(),
+            )
+            .await
+            .log_err();
 
             // Voice keeps its existing Sarah workroom owner and state machine,
             // but zero base does not add that owner to a dock.
@@ -921,7 +936,12 @@ pub(crate) fn initialize_panels(
             add_panel_when_ready(debug_panel, workspace_handle.clone(), cx.clone()),
             add_panel_when_ready(agent_computer_panel, workspace_handle.clone(), cx.clone()),
             add_panel_when_ready(sarah_workroom_panel, workspace_handle.clone(), cx.clone()),
-            initialize_agent_panel(workspace_handle.clone(), cx.clone()).map(|r| r.log_err()),
+            initialize_agent_panel(
+                workspace_handle.clone(),
+                vim_mode_indicator.clone(),
+                cx.clone(),
+            )
+            .map(|r| r.log_err()),
         );
 
         if workroom_ui::public_demo_mode() {
@@ -976,11 +996,12 @@ fn setup_or_teardown_ai_panel<P: Panel>(
 fn ensure_agent_panel_for_workspace(
     workspace: &mut Workspace,
     source_workspace: Option<WeakEntity<Workspace>>,
+    vim_mode_indicator: Entity<vim::ModeIndicator>,
     window: &mut Window,
     cx: &mut Context<Workspace>,
 ) -> Task<anyhow::Result<()>> {
     let task = setup_or_teardown_ai_panel(workspace, window, cx, move |workspace, cx| {
-        agent_ui::AgentPanel::load(workspace, cx)
+        agent_ui::AgentPanel::load_with_vim_mode_indicator(workspace, cx, vim_mode_indicator)
     });
 
     cx.spawn_in(window, async move |workspace, cx| {
@@ -999,17 +1020,31 @@ fn ensure_agent_panel_for_workspace(
 
 async fn initialize_agent_panel(
     workspace_handle: WeakEntity<Workspace>,
+    vim_mode_indicator: Entity<vim::ModeIndicator>,
     mut cx: AsyncWindowContext,
 ) -> anyhow::Result<()> {
     workspace_handle
         .update_in(&mut cx, |workspace, window, cx| {
-            ensure_agent_panel_for_workspace(workspace, None, window, cx)
+            ensure_agent_panel_for_workspace(
+                workspace,
+                None,
+                vim_mode_indicator.clone(),
+                window,
+                cx,
+            )
         })?
         .await?;
 
     workspace_handle.update_in(&mut cx, |workspace, window, cx| {
         cx.observe_global_in::<SettingsStore>(window, move |workspace, window, cx| {
-            ensure_agent_panel_for_workspace(workspace, None, window, cx).detach_and_log_err(cx);
+            ensure_agent_panel_for_workspace(
+                workspace,
+                None,
+                vim_mode_indicator.clone(),
+                window,
+                cx,
+            )
+            .detach_and_log_err(cx);
         })
         .detach();
 

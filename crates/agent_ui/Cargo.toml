@@ -150,6 +150,7 @@ unicode-segmentation.workspace = true
 url.workspace = true
 util.workspace = true
 uuid.workspace = true
+vim.workspace = true
 watch.workspace = true
 workspace.workspace = true
 zed_actions.workspace = true
@@ -187,7 +188,6 @@ search = { workspace = true, features = ["test-support"] }
 semver.workspace = true
 shlex.workspace = true
 reqwest_client.workspace = true
-vim.workspace = true
 tree-sitter-md.workspace = true
 unindent.workspace = true
 terminal = { workspace = true, features = ["test-support"] }

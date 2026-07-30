@@ -722,6 +722,9 @@ pub struct ConversationView {
     /// `OMEGA-DELTA-0122`. Handed to the real composer the moment one exists —
     /// see [`ConversationView::hand_loading_draft_over`] — and dropped there.
     loading_composer: Option<Entity<Editor>>,
+    /// One readout shared by the loading composer and every connected thread.
+    /// It follows whichever Vim editor in this window most recently focused.
+    vim_mode_indicator: Entity<vim::ModeIndicator>,
     /// The rebuild waiting for the person to stop cycling executors.
     ///
     /// omega#117. Holding the task is what makes this a debounce: assigning a
@@ -1159,6 +1162,43 @@ impl ConversationView {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> Self {
+        let vim_mode_indicator = cx.new(|cx| vim::ModeIndicator::new(window, cx));
+        Self::new_with_vim_mode_indicator(
+            agent,
+            connection_store,
+            connection_key,
+            resume_session_id,
+            thread_id,
+            work_dirs,
+            title,
+            initial_content,
+            workspace,
+            project,
+            thread_store,
+            source,
+            vim_mode_indicator,
+            window,
+            cx,
+        )
+    }
+
+    pub(crate) fn new_with_vim_mode_indicator(
+        agent: Rc<dyn AgentServer>,
+        connection_store: Entity<AgentConnectionStore>,
+        connection_key: Agent,
+        resume_session_id: Option<acp::SessionId>,
+        thread_id: Option<ThreadId>,
+        work_dirs: Option<PathList>,
+        title: Option<SharedString>,
+        initial_content: Option<AgentInitialContent>,
+        workspace: WeakEntity<Workspace>,
+        project: Entity<Project>,
+        thread_store: Option<Entity<ThreadStore>>,
+        source: AgentThreadSource,
+        vim_mode_indicator: Entity<vim::ModeIndicator>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> Self {
         let agent_server_store = project.read(cx).agent_server_store().clone();
         let code_span_resolver = AgentCodeSpanResolver::new(&project.downgrade(), cx);
         let mut subscriptions = vec![
@@ -1260,6 +1300,7 @@ impl ConversationView {
             auth_task: None,
             loading_status: None,
             loading_composer: None,
+            vim_mode_indicator,
             pending_executor_rebuild: None,
             pending_connect_messages: Vec::new(),
             last_theme_id: Some(cx.theme().id.clone()),
@@ -2181,6 +2222,7 @@ impl ConversationView {
                 thread,
                 conversation,
                 weak,
+                self.vim_mode_indicator.clone(),
                 agent_icon,
                 agent_icon_from_external_svg,
                 agent_id,
@@ -3576,8 +3618,9 @@ impl ConversationView {
     /// The owner: "move the loading indicator to inside the input bar like
     /// bottom left". Which is also where it stops: bottom-left is empty once
     /// loaded and stays empty — `render_zero_base_executor_bar` puts the
-    /// provider's controls on the right, and the left carries only the turn's
-    /// own state while there is a turn.
+    /// provider's controls on the right. `OMEGA-DELTA-0175` adds the Vim mode
+    /// readout to the left in both states; the connecting label itself still
+    /// disappears when the connection lands.
     fn render_loading_composer(
         &mut self,
         window: &mut Window,
@@ -3642,18 +3685,24 @@ impl ConversationView {
                                 .gap_1()
                                 .justify_between()
                                 .child(
-                                    h_flex().min_w_0().child(
-                                        Label::new(status)
-                                            .size(LabelSize::Small)
-                                            .color(Color::Muted)
-                                            .with_animation(
-                                                "loading-agent-label",
-                                                Animation::new(Duration::from_secs(2))
-                                                    .repeat()
-                                                    .with_easing(pulsating_between(0.3, 0.7)),
-                                                |label, delta| label.alpha(delta),
-                                            ),
-                                    ),
+                                    h_flex()
+                                        .min_w_0()
+                                        .gap_1()
+                                        .when(omega_zero_base::is_active(), |this| {
+                                            this.child(self.vim_mode_indicator.clone())
+                                        })
+                                        .child(
+                                            Label::new(status)
+                                                .size(LabelSize::Small)
+                                                .color(Color::Muted)
+                                                .with_animation(
+                                                    "loading-agent-label",
+                                                    Animation::new(Duration::from_secs(2))
+                                                        .repeat()
+                                                        .with_easing(pulsating_between(0.3, 0.7)),
+                                                    |label, delta| label.alpha(delta),
+                                                ),
+                                        ),
                                 )
                                 .child(
                                     h_flex().min_w_0().child(
@@ -4544,8 +4593,8 @@ impl Render for ConversationView {
         // Moving it down was accepted and was not enough: "you still dont show
         // the input bar while its fucking loading". So the label is now the
         // status line of a real, typable composer, which is the window still
-        // looking like the window you were just in — and the bottom-left corner
-        // it sits in is the one `render_zero_base_executor_bar` leaves empty.
+        // looking like the window you were just in. The bottom-left corner also
+        // holds the persistent Vim readout when modal editing is enabled.
         //
         // Built before the match rather than inside it: drawing it needs
         // `&mut self`, and the match holds `&self.server_state` across every
@@ -4874,7 +4923,9 @@ pub(crate) mod tests {
     use editor::actions::Paste;
     use feature_flags::{AcpBetaFeatureFlag, FeatureFlag as _, FeatureFlagAppExt as _};
     use fs::FakeFs;
-    use gpui::{ClipboardItem, EventEmitter, TestAppContext, VisualTestContext, point, size};
+    use gpui::{
+        ClipboardItem, EventEmitter, TestAppContext, UpdateGlobal, VisualTestContext, point, size,
+    };
     use parking_lot::Mutex;
     use project::Project;
     use serde_json::json;
@@ -7270,6 +7321,29 @@ pub(crate) mod tests {
             .unwrap();
     }
 
+    fn add_with_vim_indicator(
+        conversation_view: Entity<ConversationView>,
+        cx: &mut VisualTestContext,
+    ) {
+        let (workspace, indicator) = conversation_view.read_with(cx, |view, _cx| {
+            (view.workspace.clone(), view.vim_mode_indicator.clone())
+        });
+        workspace
+            .update_in(cx, |workspace, window, cx| {
+                workspace.add_item_to_active_pane(
+                    Box::new(cx.new(|_| VimIndicatorTestItem {
+                        conversation_view,
+                        indicator,
+                    })),
+                    None,
+                    true,
+                    window,
+                    cx,
+                );
+            })
+            .expect("test workspace should still exist");
+    }
+
     struct ThreadViewItem(Entity<ConversationView>);
 
     impl Item for ThreadViewItem {
@@ -7304,6 +7378,143 @@ pub(crate) mod tests {
 
             v_flex().children(title_editor).child(self.0.clone())
         }
+    }
+
+    struct VimIndicatorTestItem {
+        conversation_view: Entity<ConversationView>,
+        indicator: Entity<vim::ModeIndicator>,
+    }
+
+    impl Item for VimIndicatorTestItem {
+        type Event = ();
+
+        fn include_in_nav_history() -> bool {
+            false
+        }
+
+        fn tab_content_text(&self, _detail: usize, _cx: &App) -> SharedString {
+            "Vim indicator test".into()
+        }
+    }
+
+    impl EventEmitter<()> for VimIndicatorTestItem {}
+
+    impl Focusable for VimIndicatorTestItem {
+        fn focus_handle(&self, cx: &App) -> FocusHandle {
+            self.conversation_view.read(cx).focus_handle(cx)
+        }
+    }
+
+    impl Render for VimIndicatorTestItem {
+        fn render(&mut self, _window: &mut Window, _cx: &mut Context<Self>) -> impl IntoElement {
+            v_flex()
+                .child(self.conversation_view.clone())
+                .child(self.indicator.clone())
+        }
+    }
+
+    fn init_vim_test(cx: &mut TestAppContext) {
+        init_test(cx);
+        cx.update(|cx| {
+            vim::init(cx);
+            SettingsStore::update_global(cx, |store, cx| {
+                store.update_user_settings(cx, |settings| settings.vim_mode = Some(true));
+            });
+            let mut bindings =
+                settings::KeymapFile::load_asset_allow_partial_failure("keymaps/vim.json", cx)
+                    .expect("the retained Vim keymap should load");
+            for binding in &mut bindings {
+                binding.set_meta(settings::KeybindSource::Vim.meta());
+            }
+            cx.bind_keys(bindings);
+        });
+    }
+
+    #[gpui::test]
+    async fn vim_indicator_is_shared_across_composer_transition_and_tracks_mode(
+        cx: &mut TestAppContext,
+    ) {
+        init_vim_test(cx);
+
+        let rejected_actions = Arc::new(Mutex::new(Vec::new()));
+        cx.update({
+            let rejected_actions = rejected_actions.clone();
+            move |cx| {
+                cx.set_action_gate(move |action, _cx| {
+                    let admitted = omega_zero_base::admits_action(action.name());
+                    if !admitted {
+                        rejected_actions.lock().push(action.name().to_owned());
+                    }
+                    admitted
+                });
+            }
+        });
+
+        let connection = StubAgentConnection::new();
+        let (conversation_view, cx) =
+            setup_conversation_view_still_connecting(StubAgentServer::new(connection), cx).await;
+
+        let loading_indicator_id = conversation_view.update_in(cx, |view, window, cx| {
+            assert!(matches!(view.server_state, ServerState::Loading { .. }));
+            let indicator_id = view.vim_mode_indicator.entity_id();
+            let loading_editor = view.loading_composer(window, cx);
+            loading_editor.read(cx).focus_handle(cx).focus(window, cx);
+            indicator_id
+        });
+
+        cx.run_until_parked();
+        let connected_indicator_id = active_thread(&conversation_view, cx)
+            .read_with(cx, |view, _| view.vim_mode_indicator.entity_id());
+        assert_eq!(
+            connected_indicator_id, loading_indicator_id,
+            "loading and connected composer bars must retain one ModeIndicator entity"
+        );
+
+        add_with_vim_indicator(conversation_view.clone(), cx);
+        cx.set_debug_accessibility_active(true);
+        message_editor(&conversation_view, cx).update_in(cx, |editor, window, cx| {
+            editor.focus_handle(cx).focus(window, cx);
+        });
+        cx.simulate_keystrokes("escape");
+
+        let snapshot = cx.debug_render_snapshot();
+        assert_eq!(
+            snapshot.selector_count("vim.mode-indicator"),
+            1,
+            "the shared indicator should expose one stable rendered selector"
+        );
+        let normal_tree = snapshot
+            .accessibility_tree_json()
+            .expect("forced accessibility should capture the indicator");
+        assert!(
+            normal_tree.contains("Vim mode: NORMAL"),
+            "the indicator should announce the focused composer's normal mode: {normal_tree}"
+        );
+
+        cx.simulate_keystrokes("i");
+        let insert_snapshot = cx.debug_render_snapshot();
+        let insert_tree = insert_snapshot
+            .accessibility_tree_json()
+            .expect("forced accessibility should retain the indicator");
+        assert!(
+            insert_tree.contains("Vim mode: INSERT"),
+            "the same indicator should follow the focused composer's insert mode: {insert_tree}"
+        );
+        cx.simulate_keystrokes("escape v l");
+        let visual_snapshot = cx.debug_render_snapshot();
+        let visual_tree = visual_snapshot
+            .accessibility_tree_json()
+            .expect("forced accessibility should retain the indicator in visual mode");
+        assert!(
+            visual_tree.contains("Vim mode: VISUAL"),
+            "the gated composer journey must expose visual mode: {visual_tree}"
+        );
+        cx.simulate_keystrokes("escape");
+        assert_eq!(
+            *rejected_actions.lock(),
+            Vec::<String>::new(),
+            "the production zero-base predicate must admit every action in the Vim composer journey"
+        );
     }
 
     pub(crate) struct StubAgentServer<C> {

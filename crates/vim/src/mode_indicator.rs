@@ -1,5 +1,6 @@
 use gpui::{
-    App, Context, Element, Entity, FontWeight, Render, Subscription, WeakEntity, Window, div,
+    App, Context, Element, Entity, FontWeight, Render, Role, StatefulInteractiveElement,
+    Subscription, WeakEntity, Window, div,
 };
 use ui::text_for_keystrokes;
 use workspace::{HideStatusItem, StatusItemView, item::ItemHandle, ui::prelude::*};
@@ -11,45 +12,66 @@ pub struct ModeIndicator {
     vim: Option<WeakEntity<Vim>>,
     pending_keys: Option<String>,
     vim_subscription: Option<Subscription>,
+    vim_focus_subscriptions: Vec<Subscription>,
+    _pending_input_subscription: Subscription,
+    _vim_observer: Subscription,
 }
 
 impl ModeIndicator {
     /// Construct a new mode indicator in this window.
     pub fn new(window: &mut Window, cx: &mut Context<Self>) -> Self {
-        cx.observe_pending_input(window, |this: &mut Self, window, cx| {
-            this.update_pending_keys(window, cx);
-            cx.notify();
-        })
-        .detach();
+        let pending_input_subscription =
+            cx.observe_pending_input(window, |this: &mut Self, window, cx| {
+                this.update_pending_keys(window, cx);
+                cx.notify();
+            });
 
-        let handle = cx.entity();
+        let handle = cx.weak_entity();
         let window_handle = window.window_handle();
-        cx.observe_new::<Vim>(move |_, window, cx| {
+        let vim_observer = cx.observe_new::<Vim>(move |_, window, cx| {
             let Some(window) = window else {
                 return;
             };
             if window.window_handle() != window_handle {
                 return;
             }
+            let Some(handle) = handle.upgrade() else {
+                return;
+            };
             let vim = cx.entity();
-            handle.update(cx, |_, cx| {
-                cx.subscribe(&vim, |mode_indicator, vim, event, cx| match event {
-                    VimEvent::Focused => {
-                        mode_indicator.vim_subscription =
-                            Some(cx.observe(&vim, |_, _, cx| cx.notify()));
-                        mode_indicator.vim = Some(vim.downgrade());
-                    }
-                })
-                .detach()
-            })
-        })
-        .detach();
+            handle.update(cx, |mode_indicator, cx| {
+                let focus_subscription =
+                    cx.subscribe(&vim, |mode_indicator, vim, event, cx| match event {
+                        VimEvent::Focused => {
+                            mode_indicator.set_vim(vim, cx);
+                        }
+                    });
+                mode_indicator
+                    .vim_focus_subscriptions
+                    .push(focus_subscription);
+            });
+        });
 
         Self {
             vim: None,
             pending_keys: None,
             vim_subscription: None,
+            vim_focus_subscriptions: Vec::new(),
+            _pending_input_subscription: pending_input_subscription,
+            _vim_observer: vim_observer,
         }
+    }
+
+    fn set_vim(&mut self, vim: Entity<Vim>, cx: &mut Context<Self>) {
+        if self
+            .vim
+            .as_ref()
+            .is_some_and(|current| current.entity_id() == vim.entity_id())
+        {
+            return;
+        }
+        self.vim_subscription = Some(cx.observe(&vim, |_, _, cx| cx.notify()));
+        self.vim = Some(vim.downgrade());
     }
 
     fn update_pending_keys(&mut self, window: &mut Window, cx: &App) {
@@ -98,6 +120,16 @@ impl Render for ModeIndicator {
         let status_label = vim_readable.status_label.clone();
         let temp_mode = vim_readable.temp_mode;
         let mode = vim_readable.mode;
+        let accessible_label: SharedString = status_label.as_ref().map_or_else(
+            || {
+                if temp_mode {
+                    format!("Vim mode: temporary insert ({mode})").into()
+                } else {
+                    format!("Vim mode: {mode}").into()
+                }
+            },
+            |label| format!("Vim status: {label}").into(),
+        );
 
         let theme = cx.theme();
         let colors = theme.colors();
@@ -146,6 +178,10 @@ impl Render for ModeIndicator {
             (pending.into(), Some(mode))
         };
         h_flex()
+            .id("vim-mode-indicator")
+            .debug_selector(|| "vim.mode-indicator".into())
+            .role(Role::Status)
+            .aria_label(accessible_label)
             .gap_1()
             .when(!label.is_empty(), |el| {
                 el.child(

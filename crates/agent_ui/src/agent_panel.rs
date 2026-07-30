@@ -1328,6 +1328,7 @@ struct ThreadIdentityOperationError {
 
 pub struct AgentPanel {
     workspace: WeakEntity<Workspace>,
+    vim_mode_indicator: Entity<vim::ModeIndicator>,
     /// Workspace id is used as a database key
     workspace_id: Option<WorkspaceId>,
     project: Entity<Project>,
@@ -1547,7 +1548,23 @@ impl AgentPanel {
 
     pub fn load(
         workspace: WeakEntity<Workspace>,
+        cx: AsyncWindowContext,
+    ) -> Task<Result<Entity<Self>>> {
+        Self::load_inner(workspace, cx, None)
+    }
+
+    pub fn load_with_vim_mode_indicator(
+        workspace: WeakEntity<Workspace>,
+        cx: AsyncWindowContext,
+        vim_mode_indicator: Entity<vim::ModeIndicator>,
+    ) -> Task<Result<Entity<Self>>> {
+        Self::load_inner(workspace, cx, Some(vim_mode_indicator))
+    }
+
+    fn load_inner(
+        workspace: WeakEntity<Workspace>,
         mut cx: AsyncWindowContext,
+        vim_mode_indicator: Option<Entity<vim::ModeIndicator>>,
     ) -> Task<Result<Entity<Self>>> {
         let kvp = cx.update(|_window, cx| KeyValueStore::global(cx)).ok();
         cx.spawn(async move |cx| {
@@ -1675,7 +1692,15 @@ impl AgentPanel {
             };
 
             let panel = workspace.update_in(cx, |workspace, window, cx| {
-                let panel = cx.new(|cx| Self::new(workspace, window, cx));
+                let panel = cx.new(|cx| match vim_mode_indicator {
+                    Some(vim_mode_indicator) => Self::new_with_vim_mode_indicator(
+                        workspace,
+                        vim_mode_indicator,
+                        window,
+                        cx,
+                    ),
+                    None => Self::new(workspace, window, cx),
+                });
 
                 panel.update(cx, |panel, cx| {
                     let is_via_collab = panel.project.read(cx).is_via_collab();
@@ -1756,6 +1781,16 @@ impl AgentPanel {
     }
 
     pub(crate) fn new(workspace: &Workspace, window: &mut Window, cx: &mut Context<Self>) -> Self {
+        let vim_mode_indicator = cx.new(|cx| vim::ModeIndicator::new(window, cx));
+        Self::new_with_vim_mode_indicator(workspace, vim_mode_indicator, window, cx)
+    }
+
+    pub(crate) fn new_with_vim_mode_indicator(
+        workspace: &Workspace,
+        vim_mode_indicator: Entity<vim::ModeIndicator>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> Self {
         let fs = workspace.app_state().fs.clone();
         let project = workspace.project();
         let language_registry = project.read(cx).languages().clone();
@@ -1943,6 +1978,7 @@ impl AgentPanel {
             base_view,
             last_created_entry_kind: AgentPanelEntryKind::Thread,
             workspace,
+            vim_mode_indicator,
             project: project.clone(),
             fs: fs.clone(),
             language_registry,
@@ -6294,7 +6330,7 @@ impl AgentPanel {
         let connection_store = self.connection_store.clone();
 
         let conversation_view = cx.new(|cx| {
-            crate::ConversationView::new(
+            crate::ConversationView::new_with_vim_mode_indicator(
                 server,
                 connection_store,
                 agent,
@@ -6307,6 +6343,7 @@ impl AgentPanel {
                 project,
                 thread_store,
                 source,
+                self.vim_mode_indicator.clone(),
                 window,
                 cx,
             )

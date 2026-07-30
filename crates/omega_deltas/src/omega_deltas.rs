@@ -163,6 +163,7 @@ pub const ENFORCED_DELTAS: &[&str] = &[
     "OMEGA-DELTA-0172",
     "OMEGA-DELTA-0173",
     "OMEGA-DELTA-0174",
+    "OMEGA-DELTA-0175",
 ];
 
 /// The concise product contract adjacent to the delta registry.
@@ -21400,6 +21401,302 @@ mod tests {
             assert!(
                 documentation.contains(required),
                 "OMEGA-DELTA-0174: workbench documentation lost `{required}`"
+            );
+        }
+    }
+
+    /// OMEGA-DELTA-0175. Vim is deliberately admitted in the default surface,
+    /// but the wider Workspace and Helix controls are not. One indicator is
+    /// installed before editor construction and reused by both composer bars.
+    #[test]
+    fn vim_is_admitted_with_one_shared_default_surface_indicator() {
+        let mode_path = repository_path("crates/omega_zero_base/src/omega_zero_base.rs");
+        let mode = read_repository_file("crates/omega_zero_base/src/omega_zero_base.rs");
+        let namespaces = mode
+            .split_once("pub const ADMITTED_NAMESPACES: &[&str] = &[")
+            .and_then(|(_, source)| source.split_once("];").map(|(list, _)| list))
+            .expect("OMEGA-DELTA-0175: cannot find the admitted namespace list");
+        assert!(
+            !namespaces.contains("\"vim\"")
+                && !namespaces.contains("\"workspace\"")
+                && !namespaces.contains("\"helix\""),
+            "OMEGA-DELTA-0175: a broad Vim, Workspace, or Helix namespace was admitted"
+        );
+
+        fn quoted_vim_actions(source: &str) -> Vec<String> {
+            let mut actions = Vec::new();
+            let uncommented = source
+                .lines()
+                .filter(|line| !line.trim_start().starts_with("//"))
+                .collect::<Vec<_>>()
+                .join("\n");
+            let mut remaining = uncommented.as_str();
+            while let Some(start) = remaining.find("\"vim::") {
+                remaining = &remaining[start + 1..];
+                let end = remaining
+                    .find('"')
+                    .expect("OMEGA-DELTA-0175: unterminated Vim action name");
+                actions.push(remaining[..end].to_owned());
+                remaining = &remaining[end + 1..];
+            }
+            actions.sort();
+            actions.dedup();
+            actions
+        }
+
+        let admitted_actions = mode
+            .split_once("pub const ADMITTED_ACTIONS: &[&str] = &[")
+            .and_then(|(_, source)| source.split_once("];"))
+            .map(|(actions, _)| quoted_vim_actions(actions))
+            .expect("OMEGA-DELTA-0175: cannot find the admitted action list");
+        let excluded_management_actions = [
+            "vim::GoToTab",
+            "vim::GoToPreviousTab",
+            "vim::MaximizePane",
+            "vim::MenuSelectNext",
+            "vim::MenuSelectPrevious",
+            "vim::ResetPaneSizes",
+            "vim::ResizePaneDown",
+            "vim::ResizePaneLeft",
+            "vim::ResizePaneRight",
+            "vim::ResizePaneUp",
+            "vim::ToggleProjectPanelFocus",
+        ];
+        let keymap = read_repository_file("assets/keymaps/vim.json");
+        let keymap_actions = quoted_vim_actions(&keymap);
+        assert_eq!(
+            keymap_actions.len(),
+            230,
+            "OMEGA-DELTA-0175: the shipped Vim keymap census changed; re-audit the scoped set"
+        );
+        let mut expected_actions = keymap_actions
+            .iter()
+            .filter(|action| {
+                !action.contains("Helix") && !excluded_management_actions.contains(&action.as_str())
+            })
+            .cloned()
+            .collect::<Vec<_>>();
+        expected_actions.sort();
+        assert_eq!(expected_actions.len(), 193);
+        assert_eq!(keymap_actions.len() - expected_actions.len(), 37);
+        assert_eq!(
+            admitted_actions,
+            expected_actions,
+            "OMEGA-DELTA-0175: {} must admit exactly the clean-profile Vim editor action set",
+            mode_path.display()
+        );
+        for action in keymap_actions.into_iter().filter(|action| {
+            action.contains("Helix") || excluded_management_actions.contains(&action.as_str())
+        }) {
+            assert!(
+                !omega_zero_base::admits_action(&action),
+                "OMEGA-DELTA-0175: excluded keymap action `{action}` was admitted"
+            );
+        }
+
+        // Complete unique inventory from the rc refusal session. Keeping it
+        // here makes a change to namespace admission fail against the actions
+        // that exposed the bug rather than against three representative keys.
+        for action in [
+            "vim::PushFindForward",
+            "vim::InsertBefore",
+            "vim::Down",
+            "vim::InsertLineBelow",
+            "vim::Substitute",
+            "vim::PushDelete",
+            "vim::InsertAfter",
+            "vim::Number",
+            "vim::Up",
+            "vim::PreviousLineStart",
+            "vim::InsertLineAbove",
+        ] {
+            assert!(
+                omega_zero_base::admits_action(action),
+                "OMEGA-DELTA-0175: rc-refused action `{action}` is refused again"
+            );
+        }
+        for action in ["workspace::ToggleVimMode", "workspace::Save"] {
+            assert!(
+                omega_zero_base::admits_action(action),
+                "OMEGA-DELTA-0175: required exact action `{action}` is refused"
+            );
+        }
+        for action in [
+            "workspace::ToggleHelixMode",
+            "workspace::ToggleLeftDock",
+            "workspace::OpenTerminal",
+        ] {
+            assert!(
+                !omega_zero_base::admits_action(action),
+                "OMEGA-DELTA-0175: scoped Vim admission leaked into `{action}`"
+            );
+        }
+        assert!(
+            repository_path("assets/keymaps/vim.json").is_file(),
+            "OMEGA-DELTA-0175: the retained Vim keymap was stripped"
+        );
+
+        let manifest_path = repository_path("crates/agent_ui/Cargo.toml");
+        let manifest = read_repository_file("crates/agent_ui/Cargo.toml");
+        let (production_dependencies, development_dependencies) = manifest
+            .split_once("[dev-dependencies]")
+            .expect("OMEGA-DELTA-0175: agent_ui lost its dev-dependency boundary");
+        assert!(
+            production_dependencies.contains("vim.workspace = true")
+                && !development_dependencies.contains("vim.workspace = true"),
+            "OMEGA-DELTA-0175: {} must link Vim in production, not only in tests",
+            manifest_path.display()
+        );
+
+        let zed = read_repository_file("crates/zed/src/zed.rs");
+        let workspace_setup = zed
+            .split_once("cx.observe_new(move |workspace: &mut Workspace")
+            .and_then(|(_, source)| source.split_once("fn initialize_pane"))
+            .map(|(body, _)| body)
+            .expect("OMEGA-DELTA-0175: cannot isolate Workspace initialization");
+        let indicator_construction = workspace_setup
+            .find("let vim_mode_indicator = cx.new(|cx| vim::ModeIndicator::new(window, cx));")
+            .expect("OMEGA-DELTA-0175: Workspace no longer constructs one Vim indicator");
+        let panel_initialization = workspace_setup
+            .find("initialize_panels(vim_mode_indicator")
+            .expect("OMEGA-DELTA-0175: Workspace no longer shares the indicator with panels");
+        assert!(indicator_construction < panel_initialization);
+
+        let agent_panel = read_repository_file("crates/agent_ui/src/agent_panel.rs");
+        for required in [
+            "vim_mode_indicator: Entity<vim::ModeIndicator>",
+            "pub fn load_with_vim_mode_indicator",
+            "Self::new_with_vim_mode_indicator(",
+            "ConversationView::new_with_vim_mode_indicator(",
+        ] {
+            assert!(
+                agent_panel.contains(required),
+                "OMEGA-DELTA-0175: Agent Panel lost window-shared indicator seam `{required}`"
+            );
+        }
+
+        let conversation_path = repository_path(CONVERSATION_VIEW_PATH);
+        let conversation = read_repository_file(CONVERSATION_VIEW_PATH);
+        let constructor = conversation
+            .split_once("pub fn new(\n        agent:")
+            .and_then(|(_, source)| {
+                source
+                    .split_once("fn set_server_state")
+                    .map(|(body, _)| body)
+            })
+            .expect("OMEGA-DELTA-0175: cannot isolate ConversationView::new");
+        let indicator_construction = constructor
+            .find("cx.new(|cx| vim::ModeIndicator::new(window, cx))")
+            .expect("OMEGA-DELTA-0175: ConversationView no longer constructs the indicator");
+        let initial_state = constructor
+            .find("Self::initial_state(")
+            .expect("OMEGA-DELTA-0175: ConversationView::new lost initial-state construction");
+        assert!(
+            indicator_construction < initial_state,
+            "OMEGA-DELTA-0175: {} constructs an editor-capable initial state before installing \
+             the Vim observer",
+            conversation_path.display()
+        );
+        for required in [
+            "vim_mode_indicator: Entity<vim::ModeIndicator>",
+            "vim_mode_indicator,",
+            "self.vim_mode_indicator.clone(),",
+        ] {
+            assert!(
+                conversation.contains(required),
+                "OMEGA-DELTA-0175: {} lost shared-indicator wiring `{required}`",
+                conversation_path.display()
+            );
+        }
+        let loading_bar = function_body(&conversation, "render_loading_composer")
+            .expect("OMEGA-DELTA-0175: loading composer renderer is gone");
+        assert_eq!(
+            loading_bar
+                .matches(".child(self.vim_mode_indicator.clone())")
+                .count(),
+            1,
+            "OMEGA-DELTA-0175: the loading composer must render the shared indicator once"
+        );
+        assert!(
+            loading_bar.contains(".when(omega_zero_base::is_active(), |this|"),
+            "OMEGA-DELTA-0175: full editor must leave its shared Vim indicator in the status bar"
+        );
+
+        let thread_path = repository_path(ZERO_BASE_THREAD_VIEW_PATH);
+        let thread = read_repository_file(ZERO_BASE_THREAD_VIEW_PATH);
+        for required in [
+            "vim_mode_indicator: Entity<vim::ModeIndicator>",
+            "server_view: WeakEntity<ConversationView>,\n        vim_mode_indicator: Entity<vim::ModeIndicator>",
+            "server_view,\n            vim_mode_indicator,",
+        ] {
+            assert!(
+                thread.contains(required),
+                "OMEGA-DELTA-0175: {} lost ThreadView sharing seam `{required}`",
+                thread_path.display()
+            );
+        }
+        let connected_bar = function_body(&thread, "render_zero_base_executor_bar")
+            .expect("OMEGA-DELTA-0175: connected zero-base composer bar is gone");
+        assert_eq!(
+            connected_bar
+                .matches(".child(self.vim_mode_indicator.clone())")
+                .count(),
+            1,
+            "OMEGA-DELTA-0175: the connected composer must render the shared indicator once"
+        );
+        for required in [
+            "fn owns_shared_vim_indicator(&self, cx: &App) -> bool",
+            ".when(self.owns_shared_vim_indicator(cx), |this|",
+            "connected.active_id.as_ref()",
+            "Some(&self.session_id)",
+        ] {
+            assert!(
+                thread.contains(required),
+                "OMEGA-DELTA-0175: connected composer lost active-thread host guard `{required}`"
+            );
+        }
+
+        let indicator_path = repository_path("crates/vim/src/mode_indicator.rs");
+        let indicator = read_repository_file("crates/vim/src/mode_indicator.rs");
+        for required in [
+            "cx.observe_new::<Vim>",
+            "VimEvent::Focused",
+            "cx.observe(&vim",
+            "let handle = cx.weak_entity()",
+            "_vim_observer: Subscription",
+            "vim_focus_subscriptions: Vec<Subscription>",
+            ".debug_selector(|| \"vim.mode-indicator\".into())",
+            ".role(Role::Status)",
+            ".aria_label(accessible_label)",
+        ] {
+            assert!(
+                indicator.contains(required),
+                "OMEGA-DELTA-0175: {} lost focus/status behavior `{required}`",
+                indicator_path.display()
+            );
+        }
+
+        let vim_docs = read_repository_file("docs/src/vim.md");
+        let shell_docs =
+            read_repository_file("docs/src/development/omega-desktop-workbench-shell.md");
+        for required in [
+            "bottom left of the composer",
+            "focused editor. Saving an open file",
+            "Helix-flavored and workspace-management actions remain refused",
+        ] {
+            assert!(
+                vim_docs.contains(required),
+                "OMEGA-DELTA-0175: Vim documentation lost `{required}`"
+            );
+        }
+        for required in [
+            "workspace::ToggleVimMode",
+            "workspace::ToggleHelixMode",
+            "shared with Agent Panel",
+        ] {
+            assert!(
+                shell_docs.contains(required),
+                "OMEGA-DELTA-0175: workbench documentation lost `{required}`"
             );
         }
     }

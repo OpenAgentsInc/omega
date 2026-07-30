@@ -579,6 +579,7 @@ pub struct ThreadView {
     pub thread: Entity<AcpThread>,
     pub(crate) conversation: Entity<super::Conversation>,
     pub server_view: WeakEntity<ConversationView>,
+    pub(crate) vim_mode_indicator: Entity<vim::ModeIndicator>,
     pub agent_icon: IconName,
     pub agent_icon_from_external_svg: Option<SharedString>,
     pub agent_id: AgentId,
@@ -677,6 +678,16 @@ impl Focusable for ThreadView {
 }
 
 impl ThreadView {
+    fn owns_shared_vim_indicator(&self, cx: &App) -> bool {
+        self.server_view.upgrade().is_some_and(|server_view| {
+            server_view
+                .read(cx)
+                .as_connected()
+                .and_then(|connected| connected.active_id.as_ref())
+                == Some(&self.session_id)
+        })
+    }
+
     pub(crate) fn activation_focus_handle(&self, cx: &App) -> FocusHandle {
         if self.parent_session_id.is_some() {
             self.focus_handle.clone()
@@ -841,6 +852,7 @@ impl ThreadView {
         thread: Entity<AcpThread>,
         conversation: Entity<super::Conversation>,
         server_view: WeakEntity<ConversationView>,
+        vim_mode_indicator: Entity<vim::ModeIndicator>,
         agent_icon: IconName,
         agent_icon_from_external_svg: Option<SharedString>,
         agent_id: AgentId,
@@ -1077,6 +1089,7 @@ impl ThreadView {
             thread,
             conversation,
             server_view,
+            vim_mode_indicator,
             agent_icon,
             agent_icon_from_external_svg,
             agent_id,
@@ -13573,8 +13586,8 @@ impl ThreadView {
     ///
     /// omega#99. The owner asked for the input bar to become the centre of
     /// gravity — "the options of which provider as dropdowns inside it kinda" —
-    /// and for everything else to go. This row carries the provider's controls,
-    /// transient turn state, and send.
+    /// and for everything else to go. This row carries the Vim mode readout,
+    /// provider controls, transient turn state, and send.
     ///
     /// `OMEGA-DELTA-0149` removes executor-selection chrome from this row.
     /// Routing still reads the typed `omega_front_door::ExecutorDisclosure`;
@@ -13613,6 +13626,9 @@ impl ThreadView {
                 h_flex()
                     .min_w_0()
                     .gap_1()
+                    .when(self.owns_shared_vim_indicator(cx), |this| {
+                        this.child(self.vim_mode_indicator.clone())
+                    })
                     // omega#99. The turn's own state, only while there is a
                     // turn. Permanent chrome that says "idle" at a person all
                     // day is a knob; a dot that appears when the executor
