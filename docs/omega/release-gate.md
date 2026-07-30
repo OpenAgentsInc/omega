@@ -87,13 +87,13 @@ before duplicating) · OPEN (nobody holds it).
 ### Review batch 2 (agent: exposition/status sweep)
 | # | Item | Spec | State |
 |---|---|---|---|
-| 4 | Record the no-exposition law | Product-contract/delta note, mechanically citable. | IN-FLIGHT |
-| 5 | Kill the executor-dropdown tooltip essay | "This conversation will run on Omega Agent. The executor is free to change…" — delete, no replacement copy. | IN-FLIGHT |
-| 6 | Remove the routing-mode dropdown entirely | The second composer dropdown ("Run this new conversation on" → Automatic/Omega). Routing stays automatic (OMEGA-DELTA-0179 behavior unchanged); only the selector + its state/actions die. Amend 0184's row inventory if pinned. | IN-FLIGHT |
-| 7 | Remove "Omega router ready · route selected when sent" | Plus sweep the composer/empty states for any similar "ready — X when Y" status sentences. | IN-FLIGHT |
-| 8 | Sidebar statuses → color/icon only | Law 3. Amend the 0181 check if it pins label text. Keep existing color semantics. | IN-FLIGHT |
-| 9 | Remove "Owner unverified — legacy thread" sidebar annotation | The legacy-ambiguity fact stays internal (from omega#152 versioned owner metadata); no sidebar copy. | IN-FLIGHT |
-| 10 | Settings window closes on Escape | `crates/settings_ui`; test if harness allows. | IN-FLIGHT |
+| 4 | Record the no-exposition law | Product-contract/delta note, mechanically citable. | LANDED (`OMEGA-DELTA-0189`) |
+| 5 | Kill the executor-dropdown tooltip essay | "This conversation will run on Omega Agent. The executor is free to change…" — delete, no replacement copy. | LANDED |
+| 6 | Remove the routing-mode dropdown entirely | The second composer dropdown ("Run this new conversation on" → Automatic/Omega). Routing stays automatic (OMEGA-DELTA-0179 behavior unchanged); only the selector + its state/actions die. Amend 0184's row inventory if pinned. | LANDED |
+| 7 | Remove "Omega router ready · route selected when sent" | Plus sweep the composer/empty states for any similar "ready — X when Y" status sentences. | LANDED |
+| 8 | Sidebar statuses → color/icon only | Law 3. Amend the 0181 check if it pins label text. Keep existing color semantics. | LANDED |
+| 9 | Remove "Owner unverified — legacy thread" sidebar annotation | The legacy-ambiguity fact stays internal (from omega#152 versioned owner metadata); no sidebar copy. | LANDED |
+| 10 | Settings window closes on Escape | `crates/settings_ui`; test if harness allows. | LANDED |
 
 ### Review batch 3 (agent: channels/backup/pair-phone)
 | # | Item | Spec | State |

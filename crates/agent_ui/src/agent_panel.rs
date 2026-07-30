@@ -147,20 +147,21 @@ fn render_thread_lifecycle_badge(
         crate::omega_agent_supervision::SupervisedThreadLifecycle::Completed => Color::Success,
         crate::omega_agent_supervision::SupervisedThreadLifecycle::Cancelled => Color::Muted,
     };
-    let label = lifecycle.label();
+    // OMEGA-DELTA-0189 / law 3: statuses are a colored icon only. One-word
+    // tooltip is the maximum copy; aria keeps the same short name for AT.
+    let status_word = lifecycle.status_word();
     h_flex()
         .id(element_id)
         .debug_selector(move || format!("omega.thread.lifecycle.{}", lifecycle.token()))
         .role(gpui::Role::Status)
-        .aria_label(format!("Thread status: {label}"))
+        .aria_label(format!("Thread status: {status_word}"))
+        .tooltip(Tooltip::text(status_word))
         .flex_none()
-        .gap_0p5()
         .child(
             Icon::new(IconName::Circle)
                 .size(IconSize::XSmall)
                 .color(color),
         )
-        .child(Label::new(label).size(LabelSize::XSmall).color(color))
         .into_any_element()
 }
 const KNOWN_TERMINAL_AGENT_COMMANDS: &[&str] = &[

@@ -37,9 +37,7 @@ use std::collections::HashMap;
 
 use gpui::{AnyElement, App, EntityId, Global, WeakEntity, Window};
 use omega_front_door::ModeReadiness;
-use ui::{
-    Button, ContextMenu, ContextMenuEntry, PopoverMenu, PopoverMenuHandle, Tooltip, prelude::*,
-};
+use ui::{Button, ContextMenu, ContextMenuEntry, PopoverMenu, PopoverMenuHandle, prelude::*};
 use util::ResultExt as _;
 use workspace::Workspace;
 
@@ -92,14 +90,6 @@ pub const UNBOUND_MENU_HEADER: &str = "Run this conversation on";
 /// executor, and choosing starts a new conversation instead.
 pub const BOUND_MENU_HEADER: &str = "Start a new conversation on";
 
-/// What the trigger's tooltip says while selection is still free.
-pub const FREE_UNTIL_FIRST_SEND: &str =
-    "The executor is free to change until the first message is sent.";
-
-/// What the trigger's tooltip says once the conversation is bound.
-pub const BOUND_STARTS_A_NEW_THREAD: &str =
-    "This conversation keeps its executor. Picking a different one starts a new conversation.";
-
 /// The fixed label for a named direct agent whose install registry carries
 /// no display name. The trio the issue names, by exact ACP id.
 #[must_use]
@@ -144,25 +134,16 @@ pub fn render_composer_executor_menu(
                 .color(Color::Muted),
         );
 
-    let tooltip = SharedString::from(if conversation_is_bound {
-        format!("This conversation runs on {current_label}. {BOUND_STARTS_A_NEW_THREAD}")
-    } else {
-        format!("This conversation will run on {current_label}. {FREE_UNTIL_FIRST_SEND}")
-    });
-
     Some(
         PopoverMenu::new("omega-composer-executor")
             // Keyboard-reachable: `agent::ToggleComposerExecutorMenu` opens
             // this handle, and the context menu itself is arrow-key driven.
+            //
+            // No trigger tooltip. The owner's law (omega#160, 2026-07-30,
+            // `OMEGA-DELTA-0189`): a dropdown labeled with the executor name
+            // needs no essay about internal mechanics.
             .with_handle(handle)
-            .trigger_with_tooltip(
-                trigger,
-                Tooltip::element(move |_window, _cx| {
-                    Label::new(tooltip.clone())
-                        .size(LabelSize::Small)
-                        .into_any_element()
-                }),
-            )
+            .trigger(trigger)
             .anchor(gpui::Anchor::BottomRight)
             .menu(move |window, cx| {
                 // The rows are read at open time, in an event context:
@@ -271,14 +252,6 @@ mod tests {
     fn the_menu_headers_separate_rehoming_from_starting_anew() {
         assert_ne!(UNBOUND_MENU_HEADER, BOUND_MENU_HEADER);
         assert!(BOUND_MENU_HEADER.contains("new conversation"));
-    }
-
-    /// The bound tooltip states the ownership law a person is about to rely
-    /// on: the transcript keeps its executor.
-    #[test]
-    fn the_bound_tooltip_states_the_ownership_law() {
-        assert!(BOUND_STARTS_A_NEW_THREAD.contains("keeps its executor"));
-        assert!(FREE_UNTIL_FIRST_SEND.contains("first message"));
     }
 
     #[test]

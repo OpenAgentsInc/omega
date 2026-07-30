@@ -177,6 +177,7 @@ pub const ENFORCED_DELTAS: &[&str] = &[
     "OMEGA-DELTA-0186",
     "OMEGA-DELTA-0187",
     "OMEGA-DELTA-0188",
+    "OMEGA-DELTA-0189",
 ];
 
 /// The concise product contract adjacent to the delta registry.
@@ -23273,5 +23274,108 @@ mod tests {
             "OMEGA-DELTA-0187: docs/omega/release-gate.md no longer names the \
              control-crawl row"
         );
+    }
+
+    /// OMEGA-DELTA-0189. No exposition in the UI; lifecycle statuses are
+    /// colored icons only; Escape closes the settings window.
+    #[test]
+    fn ui_carries_no_exposition_statuses_are_icons_and_escape_closes_settings() {
+        let menu = read_repository_file("crates/agent_ui/src/omega_composer_executor_menu.rs");
+        for gone in [
+            "FREE_UNTIL_FIRST_SEND",
+            "BOUND_STARTS_A_NEW_THREAD",
+            "The executor is free to change",
+            "This conversation will run on",
+            "This conversation keeps its executor",
+            "trigger_with_tooltip",
+        ] {
+            assert!(
+                !menu.contains(gone),
+                "OMEGA-DELTA-0189: the composer executor dropdown still \
+                 carries exposition (`{gone}`). Controls are labeled, not \
+                 narrated."
+            );
+        }
+
+        let conversation = read_repository_file("crates/agent_ui/src/conversation_view.rs");
+        for gone in [
+            "NewConversationRouteOverride",
+            "omega_route_override",
+            "render_omega_route_override",
+            "Run this new conversation on",
+            "Omega router ready",
+            "route selected when sent",
+            "Choosing an executor and creating its session",
+            "Choose the route, create its exact session, and send",
+        ] {
+            assert!(
+                !conversation.contains(gone),
+                "OMEGA-DELTA-0189: the loading composer still carries the \
+                 routing dropdown or ready/status exposition (`{gone}`)."
+            );
+        }
+        assert!(
+            conversation.contains("ExecutorOverride::Auto")
+                && conversation.contains("omega_route_not_yet_recorded"),
+            "OMEGA-DELTA-0189: routing must stay automatic (OMEGA-DELTA-0179) \
+             after the override selector dies."
+        );
+
+        let sidebar = read_repository_file("crates/agent_ui/src/omega_threads_sidebar.rs");
+        assert!(
+            !sidebar.contains("Owner unverified"),
+            "OMEGA-DELTA-0189: legacy owner ambiguity leaked back into the \
+             sidebar annotation."
+        );
+
+        let panel = read_repository_file(AGENT_PANEL_PATH);
+        let badge = body_of(&panel, "render_thread_lifecycle_badge");
+        assert!(
+            badge.contains("status_word")
+                && badge.contains("IconName::Circle")
+                && !badge.contains("Label::new"),
+            "OMEGA-DELTA-0189: lifecycle badges must be a colored icon only \
+             (one-word tooltip max), never a status word Label."
+        );
+
+        let supervision = read_repository_file("crates/agent_ui/src/omega_agent_supervision.rs");
+        assert!(
+            supervision.contains("pub const fn status_word"),
+            "OMEGA-DELTA-0189: one-word status tooltips need status_word()."
+        );
+
+        let settings = read_repository_file("crates/settings_ui/src/settings_ui.rs");
+        assert!(
+            settings.contains("on_action(|_: &CloseWindow")
+                && settings.contains("window.remove_window()"),
+            "OMEGA-DELTA-0189: SettingsWindow must handle CloseWindow (Escape) \
+             by removing itself."
+        );
+        for keymap in [
+            "assets/keymaps/default-macos.json",
+            "assets/keymaps/default-linux.json",
+            "assets/keymaps/default-windows.json",
+        ] {
+            let bindings = read_repository_file(keymap);
+            assert!(
+                bindings.contains("\"context\": \"SettingsWindow\"")
+                    && bindings.contains("\"escape\": \"workspace::CloseWindow\""),
+                "OMEGA-DELTA-0189: {keymap} must bind Escape to CloseWindow in \
+                 the SettingsWindow context."
+            );
+        }
+
+        let ledger = read_repository_file("docs/omega/release-gate.md");
+        for law in [
+            "No exposition in the UI, anywhere",
+            "Statuses are colors/icons, never words",
+            "Escape closes every modal",
+        ] {
+            assert!(
+                ledger.contains(law),
+                "OMEGA-DELTA-0189: the owner review ledger lost standing law \
+                 text `{law}`."
+            );
+        }
     }
 }

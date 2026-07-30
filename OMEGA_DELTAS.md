@@ -8045,11 +8045,13 @@ startup recheck — survives unchanged behind that dropdown.
 ### OMEGA-DELTA-0181 — Concurrent agent turns are supervised and isolated
 
 - **Every direct agent thread exposes one lifecycle.** The Threads Sidebar and
-  active-thread header identify the executor and show Running, Waiting for you,
-  Failed, Completed, or Cancelled. Waiting for a person takes precedence over a
-  generic running state. Only terminal states survive a restart; an interrupted
-  nonterminal record fails closed instead of pretending that work is still
-  live.
+  active-thread header identify the executor and show the lifecycle as a
+  colored icon only (Running, Waiting, Failed, Completed, or Cancelled — words
+  live in the one-word tooltip and accessibility label, never as visible status
+  text; amended by `OMEGA-DELTA-0189`). Waiting for a person takes precedence
+  over a generic running state. Only terminal states survive a restart; an
+  interrupted nonterminal record fails closed instead of pretending that work
+  is still live.
 - **Cancellation is thread-owned.** The active-thread control cancels only that
   thread. Switching threads does not stop background work, and relaunch keeps
   each thread's identity, terminal lifecycle, transcript, and durable queued
@@ -8362,3 +8364,42 @@ startup recheck — survives unchanged behind that dropdown.
 - **Enforced by:** `removed_surfaces_stay_removed` (the deleted file) and
   `keymaps_name_no_deleted_action` (the forbidden
   `omega_thread_outline::` namespace) in `crates/omega_deltas`.
+
+### OMEGA-DELTA-0189 — No exposition in the UI; statuses are icons; Escape closes modals
+
+- **Origin:** owner review of rc28 (omega#160, 2026-07-30). Standing laws 2–4
+  from the owner review ledger in `docs/omega/release-gate.md`.
+- **No exposition anywhere.** The product never renders multi-sentence
+  explanations of internal mechanics in tooltips, status lines, or empty
+  states. Controls are labeled, not narrated. One-word tooltips are the
+  maximum copy. Specifically removed:
+  - The composer executor dropdown tooltip essay
+    (`"The executor is free to change until the first message is sent."` /
+    `"This conversation will run on …"`) — delete, no replacement.
+  - Composer ready/status sentences such as
+    `"Omega router ready · route selected when sent"` and
+    `"Choosing an executor and creating its session…"`.
+  - The routing-mode dropdown
+    (`"Run this new conversation on"` → Automatic/Omega and its
+    `NewConversationRouteOverride` state). Routing stays automatic
+    (`OMEGA-DELTA-0179`); only the selector and its state die. Exact executor
+    choice remains the composer executor dropdown (`OMEGA-DELTA-0184`).
+  - The sidebar annotation `"Owner unverified — legacy thread"`. Legacy owner
+    ambiguity stays internal (omega#152 versioned owner metadata); click still
+    refuses so a session is not guessed.
+- **Statuses are colors/icons, never words.** Sidebar and header lifecycle
+  badges are a colored dot only. A one-word tooltip (`Running` / `Waiting` /
+  `Failed` / `Completed` / `Cancelled`) is the maximum copy. Amends the
+  presentation half of `OMEGA-DELTA-0181`.
+- **Escape closes every modal/auxiliary window.** Settings
+  (`crates/settings_ui`) handles `workspace::CloseWindow` (the keymap binding
+  for Escape in the `SettingsWindow` context) by removing its own window.
+- **Why:** the owner hit the Automatic/Omega routing control and the
+  "route selected when sent" status and rejected both as unclear exposition.
+  Status words next to every thread row are noise; colors carry the same
+  information. A settings window that ignores Escape fails the modal law.
+- **Enforced by:** `ui_carries_no_exposition_statuses_are_icons_and_escape_closes_settings`
+  in `crates/omega_deltas`; unit tests on the composer menu constants, the
+  threads sidebar (legacy note absent), and
+  `settings_window_closes_on_close_window_action` in `crates/settings_ui`.
+

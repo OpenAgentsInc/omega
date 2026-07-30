@@ -148,8 +148,11 @@ pub fn rows<'a>(
         .map(|thread| {
             let executor = recorded_executor(&thread.agent_id);
             let unreopenable = match thread.conversation_owner() {
+                // Legacy owner ambiguity stays internal (omega#152 versioned
+                // owner metadata). No sidebar annotation — the click still
+                // refuses so a person is not dumped into a guessed session.
                 ConversationOwner::LegacyAmbiguous(ref agent_id) => Some(Unreopenable {
-                    note: "Owner unverified — legacy thread".into(),
+                    note: None,
                     refusal: format!(
                         "This thread predates verified Direct Agent ownership. Its recorded id \
                          `{agent_id}` may be an owner or a routed executor, so Omega will not \
@@ -172,7 +175,7 @@ pub fn rows<'a>(
                 folder_paths: thread.folder_paths().clone(),
                 unavailable_note: unreopenable
                     .as_ref()
-                    .map(|unreopenable| unreopenable.note.clone()),
+                    .and_then(|unreopenable| unreopenable.note.clone()),
                 refusal: unreopenable.map(|unreopenable| unreopenable.refusal),
                 lifecycle: thread.lifecycle,
             }
@@ -202,7 +205,10 @@ pub fn recorded_executor(agent_id: &AgentId) -> Option<SelectableExecutor> {
 /// repair.
 struct Unreopenable {
     /// On the row, unclicked: `Codex — not installed`.
-    note: SharedString,
+    ///
+    /// `None` when the row refuses without a pre-click annotation — legacy
+    /// owner-ambiguous threads keep the fact internal (`OMEGA-DELTA-0189`).
+    note: Option<SharedString>,
     /// After the click: the same reason, and what follows from it.
     refusal: SharedString,
 }
@@ -258,7 +264,7 @@ fn reopen_refusal(
         }
         let agent_id = agent_id.as_ref();
         return Some(Unreopenable {
-            note: format!("{agent_id} — not registered in this window").into(),
+            note: Some(format!("{agent_id} — not registered in this window").into()),
             refusal: format!(
                 "This thread ran on the agent `{agent_id}`, which is not registered in \
                  this window. {consequence}"
@@ -273,7 +279,7 @@ fn reopen_refusal(
     let name = executor.name();
 
     Some(Unreopenable {
-        note: format!("{name} — {reason}").into(),
+        note: Some(format!("{name} — {reason}").into()),
         refusal: format!(
             "This thread ran on {name}, which cannot run here: {reason}. {consequence}"
         )
@@ -523,6 +529,32 @@ mod tests {
         let admitted = rows(entries.iter(), now, ALL_READY, &registered);
         assert!(admitted[0].is_reopenable(), "{:?}", admitted[0].refusal);
         assert!(admitted[0].unavailable_note.is_none());
+    }
+
+    /// Legacy owner-ambiguous threads stay reopen-refused, but carry no
+    /// sidebar annotation. OMEGA-DELTA-0189 / omega#160 item 9.
+    #[test]
+    fn a_legacy_ambiguous_thread_has_no_sidebar_annotation() {
+        let now = at(10);
+        let mut legacy = thread("legacy codex", agent_servers::CODEX_ID, at(9), true);
+        legacy.conversation_owner_version =
+            crate::thread_metadata_store::ConversationOwnerVersion::Legacy;
+        let rows = rows([legacy].iter(), now, ALL_READY, &[]);
+
+        assert!(
+            rows[0].unavailable_note.is_none(),
+            "legacy ownership stays internal — no sidebar annotation: {:?}",
+            rows[0].unavailable_note
+        );
+        assert!(
+            rows[0]
+                .refusal
+                .as_ref()
+                .is_some_and(|refusal| refusal.contains("predates verified")),
+            "click still refuses so the session is not guessed: {:?}",
+            rows[0].refusal
+        );
+        assert!(!rows[0].is_reopenable());
     }
 
     #[test]

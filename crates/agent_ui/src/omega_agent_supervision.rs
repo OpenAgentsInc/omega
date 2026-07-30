@@ -31,6 +31,18 @@ impl SupervisedThreadLifecycle {
         }
     }
 
+    /// One-word status for UI chrome (tooltips). `OMEGA-DELTA-0189` law 3:
+    /// statuses are colors/icons, never multi-word labels.
+    pub const fn status_word(self) -> &'static str {
+        match self {
+            Self::Running => "Running",
+            Self::WaitingForPerson => "Waiting",
+            Self::Failed => "Failed",
+            Self::Completed => "Completed",
+            Self::Cancelled => "Cancelled",
+        }
+    }
+
     pub const fn token(self) -> &'static str {
         match self {
             Self::Running => "running",

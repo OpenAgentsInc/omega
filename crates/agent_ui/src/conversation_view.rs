@@ -735,12 +735,11 @@ pub struct ConversationView {
     /// Holding the task keeps session creation alive while the logical router
     /// composer remains usable. Direct Agent conversations never use it.
     deferred_omega_session: Option<Task<()>>,
-    /// A one-shot route constraint for the first physical session.
+    /// The frozen first-route decision, recorded when the router chooses.
     ///
-    /// This control exists only while a new Omega conversation is logically
-    /// ready and has no thread, so it cannot retarget an existing transcript.
-    omega_route_override: NewConversationRouteOverride,
-    /// The frozen decision shown while its physical executor session starts.
+    /// Held as state — not composer copy. The owner's law (omega#160,
+    /// `OMEGA-DELTA-0189`): routing mechanics are not explained in the
+    /// composer bar. The durable receipt remains the disclosure surface.
     omega_route_summary: Option<SharedString>,
     /// Messages a person sent while the executor was still connecting.
     ///
@@ -1137,39 +1136,6 @@ pub(crate) enum ConversationPreparation {
     SetupRequired { reason: SharedString },
 }
 
-#[derive(Clone, Debug, Default, PartialEq, Eq)]
-enum NewConversationRouteOverride {
-    #[default]
-    Automatic,
-    NativeLoop,
-    ExactExternal {
-        agent_id: String,
-        label: SharedString,
-    },
-}
-
-impl NewConversationRouteOverride {
-    fn label(&self) -> SharedString {
-        match self {
-            Self::Automatic => "Automatic".into(),
-            Self::NativeLoop => "Omega".into(),
-            Self::ExactExternal { label, .. } => label.clone(),
-        }
-    }
-
-    fn router_value(&self) -> omega_front_door::router::ExecutorOverride {
-        use omega_front_door::router::ExecutorOverride;
-
-        match self {
-            Self::Automatic => ExecutorOverride::Auto,
-            Self::NativeLoop => ExecutorOverride::Native,
-            Self::ExactExternal { agent_id, .. } => {
-                ExecutorOverride::ExactExternal(agent_id.clone())
-            }
-        }
-    }
-}
-
 pub(crate) fn visible_omega_route_decision(
     decision: &omega_front_door::RouteDecision,
 ) -> SharedString {
@@ -1471,7 +1437,6 @@ impl ConversationView {
             vim_mode_indicator,
             pending_executor_rebuild: None,
             deferred_omega_session: None,
-            omega_route_override: NewConversationRouteOverride::Automatic,
             omega_route_summary: None,
             pending_connect_messages: Vec::new(),
             last_theme_id: Some(cx.theme().id.clone()),
@@ -1776,9 +1741,10 @@ impl ConversationView {
             );
             return;
         };
-        let decision = match router
-            .prepare_next_session(task_requirements, self.omega_route_override.router_value())
-        {
+        let decision = match router.prepare_next_session(
+            task_requirements,
+            omega_front_door::router::ExecutorOverride::Auto,
+        ) {
             Ok(decision) => decision,
             Err(error) => {
                 self.handle_load_error(
@@ -4149,106 +4115,12 @@ impl ConversationView {
         );
     }
 
-    /// The composer, while the executor is connecting.
+    /// Whether this conversation's first Omega route is still unrecorded.
     ///
-    /// `OMEGA-DELTA-0122`, amended by `OMEGA-DELTA-0170`. Same box, same
-    /// place, same type — see [`Self::loading_composer`] for why it exists and
-    /// [`Self::hand_loading_draft_over`] for what becomes of a draft left in
-    /// it.
-    ///
-    /// # Enter always accepts
-    ///
-    /// The owner, on the refusal this replaces: "never block user from
-    /// hitting enter, if not connected just show a loading thing in the
-    /// chat." A `Chat` here does what a `Chat` does in a connected thread: the
-    /// message leaves the composer. It becomes a pending turn drawn above the
-    /// box — [`Self::render_pending_connect_messages`] — and dispatches, in
-    /// order, the moment the session exists. Send is the same press with a
-    /// mouse, so it is live too; a dead button beside a live Enter would make
-    /// the two claims about one state.
-    ///
-    /// # The indicator is in the bar, bottom left
-    ///
-    /// The owner: "move the loading indicator to inside the input bar like
-    /// bottom left". Which is also where it stops: bottom-left is empty once
-    /// loaded and stays empty — `render_zero_base_executor_bar` puts the
-    /// provider's controls on the right. `OMEGA-DELTA-0175` adds the Vim mode
-    /// readout to the left in both states; the connecting label itself still
-    /// disappears when the connection lands.
-    fn render_omega_route_override(&self, cx: &mut Context<Self>) -> AnyElement {
-        use crate::omega_executor_selector::{SelectableExecutor, ready_here};
-
-        let selected = self.omega_route_override.clone();
-        let selected_label = selected.label();
-        let weak_self = cx.entity().downgrade();
-        let choices = ready_here()
-            .into_iter()
-            .filter_map(|choice| match choice {
-                SelectableExecutor::Omega | SelectableExecutor::Exo => None,
-                SelectableExecutor::Codex
-                | SelectableExecutor::Claude
-                | SelectableExecutor::Grok => Some(NewConversationRouteOverride::ExactExternal {
-                    agent_id: choice.adapter_id()?.to_string(),
-                    label: choice.selector_name().into(),
-                }),
-            })
-            .collect::<Vec<_>>();
-
-        PopoverMenu::new("omega-new-conversation-route-override")
-            .trigger_with_tooltip(
-                Button::new(
-                    "omega-new-conversation-route-override-trigger",
-                    selected_label,
-                )
-                .label_size(LabelSize::XSmall)
-                .color(Color::Muted)
-                .end_icon(
-                    Icon::new(IconName::ChevronDown)
-                        .size(IconSize::XSmall)
-                        .color(Color::Muted),
-                ),
-                Tooltip::text("Override Omega's automatic route for this new conversation only"),
-            )
-            .anchor(gpui::Anchor::BottomLeft)
-            .menu(move |window, cx| {
-                let selected = selected.clone();
-                let weak_self = weak_self.clone();
-                let choices = choices.clone();
-                Some(ContextMenu::build(
-                    window,
-                    cx,
-                    move |mut menu, _window, _cx| {
-                        menu = menu.header("Run this new conversation on");
-                        for choice in std::iter::once(NewConversationRouteOverride::Automatic)
-                            .chain(std::iter::once(NewConversationRouteOverride::NativeLoop))
-                            .chain(choices)
-                        {
-                            let is_selected = choice == selected;
-                            let weak_self = weak_self.clone();
-                            let label = choice.label();
-                            menu.push_item(
-                                ContextMenuEntry::new(label)
-                                    .toggleable(IconPosition::End, is_selected)
-                                    .handler(move |_window, cx| {
-                                        weak_self
-                                            .update(cx, |this, cx| {
-                                                if this.omega_route_override_is_editable() {
-                                                    this.omega_route_override = choice.clone();
-                                                    cx.notify();
-                                                }
-                                            })
-                                            .log_err();
-                                    }),
-                            );
-                        }
-                        menu.key_context("OmegaNewConversationRouteOverride")
-                    },
-                ))
-            })
-            .into_any_element()
-    }
-
-    fn omega_route_override_is_editable(&self) -> bool {
+    /// True until the router freezes a decision or a physical session exists.
+    /// This is the fact the executor dropdown reads to know a draft can still
+    /// be re-homed; it is state, never composer copy.
+    fn omega_route_not_yet_recorded(&self) -> bool {
         self.omega_route_summary.is_none()
             && self.deferred_omega_session.is_none()
             && self.root_session_id.is_none()
@@ -4275,6 +4147,43 @@ impl ConversationView {
         }
     }
 
+    /// The composer, while the executor is connecting.
+    ///
+    /// `OMEGA-DELTA-0122`, amended by `OMEGA-DELTA-0170`. Same box, same
+    /// place, same type — see [`Self::loading_composer`] for why it exists and
+    /// [`Self::hand_loading_draft_over`] for what becomes of a draft left in
+    /// it.
+    ///
+    /// # Enter always accepts
+    ///
+    /// The owner, on the refusal this replaces: "never block user from
+    /// hitting enter, if not connected just show a loading thing in the
+    /// chat." A `Chat` here does what a `Chat` does in a connected thread: the
+    /// message leaves the composer. It becomes a pending turn drawn above the
+    /// box — [`Self::render_pending_connect_messages`] — and dispatches, in
+    /// order, the moment the session exists. Send is the same press with a
+    /// mouse, so it is live too; a dead button beside a live Enter would make
+    /// the two claims about one state.
+    ///
+    /// # The indicator is in the bar, bottom left — and says nothing more
+    ///
+    /// The owner: "move the loading indicator to inside the input bar like
+    /// bottom left". Which is also where it stops: bottom-left is empty once
+    /// loaded and stays empty — `render_zero_base_executor_bar` puts the
+    /// provider's controls on the right. `OMEGA-DELTA-0175` adds the Vim mode
+    /// readout to the left in both states.
+    ///
+    /// `OMEGA-DELTA-0189`, omega#160: the indicator is "Connecting…" while
+    /// something is actually connecting, and absent otherwise. It used to
+    /// narrate router readiness and frozen route summaries beside a second
+    /// Automatic/Omega routing dropdown. The owner rejected that as unclear
+    /// exposition: the Omega Agent mode routes automatically — that is the
+    /// whole point — so the control, its state, and every sentence explaining
+    /// the router belong nowhere on the surface. Routing behavior itself
+    /// (`OMEGA-DELTA-0179`) is unchanged: the first request routes with
+    /// `ExecutorOverride::Auto` and the durable receipt records the decision.
+    /// A person who wants one exact executor picks it in the executor
+    /// dropdown (`OMEGA-DELTA-0184`).
     fn render_loading_composer(
         &mut self,
         router_ready: bool,
@@ -4282,18 +4191,19 @@ impl ConversationView {
         cx: &mut Context<Self>,
     ) -> AnyElement {
         let editor = self.loading_composer(window, cx);
-        let status = if let Some(route_summary) = &self.omega_route_summary {
-            route_summary.clone()
-        } else if router_ready {
-            if self.deferred_omega_session.is_some() {
-                "Choosing an executor and creating its session…".into()
-            } else {
-                "Omega router ready · route selected when sent".into()
-            }
+        let status: Option<SharedString> = if router_ready {
+            // Logically ready and idle: nothing is connecting, so nothing
+            // pulses. The deferred-session window between the first send and
+            // its physical session is a real connection in progress.
+            self.deferred_omega_session
+                .is_some()
+                .then(|| "Connecting…".into())
         } else {
-            self.loading_status
-                .clone()
-                .unwrap_or_else(|| "Connecting…".into())
+            Some(
+                self.loading_status
+                    .clone()
+                    .unwrap_or_else(|| "Connecting…".into()),
+            )
         };
         let max_content_width = AgentSettings::get_global(cx).max_content_width;
         let pending_turns = self.render_pending_connect_messages(false, cx);
@@ -4365,7 +4275,7 @@ impl ConversationView {
                                             let conversation_is_bound = !self
                                                 .pending_connect_messages
                                                 .is_empty()
-                                                || !self.omega_route_override_is_editable();
+                                                || !self.omega_route_not_yet_recorded();
                                             this.children(
                                                 crate::omega_composer_executor_menu::render_composer_executor_menu(
                                                     self.workspace.clone(),
@@ -4375,14 +4285,7 @@ impl ConversationView {
                                                 ),
                                             )
                                         })
-                                        .when(
-                                            router_ready
-                                                && self.omega_route_override_is_editable(),
-                                            |this| {
-                                            this.child(self.render_omega_route_override(cx))
-                                            },
-                                        )
-                                        .child(
+                                        .children(status.map(|status| {
                                             Label::new(status)
                                                 .size(LabelSize::Small)
                                                 .color(Color::Muted)
@@ -4392,19 +4295,14 @@ impl ConversationView {
                                                         .repeat()
                                                         .with_easing(pulsating_between(0.3, 0.7)),
                                                     |label, delta| label.alpha(delta),
-                                                ),
-                                        ),
+                                                )
+                                        })),
                                 )
                                 .child(
                                     h_flex().min_w_0().child(
                                         IconButton::new("send-message", IconName::Send)
                                             .style(ButtonStyle::Filled)
-                                            .tooltip(Tooltip::text(if router_ready {
-                                                "Choose the route, create its exact session, and send"
-                                            } else {
-                                                "Sends when the executor connects — the message \
-                                                 shows in the chat until then"
-                                            }))
+                                            .tooltip(Tooltip::text("Send"))
                                             .on_click(cx.listener(|this, _, window, cx| {
                                                 this.submit_before_session(window, cx);
                                             })),
@@ -5755,7 +5653,7 @@ pub(crate) mod tests {
         };
         assert!(
             !omega_initial_content_has_request(&empty_draft),
-            "an empty restored draft must not freeze Automatic before the user can choose an override"
+            "an empty restored draft is not a first request and must not freeze a route"
         );
         let blank_draft = AgentInitialContent::ContentBlock {
             blocks: vec![acp::ContentBlock::Text(acp::TextContent::new(
@@ -5784,20 +5682,6 @@ pub(crate) mod tests {
             omega_task_requirements(None).kind,
             TaskKind::GeneralReasoning,
             "an open project is not itself a first-request task requirement"
-        );
-    }
-
-    #[test]
-    fn new_conversation_override_keeps_the_exact_external_id() {
-        use omega_front_door::router::ExecutorOverride;
-
-        let selection = NewConversationRouteOverride::ExactExternal {
-            agent_id: "claude-acp".to_owned(),
-            label: "Claude Code".into(),
-        };
-        assert_eq!(
-            selection.router_value(),
-            ExecutorOverride::ExactExternal("claude-acp".to_owned())
         );
     }
 
@@ -8497,8 +8381,8 @@ pub(crate) mod tests {
                 "session creation is asynchronous, so the accepted text must not depend on it"
             );
             assert!(
-                this.omega_route_summary.is_some() && !this.omega_route_override_is_editable(),
-                "the visible override must freeze as soon as the first route is recorded"
+                this.omega_route_summary.is_some() && !this.omega_route_not_yet_recorded(),
+                "the recorded first route must freeze the conversation's draft state"
             );
         });
         cx.run_until_parked();

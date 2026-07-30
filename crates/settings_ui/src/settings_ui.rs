@@ -44,7 +44,7 @@ use ui::{
 
 use util::{ResultExt as _, paths::PathStyle, rel_path::RelPath};
 use workspace::{
-    AppState, MultiWorkspace, OpenOptions, OpenVisible, Workspace, WorkspaceSettings,
+    AppState, CloseWindow, MultiWorkspace, OpenOptions, OpenVisible, Workspace, WorkspaceSettings,
     client_side_decorations,
 };
 use zed_actions::{
@@ -4693,6 +4693,13 @@ impl Render for SettingsWindow {
                         .id("settings-window")
                         .key_context("SettingsWindow")
                         .track_focus(&self.focus_handle)
+                        // Escape (and cmd/ctrl-w) bind to `workspace::CloseWindow`
+                        // in the SettingsWindow keymap context. Handle it here —
+                        // Settings is not a Workspace, so the multi-workspace
+                        // close path never sees the action. OMEGA-DELTA-0189.
+                        .on_action(|_: &CloseWindow, window, _cx| {
+                            window.remove_window();
+                        })
                         .on_action(cx.listener(|this, _: &OpenCurrentFile, window, cx| {
                             this.open_current_settings_file(window, cx);
                         }))
@@ -5860,6 +5867,42 @@ pub mod test {
         > Appearance & Behavior
         "
     );
+
+    /// Escape (and the SettingsWindow keymap binding for it) dispatch
+    /// `workspace::CloseWindow`. The settings surface is not a Workspace, so
+    /// it must handle that action itself. OMEGA-DELTA-0189.
+    #[gpui::test]
+    fn settings_window_closes_on_close_window_action(cx: &mut gpui::TestAppContext) {
+        let (settings_window, cx) = cx.add_window_view(|window, cx| {
+            register_settings(cx);
+            SettingsWindow::test(window, cx)
+        });
+
+        assert!(
+            cx.windows()
+                .iter()
+                .any(|window| window.downcast::<SettingsWindow>().is_some()),
+            "precondition: a SettingsWindow is open"
+        );
+
+        // Focus first, then dispatch on a separate step. Closing inside
+        // `update_in` removes the window before that call can finish.
+        settings_window.update_in(cx, |this, window, cx| {
+            window.focus(&this.focus_handle, cx);
+        });
+        cx.dispatch_action(CloseWindow);
+        cx.run_until_parked();
+
+        // Use the app window list — VisualTestContext::update panics once the
+        // window is gone, which is exactly the success condition here.
+        assert!(
+            cx.windows()
+                .iter()
+                .find_map(|window| window.downcast::<SettingsWindow>())
+                .is_none(),
+            "CloseWindow must remove the SettingsWindow (Escape maps to it)"
+        );
+    }
 
     #[gpui::test]
     fn navbar_double_click_toggle(cx: &mut gpui::TestAppContext) {
