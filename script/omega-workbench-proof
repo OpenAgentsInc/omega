@@ -136,7 +136,13 @@ if [[ "$update_baseline" -eq 1 && ( -n "${CI:-}" || -n "${GITHUB_ACTIONS:-}" ) ]
 fi
 
 if [[ "$build_runner" -eq 1 ]]; then
-  cargo build --release -p zed --bin zed_visual_test_runner --features visual-tests
+  # `-p omega`, not `-p zed`. The package was renamed with the fork; the only
+  # package in this workspace is `omega`, so `-p zed` failed every invocation
+  # of this script with "cannot specify features for packages outside of
+  # workspace" — which made the whole sealed-visual lane unrunnable, including
+  # `--update`. The binary keeps its upstream name so recorded receipts and
+  # baselines stay comparable.
+  cargo build --release -p omega --bin zed_visual_test_runner --features visual-tests
 fi
 runner="$(cargo metadata --format-version 1 --no-deps | \
   python3 -c 'import json,sys; print(json.load(sys.stdin)["target_directory"])')/release/zed_visual_test_runner"
