@@ -29,6 +29,7 @@ use crate::{
     KeyringLocator, NostrPublicKeyHex, OwnerAttestationRequest, OwnerAttestationResult,
     PendingIdentityOperation, PendingIdentityTransaction, PrivateMessageRequest, PublicIdentity,
     PublicStoreError, ReceiptRef, SigningResult, UnwrappedPrivateMessage,
+    accounts::channel_data_root,
     mutation_lock::{IdentityMutationGuard, MutationLockError},
     proof::{IDENTITY_PROOF_KEYRING_ACCOUNT, IDENTITY_PROOF_KEYRING_SERVICE, ProofCrashBoundary},
     public_store::{
@@ -2614,40 +2615,6 @@ impl CustodyPaths {
             account_path: root.join("identity.account.json"),
             held_identity_action_path: root.join("identity.action-intent.json"),
         }
-    }
-}
-
-fn channel_data_root(channel: AppChannel) -> PathBuf {
-    #[cfg(target_os = "macos")]
-    {
-        paths::home_dir()
-            .join("Library/Application Support")
-            .join(channel.display_name())
-    }
-    #[cfg(any(target_os = "linux", target_os = "freebsd"))]
-    {
-        let base = std::env::var_os("XDG_DATA_HOME")
-            .map(PathBuf::from)
-            .unwrap_or_else(|| paths::home_dir().join(".local/share"));
-        base.join(channel.storage_slug())
-    }
-    #[cfg(target_os = "windows")]
-    {
-        std::env::var_os("LOCALAPPDATA")
-            .map(PathBuf::from)
-            .unwrap_or_else(|| paths::home_dir().join("AppData").join("Local"))
-            .join(channel.display_name())
-    }
-    #[cfg(not(any(
-        target_os = "macos",
-        target_os = "linux",
-        target_os = "freebsd",
-        target_os = "windows"
-    )))]
-    {
-        paths::home_dir()
-            .join(".config")
-            .join(channel.storage_slug())
     }
 }
 

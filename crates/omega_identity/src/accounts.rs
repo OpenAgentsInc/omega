@@ -1930,7 +1930,31 @@ fn unix_time_now() -> u64 {
         .map_or(0, |duration| duration.as_secs())
 }
 
-fn channel_data_root(channel: AppChannel) -> PathBuf {
+/// Resolve the data root that owns `channel`'s identity registry.
+///
+/// `--user-data-dir` selects the whole profile, identity included
+/// (`OMEGA-DELTA-0110`): first-launch provisioning writes through
+/// `IdentityService::system`, which resolves `paths::data_dir()` and therefore
+/// honours the override. Resolving the registry from the platform default here
+/// made the two disagree, so an install launched on a non-default data
+/// directory signed in against a directory it had never written to — hosted
+/// Nostr sign-in and the Sarah admission page both reported the identity
+/// `Unavailable` on a profile that had one.
+///
+/// Only the running process's own channel follows the override. The
+/// `channel`-parameterised form exists so an operator CLI built from a `dev`
+/// tree can address the real `rc` profile, and that must keep naming `rc`'s
+/// platform directory rather than this process's private one.
+pub(crate) fn channel_data_root(channel: AppChannel) -> PathBuf {
+    if channel == *app_identity::CHANNEL
+        && let Some(custom_root) = paths::custom_data_dir()
+    {
+        return custom_root.clone();
+    }
+    platform_channel_data_root(channel)
+}
+
+fn platform_channel_data_root(channel: AppChannel) -> PathBuf {
     #[cfg(target_os = "macos")]
     {
         paths::home_dir()
