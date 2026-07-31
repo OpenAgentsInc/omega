@@ -2288,6 +2288,35 @@ impl Thread {
         self.turn_fallback_model.as_ref().or_else(|| self.model())
     }
 
+    /// `OMEGA-DELTA-0207`. The provider/model pair this thread will dispatch
+    /// on, including before the model has resolved.
+    ///
+    /// [`Self::active_turn_model`] can only answer once the model is
+    /// [`ThreadModel::Ready`]. A thread whose model is still
+    /// [`ThreadModel::Unresolved`] already holds the exact pair
+    /// [`Self::send_existing`] will dispatch — it is waiting for the provider
+    /// to register, not for a decision — and answering "not disclosed" for it
+    /// is what let every label fall through to the process-wide standing
+    /// choice. That static is `Luna` at every launch, so the composer said
+    /// **Luna** while the send went to `openagents/gemini-3.6-flash`: the
+    /// `OMEGA-DELTA-0131` defect, in the window `OMEGA-DELTA-0202` left open.
+    ///
+    /// The order is the dispatch order: the live fallback rung, then the
+    /// configured model, then the pair a resolution is still pending on.
+    #[must_use]
+    pub fn routed_model_pair(&self) -> Option<(String, String)> {
+        if let Some(model) = self.active_turn_model() {
+            return Some((model.provider_id().0.to_string(), model.id().0.to_string()));
+        }
+        match &self.model {
+            ThreadModel::Unresolved(selection) => Some((
+                selection.provider.0.to_string(),
+                selection.model.0.to_string(),
+            )),
+            ThreadModel::Ready(_) | ThreadModel::Unset => None,
+        }
+    }
+
     /// Record which rung of the `OMEGA-DELTA-0201` chain is serving the turn.
     ///
     /// `None` restores the configured model as the answer, which is what the

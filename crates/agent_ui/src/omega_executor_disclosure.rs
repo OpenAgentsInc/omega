@@ -104,15 +104,20 @@ fn classify_connection(
         // what is answering, and this record is what every label is derived
         // from. Reading the configured model here would put the whole surface
         // back to naming a model that is not serving the turn.
+        //
+        // `OMEGA-DELTA-0207`. `routed_model_pair` and not `active_turn_model`:
+        // the latter answers only once the model is `Ready`, so a thread that
+        // already knows it will dispatch on `openagents/gemini-3.6-flash` —
+        // and is merely waiting for the provider to register — reported "not
+        // disclosed" here, and every label fell through to the standing choice,
+        // which is `Luna` at every launch.
         let (provider, model) = native
             .thread(session_id, cx)
             .and_then(|thread| {
-                thread.read(cx).active_turn_model().map(|model| {
-                    (
-                        Some(model.provider_id().0.to_string()),
-                        Some(model.id().0.to_string()),
-                    )
-                })
+                thread
+                    .read(cx)
+                    .routed_model_pair()
+                    .map(|(provider, model)| (Some(provider), Some(model)))
             })
             .unwrap_or((None, None));
         return ExecutorDisclosure {

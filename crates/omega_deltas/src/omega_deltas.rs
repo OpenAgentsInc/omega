@@ -194,6 +194,8 @@ pub const ENFORCED_DELTAS: &[&str] = &[
     "OMEGA-DELTA-0203",
     "OMEGA-DELTA-0204",
     "OMEGA-DELTA-0205",
+    "OMEGA-DELTA-0206",
+    "OMEGA-DELTA-0207",
 ];
 
 /// OMEGA-DELTA-0204. Every control the composer's bar offers, written twice:
@@ -238,6 +240,9 @@ pub const GOOGLE_PROVIDER_PATH: &str = "crates/language_models/src/provider/goog
 pub const GOOGLE_CLIENT_PATH: &str = "crates/google_ai/src/google_ai.rs";
 pub const OPENAGENTS_PROVIDER_PATH: &str = "crates/language_models/src/provider/openagents.rs";
 pub const OMEGA_MODEL_TIER_PATH: &str = "crates/agent_ui/src/omega_model_tier.rs";
+/// OMEGA-DELTA-0206. The OpenAI-compatible mapper every hosted lane shares,
+/// and therefore the one place a provider's capitalization gets normalized.
+pub const OPEN_AI_COMPLETION_PATH: &str = "crates/open_ai/src/completion.rs";
 /// OMEGA-DELTA-0202. The single routed-model authority every label reads.
 pub const OMEGA_ROUTED_MODEL_PATH: &str = "crates/agent_ui/src/omega_routed_model.rs";
 /// OMEGA-DELTA-0202. Where the executor disclosure record is built from a live
@@ -25338,15 +25343,31 @@ mod tests {
             repository_path(OPENAGENTS_PROVIDER_PATH).display()
         );
 
+        // OMEGA-DELTA-0202, amended by OMEGA-DELTA-0207. The disclosure now
+        // reads `routed_model_pair()`, which is a strict superset of
+        // `active_turn_model()`: it consults the live fallback rung *first* and
+        // only then widens to the pair a resolution is still pending on. The
+        // guarantee 0202 bought is unchanged and is asserted where it lives —
+        // inside `routed_model_pair` itself, below — rather than weakened here.
         let disclosure = read_repository_file(OMEGA_EXECUTOR_DISCLOSURE_PATH);
         assert!(
-            disclosure.contains("active_turn_model()"),
-            "OMEGA-DELTA-0202: {} reads the configured model again. While a turn \
-             is on a fallback rung, that names a model which is not answering.",
+            disclosure.contains("routed_model_pair()")
+                || disclosure.contains("active_turn_model()"),
+            "OMEGA-DELTA-0202 (amended by OMEGA-DELTA-0207): {} reads the \
+             configured model again. While a turn is on a fallback rung, that \
+             names a model which is not answering.",
             repository_path(OMEGA_EXECUTOR_DISCLOSURE_PATH).display()
         );
 
         let thread = read_repository_file(AGENT_THREAD_PATH);
+        assert!(
+            body_of(&thread, "routed_model_pair").contains("self.active_turn_model()"),
+            "OMEGA-DELTA-0202 (amended by OMEGA-DELTA-0207): `routed_model_pair` \
+             in {} no longer consults the live fallback rung first, so the \
+             record every label is derived from can name the configured model \
+             while another rung is answering.",
+            repository_path(AGENT_THREAD_PATH).display()
+        );
         for required in [
             "fn active_turn_model(",
             "fn set_turn_fallback_model(",
@@ -25641,5 +25662,140 @@ mod tests {
              sidebar layout into the activity rail and the sidebar column.",
             panel_path.display()
         );
+    }
+
+    /// OMEGA-DELTA-0206. A provider's capitalization is not authority over
+    /// whether a turn finished.
+    ///
+    /// Gemini's OpenAI-compatible surface writes `STOP`, and the hosted Gemini
+    /// lane reaches the same `open_ai` mapper every OpenAI-compatible provider
+    /// does. Three lower-case literals meant every healthy Gemini turn took the
+    /// unknown arm and logged `Unexpected OpenAI stop_reason: "STOP"`.
+    #[test]
+    fn a_provider_finish_word_is_read_without_case_as_authority() {
+        let path = repository_path(OPEN_AI_COMPLETION_PATH);
+        let completion = read_repository_file(OPEN_AI_COMPLETION_PATH);
+
+        assert!(
+            completion.contains("to_ascii_lowercase"),
+            "OMEGA-DELTA-0206: {} matches `finish_reason` as the provider wrote \
+             it. Gemini writes `STOP` where OpenAI writes `stop`, and a \
+             case-sensitive match sends a completed turn to the unknown arm.",
+            path.display()
+        );
+
+        // The words a turn can end on, each of which must be read rather than
+        // guessed at. `length` is OpenAI's own and had no arm at all, so even
+        // upstream-spec truncation was reported as a completed turn.
+        for required in [
+            "Some(\"length\" | \"max_tokens\")",
+            "StopReason::MaxTokens",
+            "\"safety\"",
+            "\"recitation\"",
+            "StopReason::Refusal",
+            "Some(\"tool_calls\" | \"function_call\")",
+        ] {
+            assert!(
+                completion.contains(required),
+                "OMEGA-DELTA-0206: {} lost `{required}`. A finish word that is \
+                 not read is a turn reported as something it was not.",
+                path.display()
+            );
+        }
+
+        assert!(
+            completion.contains("let raw = choice.finish_reason.as_deref()"),
+            "OMEGA-DELTA-0206: {} logs the normalized copy of an unknown finish \
+             word rather than the word the provider actually sent, which is the \
+             one thing that made this defect diagnosable.",
+            path.display()
+        );
+    }
+
+    /// OMEGA-DELTA-0207. The label names the model the send will dispatch on,
+    /// including before that model has resolved.
+    ///
+    /// `OMEGA-DELTA-0202` made every label a function of one routed decision,
+    /// but only once the thread's model was `Ready`. Before that, the routed
+    /// decision was `None` and every surface fell through to the process-wide
+    /// standing tier — a static that begins each launch at `Luna` and is never
+    /// seeded from settings. So the composer said **Luna** while
+    /// `Thread::send` dispatched `openagents/gemini-3.6-flash`.
+    #[test]
+    fn the_label_names_the_model_the_send_will_dispatch_on() {
+        // The send path publishes the pair it will dispatch on, including the
+        // `Unresolved` case it used to answer `None` for.
+        let thread_path = repository_path(AGENT_THREAD_PATH);
+        let thread = read_repository_file(AGENT_THREAD_PATH);
+        for required in [
+            "pub fn routed_model_pair(",
+            "ThreadModel::Unresolved(selection) => Some((",
+        ] {
+            assert!(
+                thread.contains(required),
+                "OMEGA-DELTA-0207: {} lost `{required}`. A thread waiting for \
+                 its provider to register already knows the pair \
+                 `send_existing` will dispatch, and answering `None` for it is \
+                 what let the label fall through to the standing choice.",
+                thread_path.display()
+            );
+        }
+
+        // The disclosure — the record every label is derived from — reads that
+        // same answer rather than the narrower `Ready`-only one.
+        let disclosure_path = repository_path(OMEGA_EXECUTOR_DISCLOSURE_PATH);
+        let disclosure = read_repository_file(OMEGA_EXECUTOR_DISCLOSURE_PATH);
+        assert!(
+            disclosure.contains("routed_model_pair()"),
+            "OMEGA-DELTA-0207: {} reads a model that only exists once the \
+             thread has resolved one, so a thread that knows its pair still \
+             reports `not disclosed` and the label guesses.",
+            disclosure_path.display()
+        );
+
+        // The pre-session answer comes from the registry the new thread will
+        // actually be handed, not from the standing static.
+        let routed_path = repository_path(OMEGA_ROUTED_MODEL_PATH);
+        let routed = read_repository_file(OMEGA_ROUTED_MODEL_PATH);
+        for required in [
+            "pub fn pending_routed_model(",
+            "pub fn face_for_next_turn(",
+            "LanguageModelRegistry::try_global(cx)",
+            "registry.read(cx).default_model()",
+        ] {
+            assert!(
+                routed.contains(required),
+                "OMEGA-DELTA-0207: {} lost `{required}`. Without asking the \
+                 registry, the only answer available before a thread resolves \
+                 is the standing choice, which is a guess.",
+                routed_path.display()
+            );
+        }
+
+        // And no composer is allowed to reach for the standing choice directly
+        // again. This is the regression that actually shipped.
+        for (path, forbidden) in [
+            (CONVERSATION_VIEW_PATH, "RoutedFace::pending(selected())"),
+            (
+                ZERO_BASE_THREAD_VIEW_PATH,
+                "face_for(routed.as_ref(), selected())",
+            ),
+        ] {
+            let source = without_comments(&read_repository_file(path));
+            assert!(
+                !source.contains(forbidden),
+                "OMEGA-DELTA-0207: {} names the model with `{forbidden}`. The \
+                 standing choice is a process-wide static that is `Luna` at \
+                 every launch; a composer that reads it is only accidentally \
+                 in agreement with the send.",
+                repository_path(path).display()
+            );
+            assert!(
+                source.contains("face_for_next_turn("),
+                "OMEGA-DELTA-0207: {} no longer derives its face from the \
+                 model the next turn will start on.",
+                repository_path(path).display()
+            );
+        }
     }
 }

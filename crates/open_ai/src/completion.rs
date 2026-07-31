@@ -810,11 +810,33 @@ impl OpenAiEventMapper {
             }
         }
 
-        match choice.finish_reason.as_deref() {
+        // `OMEGA-DELTA-0206`. The wire word is normalized before it is matched.
+        // OpenAI writes `stop`; Gemini's OpenAI-compatible surface writes
+        // `STOP`, and the hosted Gemini lane reaches this same mapper. A
+        // case-sensitive match sent `"STOP"` to the unknown arm, which logged
+        // `Unexpected OpenAI stop_reason: "STOP"` on every healthy Gemini turn.
+        let finish_reason = choice.finish_reason.as_deref().map(str::to_ascii_lowercase);
+        match finish_reason.as_deref() {
             Some("stop") => {
                 events.push(Ok(LanguageModelCompletionEvent::Stop(StopReason::EndTurn)));
             }
-            Some("tool_calls") => {
+            // `length` is OpenAI's own word and `max_tokens` is Gemini's. Both
+            // mean the answer was cut off, and both used to fall through to the
+            // unknown arm and be reported as a complete turn.
+            Some("length" | "max_tokens") => {
+                events.push(Ok(LanguageModelCompletionEvent::Stop(
+                    StopReason::MaxTokens,
+                )));
+            }
+            // Gemini stops a turn it will not finish with these. They are
+            // refusals, not completed turns.
+            Some(
+                "safety" | "recitation" | "blocklist" | "prohibited_content" | "spii"
+                | "content_filter" | "image_safety",
+            ) => {
+                events.push(Ok(LanguageModelCompletionEvent::Stop(StopReason::Refusal)));
+            }
+            Some("tool_calls" | "function_call") => {
                 events.extend(self.tool_calls_by_index.drain().map(|(_, tool_call)| {
                     match parse_tool_arguments(&tool_call.arguments) {
                         Ok(input) => Ok(LanguageModelCompletionEvent::ToolUse(
@@ -838,8 +860,11 @@ impl OpenAiEventMapper {
 
                 events.push(Ok(LanguageModelCompletionEvent::Stop(StopReason::ToolUse)));
             }
-            Some(stop_reason) => {
-                log::error!("Unexpected OpenAI stop_reason: {stop_reason:?}",);
+            Some(_) => {
+                // Log the word as the provider actually wrote it, not the
+                // normalized copy, so an unknown reason stays diagnosable.
+                let raw = choice.finish_reason.as_deref().unwrap_or_default();
+                log::error!("Unexpected OpenAI stop_reason: {raw:?}",);
                 events.push(Ok(LanguageModelCompletionEvent::Stop(StopReason::EndTurn)));
             }
             None => {}
@@ -4097,6 +4122,129 @@ mod tests {
                 LanguageModelCompletionEvent::Stop(StopReason::ToolUse)
             )
         }));
+    }
+
+    /// `OMEGA-DELTA-0206`. Gemini's OpenAI-compatible surface writes its finish
+    /// reasons in upper case, and the hosted Gemini lane reaches this mapper.
+    ///
+    /// The live defect, from the owner's run of `3becb7c004`:
+    /// `ERROR [open_ai::completion] Unexpected OpenAI stop_reason: "STOP"`.
+    /// A completed Gemini turn took the unknown arm on every single turn.
+    #[test]
+    fn gemini_upper_case_finish_reasons_are_not_unknown() {
+        // The exact literal from the owner's log.
+        assert_eq!(
+            stop_events_for_finish_reason("STOP"),
+            vec![StopReason::EndTurn],
+            "`STOP` is Gemini's word for a completed turn"
+        );
+
+        for (wire, expected) in [
+            // Gemini's uppercase enum.
+            ("MAX_TOKENS", StopReason::MaxTokens),
+            ("SAFETY", StopReason::Refusal),
+            ("RECITATION", StopReason::Refusal),
+            ("BLOCKLIST", StopReason::Refusal),
+            ("PROHIBITED_CONTENT", StopReason::Refusal),
+            ("SPII", StopReason::Refusal),
+            // OpenAI's own spelling still means what it always meant.
+            ("stop", StopReason::EndTurn),
+            ("length", StopReason::MaxTokens),
+            ("content_filter", StopReason::Refusal),
+            // Case is not authority in either direction.
+            ("Stop", StopReason::EndTurn),
+            ("Length", StopReason::MaxTokens),
+        ] {
+            assert_eq!(
+                stop_events_for_finish_reason(wire),
+                vec![expected],
+                "finish_reason {wire:?} must map to {expected:?} rather than \
+                 falling through to the unknown arm"
+            );
+        }
+    }
+
+    /// `OMEGA-DELTA-0206`. `TOOL_CALLS` drains the accumulated calls, exactly as
+    /// the lower-case spelling does, and stops with `ToolUse`.
+    #[test]
+    fn an_upper_case_tool_call_finish_reason_still_drains_the_calls() {
+        let events = vec![
+            ResponseStreamEvent {
+                choices: vec![ChoiceDelta {
+                    index: 0,
+                    delta: Some(ResponseMessageDelta {
+                        role: None,
+                        content: None,
+                        reasoning: None,
+                        tool_calls: Some(vec![ToolCallChunk {
+                            index: 0,
+                            id: Some("call_upper".into()),
+                            function: Some(FunctionChunk {
+                                name: Some("list_directory".into()),
+                                arguments: Some("{\"path\": \"src\"}".into()),
+                            }),
+                        }]),
+                        reasoning_content: None,
+                    }),
+                    finish_reason: None,
+                }],
+                usage: None,
+            },
+            ResponseStreamEvent {
+                choices: vec![ChoiceDelta {
+                    index: 0,
+                    delta: None,
+                    finish_reason: Some("TOOL_CALLS".into()),
+                }],
+                usage: None,
+            },
+        ];
+
+        let mapped = map_completion_events(events);
+        assert!(
+            mapped.iter().any(|event| matches!(
+                event,
+                LanguageModelCompletionEvent::Stop(StopReason::ToolUse)
+            )),
+            "`TOOL_CALLS` must stop with ToolUse, not EndTurn"
+        );
+        assert!(
+            mapped.iter().any(|event| matches!(
+                event,
+                LanguageModelCompletionEvent::ToolUse(tool_use)
+                    if tool_use.is_input_complete
+                        && tool_use.raw_input == "{\"path\": \"src\"}"
+            )),
+            "the accumulated call must be drained by the upper-case spelling too"
+        );
+    }
+
+    /// A genuinely unknown word is still reported, and still as the provider
+    /// wrote it rather than as the normalized copy.
+    #[test]
+    fn an_unknown_finish_reason_still_ends_the_turn() {
+        assert_eq!(
+            stop_events_for_finish_reason("WAT_IS_THIS"),
+            vec![StopReason::EndTurn]
+        );
+    }
+
+    /// The stop events a single terminal chunk with this `finish_reason` maps to.
+    fn stop_events_for_finish_reason(wire: &str) -> Vec<StopReason> {
+        map_completion_events(vec![ResponseStreamEvent {
+            choices: vec![ChoiceDelta {
+                index: 0,
+                delta: None,
+                finish_reason: Some(wire.to_owned()),
+            }],
+            usage: None,
+        }])
+        .into_iter()
+        .filter_map(|event| match event {
+            LanguageModelCompletionEvent::Stop(reason) => Some(reason),
+            _ => None,
+        })
+        .collect()
     }
 
     #[test]

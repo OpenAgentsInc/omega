@@ -32,6 +32,8 @@
 //! conversation starts on. It is simply no longer allowed to describe a thread
 //! that has already resolved a model.
 
+use gpui::App;
+use language_model::LanguageModelRegistry;
 use omega_front_door::ExecutorDisclosure;
 use ui::SharedString;
 
@@ -113,10 +115,56 @@ impl RoutedModel {
 
 /// The face for a thread, falling back to the standing choice only when nothing
 /// has been routed yet.
+///
+/// Prefer [`face_for_next_turn`]. This entry point cannot see the registry, so
+/// its `None` arm can only report the standing choice — which is what
+/// `OMEGA-DELTA-0207` found naming a model the send did not use.
 #[must_use]
 pub fn face_for(routed: Option<&RoutedModel>, standing: ModelTier) -> RoutedFace {
     match routed {
         Some(routed) => routed.face(),
+        None => RoutedFace::pending(standing),
+    }
+}
+
+/// The pair a thread that has not resolved a model yet will actually start on.
+///
+/// `OMEGA-DELTA-0207`. This asks the same question `Thread::send_existing`
+/// answers, before the thread exists: the registry's default model is what
+/// `NativeAgent` hands a new thread and what `Thread::ensure_model` fills an
+/// unset one with. Reading it here is what makes the pre-session label a
+/// statement about the next turn rather than a guess.
+#[must_use]
+pub fn pending_routed_model(cx: &App) -> Option<RoutedModel> {
+    let registry = LanguageModelRegistry::try_global(cx)?;
+    let configured = registry.read(cx).default_model()?;
+    Some(RoutedModel::new(
+        configured.model.provider_id().0.to_string(),
+        configured.model.id().0.to_string(),
+    ))
+}
+
+/// The face every composer shows: the routed decision when there is one, and
+/// otherwise the model the next turn will actually start on.
+///
+/// `OMEGA-DELTA-0207`. The standing choice is the last resort and nothing
+/// else. It is a process-wide static that begins every launch at `Luna` and is
+/// never seeded from settings, so a composer that read it named **Luna** on a
+/// thread whose send went to `openagents/gemini-3.6-flash`. It survives here
+/// only for a process with no registry at all — a test harness, or a window
+/// drawn before the providers install — where there is no better answer and no
+/// send to disagree with yet.
+#[must_use]
+pub fn face_for_next_turn(
+    routed: Option<&RoutedModel>,
+    standing: ModelTier,
+    cx: &App,
+) -> RoutedFace {
+    if let Some(routed) = routed {
+        return routed.face();
+    }
+    match pending_routed_model(cx) {
+        Some(pending) => pending.face(),
         None => RoutedFace::pending(standing),
     }
 }
@@ -237,6 +285,135 @@ mod tests {
         let face = face_for(None, ModelTier::Flash);
         assert_eq!(face.tier, Some(ModelTier::Flash));
         assert_eq!(face.label.as_ref(), "Flash");
+    }
+
+    /// The live defect from the owner's run of `3becb7c004`. `OMEGA-DELTA-0207`.
+    ///
+    /// The configured default is Luna, the standing static is a stale Flash,
+    /// and no thread has routed anything yet. The composer must name **Luna** —
+    /// the model the send will actually dispatch on — rather than the standing
+    /// choice. The owner saw the mirror image of this: a label reading Luna
+    /// over a send that went to `openagents/gemini-3.6-flash`.
+    #[gpui::test]
+    fn a_stale_standing_choice_never_outranks_the_model_the_next_turn_starts_on(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        cx.update(|cx| {
+            let registry =
+                install_registry_defaulting_to("openagents", "gpt-5.6-luna", "GPT-5.6 Luna", cx);
+            drop(registry);
+
+            // The stale standing choice: a different tier entirely.
+            crate::omega_model_tier::select_for_test(ModelTier::Flash);
+            assert_eq!(crate::omega_model_tier::selected(), ModelTier::Flash);
+
+            // What the next turn will actually start on.
+            let pending = pending_routed_model(cx).expect("the registry has a default model");
+            assert_eq!(pending.wire_id(), "openagents/gpt-5.6-luna");
+
+            // Every surface, from that one answer.
+            let face = face_for_next_turn(None, crate::omega_model_tier::selected(), cx);
+            assert_eq!(
+                face.label.as_ref(),
+                "Luna",
+                "the tier control named the standing choice instead of the \
+                 model the send would dispatch on"
+            );
+            assert_eq!(face.model_name.as_ref(), "GPT-5.6 Luna");
+            assert_eq!(face.tier, Some(ModelTier::Luna));
+            assert_eq!(pending.status_line().as_ref(), "GPT-5.6 Luna");
+            assert_eq!(pending.face().label.as_ref(), face.label.as_ref());
+
+            crate::omega_model_tier::clear_selection_for_test();
+        });
+    }
+
+    /// The same guarantee in the direction the owner actually hit: the model
+    /// the next turn starts on is Gemini, the standing static is a launch-fresh
+    /// Luna, and the label must say Flash rather than Luna.
+    #[gpui::test]
+    fn the_label_follows_the_dispatch_when_the_standing_choice_is_launch_fresh(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        cx.update(|cx| {
+            let registry = install_registry_defaulting_to(
+                "openagents",
+                "gemini-3.6-flash",
+                "Gemini 3.6 Flash",
+                cx,
+            );
+            drop(registry);
+
+            // A launch-fresh process: the static is Luna and nobody chose it.
+            crate::omega_model_tier::clear_selection_for_test();
+            assert_eq!(crate::omega_model_tier::selected(), ModelTier::Luna);
+
+            let face = face_for_next_turn(None, crate::omega_model_tier::selected(), cx);
+            assert_eq!(
+                face.label.as_ref(),
+                "Flash",
+                "this is the owner's defect exactly: the composer said Luna \
+                 while the send went to openagents/gemini-3.6-flash"
+            );
+            assert_ne!(face.label.as_ref(), "Luna");
+            assert_eq!(face.model_name.as_ref(), "Gemini 3.6 Flash");
+
+            crate::omega_model_tier::clear_selection_for_test();
+        });
+    }
+
+    /// A process with no registry has no better answer than the standing
+    /// choice, and must still draw a control rather than panicking.
+    #[gpui::test]
+    fn without_a_registry_the_standing_choice_is_the_last_resort(cx: &mut gpui::TestAppContext) {
+        cx.update(|cx| {
+            assert_eq!(pending_routed_model(cx), None);
+            let face = face_for_next_turn(None, ModelTier::Pro, cx);
+            assert_eq!(face.label.as_ref(), "Pro");
+        });
+    }
+
+    /// Register a single provider whose default model is the named pair, and
+    /// make it the registry's default model.
+    fn install_registry_defaulting_to(
+        provider_id: &str,
+        model_id: &str,
+        model_name: &str,
+        cx: &mut gpui::App,
+    ) -> gpui::Entity<LanguageModelRegistry> {
+        use language_model::fake_provider::{FakeLanguageModel, FakeLanguageModelProvider};
+        use language_model::{
+            ConfiguredModel, LanguageModel, LanguageModelProviderId, LanguageModelProviderName,
+        };
+        use std::sync::Arc;
+
+        let model: Arc<dyn LanguageModel> = Arc::new(FakeLanguageModel::with_id_and_thinking(
+            provider_id,
+            model_id,
+            model_name,
+            false,
+        ));
+        let provider = Arc::new(
+            FakeLanguageModelProvider::new(
+                LanguageModelProviderId::from(provider_id.to_string()),
+                LanguageModelProviderName::from(provider_id.to_string()),
+            )
+            .with_models(vec![model.clone()]),
+        );
+
+        language_model::init(cx);
+        let registry = LanguageModelRegistry::global(cx);
+        registry.update(cx, |registry, cx| {
+            registry.register_provider(provider.clone(), cx);
+            registry.set_default_model(
+                Some(ConfiguredModel {
+                    provider: provider.clone(),
+                    model,
+                }),
+                cx,
+            );
+        });
+        registry
     }
 
     /// An empty identifier is a bug, not a disclosure, and must not become a

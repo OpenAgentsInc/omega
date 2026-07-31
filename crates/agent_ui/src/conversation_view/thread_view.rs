@@ -13949,12 +13949,15 @@ impl ThreadView {
     /// choice speaks only for a thread that has not routed anything yet.
     fn render_model_tier_selector(&self, enabled: bool, cx: &mut Context<Self>) -> AnyElement {
         use crate::omega_model_tier::{render_model_tier_selector, select, selected};
-        use crate::omega_routed_model::{RoutedModel, face_for};
+        use crate::omega_routed_model::{RoutedModel, face_for_next_turn};
         use acp_thread::AgentModelId;
         use std::rc::Rc;
 
         let routed = RoutedModel::from_disclosure(&self.executor_disclosure(cx));
-        let face = face_for(routed.as_ref(), selected());
+        // `OMEGA-DELTA-0207`. When nothing has routed yet, the model the next
+        // turn will start on — not the standing static, which is `Luna` at
+        // every launch and disagreed with the send.
+        let face = face_for_next_turn(routed.as_ref(), selected(), cx);
         let model_selector = self.model_selector.clone();
 
         render_model_tier_selector(

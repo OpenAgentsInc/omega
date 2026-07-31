@@ -8964,6 +8964,13 @@ loading composer, which is the property that delta exists for.
   retry-exhausted stream failure both already advanced correctly, and now have
   tests that will fail if they stop.
 
+**Amended by `OMEGA-DELTA-0207`.** This delta covered a thread that had already
+resolved a model. Before resolution the routed decision was `None`, every
+surface fell through to the process-wide standing tier, and the composer read
+**Luna** while the send dispatched `openagents/gemini-3.6-flash`. The
+disclosure now reads `Thread::routed_model_pair`, a strict superset of
+`active_turn_model` that still consults the live fallback rung first.
+
 - **Enforced by:** `one_routed_decision_answers_every_label_and_no_lane_dead_ends`
   and the amended `the_thread_surface_renders_the_executor_line_from_the_record`
   in `crates/omega_deltas`;
@@ -9125,3 +9132,88 @@ own collapse control). Settings keeps tooltip `Settings` and accessible name
   in `crates/omega_deltas`; `a_collapsed_sidebar_takes_no_column_of_its_own` in
   `crates/agent_ui/src/omega_sidebar.rs`; and the workbench layout unit tests in
   `workbench_shell`.
+
+### OMEGA-DELTA-0206 — The finish word is read without case as authority
+
+**A completion's `finish_reason` is normalized before it is matched, so a
+provider's capitalization cannot turn a completed turn into an unknown one.**
+`STOP` and `stop` are the same answer. So are `MAX_TOKENS` and `length`, and
+`SAFETY` and `content_filter`.
+
+**Why.** Gemini's OpenAI-compatible surface writes the uppercase enum from
+Gemini's own API — `STOP`, `MAX_TOKENS`, `SAFETY`, `RECITATION`,
+`TOOL_CALLS` — and the hosted Gemini lane
+(`openagents/gemini-3.6-flash`) reaches the same `open_ai` mapper every other
+OpenAI-compatible provider does. That mapper matched three lower-case literals,
+so every healthy Gemini turn took the unknown arm and logged
+`Unexpected OpenAI stop_reason: "STOP"`. The turn was then reported as
+`EndTurn` by accident rather than by reading, and a turn cut off at the token
+limit was reported as a turn that finished.
+
+**Where this is owned.** In the `open_ai` crate, not in the gateway. The
+OpenAI-compatible wire format is what this crate parses, and Gemini's uppercase
+enum is part of that format as Gemini serves it — as are the same words served
+through OpenRouter and through a person's own configured Gemini base URL, which
+never pass through our gateway at all. Normalizing at the gateway would mean
+rewriting partner SSE bodies, which would break passthrough's defining
+property and still leave the direct routes broken.
+
+**What is now read rather than guessed.** `length` and `max_tokens` stop with
+`MaxTokens`; `safety`, `recitation`, `blocklist`, `prohibited_content`, `spii`,
+`content_filter` and `image_safety` stop with `Refusal`; `function_call` drains
+tool calls exactly as `tool_calls` does. `length` had no arm at all before this,
+so even upstream-spec OpenAI truncation was reported as a completed turn. A word
+that is still unknown is logged as the provider actually wrote it, not as the
+normalized copy, so it stays diagnosable.
+
+- **Enforced by:** `a_provider_finish_word_is_read_without_case_as_authority` in
+  `crates/omega_deltas`; and
+  `gemini_upper_case_finish_reasons_are_not_unknown`,
+  `an_upper_case_tool_call_finish_reason_still_drains_the_calls`,
+  `an_unknown_finish_reason_still_ends_the_turn` in
+  `crates/open_ai/src/completion.rs`.
+
+### OMEGA-DELTA-0207 — The label names the model the send will dispatch on
+
+**A model label is derived from the pair `Thread::send` will actually dispatch
+on, including before that pair has resolved into a live model.** The
+process-wide standing tier choice is the last resort and nothing else: it
+speaks only in a process that has no model registry at all.
+
+**Why.** `OMEGA-DELTA-0202` made every label a function of one routed decision,
+and closed the case where a resolved thread's surfaces disagreed. It left the
+window before resolution open. `Thread::active_turn_model` answers only once
+the thread's model is `Ready`; a thread whose model is `Unresolved` — it knows
+its provider/model pair and is waiting for the provider to register — reported
+"not disclosed", every surface fell through to `face_for(None, …)`, and that
+arm returned the standing tier. That static begins every launch at `Luna` and
+is never seeded from settings, so the composer read **Luna** while the send
+went to `openagents/gemini-3.6-flash`. This is the `OMEGA-DELTA-0131` defect
+exactly, in the one window `OMEGA-DELTA-0202` did not cover.
+
+**Where the guarantee leaked.** `OMEGA-DELTA-0202`'s check is a source-text
+grep over five render-side files. It never names `send_existing`, `ThreadModel`,
+or `ensure_model`, and it never asserts the converse of its own claim — that
+the model dispatched is the model labelled. Its unit test
+`an_unrouted_thread_falls_back_to_the_standing_choice` asserted only that the
+fallback returns the standing choice, never that the standing choice matches
+what will be dispatched, so the test blessed the hole rather than closing it.
+
+**What now holds.** `Thread::routed_model_pair` publishes the dispatch pair in
+dispatch order — the live fallback rung, then the configured model, then the
+pair a resolution is still pending on. The executor disclosure reads it.
+`pending_routed_model` answers the pre-session question from the registry's
+default model, which is what a new thread is handed and what `ensure_model`
+fills an unset thread with. `face_for_next_turn` is what every composer calls.
+
+**The standing choice is not deleted.** It still records what a person picked
+for the next connection, and `select_before_session` still writes that choice
+into settings, which is what the registry then serves. It is simply no longer
+permitted to *describe* a turn.
+
+- **Enforced by:** `the_label_names_the_model_the_send_will_dispatch_on` in
+  `crates/omega_deltas`; and
+  `a_stale_standing_choice_never_outranks_the_model_the_next_turn_starts_on`,
+  `the_label_follows_the_dispatch_when_the_standing_choice_is_launch_fresh`,
+  `without_a_registry_the_standing_choice_is_the_last_resort` in
+  `crates/agent_ui/src/omega_routed_model.rs`.

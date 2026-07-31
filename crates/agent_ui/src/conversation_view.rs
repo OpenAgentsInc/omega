@@ -4404,17 +4404,23 @@ impl ConversationView {
 
     /// The Luna / Flash / Pro dropdown, before a session exists.
     ///
-    /// `OMEGA-DELTA-0204`. `RoutedFace::pending` is the documented case for a
-    /// thread that has not routed anything yet: the standing choice is then a
-    /// truthful statement about what the next turn will start on, which is
-    /// exactly what this composer is for. Nothing here names a model as
-    /// *serving* a turn, because no turn has run.
+    /// `OMEGA-DELTA-0204`. Nothing here names a model as *serving* a turn,
+    /// because no turn has run.
+    ///
+    /// `OMEGA-DELTA-0207`. It names the model the next turn will start on, and
+    /// it gets that from the registry rather than from the standing choice.
+    /// The standing choice claimed to be "a truthful statement about what the
+    /// next turn will start on" and was not one: it is a process-wide static
+    /// that begins every launch at `Luna` and is never seeded from settings, so
+    /// this composer said **Luna** on a thread whose send went to
+    /// `openagents/gemini-3.6-flash`.
     fn render_pre_session_model_tier_selector(&self, cx: &mut Context<Self>) -> AnyElement {
-        use crate::omega_model_tier::{RoutedFace, render_model_tier_selector, selected};
+        use crate::omega_model_tier::{render_model_tier_selector, selected};
+        use crate::omega_routed_model::face_for_next_turn;
 
         let fs = self.project.read(cx).fs().clone();
         render_model_tier_selector(
-            RoutedFace::pending(selected()),
+            face_for_next_turn(None, selected(), cx),
             true,
             Rc::new(move |tier, _window, cx| {
                 crate::omega_model_tier::select_before_session(tier, fs.clone(), cx);
