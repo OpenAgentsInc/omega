@@ -2,7 +2,7 @@ use std::path::PathBuf;
 use std::thread::ThreadId;
 
 use anyhow::Context;
-use gpui::{SerializedThreadTaskTimings, TasksIncluded, profiler};
+use gpui::{SerializedThreadTaskTimings, TasksIncluded};
 use util::ResultExt;
 
 use crate::STARTUP_TIME;
@@ -29,19 +29,30 @@ pub fn save_any(main_thread_id: ThreadId) -> Option<PathBuf> {
         return None;
     };
 
-    if profiler::trace_enabled() {
-        None
-    } else {
-        cleanup_old_hang_traces();
-        let trace_path = paths::hang_traces_dir().join(&format!(
-            "hang-{}.miniprof.json",
-            chrono::Local::now().format("%Y-%m-%d_%H-%M-%S")
-        ));
-        std::fs::write(&trace_path, timings)
-            .context("hang trace file writing")
-            .log_err();
-        Some(trace_path)
-    }
+    // `OMEGA-DELTA-0210`. Write the trace whenever a hang produced one.
+    //
+    // This used to be `if profiler::trace_enabled() { None } else { …write… }`,
+    // and that is exactly backwards for the only configuration Omega has. The
+    // inversion made sense upstream, where a live miniprofiler session owned
+    // the buffer and a second consumer dumping it would have fought the viewer.
+    // `OMEGA-DELTA-0186` deleted that viewer, so nothing enabled tracing at
+    // all — and the guard then wrote the file *only* in the state where the
+    // buffer is guaranteed empty. Every trace Omega has written since carried
+    // `"timings": []` for every thread: a file that exists, is named after the
+    // hang, is cleaned up on a rotation, and says nothing.
+    //
+    // Now the hang detector enables tracing itself, so `trace_enabled()` is
+    // always true here and the old guard would suppress every trace. If a live
+    // trace consumer ever returns, it — not this — should be what defers.
+    cleanup_old_hang_traces();
+    let trace_path = paths::hang_traces_dir().join(&format!(
+        "hang-{}.miniprof.json",
+        chrono::Local::now().format("%Y-%m-%d_%H-%M-%S")
+    ));
+    std::fs::write(&trace_path, timings)
+        .context("hang trace file writing")
+        .log_err();
+    Some(trace_path)
 }
 
 pub fn cleanup_old_hang_traces() {

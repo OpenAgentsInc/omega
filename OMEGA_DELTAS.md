@@ -9353,3 +9353,68 @@ constant the description serves rather than a doc comment nothing reads.
   `an_unshapeable_task_is_not_an_execution_error` and
   `a_task_a_structured_target_cannot_parse_is_refused_by_naming_the_shape` in
   `agent`.
+
+### OMEGA-DELTA-0210 — The hang detector owns the trace it writes
+
+**A hang trace has the timings in it.** Omega's hang detector enables gpui's
+task-timing trace itself, with a bounded per-thread window, and writes the
+trace whenever a hang produced one.
+
+**Why.** The owner's dev build logged `New foreground hang detected: Tasks(s)
+that ran too long` and wrote
+`~/Library/Application Support/Omega Dev/hang_traces/hang-2026-07-31_02-56-02.miniprof.json`.
+That file — and every hang trace Omega had written — contained `"timings": []`
+for all eleven threads. A file that exists, is named after the hang, is rotated
+on a three-file cleanup, and cannot explain anything.
+
+Two independent defects, stacked:
+
+1. **Nothing enabled tracing.** `gpui::profiler::save_task_timing` pushes into
+   the per-thread ring buffer only `if trace_enabled()`, and `PROFILER_ENABLED`
+   is an `AtomicBool::new(false)` that only `set_trace_enabled` flips. Upstream,
+   the one caller was `crates/miniprofiler_ui`. `OMEGA-DELTA-0186` deleted that
+   crate with the rest of the legacy editor surface, which left
+   `set_trace_enabled` with **no callers at all**. The deletion was right; the
+   orphaned switch was not noticed.
+2. **The writer refused to write when tracing was on.** `task_traces::save_any`
+   read `if profiler::trace_enabled() { None } else { …write… }`. That guard is
+   correct upstream, where a live miniprofiler session owns the buffer and a
+   second consumer would fight the viewer. With the viewer gone it wrote the
+   file *only* in the state where the buffer is guaranteed empty.
+
+Each defect alone produces an empty trace. Together they made the emptiness
+look intentional.
+
+**Why the statistics still worked.** `TaskStatistics` is gathered
+unconditionally, which is why the log line still named a frame — `110.114875ms
+- crates/session/src/session.rs:75:16` an hour earlier in the same session —
+while the trace file could not. The surface that appeared to work is what kept
+the surface that did not from being noticed.
+
+**What now holds.** `start_hang_detection` calls
+`profiler::set_trace_enabled_with_capacity(true, 8192)`. The hang detector is
+the only thing left in Omega that reads the buffer, so it is what turns the
+buffer on; a buffer whose only reader does not enable it is a buffer that is
+never read. `save_any` writes unconditionally. If a live trace consumer ever
+returns, deferring is *its* business, not the writer's.
+
+**The window is bounded, and the bound is the caller's.**
+`set_trace_enabled` reserves `MAX_TASK_TIMINGS` — 16 MiB **per thread** — which
+is sized for a viewer somebody is reading. A trace that is on for the life of
+the process pays that on every thread forever, so
+`set_trace_enabled_with_capacity` lets the hang detector ask for the recent
+window it actually dumps: 8192 timings, a few hundred KiB a thread. The
+eviction keeps the newest, because a hang is explained by what ran just before
+it.
+
+**This does not claim to have explained the 02:56 hang.** That trace is empty
+and cannot be recovered, and the log frames went to a terminal rather than
+`~/Library/Logs/omega-dev/omega-dev.log`, because the process was launched from
+an interactive shell and `stdout_is_a_pty()` routes logging to stdout. What this
+delta guarantees is that the next one is answerable. The open question it leaves
+is recorded in omega#190.
+
+- **Enforced by:** `the_hang_detector_enables_the_trace_it_writes` in
+  `crates/omega_deltas`; and
+  `an_enabled_trace_records_within_the_window_its_caller_paid_for` in
+  `crates/gpui/src/profiler.rs`.

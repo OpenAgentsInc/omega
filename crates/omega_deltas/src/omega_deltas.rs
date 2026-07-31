@@ -198,6 +198,7 @@ pub const ENFORCED_DELTAS: &[&str] = &[
     "OMEGA-DELTA-0207",
     "OMEGA-DELTA-0208",
     "OMEGA-DELTA-0209",
+    "OMEGA-DELTA-0210",
 ];
 
 /// OMEGA-DELTA-0204. Every control the composer's bar offers, written twice:
@@ -247,6 +248,14 @@ pub const OMEGA_MODEL_TIER_PATH: &str = "crates/agent_ui/src/omega_model_tier.rs
 pub const OPEN_AI_COMPLETION_PATH: &str = "crates/open_ai/src/completion.rs";
 /// OMEGA-DELTA-0202. The single routed-model authority every label reads.
 pub const OMEGA_ROUTED_MODEL_PATH: &str = "crates/agent_ui/src/omega_routed_model.rs";
+
+/// OMEGA-DELTA-0210. Where the hang detector turns the trace on.
+pub const HANG_DETECTION_PATH: &str = "crates/omega/src/reliability/hang_detection.rs";
+/// OMEGA-DELTA-0210. Where the hang trace is written.
+pub const HANG_TRACE_WRITER_PATH: &str =
+    "crates/omega/src/reliability/hang_detection/task_traces.rs";
+/// OMEGA-DELTA-0210. gpui's task-timing trace switch and its bounded window.
+pub const GPUI_PROFILER_PATH: &str = "crates/gpui/src/profiler.rs";
 /// OMEGA-DELTA-0202. Where the executor disclosure record is built from a live
 /// thread, and therefore where a label stops being able to disagree with it.
 pub const OMEGA_EXECUTOR_DISCLOSURE_PATH: &str = "crates/agent_ui/src/omega_executor_disclosure.rs";
@@ -26044,6 +26053,75 @@ mod tests {
                  either the model is never told a structured target's contract, or a task \
                  it cannot parse is sent anyway.",
                 repository_path(SUBAGENT_SPAWN_TOOL_PATH).display()
+            );
+        }
+    }
+
+    /// OMEGA-DELTA-0210. The hang detector enables the trace it writes.
+    ///
+    /// Both halves are asserted, because either one alone produces an empty
+    /// file. `gpui::profiler::save_task_timing` pushes into the per-thread ring
+    /// buffer only while tracing is enabled, and gpui ships it disabled;
+    /// upstream's only caller was `crates/miniprofiler_ui`, which
+    /// `OMEGA-DELTA-0186` deleted. And the writer used to skip the file
+    /// whenever tracing *was* on — correct upstream, where a live viewer owned
+    /// the buffer, and exactly inverted here, where it meant the file was
+    /// written only in the state that guarantees it is empty.
+    ///
+    /// This is a source check and it knows what it is: it cannot prove a trace
+    /// has content. That oracle lives where it can run —
+    /// `an_enabled_trace_records_within_the_window_its_caller_paid_for` in
+    /// `crates/gpui/src/profiler.rs` records a task with tracing off, asserts
+    /// nothing is retained, turns it on and asserts one is.
+    #[test]
+    fn the_hang_detector_enables_the_trace_it_writes() {
+        let detection_path = repository_path(HANG_DETECTION_PATH);
+        let detection = read_repository_file(HANG_DETECTION_PATH);
+        assert!(
+            detection.contains("profiler::set_trace_enabled_with_capacity(true,"),
+            "OMEGA-DELTA-0210: {} no longer enables task-timing tracing. \
+             `PROFILER_ENABLED` ships `false` and the miniprofiler UI that used \
+             to flip it was deleted by `OMEGA-DELTA-0186`, so every hang trace \
+             is written with an empty `timings` array for every thread.",
+            detection_path.display()
+        );
+        assert!(
+            detection.contains("const HANG_TRACE_TIMINGS_PER_THREAD: usize ="),
+            "OMEGA-DELTA-0210: {} enables tracing without naming the window it \
+             pays for. `set_trace_enabled` reserves 16 MiB per thread, which is \
+             sized for a live viewer, not for a buffer left on for the life of \
+             the process.",
+            detection_path.display()
+        );
+
+        let writer_path = repository_path(HANG_TRACE_WRITER_PATH);
+        let writer = without_comments(&read_repository_file(HANG_TRACE_WRITER_PATH));
+        assert!(
+            !writer.contains("trace_enabled()"),
+            "OMEGA-DELTA-0210: {} defers to a live trace consumer again. There \
+             is none — the guard now writes the file only when the buffer is \
+             guaranteed empty. If a live consumer returns, deferring is its \
+             business, not the writer's.",
+            writer_path.display()
+        );
+        assert!(
+            writer.contains("std::fs::write(&trace_path, timings)"),
+            "OMEGA-DELTA-0210: {} no longer writes the hang trace.",
+            writer_path.display()
+        );
+
+        let profiler_path = repository_path(GPUI_PROFILER_PATH);
+        let profiler = read_repository_file(GPUI_PROFILER_PATH);
+        for required in [
+            "pub fn set_trace_enabled_with_capacity(enabled: bool, capacity: usize) -> bool",
+            "let capacity = trace_capacity();",
+        ] {
+            assert!(
+                profiler.contains(required),
+                "OMEGA-DELTA-0210: {} lost `{required}`. Without a caller-owned \
+                 window, an always-on trace grows to `MAX_TASK_TIMINGS` on every \
+                 thread.",
+                profiler_path.display()
             );
         }
     }

@@ -603,7 +603,8 @@ impl ThreadTimings {
 
         if trace_enabled() {
             std::hint::cold_path(); // optimize for when the profiling is off
-            if self.timings.len() >= MAX_TASK_TIMINGS {
+            let capacity = trace_capacity();
+            while self.timings.len() >= capacity {
                 self.timings.pop_front();
             }
             self.timings.push_back(timing);
@@ -677,6 +678,24 @@ pub fn get_current_thread_task_timings(include_running: TasksIncluded) -> Thread
 
 static PROFILER_ENABLED: AtomicBool = AtomicBool::new(false);
 
+/// How many completed timings each thread retains while tracing is on.
+///
+/// A live trace viewer wants everything it can hold, and [`MAX_TASK_TIMINGS`]
+/// is that: 16 MiB **per thread**. A trace that is always on for the sake of a
+/// hang report wants a recent window instead, because it pays that memory on
+/// every thread for the whole life of the process. See
+/// [`set_trace_enabled_with_capacity`].
+#[cfg(feature = "profiler")]
+static TRACE_CAPACITY: std::sync::atomic::AtomicUsize =
+    std::sync::atomic::AtomicUsize::new(MAX_TASK_TIMINGS);
+
+#[cfg(feature = "profiler")]
+fn trace_capacity() -> usize {
+    TRACE_CAPACITY
+        .load(Ordering::Relaxed)
+        .clamp(1, MAX_TASK_TIMINGS)
+}
+
 /// Enables or disables task timing trace collection at runtime.
 ///
 /// When transitioning from enabled to disabled, `add_task_timing` becomes a
@@ -684,6 +703,35 @@ static PROFILER_ENABLED: AtomicBool = AtomicBool::new(false);
 /// buffers for traces are cleared so stale data isn't reported after a later
 /// re-enable. Calls with the current value are a no-op.
 pub fn set_trace_enabled(enabled: bool) -> bool {
+    #[cfg(feature = "profiler")]
+    if enabled {
+        TRACE_CAPACITY.store(MAX_TASK_TIMINGS, Ordering::Relaxed);
+    }
+    set_trace_enabled_inner(enabled)
+}
+
+/// Enable tracing while retaining at most `capacity` timings per thread.
+///
+/// The retained window is the whole cost of leaving tracing on: each thread
+/// holds up to `capacity` [`TaskTiming`]s, and nothing else about
+/// `save_task_timing` changes. A caller that wants a trace to *exist* when
+/// something goes wrong — rather than a trace to browse — asks for a window it
+/// is willing to pay for on every thread, forever, instead of the 16 MiB per
+/// thread [`set_trace_enabled`] reserves for a live viewer.
+///
+/// `capacity` is clamped into `1..=MAX_TASK_TIMINGS`. Disabling ignores it and
+/// is exactly [`set_trace_enabled(false)`](set_trace_enabled).
+pub fn set_trace_enabled_with_capacity(enabled: bool, capacity: usize) -> bool {
+    #[cfg(feature = "profiler")]
+    if enabled {
+        TRACE_CAPACITY.store(capacity, Ordering::Relaxed);
+    }
+    #[cfg(not(feature = "profiler"))]
+    let _ = capacity;
+    set_trace_enabled_inner(enabled)
+}
+
+fn set_trace_enabled_inner(enabled: bool) -> bool {
     if PROFILER_ENABLED.swap(enabled, Ordering::AcqRel) == enabled {
         return false;
     }
@@ -826,5 +874,86 @@ impl FrameTimingCollector {
             .collect();
         self.cursor = frames.total_pushed;
         unseen
+    }
+}
+
+#[cfg(all(test, feature = "profiler"))]
+mod tests {
+    use super::*;
+
+    /// Both halves of `OMEGA-DELTA-0210`, in one test because both drive one
+    /// process-wide switch: two tests would race each other's `set_trace_*`.
+    ///
+    /// **A trace nobody enabled is a trace with nothing in it.** That is the
+    /// regression that shipped. The only caller of [`set_trace_enabled`] left
+    /// the tree with the miniprofiler UI, so `PROFILER_ENABLED` stayed `false`
+    /// for the whole life of every Omega process, `save_task_timing` never
+    /// pushed, and the hang detector wrote a file whose `timings` array was
+    /// empty for every thread. The statistics path is unconditional, which is
+    /// why the log report still named a frame while the trace file could not,
+    /// and why this went a release without being noticed.
+    ///
+    /// **The retained window is bounded, and the bound is the caller's.**
+    /// Without a capacity of its own, a trace left on for the life of the
+    /// process would grow to `MAX_TASK_TIMINGS` — 16 MiB — on every thread.
+    /// That size is for a live viewer somebody is reading, not for a buffer
+    /// that exists to be dumped after a hang.
+    #[test]
+    fn an_enabled_trace_records_within_the_window_its_caller_paid_for() {
+        set_trace_enabled(false);
+        clear_current_thread_timings();
+        record_one_task();
+        assert!(
+            current_timings().is_empty(),
+            "tracing is off, so no timing may be retained"
+        );
+
+        assert!(set_trace_enabled_with_capacity(true, 4));
+        record_one_task();
+        assert_eq!(
+            current_timings().len(),
+            1,
+            "a hang trace written now would be the empty file OMEGA-DELTA-0210 \
+             exists to stop"
+        );
+
+        for _ in 0..32 {
+            record_one_task();
+        }
+        let kept = current_timings();
+        assert_eq!(
+            kept.len(),
+            4,
+            "the ring buffer grew past the capacity the caller asked for"
+        );
+        // And the newest polls are the ones kept: a hang is explained by what
+        // ran just before it, not by what ran first.
+        assert!(
+            kept.windows(2).all(|pair| pair[0].start <= pair[1].start),
+            "the retained window is out of order, so the oldest entries were \
+             not the ones evicted"
+        );
+
+        // Disabling clears, so a later re-enable cannot report stale work.
+        assert!(set_trace_enabled(false));
+        assert!(current_timings().is_empty());
+    }
+
+    #[track_caller]
+    fn record_one_task() {
+        update_running_task(SpawnTime(Instant::now()), std::panic::Location::caller());
+        save_task_timing();
+    }
+
+    fn current_timings() -> Vec<TaskTiming> {
+        get_current_thread_task_timings(TasksIncluded::OnlyCompleted).timings
+    }
+
+    fn clear_current_thread_timings() {
+        THREAD_TIMINGS.with(|timings| {
+            let mut timings = timings.lock();
+            timings.timings.clear();
+            timings.total_pushed = 0;
+        });
     }
 }

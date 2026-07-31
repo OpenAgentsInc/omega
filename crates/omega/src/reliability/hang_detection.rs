@@ -75,7 +75,38 @@ pub(crate) fn start(client: Arc<Client>, cx: &mut App) {
     });
 }
 
+/// How many completed task timings each thread keeps for a hang trace.
+///
+/// `OMEGA-DELTA-0210`. A `TaskTiming` is four words, so this is a few hundred
+/// KiB per thread and a few MiB across a running Omega — paid for the life of
+/// the process, on every thread, so that a hang trace has something in it. The
+/// alternative gpui offers is 16 MiB per thread, which is sized for a live
+/// trace viewer somebody is reading, not for a buffer that exists to be dumped
+/// after the fact.
+///
+/// A power of two: `VecDeque` grows by doubling, and an off-by-one capacity
+/// wastes half a buffer on every thread.
+const HANG_TRACE_TIMINGS_PER_THREAD: usize = 8192;
+
 fn start_hang_detection(report_longer_then: Duration, client: Arc<Client>, cx: &App) {
+    // `OMEGA-DELTA-0210`. Turn task-timing tracing on, because otherwise the
+    // trace this detector writes is empty.
+    //
+    // gpui gathers cheap statistics unconditionally — which is what the log
+    // report below is built from — but only pushes a timing into the per-thread
+    // ring buffer when tracing is enabled, and it ships disabled. Upstream, the
+    // one caller that enabled it was the miniprofiler UI. `OMEGA-DELTA-0186`
+    // deleted that crate with the rest of the legacy editor surface, which left
+    // `set_trace_enabled` with no callers at all, and from then on every
+    // `hang-*.miniprof.json` Omega wrote contained `"timings": []` for every
+    // thread. The file was still written, still cleaned up, still named after
+    // the hang — and could never explain one.
+    //
+    // So the hang detector owns the trace now. That is the honest ownership:
+    // it is the only thing left in Omega that reads the buffer, and a buffer
+    // whose only reader does not enable it is a buffer that is never read.
+    profiler::set_trace_enabled_with_capacity(true, HANG_TRACE_TIMINGS_PER_THREAD);
+
     let foreground_thread = thread::current().id();
     let monitor_interval = Duration::from_secs(1);
     let background_report_longer_then = report_longer_then.max(Duration::from_secs(1));
