@@ -50,6 +50,33 @@ script/prove-omega-rc-install \
   --lifecycle-evidence target/omega-rc-proof/lifecycle/manifest.json
 ```
 
+The Episode 263 release cut has a separate aggregate verdict. After collecting
+the public-safe Sarah LiveKit manifest and owner-assisted observations, run:
+
+```sh
+script/omega-release-gate \
+  --dmg target/omega-rc/Omega-v0.2.0-rc28-macos-arm64.dmg \
+  --release-record target/omega-rc/omega-v0.2.0-rc28-macos-arm64.release.json \
+  --sarah-livekit-evidence target/omega-release-gate/sarah-livekit.json \
+  --owner-evidence target/omega-release-gate/owner-evidence.json \
+  --receipt-copy docs/omega/release-gate/<date>-<candidate>.gate.json \
+  --report docs/omega/release-gate.md \
+  --require-green
+```
+
+The owner manifest is
+`openagents.omega.release-gate-owner-evidence.v1`; its checked-in schema and
+valid self-test fixture live under
+`script/fixtures/omega-release-gate/`. Partial manifests are allowed while
+collecting evidence, but they leave absent rows pending. Every included row
+must name the observer and time, bind the exact package/source, and reference
+repository-local public-safe evidence by SHA-256. The independent-review
+observer cannot be the candidate producer. The distribution observation must
+record claim-for-claim agreement among the Episode 263 transcript, website,
+release notes, installed binary, and announcement copy. `--require-green`
+turns any pending, blocked, inconclusive, or failed row into a nonzero release
+decision; without it, exit zero means only that no automated check failed.
+
 Harness validation without an installed candidate:
 
 ```sh

@@ -1,0 +1,47 @@
+{
+  "binding": {
+    "candidate_producer": "candidate-producer",
+    "omega_package_sha256": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+    "omega_source_revision": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+  },
+  "rows": [
+    {
+      "evidence_refs": [
+        {
+          "path": "docs/omega/release-gate/fixture-distribution.json",
+          "public_safe": true,
+          "sha256": "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc"
+        }
+      ],
+      "facts": {
+        "announcement_copy_agrees": true,
+        "installed_binary_agrees": true,
+        "release_notes_agree": true,
+        "transcript_agrees": true,
+        "website_agrees": true
+      },
+      "id": "distribution",
+      "observed_at": "2026-07-31T12:00:00Z",
+      "observer": "candidate-producer",
+      "status": "owner-assisted-pass"
+    },
+    {
+      "evidence_refs": [
+        {
+          "path": "docs/omega/release-gate/fixture-independent-review.json",
+          "public_safe": true,
+          "sha256": "dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd"
+        }
+      ],
+      "facts": {
+        "held_out_journey_repeated": true,
+        "reviewer_verdict": "accepted"
+      },
+      "id": "independent-review",
+      "observed_at": "2026-07-31T12:30:00Z",
+      "observer": "independent-reviewer",
+      "status": "owner-assisted-pass"
+    }
+  ],
+  "schema": "openagents.omega.release-gate-owner-evidence.v1"
+}

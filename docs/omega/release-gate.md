@@ -30,7 +30,38 @@ its value; an unreadable required secret surface blocks the row.
 Regenerate: build the candidate with `script/bundle-omega-rc`, then run
 `script/omega-release-gate --report docs/omega/release-gate.md --receipt-copy
 docs/omega/release-gate/<date>-<candidate>.gate.json
---sarah-livekit-evidence <public-safe-manifest.json>`.
+--sarah-livekit-evidence <public-safe-manifest.json>
+--owner-evidence <public-safe-owner-observations.json> --require-green`.
+The final command exits nonzero unless every row is a preserved pass.
+
+The owner-evidence manifest uses
+`openagents.omega.release-gate-owner-evidence.v1` and the checked-in schema at
+`script/fixtures/omega-release-gate/owner-evidence.schema.json`. Every supplied
+row is bound to this candidate's package digest and source revision, names its
+observer and timezone-qualified observation time, and carries repository-local
+public-safe evidence with an exact SHA-256. The independent reviewer must
+differ from the candidate producer. The distribution row additionally refuses
+to pass unless the Episode 263 transcript, website, release notes, installed
+binary, and announcement copy agree claim for claim.
+
+This checked-in report remains an rc28 historical receipt, not a 0.2.0 release
+verdict. Its owner-assisted, blocked, and inconclusive rows are the exact known
+limits. A later candidate must replace the candidate metadata and evidence;
+source tests or closed implementation issues cannot promote this receipt.
+
+As of 2026-07-31 the cut remains **no-go**. Omega issues
+[#185](https://github.com/OpenAgentsInc/omega/issues/185),
+[#186](https://github.com/OpenAgentsInc/omega/issues/186), and
+[#187](https://github.com/OpenAgentsInc/omega/issues/187) still own the
+unfinished LiveKit desktop and installed-evidence journeys. Issue
+[#191](https://github.com/OpenAgentsInc/omega/issues/191) reports that the
+sealed visual proof is currently unrunnable, so the earlier rc28 visual result
+cannot be carried forward. Issue
+[#189](https://github.com/OpenAgentsInc/omega/issues/189) still owns the
+candidate-bound Episode 263 footage. Independently of those issues, every row
+shown below as `owner-assisted-pending` still needs observation on the exact
+new package, and the distribution and independent-review rows need the strict
+owner manifest described above.
 
 Assemble that manifest with
 `script/assemble-omega-sarah-livekit-evidence`. It takes the DMG and release

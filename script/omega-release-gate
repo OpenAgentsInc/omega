@@ -30,11 +30,13 @@ Usage:
     script/omega-release-gate [--dmg PATH] [--release-record PATH]
                               [--output-dir DIR] [--skip-launch]
                               [--launch-settle SECONDS] [--report PATH]
-                              [--receipt-copy PATH] [--self-test]
+                              [--receipt-copy PATH]
+                              [--owner-evidence PATH] [--require-green]
+                              [--self-test]
 
-Exit codes: 0 = no automated row failed (owner-assisted rows may remain
-pending), 1 = at least one automated row failed, 2 = harness error,
-3 = self-test failure.
+Exit codes: 0 = no automated row failed (or, with --require-green, every row
+passed), 1 = an automated row failed or --require-green found a pending,
+blocked, or inconclusive row, 2 = harness error, 3 = self-test failure.
 """
 
 from __future__ import annotations
@@ -56,6 +58,7 @@ from pathlib import Path
 
 SCHEMA = "openagents.omega.release-gate.v2"
 SARAH_LIVEKIT_EVIDENCE_SCHEMA = "openagents.omega.sarah-livekit-evidence.v1"
+OWNER_EVIDENCE_SCHEMA = "openagents.omega.release-gate-owner-evidence.v1"
 
 ROOT = Path(__file__).resolve().parent.parent
 
@@ -562,6 +565,132 @@ def validate_sarah_livekit_evidence(
     return binding, rows
 
 
+def validate_owner_evidence(
+    payload: dict,
+    package_sha256: str,
+    source_revision: str,
+    *,
+    allow_unresolved_refs: bool = False,
+) -> tuple[str, dict[str, dict]]:
+    if payload.get("schema") != OWNER_EVIDENCE_SCHEMA:
+        raise ValueError(
+            f"expected schema {OWNER_EVIDENCE_SCHEMA!r}, "
+            f"got {payload.get('schema')!r}"
+        )
+    binding = payload.get("binding")
+    if not isinstance(binding, dict) or set(binding) != {
+        "omega_package_sha256",
+        "omega_source_revision",
+        "candidate_producer",
+    }:
+        raise ValueError("owner evidence binding has unexpected or missing fields")
+    if binding["omega_package_sha256"] != package_sha256:
+        raise ValueError("owner evidence package digest does not match the candidate")
+    if binding["omega_source_revision"] != source_revision:
+        raise ValueError("owner evidence source revision does not match the candidate")
+    producer = binding["candidate_producer"]
+    if not isinstance(producer, str) or not producer.strip():
+        raise ValueError("owner evidence must name the candidate producer")
+
+    expected_ids = {spec["id"] for spec in OWNER_ASSISTED_ROWS}
+    rows: dict[str, dict] = {}
+    raw_rows = payload.get("rows")
+    if not isinstance(raw_rows, list):
+        raise ValueError("owner evidence rows must be an array")
+    for row in raw_rows:
+        if not isinstance(row, dict) or set(row) != {
+            "id",
+            "status",
+            "observer",
+            "observed_at",
+            "facts",
+            "evidence_refs",
+        }:
+            raise ValueError("every owner evidence row must have the exact admitted fields")
+        row_id = row["id"]
+        if row_id not in expected_ids:
+            raise ValueError(f"unexpected owner evidence row {row_id!r}")
+        if row_id in rows:
+            raise ValueError(f"duplicate owner evidence row {row_id}")
+        if row["status"] != "owner-assisted-pass":
+            raise ValueError(f"owner evidence row {row_id} must be owner-assisted-pass")
+        observer = row["observer"]
+        if not isinstance(observer, str) or not observer.strip():
+            raise ValueError(f"owner evidence row {row_id} must name its observer")
+        observed_at = row["observed_at"]
+        if (
+            not isinstance(observed_at, str)
+            or re.fullmatch(
+                r"\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:Z|[+-]\d{2}:\d{2})",
+                observed_at,
+            )
+            is None
+        ):
+            raise ValueError(f"owner evidence row {row_id} needs a timezone timestamp")
+        facts = row["facts"]
+        if not isinstance(facts, dict):
+            raise ValueError(f"owner evidence row {row_id} facts must be an object")
+        if row_id == "independent-review":
+            if observer == producer:
+                raise ValueError("independent reviewer must differ from candidate producer")
+            if facts != {
+                "held_out_journey_repeated": True,
+                "reviewer_verdict": "accepted",
+            }:
+                raise ValueError("independent review facts do not record an accepted held-out journey")
+        if row_id == "distribution":
+            required_claim_facts = {
+                "transcript_agrees": True,
+                "website_agrees": True,
+                "release_notes_agree": True,
+                "installed_binary_agrees": True,
+                "announcement_copy_agrees": True,
+            }
+            if facts != required_claim_facts:
+                raise ValueError("distribution facts do not prove claim-for-claim agreement")
+        refs = row["evidence_refs"]
+        if not isinstance(refs, list) or not refs:
+            raise ValueError(f"owner evidence row {row_id} must preserve evidence")
+        seen_paths: set[str] = set()
+        for ref in refs:
+            if not isinstance(ref, dict) or set(ref) != {
+                "path",
+                "sha256",
+                "public_safe",
+            }:
+                raise ValueError(f"owner evidence row {row_id} has an invalid evidence ref")
+            path = ref["path"]
+            if (
+                not isinstance(path, str)
+                or not path
+                or Path(path).is_absolute()
+                or ".." in Path(path).parts
+                or path in seen_paths
+            ):
+                raise ValueError(f"owner evidence row {row_id} has an unsafe evidence path")
+            seen_paths.add(path)
+            if re.fullmatch(r"[0-9a-f]{64}", str(ref["sha256"])) is None:
+                raise ValueError(f"owner evidence row {row_id} ref must carry a sha256")
+            if ref["public_safe"] is not True:
+                raise ValueError(f"owner evidence row {row_id} ref is not public-safe")
+            evidence_path = ROOT / path
+            if not allow_unresolved_refs:
+                if (
+                    not evidence_path.is_file()
+                    or evidence_path.is_symlink()
+                    or sha256_file(evidence_path) != ref["sha256"]
+                ):
+                    raise ValueError(
+                        f"owner evidence row {row_id} ref is absent, linked, or mismatched"
+                    )
+        rows[row_id] = row
+
+    serialized = json.dumps(payload, sort_keys=True)
+    if re.search(r"(?i)(bearer\s+[a-z0-9._-]+|sk-[a-z0-9_-]{12,})", serialized):
+        raise ValueError("owner evidence contains a secret-shaped value")
+    return producer, rows
+
+
 def now_utc() -> str:
     return (
         datetime.datetime.now(datetime.timezone.utc)
@@ -803,9 +932,49 @@ def self_test() -> int:
     if canonical_digest(binding) == "":
         print("self-test: LiveKit binding digest is empty", file=sys.stderr)
         return 3
+    owner_fixture_path = (
+        ROOT / "script/fixtures/omega-release-gate/owner-evidence-valid.json"
+    )
+    try:
+        owner_fixture = json.loads(owner_fixture_path.read_text())
+        producer, owner_rows = validate_owner_evidence(
+            owner_fixture, "a" * 64, "b" * 40, allow_unresolved_refs=True
+        )
+    except (OSError, json.JSONDecodeError, ValueError) as error:
+        print(f"self-test: valid owner evidence fixture failed: {error}", file=sys.stderr)
+        return 3
+    if producer != "candidate-producer" or set(owner_rows) != {
+        "distribution",
+        "independent-review",
+    }:
+        print("self-test: owner evidence fixture lost its exact authority", file=sys.stderr)
+        return 3
+    same_reviewer = json.loads(json.dumps(owner_fixture))
+    same_reviewer["rows"][1]["observer"] = "candidate-producer"
+    try:
+        validate_owner_evidence(
+            same_reviewer, "a" * 64, "b" * 40, allow_unresolved_refs=True
+        )
+    except ValueError:
+        pass
+    else:
+        print("self-test: candidate producer was accepted as reviewer", file=sys.stderr)
+        return 3
+    divergent_claim = json.loads(json.dumps(owner_fixture))
+    divergent_claim["rows"][0]["facts"]["website_agrees"] = False
+    try:
+        validate_owner_evidence(
+            divergent_claim, "a" * 64, "b" * 40, allow_unresolved_refs=True
+        )
+    except ValueError:
+        pass
+    else:
+        print("self-test: divergent release claims were accepted", file=sys.stderr)
+        return 3
     print(
         "release-gate self-test passed: sweep fires, tampering and "
-        "candidate-mismatched and incomplete passing LiveKit evidence are refused."
+        "candidate-mismatched and incomplete passing LiveKit evidence, producer "
+        "self-review, and divergent release claims are refused."
     )
     return 0
 
@@ -837,6 +1006,20 @@ def main() -> int:
             "public-safe evidence manifest binding all six Sarah LiveKit rows "
             "to this exact package and infrastructure"
         ),
+    )
+    parser.add_argument(
+        "--owner-evidence",
+        type=Path,
+        default=None,
+        help=(
+            "public-safe, content-addressed observations that may promote "
+            "owner-assisted rows for this exact candidate"
+        ),
+    )
+    parser.add_argument(
+        "--require-green",
+        action="store_true",
+        help="exit nonzero unless every release row is a preserved pass",
     )
     parser.add_argument("--self-test", action="store_true")
     args = parser.parse_args()
@@ -886,6 +1069,9 @@ def main() -> int:
     livekit_evidence_rows: dict[str, dict] | None = None
     livekit_evidence_error: str | None = None
     livekit_evidence_ref: dict | None = None
+    owner_evidence_rows: dict[str, dict] = {}
+    owner_evidence_error: str | None = None
+    owner_evidence_ref: dict | None = None
     if args.sarah_livekit_evidence is None:
         livekit_evidence_error = (
             "no --sarah-livekit-evidence manifest was supplied for this candidate"
@@ -903,6 +1089,19 @@ def main() -> int:
             }
         except (OSError, json.JSONDecodeError, ValueError) as error:
             livekit_evidence_error = str(error)
+    if args.owner_evidence is not None:
+        try:
+            owner_payload = json.loads(args.owner_evidence.read_text())
+            _, owner_evidence_rows = validate_owner_evidence(
+                owner_payload, package_digest, commit
+            )
+            owner_evidence_ref = {
+                "path": portable_path(args.owner_evidence),
+                "sha256": sha256_file(args.owner_evidence),
+                "public_safe": True,
+            }
+        except (OSError, json.JSONDecodeError, ValueError) as error:
+            owner_evidence_error = str(error)
     integrity_facts = {
         "artifact": args.dmg.name,
         "package_sha256": package_digest,
@@ -1350,18 +1549,55 @@ def main() -> int:
         safety_refs,
     )
     menu_owner = next(r for r in OWNER_ASSISTED_ROWS if r["id"] == "menu-honesty")
-    add_row(
-        "menu-honesty",
-        menu_owner["title"],
-        "owner-assisted-pending",
-        menu_facts,
-        menu_refs,
-        issues=menu_owner["issues"],
-        owner_instruction=menu_owner["owner_instruction"],
-    )
+    menu_observed = owner_evidence_rows.get("menu-honesty")
+    if menu_observed is None:
+        add_row(
+            "menu-honesty",
+            menu_owner["title"],
+            "owner-assisted-pending",
+            menu_facts,
+            menu_refs,
+            issues=menu_owner["issues"],
+            owner_instruction=menu_owner["owner_instruction"],
+        )
+    else:
+        observed_refs = list(menu_observed["evidence_refs"])
+        if owner_evidence_ref is not None:
+            observed_refs.append(owner_evidence_ref)
+        add_row(
+            "menu-honesty",
+            menu_owner["title"],
+            "owner-assisted-pass",
+            {
+                **menu_facts,
+                **menu_observed["facts"],
+                "observer": menu_observed["observer"],
+                "observed_at": menu_observed["observed_at"],
+            },
+            menu_refs + observed_refs,
+            issues=menu_owner["issues"],
+        )
 
     for spec in OWNER_ASSISTED_ROWS:
         if spec["id"] == "menu-honesty":
+            continue
+        observed = owner_evidence_rows.get(spec["id"])
+        if observed is not None:
+            refs = list(observed["evidence_refs"])
+            if owner_evidence_ref is not None:
+                refs.append(owner_evidence_ref)
+            add_row(
+                spec["id"],
+                spec["title"],
+                "owner-assisted-pass",
+                {
+                    **observed["facts"],
+                    "observer": observed["observer"],
+                    "observed_at": observed["observed_at"],
+                },
+                refs,
+                issues=spec["issues"],
+            )
             continue
         add_row(
             spec["id"],
@@ -1371,6 +1607,16 @@ def main() -> int:
             [],
             issues=spec["issues"],
             owner_instruction=spec["owner_instruction"],
+        )
+
+    if owner_evidence_error is not None:
+        add_row(
+            "owner-evidence-validation",
+            "Owner-assisted evidence manifest is valid and candidate-bound",
+            "automated-fail",
+            {"error": owner_evidence_error},
+            [],
+            issues=["omega#160"],
         )
 
     for spec in SARAH_LIVEKIT_ROWS:
@@ -1429,9 +1675,16 @@ def main() -> int:
         "candidate": {
             "artifact_name": args.dmg.name,
             "package_sha256": package_digest,
+            "release_record_sha256": sha256_file(args.release_record),
             "source_commit": commit,
             "version": record.get("version"),
             "channel": record.get("channel"),
+            "platform": record.get("toolchains", {}).get("target"),
+            "signing_identity": record.get("signing_identity"),
+            "team_id": record.get("team_id"),
+            "signature_verified": integrity_facts["codesign_verify"],
+            "notarization": record.get("notarization"),
+            "known_limits": automated_failures + pending + blocked,
         },
         "sarah_livekit_binding": livekit_binding,
         "harness_commit": run(
@@ -1457,6 +1710,8 @@ def main() -> int:
     for row in rows:
         print(f"  {row['status']:<24} {row['id']}")
     print(f"receipt: {receipt_path}")
+    if args.require_green and status != "passed":
+        return 1
     return 1 if automated_failures else 0
 
 
@@ -1479,7 +1734,19 @@ def write_report(path: Path, receipt: dict) -> None:
         f"(version {receipt['candidate']['version']}, "
         f"channel {receipt['candidate']['channel']})",
         f"- Package SHA-256: `{receipt['candidate']['package_sha256']}`",
+        f"- Release-record SHA-256: `{receipt['candidate']['release_record_sha256']}`",
         f"- Source commit: `{receipt['candidate']['source_commit']}`",
+        f"- Platform: `{receipt['candidate']['platform']}`",
+        f"- Signing identity: `{receipt['candidate']['signing_identity']}` "
+        f"(team `{receipt['candidate']['team_id']}`)",
+        f"- Signature verified: `{receipt['candidate']['signature_verified']}`",
+        f"- Notarization: `{json.dumps(receipt['candidate']['notarization'], sort_keys=True)}`",
+        "- Known limits: "
+        + (
+            ", ".join(f"`{row_id}`" for row_id in receipt["candidate"]["known_limits"])
+            if receipt["candidate"]["known_limits"]
+            else "none"
+        ),
         f"- Harness commit: `{receipt['harness_commit']}`",
         f"- Overall status: **{receipt['status']}**",
         f"- Receipt digest: `{receipt['evidence_sha256']}`",
@@ -1499,7 +1766,10 @@ def write_report(path: Path, receipt: dict) -> None:
         "Regenerate: build the candidate with `script/bundle-omega-rc`, then "
         "run `script/omega-release-gate --report docs/omega/release-gate.md "
         "--receipt-copy docs/omega/release-gate/<date>-<candidate>.gate.json "
-        "--sarah-livekit-evidence <public-safe-manifest.json>`.",
+        "--sarah-livekit-evidence <public-safe-manifest.json> "
+        "--owner-evidence <public-safe-owner-observations.json> "
+        "--require-green`. The final command exits nonzero unless every row "
+        "is a preserved pass.",
         "",
         "| Row | Status | Issues | Evidence / owner instruction |",
         "| --- | --- | --- | --- |",

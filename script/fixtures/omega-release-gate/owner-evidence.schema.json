@@ -1,0 +1,113 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "additionalProperties": false,
+  "properties": {
+    "binding": {
+      "additionalProperties": false,
+      "properties": {
+        "candidate_producer": {
+          "minLength": 1,
+          "type": "string"
+        },
+        "omega_package_sha256": {
+          "pattern": "^[0-9a-f]{64}$",
+          "type": "string"
+        },
+        "omega_source_revision": {
+          "minLength": 1,
+          "type": "string"
+        }
+      },
+      "required": [
+        "omega_package_sha256",
+        "omega_source_revision",
+        "candidate_producer"
+      ],
+      "type": "object"
+    },
+    "rows": {
+      "items": {
+        "additionalProperties": false,
+        "properties": {
+          "evidence_refs": {
+            "items": {
+              "additionalProperties": false,
+              "properties": {
+                "path": {
+                  "minLength": 1,
+                  "type": "string"
+                },
+                "public_safe": {
+                  "const": true
+                },
+                "sha256": {
+                  "pattern": "^[0-9a-f]{64}$",
+                  "type": "string"
+                }
+              },
+              "required": [
+                "path",
+                "sha256",
+                "public_safe"
+              ],
+              "type": "object"
+            },
+            "minItems": 1,
+            "type": "array"
+          },
+          "facts": {
+            "type": "object"
+          },
+          "id": {
+            "enum": [
+              "direct-codex",
+              "direct-claude-code",
+              "direct-grok",
+              "generic-acp",
+              "concurrency-supervision",
+              "three-mode-journeys",
+              "omega-routing",
+              "sarah-journey",
+              "work-surfaces",
+              "update-safety-lifecycle",
+              "distribution",
+              "independent-review",
+              "menu-honesty"
+            ]
+          },
+          "observed_at": {
+            "pattern": "^\\d{4}-\\d{2}-\\d{2}T\\d{2}:\\d{2}:\\d{2}(?:Z|[+-]\\d{2}:\\d{2})$",
+            "type": "string"
+          },
+          "observer": {
+            "minLength": 1,
+            "type": "string"
+          },
+          "status": {
+            "const": "owner-assisted-pass"
+          }
+        },
+        "required": [
+          "id",
+          "status",
+          "observer",
+          "observed_at",
+          "facts",
+          "evidence_refs"
+        ],
+        "type": "object"
+      },
+      "type": "array"
+    },
+    "schema": {
+      "const": "openagents.omega.release-gate-owner-evidence.v1"
+    }
+  },
+  "required": [
+    "schema",
+    "binding",
+    "rows"
+  ],
+  "title": "Omega release-gate owner-assisted evidence",
+  "type": "object"
+}

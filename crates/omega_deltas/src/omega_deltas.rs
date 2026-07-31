@@ -23930,6 +23930,7 @@ mod tests {
         }
         for honesty in [
             "openagents.omega.release-gate.v2",
+            "openagents.omega.release-gate-owner-evidence.v1",
             "automated-pass",
             "automated-fail",
             "owner-assisted-pass",
@@ -23941,7 +23942,40 @@ mod tests {
                 gate.contains(honesty),
                 "OMEGA-DELTA-0185: script/omega-release-gate lost the `{honesty}` \
                  status vocabulary. \"Nothing was found\" and \"nobody looked\" \
-                 must never read the same."
+                must never read the same."
+            );
+        }
+        for finalization_boundary in [
+            "--owner-evidence",
+            "--require-green",
+            "independent reviewer must differ from candidate producer",
+            "transcript_agrees",
+            "website_agrees",
+            "release_notes_agree",
+            "installed_binary_agrees",
+            "announcement_copy_agrees",
+        ] {
+            assert!(
+                gate.contains(finalization_boundary),
+                "OMEGA-DELTA-0185: script/omega-release-gate lost the final \
+                 release boundary `{finalization_boundary}`."
+            );
+        }
+        let owner_schema =
+            read_repository_file("script/fixtures/omega-release-gate/owner-evidence.schema.json");
+        let owner_fixture =
+            read_repository_file("script/fixtures/omega-release-gate/owner-evidence-valid.json");
+        for binding in [
+            "candidate_producer",
+            "omega_package_sha256",
+            "omega_source_revision",
+            "independent-review",
+            "distribution",
+        ] {
+            assert!(
+                owner_schema.contains(binding) && owner_fixture.contains(binding),
+                "OMEGA-DELTA-0185: owner evidence schema or fixture lost \
+                 `{binding}`."
             );
         }
 
