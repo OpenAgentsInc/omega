@@ -23,22 +23,22 @@
       "sarah_worker_image_digest": "infra/livekit/production/resources/sarah-agent-runtime.yaml and infra/livekit/bundle.json workerImage (pinState pinned); pinned by openagents commit 8489421023, the direct child of worker source fdd0db9bab",
       "unbound_identifier": "The Cloud Run serving revision openagents-monolith-00349-7q2 was reported to the assembling agent but is recorded nowhere in openagents at c4906fbd89, so it is deliberately absent from this binding. The last serving revision recorded in the repository in a Sarah LiveKit context is openagents-monolith-00347-bds."
     },
-    "blocked_reason": "No failure drill has been executed against this candidate or this infrastructure. The failure-matrix harness states its own limitation that fault actions are observed and not executed by it. The production route that would arm the exact provider-disconnect drill is gated by SARAH_LIVEKIT_PROVIDER_DISCONNECT_ACCEPTANCE_ENABLED, which is \"false\" in the production deploy bundle and contract-locked to false by a deploy-bundle test, so the route answers 404 before authentication. Worker crash, timeout, hold exhaustion, duplicate participant, membership revocation, the reconnect-cannot-revive drill, and SFU loss have no live receipt. The SFU-loss scenario is now DEFINED in the failure matrix (openagents af65458919): fault delete_exact_sfu_pod, a 30000 ms bound measured from fault injection rather than from session start, admitted terminal reasons worker_shutdown, participant_left, and worker_error, and session_expired and completed explicitly refused. Defining it removes the prerequisite gap this row previously recorded; it does not execute it, and an unexecuted defined scenario is worth exactly as much as an undefined one for this row. The eight-scope privacy scan has still produced no output, and its four blockers are now enumerated per scope (openagents bbf6f9831e): the automation identity cannot read pod logs or exec, Error Reporting is not enabled on the project, Redis has no IAM and no read-only network path, and packaged_clients, object_storage, and traces have no defined in-scope target set. Three of the four are outside what any repository change can fix. No media-key rekey proof exists.",
+    "blocked_reason": "No failure drill has been executed against this candidate or this infrastructure. Two of the three prerequisites the previous pass recorded are now cleared, and clearing them exposed a third that no credential or permission can address. CLEARED: the two mandatory 24 kHz mono s16 PCM prompts now have a documented ten-second regeneration procedure and a pinned machine-local location (openagents dd5d62a5dd), proven by a live two-journey acceptance run that passed with Sarah audio, ephemeral transcription, and exact settlement in both journeys. CLEARED: the automation identity now holds a namespace-scoped RBAC Role in livekit-system granting exactly pods:delete and pods/log:get,list, verified by real API calls rather than kubectl auth can-i, which answers optimistically for subresources and returned a false yes for pods/log. STILL BLOCKED, and this is the binding constraint: there is no single-session driver. runSarahLiveKitAcceptance requires both a private and a community scenario, runs them concurrently, hard-asserts concurrent overlap, and returns only after both settle, so nothing can hold one session live while a fault is injected into it. That blocks worker_crash, sfu_loss, provider_disconnect, timeout, hold_exhaustion, and reconnect alike. sfu_loss additionally requires concurrentBillableSessionCount: 1, which that driver can never produce; its step 2 is also unsolved under the granted authority, because it reads livekit_room_total through pods/exec, which was deliberately not granted, and the Managed Prometheus substitute scrapes every 30 s against a session that lives about 21 s. membership_revocation_bounded and hold_exhaustion_bounded have no operator path at all: the only revocation lever revokes every active alpha member with no bulk re-admit, and no checked-in tool derives the worker control bearer. replayed_grant_refused has no defined procedure. duplicate_participant_refused still has no production code path. The provider-disconnect route remains contract-locked closed; arming was authorized for this lane but not performed, because the drill it enables still needs the missing driver, and an armed window that cannot be used is production mutation without evidence. The eight-scope privacy scan is no longer blocked: a separate lane cleared all four blockers and defined the three prose-only scopes (openagents c1a54c919d), and this lane injected the retention canaries that scan needs, because a canary generated at scan time tests nothing. The canaries were spoken into real production sessions in the window 2026-07-31T18:41:26Z to 18:41:51Z with transcription observed on both journeys. The scan itself has still produced no receipt, so privacy_scope_count remains not_observed. No media-key rekey proof exists.",
     "issues": [
       "openagents#9284",
       "openagents#9285",
       "openagents#9286"
     ],
     "not_observed": [
-      "worker_crash_bounded",
-      "sfu_loss_bounded: the scenario is now defined in the failure matrix (openagents af65458919) but has not been executed against this binding",
-      "openai_disconnect_bounded (its production route is disabled)",
-      "replayed_grant_refused as a live drill",
-      "duplicate_participant_refused as a live drill",
-      "membership_revocation_bounded as a live drill",
-      "hold_exhaustion_bounded",
-      "reconnect_no_overlap: the reconnect-cannot-revive drill",
-      "privacy_scope_count>=8: the eight-scope privacy scan across packaged Omega, packaged clients, pods, logs, redis, object storage, traces, and crash artifacts; four blockers are enumerated per scope in openagents docs/ops/2026-07-31-sarah-livekit-privacy-scan-executability.md and the collector's one-window all-eight requirement means partial remediation produces nothing",
+      "worker_crash_bounded: permission cleared 2026-07-31; blocked on the missing single-session driver",
+      "sfu_loss_bounded: scenario defined (openagents af65458919) and delete-pods authority granted, but concurrentBillableSessionCount=1 is unsatisfiable by the only session driver, and pod identification still needs pods/exec",
+      "openai_disconnect_bounded (its production route is contract-locked closed; arming authorized but not performed)",
+      "replayed_grant_refused: no procedure defines which grant is replayed or the expected refusal code",
+      "duplicate_participant_refused: no production code path, unchanged",
+      "membership_revocation_bounded: no bounded single-member operator path exists",
+      "hold_exhaustion_bounded: no drill driver and no tool that derives the worker control bearer",
+      "reconnect_no_overlap: the reconnect-cannot-revive drill; no post-terminal boundary is reachable",
+      "privacy_scope_count>=8: all four blockers cleared by openagents c1a54c919d and retention canaries injected 2026-07-31T18:41:26Z-18:41:51Z; the scan has still produced no receipt",
       "media_key_rekey_proof"
     ],
     "note": "This receipt records what was actually observed for one Sarah LiveKit release-gate row on Omega v0.2.0-rc29. It never promotes source tests, configuration, deployment-lifecycle receipts, or a headless harness run into an installed packaged-candidate observation.",
@@ -47,21 +47,37 @@
       "failure_drills_executed": 0,
       "media_key_rekey_proofs_found": 0,
       "privacy_scan_receipts_found": 0,
-      "privacy_scan_scopes_blocked": 3,
-      "privacy_scan_scopes_ready": 2,
-      "privacy_scan_scopes_undefined": 3,
+      "privacy_scan_scopes_blocked": 0,
+      "privacy_scan_scopes_ready": 8,
+      "privacy_scan_scopes_undefined": 0,
       "privacy_scope_count": 0,
       "privacy_scopes_required": 8,
       "provider_disconnect_acceptance_route_enabled": false,
       "provider_disconnect_flag": "SARAH_LIVEKIT_PROVIDER_DISCONNECT_ACCEPTANCE_ENABLED=false",
       "sfu_loss_bound_ms": 30000,
       "sfu_loss_scenario_defined": true,
-      "static_e2ee_key_revision_present": true
+      "static_e2ee_key_revision_present": true,
+      "cluster_pod_delete_authority_granted": true,
+      "cluster_pod_log_authority_granted": true,
+      "cluster_pod_exec_authority_granted": false,
+      "acceptance_pcm_prompts_available": true,
+      "live_acceptance_run_passed": true,
+      "single_session_drill_driver_exists": false,
+      "gate_observation_receipts_found": 1,
+      "gate_observation_row_outcome": "incomplete",
+      "retention_canaries_injected": 2,
+      "retention_canary_window_utc": "2026-07-31T18:41:26Z/2026-07-31T18:41:51Z"
     },
     "refused_claims": [
       "Arming, or being able to arm, the provider-disconnect route is not evidence that the drill passed; the flag is false, so it was never even armed.",
       "A checked-in static E2EE key revision value is configuration, not a rekey proof.",
-      "Unit tests of the failure-matrix contract and of replay, duplicate-claim, and revocation refusals are source evidence and do not stand in for executed drills."
+      "Unit tests of the failure-matrix contract and of replay, duplicate-claim, and revocation refusals are source evidence and do not stand in for executed drills.",
+      "Clearing the PCM and cluster-authority blockers is not progress toward green for this row. No drill ran, and the driver gap that remains blocks strictly more scenarios than either cleared blocker did.",
+      "A passing live acceptance run is not a failure drill. It proves the prompts and the session path work; it injects no fault and settles no scenario under one.",
+      "kubectl auth can-i is not evidence of a cluster permission. It answered yes for pods/log while the real call was Forbidden, and the shared gke-gcloud-auth-plugin token cache outside CLOUDSDK_CONFIG can silently answer as a different identity.",
+      "The first gate observation receipt is not a gate result. Every one of its ten observations is not_observed and its outcome is incomplete.",
+      "Injecting retention canaries is not a privacy scan result. It removes a false-clean risk on one axis of a scan that has still not been run.",
+      "A clean retention result would be bounded by the retention horizon of whatever the canaries entered. A scan run long after the injection window may find nothing because the material aged out, not because nothing retained it."
     ],
     "source_evidence": [
       {
@@ -99,9 +115,40 @@
         "repository": "https://github.com/OpenAgentsInc/openagents",
         "revision": "bbf6f9831e41efb0e39742f0f708afc75fb5621a",
         "role": "per-scope executability finding for the eight-scope privacy scan, each blocker verified by a read-only command against the live production deployment; a feasibility finding and never a scan result"
+      },
+      {
+        "path": "docs/ops/receipts/livekit/gate/2026-07-31-rc29-sarah-livekit-failure.json",
+        "repository": "https://github.com/OpenAgentsInc/openagents",
+        "revision": "dd5d62a5dd4ea65712458c6e3f98b598a5db5b52",
+        "schema": "openagents.sarah.livekit-gate-observation.v1",
+        "outcome": "incomplete",
+        "result_digest": "sha256:fa73a9ef4cd6d84165a4f3949088d59e1050a2e2427f81c193bf18a01528ec7d",
+        "sha256": "90c0088e129021d651295ae679570d6f76b4233ef803e7d3ce7f67177c08ed2a",
+        "role": "the first gate observation receipt this repository has produced; records all ten failure-row observations as not_observed with the specific obstruction for each"
+      },
+      {
+        "path": "docs/ops/receipts/livekit/production-sarah-headless-20260731T183100Z.json",
+        "repository": "https://github.com/OpenAgentsInc/openagents",
+        "revision": "dd5d62a5dd4ea65712458c6e3f98b598a5db5b52",
+        "schema": "openagents.sarah.livekit-acceptance.v3",
+        "outcome": "passed",
+        "role": "live two-journey acceptance proving the regenerated PCM prompts drive a real production session to exact settlement; establishes the ~21 s session length that makes the 30 s Prometheus scrape unusable for SFU-loss pod identification"
+      },
+      {
+        "path": "docs/ops/2026-07-30-livekit-self-hosted-gcp-runbook.md",
+        "repository": "https://github.com/OpenAgentsInc/openagents",
+        "revision": "dd5d62a5dd4ea65712458c6e3f98b598a5db5b52",
+        "role": "carries the PCM regeneration procedure, the granted namespace RBAC and why a namespace Role was chosen over project IAM, the two verification traps that produce false permission results, the missing-single-session-driver blocker, and the corrected eight-scenario private input"
+      },
+      {
+        "path": "docs/ops/receipts/livekit/production-sarah-canary-20260731T184800Z.json",
+        "repository": "https://github.com/OpenAgentsInc/openagents",
+        "schema": "openagents.sarah.livekit-acceptance.v3",
+        "outcome": "passed",
+        "role": "retention-canary injection for the eight-scope privacy scan; spoken canaries entered real production sessions with transcription observed on both journeys, giving the scan a canary that was genuinely introduced rather than generated at scan time"
       }
     ],
-    "unblocks_when": "The eight bounded drills are executed against this infrastructure binding with deterministic settlement preserved for each, the eight-scope privacy scan produces a same-window complete export, and a media-key rekey is observed. Any scenario that cannot be executed is recorded inconclusive rather than passed. Two prerequisites are now known and neither is a repository change: the drills that delete a pod need cluster mutation authority the automation identity does not hold, and the privacy scan needs its four enumerated blockers cleared together rather than one at a time."
+    "unblocks_when": "A single-session drill driver exists that admits one scenario, completes a turn, and holds the session open until the operator injects a fault and releases it. That is now the binding prerequisite: it blocks six of the ten observations by itself, and it is a repository change, unlike the two prerequisites cleared on 2026-07-31. With it, the eight bounded drills are executed against this infrastructure binding with deterministic settlement preserved for each, the eight-scope privacy scan produces a same-window complete export, and a media-key rekey is observed. Any scenario that cannot be executed is recorded inconclusive rather than passed. Four gaps additionally need a decision rather than a run: sfu_loss step 2 needs either pods/exec or a faster scrape, membership_revocation and hold_exhaustion need bounded operator paths that do not exist, and replayed_grant_refused needs a defined procedure."
   },
   "public_safe": true,
   "row_id": "sarah-livekit-failure",
