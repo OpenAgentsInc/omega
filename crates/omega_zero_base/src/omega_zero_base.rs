@@ -387,6 +387,10 @@ pub const ADMITTED_ACTIONS: &[&str] = &[
     "workroom::PrepareVoiceAdmission",
     "workroom::PrepareVoiceAdmission",
     "workroom::StartVoice",
+    // OMEGA-DELTA-0211. The composer microphone's own start path: it opens
+    // audio without navigating to the admission page, so it must be admitted
+    // beside the page's `StartVoice`.
+    "workroom::StartVoiceFromComposer",
     "workroom::ApproveSarahVoiceCommand",
     "workroom::RejectSarahVoiceCommand",
     "workroom::ToggleVoiceMute",

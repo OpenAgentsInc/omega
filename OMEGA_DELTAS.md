@@ -9418,3 +9418,59 @@ is recorded in omega#190.
   `crates/omega_deltas`; and
   `an_enabled_trace_records_within_the_window_its_caller_paid_for` in
   `crates/gpui/src/profiler.rs`.
+
+### OMEGA-DELTA-0211 — The composer's microphone never takes the conversation away
+
+**The composer voice control never navigates.** It opens audio when the exact
+admission terms are already loaded and admitted, loads them and opens audio
+when they are not, and when voice is refused it draws one short sentence
+anchored to the button that was clicked, with a link to Settings. The detailed
+admission surface — cohort reference, refusal reason, rate, credit hold,
+remaining credit, duration, transcript policy, bounded capabilities — is not
+deleted and not weakened. It is reached from Settings, the `+` menu, and the
+Thread menu, by a person who went looking for it.
+
+**Why.** The microphone sat in the composer, beside Send, on the surface where
+a person writes. `OMEGA-DELTA-0180` wired every non-active phase of it —
+`Idle`, `Unavailable`, `AccessRequired`, `Error`, `Reconnecting` — to
+`agent::OpenSarahAdmission`, which sets `showing_sarah_admission` and replaces
+the whole panel. So the ordinary gesture "I would rather say this than type it"
+answered by discarding the view of the half-written message and presenting
+`sarah_voice_cohort:alpha_v1`, `cohort_inactive`, and msat arithmetic. The
+owner's words: *"When I click the voice button, I get this horrible screen. I
+never want to see this shit, at least not navigated to from the input
+composer."*
+
+**The interstitial was not protecting anything either.** The admission page's
+job is exact-terms disclosure before spend, and that job is done by the
+projection, not by the page: `start_voice` refuses unless the workspace's
+projection is `Ready`, and `has_same_reviewed_terms` re-refuses if OpenAgents
+changes a term between review and connect. A composer that dispatches
+`StartVoice` only on an already-`Ready` projection is inside the same gate the
+page was inside. Nothing about the fail-closed contract required the person to
+be moved.
+
+**Drawn implies working, on both branches.** The click has to have a visible
+consequence in every state, which is what made the naive fix wrong: a composer
+that dispatched `StartVoice` with no prepared admission would publish
+`preflight_required` into a projection the composer does not draw — a silent
+no-op wearing a button. So `workroom::StartVoiceFromComposer` loads the terms
+and opens audio when they arrive, and every refusal on that path — public demo,
+community room, pending settlement, malformed terms, a cohort or credit blocker
+— raises the same one line the composer draws for the states it can already
+read.
+
+**One line, not a page in miniature.** `COMPOSER_VOICE_NOTICE_COPY` is
+mechanically held to a single short sentence with no cohort reference, no
+refusal token, and no credit number. The notice is anchored to the microphone
+rather than toasted into a window corner, which is `OMEGA-DELTA-0053` and
+omega#119's existing law about where a refusal belongs, not a second one.
+
+- **Enforced by:**
+  `the_composer_microphone_never_navigates_away_from_the_conversation` in
+  `crates/omega_deltas`; the amended
+  `sarah_voice_admission_is_visible_bounded_and_fail_closed`, which now asserts
+  the converse of what it used to; and
+  `the_composer_microphone_never_navigates_to_the_admission_page` in
+  `crates/agent_ui/src/agent_panel.rs`, which clicks the rendered control while
+  voice is unavailable and asserts `omega.sarah.admission` is never drawn.

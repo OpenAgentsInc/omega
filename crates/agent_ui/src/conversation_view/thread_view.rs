@@ -1015,6 +1015,14 @@ impl ThreadView {
             crate::composer_voice::composer_voice_status(workspace.entity_id(), cx);
         subscriptions.push(cx.observe(&composer_voice_status, |_, _, cx| cx.notify()));
 
+        // `OMEGA-DELTA-0211`. The composer's voice notice is workspace state,
+        // not view state, because both composers draw the same control. A
+        // composer that does not watch it draws a click that had no visible
+        // consequence.
+        let composer_voice_notice =
+            crate::composer_voice::composer_voice_notice(workspace.entity_id(), cx);
+        subscriptions.push(cx.observe(&composer_voice_notice, |_, _, cx| cx.notify()));
+
         // If this thread is backed by a NativeAgent, listen for skill loading
         // issues so we can surface them as banners. The agent emits a single
         // replacement-style event per project refresh, so we overwrite our

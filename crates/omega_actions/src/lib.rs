@@ -986,6 +986,14 @@ pub mod workroom {
             PrepareVoiceAdmission,
             /// Starts Sarah's managed Realtime voice session.
             StartVoice,
+            /// Starts Sarah voice from the composer, loading admission terms
+            /// first when they are not already current.
+            ///
+            /// `OMEGA-DELTA-0211`. The composer microphone never navigates.
+            /// This is the one action that turns a composer click into audio
+            /// without an interstitial page, and it reports its own refusal
+            /// through the composer's voice notice.
+            StartVoiceFromComposer,
             /// Mutes or unmutes Sarah's microphone capture.
             ToggleVoiceMute,
             /// Interrupts Sarah's current spoken response.

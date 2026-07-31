@@ -36,7 +36,7 @@ use omega_actions::{
     workroom::{
         ApproveSarahVoiceCommand, EndVoice, FocusComposer, InterruptTurn, InterruptVoice,
         OpenPanel, PrepareVoiceAdmission, RejectSarahVoiceCommand, RetryVoice, SendMessage,
-        StartVoice, ToggleVoiceMute,
+        StartVoice, StartVoiceFromComposer, ToggleVoiceMute,
     },
 };
 use omega_effectd::{
@@ -356,6 +356,8 @@ pub struct SarahWorkroomPanel {
     prepared_voice_admission: Option<omega_effectd::PreparedSarahVoiceAdmission>,
     pending_voice_settlement: Option<PendingSarahVoiceSettlement>,
     settlement_retrying: bool,
+    /// `OMEGA-DELTA-0211`. A composer click is waiting on admission terms.
+    start_voice_after_admission: bool,
     voice_transcript: Vec<VoiceTranscriptItem>,
     voice_transcript_recovery: SharedString,
     pending_voice_command: Option<VoiceCommandRequest>,
@@ -373,6 +375,7 @@ pub fn init(cx: &mut App) {
                 .0
                 .remove(&workspace_id);
             agent_ui::composer_voice::remove_composer_voice_status(workspace_id, cx);
+            agent_ui::composer_voice::remove_composer_voice_notice(workspace_id, cx);
             agent_ui::composer_voice::remove_sarah_voice_admission(workspace_id, cx);
         })
         .detach();
@@ -407,9 +410,14 @@ pub fn init(cx: &mut App) {
                     panel.update(cx, |panel, cx| panel.start_voice(window, cx));
                 }
             })
-            .register_action(|_workspace, _: &PrepareVoiceAdmission, _window, cx| {
+            .register_action(|_workspace, _: &StartVoiceFromComposer, window, cx| {
                 if let Some(panel) = voice_panel(cx.entity_id(), cx) {
-                    panel.update(cx, |panel, cx| panel.prepare_voice_admission(cx));
+                    panel.update(cx, |panel, cx| panel.start_voice_from_composer(window, cx));
+                }
+            })
+            .register_action(|_workspace, _: &PrepareVoiceAdmission, window, cx| {
+                if let Some(panel) = voice_panel(cx.entity_id(), cx) {
+                    panel.update(cx, |panel, cx| panel.prepare_voice_admission(window, cx));
                 }
             })
             .register_action(|_workspace, _: &ToggleVoiceMute, _window, cx| {
@@ -661,6 +669,7 @@ impl SarahWorkroomPanel {
             prepared_voice_admission: None,
             pending_voice_settlement: None,
             settlement_retrying: false,
+            start_voice_after_admission: false,
             voice_transcript: Vec::new(),
             voice_transcript_recovery: "No prior transcript rows were recovered.".into(),
             pending_voice_command: None,
@@ -1710,8 +1719,61 @@ impl SarahWorkroomPanel {
         .detach();
     }
 
-    fn prepare_voice_admission(&mut self, cx: &mut Context<Self>) {
+    /// `OMEGA-DELTA-0211`. The composer microphone's own start path.
+    ///
+    /// The composer never navigates to the admission page, so this is what a
+    /// click has to do instead: open audio when the exact terms are already
+    /// loaded and admitted, and otherwise load them and open audio when they
+    /// arrive. Every refusal on this path raises the composer's one-line voice
+    /// notice, because a click whose only consequence is a projection nobody
+    /// draws is the silent no-op the crawl gate exists to forbid.
+    fn start_voice_from_composer(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if self.voice_state.is_active() {
+            return;
+        }
+        if self.public_demo || self.active_room.is_community() {
+            self.start_voice_after_admission = false;
+            self.show_composer_voice_notice(cx);
+            return;
+        }
+        let admission_is_ready = self.prepared_voice_admission.is_some()
+            && self.workspace.upgrade().is_some_and(|workspace| {
+                matches!(
+                    agent_ui::composer_voice::sarah_voice_admission(workspace.entity_id(), cx)
+                        .read(cx),
+                    agent_ui::composer_voice::SarahVoiceAdmissionProjection::Ready { .. }
+                )
+            });
+        if admission_is_ready {
+            self.start_voice_after_admission = false;
+            self.start_voice(window, cx);
+            return;
+        }
+        self.start_voice_after_admission = true;
+        self.prepare_voice_admission(window, cx);
+    }
+
+    /// `OMEGA-DELTA-0211`. Raise the composer's one-line notice for this
+    /// workspace, leaving the conversation exactly where it was.
+    fn show_composer_voice_notice(&self, cx: &mut App) {
+        if let Some(workspace) = self.workspace.upgrade() {
+            agent_ui::composer_voice::show_composer_voice_notice(workspace.entity_id(), cx);
+        }
+    }
+
+    /// `OMEGA-DELTA-0211`. Report a refused composer-started attempt where the
+    /// person clicked, and forget the pending intent.
+    fn refuse_composer_voice_start(&mut self, cx: &mut App) {
+        if !self.start_voice_after_admission {
+            return;
+        }
+        self.start_voice_after_admission = false;
+        self.show_composer_voice_notice(cx);
+    }
+
+    fn prepare_voice_admission(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         if self.public_demo || self.active_room.is_community() || self.voice_state.is_active() {
+            self.refuse_composer_voice_start(cx);
             return;
         }
         if self.pending_voice_settlement.is_some() {
@@ -1726,6 +1788,7 @@ impl SarahWorkroomPanel {
                 cx,
             );
             self.voice_status = "Previous-session settlement is still pending. Choose Retry settlement; its original thread and session references are retained.".into();
+            self.refuse_composer_voice_start(cx);
             cx.notify();
             return;
         }
@@ -1739,11 +1802,11 @@ impl SarahWorkroomPanel {
             cx,
         );
         let openagents_session = omega_effectd::openagents_session(cx);
-        cx.spawn(async move |this, cx| {
+        cx.spawn_in(window, async move |this, cx| {
             let result = openagents_session
                 .prepare_sarah_voice_admission("sarah-owner-private", cx)
                 .await;
-            this.update(cx, |panel, cx| {
+            this.update_in(cx, |panel, window, cx| {
                 match result {
                     Ok(admission) => {
                         let terms = voice_admission_terms(&admission.projection);
@@ -1756,6 +1819,13 @@ impl SarahWorkroomPanel {
                                 },
                                 cx,
                             );
+                            // `OMEGA-DELTA-0211`. A composer click is waiting
+                            // on exactly these terms: open audio now rather
+                            // than making the person find a second control.
+                            if panel.start_voice_after_admission {
+                                panel.start_voice_after_admission = false;
+                                panel.start_voice(window, cx);
+                            }
                         } else {
                             panel.publish_voice_admission(
                                 agent_ui::composer_voice::SarahVoiceAdmissionProjection::Unavailable {
@@ -1767,6 +1837,7 @@ impl SarahWorkroomPanel {
                                 },
                                 cx,
                             );
+                            panel.refuse_composer_voice_start(cx);
                         }
                     }
                     Err(blocker) => {
@@ -1791,6 +1862,7 @@ impl SarahWorkroomPanel {
                             },
                             cx,
                         );
+                        panel.refuse_composer_voice_start(cx);
                     }
                 }
                 cx.notify();
@@ -1805,7 +1877,7 @@ impl SarahWorkroomPanel {
             return;
         }
         if self.pending_voice_settlement.is_some() {
-            self.prepare_voice_admission(cx);
+            self.prepare_voice_admission(window, cx);
             return;
         }
         let admission_is_ready = self.workspace.upgrade().is_some_and(|workspace| {
@@ -1828,6 +1900,7 @@ impl SarahWorkroomPanel {
                 },
                 cx,
             );
+            self.refuse_composer_voice_start(cx);
             return;
         };
         let reviewed_admission = prepared_admission.projection.clone();

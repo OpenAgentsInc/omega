@@ -6127,6 +6127,10 @@ impl AgentPanel {
                 // `OMEGA-DELTA-0053` records that a zero-base window is where a
                 // notification is least likely to be where somebody is looking,
                 // and omega#119 records what happened when refusals did toast.
+                // `OMEGA-DELTA-0211` is the same law, not a second one: the
+                // composer's voice refusal draws one line anchored to the
+                // microphone that was clicked, rather than navigating away or
+                // toasting a window corner.
                 // In the ordinary colour, because the row now says this before
                 // the click and nothing has gone wrong when somebody reads the
                 // long version of a fact they were already shown. A warning
@@ -18493,6 +18497,142 @@ mod tests {
             settled
                 .occurrences("omega.sarah.admission.start")
                 .is_empty()
+        );
+    }
+
+    /// `OMEGA-DELTA-0211`. The composer microphone cannot reach the page.
+    ///
+    /// The owner's report was about navigation, so this is a rendered proof
+    /// about navigation: click the control that is actually drawn in the
+    /// composer, while voice is unavailable, and assert that the whole-panel
+    /// admission surface is never drawn — while the composer the person was
+    /// writing in is still there, and the one-line notice is.
+    #[gpui::test]
+    async fn the_composer_microphone_never_navigates_to_the_admission_page(
+        cx: &mut TestAppContext,
+    ) {
+        use crate::composer_voice::{
+            ComposerVoicePhase, ComposerVoiceStatus, SarahVoiceAdmissionProjection,
+            set_composer_voice_status, set_sarah_voice_admission,
+        };
+
+        let (panel, mut cx) = setup_visible_panel(cx).await;
+        panel.update_in(&mut cx, |panel, window, cx| {
+            panel.new_thread(&NewThread, window, cx);
+        });
+        cx.run_until_parked();
+
+        let workspace_id = panel.read_with(&cx, |panel, _cx| {
+            panel
+                .workspace
+                .upgrade()
+                .expect("the panel keeps its workspace")
+                .entity_id()
+        });
+        cx.update(|_window, cx| {
+            set_composer_voice_status(
+                workspace_id,
+                ComposerVoiceStatus {
+                    phase: ComposerVoicePhase::Unavailable,
+                    detail: "Sarah voice is not available in this workspace.".into(),
+                    muted: false,
+                    retryable: false,
+                },
+                cx,
+            );
+            set_sarah_voice_admission(
+                workspace_id,
+                SarahVoiceAdmissionProjection::Unavailable {
+                    reason: "This account is outside the active Sarah cohort.".into(),
+                    retryable: false,
+                    cohort_ref: Some("sarah_voice_cohort:alpha_v1".into()),
+                    refusal_reason: Some("cohort_inactive".into()),
+                },
+                cx,
+            );
+        });
+        cx.run_until_parked();
+
+        let before = cx.debug_render_snapshot();
+        assert_eq!(
+            before.occurrences("agent.composer.voice").len(),
+            1,
+            "the composer always draws the microphone"
+        );
+        assert!(
+            before.occurrences("agent.composer.voice-notice").is_empty(),
+            "the notice is a consequence of a click, never ambient"
+        );
+        assert!(
+            before.occurrences("omega.sarah.admission").is_empty(),
+            "nothing has opened the admission surface yet"
+        );
+
+        let voice_bounds = cx
+            .debug_bounds("agent.composer.voice")
+            .expect("the composer's microphone is drawn");
+        cx.simulate_click(voice_bounds.center(), Modifiers::default());
+        cx.run_until_parked();
+
+        panel.read_with(&cx, |panel, _cx| {
+            assert!(
+                !panel.showing_sarah_admission,
+                "OMEGA-DELTA-0211: the composer microphone opened the \
+                 admission page. That is the navigation the owner asked to \
+                 never happen from the composer."
+            );
+        });
+
+        let after = cx.debug_render_snapshot();
+        assert_eq!(
+            after.occurrences("omega.sarah.admission").len(),
+            0,
+            "OMEGA-DELTA-0211: the whole-panel admission surface was drawn \
+             from a composer voice click"
+        );
+        assert_eq!(
+            after.occurrences("agent.composer.voice-notice").len(),
+            1,
+            "OMEGA-DELTA-0211: the click has to leave something a person can \
+             see, or it is a silent no-op"
+        );
+        assert_eq!(
+            after
+                .occurrences("agent.composer.voice-notice.settings")
+                .len(),
+            1,
+            "the notice's only offer is the way to Settings"
+        );
+        assert_eq!(
+            after.occurrences("omega.workbench.composer").len(),
+            1,
+            "OMEGA-DELTA-0211: the conversation the person was writing in has \
+             to still be there"
+        );
+        assert_eq!(
+            after.occurrences("agent.composer.voice").len(),
+            1,
+            "the microphone is still where it was"
+        );
+
+        // The Settings control is a door, not a decoration: it dispatches the
+        // shipped action, and the notice comes back down.
+        let settings_bounds = cx
+            .debug_bounds("agent.composer.voice-notice.settings")
+            .expect("the notice draws its Settings control");
+        cx.simulate_click(settings_bounds.center(), Modifiers::default());
+        cx.run_until_parked();
+        cx.update(|_window, cx| {
+            assert!(
+                !crate::composer_voice::composer_voice_notice(workspace_id, cx)
+                    .read(cx)
+                    .showing,
+                "OMEGA-DELTA-0211: choosing Settings must take the notice down"
+            );
+        });
+        assert!(
+            omega_zero_base::admits_action("omega::OpenSettings"),
+            "OMEGA-DELTA-0211: the notice's Settings action is refused in zero base"
         );
     }
 

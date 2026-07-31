@@ -7,10 +7,14 @@ destination. It is independent of collaboration calls. It does not join a
 LiveKit room, publish a LiveKit track, or change collaboration mute or deafen
 state.
 
-Opening Sarah from the new-conversation row, Thread menu, or toolbar `+` menu
-only opens admission. The composer microphone control follows the same route
-when voice is idle, unavailable, or needs retry; it never starts or retries
-audio directly. Before **Start voice** is enabled, the service-backed projection
+Opening Sarah from the new-conversation row, Thread menu, toolbar `+` menu, or
+the **Voice** page in Settings only opens admission. The composer microphone
+control never opens admission and never navigates: it opens audio when the
+exact terms are already loaded and admitted, loads them and opens audio when
+they are not, and when voice is refused it draws one sentence beside the button
+with a link to Settings. The admission page is where a person goes to read the
+detail, not where a click while writing puts them.
+Before **Start voice** is enabled, the service-backed projection
 must disclose `admissionCohortRef`, the effective rate in msat per million
 tokens, credit hold, remaining credit, maximum duration, transcript policy,
 bounded capabilities, and confirmation class. The admitted cohort is

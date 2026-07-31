@@ -199,6 +199,7 @@ pub const ENFORCED_DELTAS: &[&str] = &[
     "OMEGA-DELTA-0208",
     "OMEGA-DELTA-0209",
     "OMEGA-DELTA-0210",
+    "OMEGA-DELTA-0211",
 ];
 
 /// OMEGA-DELTA-0204. Every control the composer's bar offers, written twice:
@@ -22848,14 +22849,31 @@ mod tests {
 
         // `OMEGA-DELTA-0204` moved this body out of `ThreadView` and into
         // `composer_voice.rs` so both composers could draw the same control.
-        // The policy is unchanged and so is this assertion: the only door the
-        // microphone opens is the bounded admission flow.
+        //
+        // `OMEGA-DELTA-0211` changed what the control does, and therefore what
+        // this assertion says. It used to require the opposite: that the
+        // microphone dispatch `OpenSarahAdmission` and never reach `StartVoice`.
+        // That was the defect, not the guarantee — a person clicking the
+        // microphone while writing lost the conversation to a page of cohort
+        // references. The admission surface is still fail-closed and still the
+        // only place `Start voice` is offered from terms; it is simply no
+        // longer somewhere the composer can send anybody. The exact terms
+        // discipline is unchanged: the composer only dispatches `StartVoice`
+        // when the projection is already `Ready`.
         let composer_voice = read_repository_file("crates/agent_ui/src/composer_voice.rs");
         let voice_controls = function_body(&composer_voice, "render_composer_voice_controls")
             .expect("OMEGA-DELTA-0180: composer voice controls were removed");
-        assert!(voice_controls.contains("OpenSarahAdmission"));
-        assert!(!voice_controls.contains("StartVoice"));
-        assert!(!voice_controls.contains("RetryVoice"));
+        assert!(
+            !voice_controls.contains("OpenSarahAdmission"),
+            "OMEGA-DELTA-0180, amended by OMEGA-DELTA-0211: the composer \
+             microphone must never navigate to the admission page"
+        );
+        assert!(
+            voice_controls.contains("SarahVoiceAdmissionProjection::Ready { .. }")
+                && voice_controls.contains("ComposerVoicePhase::Idle if admission_is_ready"),
+            "OMEGA-DELTA-0180: the composer may only open audio directly from \
+             an already-Ready admission projection"
+        );
 
         let workroom = read_repository_file("crates/workroom_ui/src/panel.rs");
         for required in [
@@ -22882,7 +22900,7 @@ mod tests {
             ),
             (
                 "docs/omega/sarah-realtime-voice.md",
-                "only opens admission. The composer microphone control follows the same route",
+                "The composer microphone\ncontrol never opens admission and never navigates",
             ),
         ] {
             assert!(
@@ -22890,6 +22908,147 @@ mod tests {
                 "OMEGA-DELTA-0180: {path} lost `{required}`"
             );
         }
+    }
+
+    /// OMEGA-DELTA-0211. The composer microphone never navigates, and the one
+    /// line it draws instead carries no exposition.
+    #[test]
+    fn the_composer_microphone_never_navigates_away_from_the_conversation() {
+        let composer_voice = read_repository_file("crates/agent_ui/src/composer_voice.rs");
+        let voice_controls = function_body(&composer_voice, "render_composer_voice_controls")
+            .expect("OMEGA-DELTA-0211: composer voice controls were removed");
+
+        // The defect, stated as the check that would have caught it: the
+        // control that draws the composer's microphone cannot name the action
+        // that replaces the whole panel.
+        assert!(
+            !voice_controls.contains("OpenSarahAdmission"),
+            "OMEGA-DELTA-0211: the composer microphone reached \
+             `OpenSarahAdmission` again. A person clicking it is in the middle \
+             of writing; taking the panel over is what this delta removed."
+        );
+        for required in [
+            "StartVoice.boxed_clone()",
+            "StartVoiceFromComposer.boxed_clone()",
+            "show_composer_voice_notice(workspace_id, cx)",
+            "OpenSettings.boxed_clone()",
+            "agent.composer.voice-notice",
+            "agent.composer.voice-notice.settings",
+            "agent.composer.voice-notice.dismiss",
+            "COMPOSER_VOICE_NOTICE_COPY",
+        ] {
+            assert!(
+                voice_controls.contains(required),
+                "OMEGA-DELTA-0211: the composer voice control lost `{required}`"
+            );
+        }
+
+        // Owner law 2, mechanised for exactly this string: the notice is one
+        // short sentence. No cohort reference, no refusal token, no credit
+        // arithmetic — that detail did not disappear, it moved to Settings.
+        let copy = string_constant(&composer_voice, "COMPOSER_VOICE_NOTICE_COPY")
+            .expect("OMEGA-DELTA-0211: the composer voice notice lost its copy constant");
+        // The same rule the control-crawl copy lint applies, inlined so this
+        // crate keeps its dependency-free source-text shape: a terminator
+        // followed by whitespace and a further letter is a second sentence.
+        let second_sentence = copy.char_indices().any(|(index, character)| {
+            if !matches!(character, '.' | '!' | '?') {
+                return false;
+            }
+            copy[index + character.len_utf8()..]
+                .trim_start()
+                .starts_with(char::is_alphabetic)
+        });
+        assert!(
+            !second_sentence,
+            "OMEGA-DELTA-0211: the composer voice notice grew a second \
+             sentence: {copy:?}"
+        );
+        assert!(
+            copy.len() <= 60,
+            "OMEGA-DELTA-0211: the composer voice notice is {} characters. \
+             One short line is the whole affordance: {copy:?}",
+            copy.len()
+        );
+        for forbidden in [
+            "cohort", "Cohort", "refus", "Refus", "credit", "Credit", "msat",
+        ] {
+            assert!(
+                !copy.contains(forbidden),
+                "OMEGA-DELTA-0211: the composer voice notice says `{forbidden}`. \
+                 That is the exposition the owner asked never to be navigated \
+                 into; Settings is where it lives."
+            );
+        }
+
+        // The Settings link is a real door, and the detail is behind it.
+        let page_data = read_repository_file("crates/settings_ui/src/page_data.rs");
+        for required in [
+            "fn omega_voice_page()",
+            "title: \"Voice\"",
+            "agent::OpenSarahAdmission",
+            "omega_voice_page()",
+        ] {
+            assert!(
+                page_data.contains(required),
+                "OMEGA-DELTA-0211: focused Settings lost `{required}`. The \
+                 composer's popup sends people here; a row that is not there \
+                 makes the link a lie."
+            );
+        }
+        assert!(
+            omega_zero_base::admits_action("omega::OpenSettings"),
+            "OMEGA-DELTA-0211: the composer's Settings link is refused in zero base"
+        );
+        assert!(
+            omega_zero_base::admits_action("workroom::StartVoiceFromComposer"),
+            "OMEGA-DELTA-0211: the composer's own start action is refused in zero base"
+        );
+
+        // The runtime side of "drawn implies working": a composer-started
+        // attempt that is refused after admission loads raises the same one
+        // line, rather than changing a projection nothing on screen draws.
+        let workroom = read_repository_file("crates/workroom_ui/src/panel.rs");
+        for required in [
+            "fn start_voice_from_composer",
+            "fn refuse_composer_voice_start",
+            "start_voice_after_admission",
+            "agent_ui::composer_voice::show_composer_voice_notice",
+            "remove_composer_voice_notice",
+        ] {
+            assert!(
+                workroom.contains(required),
+                "OMEGA-DELTA-0211: the voice runtime lost `{required}`"
+            );
+        }
+
+        // Both composers watch the notice. One that does not draws a click
+        // with no visible consequence.
+        for path in [
+            "crates/agent_ui/src/conversation_view.rs",
+            "crates/agent_ui/src/conversation_view/thread_view.rs",
+        ] {
+            assert!(
+                read_repository_file(path).contains("composer_voice::composer_voice_notice("),
+                "OMEGA-DELTA-0211: {path} no longer observes the composer voice notice"
+            );
+        }
+
+        // Same-commit registration law.
+        let registry = read_repository_file("docs/omega/control-crawl-registry.json");
+        assert!(
+            registry.contains("composer-voice-unavailable-popup"),
+            "OMEGA-DELTA-0211: the composer voice notice is a new interactive \
+             surface and is not in the control-crawl registry"
+        );
+
+        // The gpui proof that the page is genuinely unreachable from the click.
+        assert!(
+            read_repository_file(AGENT_PANEL_PATH)
+                .contains("the_composer_microphone_never_navigates_to_the_admission_page"),
+            "OMEGA-DELTA-0211: the rendered proof that a composer voice click \
+             cannot reach `omega.sarah.admission` is gone"
+        );
     }
 
     /// OMEGA-DELTA-0181. Direct agent turns expose a durable lifecycle, keep

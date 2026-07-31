@@ -1,6 +1,9 @@
 use std::collections::HashMap;
 
-use gpui::{Action as _, AnyElement, App, AppContext as _, Entity, EntityId, Global, SharedString};
+use gpui::{
+    Action as _, Anchor, AnyElement, App, AppContext as _, Entity, EntityId, Global, SharedString,
+    anchored, deferred,
+};
 use ui::{TintColor, Tooltip, prelude::*};
 
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
@@ -285,10 +288,38 @@ impl Default for ComposerVoiceStatus {
     }
 }
 
+/// Whether the composer is currently showing its one-line voice notice.
+///
+/// `OMEGA-DELTA-0211`. The composer microphone used to answer an unavailable
+/// account by navigating: it dispatched `OpenSarahAdmission`, which replaced
+/// the whole panel — the conversation the person was in the middle of writing
+/// included — with a page of cohort references, refusal tokens, and credit
+/// arithmetic. This flag is what replaced that navigation. It is a workspace's
+/// own state rather than a view's because both composers draw the same control
+/// from the same free function.
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub struct ComposerVoiceNotice {
+    /// Is the notice drawn right now?
+    pub showing: bool,
+}
+
+/// The composer's whole voice-notice copy.
+///
+/// `OMEGA-DELTA-0211`. One sentence, no cohort reference, no refusal token, no
+/// credit number, and no second sentence — the owner law the control-crawl copy
+/// lint enforces. Everything the detailed admission surface says still exists;
+/// Settings is where a person who wants it goes.
+pub const COMPOSER_VOICE_NOTICE_COPY: &str = "Sarah voice is not available.";
+
 #[derive(Default)]
 struct GlobalComposerVoiceStatus(HashMap<EntityId, Entity<ComposerVoiceStatus>>);
 
 impl Global for GlobalComposerVoiceStatus {}
+
+#[derive(Default)]
+struct GlobalComposerVoiceNotice(HashMap<EntityId, Entity<ComposerVoiceNotice>>);
+
+impl Global for GlobalComposerVoiceNotice {}
 
 #[derive(Default)]
 struct GlobalSarahVoiceAdmission(HashMap<EntityId, Entity<SarahVoiceAdmissionProjection>>);
@@ -327,6 +358,55 @@ pub fn set_composer_voice_status(
 
 pub fn remove_composer_voice_status(workspace_id: EntityId, cx: &mut App) {
     cx.default_global::<GlobalComposerVoiceStatus>()
+        .0
+        .remove(&workspace_id);
+}
+
+/// The composer's voice notice for one workspace.
+pub fn composer_voice_notice(workspace_id: EntityId, cx: &mut App) -> Entity<ComposerVoiceNotice> {
+    if let Some(notice) = cx
+        .default_global::<GlobalComposerVoiceNotice>()
+        .0
+        .get(&workspace_id)
+        .cloned()
+    {
+        return notice;
+    }
+
+    let notice = cx.new(|_| ComposerVoiceNotice::default());
+    cx.default_global::<GlobalComposerVoiceNotice>()
+        .0
+        .insert(workspace_id, notice.clone());
+    notice
+}
+
+/// Draw the composer's one-line voice notice.
+///
+/// `OMEGA-DELTA-0211`. Called by the composer when the state it can already
+/// read says voice is unavailable, and by the voice runtime when a
+/// composer-started attempt is refused after admission loads. Both paths leave
+/// the conversation exactly where it was.
+pub fn show_composer_voice_notice(workspace_id: EntityId, cx: &mut App) {
+    set_composer_voice_notice(workspace_id, true, cx);
+}
+
+/// Take the composer's voice notice back down.
+pub fn dismiss_composer_voice_notice(workspace_id: EntityId, cx: &mut App) {
+    set_composer_voice_notice(workspace_id, false, cx);
+}
+
+fn set_composer_voice_notice(workspace_id: EntityId, showing: bool, cx: &mut App) {
+    composer_voice_notice(workspace_id, cx).update(cx, |notice, cx| {
+        if notice.showing != showing {
+            notice.showing = showing;
+            cx.notify();
+        }
+    });
+}
+
+/// Forget a released workspace's voice notice.
+pub fn remove_composer_voice_notice(workspace_id: EntityId, cx: &mut App) {
+    cx.default_global::<GlobalComposerVoiceNotice>()
         .0
         .remove(&workspace_id);
 }
@@ -378,9 +458,17 @@ pub fn remove_sarah_voice_admission(workspace_id: EntityId, cx: &mut App) {
 /// Sarah session, not of an ACP session, so nothing about a thread that has not
 /// connected yet makes the microphone unavailable; it was missing only because
 /// the code that draws it was out of reach.
+///
+/// `OMEGA-DELTA-0211`. The control never navigates. When admission is already
+/// current it opens audio; when it is not, `StartVoiceFromComposer` loads the
+/// terms and opens audio without drawing a page; and when voice is refused it
+/// draws one sentence beside the button with a way to Settings. The detailed
+/// admission surface still exists and is still reached from Settings, the `+`
+/// menu, and the Thread menu — never from the microphone the person clicked
+/// while writing.
 pub fn render_composer_voice_controls(workspace_id: EntityId, cx: &mut App) -> AnyElement {
-    use crate::OpenSarahAdmission;
-    use omega_actions::workroom::{EndVoice, ToggleVoiceMute};
+    use omega_actions::OpenSettings;
+    use omega_actions::workroom::{EndVoice, StartVoice, StartVoiceFromComposer, ToggleVoiceMute};
 
     let status = composer_voice_status(workspace_id, cx).read(cx).clone();
     let phase = status.phase;
@@ -402,6 +490,58 @@ pub fn render_composer_voice_controls(workspace_id: EntityId, cx: &mut App) -> A
     } else {
         IconName::Mic
     };
+    // The one question the composer can answer without navigating: are the
+    // exact terms already loaded and admitted? If they are, the click is audio.
+    let admission_is_ready = matches!(
+        sarah_voice_admission(workspace_id, cx).read(cx),
+        SarahVoiceAdmissionProjection::Ready { .. }
+    );
+    let notice_showing = composer_voice_notice(workspace_id, cx).read(cx).showing;
+    let notice = notice_showing.then(|| {
+        deferred(
+            anchored()
+                .anchor(Anchor::BottomRight)
+                .snap_to_window_with_margin(px(8.))
+                .child(
+                    h_flex()
+                        .id("agent-composer-voice-notice")
+                        .debug_selector(|| "agent.composer.voice-notice".into())
+                        .occlude()
+                        .elevation_2(cx)
+                        .gap_1p5()
+                        .px_2()
+                        .py_1()
+                        .child(
+                            Label::new(COMPOSER_VOICE_NOTICE_COPY)
+                                .size(LabelSize::Small)
+                                .color(Color::Default),
+                        )
+                        .child(
+                            Button::new("agent-composer-voice-notice-settings", "Settings")
+                                .debug_selector(|| "agent.composer.voice-notice.settings".into())
+                                .style(ButtonStyle::Subtle)
+                                .label_size(LabelSize::Small)
+                                .aria_label("Open Settings")
+                                .on_click(move |_, window, cx| {
+                                    dismiss_composer_voice_notice(workspace_id, cx);
+                                    window.dispatch_action(OpenSettings.boxed_clone(), cx);
+                                }),
+                        )
+                        .child(
+                            IconButton::new("agent-composer-voice-notice-dismiss", IconName::Close)
+                                .debug_selector(|| "agent.composer.voice-notice.dismiss".into())
+                                .icon_size(IconSize::XSmall)
+                                .icon_color(Color::Muted)
+                                .aria_label("Dismiss")
+                                .tooltip(Tooltip::text("Dismiss"))
+                                .on_click(move |_, _, cx| {
+                                    dismiss_composer_voice_notice(workspace_id, cx);
+                                }),
+                        ),
+                ),
+        )
+        .with_priority(1)
+    });
 
     h_flex()
         .id("agent-composer-voice-controls")
@@ -437,12 +577,25 @@ pub fn render_composer_voice_controls(workspace_id: EntityId, cx: &mut App) -> A
                 .aria_description(detail.clone())
                 .tooltip(move |_, cx| Tooltip::with_meta(label, None, detail.clone(), cx))
                 .on_click(move |_, window, cx| match phase {
-                    ComposerVoicePhase::Idle
-                    | ComposerVoicePhase::Unavailable
+                    // Voice is available and the exact terms are already
+                    // loaded: open audio. No page, no second click.
+                    ComposerVoicePhase::Idle if admission_is_ready => {
+                        dismiss_composer_voice_notice(workspace_id, cx);
+                        window.dispatch_action(StartVoice.boxed_clone(), cx)
+                    }
+                    // Voice is available but the terms are not loaded yet. The
+                    // runtime loads them and opens audio; if that load is
+                    // refused it raises the same one-line notice, so the click
+                    // always has a consequence a person can see.
+                    ComposerVoicePhase::Idle => {
+                        dismiss_composer_voice_notice(workspace_id, cx);
+                        window.dispatch_action(StartVoiceFromComposer.boxed_clone(), cx)
+                    }
+                    ComposerVoicePhase::Unavailable
                     | ComposerVoicePhase::AccessRequired
                     | ComposerVoicePhase::Error
                     | ComposerVoicePhase::Reconnecting => {
-                        window.dispatch_action(OpenSarahAdmission.boxed_clone(), cx)
+                        show_composer_voice_notice(workspace_id, cx)
                     }
                     phase if phase.is_active() => {
                         window.dispatch_action(ToggleVoiceMute.boxed_clone(), cx)
@@ -471,6 +624,7 @@ pub fn render_composer_voice_controls(workspace_id: EntityId, cx: &mut App) -> A
                 )
             },
         )
+        .children(notice)
         .into_any_element()
 }
 

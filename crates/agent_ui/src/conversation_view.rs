@@ -1351,6 +1351,16 @@ impl ConversationView {
                 Self::handle_agent_servers_updated,
             ),
         ];
+        // `OMEGA-DELTA-0211`. The pre-session composer draws the same voice
+        // control as the connected one, so it has to watch the same
+        // workspace-owned notice. Without this the microphone click on a brand
+        // new thread — the composer a person meets first — would change state
+        // nothing repainted.
+        {
+            let composer_voice_notice =
+                crate::composer_voice::composer_voice_notice(workspace.entity_id(), cx);
+            subscriptions.push(cx.observe(&composer_voice_notice, |_, _, cx| cx.notify()));
+        }
         subscriptions.push(cx.subscribe(&project, {
             let resolver = code_span_resolver.clone();
             move |_this: &mut Self, _project, event: &project::Event, cx| {
