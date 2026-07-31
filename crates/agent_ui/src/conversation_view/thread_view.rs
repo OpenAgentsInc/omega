@@ -1856,8 +1856,9 @@ impl ThreadView {
                 .title()
                 .unwrap_or_else(|| DEFAULT_THREAD_TITLE.into()),
             executor: {
+                // `OMEGA-DELTA-0208`. The chrome line, not the record's line.
                 use crate::omega_executor_disclosure::ThreadExecutorDisclosure as _;
-                thread.omega_executor_disclosure(cx).label().into()
+                crate::omega_routed_model::chrome_line(&thread.omega_executor_disclosure(cx)).into()
             },
             lifecycle: SupervisedThreadLifecycle::Running,
         };
@@ -11348,14 +11349,11 @@ impl ThreadView {
             use crate::omega_executor_disclosure::ThreadExecutorDisclosure as _;
             let disclosure = thread.read(cx).omega_executor_disclosure(cx);
             (disclosure.class != omega_front_door::ExecutorClass::NativeLoop).then(|| {
-                let header = match disclosure.model.as_deref() {
-                    Some(model) => format!("{} · {model}", disclosure.agent_id),
-                    None => format!("{} · model not disclosed", disclosure.agent_id),
-                };
-                (
-                    SharedString::from(header),
-                    SharedString::from(disclosure.label()),
-                )
+                // `OMEGA-DELTA-0208`. One line, from the one authority. The
+                // card used to hand-build a header — `{agent_id} · {model}` —
+                // beside a tooltip holding the record's own line, so a person
+                // read the model twice and, in the tooltip, by its wire pair.
+                SharedString::from(crate::omega_routed_model::chrome_line(&disclosure))
             })
         });
 
@@ -11495,21 +11493,18 @@ impl ThreadView {
                                             .size(LabelSize::Custom(self.tool_name_font_size()))
                                             .truncate(),
                                     )
-                                    .when_some(external_executor, |this, (header, label)| {
+                                    .when_some(external_executor, |this, executor| {
                                         this.child(
                                             div()
                                                 .id(("subagent-executor", entry_ix))
                                                 .flex_none()
                                                 .child(
-                                                    Label::new(header)
+                                                    Label::new(executor)
                                                         .size(LabelSize::Custom(
                                                             self.tool_name_font_size(),
                                                         ))
                                                         .color(Color::Muted),
-                                                )
-                                                .tooltip(move |_, cx| {
-                                                    Tooltip::simple(label.clone(), cx)
-                                                }),
+                                                ),
                                         )
                                     })
                                     .when(files_changed > 0, |this| {
@@ -13427,7 +13422,9 @@ impl ThreadView {
                             .color(Color::Default),
                     )
                     .child(
-                        Label::new(disclosure.label())
+                        // `OMEGA-DELTA-0208`. The chrome line: this header sits
+                        // above an Exo turn a person is reading.
+                        Label::new(crate::omega_routed_model::chrome_line(&disclosure))
                             .size(LabelSize::XSmall)
                             .color(Color::Muted)
                             .truncate(),
@@ -13814,8 +13811,7 @@ impl ThreadView {
     /// the three — is still reachable by a pin and by nothing else.
     fn render_zero_base_executor_bar(&self, cx: &mut Context<Self>) -> AnyElement {
         let exo = self.exo_connection(cx);
-        let disclosure = self.executor_disclosure(cx);
-        let routed_model = self.omega_routed_model_label(cx);
+        let disclosure_line = self.omega_disclosure_line(cx);
         let inspector_open = self.exo_inspector_expanded;
         let turn_phase = exo.as_ref().map(|exo| exo.turn().phase);
         let turn_running = self.thread.read(cx).status() != ThreadStatus::Idle;
@@ -13835,24 +13831,16 @@ impl ThreadView {
                         this.child(self.vim_mode_indicator.clone())
                     })
                     .child(
-                        Label::new(disclosure.label())
-                            .size(LabelSize::XSmall)
-                            .color(Color::Muted),
+                        div()
+                            .id("omega-routed-model")
+                            .role(gpui::Role::Status)
+                            .aria_label(disclosure_line.clone())
+                            .child(
+                                Label::new(disclosure_line)
+                                    .size(LabelSize::XSmall)
+                                    .color(Color::Muted),
+                            ),
                     )
-                    .when_some(routed_model, |this, routed_model| {
-                        let accessibility_label = routed_model.clone();
-                        this.child(
-                            div()
-                                .id("omega-routed-model")
-                                .role(gpui::Role::Status)
-                                .aria_label(accessibility_label)
-                                .child(
-                                    Label::new(routed_model)
-                                        .size(LabelSize::XSmall)
-                                        .color(Color::Muted),
-                                ),
-                        )
-                    })
                     // omega#99. The turn's own state, only while there is a
                     // turn. Permanent chrome that says "idle" at a person all
                     // day is a knob; a dot that appears when the executor
@@ -14234,11 +14222,10 @@ impl ThreadView {
     /// omega#77's falsifier is a thread surface that shows work without naming
     /// its executor — including an empty thread, which is about to.
     fn render_executor_disclosure(&self, cx: &mut Context<Self>) -> AnyElement {
-        let disclosure = self.executor_disclosure(cx);
         if let Some(exo) = self.exo_connection(cx) {
             return self.render_exo_header(exo, cx);
         }
-        let routed_model = self.omega_routed_model_label(cx);
+        let disclosure_line = self.omega_disclosure_line(cx);
 
         h_flex()
             .w_full()
@@ -14253,49 +14240,50 @@ impl ThreadView {
                     .color(Color::Muted),
             )
             .child(
-                v_flex()
-                    .min_w_0()
-                    .child(
-                        Label::new(disclosure.label())
-                            .size(LabelSize::XSmall)
-                            .color(Color::Muted),
-                    )
-                    .when_some(routed_model, |this, routed_model| {
-                        let accessibility_label = routed_model.clone();
-                        this.child(
-                            div()
-                                .id("omega-routed-model")
-                                .role(gpui::Role::Status)
-                                .aria_label(accessibility_label)
-                                .child(
-                                    Label::new(routed_model)
-                                        .size(LabelSize::XSmall)
-                                        .color(Color::Muted),
-                                ),
-                        )
-                    }),
+                v_flex().min_w_0().child(
+                    div()
+                        .id("omega-routed-model")
+                        .role(gpui::Role::Status)
+                        .aria_label(disclosure_line.clone())
+                        .child(
+                            Label::new(disclosure_line)
+                                .size(LabelSize::XSmall)
+                                .color(Color::Muted),
+                        ),
+                ),
             )
             .child(div().flex_1())
             .into_any_element()
     }
 
-    /// The status line under the disclosure. `OMEGA-DELTA-0202`.
+    /// The one line that names this thread's executor and its model.
+    /// `OMEGA-DELTA-0202`, amended by `OMEGA-DELTA-0208`.
     ///
-    /// **At most the model name.** This line used to read
-    /// `Receipt 0 · Route: Omega Agent (general reasoning) · override: automatic
-    /// · fallback: none` — a dispatch reference, a router summary, an override
-    /// mode and a route-fallback state, none of which is a fact about the
-    /// person's work. The owner's standing no-exposition law applies to it. The
-    /// route receipt is still recorded and still reachable; it is not composer
-    /// copy.
+    /// **One name for one model.** There were two lines here: the record's own
+    /// [`omega_front_door::ExecutorDisclosure::label`], which names the model by
+    /// its `provider/model` wire pair, and under it the model's own name. A
+    /// thread on Kimi therefore read `Omega Agent · openagents/kimi-k3` above
+    /// `Kimi K3` — one fact stated twice, once in a vocabulary this surface is
+    /// not allowed to teach. The owner: "remove the `openagents/gpt-5.6-luna` …
+    /// its duplicative with gpt 5.6 luna like the real name."
     ///
-    /// What remains is derived from the same routed decision the tier control's
-    /// face and the disclosure line are derived from, so the three cannot
-    /// disagree.
-    fn omega_routed_model_label(&self, cx: &App) -> Option<SharedString> {
-        use crate::omega_routed_model::RoutedModel;
-
-        Some(RoutedModel::from_disclosure(&self.executor_disclosure(cx))?.status_line())
+    /// The `OMEGA-DELTA-0202` constraint the second line was born with is what
+    /// makes the fold safe rather than a subtraction: it was already held to
+    /// **at most the model name**. It used to read `Receipt 0 · Route: Omega
+    /// Agent (general reasoning) · override: automatic · fallback: none` — a
+    /// dispatch reference, a router summary, an override mode and a
+    /// route-fallback state, none of which is a fact about the person's work,
+    /// and all of which the standing no-exposition law removed. The route
+    /// receipt is still recorded and still reachable; it is not composer copy,
+    /// and neither is the wire pair.
+    ///
+    /// Still derived from the same routed decision the tier control's face is
+    /// derived from, through the one authority in [`crate::omega_routed_model`],
+    /// so the control and the line cannot name different models.
+    fn omega_disclosure_line(&self, cx: &App) -> SharedString {
+        SharedString::from(crate::omega_routed_model::chrome_line(
+            &self.executor_disclosure(cx),
+        ))
     }
 }
 

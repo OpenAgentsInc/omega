@@ -9644,7 +9644,11 @@ impl AgentPanel {
                 let thread = thread.read(cx);
                 let lifecycle = crate::omega_agent_supervision::lifecycle_for_thread(thread);
                 use crate::omega_executor_disclosure::ThreadExecutorDisclosure as _;
-                let executor = thread.omega_executor_disclosure(cx).label();
+                // `OMEGA-DELTA-0208`. The chrome line, not the record's line:
+                // this chip sits in the toolbar a person reads, and the
+                // `provider/model` wire pair belongs in receipts, not here.
+                let executor =
+                    crate::omega_routed_model::chrome_line(&thread.omega_executor_disclosure(cx));
                 let can_cancel = matches!(
                 lifecycle,
                 crate::omega_agent_supervision::SupervisedThreadLifecycle::Running

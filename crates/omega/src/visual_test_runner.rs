@@ -9695,7 +9695,7 @@ fn run_omega_agent_visual_tests_inner(
         "the first accepted turn did not create its routed physical executor session"
     );
     let routed_model_line = cx
-        .read(|cx| omega_routed_model_line(&panel, cx))
+        .read(|cx| omega_executor_line(&panel, cx))
         .ok_or_else(|| anyhow::anyhow!("the routed thread discloses no model"))?;
     cx.set_debug_accessibility_active(workspace_window, true)?;
     let snapshot = cx.debug_render_snapshot(workspace_window)?;
@@ -10117,32 +10117,26 @@ fn run_omega_agent_visual_tests_inner(
 
 /// The executor line the agent panel's active thread would render.
 ///
-/// Read through the same `ThreadView::executor_disclosure` the render calls, so
-/// the assertion and the pixels cannot disagree about what the line says.
-#[cfg(all(target_os = "macos", feature = "visual-tests"))]
-fn omega_executor_line(panel: &Entity<agent_ui::AgentPanel>, cx: &App) -> Option<String> {
-    Some(omega_executor_record(panel, cx)?.label())
-}
-
-/// The status line the agent panel's active thread would render.
+/// Read through the same `ThreadView::executor_disclosure` the render calls,
+/// and rendered through the same `omega_routed_model::chrome_line` authority,
+/// so the assertion and the pixels cannot disagree about what the line says.
 ///
-/// `OMEGA-DELTA-0202`. Derived from the same executor record the disclosure
-/// line is derived from, through the one routed-model authority, so this
-/// assertion and the pixels cannot disagree — and neither can the two lines.
+/// `OMEGA-DELTA-0202`, amended by `OMEGA-DELTA-0208`. There were two helpers
+/// here, one per line, because the composer drew two: the record's own line and
+/// the model's name beneath it. 0208 folded those into one — they were the same
+/// fact said twice — and the two helpers folded with them. The record's own
+/// line, which names the model by its `provider/model` wire pair, is what a
+/// receipt renders and is asserted through `omega_executor_record` where a
+/// scene needs the exact pair.
 ///
-/// It used to reconstruct the route receipt here:
+/// The status line used to reconstruct the route receipt:
 /// `Receipt 0 · Route: … · override: … · fallback: …`. That exposition is gone
 /// from the composer, so the proof no longer photographs it.
 #[cfg(all(target_os = "macos", feature = "visual-tests"))]
-fn omega_routed_model_line(panel: &Entity<agent_ui::AgentPanel>, cx: &App) -> Option<String> {
-    use agent_ui::omega_routed_model::RoutedModel;
-
-    let record = omega_executor_record(panel, cx)?;
-    Some(
-        RoutedModel::from_disclosure(&record)?
-            .status_line()
-            .to_string(),
-    )
+fn omega_executor_line(panel: &Entity<agent_ui::AgentPanel>, cx: &App) -> Option<String> {
+    Some(agent_ui::omega_routed_model::chrome_line(
+        &omega_executor_record(panel, cx)?,
+    ))
 }
 
 /// The executor *record* the agent panel's active thread would render from.

@@ -2904,8 +2904,14 @@ impl ConversationView {
                         .title()
                         .unwrap_or_else(|| DEFAULT_THREAD_TITLE.into()),
                     executor: {
+                        // `OMEGA-DELTA-0208`. The chrome line: this snapshot is
+                        // what the supervision surfaces show a person, and the
+                        // `provider/model` wire pair is not chrome copy.
                         use crate::omega_executor_disclosure::ThreadExecutorDisclosure as _;
-                        thread.omega_executor_disclosure(cx).label().into()
+                        crate::omega_routed_model::chrome_line(
+                            &thread.omega_executor_disclosure(cx),
+                        )
+                        .into()
                     },
                     lifecycle: crate::omega_agent_supervision::lifecycle_for_thread(&thread),
                 }

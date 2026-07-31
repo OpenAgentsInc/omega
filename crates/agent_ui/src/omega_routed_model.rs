@@ -1,8 +1,10 @@
 //! The routed decision. `OMEGA-DELTA-0202`.
 //!
 //! One answer to "which model is serving this thread", and every label a person
-//! reads is a function of it: the tier control's face, the executor disclosure
-//! line, and the composer's status line.
+//! reads is a function of it: the tier control's face and the executor
+//! disclosure line. `OMEGA-DELTA-0208` folded what used to be a separate
+//! composer status line into that one line, because the two were the same fact
+//! said twice — see [`chrome_line`].
 //!
 //! # Why this exists
 //!
@@ -100,17 +102,53 @@ impl RoutedModel {
         RoutedFace::for_model(&self.provider_id, &self.model_id)
     }
 
-    /// What the composer's status line reads.
+    /// The model's own name, as a person says it — `Kimi K3`, not
+    /// `openagents/kimi-k3`.
     ///
-    /// `OMEGA-DELTA-0202` holds this to **at most the model name**. The line
-    /// used to carry the route receipt — dispatch reference, route summary,
-    /// override mode, route-fallback state — none of which is a fact about the
-    /// person's work, and the owner's standing no-exposition law applies to it.
-    /// The route receipt is still recorded; it is simply not composer copy.
+    /// `OMEGA-DELTA-0202` introduced this as `status_line`, when it was the
+    /// whole of a second line under the disclosure. `OMEGA-DELTA-0208` folded
+    /// that line into the disclosure's own, so this is now the model segment of
+    /// one line rather than a line, and it is named for what it is. The
+    /// constraint it was born with is unchanged and is why the fold is safe:
+    /// **at most the model name**. It used to carry the route receipt —
+    /// dispatch reference, route summary, override mode, route-fallback state —
+    /// none of which is a fact about the person's work, and the owner's
+    /// standing no-exposition law applies to it. The route receipt is still
+    /// recorded; it is simply not composer copy.
     #[must_use]
-    pub fn status_line(&self) -> SharedString {
+    pub fn human_name(&self) -> SharedString {
         self.face().model_name
     }
+}
+
+/// The one line a person's chrome shows for a thread: who ran it, and the model
+/// under the name that model actually has.
+///
+/// `OMEGA-DELTA-0208`. The composer drew two lines from one fact — the record's
+/// own [`ExecutorDisclosure::label`], which names the model by its wire pair,
+/// and beneath it [`RoutedModel::human_name`], which names the same model as a
+/// person says it. So a thread on Kimi read `Omega Agent · openagents/kimi-k3`
+/// above `Kimi K3`. The owner: "remove the `openagents/gpt-5.6-luna` … its
+/// duplicative with gpt 5.6 luna like the real name."
+///
+/// One line, one name. `openagents/kimi-k3` is a wire identifier, and the
+/// standing no-exposition law is the same law that took the class token off
+/// this row in omega#100: a person is not here to learn Omega's routing
+/// vocabulary. The pair is not lost — [`ExecutorDisclosure::label`] still
+/// renders it for receipts, copied system specs and machine readers, which is
+/// where an exact identifier is the useful answer.
+///
+/// Everything else about the line is unchanged, because the shape stays in
+/// [`ExecutorDisclosure::label_with_model`]: the run reference and the fallback
+/// clause are still said, and a model nobody disclosed is still *said* to be
+/// undisclosed rather than quietly dropped.
+#[must_use]
+pub fn chrome_line(disclosure: &ExecutorDisclosure) -> String {
+    let model = RoutedModel::from_disclosure(disclosure).map_or_else(
+        || disclosure.model_phrase(),
+        |routed| routed.human_name().to_string(),
+    );
+    disclosure.label_with_model(&model)
 }
 
 /// The face for a thread, falling back to the standing choice only when nothing
@@ -214,7 +252,7 @@ mod tests {
         assert_eq!(face.label.as_ref(), "Pro");
         assert_eq!(face.model_name.as_ref(), "Kimi K3");
 
-        let status = routed.status_line();
+        let status = routed.human_name();
         assert_eq!(status.as_ref(), "Kimi K3");
 
         let line = disclosure.label();
@@ -237,6 +275,102 @@ mod tests {
         );
     }
 
+    /// The live defect, as a test. `OMEGA-DELTA-0208`.
+    ///
+    /// The owner read `Omega Agent · openagents/kimi-k3` with `Kimi K3` under
+    /// it and said: "remove the `openagents/gpt-5.6-luna` … its duplicative
+    /// with gpt 5.6 luna like the real name."
+    ///
+    /// So the chrome line names the model once, under the name the model has.
+    /// The wire pair is not deleted — the record's own line still carries it,
+    /// which is asserted here too, because "the id is gone from the chrome" and
+    /// "the id is gone" are different claims and only the first one is wanted.
+    #[test]
+    fn the_chrome_line_names_one_model_once_and_never_by_its_wire_id() {
+        for (provider, model, human) in [
+            ("openagents", "kimi-k3", "Kimi K3"),
+            ("openagents", "gpt-5.6-luna", "GPT-5.6 Luna"),
+            ("openagents", "gemini-3.6-flash", "Gemini 3.6 Flash"),
+        ] {
+            let disclosure = native_disclosure(provider, model);
+            let line = chrome_line(&disclosure);
+
+            assert_eq!(
+                line,
+                format!("Omega Agent · {human}"),
+                "the chrome line must name the executor and the model, once each"
+            );
+            let wire = format!("{provider}/{model}");
+            assert!(
+                !line.contains(&wire),
+                "the wire pair is exposition on a person's chrome: {line}"
+            );
+            assert_eq!(
+                line.matches(human).count(),
+                1,
+                "the model is named twice again: {line}"
+            );
+
+            // And the record still knows the exact pair, for the receipt, the
+            // copied system spec, and every machine reader.
+            assert!(
+                disclosure.label().contains(&wire),
+                "the record's own line must keep the exact identifier: {}",
+                disclosure.label()
+            );
+        }
+    }
+
+    /// The fold changed which word names the model and nothing else.
+    ///
+    /// `OMEGA-DELTA-0208`. A run reference is still said, a fallback is still
+    /// said, and a model nobody disclosed is still *said* to be undisclosed
+    /// rather than quietly dropped — which is the whole reason
+    /// `ExecutorDisclosure::label_with_model` owns the shape of the line and
+    /// this module only chooses the model phrase.
+    #[test]
+    fn folding_the_line_kept_every_other_part_of_it() {
+        let delegated = ExecutorDisclosure {
+            class: ExecutorClass::EngineLane,
+            agent_id: "codex-acp".to_owned(),
+            provider: Some("openagents".to_owned()),
+            model: Some("kimi-k3".to_owned()),
+            run_ref: Some("operation.full-auto.77".to_owned()),
+            route: None,
+        };
+        let line = chrome_line(&delegated);
+        assert_eq!(line, "codex-acp · Kimi K3 · operation.full-auto.77");
+
+        let fell_back = ExecutorDisclosure {
+            class: ExecutorClass::NativeLoop,
+            agent_id: "Omega Agent".to_owned(),
+            provider: Some("openagents".to_owned()),
+            model: Some("gpt-5.6-luna".to_owned()),
+            run_ref: None,
+            route: Some(omega_front_door::RouteReason::EngineUnreachable),
+        };
+        let line = chrome_line(&fell_back);
+        assert!(
+            line.starts_with("Omega Agent · GPT-5.6 Luna · routed: "),
+            "a fallback a person could not otherwise see must still be said: {line}"
+        );
+
+        let undisclosed = ExecutorDisclosure {
+            class: ExecutorClass::ExternalAcp,
+            agent_id: "codex".to_owned(),
+            provider: None,
+            model: None,
+            run_ref: None,
+            route: None,
+        };
+        assert_eq!(
+            chrome_line(&undisclosed),
+            undisclosed.label(),
+            "with nothing to name humanly the chrome line is the record's own, \
+             so ignorance is still stated rather than dropped"
+        );
+    }
+
     /// The three surfaces are one function of one record, so they cannot
     /// disagree for any model at all — not only for the pair that was reported.
     #[test]
@@ -254,7 +388,7 @@ mod tests {
             let face = face_for(Some(&routed), ModelTier::Luna);
 
             assert_eq!(routed.wire_id(), format!("{provider}/{model}"));
-            assert_eq!(face.model_name, routed.status_line());
+            assert_eq!(face.model_name, routed.human_name());
             match face.tier {
                 Some(tier) => {
                     assert_eq!(tier.provider_id(), provider);
@@ -321,7 +455,7 @@ mod tests {
             );
             assert_eq!(face.model_name.as_ref(), "GPT-5.6 Luna");
             assert_eq!(face.tier, Some(ModelTier::Luna));
-            assert_eq!(pending.status_line().as_ref(), "GPT-5.6 Luna");
+            assert_eq!(pending.human_name().as_ref(), "GPT-5.6 Luna");
             assert_eq!(pending.face().label.as_ref(), face.label.as_ref());
 
             crate::omega_model_tier::clear_selection_for_test();

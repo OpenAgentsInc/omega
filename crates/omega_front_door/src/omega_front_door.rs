@@ -455,14 +455,49 @@ impl ExecutorDisclosure {
     /// dropped the model segment would read as a complete disclosure, and the
     /// reader would have no way to tell "Omega did not ask" from "the executor
     /// would not say".
+    ///
+    /// This is the **record's** line: it names the model by its wire pair,
+    /// which is what a receipt, a copied system spec and a machine reader want.
+    /// A person's chrome wants the model's own name, and asks
+    /// [`label_with_model`](Self::label_with_model) for the same line with that
+    /// phrase substituted. See `OMEGA-DELTA-0208`.
     #[must_use]
     pub fn label(&self) -> String {
-        let model = match (&self.provider, &self.model) {
+        self.label_with_model(&self.model_phrase())
+    }
+
+    /// How the record itself names the model: the `provider/model` wire pair,
+    /// or exactly which half is undisclosed.
+    ///
+    /// Separated from [`label`](Self::label) so that a caller substituting a
+    /// human model name has a defined answer for the undisclosed cases too,
+    /// rather than inventing a second vocabulary for them.
+    #[must_use]
+    pub fn model_phrase(&self) -> String {
+        match (&self.provider, &self.model) {
             (Some(provider), Some(model)) => format!("{provider}/{model}"),
             (Some(provider), None) => format!("{provider}/model not disclosed"),
             (None, Some(model)) => format!("provider not disclosed/{model}"),
             (None, None) => "model not disclosed".to_owned(),
-        };
+        }
+    }
+
+    /// The same line, naming the model with the phrase the caller supplies.
+    ///
+    /// `OMEGA-DELTA-0208`. The composer chrome drew this record's line *and* a
+    /// second line holding the model's own name, so a person read
+    /// `Omega Agent · openagents/kimi-k3` above `Kimi K3` — the same fact
+    /// twice, once in a vocabulary the surface is not allowed to teach. The
+    /// owner: "remove the `openagents/gpt-5.6-luna` … its duplicative with gpt
+    /// 5.6 luna like the real name."
+    ///
+    /// The shape of the line — who ran it, then the model, then the run, then a
+    /// fallback if there was one — is decided **here and only here**, so a
+    /// surface choosing a different word for the model cannot also drift into a
+    /// different line. The wire pair is not deleted; it is what
+    /// [`label`](Self::label) still renders for receipts and machine readers.
+    #[must_use]
+    pub fn label_with_model(&self, model: &str) -> String {
         // omega#100. The class token is not shown to a person.
         //
         // `native_loop`, `external_acp` and `engine_lane` are wire tokens. They

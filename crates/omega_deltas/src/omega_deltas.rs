@@ -196,6 +196,7 @@ pub const ENFORCED_DELTAS: &[&str] = &[
     "OMEGA-DELTA-0205",
     "OMEGA-DELTA-0206",
     "OMEGA-DELTA-0207",
+    "OMEGA-DELTA-0208",
 ];
 
 /// OMEGA-DELTA-0204. Every control the composer's bar offers, written twice:
@@ -6195,29 +6196,58 @@ mod tests {
              Defining it without rendering it discloses nothing.",
             path.display()
         );
+        // OMEGA-DELTA-0021, amended by OMEGA-DELTA-0208. This asserted
+        // `Label::new(disclosure.label())`, which pinned the *record's* line —
+        // the one that names the model by its `provider/model` wire pair. That
+        // pair is exposition on a person's chrome, and 0208 replaced it with
+        // the model's own name. The property 0021 exists for is unchanged and
+        // is what is asserted now: the line is a function of the typed record,
+        // built by the one authority that owns its shape, and never a stored or
+        // hand-built string.
         assert!(
-            source.contains("Label::new(disclosure.label())"),
-            "OMEGA-DELTA-0021: the executor line must be rendered from the \
-             disclosure record in {}, not from a stored or hand-built string.",
+            source.contains("crate::omega_routed_model::chrome_line(")
+                && source.contains("Label::new(disclosure_line)"),
+            "OMEGA-DELTA-0021 (amended by OMEGA-DELTA-0208): the executor line \
+             must be rendered from the disclosure record in {}, through \
+             `omega_routed_model::chrome_line`, not from a stored or \
+             hand-built string.",
             path.display()
         );
-        // OMEGA-DELTA-0179 amended by OMEGA-DELTA-0202. The status line under
-        // the disclosure survives — it is still drawn on both surfaces, after
-        // the physical session replaces the loading composer, which is the
-        // property 0179 exists for. What it says changed: the route receipt's
-        // dispatch reference, route summary, override mode and route-fallback
-        // state were exposition, and the owner's standing no-exposition law
-        // removed them. The line now carries at most the model name, derived
-        // from the one routed-model authority.
+        // OMEGA-DELTA-0208. The wire pair is not chrome copy. A surface that
+        // rendered `disclosure.label()` would put `openagents/kimi-k3` back
+        // beside the model's own name, which is the duplication the owner read
+        // and rejected.
         assert!(
-            source.contains("fn omega_routed_model_label(")
-                && source.contains("crate::omega_routed_model::RoutedModel")
+            !source.contains("disclosure.label()"),
+            "OMEGA-DELTA-0208: {} renders the record's own line, which names \
+             the model by its `provider/model` wire pair. A person's chrome \
+             names the model once, by its own name; the pair belongs on the \
+             record, where a receipt reads it.",
+            path.display()
+        );
+        // OMEGA-DELTA-0179, amended by OMEGA-DELTA-0202 and OMEGA-DELTA-0208.
+        // The status line survives — it is still drawn on both surfaces, after
+        // the physical session replaces the loading composer, which is the
+        // property 0179 exists for. What it says changed twice: 0202 removed
+        // the route receipt's dispatch reference, route summary, override mode
+        // and route-fallback state as exposition, holding the line to at most
+        // the model name; 0208 then folded that line into the disclosure's own,
+        // because a model name printed under a line that already named the
+        // model is the same fact twice. The `Role::Status` region is still on
+        // both surfaces and now carries the whole line.
+        assert!(
+            source.contains("fn omega_disclosure_line(")
+                && source.contains("crate::omega_routed_model::chrome_line")
                 && source.matches("id(\"omega-routed-model\")").count() >= 2
                 && source.matches("role(gpui::Role::Status)").count() >= 2
-                && source.matches(".when_some(routed_model").count() >= 2,
-            "OMEGA-DELTA-0179 (amended by OMEGA-DELTA-0202): {} must keep the \
-             status line visible after the physical session replaces the \
-             loading composer, in both ordinary and zero-base thread surfaces.",
+                && source
+                    .matches("aria_label(disclosure_line.clone())")
+                    .count()
+                    >= 2,
+            "OMEGA-DELTA-0179 (amended by OMEGA-DELTA-0202 and \
+             OMEGA-DELTA-0208): {} must keep the status region visible after \
+             the physical session replaces the loading composer, in both \
+             ordinary and zero-base thread surfaces.",
             path.display()
         );
         // Judged over string literals only. The comment above the status line
@@ -13016,21 +13046,44 @@ mod tests {
             binding_path.display()
         );
 
+        // OMEGA-DELTA-0101, amended by OMEGA-DELTA-0208. This pinned the two
+        // arms of a `match` the card built by hand — `{agent_id} · {model}` and
+        // `{agent_id} · model not disclosed` — beside a tooltip carrying the
+        // record's own line. So the card said the model twice, and the second
+        // time by its `provider/model` wire pair, which is the duplication the
+        // owner rejected on the composer. 0208 gave every chrome surface one
+        // line from one authority, and this card renders it.
+        //
+        // The property 0101 exists for is unchanged and is what is asserted
+        // now: the model is named beside the ACP agent id on the collapsed
+        // line. `chrome_line` produces exactly that — `agent_id · model` — and
+        // still says "model not disclosed" when the adapter advertises none,
+        // which is asserted directly on the shared authority in
+        // `crates/agent_ui/src/omega_routed_model.rs` rather than by grepping
+        // for a `format!` string here.
         let view_path = repository_path(THREAD_VIEW_PATH);
         let view = read_repository_file(THREAD_VIEW_PATH);
         let compact_view = without_whitespace(&view);
-        for required in [
-            "Some(model) => format!(\"{} · {model}\", disclosure.agent_id)",
-            "None => format!(\"{} · model not disclosed\", disclosure.agent_id)",
-        ] {
-            assert!(
-                compact_view.contains(&without_whitespace(required)),
-                "OMEGA-DELTA-0101: {} no longer renders `{required}` in the \
-                 subagent card header. The model belongs beside the ACP agent \
-                 id on the collapsed line.",
-                view_path.display()
-            );
-        }
+        let card = body_of(&view, "render_subagent_card");
+        assert!(
+            without_whitespace(&card).contains(&without_whitespace(
+                "crate::omega_routed_model::chrome_line("
+            )),
+            "OMEGA-DELTA-0101 (amended by OMEGA-DELTA-0208): {} no longer names \
+             the executor and its model on the collapsed subagent card. The \
+             model belongs beside the ACP agent id on that line.",
+            view_path.display()
+        );
+        assert!(
+            compact_view.contains(&without_whitespace(
+                "disclosure.class != omega_front_door::ExecutorClass::NativeLoop"
+            )),
+            "OMEGA-DELTA-0101: {} no longer limits the subagent card's executor \
+             line to a subagent that is not Omega's own loop. Naming Omega \
+             inside Omega is noise, and absence of the line is what already \
+             means the default.",
+            view_path.display()
+        );
     }
 
     /// OMEGA-DELTA-0101. A session Omega holds no transcript for says so
@@ -25305,7 +25358,13 @@ mod tests {
             "pub struct RoutedModel",
             "pub fn from_disclosure(",
             "pub fn face(&self)",
-            "pub fn status_line(&self)",
+            // OMEGA-DELTA-0208 renamed `status_line` to `human_name`: it names
+            // a model, and since 0208 folded the second line away it is a
+            // segment of one line rather than a line. `chrome_line` is the new
+            // half of the same authority — the whole line every surface a
+            // person reads renders.
+            "pub fn human_name(&self)",
+            "pub fn chrome_line(",
             "pub fn face_for(",
         ] {
             assert!(
@@ -25794,6 +25853,79 @@ mod tests {
                 source.contains("face_for_next_turn("),
                 "OMEGA-DELTA-0207: {} no longer derives its face from the \
                  model the next turn will start on.",
+                repository_path(path).display()
+            );
+        }
+    }
+
+    /// OMEGA-DELTA-0208. One model, named once, by its own name.
+    ///
+    /// The composer drew the record's line — which names the model by its
+    /// `provider/model` wire pair — and, directly beneath it, the model's own
+    /// name. The owner read `Omega Agent · openagents/kimi-k3` over `Kimi K3`
+    /// and said: "remove the `openagents/gpt-5.6-luna` … its duplicative with
+    /// gpt 5.6 luna like the real name."
+    ///
+    /// Two things are checked, and they are different claims. The wire pair is
+    /// **gone from a person's chrome**, and the wire pair is **still on the
+    /// record**, where a receipt and a machine reader want an exact identifier.
+    /// A check that only asserted the first would be satisfied by deleting the
+    /// pair outright, which would take the exact identifier away from the
+    /// surfaces that exist to carry it.
+    #[test]
+    fn the_chrome_names_one_model_once_and_never_by_its_wire_id() {
+        // The shape of the line has one owner, so a caller that substitutes a
+        // different word for the model cannot also drift into a different line.
+        let record_path = repository_path(EXECUTOR_DISCLOSURE_RECORD_PATH);
+        let record = read_repository_file(EXECUTOR_DISCLOSURE_RECORD_PATH);
+        for required in [
+            "pub fn label_with_model(&self, model: &str) -> String",
+            "pub fn model_phrase(&self) -> String",
+            "self.label_with_model(&self.model_phrase())",
+        ] {
+            assert!(
+                record.contains(required),
+                "OMEGA-DELTA-0208: {} lost `{required}`. The line's shape — who \
+                 ran it, the model, the run, a fallback — belongs to one \
+                 function; two functions building it is how the run reference \
+                 or the fallback clause goes missing from one of them.",
+                record_path.display()
+            );
+        }
+        assert!(
+            record.contains("format!(\"{provider}/{model}\")"),
+            "OMEGA-DELTA-0208: {} no longer renders the exact `provider/model` \
+             pair. The pair leaves the chrome, not the record: a receipt, a \
+             copied system spec and a machine reader all want the exact \
+             identifier.",
+            record_path.display()
+        );
+
+        // And every surface a person reads asks for the human name.
+        let routed = read_repository_file(OMEGA_ROUTED_MODEL_PATH);
+        assert!(
+            routed.contains("pub fn chrome_line(") && routed.contains("label_with_model(&model)"),
+            "OMEGA-DELTA-0208: {} lost the one authority every chrome surface \
+             renders through.",
+            repository_path(OMEGA_ROUTED_MODEL_PATH).display()
+        );
+        assert!(
+            routed.contains("disclosure.model_phrase()"),
+            "OMEGA-DELTA-0208: {} stopped falling back to the record's own \
+             phrase for a model nobody disclosed. An undisclosed model is said, \
+             not skipped: a line that dropped the segment would read as a \
+             complete disclosure.",
+            repository_path(OMEGA_ROUTED_MODEL_PATH).display()
+        );
+        for path in [THREAD_VIEW_PATH, AGENT_PANEL_PATH, CONVERSATION_VIEW_PATH] {
+            let source = without_comments(&read_repository_file(path));
+            assert!(
+                !source.contains("disclosure.label()")
+                    && !source.contains("omega_executor_disclosure(cx).label()"),
+                "OMEGA-DELTA-0208: {} renders the record's own line to a \
+                 person. That names the model by its wire pair, which is the \
+                 duplication the owner rejected; render \
+                 `omega_routed_model::chrome_line` instead.",
                 repository_path(path).display()
             );
         }

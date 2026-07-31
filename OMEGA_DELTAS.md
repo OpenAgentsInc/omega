@@ -9217,3 +9217,56 @@ permitted to *describe* a turn.
   `the_label_follows_the_dispatch_when_the_standing_choice_is_launch_fresh`,
   `without_a_registry_the_standing_choice_is_the_last_resort` in
   `crates/agent_ui/src/omega_routed_model.rs`.
+
+### OMEGA-DELTA-0208 — One model, named once, by its own name
+
+**A person's chrome names the model that is serving a thread exactly once, and
+by the name the model has.** `openagents/kimi-k3` is a wire identifier. It stays
+on the record, where receipts, copied system specs and machine readers want an
+exact pair; it does not appear on the composer, the disclosure line, or the
+thread toolbar.
+
+**Why.** The composer drew two lines from one fact. The first was the record's
+own `ExecutorDisclosure::label`, which names the model by its `provider/model`
+pair. The second, added by `OMEGA-DELTA-0202`, was the model's own name. So a
+thread on Kimi read `Omega Agent · openagents/kimi-k3` with `Kimi K3` directly
+beneath it — one fact stated twice, once in a vocabulary this surface is not
+allowed to teach. The owner: "remove the `openagents/gpt-5.6-luna` … its
+duplicative with gpt 5.6 luna like the real name."
+
+This is the same law that took the class token off this row in omega#100. The
+tokens `native_loop`, `external_acp` and `engine_lane` were removed from the
+line because a person is not here to learn Omega's routing vocabulary, and
+`openagents/kimi-k3` is that vocabulary's other half. The standing
+no-exposition law does not distinguish between them.
+
+**What now holds.** `ExecutorDisclosure::label_with_model` owns the *shape* of
+the line — who ran it, then the model, then the run, then a fallback when there
+was one — and nothing else may build that line by hand.
+`ExecutorDisclosure::label` calls it with the wire pair and is what a receipt
+renders. `omega_routed_model::chrome_line` calls it with
+`RoutedModel::human_name`, and is what every surface a person reads renders.
+Because the model phrase is the only thing that varies, a surface choosing a
+different word for the model cannot also drift into a different line.
+
+**What did not change.** The run reference is still said. A fallback route a
+person could not otherwise see is still said. A model nobody disclosed is still
+*said* to be undisclosed rather than quietly dropped — `chrome_line` falls back
+to the record's own phrase for exactly that case, so the surfaces still agree
+even about their ignorance. `OMEGA-DELTA-0021`'s property is intact: every
+thread surface still names its executor, still rendered from the typed record
+and never from a stored or hand-built string.
+
+**The second line is folded, not deleted.** `OMEGA-DELTA-0179` required a status
+line to survive the loading composer's replacement by the physical session, and
+`OMEGA-DELTA-0202` held that line to *at most the model name*. Because it was
+already held to the model name and nothing else, folding it into the disclosure
+line loses no fact — the same `Role::Status` region on the same two surfaces now
+carries the whole line. `RoutedModel::status_line` is renamed `human_name`,
+since it is a model's name rather than a line.
+
+- **Enforced by:** `the_chrome_names_one_model_once_and_never_by_its_wire_id`
+  in `crates/omega_deltas`; and
+  `the_chrome_line_names_one_model_once_and_never_by_its_wire_id`,
+  `folding_the_line_kept_every_other_part_of_it` in
+  `crates/agent_ui/src/omega_routed_model.rs`.
