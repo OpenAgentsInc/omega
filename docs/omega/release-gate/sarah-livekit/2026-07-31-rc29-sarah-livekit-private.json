@@ -14,6 +14,7 @@
   "facts": {
     "binding_provenance": {
       "admitted_model_revision": "NO versioned model catalog exists for Sarah. The realtime model is the bare pinned constant SARAH_LIVEKIT_MODEL and the transcription constant SARAH_LIVEKIT_TRANSCRIPTION_MODEL in packages/audio-contract/src/sarah-livekit-worker.ts. This binding names those constants and must not be read as a catalog revision.",
+      "bargein_audio_fix": "The 30-second voice drop was barge-in performing fallible CoreAudio device teardown and reopen, fixed by omega bc968334ac (2026-07-29). That commit is an ancestor of the rc29 source revision c7ecf769e8 (2026-07-31), verified by git merge-base --is-ancestor, so this candidate carries the fix. A mid-turn drop observed on rc29 is therefore a NEW defect and must not be attributed to that known cause.",
       "livekit_config_revision": "configurationDigest of infra/livekit/production/livekit.yaml, stable across every production receipt",
       "livekit_image_digest": "infra/livekit/bundle.json serverImage (livekit-server v1.13.4)",
       "livekit_infrastructure_revision": "deployedRevision of the last production LiveKit runtime deployment receipt docs/ops/receipts/livekit/production-runtime-signer-worker-20260731T113000Z.json",
@@ -23,7 +24,7 @@
       "sarah_worker_image_digest": "infra/livekit/production/resources/sarah-agent-runtime.yaml and infra/livekit/bundle.json workerImage (pinState pinned); pinned by openagents commit 8489421023, the direct child of worker source fdd0db9bab",
       "unbound_identifier": "The Cloud Run serving revision openagents-monolith-00349-7q2 was reported to the assembling agent but is recorded nowhere in openagents at c4906fbd89, so it is deliberately absent from this binding. The last serving revision recorded in the repository in a Sarah LiveKit context is openagents-monolith-00347-bds."
     },
-    "blocked_reason": "No packaged Omega desktop completed the private Sarah LiveKit journey. The only evidence bound to this candidate is a headless Node acceptance harness run against production, which proves a completed voice turn, a 110 ms interrupt acknowledgement with a 170 ms audio tail, one accounted cancelled response, and exact provider usage reconciled to a settled 74368 msat charge. Admission price, hold, rate, and limit shown before capture, one confirmed bounded command, one started agent thread, and an admitted media reconnect without a second provider generation were observed on no client at all.",
+    "blocked_reason": "No packaged Omega desktop completed the private Sarah LiveKit journey. The only evidence bound to this candidate is a headless Node acceptance harness run against production, which proves a completed voice turn, a 110 ms interrupt acknowledgement with a 170 ms audio tail, one accounted cancelled response, and exact provider usage reconciled to a settled 74368 msat charge. Admission price, hold, rate, and limit shown before capture, one confirmed bounded command, one started agent thread, and an admitted media reconnect without a second provider generation were observed on no client at all. Re-examined 2026-07-31 with the admission blockers cleared. Cohort admission is no longer a precondition: the journey identities hold active sarah_voice_cohort:alpha_v1 rows, so an eligible account exists on this candidate. What remains is a client-driving problem and an audio problem, neither of which is a credential. The private admission flow is entered from the native menu item Sarah voice..., which is an ordinary NSMenuItem and therefore reachable by macOS Accessibility, but everything the row actually requires to be OBSERVED - the admission price, hold, rate, duration and spend limit, the bounded-command confirmation, the started agent thread, and the exact final charge - is GPUI-rendered content that is not exposed to Accessibility at all unless the instance is launched with the undocumented, off-by-default ZED_EXPERIMENTAL_A11Y=1. Separately, a real voice turn needs prompt audio to reach the app's CoreAudio input; the only virtual audio device present on the acceptance host is a third-party loopback that is not ours to depend on, and no supported injection path exists. So the row stays inconclusive on client evidence, and it is deliberately NOT downgraded to blocked: nothing here contradicts the harness result.",
     "issues": [
       "omega#185",
       "openagents#9283",
@@ -38,7 +39,9 @@
     ],
     "note": "This receipt records what was actually observed for one Sarah LiveKit release-gate row on Omega v0.2.0-rc29. It never promotes source tests, configuration, deployment-lifecycle receipts, or a headless harness run into an installed packaged-candidate observation.",
     "observed": {
+      "candidate_carries_bargein_audio_fix": true,
       "client_kind": "headless Node acceptance harness, not the packaged candidate",
+      "eligible_alpha_cohort_account_exists_for_candidate": true,
       "headless_active_room_duration_ms": 13639,
       "headless_cancelled_response_count": 1,
       "headless_exact_provider_usage_reconciled_to_final_charge": true,
@@ -54,7 +57,9 @@
     },
     "refused_claims": [
       "A headless Node harness session is not the packaged candidate and is not promoted to owner-assisted-pass for this row.",
-      "Server-side admission-terms machinery and its production hold, rate, and limit values are source and configuration evidence; they do not prove any client displayed the terms before capture."
+      "Server-side admission-terms machinery and its production hold, rate, and limit values are source and configuration evidence; they do not prove any client displayed the terms before capture.",
+      "A cleared cohort admission is NOT client evidence. It removes a precondition and observes none of the five facts this row is missing.",
+      "A boolean reconnect flag is NOT the reconnect assertion. The property under test is that no SECOND provider generation opened, which only a compared generation identity can show."
     ],
     "source_evidence": [
       {
@@ -76,7 +81,7 @@
         "role": "read-only production acceptance audit; records the connectivity, load, privacy, cost, and drill rows as blocked or not run"
       }
     ],
-    "unblocks_when": "An eligible account runs the full private journey on Omega v0.2.0-rc29 itself and the observation preserves admission terms shown before capture, the bounded command confirmation, the started agent thread, and a media reconnect whose provider generation digest is unchanged."
+    "unblocks_when": "An eligible account runs the full private journey on Omega v0.2.0-rc29 itself and the observation preserves admission terms shown before capture, the bounded command confirmation, the started agent thread, and a media reconnect whose provider generation digest is unchanged. Admission no longer gates this: eligible identities exist. Two things do. First, a driver for the packaged client - a human, or an unattended path that does not exist today. Second, a way to put the prompt audio into the app's input device. The reconnect assertion must compare the provider generation identity captured on both sides of the reconnect, not a boolean; the sibling sarah-livekit-isolation row is inconclusive precisely because its identityIsolationObserved is a harness literal rather than a measurement, and repeating that shape here would produce the same worthless pass."
   },
   "public_safe": true,
   "row_id": "sarah-livekit-private",
