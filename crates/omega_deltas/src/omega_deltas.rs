@@ -190,6 +190,7 @@ pub const ENFORCED_DELTAS: &[&str] = &[
     "OMEGA-DELTA-0199",
     "OMEGA-DELTA-0200",
     "OMEGA-DELTA-0201",
+    "OMEGA-DELTA-0202",
 ];
 
 /// The concise product contract adjacent to the delta registry.
@@ -202,6 +203,11 @@ pub const GOOGLE_PROVIDER_PATH: &str = "crates/language_models/src/provider/goog
 pub const GOOGLE_CLIENT_PATH: &str = "crates/google_ai/src/google_ai.rs";
 pub const OPENAGENTS_PROVIDER_PATH: &str = "crates/language_models/src/provider/openagents.rs";
 pub const OMEGA_MODEL_TIER_PATH: &str = "crates/agent_ui/src/omega_model_tier.rs";
+/// OMEGA-DELTA-0202. The single routed-model authority every label reads.
+pub const OMEGA_ROUTED_MODEL_PATH: &str = "crates/agent_ui/src/omega_routed_model.rs";
+/// OMEGA-DELTA-0202. Where the executor disclosure record is built from a live
+/// thread, and therefore where a label stops being able to disagree with it.
+pub const OMEGA_EXECUTOR_DISCLOSURE_PATH: &str = "crates/agent_ui/src/omega_executor_disclosure.rs";
 pub const ZERO_BASE_THREAD_VIEW_PATH: &str = "crates/agent_ui/src/conversation_view/thread_view.rs";
 pub const BASIC_SYSTEM_PROMPT_PATH: &str = "crates/agent/src/templates/basic_system_prompt.hbs";
 pub const AGENT_THREAD_PATH: &str = "crates/agent/src/thread.rs";
@@ -6152,15 +6158,36 @@ mod tests {
              disclosure record in {}, not from a stored or hand-built string.",
             path.display()
         );
+        // OMEGA-DELTA-0179 amended by OMEGA-DELTA-0202. The status line under
+        // the disclosure survives — it is still drawn on both surfaces, after
+        // the physical session replaces the loading composer, which is the
+        // property 0179 exists for. What it says changed: the route receipt's
+        // dispatch reference, route summary, override mode and route-fallback
+        // state were exposition, and the owner's standing no-exposition law
+        // removed them. The line now carries at most the model name, derived
+        // from the one routed-model authority.
         assert!(
-            source.contains("fn omega_route_receipt_label(")
-                && source.contains("recorded_route_receipt(")
-                && source.matches("id(\"omega-route-receipt\")").count() >= 2
+            source.contains("fn omega_routed_model_label(")
+                && source.contains("crate::omega_routed_model::RoutedModel")
+                && source.matches("id(\"omega-routed-model\")").count() >= 2
                 && source.matches("role(gpui::Role::Status)").count() >= 2
-                && source.matches(".when_some(route_receipt").count() >= 2,
-            "OMEGA-DELTA-0179: {} must keep the durable route receipt visible \
-             after the physical session replaces the loading composer, in both \
-             ordinary and zero-base thread surfaces.",
+                && source.matches(".when_some(routed_model").count() >= 2,
+            "OMEGA-DELTA-0179 (amended by OMEGA-DELTA-0202): {} must keep the \
+             status line visible after the physical session replaces the \
+             loading composer, in both ordinary and zero-base thread surfaces.",
+            path.display()
+        );
+        // Judged over string literals only. The comment above the status line
+        // quotes the exposition it removed, and a check that could not tell a
+        // quoted defect from a live one would forbid recording why.
+        let rendered_text = string_literal_contents(&source);
+        assert!(
+            !rendered_text.contains("Receipt {} · ")
+                && !rendered_text.contains("· override: ")
+                && !rendered_text.contains("· fallback: "),
+            "OMEGA-DELTA-0202: {} put route exposition back on the composer's \
+             status line. The owner's standing no-exposition law holds it to at \
+             most the model name.",
             path.display()
         );
 
@@ -21124,11 +21151,11 @@ mod tests {
         );
     }
 
-    /// OMEGA-DELTA-0172 (amended 2026-07-30). Zero base offers the model tier
-    /// control in the input bar: Luna (default, openagents/gpt-5.6-luna),
-    /// Flash (google/gemini-3.6-flash, the backup), and Pro
-    /// (openagents/kimi-k3) via the OpenAgents hosted chat-completions
-    /// provider.
+    /// OMEGA-DELTA-0172 (amended 2026-07-30, again by OMEGA-DELTA-0202). Zero
+    /// base offers the model tier control in the input bar: Luna (default,
+    /// openagents/gpt-5.6-luna), Flash (openagents/gemini-3.6-flash, the
+    /// backup), and Pro (openagents/kimi-k3) — all three via the OpenAgents
+    /// hosted chat-completions provider.
     #[test]
     fn zero_base_input_bar_offers_flash_and_pro_hosted_lanes() {
         let tier = read_repository_file(OMEGA_MODEL_TIER_PATH);
@@ -21141,7 +21168,7 @@ mod tests {
                 && tier.contains("Flash")
                 && tier.contains("Pro")
                 && tier.contains("openagents/gpt-5.6-luna")
-                && tier.contains("google/gemini-3.6-flash")
+                && tier.contains("openagents/gemini-3.6-flash")
                 && tier.contains("openagents/kimi-k3")
                 && tier.contains("render_model_tier_selector"),
             "OMEGA-DELTA-0172: {} lost the Luna/Flash/Pro tier mapping or renderer.",
@@ -21149,6 +21176,7 @@ mod tests {
         );
         assert!(
             provider.contains("gpt-5.6-luna")
+                && provider.contains("gemini-3.6-flash")
                 && provider.contains("kimi-k3")
                 && provider.contains("/api/v1")
                 && provider.contains("openagents_session")
@@ -25212,6 +25240,90 @@ mod tests {
             thread.contains("is_authenticated(cx)"),
             "OMEGA-DELTA-0201: the fallback walk no longer reaches configured \
              direct-key providers after the hosted rungs."
+        );
+    }
+
+    /// OMEGA-DELTA-0202. One routed-model authority, and no lane inside a turn
+    /// may dead-end without walking the `OMEGA-DELTA-0201` chain first.
+    #[test]
+    fn one_routed_decision_answers_every_label_and_no_lane_dead_ends() {
+        let routed = read_repository_file(OMEGA_ROUTED_MODEL_PATH);
+        for required in [
+            "pub struct RoutedModel",
+            "pub fn from_disclosure(",
+            "pub fn face(&self)",
+            "pub fn status_line(&self)",
+            "pub fn face_for(",
+        ] {
+            assert!(
+                routed.contains(required),
+                "OMEGA-DELTA-0202: {} lost `{required}`. Without one authority \
+                 each label recomputes its own answer and they drift apart, \
+                 which is the `OMEGA-DELTA-0131` defect on a new control.",
+                repository_path(OMEGA_ROUTED_MODEL_PATH).display()
+            );
+        }
+
+        let tier = read_repository_file(OMEGA_MODEL_TIER_PATH);
+        assert!(
+            tier.contains("pub struct RoutedFace") && tier.contains("face: RoutedFace"),
+            "OMEGA-DELTA-0202: {} no longer renders the tier control from the \
+             routed decision. Reading the process-wide standing choice is what \
+             showed `Luna` over a thread Kimi K3 was answering.",
+            repository_path(OMEGA_MODEL_TIER_PATH).display()
+        );
+        assert!(
+            tier.contains("Self::Luna | Self::Flash | Self::Pro => \"openagents\"")
+                && tier.contains("openagents/gemini-3.6-flash"),
+            "OMEGA-DELTA-0202: {} sent the Flash tier back to the direct Google \
+             provider. That rung then needs the person's own Google AI \
+             credential, and the middle of the always-work chain reports \
+             `Gemini 3.6 Flash is unavailable` while the hosted lane is healthy.",
+            repository_path(OMEGA_MODEL_TIER_PATH).display()
+        );
+
+        let provider = read_repository_file(OPENAGENTS_PROVIDER_PATH);
+        assert!(
+            provider.contains("Gemini36Flash") && provider.contains("gemini-3.6-flash"),
+            "OMEGA-DELTA-0202: {} no longer serves the hosted Gemini lane, so \
+             the Flash tier has nowhere to point.",
+            repository_path(OPENAGENTS_PROVIDER_PATH).display()
+        );
+
+        let disclosure = read_repository_file(OMEGA_EXECUTOR_DISCLOSURE_PATH);
+        assert!(
+            disclosure.contains("active_turn_model()"),
+            "OMEGA-DELTA-0202: {} reads the configured model again. While a turn \
+             is on a fallback rung, that names a model which is not answering.",
+            repository_path(OMEGA_EXECUTOR_DISCLOSURE_PATH).display()
+        );
+
+        let thread = read_repository_file(AGENT_THREAD_PATH);
+        for required in [
+            "fn active_turn_model(",
+            "fn set_turn_fallback_model(",
+            "fn advance_to_next_rung(",
+        ] {
+            assert!(
+                thread.contains(required),
+                "OMEGA-DELTA-0202: {} lost `{required}`.",
+                repository_path(AGENT_THREAD_PATH).display()
+            );
+        }
+        assert!(
+            thread.matches("Self::advance_to_next_rung(").count() >= 2,
+            "OMEGA-DELTA-0202: {} has a lane inside a turn that dead-ends \
+             without walking the chain. Compaction runs at the head of every \
+             iteration, and its retry-exhausted arm used to return outright.",
+            repository_path(AGENT_THREAD_PATH).display()
+        );
+        assert!(
+            thread.contains("provider(&LanguageModelProviderId::from("),
+            "OMEGA-DELTA-0202: {} resolves the named rungs through \
+             `available_models` again, which hides every provider the registry \
+             has not yet marked authenticated — including hosted lanes that \
+             authenticate at request time.",
+            repository_path(AGENT_THREAD_PATH).display()
         );
     }
 }

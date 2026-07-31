@@ -7720,9 +7720,18 @@ current image build does not decode it inline.
 - **Amended 2026-07-30 (owner direction: "CORE OMEGA AGENT MUST ALWAYS HIT
   OUR API AND WORK"):** the control is now **Luna | Flash | Pro**. Luna
   (default) selects `openagents/gpt-5.6-luna` on the hosted OpenAgents lane.
-  Flash stays reachable as the `google/gemini-3.6-flash` backup. Pro stays
-  `openagents/kimi-k3`. OpenAgents cloud accepts the user bearer for those
-  exact hosted lanes (gemini-3.6-flash, kimi-k3, gpt-5.6-luna).
+  Flash stays reachable as the Gemini backup. Pro stays `openagents/kimi-k3`.
+  OpenAgents cloud accepts the user bearer for those exact hosted lanes
+  (gemini-3.6-flash, kimi-k3, gpt-5.6-luna).
+- **Amended 2026-07-31 by `OMEGA-DELTA-0202`:** Flash selects
+  `openagents/gemini-3.6-flash`, not `google/gemini-3.6-flash`. It had been
+  pointing at the *direct* Google provider, which needs the person's own Google
+  AI credential — so the middle tier, and the middle rung of the always-work
+  chain, reported "Gemini 3.6 Flash is unavailable" on a machine whose hosted
+  Gemini lane was healthy and serving the other two tiers on the same session.
+  All three tiers are hosted lanes now, which is what this control's own
+  documentation had claimed throughout. A configured direct Google key still
+  has a lane: it sits behind the hosted rung in the fallback chain.
 - **Enforced by:** `omega_model_tier` unit tests, `language_models` openagents
   provider tests, the OpenAgents chat-completions dual-auth path, and
   `zero_base_input_bar_offers_flash_and_pro_hosted_lanes` in
@@ -8868,3 +8877,104 @@ startup recheck — survives unchanged behind that dropdown.
   `omega_identity`; and
   `hosted_failure_copy_names_the_automatic_fallback_not_a_key` in
   `language_models`.
+
+### OMEGA-DELTA-0202 — One routed decision behind every model label, and no lane dead-ends
+
+- **Origin:** owner evidence 2026-07-31, on a build carrying
+  `OMEGA-DELTA-0201`. Three defects in one window, all client-side.
+
+**The label lied.** A pre-existing thread showed **Luna** on the tier control
+while the disclosure line under it read `openagents/kimi-k3` and the status
+line agreed with the disclosure. Kimi is what answered. This is
+`OMEGA-DELTA-0131`'s defect restated on a newer control, and it has the same
+cause it had then: **two selections, not connected to each other.**
+
+- The disclosure read the thread's own model, through
+  `ExecutorDisclosure` — a projection over the thread's durable record.
+- The tier control read `omega_model_tier::selected()`, a process-wide static
+  that is *the standing choice for the next connection* and resets to Luna at
+  every launch. Reopening a Kimi thread in a new process therefore drew
+  **Luna** on the control, with nothing having moved.
+
+A control whose face comes from a different place than the work cannot be kept
+in agreement by care. It is only ever accidentally right, which is why the
+repair is structural rather than a corrected read: `crates/agent_ui/src/omega_routed_model.rs`
+holds `RoutedModel`, derived from the disclosure record, and the tier face, the
+disclosure line and the status line are all functions of it. The standing
+choice still decides what a *new* conversation starts on — that is a truthful
+statement about the next turn — and it is no longer permitted to describe a
+thread that has already resolved a model. An off-chain model (a fallback rung
+on a direct-key provider) is *named*, never dressed in a tier word it is not
+on.
+
+**The rung is part of the answer.** `OMEGA-DELTA-0201`'s fallback lived
+entirely in a local variable of the turn loop, so while a turn ran on Kimi
+after Luna died, every label still said Luna — truthfully reporting the
+configured model, and wrong about what was answering. `Thread::active_turn_model`
+is now the single model-level authority: the configured model at rest, the live
+rung while a turn is on one. It is turn-local and cleared when the turn ends,
+because the fallback still never rewrites the person's default.
+
+**A lane inside the turn dead-ended.** The owner watched a turn retry
+(*"Attempt 2 of 2"*) and then terminate with the chain never consulted, while a
+later turn walked Luna → Flash → Kimi correctly. Compaction is the lane that
+could do that: it runs at the head of every turn iteration, and its
+retry-exhausted arm returned outright instead of walking the chain — so a long
+pre-existing thread, whose first act is a compaction, could exhaust its retries
+and die on its own summary. `advance_to_next_rung` is now one implementation
+shared by both lanes, and compaction moves onto the rung with the rest of the
+turn rather than continuing to stream at a lane the turn just proved dead.
+
+- **The walk could also see nothing.** The named rungs were resolved through
+  `LanguageModelRegistry::available_models`, which filters out every provider
+  the registry has not marked authenticated. The hosted lanes authenticate at
+  *request* time — the session is resolved inside the stream — so a stale
+  readiness flag could empty an "always work" chain without one rung being
+  asked. Named rungs now resolve from the provider directly. A rung that truly
+  cannot serve fails on its own attempt and the walk moves on; that is the
+  honest ordering.
+
+**Flash was pointed at the wrong provider.** `ModelTier::Flash` mapped to
+`google/gemini-3.6-flash`, the *direct* Google provider, which needs the
+person's own Google AI credential — while this module's own documentation
+called Flash a hosted lane, and the hosted Gemini lane was healthy and serving
+the other two tiers on the same session. So *"Gemini 3.6 Flash is unavailable"*
+was the client correctly reporting a missing personal key, and the middle rung
+of the always-work chain was unreachable by design. `HostedModel::Gemini36Flash`
+serves it now and the tier points at `openagents/gemini-3.6-flash`. The direct
+Google rung is kept behind the hosted one rather than deleted: a person who has
+configured a key keeps that lane.
+
+**The status line said too much.** It read
+`Receipt 0 · Route: Omega Agent (general reasoning) · override: automatic ·
+fallback: none` — a dispatch reference, a router summary, an override mode and
+a route-fallback state. None of that is a fact about the person's work, and the
+owner's standing no-exposition law applies to it. It now carries at most the
+model name, from the same routed decision as the other two surfaces. The route
+receipt is still recorded and still reachable; it is not composer copy.
+`OMEGA-DELTA-0179` is amended, not withdrawn: the line is still drawn on both
+the ordinary and zero-base surfaces after the physical session replaces the
+loading composer, which is the property that delta exists for.
+
+- **What this does not claim.** The exact live sequence that produced the
+  terminated Luna turn was not reproduced in a harness. Two dead-ends were
+  found by reading, and both are fixed and covered: the compaction arm and the
+  authenticated-only rung lookup. A non-retryable stream failure and a
+  retry-exhausted stream failure both already advanced correctly, and now have
+  tests that will fail if they stop.
+
+- **Enforced by:** `one_routed_decision_answers_every_label_and_no_lane_dead_ends`
+  and the amended `the_thread_surface_renders_the_executor_line_from_the_record`
+  in `crates/omega_deltas`;
+  `every_surface_reports_the_routed_model_when_the_stored_default_differs`,
+  `no_disclosed_model_produces_two_different_answers`,
+  `an_unrouted_thread_falls_back_to_the_standing_choice` and
+  `an_empty_identifier_is_not_a_routed_model` in `agent_ui`;
+  `the_face_names_the_routed_model_not_the_standing_choice`,
+  `an_off_tier_model_is_named_rather_than_labelled_with_a_tier` and
+  `flash_stays_reachable_as_the_hosted_gemini_backup` in `agent_ui`;
+  `flash_is_served_by_the_hosted_lane` in `language_models`; and
+  `test_a_dead_stream_lane_advances_to_the_next_rung`,
+  `test_a_retry_exhausted_stream_lane_advances_to_the_next_rung`,
+  `test_a_dead_compaction_lane_advances_to_the_next_rung` and
+  `test_the_labels_follow_the_rung_that_is_serving_the_turn` in `agent`.

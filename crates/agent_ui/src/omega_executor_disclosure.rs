@@ -99,10 +99,15 @@ fn classify_connection(
     let agent_id = connection.agent_id().0.to_string();
 
     if let Some(native) = connection.clone().downcast::<NativeAgentConnection>() {
+        // `OMEGA-DELTA-0202`. `active_turn_model` and not `model`: while a turn
+        // has fallen onto a rung of the `OMEGA-DELTA-0201` chain, the rung is
+        // what is answering, and this record is what every label is derived
+        // from. Reading the configured model here would put the whole surface
+        // back to naming a model that is not serving the turn.
         let (provider, model) = native
             .thread(session_id, cx)
             .and_then(|thread| {
-                thread.read(cx).model().map(|model| {
+                thread.read(cx).active_turn_model().map(|model| {
                     (
                         Some(model.provider_id().0.to_string()),
                         Some(model.id().0.to_string()),

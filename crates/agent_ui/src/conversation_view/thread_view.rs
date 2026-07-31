@@ -13906,7 +13906,7 @@ impl ThreadView {
     fn render_zero_base_executor_bar(&self, cx: &mut Context<Self>) -> AnyElement {
         let exo = self.exo_connection(cx);
         let disclosure = self.executor_disclosure(cx);
-        let route_receipt = self.omega_route_receipt_label(cx);
+        let routed_model = self.omega_routed_model_label(cx);
         let inspector_open = self.exo_inspector_expanded;
         let turn_phase = exo.as_ref().map(|exo| exo.turn().phase);
         let turn_running = self.thread.read(cx).status() != ThreadStatus::Idle;
@@ -13930,15 +13930,15 @@ impl ThreadView {
                             .size(LabelSize::XSmall)
                             .color(Color::Muted),
                     )
-                    .when_some(route_receipt, |this, route_receipt| {
-                        let accessibility_label = route_receipt.clone();
+                    .when_some(routed_model, |this, routed_model| {
+                        let accessibility_label = routed_model.clone();
                         this.child(
                             div()
-                                .id("omega-route-receipt")
+                                .id("omega-routed-model")
                                 .role(gpui::Role::Status)
                                 .aria_label(accessibility_label)
                                 .child(
-                                    Label::new(route_receipt)
+                                    Label::new(routed_model)
                                         .size(LabelSize::XSmall)
                                         .color(Color::Muted),
                                 ),
@@ -14032,17 +14032,24 @@ impl ThreadView {
         )
     }
 
-    /// Flash / Pro dropdown for Omega's hosted inference lanes.
-    fn render_model_tier_selector(&self, enabled: bool, _cx: &mut Context<Self>) -> AnyElement {
+    /// Luna / Flash / Pro dropdown for Omega's hosted inference lanes.
+    ///
+    /// `OMEGA-DELTA-0202`. The face is the routed decision, read through the one
+    /// authority in `crate::omega_routed_model`, so it cannot name a different
+    /// model from the disclosure line and status line beside it. The standing
+    /// choice speaks only for a thread that has not routed anything yet.
+    fn render_model_tier_selector(&self, enabled: bool, cx: &mut Context<Self>) -> AnyElement {
         use crate::omega_model_tier::{render_model_tier_selector, select, selected};
+        use crate::omega_routed_model::{RoutedModel, face_for};
         use acp_thread::AgentModelId;
         use std::rc::Rc;
 
-        let current = selected();
+        let routed = RoutedModel::from_disclosure(&self.executor_disclosure(cx));
+        let face = face_for(routed.as_ref(), selected());
         let model_selector = self.model_selector.clone();
 
         render_model_tier_selector(
-            current,
+            face,
             enabled,
             Rc::new(move |tier, _window, cx| {
                 select(tier);
@@ -14319,7 +14326,7 @@ impl ThreadView {
         if let Some(exo) = self.exo_connection(cx) {
             return self.render_exo_header(exo, cx);
         }
-        let route_receipt = self.omega_route_receipt_label(cx);
+        let routed_model = self.omega_routed_model_label(cx);
 
         h_flex()
             .w_full()
@@ -14341,15 +14348,15 @@ impl ThreadView {
                             .size(LabelSize::XSmall)
                             .color(Color::Muted),
                     )
-                    .when_some(route_receipt, |this, route_receipt| {
-                        let accessibility_label = route_receipt.clone();
+                    .when_some(routed_model, |this, routed_model| {
+                        let accessibility_label = routed_model.clone();
                         this.child(
                             div()
-                                .id("omega-route-receipt")
+                                .id("omega-routed-model")
                                 .role(gpui::Role::Status)
                                 .aria_label(accessibility_label)
                                 .child(
-                                    Label::new(route_receipt)
+                                    Label::new(routed_model)
                                         .size(LabelSize::XSmall)
                                         .color(Color::Muted),
                                 ),
@@ -14360,17 +14367,23 @@ impl ThreadView {
             .into_any_element()
     }
 
-    fn omega_route_receipt_label(&self, cx: &App) -> Option<SharedString> {
-        let session_id = self.thread.read(cx).session_id().clone();
-        let receipt = crate::omega_router::recorded_route_receipt(&session_id)?;
-        Some(
-            format!(
-                "Receipt {} · {}",
-                receipt.dispatch_ref,
-                crate::conversation_view::visible_omega_route_decision(&receipt.decision)
-            )
-            .into(),
-        )
+    /// The status line under the disclosure. `OMEGA-DELTA-0202`.
+    ///
+    /// **At most the model name.** This line used to read
+    /// `Receipt 0 · Route: Omega Agent (general reasoning) · override: automatic
+    /// · fallback: none` — a dispatch reference, a router summary, an override
+    /// mode and a route-fallback state, none of which is a fact about the
+    /// person's work. The owner's standing no-exposition law applies to it. The
+    /// route receipt is still recorded and still reachable; it is not composer
+    /// copy.
+    ///
+    /// What remains is derived from the same routed decision the tier control's
+    /// face and the disclosure line are derived from, so the three cannot
+    /// disagree.
+    fn omega_routed_model_label(&self, cx: &App) -> Option<SharedString> {
+        use crate::omega_routed_model::RoutedModel;
+
+        Some(RoutedModel::from_disclosure(&self.executor_disclosure(cx))?.status_line())
     }
 }
 

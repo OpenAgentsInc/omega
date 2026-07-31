@@ -49,6 +49,7 @@ pub mod omega_public_channel_relay;
 pub mod omega_public_channel_timeline;
 pub mod omega_public_channel_view;
 pub mod omega_public_channels;
+pub mod omega_routed_model;
 pub mod omega_router;
 pub mod omega_send_queue;
 pub mod omega_sidebar;

@@ -9694,13 +9694,13 @@ fn run_omega_agent_visual_tests_inner(
         }),
         "the first accepted turn did not create its routed physical executor session"
     );
-    let route_receipt_line = cx
-        .read(|cx| omega_route_receipt_line(&panel, cx))
-        .ok_or_else(|| anyhow::anyhow!("the routed thread has no durable route receipt"))?;
+    let routed_model_line = cx
+        .read(|cx| omega_routed_model_line(&panel, cx))
+        .ok_or_else(|| anyhow::anyhow!("the routed thread discloses no model"))?;
     cx.set_debug_accessibility_active(workspace_window, true)?;
     let snapshot = cx.debug_render_snapshot(workspace_window)?;
     let mut probe = SemanticProbe::new(&snapshot);
-    probe.require_accessible("omega-route-receipt", "Status", &route_receipt_line)?;
+    probe.require_accessible("omega-routed-model", "Status", &routed_model_line)?;
     probe.require_absent("omega-new-conversation-route-override-trigger")?;
     record_workbench_semantic_checks("omega_executor_disclosure_native", probe.into_checks());
 
@@ -10124,45 +10124,25 @@ fn omega_executor_line(panel: &Entity<agent_ui::AgentPanel>, cx: &App) -> Option
     Some(omega_executor_record(panel, cx)?.label())
 }
 
+/// The status line the agent panel's active thread would render.
+///
+/// `OMEGA-DELTA-0202`. Derived from the same executor record the disclosure
+/// line is derived from, through the one routed-model authority, so this
+/// assertion and the pixels cannot disagree — and neither can the two lines.
+///
+/// It used to reconstruct the route receipt here:
+/// `Receipt 0 · Route: … · override: … · fallback: …`. That exposition is gone
+/// from the composer, so the proof no longer photographs it.
 #[cfg(all(target_os = "macos", feature = "visual-tests"))]
-fn omega_route_receipt_line(panel: &Entity<agent_ui::AgentPanel>, cx: &App) -> Option<String> {
-    use omega_front_door::router::{ExecutorOverride, RouteFallback};
+fn omega_routed_model_line(panel: &Entity<agent_ui::AgentPanel>, cx: &App) -> Option<String> {
+    use agent_ui::omega_routed_model::RoutedModel;
 
-    let session_id = panel
-        .read(cx)
-        .active_thread_view_for_tests()?
-        .read(cx)
-        .root_thread_view()?
-        .read(cx)
-        .thread
-        .read(cx)
-        .session_id()
-        .clone();
-    let receipt = agent_ui::omega_router::recorded_route_receipt(&session_id)?;
-    let route_override =
-        receipt
-            .decision
-            .inputs
-            .as_ref()
-            .map_or("not recorded".to_owned(), |inputs| {
-                match &inputs.executor_override {
-                    ExecutorOverride::Auto => "automatic".to_owned(),
-                    ExecutorOverride::Native => "Omega".to_owned(),
-                    ExecutorOverride::ExactExternal(agent_id) => format!("exact {agent_id}"),
-                }
-            });
-    let fallback = match &receipt.decision.fallback {
-        Some(RouteFallback::NativeForGeneralReasoning) => "Omega for general reasoning",
-        Some(RouteFallback::NativeAfterExternalUnavailable) => {
-            "Omega after external executor became unavailable"
-        }
-        None => "none",
-    };
-    Some(format!(
-        "Receipt {} · Route: {} · override: {route_override} · fallback: {fallback}",
-        receipt.dispatch_ref,
-        receipt.decision.summary()
-    ))
+    let record = omega_executor_record(panel, cx)?;
+    Some(
+        RoutedModel::from_disclosure(&record)?
+            .status_line()
+            .to_string(),
+    )
 }
 
 /// The executor *record* the agent panel's active thread would render from.

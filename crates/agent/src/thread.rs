@@ -1490,6 +1490,16 @@ pub struct Thread {
     thread_log: RefCell<ThreadEventLog>,
     /// Source cursor when this thread was created as a fork.
     fork_origin: Option<ThreadForkOrigin>,
+    /// `OMEGA-DELTA-0202`. The rung of the `OMEGA-DELTA-0201` chain that is
+    /// serving the turn in flight, when the turn has fallen off its configured
+    /// lane.
+    ///
+    /// Turn-local by construction: set when the walk advances, cleared when the
+    /// turn ends, never written to settings. It exists because a fallback that
+    /// only the turn loop knows about makes every label a guess — the selector
+    /// keeps naming the configured model while another one answers, which is
+    /// the disagreement `OMEGA-DELTA-0131` forbids.
+    turn_fallback_model: Option<Arc<dyn LanguageModel>>,
 }
 
 impl Thread {
@@ -1629,6 +1639,7 @@ impl Thread {
             tool_result_artifacts: Rc::new(RefCell::new(ToolResultArtifactRegistry::default())),
             thread_log: RefCell::new(ThreadEventLog::default()),
             fork_origin: None,
+            turn_fallback_model: None,
         }
     }
 
@@ -2048,6 +2059,7 @@ impl Thread {
             tool_result_artifacts: Rc::new(RefCell::new(ToolResultArtifactRegistry::default())),
             thread_log: RefCell::new(db_thread.thread_log),
             fork_origin: db_thread.fork_origin,
+            turn_fallback_model: None,
         }
     }
 
@@ -2263,6 +2275,34 @@ impl Thread {
 
     pub fn model(&self) -> Option<&Arc<dyn LanguageModel>> {
         self.model.as_model()
+    }
+
+    /// `OMEGA-DELTA-0202`. The model actually serving this thread right now.
+    ///
+    /// **The single routed-model authority.** Every label a person reads — the
+    /// tier control's face, the executor disclosure line, the composer's status
+    /// line — is derived from this one answer, so no two of them can name
+    /// different models. It is the configured model at rest, and the live
+    /// fallback rung while a turn is running on one.
+    pub fn active_turn_model(&self) -> Option<&Arc<dyn LanguageModel>> {
+        self.turn_fallback_model.as_ref().or_else(|| self.model())
+    }
+
+    /// Record which rung of the `OMEGA-DELTA-0201` chain is serving the turn.
+    ///
+    /// `None` restores the configured model as the answer, which is what the
+    /// end of a turn means: the fallback never rewrites the person's default.
+    fn set_turn_fallback_model(
+        &mut self,
+        model: Option<Arc<dyn LanguageModel>>,
+        cx: &mut Context<Self>,
+    ) {
+        let key = |model: &Arc<dyn LanguageModel>| (model.provider_id(), model.id());
+        if self.turn_fallback_model.as_ref().map(key) == model.as_ref().map(key) {
+            return;
+        }
+        self.turn_fallback_model = model;
+        cx.notify();
     }
 
     pub fn thread_model(&self) -> &ThreadModel {
@@ -3051,7 +3091,13 @@ impl Thread {
                     }
                 }
 
-                _ = this.update(cx, |this, _| this.running_turn.take());
+                _ = this.update(cx, |this, cx| {
+                    // `OMEGA-DELTA-0202`. The rung is turn-local, so the answer
+                    // every label reads goes back to the configured model the
+                    // moment the turn stops.
+                    this.set_turn_fallback_model(None, cx);
+                    this.running_turn.take()
+                });
             }
         });
         self.running_turn = Some(RunningTurn::new(event_stream, tools, cancellation_tx, task));
@@ -3072,11 +3118,17 @@ impl Thread {
         // Provider+model ids this turn has already tried (or found missing)
         // while walking the provider fallback chain, so the chain never loops.
         let mut provider_fallback_attempted: Vec<(String, String)> = Vec::new();
+        // The model compaction actually streamed to on this iteration, so a
+        // compaction dead-end names the lane that died rather than guessing.
+        let mut compaction_model_used: Option<Arc<dyn LanguageModel>> = None;
+        this.update(cx, |this, cx| this.set_turn_fallback_model(None, cx))?;
         loop {
             match Self::perform_compaction_if_needed(
                 this,
                 event_stream,
                 cancellation_rx.clone(),
+                refusal_fallback_model.clone(),
+                &mut compaction_model_used,
                 cx,
             )
             .await
@@ -3125,13 +3177,43 @@ impl Thread {
                                     continue;
                                 }
                                 Err(retry_error) => {
-                                    this.update(cx, |this, _| {
-                                        this.emit_compaction_telemetry_outcome(
-                                            "failed",
-                                            Some(error_message),
-                                        )
-                                    })?;
-                                    return Err(retry_error);
+                                    // `OMEGA-DELTA-0202`. Compaction is part of
+                                    // the turn, so its dead-end is the turn's
+                                    // dead-end, and the owner mandate behind
+                                    // `OMEGA-DELTA-0201` ("ALWAYS WORK") applies
+                                    // here exactly as it does to the completion
+                                    // below. This arm used to return, which is
+                                    // why a long thread whose first act is a
+                                    // compaction could exhaust its retries and
+                                    // terminate with the fallback chain never
+                                    // consulted.
+                                    let failed_model = compaction_model_used
+                                        .clone()
+                                        .or_else(|| refusal_fallback_model.clone())
+                                        .or(this.read_with(cx, |this, _| this.model().cloned())?);
+                                    let advanced = match failed_model {
+                                        Some(failed_model) => Self::advance_to_next_rung(
+                                            this,
+                                            event_stream,
+                                            &failed_model,
+                                            &retry_error,
+                                            &mut provider_fallback_attempted,
+                                            cx,
+                                        )?,
+                                        None => None,
+                                    };
+                                    let Some(fallback) = advanced else {
+                                        this.update(cx, |this, _| {
+                                            this.emit_compaction_telemetry_outcome(
+                                                "failed",
+                                                Some(error_message),
+                                            )
+                                        })?;
+                                        return Err(retry_error);
+                                    };
+                                    refusal_fallback_model = Some(fallback);
+                                    attempt = 0;
+                                    continue;
                                 }
                             }
                         }
@@ -3396,33 +3478,17 @@ impl Thread {
                         // ("ALWAYS WORK"): fall down the provider chain
                         // instead of dead-ending the turn. The turn fails only
                         // when every rung has failed.
-                        let failed_model = model.clone();
-                        let maybe_fallback = this.update(cx, |_, cx| {
-                            Self::next_turn_fallback_model(
-                                &failed_model,
-                                &mut provider_fallback_attempted,
-                                cx,
-                            )
-                        })?;
-                        let Some(fallback) = maybe_fallback else {
+                        let Some(fallback) = Self::advance_to_next_rung(
+                            this,
+                            event_stream,
+                            &model,
+                            &turn_error,
+                            &mut provider_fallback_attempted,
+                            cx,
+                        )?
+                        else {
                             return Err(turn_error);
                         };
-                        log::warn!(
-                            "provider fallback: {}/{} failed ({}); retrying the turn with {}/{}",
-                            failed_model.provider_id(),
-                            failed_model.id().0,
-                            turn_error,
-                            fallback.provider_id(),
-                            fallback.id().0
-                        );
-                        event_stream.send_retry(acp_thread::RetryStatus {
-                            last_error: format!("{} is unavailable", failed_model.name().0).into(),
-                            attempt: 1,
-                            max_attempts: 1,
-                            started_at: Instant::now(),
-                            duration: Duration::MAX,
-                            meta: Some(acp_thread::meta_with_refusal_fallback(&fallback.name().0)),
-                        });
                         // Turn-local override only: the person's configured
                         // default model is not rewritten by an automatic
                         // fallback.
@@ -3483,15 +3549,73 @@ impl Thread {
         Ok(ControlFlow::Continue(()))
     }
 
+    /// Move the turn onto the next rung of the `OMEGA-DELTA-0201` chain.
+    ///
+    /// One implementation for every lane that can dead-end inside a turn — the
+    /// completion stream and compaction alike. Returns the rung that will serve
+    /// the rest of the turn, or `None` when every rung has been tried and the
+    /// caller may fail with the last honest error.
+    ///
+    /// The rung is recorded on the thread (`OMEGA-DELTA-0202`) before it is
+    /// returned, so the labels a person reads name the model that is about to
+    /// answer rather than the one that just died.
+    fn advance_to_next_rung(
+        this: &WeakEntity<Self>,
+        event_stream: &ThreadEventStream,
+        failed_model: &Arc<dyn LanguageModel>,
+        failure: &anyhow::Error,
+        attempted: &mut Vec<(String, String)>,
+        cx: &mut AsyncApp,
+    ) -> Result<Option<Arc<dyn LanguageModel>>> {
+        let fallback = this.update(cx, |_, cx| {
+            Self::next_turn_fallback_model(failed_model, attempted, cx)
+        })?;
+        let Some(fallback) = fallback else {
+            log::warn!(
+                "provider fallback: {}/{} failed ({}); every rung has been tried",
+                failed_model.provider_id(),
+                failed_model.id().0,
+                failure
+            );
+            return Ok(None);
+        };
+        log::warn!(
+            "provider fallback: {}/{} failed ({}); retrying the turn with {}/{}",
+            failed_model.provider_id(),
+            failed_model.id().0,
+            failure,
+            fallback.provider_id(),
+            fallback.id().0
+        );
+        this.update(cx, |this, cx| {
+            this.set_turn_fallback_model(Some(fallback.clone()), cx)
+        })?;
+        event_stream.send_retry(acp_thread::RetryStatus {
+            last_error: format!("{} is unavailable", failed_model.name().0).into(),
+            attempt: 1,
+            max_attempts: 1,
+            started_at: Instant::now(),
+            duration: Duration::MAX,
+            meta: Some(acp_thread::meta_with_refusal_fallback(&fallback.name().0)),
+        });
+        Ok(Some(fallback))
+    }
+
     /// The next model the turn should try after its current lane dead-ends.
     ///
     /// Owner mandate 2026-07-30 ("CORE OMEGA AGENT MUST ALWAYS HIT OUR API AND
-    /// WORK"): the ordered chain is the hosted OpenAgents Luna lane, the
-    /// hosted/direct Gemini lane, the hosted Kimi K3 lane, and then the
-    /// default model of any other authenticated provider (a configured direct
-    /// key). Each rung is tried at most once per turn, so the walk always
+    /// WORK"): the ordered chain is the hosted OpenAgents Luna lane, the hosted
+    /// Gemini lane, the direct-key Gemini lane, the hosted Kimi K3 lane, and
+    /// then the default model of any other authenticated provider (a configured
+    /// direct key). Each rung is tried at most once per turn, so the walk always
     /// terminates; `None` means every rung was tried and the turn may fail
     /// with the last honest error.
+    ///
+    /// The hosted Gemini rung sits ahead of the direct one because it needs no
+    /// credential of the person's own: `OMEGA-DELTA-0202` found the middle rung
+    /// reporting "Gemini 3.6 Flash is unavailable" on a machine with a perfectly
+    /// healthy hosted Gemini lane, purely because the tier pointed at the direct
+    /// Google provider and no personal Google key was configured.
     fn next_turn_fallback_model(
         failed_model: &Arc<dyn LanguageModel>,
         attempted: &mut Vec<(String, String)>,
@@ -3499,6 +3623,7 @@ impl Thread {
     ) -> Option<Arc<dyn LanguageModel>> {
         const TURN_PROVIDER_FALLBACK_CHAIN: &[(&str, &str)] = &[
             ("openagents", "gpt-5.6-luna"),
+            ("openagents", "gemini-3.6-flash"),
             ("google", "gemini-3.6-flash"),
             ("openagents", "kimi-k3"),
         ];
@@ -3520,9 +3645,23 @@ impl Thread {
                 continue;
             }
             attempted.push(key);
-            if let Some(found) = registry.available_models(cx).find(|model| {
-                model.provider_id().0.as_ref() == *provider_id && model.id().0.as_ref() == *model_id
-            }) {
+            // The named rungs are resolved from the provider itself rather than
+            // from `available_models`, which hides every provider the registry
+            // has not yet marked authenticated. The hosted lanes authenticate
+            // at request time — the session is resolved inside the stream — so
+            // filtering them out here is how an "always work" chain silently
+            // becomes an empty one. A rung that really cannot serve the turn
+            // fails on its own attempt, and the walk moves on; a rung skipped
+            // for a stale readiness flag never gets to answer at all.
+            if let Some(found) = registry
+                .provider(&LanguageModelProviderId::from((*provider_id).to_string()))
+                .and_then(|provider| {
+                    provider
+                        .provided_models(cx)
+                        .into_iter()
+                        .find(|model| model.id().0.as_ref() == *model_id)
+                })
+            {
                 return Some(found);
             }
         }
@@ -3543,15 +3682,26 @@ impl Thread {
         None
     }
 
+    /// `turn_model_override` is the `OMEGA-DELTA-0201` rung the turn has fallen
+    /// onto, if any. Compaction has to move with it: leaving compaction on the
+    /// configured model would keep streaming to the lane the turn just proved
+    /// dead, and the turn would dead-end on its own summary. `model_used`
+    /// reports the model that actually streamed, so a caller that has to handle
+    /// the failure names the lane that died.
     async fn perform_compaction_if_needed(
         this: &WeakEntity<Self>,
         event_stream: &ThreadEventStream,
         cancellation_rx: watch::Receiver<bool>,
+        turn_model_override: Option<Arc<dyn LanguageModel>>,
+        model_used: &mut Option<Arc<dyn LanguageModel>>,
         cx: &mut AsyncApp,
     ) -> Result<ControlFlow<()>> {
         let Some((model, request, insertion_ix)) = this.update(cx, |this, cx| {
             let insertion_ix = this.compaction_message_target_ix(cx)?;
-            let model = this.compaction_model(cx)?;
+            let model = match &turn_model_override {
+                Some(model) => model.clone(),
+                None => this.compaction_model(cx)?,
+            };
             let request = this.build_compaction_request(insertion_ix, &model, cx);
             this.current_request_token_usage = TokenUsage::default();
             // Preserve telemetry across retries so the retry count keeps
@@ -3563,8 +3713,10 @@ impl Thread {
             Some((model, request, insertion_ix))
         })?
         else {
+            *model_used = None;
             return Ok(ControlFlow::Continue(()));
         };
+        *model_used = Some(model.clone());
 
         Self::stream_compaction(
             this,
@@ -9235,5 +9387,256 @@ mod tests {
             );
             assert!(last_message.tool_results.contains_key(&tool_use_id));
         })
+    }
+
+    /// The `OMEGA-DELTA-0201` chain, wired into a test registry.
+    ///
+    /// Returns the three named rungs in chain order so a test can fail one and
+    /// assert which one the turn moves to.
+    fn register_omega_fallback_chain(
+        cx: &mut App,
+    ) -> (
+        Arc<FakeLanguageModel>,
+        Arc<FakeLanguageModel>,
+        Arc<FakeLanguageModel>,
+    ) {
+        use language_model::LanguageModelProviderName;
+        use language_model::fake_provider::FakeLanguageModelProvider;
+
+        let luna = Arc::new(FakeLanguageModel::with_id_and_thinking(
+            "openagents",
+            "gpt-5.6-luna",
+            "GPT-5.6 Luna",
+            false,
+        ));
+        let flash = Arc::new(FakeLanguageModel::with_id_and_thinking(
+            "openagents",
+            "gemini-3.6-flash",
+            "Gemini 3.6 Flash",
+            false,
+        ));
+        let kimi = Arc::new(FakeLanguageModel::with_id_and_thinking(
+            "openagents",
+            "kimi-k3",
+            "Kimi K3",
+            false,
+        ));
+        LanguageModelRegistry::global(cx).update(cx, |registry, cx| {
+            registry.register_provider(
+                Arc::new(
+                    FakeLanguageModelProvider::new(
+                        LanguageModelProviderId::from("openagents".to_string()),
+                        LanguageModelProviderName::from("OpenAgents".to_string()),
+                    )
+                    .with_models(vec![
+                        luna.clone() as Arc<dyn LanguageModel>,
+                        flash.clone() as Arc<dyn LanguageModel>,
+                        kimi.clone() as Arc<dyn LanguageModel>,
+                    ]),
+                ),
+                cx,
+            );
+        });
+        (luna, flash, kimi)
+    }
+
+    fn send_one_turn(thread: &Entity<Thread>, cx: &mut TestAppContext) {
+        let events = cx
+            .update(|cx| {
+                thread.update(cx, |thread, cx| {
+                    thread.send(ClientUserMessageId::new(), vec!["hello"], cx)
+                })
+            })
+            .expect("the turn starts");
+        drop(events);
+        cx.run_until_parked();
+    }
+
+    /// `OMEGA-DELTA-0202`. A stream lane that cannot be retried advances.
+    ///
+    /// The owner mandate behind `OMEGA-DELTA-0201` is "ALWAYS WORK": a turn
+    /// fails only when every rung has failed, never because the first one did.
+    #[gpui::test]
+    async fn test_a_dead_stream_lane_advances_to_the_next_rung(cx: &mut TestAppContext) {
+        let (thread, _event_stream) = setup_thread_for_test(cx).await;
+        let (luna, flash, kimi) = cx.update(register_omega_fallback_chain);
+        cx.update(|cx| thread.update(cx, |thread, cx| thread.set_model(luna.clone(), cx)));
+
+        send_one_turn(&thread, cx);
+        let request = luna
+            .pending_completions()
+            .pop()
+            .expect("the turn starts on the configured model");
+        luna.send_completion_stream_error(
+            &request,
+            LanguageModelCompletionError::PermissionError {
+                provider: language_model::LanguageModelProviderName::from("OpenAgents".to_string()),
+                message: "the hosted lane refused this turn".into(),
+            },
+        );
+        luna.end_completion_stream(&request);
+        cx.run_until_parked();
+
+        assert_eq!(
+            flash.completion_count(),
+            1,
+            "a hosted lane that cannot be retried must hand the turn to the \
+             next rung, not end it"
+        );
+        assert_eq!(
+            kimi.completion_count(),
+            0,
+            "the walk takes one rung at a time"
+        );
+    }
+
+    /// `OMEGA-DELTA-0202`. Same law once the retries are spent rather than
+    /// refused outright. This is the shape the owner watched die: a retryable
+    /// hosted failure, "Attempt 2 of 2", and then nothing.
+    #[gpui::test]
+    async fn test_a_retry_exhausted_stream_lane_advances_to_the_next_rung(cx: &mut TestAppContext) {
+        let (thread, _event_stream) = setup_thread_for_test(cx).await;
+        let (luna, flash, _kimi) = cx.update(register_omega_fallback_chain);
+        cx.update(|cx| thread.update(cx, |thread, cx| thread.set_model(luna.clone(), cx)));
+        // Every attempt on this lane fails at the point the stream opens, which
+        // is where "failed to stream OpenAgents hosted completion" is raised.
+        luna.forbid_requests();
+
+        send_one_turn(&thread, cx);
+        for _ in 0..4 {
+            cx.executor().advance_clock(BASE_RETRY_DELAY * 2);
+            cx.run_until_parked();
+        }
+
+        assert_eq!(
+            luna.completion_count(),
+            0,
+            "the dead lane never opened a stream"
+        );
+        assert_eq!(
+            flash.completion_count(),
+            1,
+            "exhausting a lane's retries must advance the turn down the chain"
+        );
+    }
+
+    /// `OMEGA-DELTA-0202`. Compaction is part of the turn, so its dead-end is
+    /// the turn's dead-end. This arm used to return outright, which is how a
+    /// long pre-existing thread could die on its own summary with the chain
+    /// never consulted.
+    #[gpui::test]
+    async fn test_a_dead_compaction_lane_advances_to_the_next_rung(cx: &mut TestAppContext) {
+        let (thread, _event_stream) = setup_thread_for_test(cx).await;
+        let (luna, flash, _kimi) = cx.update(register_omega_fallback_chain);
+        let old_user_message_id = ClientUserMessageId::new();
+
+        cx.update(|cx| {
+            thread.update(cx, |thread, cx| {
+                thread.set_model(luna.clone(), cx);
+                thread
+                    .messages
+                    .push(user_text_message(old_user_message_id.clone(), "old user"));
+                thread.messages.push(agent_text_message("old assistant"));
+                thread.request_token_usage.insert(
+                    old_user_message_id.clone(),
+                    language_model::TokenUsage {
+                        input_tokens: 960_000,
+                        ..Default::default()
+                    },
+                );
+            });
+        });
+
+        send_one_turn(&thread, cx);
+        let compaction_request = luna
+            .pending_completions()
+            .pop()
+            .expect("the turn opens with a compaction");
+        assert_eq!(
+            compaction_request.intent,
+            Some(CompletionIntent::ThreadContextSummarization)
+        );
+        luna.send_completion_stream_error(
+            &compaction_request,
+            LanguageModelCompletionError::PermissionError {
+                provider: language_model::LanguageModelProviderName::from("OpenAgents".to_string()),
+                message: "the hosted lane refused this compaction".into(),
+            },
+        );
+        luna.end_completion_stream(&compaction_request);
+        cx.run_until_parked();
+
+        assert!(
+            flash.completion_count() >= 1,
+            "a compaction that dead-ends must move the turn to the next rung \
+             rather than terminating it"
+        );
+    }
+
+    /// `OMEGA-DELTA-0202`. The labels follow the rung, not the configured model.
+    ///
+    /// `active_turn_model` is the single model-level authority every label in
+    /// `agent_ui` derives from, so this is the point at which a fallback stops
+    /// being invisible to the person watching it.
+    #[gpui::test]
+    async fn test_the_labels_follow_the_rung_that_is_serving_the_turn(cx: &mut TestAppContext) {
+        let (thread, _event_stream) = setup_thread_for_test(cx).await;
+        let (luna, flash, _kimi) = cx.update(register_omega_fallback_chain);
+        cx.update(|cx| thread.update(cx, |thread, cx| thread.set_model(luna.clone(), cx)));
+
+        thread.read_with(cx, |thread, _| {
+            assert_eq!(
+                thread
+                    .active_turn_model()
+                    .map(|model| model.id().0.to_string()),
+                Some("gpt-5.6-luna".to_string()),
+                "at rest the answer is the configured model"
+            );
+        });
+
+        send_one_turn(&thread, cx);
+        let request = luna.pending_completions().pop().expect("the turn starts");
+        luna.send_completion_stream_error(
+            &request,
+            LanguageModelCompletionError::PermissionError {
+                provider: language_model::LanguageModelProviderName::from("OpenAgents".to_string()),
+                message: "the hosted lane refused this turn".into(),
+            },
+        );
+        luna.end_completion_stream(&request);
+        cx.run_until_parked();
+
+        thread.read_with(cx, |thread, _| {
+            assert_eq!(
+                thread
+                    .active_turn_model()
+                    .map(|model| model.id().0.to_string()),
+                Some("gemini-3.6-flash".to_string()),
+                "while a turn runs on a rung, the rung is what every label names"
+            );
+            assert_eq!(
+                thread.model().map(|model| model.id().0.to_string()),
+                Some("gpt-5.6-luna".to_string()),
+                "the fallback is turn-local and never rewrites the person's default"
+            );
+        });
+
+        let pending = flash
+            .pending_completions()
+            .pop()
+            .expect("the rung is serving");
+        flash.send_completion_stream_text_chunk(&pending, "answered");
+        flash.end_completion_stream(&pending);
+        cx.run_until_parked();
+
+        thread.read_with(cx, |thread, _| {
+            assert_eq!(
+                thread
+                    .active_turn_model()
+                    .map(|model| model.id().0.to_string()),
+                Some("gpt-5.6-luna".to_string()),
+                "once the turn ends the answer goes back to the configured model"
+            );
+        });
     }
 }

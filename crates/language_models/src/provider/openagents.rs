@@ -37,12 +37,22 @@ pub const KIMI_K3_MODEL_ID: &str = "kimi-k3";
 /// passthrough lane).
 pub const GPT_56_LUNA_MODEL_ID: &str = "gpt-5.6-luna";
 
+/// Wire model id for the Flash tier over the hosted Gemini lane.
+///
+/// `OMEGA-DELTA-0202`. The Flash tier used to point at the direct Google
+/// provider, which needs the person's own Google AI credential, so the middle
+/// rung of the always-work chain reported "Gemini 3.6 Flash is unavailable" on
+/// a machine whose hosted Gemini lane was healthy and serving other lanes on
+/// the same session.
+pub const GEMINI_36_FLASH_MODEL_ID: &str = "gemini-3.6-flash";
+
 /// OpenAI-compatible chat completions path under the OpenAgents base URL.
 const CHAT_COMPLETIONS_PREFIX: &str = "/api/v1";
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum HostedModel {
     Gpt56Luna,
+    Gemini36Flash,
     KimiK3,
 }
 
@@ -50,6 +60,7 @@ impl HostedModel {
     fn id(self) -> &'static str {
         match self {
             Self::Gpt56Luna => GPT_56_LUNA_MODEL_ID,
+            Self::Gemini36Flash => GEMINI_36_FLASH_MODEL_ID,
             Self::KimiK3 => KIMI_K3_MODEL_ID,
         }
     }
@@ -57,6 +68,7 @@ impl HostedModel {
     fn display_name(self) -> &'static str {
         match self {
             Self::Gpt56Luna => "GPT-5.6 Luna",
+            Self::Gemini36Flash => "Gemini 3.6 Flash",
             Self::KimiK3 => "Kimi K3",
         }
     }
@@ -65,6 +77,8 @@ impl HostedModel {
         match self {
             // Matches open_ai::Model::FivePointSixLuna.
             Self::Gpt56Luna => 1_050_000,
+            // Matches google_ai::Model::Gemini36Flash.
+            Self::Gemini36Flash => 1_048_576,
             Self::KimiK3 => 131_072,
         }
     }
@@ -72,12 +86,13 @@ impl HostedModel {
     fn max_output_tokens(self) -> Option<u64> {
         match self {
             Self::Gpt56Luna => Some(128_000),
+            Self::Gemini36Flash => Some(65_536),
             Self::KimiK3 => Some(16_384),
         }
     }
 
     fn all() -> &'static [Self] {
-        &[Self::Gpt56Luna, Self::KimiK3]
+        &[Self::Gpt56Luna, Self::Gemini36Flash, Self::KimiK3]
     }
 }
 
@@ -395,6 +410,19 @@ mod tests {
         assert_eq!(HostedModel::Gpt56Luna.id(), "gpt-5.6-luna");
         assert_eq!(GPT_56_LUNA_MODEL_ID, "gpt-5.6-luna");
         assert_eq!(HostedModel::all().first(), Some(&HostedModel::Gpt56Luna));
+    }
+
+    /// `OMEGA-DELTA-0202`. Flash is served by the hosted lane, so the middle
+    /// rung of the always-work chain needs no credential of the person's own.
+    #[test]
+    fn flash_is_served_by_the_hosted_lane() {
+        assert_eq!(HostedModel::Gemini36Flash.id(), "gemini-3.6-flash");
+        assert_eq!(GEMINI_36_FLASH_MODEL_ID, "gemini-3.6-flash");
+        assert_eq!(
+            HostedModel::Gemini36Flash.display_name(),
+            "Gemini 3.6 Flash"
+        );
+        assert!(HostedModel::all().contains(&HostedModel::Gemini36Flash));
     }
 
     #[test]
