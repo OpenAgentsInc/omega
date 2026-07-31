@@ -104,6 +104,7 @@ dependencies = [
  "editor",
  "gpui",
  "omega_actions",
+ "omega_agent_identity",
  "omega_device_bridge",
  "omega_device_enrollment",
  "omega_effectd",
@@ -560,6 +561,7 @@ dependencies = [
  "gpui",
  "gpui_tokio",
  "heapless",
+ "hex",
  "html_to_markdown",
  "http_client",
  "http_proxy",
@@ -583,6 +585,7 @@ dependencies = [
  "notifications",
  "omega_actions",
  "omega_agent_detect",
+ "omega_agent_identity",
  "omega_audience",
  "omega_community",
  "omega_device_enrollment",
@@ -637,6 +640,7 @@ dependencies = [
  "text",
  "theme",
  "theme_settings",
+ "thiserror 2.0.17",
  "time",
  "tree-sitter-md",
  "ui",
@@ -10996,6 +11000,25 @@ dependencies = [
  "omega_workdir",
  "serde_json",
  "tempfile",
+]
+
+[[package]]
+name = "omega_agent_identity"
+version = "0.1.0"
+dependencies = [
+ "atomic-write-file",
+ "hex",
+ "libc",
+ "nostr",
+ "omega_identity",
+ "paths",
+ "serde",
+ "serde_json",
+ "sha2",
+ "tempfile",
+ "thiserror 2.0.17",
+ "windows-sys 0.61.2",
+ "zeroize",
 ]
 
 [[package]]

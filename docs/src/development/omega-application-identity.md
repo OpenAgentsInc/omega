@@ -280,6 +280,46 @@ AUTH-08 enables no macOS Keychain, Secure Enclave, Windows credential vault,
 Linux secret service, Android keystore, encrypted application vault, native
 enclave, hardware-backed credential store, or other native key custody.
 
+## Agent identities and installed assurance
+
+AUTH-09 stores an admitted agent under a separate Nostr public key and projects
+it beside, never in place of, the selected person, enrolled devices, and linked
+OpenAgents hosted user. Its bounded owner grant names owner account and person
+public key, agent reference and public key, exact methods, event kinds, room or
+tenant resources, account generation, issue and expiry times, attestation
+reference, revocation, and last successful use. The account dashboard displays
+only those public fields and provides per-agent revocation.
+
+The reachable built-in creation controls prepare and owner-attest separate
+**Omega Agent** and **Sarah** identities with exact 30-day scopes. They require
+the selected local owner signer. NIP-46 owner attestation is not wired in this
+wave, so remote-selected accounts see the controls disabled.
+
+The agent signing path does not fall back to the person's signer and exposes no
+raw person key material. Authorization binds the exact owner, agent, grant,
+generation, method, kind, resource, request id, subsystem, purpose,
+destination, origin, content digest, capability, gesture state, and expiry.
+Relay NIP-42 receipts, NIP-29 membership, OpenAgents hosted binding, device
+enrollment, and owner action authorization cannot substitute for one another.
+
+Agent records live at
+`identity/agents/records/<account-ref-sha256>/<agent-pubkey>.json`, with
+incomplete attestations at
+`identity/agents/pending/<request-ref-sha256>.json`, as ordinary unencrypted
+local files written atomically with Unix directory mode `0700` and file mode
+`0600`.
+This wave enables no macOS Keychain, Secure Enclave, Windows credential vault,
+Linux secret service, Android keystore, encrypted application vault, native
+enclave, hardware-backed credential store, or other native key custody.
+
+The host-by-host boundary is recorded in
+[`docs/omega/nostr-authentication-assurance.md`](../../omega/nostr-authentication-assurance.md)
+and its machine-readable matrix. Repository tests prove typed authorization,
+redaction, and refusal behavior. They do not prove an installed clipboard,
+accessibility tree, crash reporter, filesystem ACL, deep-link handler,
+external signer, or relay. Those rows remain owner-assisted or not admitted
+until the exact packaged candidate produces bound evidence.
+
 ## Onboarding integration
 
 The Omega onboarding identity section renders real `IdentityInspection` and

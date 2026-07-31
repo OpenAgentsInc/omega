@@ -52,6 +52,7 @@ pub mod omega_public_channels;
 pub mod omega_router;
 pub mod omega_send_queue;
 pub mod omega_sidebar;
+pub mod omega_signing_assurance;
 pub mod omega_threads_sidebar;
 pub mod plan_presentation;
 mod profile_selector;

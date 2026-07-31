@@ -188,6 +188,7 @@ pub const ENFORCED_DELTAS: &[&str] = &[
     "OMEGA-DELTA-0197",
     "OMEGA-DELTA-0198",
     "OMEGA-DELTA-0199",
+    "OMEGA-DELTA-0200",
 ];
 
 /// The concise product contract adjacent to the delta registry.
@@ -1259,6 +1260,11 @@ pub const HOST_SIGNER_CAPABILITIES_PATH: &str =
     "crates/agent_ui/src/omega_host_signer_capabilities.rs";
 pub const DEVICE_ENROLLMENT_CONTROLLER_PATH: &str =
     "crates/agent_ui/src/omega_device_enrollment_controller.rs";
+pub const AGENT_IDENTITY_PATH: &str = "crates/omega_agent_identity/omega_agent_identity.rs";
+pub const AUTHENTICATION_ASSURANCE_DOCUMENT_PATH: &str =
+    "docs/omega/nostr-authentication-assurance.md";
+pub const AUTHENTICATION_ASSURANCE_MATRIX_PATH: &str =
+    "docs/omega/nostr-authentication-assurance-matrix.json";
 
 /// OMEGA-DELTA-0192. The hosted-account link gate.
 pub const WORKROOM_PANEL_PATH: &str = "crates/workroom_ui/src/panel.rs";
@@ -24859,6 +24865,266 @@ mod tests {
                 assert!(
                     documentation.contains(required),
                     "OMEGA-DELTA-0199: {path} lost `{required}`"
+                );
+            }
+        }
+    }
+
+    /// OMEGA-DELTA-0200. Agent identities remain separate and bounded, while
+    /// installed-host claims remain tied to evidence the repository can
+    /// actually collect.
+    #[test]
+    fn agent_identity_and_authentication_assurance_stay_bounded_and_honest() {
+        let agent_identity = read_repository_file(AGENT_IDENTITY_PATH);
+        for required in [
+            "pub struct AgentIdentityStore",
+            "pub struct AgentIdentityPlan",
+            "pub struct AgentIdentityProjection",
+            "OwnerAttestationRequest",
+            "pub struct AgentAuthorizationRequest",
+            "pub fn prepare_agent_identity",
+            "pub fn complete_owner_attestation",
+            "pub fn agent_inventory",
+            "pub fn revoke_agent_grant",
+            "pub fn authorize",
+            "owner_account_ref",
+            "owner_public_key_hex",
+            "agent_public_key_hex",
+            "methods",
+            "event_kinds",
+            "rooms_or_tenants",
+            "account_generation",
+            "expires_at",
+            "revoked_at",
+            "last_used_at",
+            "0o700",
+            "0o600",
+            "[REDACTED]",
+        ] {
+            assert!(
+                agent_identity.contains(required),
+                "OMEGA-DELTA-0200: agent identity lost `{required}`"
+            );
+        }
+
+        let dashboard = read_repository_file(ACCOUNT_UI_PATH);
+        for required in [
+            "Identity principals",
+            "Person identity",
+            "Device identities",
+            "Agent identities",
+            "Hosted user",
+            "Agent grants",
+            "Owner",
+            "Agent",
+            "Methods",
+            "Event kinds",
+            "Room or tenant",
+            "Generation",
+            "Expires",
+            "Revocation",
+            "Revoke agent grant",
+            "NIP-AA agent relay auth",
+        ] {
+            assert!(
+                dashboard.contains(required),
+                "OMEGA-DELTA-0200: account UI lost `{required}`"
+            );
+        }
+
+        let assurance = normalize_prose(&read_repository_file(
+            AUTHENTICATION_ASSURANCE_DOCUMENT_PATH,
+        ));
+        for required in [
+            "source-automated",
+            "installed-automated",
+            "owner-assisted-pending",
+            "blocked",
+            "not-admitted",
+            "migration",
+            "storage",
+            "recovery",
+            "NIP-42",
+            "NIP-46",
+            "account switching",
+            "logout",
+            "community invite",
+            "hydration",
+            "device pairing",
+            "authority separation",
+            "logs",
+            "telemetry",
+            "diagnostics",
+            "crash",
+            "clipboard",
+            "accessibility",
+            "ordinary local files",
+        ] {
+            assert!(
+                assurance.contains(required),
+                "OMEGA-DELTA-0200: assurance document lost `{required}`"
+            );
+        }
+
+        let matrix: serde_json::Value =
+            serde_json::from_str(&read_repository_file(AUTHENTICATION_ASSURANCE_MATRIX_PATH))
+                .expect("OMEGA-DELTA-0200: assurance matrix must be valid JSON");
+        assert_eq!(
+            matrix["schema"],
+            "openagents.omega.nostr-authentication-assurance-matrix.v1"
+        );
+        let expected_hosts = [
+            "macos-desktop",
+            "windows-desktop",
+            "linux-desktop",
+            "web",
+            "android",
+            "ios",
+        ];
+        let hosts = matrix["hosts"]
+            .as_array()
+            .expect("OMEGA-DELTA-0200: matrix hosts");
+        for host in expected_hosts {
+            assert!(
+                hosts.iter().any(|candidate| candidate == host),
+                "OMEGA-DELTA-0200: matrix lost host `{host}`"
+            );
+        }
+        let expected_rows = [
+            "migration",
+            "storage",
+            "recovery",
+            "nip42",
+            "nip46",
+            "account-switching",
+            "logout",
+            "invites",
+            "hydration",
+            "pairing",
+            "authority-separation",
+        ];
+        let rows = matrix["rows"]
+            .as_array()
+            .expect("OMEGA-DELTA-0200: matrix rows");
+        assert_eq!(
+            matrix["installed_secret_surfaces"]
+                .as_array()
+                .expect("OMEGA-DELTA-0200: installed secret surfaces")
+                .len(),
+            6,
+            "OMEGA-DELTA-0200: matrix must retain all six installed tripwire surfaces"
+        );
+        assert_eq!(
+            rows.len(),
+            expected_rows.len(),
+            "OMEGA-DELTA-0200: matrix must have one row per required journey"
+        );
+        for row_id in expected_rows {
+            let row = rows
+                .iter()
+                .find(|row| row["id"] == row_id)
+                .unwrap_or_else(|| panic!("OMEGA-DELTA-0200: matrix lost row `{row_id}`"));
+            assert!(
+                row["source_checks"]
+                    .as_array()
+                    .is_some_and(|checks| !checks.is_empty()),
+                "OMEGA-DELTA-0200: row `{row_id}` has no source checks"
+            );
+            assert!(
+                row["installed_surfaces"]
+                    .as_array()
+                    .is_some_and(|surfaces| !surfaces.is_empty()),
+                "OMEGA-DELTA-0200: row `{row_id}` has no installed surfaces"
+            );
+            assert!(
+                row["refusals"]
+                    .as_array()
+                    .is_some_and(|refusals| !refusals.is_empty()),
+                "OMEGA-DELTA-0200: row `{row_id}` has no refusal cases"
+            );
+            assert_eq!(
+                row["tripwire_required"],
+                serde_json::Value::Bool(true),
+                "OMEGA-DELTA-0200: row `{row_id}` stopped requiring a secret tripwire"
+            );
+            assert!(
+                row["secret_canaries"]
+                    .as_array()
+                    .is_some_and(|canaries| !canaries.is_empty()),
+                "OMEGA-DELTA-0200: row `{row_id}` has no secret canary class"
+            );
+            let host_status = row["host_status"]
+                .as_object()
+                .expect("OMEGA-DELTA-0200: row host status");
+            for host in expected_hosts {
+                let status = host_status
+                    .get(host)
+                    .and_then(serde_json::Value::as_str)
+                    .unwrap_or_else(|| {
+                        panic!("OMEGA-DELTA-0200: row `{row_id}` lost host `{host}`")
+                    });
+                assert!(
+                    [
+                        "source-automated",
+                        "installed-automated",
+                        "owner-assisted-pending",
+                        "blocked",
+                        "not-admitted",
+                    ]
+                    .contains(&status),
+                    "OMEGA-DELTA-0200: row `{row_id}` has unknown status `{status}`"
+                );
+                assert_ne!(
+                    status, "installed-automated",
+                    "OMEGA-DELTA-0200: no host has candidate-bound automated evidence in this change"
+                );
+            }
+        }
+
+        let tripwires = read_repository_file(INSTALLED_TRIPWIRE_PATH);
+        for required in [
+            "--needle-fd",
+            "verify_scanner_can_fire",
+            "\"logs\"",
+            "\"telemetry\"",
+            "\"diagnostics\"",
+            "\"crashes\"",
+            "\"clipboard\"",
+            "\"accessibility\"",
+            "\"blocked\"",
+            "\"value_recorded\": False",
+        ] {
+            assert!(
+                tripwires.contains(required),
+                "OMEGA-DELTA-0200: installed tripwire lost `{required}`"
+            );
+        }
+
+        for path in [
+            IDENTITY_AUTHENTICATION_DOCUMENT_PATH,
+            RUNTIME_CREDENTIAL_STORAGE_DOCUMENT_PATH,
+            APPLICATION_IDENTITY_DOCUMENT_PATH,
+            AUTHENTICATION_ASSURANCE_DOCUMENT_PATH,
+        ] {
+            let documentation = normalize_prose(&read_repository_file(path));
+            for required in [
+                "identity/agents/records/<account-ref-sha256>/<agent-pubkey>.json",
+                "identity/agents/pending/<request-ref-sha256>.json",
+                "ordinary unencrypted",
+                "0700",
+                "0600",
+                "macOS Keychain",
+                "Secure Enclave",
+                "Windows credential vault",
+                "Linux secret service",
+                "Android keystore",
+                "encrypted application vault",
+                "native enclave",
+                "hardware-backed credential store",
+            ] {
+                assert!(
+                    documentation.contains(required),
+                    "OMEGA-DELTA-0200: {path} lost `{required}`"
                 );
             }
         }

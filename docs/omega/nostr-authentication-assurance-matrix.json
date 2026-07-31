@@ -1,0 +1,212 @@
+{
+  "schema": "openagents.omega.nostr-authentication-assurance-matrix.v1",
+  "status_values": [
+    "source-automated",
+    "installed-automated",
+    "owner-assisted-pending",
+    "blocked",
+    "not-admitted"
+  ],
+  "hosts": [
+    "macos-desktop",
+    "windows-desktop",
+    "linux-desktop",
+    "web",
+    "android",
+    "ios"
+  ],
+  "installed_secret_surfaces": [
+    "logs",
+    "telemetry",
+    "diagnostics",
+    "crashes",
+    "clipboard",
+    "accessibility"
+  ],
+  "secret_canary_classes": [
+    "private-key-shaped",
+    "disposable-signer-secret",
+    "hosted-token-shaped",
+    "private-prompt",
+    "decrypted-payload",
+    "invite-capability"
+  ],
+  "rows": [
+    {
+      "id": "migration",
+      "tripwire_required": true,
+      "secret_canaries": ["private-key-shaped"],
+      "source_checks": ["omega_identity registry migration and public-key preservation tests"],
+      "installed_surfaces": ["filesystem", "signer", "public-receipts"],
+      "refusals": ["conflict", "incomplete", "wrong-public-key", "generation-regression"],
+      "host_status": {
+        "macos-desktop": "owner-assisted-pending",
+        "windows-desktop": "owner-assisted-pending",
+        "linux-desktop": "owner-assisted-pending",
+        "web": "not-admitted",
+        "android": "not-admitted",
+        "ios": "not-admitted"
+      }
+    },
+    {
+      "id": "storage",
+      "tripwire_required": true,
+      "secret_canaries": ["private-key-shaped", "hosted-token-shaped"],
+      "source_checks": ["omega_identity, omega_agent_identity, omega_device_enrollment file mode and redaction tests"],
+      "installed_surfaces": ["filesystem", "permissions", "public-receipts"],
+      "refusals": ["symlink", "weak-mode", "wrong-owner", "unverified-delete"],
+      "host_status": {
+        "macos-desktop": "owner-assisted-pending",
+        "windows-desktop": "owner-assisted-pending",
+        "linux-desktop": "owner-assisted-pending",
+        "web": "not-admitted",
+        "android": "not-admitted",
+        "ios": "not-admitted"
+      }
+    },
+    {
+      "id": "recovery",
+      "tripwire_required": true,
+      "secret_canaries": ["private-key-shaped"],
+      "source_checks": ["omega_identity NIP-49 prepare, verify, resume, and wrong-password tests"],
+      "installed_surfaces": ["filesystem", "clipboard", "accessibility", "crashes"],
+      "refusals": ["wrong-password", "wrong-public-key", "expired-intent", "orphaned-payload"],
+      "host_status": {
+        "macos-desktop": "owner-assisted-pending",
+        "windows-desktop": "owner-assisted-pending",
+        "linux-desktop": "owner-assisted-pending",
+        "web": "not-admitted",
+        "android": "not-admitted",
+        "ios": "not-admitted"
+      }
+    },
+    {
+      "id": "nip42",
+      "tripwire_required": true,
+      "secret_canaries": ["disposable-signer-secret"],
+      "source_checks": ["omega_effectd exact challenge, connection generation, replay, and acknowledgement tests"],
+      "installed_surfaces": ["relay", "logs", "public-receipts"],
+      "refusals": ["wrong-relay", "wrong-challenge", "stale-generation", "replay", "missing-acknowledgement"],
+      "host_status": {
+        "macos-desktop": "owner-assisted-pending",
+        "windows-desktop": "owner-assisted-pending",
+        "linux-desktop": "owner-assisted-pending",
+        "web": "not-admitted",
+        "android": "not-admitted",
+        "ios": "not-admitted"
+      }
+    },
+    {
+      "id": "nip46",
+      "tripwire_required": true,
+      "secret_canaries": ["disposable-signer-secret"],
+      "source_checks": ["omega_identity and omega_signer_broker correlation, signature, permission, timeout, and revocation tests"],
+      "installed_surfaces": ["signer", "relay", "deep-link", "clipboard", "public-receipts"],
+      "refusals": ["wrong-author", "wrong-request-id", "wrong-kind", "wrong-origin", "timeout", "revoked"],
+      "host_status": {
+        "macos-desktop": "owner-assisted-pending",
+        "windows-desktop": "owner-assisted-pending",
+        "linux-desktop": "owner-assisted-pending",
+        "web": "not-admitted",
+        "android": "not-admitted",
+        "ios": "not-admitted"
+      }
+    },
+    {
+      "id": "account-switching",
+      "tripwire_required": true,
+      "secret_canaries": ["private-key-shaped"],
+      "source_checks": ["omega_identity switch journal, generation fence, partition, and stale token tests"],
+      "installed_surfaces": ["filesystem", "signer", "ui", "public-receipts"],
+      "refusals": ["stale-generation", "locked", "signed-out", "wrong-partition"],
+      "host_status": {
+        "macos-desktop": "owner-assisted-pending",
+        "windows-desktop": "owner-assisted-pending",
+        "linux-desktop": "owner-assisted-pending",
+        "web": "not-admitted",
+        "android": "not-admitted",
+        "ios": "not-admitted"
+      }
+    },
+    {
+      "id": "logout",
+      "tripwire_required": true,
+      "secret_canaries": ["private-key-shaped", "hosted-token-shaped"],
+      "source_checks": ["omega_identity sign-out, forget journal, verified deletion, and partial failure tests"],
+      "installed_surfaces": ["filesystem", "signer", "ui", "public-receipts"],
+      "refusals": ["unverified-delete", "partial-purge", "external-recovery-remains", "relay-events-remain"],
+      "host_status": {
+        "macos-desktop": "owner-assisted-pending",
+        "windows-desktop": "owner-assisted-pending",
+        "linux-desktop": "owner-assisted-pending",
+        "web": "not-admitted",
+        "android": "not-admitted",
+        "ios": "not-admitted"
+      }
+    },
+    {
+      "id": "invites",
+      "tripwire_required": true,
+      "secret_canaries": ["invite-capability"],
+      "source_checks": ["omega_invites profile, redaction, expiry, partial result, restart, and duplicate claim tests"],
+      "installed_surfaces": ["relay", "deep-link", "clipboard", "filesystem", "public-receipts"],
+      "refusals": ["unsupported-profile", "expired", "banned", "terms-required", "duplicate-claim"],
+      "host_status": {
+        "macos-desktop": "owner-assisted-pending",
+        "windows-desktop": "owner-assisted-pending",
+        "linux-desktop": "owner-assisted-pending",
+        "web": "not-admitted",
+        "android": "not-admitted",
+        "ios": "not-admitted"
+      }
+    },
+    {
+      "id": "hydration",
+      "tripwire_required": true,
+      "secret_canaries": ["decrypted-payload"],
+      "source_checks": ["omega_identity_sync deadline, partition, cache, consent, and purge tests"],
+      "installed_surfaces": ["relay", "filesystem", "signer", "public-receipts"],
+      "refusals": ["timeout", "offline", "stale-generation", "decrypt-declined", "missing-method"],
+      "host_status": {
+        "macos-desktop": "owner-assisted-pending",
+        "windows-desktop": "owner-assisted-pending",
+        "linux-desktop": "owner-assisted-pending",
+        "web": "not-admitted",
+        "android": "not-admitted",
+        "ios": "not-admitted"
+      }
+    },
+    {
+      "id": "pairing",
+      "tripwire_required": true,
+      "secret_canaries": ["disposable-signer-secret", "private-key-shaped"],
+      "source_checks": ["omega_device_enrollment expiry, SAS, replay, substitution, persistence, and revocation tests"],
+      "installed_surfaces": ["deep-link", "clipboard", "filesystem", "accessibility", "public-receipts"],
+      "refusals": ["wrong-sas", "expired", "replay", "peer-substitution", "wrong-generation", "revoked"],
+      "host_status": {
+        "macos-desktop": "owner-assisted-pending",
+        "windows-desktop": "owner-assisted-pending",
+        "linux-desktop": "owner-assisted-pending",
+        "web": "not-admitted",
+        "android": "not-admitted",
+        "ios": "not-admitted"
+      }
+    },
+    {
+      "id": "authority-separation",
+      "tripwire_required": true,
+      "secret_canaries": ["private-prompt", "hosted-token-shaped"],
+      "source_checks": ["omega_identity authentication contract and omega_agent_identity authorization non-substitution tests"],
+      "installed_surfaces": ["signer", "relay", "ui", "logs", "public-receipts"],
+      "refusals": ["person-as-agent", "agent-as-person", "relay-as-action", "group-as-hosted", "hosted-as-group", "device-as-person"],
+      "host_status": {
+        "macos-desktop": "owner-assisted-pending",
+        "windows-desktop": "owner-assisted-pending",
+        "linux-desktop": "owner-assisted-pending",
+        "web": "not-admitted",
+        "android": "not-admitted",
+        "ios": "not-admitted"
+      }
+    }
+  ]
+}

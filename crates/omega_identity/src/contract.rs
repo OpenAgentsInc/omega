@@ -693,7 +693,7 @@ impl AdmittedSigningRequest {
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct SigningResult {
     pub request_ref: ReceiptRef,
@@ -701,6 +701,19 @@ pub struct SigningResult {
     pub event_id: String,
     pub signature: String,
     pub signed_event_json: String,
+}
+
+impl fmt::Debug for SigningResult {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("SigningResult")
+            .field("request_ref", &self.request_ref)
+            .field("identity", &self.identity)
+            .field("event_id", &self.event_id)
+            .field("signature", &"[REDACTED]")
+            .field("signed_event_json", &"[REDACTED]")
+            .finish()
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -1041,6 +1054,23 @@ mod tests {
                 .validate_against(&manifest, AppChannel::Dev)
                 .is_err()
         );
+    }
+
+    #[test]
+    fn signing_result_debug_redacts_signature_and_event_content() {
+        let result = SigningResult {
+            request_ref: ReceiptRef::new("signing-result-redaction")
+                .expect("valid fixture reference"),
+            identity: identity(),
+            event_id: "1".repeat(64),
+            signature: "disposable-signature-canary".to_string(),
+            signed_event_json: r#"{"content":"private-prompt-canary"}"#.to_string(),
+        };
+
+        let debug = format!("{result:?}");
+        assert!(!debug.contains("disposable-signature-canary"));
+        assert!(!debug.contains("private-prompt-canary"));
+        assert!(debug.contains("[REDACTED]"));
     }
 
     fn assert_public_only(value: &Value) {

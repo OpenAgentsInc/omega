@@ -116,6 +116,7 @@ members = [
     "crates/ollama",
     "crates/omega_identity",
     "crates/omega_identity_sync",
+    "crates/omega_agent_identity",
     "crates/omega_invites",
     "crates/omega_signer_broker",
     "crates/omega_agent_detect",
@@ -365,6 +366,7 @@ oauth_callback_server = { path = "crates/oauth_callback_server" }
 ollama = { path = "crates/ollama" }
 omega_identity = { path = "crates/omega_identity" }
 omega_identity_sync = { path = "crates/omega_identity_sync" }
+omega_agent_identity = { path = "crates/omega_agent_identity" }
 omega_invites = { path = "crates/omega_invites" }
 omega_signer_broker = { path = "crates/omega_signer_broker" }
 omega_agent_detect = { path = "crates/omega_agent_detect" }

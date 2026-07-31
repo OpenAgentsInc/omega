@@ -1,7 +1,7 @@
 # Omega Nostr authentication contract
 
-- Status: AUTH-00 contract frozen; AUTH-01 through AUTH-08 implemented
-- Packets: `OMEGA-AUTH-00`, `OMEGA-AUTH-01`, `OMEGA-AUTH-02`, `OMEGA-AUTH-03`, `OMEGA-AUTH-04`, `OMEGA-AUTH-05`, `OMEGA-AUTH-06`, `OMEGA-AUTH-07`, `OMEGA-AUTH-08`
+- Status: AUTH-00 contract frozen; AUTH-01 through AUTH-09 implemented
+- Packets: `OMEGA-AUTH-00`, `OMEGA-AUTH-01`, `OMEGA-AUTH-02`, `OMEGA-AUTH-03`, `OMEGA-AUTH-04`, `OMEGA-AUTH-05`, `OMEGA-AUTH-06`, `OMEGA-AUTH-07`, `OMEGA-AUTH-08`, `OMEGA-AUTH-09`
 - Source baseline: Omega `0136fca2d11900ddc7982665482ed8cd035391c7`
 - Product plan:
   [Omega Nostr authentication and onboarding](https://github.com/OpenAgentsInc/openagents/blob/7010561549ebb46a37257292a9100f990a4a3356/docs/omega/2026-07-30-omega-nostr-authentication-and-onboarding.md)
@@ -481,3 +481,66 @@ pending record. The dashboard's copied value is a versioned pairing payload;
 the bridge encodes that payload as an `omega://device-enrollment/v1` deep link
 and parses it back through the same core invitation validator. The dashboard
 does not claim to render a QR code in this wave.
+
+## Agent identities and assurance
+
+AUTH-09 gives each admitted agent a separate Nostr identity. The account
+dashboard projects the selected person identity, independently enrolled device
+identities, separately attested agent identities, and linked hosted user
+without collapsing them into one account identifier. The public agent
+projection names its agent reference and public key, owner account and person
+public key, label, owner-attestation reference, exact methods, event kinds,
+room or tenant resources, account generation, issue and expiry times,
+revocation, and last successful use. It contains no secret key or bearer.
+
+An owner attestation binds the separate agent public key to the exact owner and
+bounded grant. The agent key is generated and retained by the agent-identity
+store; the owner signs only the typed attestation request. The agent does not
+receive the person's root `nsec`, a device private key, a NIP-46 disposable
+client secret, or a hosted token. By default an agent cannot sign as the
+person. Any future person-signing capability must be separately admitted and
+must bind the exact signer, method, kind, resource, destination, origin,
+content digest, gesture, generation, request id, and expiry.
+
+The desktop dashboard offers two explicit first-party presets: **Omega Agent**
+and **Sarah**. Both use a 30-day grant with `sign_event` and the distinct
+NIP-AA agent-relay method. Omega Agent is bounded to kinds `9`, `1111`, `1984`,
+and `22242` plus resource `openagents:omega`; Sarah is bounded to kinds `9`,
+`1111`, and `22242` plus `openagents:sarah`. The proposal is displayed before
+the owner gesture. This first reachable attestation flow requires the selected
+local owner signer. Remote-owner attestation is not yet routed through NIP-46,
+so the controls are disabled for a remote-selected account instead of claiming
+that path works.
+
+Agent authorization revalidates owner account, person identity, agent
+identity, grant reference, generation, method, event kind, room or tenant
+resource, request id, subsystem, purpose, destination, origin, content digest,
+capability, gesture state, and time window immediately before use. Revocation
+targets one agent grant without rotating the person identity, device keys, or
+sibling agent identities. NIP-42 relay authentication is a separate connection
+receipt and never substitutes for the owner attestation, group admission,
+hosted linking, or exact action authorization.
+
+NIP-AA agent relay authentication is a separate agent capability and is
+admitted only for the pinned Omega agent-relay profile. It binds the owner
+attestation, agent key, grant, account generation, relay challenge, connection
+generation, and expiry. It does not reuse the person's ordinary NIP-42 signer,
+and neither a NIP-AA nor NIP-42 receipt creates virtual membership, hosted
+linking, or action authority.
+
+The source and installed assurance boundary is specified in
+[Omega Nostr authentication assurance](nostr-authentication-assurance.md) and
+its machine-readable installed-candidate matrix. Source tests cover the typed
+grant, mismatch and authority-non-substitution rules. Packaged filesystem,
+clipboard, accessibility, crash, deep-link, relay, and external-signer
+behavior remains pending until candidate-bound host evidence exists; fixtures
+are not installed evidence.
+
+Agent identity records are stored in ordinary unencrypted files at
+`identity/agents/records/<account-ref-sha256>/<agent-pubkey>.json`; incomplete
+attestations remain at
+`identity/agents/pending/<request-ref-sha256>.json`. Atomic writes use
+owner-only Unix directory mode `0700` and file mode `0600`. AUTH-09 enables no macOS
+Keychain, Secure Enclave, Windows credential vault, Linux secret service,
+Android keystore, encrypted application vault, native enclave,
+hardware-backed credential store, or other native key custody.

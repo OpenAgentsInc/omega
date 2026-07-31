@@ -181,6 +181,27 @@ Keychain, Secure Enclave, Windows credential vault, Linux secret service,
 Android keystore, encrypted application vault, native enclave, hardware-backed
 credential store, or other native key custody.
 
+AUTH-09 stores separate agent identities and bounded owner grants below
+`identity/agents/records/<account-ref-sha256>/<agent-pubkey>.json`, with
+incomplete attestations below
+`identity/agents/pending/<request-ref-sha256>.json`. The agent secret remains
+in an ordinary local secret file owned by that agent record. Public inventory and
+receipt records contain only agent and owner references, public keys, exact
+methods, event kinds, room or tenant resources, generation, issue and expiry
+times, attestation reference, revocation, and last successful use. They contain
+no agent secret, person root `nsec`, device private key, bearer, private prompt,
+or decrypted payload.
+
+Agent files use the same atomic ordinary-file boundary: directories mode
+`0700` and files mode `0600` on Unix. Installed Windows ACL behavior and
+packaged host permissions remain explicit evidence requirements; Unix mode
+tests do not prove them. The installed-candidate inventory and secret-tripwire
+procedure are recorded in
+[Omega Nostr authentication assurance](nostr-authentication-assurance.md).
+AUTH-09 enables no macOS Keychain, Secure Enclave, Windows credential vault,
+Linux secret service, Android keystore, encrypted application vault, native
+enclave, hardware-backed credential store, or other native key custody.
+
 Apple code signing and notarization may use a build-machine signing identity.
 That packaging operation is outside the installed application's runtime and
 does not give Omega access to the build machine's credential store.

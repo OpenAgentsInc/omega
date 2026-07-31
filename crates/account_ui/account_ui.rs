@@ -24,6 +24,9 @@ use gpui::{
     IntoElement, PromptLevel, Render, SharedString, Task, Window,
 };
 use omega_actions::{OpenIdentityDashboard, OpenOnboarding, OpenRemoteSignerSetup};
+use omega_agent_identity::{
+    AgentGrantScope, AgentIdentityPlan, AgentIdentityProjection, AgentIdentityStore, AgentMethod,
+};
 use omega_device_bridge::auth08_pairing_invite_deep_link;
 use omega_device_enrollment::{
     DeviceCapability, DeviceInventoryEntry, DevicePlatform, EnrollmentError,
@@ -32,7 +35,7 @@ use omega_effectd::{BindingProjection, BindingState, HostedSessionProjection, Ho
 use omega_identity::{
     AccountDashboardEntry, AccountDashboardProjection, AccountLifecycleState,
     AccountProfileSummary, AccountPurgeReport, AccountPurgeTarget, AccountPurgeVerification,
-    AccountRef, AccountRegistryService, IdentityService, Nip46CapabilityMethod,
+    AccountRef, AccountRegistryService, AgentIdentityRef, IdentityService, Nip46CapabilityMethod,
     Nip46ConnectionInput, Nip46InboundEvent, Nip46PairingFence, Nip46PairingSession,
     Nip46PairingUri, Nip46PermissionPreview, Nip46ReportedSigner, Nip46Service, PublicIdentity,
     ReceiptRef, RecoveryProtectionState, RelayAuthenticationProjection, RelayAuthenticationReceipt,
@@ -70,6 +73,7 @@ const SIGN_OUT_LABEL: &str = "Sign out";
 const DISCONNECT_SIGNER_LABEL: &str = "Disconnect signer";
 const DEVICE_PAIRING_LIFETIME_SECONDS: u64 = 5 * 60;
 const DEVICE_GRANT_LIFETIME_SECONDS: u64 = 30 * 24 * 60 * 60;
+const AGENT_GRANT_LIFETIME_SECONDS: u64 = 30 * 24 * 60 * 60;
 
 fn unix_time_seconds() -> u64 {
     SystemTime::now()
@@ -639,6 +643,45 @@ enum HostedOperation {
     Disconnect,
 }
 
+#[derive(Clone, Copy)]
+enum NamedAgentPreset {
+    OmegaAgent,
+    Sarah,
+}
+
+impl NamedAgentPreset {
+    fn label(self) -> &'static str {
+        match self {
+            Self::OmegaAgent => "Omega Agent",
+            Self::Sarah => "Sarah",
+        }
+    }
+
+    fn reference_slug(self) -> &'static str {
+        match self {
+            Self::OmegaAgent => "omega-agent",
+            Self::Sarah => "sarah",
+        }
+    }
+
+    fn scope(self) -> AgentGrantScope {
+        let (event_kinds, room_or_tenant) = match self {
+            Self::OmegaAgent => (vec![9, 1111, 1984, 22242], "openagents:omega"),
+            Self::Sarah => (vec![9, 1111, 22242], "openagents:sarah"),
+        };
+        AgentGrantScope {
+            methods: [
+                AgentMethod::SignEvent,
+                AgentMethod::NipAaRelayAuthentication,
+            ]
+            .into_iter()
+            .collect(),
+            event_kinds: event_kinds.into_iter().collect(),
+            rooms_or_tenants: [room_or_tenant.to_string()].into_iter().collect(),
+        }
+    }
+}
+
 #[derive(Clone)]
 enum IdentitySyncMutation {
     SkipProfile,
@@ -750,6 +793,7 @@ pub struct IdentityDashboard {
     device_challenge_wire: Option<Zeroizing<String>>,
     device_grant_wire: Option<Zeroizing<String>>,
     device_inventory: Vec<DeviceInventoryEntry>,
+    agent_inventory: Vec<AgentIdentityProjection>,
     invite_control: InviteControl,
     pending_invite: Option<(ResolvedInvite, Zeroizing<String>)>,
     hydration_receipt: Option<HydrationReceipt>,
@@ -857,6 +901,7 @@ impl IdentityDashboard {
             device_challenge_wire: None,
             device_grant_wire: None,
             device_inventory: Vec::new(),
+            agent_inventory: Vec::new(),
             invite_control: InviteControl::default(),
             pending_invite: None,
             hydration_receipt: None,
@@ -909,7 +954,7 @@ impl IdentityDashboard {
                     }
                 }
                 this.busy = false;
-                this.refresh_device_inventory(cx);
+                this.refresh_identity_inventory(cx);
                 cx.notify();
             })
             .log_err();
@@ -963,12 +1008,13 @@ impl IdentityDashboard {
             .find(|entry| &entry.account_ref == selected)
     }
 
-    fn refresh_device_inventory(&mut self, cx: &mut Context<Self>) {
+    fn refresh_identity_inventory(&mut self, cx: &mut Context<Self>) {
         if !self
             .selected_entry()
             .is_some_and(|account| account.is_active)
         {
             self.device_inventory.clear();
+            self.agent_inventory.clear();
             cx.notify();
             return;
         }
@@ -978,26 +1024,161 @@ impl IdentityDashboard {
                     let registry = AccountRegistryService::system(*app_identity::CHANNEL);
                     let selection = registry
                         .selection_token()
-                        .map_err(|_| EnrollmentError::Storage)?;
-                    match DeviceEnrollmentController::system().device_inventory(&selection) {
-                        Ok(inventory) => Ok(inventory),
-                        Err(EnrollmentError::NotFound) => Ok(Vec::new()),
-                        Err(error) => Err(error),
-                    }
+                        .map_err(|error| error.to_string())?;
+                    let devices =
+                        match DeviceEnrollmentController::system().device_inventory(&selection) {
+                            Ok(inventory) => inventory,
+                            Err(EnrollmentError::NotFound) => Vec::new(),
+                            Err(error) => return Err(error.to_string()),
+                        };
+                    let agents = AgentIdentityStore::system()
+                        .agent_inventory(&selection.account_ref)
+                        .map_err(|error| error.to_string())?;
+                    Ok::<_, String>((devices, agents))
                 })
                 .await;
             this.update(cx, |this, cx| {
                 match result {
-                    Ok(inventory) => this.device_inventory = inventory,
+                    Ok((devices, agents)) => {
+                        this.device_inventory = devices;
+                        this.agent_inventory = agents;
+                    }
                     Err(error) => {
-                        zlog::error!("device inventory inspection failed: {error}");
-                        this.message = Some("Enrolled devices could not be loaded.".into());
+                        zlog::error!("identity inventory inspection failed: {error}");
+                        this.message =
+                            Some("Device and agent identities could not be loaded.".into());
                     }
                 }
                 cx.notify();
             })
             .log_err();
         }));
+    }
+
+    fn create_named_agent(&mut self, preset: NamedAgentPreset, cx: &mut Context<Self>) {
+        if self.busy
+            || !self.selected_entry().is_some_and(|account| {
+                account.is_active && account.signer.kind == SignerKind::LocalNative
+            })
+        {
+            return;
+        }
+        self.busy = true;
+        self.message = None;
+        self.task = Some(cx.spawn(async move |this, cx| {
+            let result = cx
+                .background_spawn(async move {
+                    let registry = AccountRegistryService::system(*app_identity::CHANNEL);
+                    let selection = registry
+                        .selection_token()
+                        .map_err(|error| error.to_string())?;
+                    let now = unix_time_seconds();
+                    let unique = SystemTime::now()
+                        .duration_since(UNIX_EPOCH)
+                        .map_or(0, |duration| duration.as_nanos());
+                    let slug = preset.reference_slug();
+                    let request_ref = ReceiptRef::new(format!("agent-attestation-{slug}-{unique}"))
+                        .map_err(|error| error.to_string())?;
+                    let grant_ref = ReceiptRef::new(format!("agent-grant-{slug}-{unique}"))
+                        .map_err(|error| error.to_string())?;
+                    let agent_identity_ref =
+                        AgentIdentityRef::new(format!("agent:{slug}:{unique}"))
+                            .map_err(|error| error.to_string())?;
+                    let plan = AgentIdentityPlan {
+                        request_ref,
+                        grant_ref,
+                        owner_account_ref: selection.account_ref.clone(),
+                        owner_identity: selection.identity.clone(),
+                        agent_identity_ref,
+                        label: preset.label().to_string(),
+                        scope: preset.scope(),
+                        account_generation: selection.generation,
+                        issued_at: now,
+                        expires_at: now.saturating_add(AGENT_GRANT_LIFETIME_SECONDS),
+                    };
+                    let store = AgentIdentityStore::system();
+                    let prepared = store
+                        .prepare_agent_identity(&selection, plan)
+                        .map_err(|error| error.to_string())?;
+                    let attestation = match IdentityService::system(*app_identity::CHANNEL)
+                        .sign_owner_attestation(&prepared.owner_attestation_request)
+                    {
+                        Ok(attestation) => attestation,
+                        Err(error) => {
+                            store
+                                .cancel_pending_agent_identity(&selection, &prepared.request_ref)
+                                .map_err(|cleanup| cleanup.to_string())?;
+                            return Err(error.to_string());
+                        }
+                    };
+                    match store.complete_owner_attestation(
+                        &selection,
+                        &prepared.request_ref,
+                        &attestation,
+                    ) {
+                        Ok(projection) => Ok(projection),
+                        Err(error) => {
+                            store
+                                .cancel_pending_agent_identity(&selection, &prepared.request_ref)
+                                .map_err(|cleanup| cleanup.to_string())?;
+                            Err(error.to_string())
+                        }
+                    }
+                })
+                .await;
+            this.update(cx, |this, cx| {
+                match result {
+                    Ok(projection) => {
+                        this.message =
+                            Some(format!("{} identity attested.", projection.label).into());
+                    }
+                    Err(error) => {
+                        zlog::error!("agent identity creation failed: {error}");
+                        this.message =
+                            Some("The bounded agent identity could not be created.".into());
+                    }
+                }
+                this.busy = false;
+                this.refresh_identity_inventory(cx);
+                cx.notify();
+            })
+            .log_err();
+        }));
+        cx.notify();
+    }
+
+    fn revoke_agent_grant(&mut self, grant_ref: ReceiptRef, cx: &mut Context<Self>) {
+        if self.busy {
+            return;
+        }
+        self.busy = true;
+        self.message = None;
+        self.task = Some(cx.spawn(async move |this, cx| {
+            let result = cx
+                .background_spawn(async move {
+                    let selection = AccountRegistryService::system(*app_identity::CHANNEL)
+                        .selection_token()
+                        .map_err(|error| error.to_string())?;
+                    AgentIdentityStore::system()
+                        .revoke_agent_grant(&selection, &grant_ref, unix_time_seconds())
+                        .map_err(|error| error.to_string())
+                })
+                .await;
+            this.update(cx, |this, cx| {
+                match result {
+                    Ok(_) => this.message = Some("Agent grant revoked.".into()),
+                    Err(error) => {
+                        zlog::error!("agent grant revocation failed: {error}");
+                        this.message = Some("The agent grant could not be revoked.".into());
+                    }
+                }
+                this.busy = false;
+                this.refresh_identity_inventory(cx);
+                cx.notify();
+            })
+            .log_err();
+        }));
+        cx.notify();
     }
 
     fn start_device_pairing(&mut self, cx: &mut Context<Self>) {
@@ -1220,7 +1401,7 @@ impl IdentityDashboard {
                             device_public_key_hex: grant.device_public_key_hex,
                         };
                         this.message = Some("Device enrollment redeemed.".into());
-                        this.refresh_device_inventory(cx);
+                        this.refresh_identity_inventory(cx);
                     }
                     Err(EnrollmentError::ExpiredInvite) => {
                         this.device_challenge_wire = None;
@@ -1280,7 +1461,7 @@ impl IdentityDashboard {
                 match result {
                     Ok(()) => {
                         this.message = Some("Device grant revoked.".into());
-                        this.refresh_device_inventory(cx);
+                        this.refresh_identity_inventory(cx);
                     }
                     Err(error) => {
                         zlog::error!("device revocation failed: {error}");
@@ -1895,6 +2076,7 @@ impl IdentityDashboard {
             )
             .on_click(cx.listener(move |this, _, _, cx| {
                 this.selected_account = Some(account_ref.clone());
+                this.refresh_identity_inventory(cx);
                 cx.notify();
             }))
             .into_any_element()
@@ -2010,6 +2192,8 @@ impl IdentityDashboard {
             })
             .child(Divider::horizontal())
             .child(self.render_authentication_authority(cx))
+            .child(Divider::horizontal())
+            .child(self.render_identity_principals(cx))
             .child(Divider::horizontal())
             .child(self.render_device_enrollment(cx))
             .child(Divider::horizontal())
@@ -2705,6 +2889,185 @@ impl IdentityDashboard {
                 "Ordinary unencrypted account files",
                 None,
             ))
+            .into_any_element()
+    }
+
+    fn render_identity_principals(&self, cx: &mut Context<Self>) -> AnyElement {
+        let person = self.selected_entry().map_or_else(
+            || "Not selected".to_string(),
+            |account| account.fingerprint.clone(),
+        );
+        let hosted_user = self
+            .hosted_session_binding_matches_selected()
+            .then(|| self.hosted_session.owner_user_id.clone())
+            .flatten()
+            .unwrap_or_else(|| "Not linked".to_string());
+        let create_enabled = self.selected_entry().is_some_and(|account| {
+            account.is_active && account.signer.kind == SignerKind::LocalNative
+        }) && !self.busy;
+        let agent_rows = self
+            .agent_inventory
+            .iter()
+            .enumerate()
+            .map(|(index, agent)| {
+                let grant_ref = agent.grant.grant_ref.clone();
+                let methods = agent
+                    .grant
+                    .scope
+                    .methods
+                    .iter()
+                    .map(|method| agent_method_label(*method))
+                    .collect::<Vec<_>>()
+                    .join(", ");
+                let event_kinds = agent
+                    .grant
+                    .scope
+                    .event_kinds
+                    .iter()
+                    .map(u16::to_string)
+                    .collect::<Vec<_>>()
+                    .join(", ");
+                let resources = agent
+                    .grant
+                    .scope
+                    .rooms_or_tenants
+                    .iter()
+                    .cloned()
+                    .collect::<Vec<_>>()
+                    .join(", ");
+                let revocation = agent.grant.revoked_at.map_or_else(
+                    || "Active".to_string(),
+                    |revoked_at| format!("Revoked {}", last_signer_use(Some(revoked_at))),
+                );
+                v_flex()
+                    .id(("omega-agent-grant", index))
+                    .gap_1()
+                    .child(Label::new(agent.label.clone()).size(LabelSize::Small))
+                    .child(detail_row(
+                        "Owner",
+                        format!(
+                            "{} · {}",
+                            agent.owner_account_ref.as_str(),
+                            public_fingerprint(agent.owner_public_key_hex.as_str())
+                        ),
+                        None,
+                    ))
+                    .child(detail_row(
+                        "Agent",
+                        format!(
+                            "{} · {}",
+                            agent.agent_identity_ref.as_str(),
+                            public_fingerprint(agent.agent_public_key_hex.as_str())
+                        ),
+                        None,
+                    ))
+                    .child(detail_row("Signer", agent.signer_ref.as_str(), None))
+                    .child(detail_row("Grant", agent.grant.grant_ref.as_str(), None))
+                    .child(detail_row("Methods", methods, None))
+                    .child(detail_row(
+                        "Event kinds",
+                        if event_kinds.is_empty() {
+                            "None".to_string()
+                        } else {
+                            event_kinds
+                        },
+                        None,
+                    ))
+                    .child(detail_row("Room or tenant", resources, None))
+                    .child(detail_row(
+                        "Generation",
+                        agent.grant.account_generation.to_string(),
+                        None,
+                    ))
+                    .child(detail_row(
+                        "Owner attestation",
+                        agent.grant.owner_attestation_ref.as_str(),
+                        None,
+                    ))
+                    .child(detail_row(
+                        "Expires",
+                        last_signer_use(Some(agent.grant.expires_at)),
+                        None,
+                    ))
+                    .child(detail_row(
+                        "Last use",
+                        last_signer_use(agent.last_used_at),
+                        None,
+                    ))
+                    .child(detail_row("Revocation", revocation, None))
+                    .child(
+                        Button::new(("omega-agent-revoke", index), "Revoke agent grant")
+                            .style(ButtonStyle::Tinted(TintColor::Error))
+                            .size(ButtonSize::Compact)
+                            .disabled(self.busy || agent.grant.revoked_at.is_some())
+                            .on_click(cx.listener(move |this, _, _, cx| {
+                                this.revoke_agent_grant(grant_ref.clone(), cx)
+                            })),
+                    )
+                    .into_any_element()
+            })
+            .collect::<Vec<_>>();
+
+        v_flex()
+            .gap_2()
+            .child(Label::new("Identity principals").size(LabelSize::Small))
+            .child(detail_row("Person identity", person, None))
+            .child(detail_row(
+                "Device identities",
+                self.device_inventory.len().to_string(),
+                None,
+            ))
+            .child(detail_row(
+                "Agent identities",
+                self.agent_inventory.len().to_string(),
+                None,
+            ))
+            .child(detail_row("Hosted user", hosted_user, None))
+            .child(Label::new("Agent grants").size(LabelSize::Small))
+            .child(detail_row(
+                "Omega Agent proposal",
+                "Sign event + NIP-AA agent relay auth · kinds 9, 1111, 1984, 22242 · openagents:omega · 30 days",
+                None,
+            ))
+            .child(detail_row(
+                "Sarah proposal",
+                "Sign event + NIP-AA agent relay auth · kinds 9, 1111, 22242 · openagents:sarah · 30 days",
+                None,
+            ))
+            .child(
+                h_flex()
+                    .gap_2()
+                    .flex_wrap()
+                    .child(
+                        Button::new("omega-create-omega-agent", "Create Omega Agent")
+                            .style(ButtonStyle::Filled)
+                            .size(ButtonSize::Compact)
+                            .disabled(!create_enabled)
+                            .tooltip(Tooltip::text(if create_enabled {
+                                "Attest bounded agent"
+                            } else {
+                                "Local owner signer required"
+                            }))
+                            .on_click(cx.listener(|this, _, _, cx| {
+                                this.create_named_agent(NamedAgentPreset::OmegaAgent, cx)
+                            })),
+                    )
+                    .child(
+                        Button::new("omega-create-sarah-agent", "Create Sarah")
+                            .style(ButtonStyle::OutlinedGhost)
+                            .size(ButtonSize::Compact)
+                            .disabled(!create_enabled)
+                            .tooltip(Tooltip::text(if create_enabled {
+                                "Attest bounded agent"
+                            } else {
+                                "Local owner signer required"
+                            }))
+                            .on_click(cx.listener(|this, _, _, cx| {
+                                this.create_named_agent(NamedAgentPreset::Sarah, cx)
+                            })),
+                    ),
+            )
+            .children(agent_rows)
             .into_any_element()
     }
 
@@ -4412,6 +4775,20 @@ fn detail_row(
         .into_any_element()
 }
 
+fn agent_method_label(method: AgentMethod) -> &'static str {
+    match method {
+        AgentMethod::SignEvent => "Sign event",
+        AgentMethod::Nip42RelayAuthentication => "NIP-42 relay auth",
+        AgentMethod::NipAaRelayAuthentication => "NIP-AA agent relay auth",
+        AgentMethod::Nip44Encrypt => "NIP-44 encrypt",
+        AgentMethod::Nip44Decrypt => "NIP-44 decrypt",
+    }
+}
+
+fn public_fingerprint(public_key_hex: &str) -> String {
+    public_key_hex.chars().take(12).collect()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -4568,6 +4945,53 @@ mod tests {
             relay_refusal_label(RelayAuthenticationRefusal::AcknowledgementMissing),
             "No acknowledgement"
         );
+    }
+
+    #[test]
+    fn named_agents_receive_distinct_bounded_scopes() {
+        let omega = NamedAgentPreset::OmegaAgent.scope();
+        let sarah = NamedAgentPreset::Sarah.scope();
+        assert_eq!(NamedAgentPreset::OmegaAgent.label(), "Omega Agent");
+        assert_eq!(NamedAgentPreset::Sarah.label(), "Sarah");
+        assert!(omega.methods.contains(&AgentMethod::SignEvent));
+        assert!(
+            omega
+                .methods
+                .contains(&AgentMethod::NipAaRelayAuthentication)
+        );
+        assert!(omega.event_kinds.contains(&1984));
+        assert!(!sarah.event_kinds.contains(&1984));
+        assert_eq!(
+            omega.rooms_or_tenants,
+            ["openagents:omega".to_string()].into_iter().collect()
+        );
+        assert_eq!(
+            sarah.rooms_or_tenants,
+            ["openagents:sarah".to_string()].into_iter().collect()
+        );
+    }
+
+    #[test]
+    fn identity_principal_labels_never_collapse_roles() {
+        let labels = [
+            "Person identity",
+            "Device identities",
+            "Agent identities",
+            "Hosted user",
+        ];
+        assert_eq!(
+            labels
+                .iter()
+                .copied()
+                .collect::<std::collections::HashSet<_>>()
+                .len(),
+            labels.len()
+        );
+        assert_eq!(
+            agent_method_label(AgentMethod::NipAaRelayAuthentication),
+            "NIP-AA agent relay auth"
+        );
+        assert_eq!(public_fingerprint("0123456789abcdef"), "0123456789ab");
     }
 
     #[test]

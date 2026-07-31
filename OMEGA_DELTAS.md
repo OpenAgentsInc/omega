@@ -8768,3 +8768,45 @@ startup recheck — survives unchanged behind that dropdown.
   the device enrollment core; preview, inventory, and lifecycle assertions in
   `account_ui`; and the `OMEGA-DELTA-0199` source assertions in
   `crates/omega_deltas`.
+
+### OMEGA-DELTA-0200 — Agents are separate principals with bounded grants and evidence-bound assurance
+
+- **Origin:** OMEGA-AUTH-09, omega#184. Extends person and device identity
+  without lending either key or authority to an agent.
+- **Identity stays separate.** Every admitted agent has its own Nostr key and
+  public projection. Its owner attestation and grant name the owner account and
+  person public key, agent reference and public key, exact methods, event kinds,
+  room or tenant resources, generation, issue and expiry times, attestation
+  reference, revocation, and last successful use. The agent cannot sign as the
+  person by fallback and receives no raw person-key material.
+- **Requests stay bounded.** Authorization rechecks owner, agent, grant,
+  generation, method, kind, resource, request id, subsystem, purpose,
+  destination, origin, content digest, capability, gesture, and expiry.
+  NIP-AA agent relay authentication is available only under its exact admitted
+  profile. NIP-AA, ordinary NIP-42 relay auth, NIP-29 membership, hosted
+  linking, device enrollment, and exact owner action authorization cannot
+  substitute for one another.
+- **Installed claims stay honest.** A machine-readable matrix inventories
+  migration, storage, recovery, NIP-42, NIP-46, account switching, logout,
+  invites, hydration, pairing, and authority separation on desktop, web,
+  Android, and iOS. Source-automated, installed-automated,
+  owner-assisted-pending, blocked, and not-admitted are distinct. No host is
+  promoted by a fixture or source test. The existing installed canary collector
+  must run with a fresh journey canary against logs, telemetry, diagnostics,
+  crashes, clipboard, and accessibility; an unreadable required surface blocks.
+- **File custody only.** Agent records live below
+  `identity/agents/records/<account-ref-sha256>/<agent-pubkey>.json`, with
+  incomplete attestations below
+  `identity/agents/pending/<request-ref-sha256>.json`, in ordinary unencrypted
+  files
+  written atomically with Unix directory mode `0700` and file mode `0600`.
+  This delta enables no macOS Keychain, Secure Enclave, Windows credential
+  vault, Linux secret service, Android keystore, encrypted application vault,
+  native enclave, hardware-backed credential store, or other native key
+  custody.
+- **Enforced by:** bounded agent identity, attestation, authorization,
+  revocation, redaction, storage, and non-substitution tests in
+  `omega_agent_identity`; public principal and grant assertions in
+  `account_ui`; the installed tripwire collector; the assurance document and
+  host matrix; and the `OMEGA-DELTA-0200` source assertions in
+  `crates/omega_deltas`.
