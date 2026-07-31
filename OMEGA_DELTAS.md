@@ -9711,10 +9711,10 @@ candidate and receipt hashes from an installed DMG and release record; the
 release gate recomputes them independently.
 
 **Blocked remains honest.** The assembler accepts blocked and inconclusive
-receipts without manufacturing pass facts. The committed rc28 report stays
-blocked. The current OpenAgents server exposes authority/floor operations but
-still provisions community rooms per `sessionRef:generation`; the docs now
-name that exact rendezvous gap instead of claiming those routes do not exist.
+receipts without manufacturing pass facts. OpenAgents now owns the durable
+community-room rendezvous and Omega consumes its authority and media contract,
+but the committed rc28 report stays blocked until an installed candidate
+produces the bound three-desktop and failure-drill receipts.
 
 - **Enforced by:** `script/omega-release-gate --self-test`;
   `sarah_livekit_release_rows_require_bound_receipts_and_observed_facts` in
