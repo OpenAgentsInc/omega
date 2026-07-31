@@ -20,6 +20,42 @@ Owner-only steps that agents deliberately leave incomplete. Public-safe; no secr
 
 Until step 1–2 succeed, first-launch **send** to Alpha feedback may authenticate via NIP-42 and then be refused by the relay if the group does not exist or is admission-gated.
 
+## Sarah LiveKit: admit three identities so the three-desktop room journey can run (omega#186 / #187)
+
+**Status:** the client side is proven; admission is the only blocker. Three packaged
+`v0.2.0-rc29` desktops (package `116ae5ae…c34`) ran concurrently on one Mac, each with
+an isolated profile and its own self-provisioned Nostr identity. None could join a
+community room, so all nine `sarah-livekit-room` observations are `not_observed`
+(receipt `docs/ops/receipts/livekit/gate/2026-07-31-rc29-room.json` in openagents,
+digest `sha256:343e7cd9…a8cf`).
+
+Three Macs and three people are **not** required — one host runs three real packaged
+instances. What is required is two owner-only admissions, per identity.
+
+**Owner steps (repeat for each of the three identities)**
+
+1. **Alpha cohort.** Run the owner-gated script in openagents against production
+   Postgres to write the `sarah_voice_cohort:alpha_v1` row:
+   `apps/openagents.com/workers/api/scripts/admit-sarah-voice-npub.ts`
+   (gate `I_APPROVE_BOUNDED_SARAH_VOICE_CREDIT`). Without this row every Sarah voice
+   session is rejected before a room exists. There is no HTTP surface for it.
+2. **NIP-29 group admission.** Using the community admin key, publish a kind-9000
+   put-user for each identity into the configured community/channel
+   (`openagents-public`, channel `agent-chat` or `alpha-feedback`) on
+   `wss://relay.openagents.com`. Make **one** of the three a group admin so the
+   moderator-stop observation is reachable.
+
+The three npubs to admit are printed by each instance at
+`<profile>/identity/identity.json`; regenerate them at run time rather than pinning
+throwaway keys here.
+
+**Not an owner step — an implementation gap.** Two of the four required refusals
+cannot return their expected codes today. `removeSarahLiveKitRoomMember` is the only
+producer of `member_removed` and `membership_changed` and has no non-test caller;
+production `resolveMember` returns undefined for a removed member, which the routes
+map to `403 room_membership_required`. Either give those codes a production emitter or
+amend the row's expected codes. No credential fixes this.
+
 ## Other open owner steps (unchanged)
 
 - Reduce Motion toggle for the strict reduced-motion cell
