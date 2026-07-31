@@ -342,14 +342,13 @@ fn main() {
 
     zlog::init();
 
-    if stdout_is_a_pty() {
+    let stdout_is_tty = stdout_is_a_pty();
+    let result = zlog::init_output_file(paths::log_file(), Some(paths::old_log_file()));
+    if let Err(err) = result {
+        eprintln!("Could not open log file: {}... Defaulting to stdout", err);
         zlog::init_output_stdout();
-    } else {
-        let result = zlog::init_output_file(paths::log_file(), Some(paths::old_log_file()));
-        if let Err(err) = result {
-            eprintln!("Could not open log file: {}... Defaulting to stdout", err);
-            zlog::init_output_stdout();
-        };
+    } else if stdout_is_tty {
+        zlog::init_output_stdout();
     }
     ztracing::init();
 
