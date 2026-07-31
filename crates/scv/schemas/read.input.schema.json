@@ -1,0 +1,24 @@
+{
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["path"],
+  "properties": {
+    "path": {
+      "type": "string",
+      "description": "Absolute path of a regular UTF-8 text file below a configured read root."
+    },
+    "offset": {
+      "type": "integer",
+      "minimum": 1,
+      "default": 1,
+      "description": "One-based line number at which to begin reading."
+    },
+    "limit": {
+      "type": "integer",
+      "minimum": 1,
+      "maximum": 2000,
+      "default": 2000,
+      "description": "Maximum number of lines to return."
+    }
+  }
+}
