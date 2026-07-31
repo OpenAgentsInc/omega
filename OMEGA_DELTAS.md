@@ -9657,12 +9657,14 @@ revocation, and server stop clear authority and mute input.
 The 30-second speaking floor remains a canonical OpenAgents lease and LiveKit
 remains media only.
 
-**Unavailable is the current honest desktop state.** OpenAgents now exposes
-the shared-room provisioning, authenticated snapshot/update feed, signed Sarah
-presence, summon/remove path, and worker-side floor enforcement, but Omega has
-not yet consumed that production contract. Hermetic authority fixtures prove
-the UI and model seam; they do not become production authority. An unjoined or
-unavailable room says **Mic off**, never **Mic on**.
+**The desktop consumes the production contract, but live proof remains a
+release gate.** Omega joins with the authenticated authority response, pins the
+admitted room and participant identities, publishes a default-muted microphone
+only while the local verified floor lease is held, subscribes only to verified
+Sarah audio, refreshes authority and roster state, and tears the transport down
+on disconnect or revocation. Hermetic tests prove those boundaries; the
+three-desktop installed-candidate journey is still required before release. An
+unjoined or unavailable room says **Mic off**, never **Mic on**.
 
 - **Enforced by:** `community_room_sarah_is_verified_bounded_and_fail_closed`
   in `crates/omega_deltas`; the model tests in
@@ -9688,3 +9690,33 @@ the visual lane into silence again.
 - **Enforced by:** `workbench_visual_launcher_tracks_the_application_package`
   in `crates/omega_deltas`; `script/omega-workbench-proof --list`; and
   `omega_workbench_harness::validate_scene_catalog`.
+
+### OMEGA-DELTA-0217 — Sarah LiveKit release evidence is executable, not testimonial
+
+**A pass now has a row-specific machine shape.** The six-row LiveKit manifest
+still binds one exact Omega package, source revision, OpenAgents revision,
+LiveKit infrastructure/config/server image, Sarah worker source/image, model,
+and price catalog. In addition, every passing row must carry the observations
+that make that row true. Three-desktop room evidence cannot pass without three
+authenticated desktops, one verified Sarah identity, floor transfer, shared
+audio, moderator stop, and non-floor/removed-member refusals. Failure evidence
+cannot pass without all eight drills, eight privacy scopes, non-overlap, and
+exact settlement.
+
+**Every referenced receipt repeats the binding.** A repository-relative hash
+is not enough: the referenced file must be bounded public-safe JSON, repeat
+the exact manifest binding plus row/status, and exclude secret/media/private
+material keys. `script/assemble-omega-sarah-livekit-evidence` computes the
+candidate and receipt hashes from an installed DMG and release record; the
+release gate recomputes them independently.
+
+**Blocked remains honest.** The assembler accepts blocked and inconclusive
+receipts without manufacturing pass facts. The committed rc28 report stays
+blocked. The current OpenAgents server exposes authority/floor operations but
+still provisions community rooms per `sessionRef:generation`; the docs now
+name that exact rendezvous gap instead of claiming those routes do not exist.
+
+- **Enforced by:** `script/omega-release-gate --self-test`;
+  `sarah_livekit_release_rows_require_bound_receipts_and_observed_facts` in
+  `crates/omega_deltas`; and the candidate assembler's digest, binding, row,
+  status, size, and public-safe checks.

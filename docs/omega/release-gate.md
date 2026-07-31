@@ -32,6 +32,41 @@ Regenerate: build the candidate with `script/bundle-omega-rc`, then run
 docs/omega/release-gate/<date>-<candidate>.gate.json
 --sarah-livekit-evidence <public-safe-manifest.json>`.
 
+Assemble that manifest with
+`script/assemble-omega-sarah-livekit-evidence`. It takes the DMG and release
+record, the exact OpenAgents/LiveKit/worker/model/pricing revisions, and six
+`--row ID=STATUS:PATH` arguments. Each path must be a repository-contained JSON
+receipt that repeats the exact candidate/infrastructure `binding`, its
+`row_id`, `status`, `facts`, and `public_safe: true`. The assembler computes
+the package and receipt digests; the gate independently recomputes them.
+Passing rows also require their row-specific observed facts. For example, the
+room row requires three authenticated desktops, a completed floor transfer,
+shared answer, moderator stop, and non-floor/removed-member refusals. The
+failure row requires all eight drills, eight privacy scopes, non-overlap, and
+exact settlement. A public-safe label without that shape cannot promote a
+row.
+
+```sh
+script/assemble-omega-sarah-livekit-evidence \
+  --dmg target/omega-rc/Omega-v0.2.0-rcNN-macos-arm64.dmg \
+  --release-record target/omega-rc/omega-v0.2.0-rcNN-macos-arm64.release.json \
+  --output docs/omega/release-gate/<date>-rcNN.sarah-livekit.json \
+  --openagents-source-revision <git-sha> \
+  --livekit-infrastructure-revision <revision> \
+  --livekit-config-revision <revision> \
+  --livekit-image-digest sha256:<digest> \
+  --sarah-worker-revision <git-sha> \
+  --sarah-worker-image-digest sha256:<digest> \
+  --admitted-model-revision <revision> \
+  --price-catalog-revision <revision> \
+  --row sarah-livekit-private=owner-assisted-pass:<receipt.json> \
+  --row sarah-livekit-room=owner-assisted-pass:<receipt.json> \
+  --row sarah-livekit-connectivity=automated-pass:<receipt.json> \
+  --row sarah-livekit-isolation=automated-pass:<receipt.json> \
+  --row sarah-livekit-failure=automated-pass:<receipt.json> \
+  --row sarah-livekit-independent-review=owner-assisted-pass:<receipt.json>
+```
+
 | Row | Status | Issues | Evidence / owner instruction |
 | --- | --- | --- | --- |
 | `package-integrity` | automated-pass | — | package-integrity.json |
@@ -180,13 +215,18 @@ document remains legible before and after GitHub assigns issue numbers:
 | [`EP263-LK-07`](https://github.com/OpenAgentsInc/omega/issues/187) | Omega | Extend the installed release gate and prove the private, group, connectivity, isolation, failure, and independent-review rows. |
 
 The #186 desktop slice is intentionally gated at the server boundary. Omega
-now has the compact tester-channel projection, verified epoch/participant
-model, canonical floor request, and fail-closed test scenes, but production
-controls remain unavailable until OpenAgents publishes an authenticated
-shared-room authority snapshot/update feed and worker-enforced floor,
-summon/remove, and moderator-stop operations. Installation alone is not
-evidence for any release row; the installed three-desktop journey above must
-still pass.
+has the compact tester-channel projection, verified epoch/participant model,
+canonical floor request, and fail-closed test scenes. OpenAgents now exposes
+authenticated snapshot, summon/remove, member/moderator floor routes and
+worker enforcement, but its production provisioner still derives
+`roomRef`/`sarahPresenceLeaseRef` from each private
+`sessionRef:generation`. It does not expose a community/channel rendezvous
+that lets three independently authenticated desktops discover and join one
+stable room. Omega therefore cannot honestly enable production controls yet:
+doing so would create one room per desktop rather than the #186 journey.
+Installation alone is not evidence for any release row; OpenAgents must first
+publish a stable community-room join contract, then Omega must consume it and
+the installed three-desktop journey above must pass.
 
 
 ---

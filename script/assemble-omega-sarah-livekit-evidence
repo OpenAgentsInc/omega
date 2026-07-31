@@ -1,0 +1,169 @@
+#!/usr/bin/env python3
+"""Assemble the six public-safe Sarah LiveKit receipts for an Omega candidate."""
+
+from __future__ import annotations
+
+import argparse
+import hashlib
+import json
+import re
+import sys
+from pathlib import Path
+
+ROOT = Path(__file__).resolve().parents[1]
+SCHEMA = "openagents.omega.sarah-livekit-evidence.v1"
+ROW_IDS = (
+    "sarah-livekit-private",
+    "sarah-livekit-room",
+    "sarah-livekit-connectivity",
+    "sarah-livekit-isolation",
+    "sarah-livekit-failure",
+    "sarah-livekit-independent-review",
+)
+STATUSES = {
+    "automated-pass",
+    "automated-fail",
+    "owner-assisted-pass",
+    "blocked",
+    "inconclusive",
+}
+
+
+def sha256_file(path: Path) -> str:
+    digest = hashlib.sha256()
+    with path.open("rb") as source:
+        for chunk in iter(lambda: source.read(1024 * 1024), b""):
+            digest.update(chunk)
+    return digest.hexdigest()
+
+
+def repository_path(path: Path) -> str:
+    try:
+        return path.resolve().relative_to(ROOT).as_posix()
+    except ValueError as error:
+        raise ValueError(f"evidence must be inside the repository: {path}") from error
+
+
+def parse_row(argument: str) -> tuple[str, str, Path]:
+    parts = argument.split("=", 1)
+    if len(parts) != 2 or parts[0] not in ROW_IDS:
+        raise ValueError(f"invalid row selector: {argument}")
+    status_and_path = parts[1].split(":", 1)
+    if len(status_and_path) != 2 or status_and_path[0] not in STATUSES:
+        raise ValueError(f"invalid row status: {argument}")
+    path = Path(status_and_path[1])
+    if not path.is_absolute():
+        path = ROOT / path
+    return parts[0], status_and_path[0], path
+
+
+def load_release_binding(args: argparse.Namespace) -> dict:
+    release_record = json.loads(args.release_record.read_text())
+    package_digest = sha256_file(args.dmg)
+    recorded_digest = release_record.get("digests", {}).get("package_sha256")
+    source_revision = release_record.get("source", {}).get("commit")
+    if package_digest != recorded_digest:
+        raise ValueError("DMG digest does not match the release record")
+    if not isinstance(source_revision, str) or not source_revision:
+        raise ValueError("release record has no source commit")
+    return {
+        "omega_source_revision": source_revision,
+        "omega_package_sha256": package_digest,
+        "openagents_source_revision": args.openagents_source_revision,
+        "livekit_infrastructure_revision": args.livekit_infrastructure_revision,
+        "livekit_config_revision": args.livekit_config_revision,
+        "livekit_image_digest": args.livekit_image_digest,
+        "sarah_worker_revision": args.sarah_worker_revision,
+        "sarah_worker_image_digest": args.sarah_worker_image_digest,
+        "admitted_model_revision": args.admitted_model_revision,
+        "price_catalog_revision": args.price_catalog_revision,
+    }
+
+
+def validate_digest(name: str, value: str) -> None:
+    if re.fullmatch(r"sha256:[0-9a-f]{64}", value) is None:
+        raise ValueError(f"{name} must be an immutable sha256 digest")
+
+
+def main() -> int:
+    parser = argparse.ArgumentParser(description=__doc__.splitlines()[0])
+    parser.add_argument("--dmg", type=Path, required=True)
+    parser.add_argument("--release-record", type=Path, required=True)
+    parser.add_argument("--output", type=Path, required=True)
+    parser.add_argument("--openagents-source-revision", required=True)
+    parser.add_argument("--livekit-infrastructure-revision", required=True)
+    parser.add_argument("--livekit-config-revision", required=True)
+    parser.add_argument("--livekit-image-digest", required=True)
+    parser.add_argument("--sarah-worker-revision", required=True)
+    parser.add_argument("--sarah-worker-image-digest", required=True)
+    parser.add_argument("--admitted-model-revision", required=True)
+    parser.add_argument("--price-catalog-revision", required=True)
+    parser.add_argument(
+        "--row",
+        action="append",
+        default=[],
+        metavar="ID=STATUS:PATH",
+        help="one public-safe JSON receipt; supply each of the six row IDs exactly once",
+    )
+    args = parser.parse_args()
+
+    try:
+        binding = load_release_binding(args)
+        validate_digest("livekit image", binding["livekit_image_digest"])
+        validate_digest("Sarah worker image", binding["sarah_worker_image_digest"])
+        rows: dict[str, dict] = {}
+        for raw_row in args.row:
+            row_id, status, path = parse_row(raw_row)
+            if row_id in rows:
+                raise ValueError(f"duplicate row: {row_id}")
+            if not path.is_file():
+                raise ValueError(f"row evidence does not exist: {path}")
+            if path.stat().st_size > 1024 * 1024:
+                raise ValueError(f"row evidence exceeds 1 MiB: {path}")
+            receipt = json.loads(path.read_text())
+            if not isinstance(receipt, dict) or receipt.get("public_safe") is not True:
+                raise ValueError(f"row evidence is not explicitly public-safe: {path}")
+            if receipt.get("row_id") != row_id or receipt.get("status") != status:
+                raise ValueError(f"row evidence identity/status mismatch: {path}")
+            if receipt.get("binding") != binding:
+                raise ValueError(f"row evidence binding mismatch: {path}")
+            facts = receipt.get("facts")
+            if not isinstance(facts, dict):
+                raise ValueError(f"row evidence facts are missing: {path}")
+            rows[row_id] = {
+                "id": row_id,
+                "status": status,
+                "facts": facts,
+                "evidence_refs": [
+                    {
+                        "path": repository_path(path),
+                        "sha256": sha256_file(path),
+                        "public_safe": True,
+                    }
+                ],
+            }
+        missing = [row_id for row_id in ROW_IDS if row_id not in rows]
+        if missing:
+            raise ValueError("missing rows: " + ", ".join(missing))
+        output = args.output if args.output.is_absolute() else ROOT / args.output
+        output.parent.mkdir(parents=True, exist_ok=True)
+        output.write_text(
+            json.dumps(
+                {
+                    "schema": SCHEMA,
+                    "binding": binding,
+                    "rows": [rows[row_id] for row_id in ROW_IDS],
+                },
+                indent=2,
+                sort_keys=True,
+            )
+            + "\n"
+        )
+    except (OSError, UnicodeDecodeError, json.JSONDecodeError, ValueError) as error:
+        print(f"error: {error}", file=sys.stderr)
+        return 2
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

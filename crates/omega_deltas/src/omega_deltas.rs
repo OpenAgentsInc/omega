@@ -205,6 +205,7 @@ pub const ENFORCED_DELTAS: &[&str] = &[
     "OMEGA-DELTA-0214",
     "OMEGA-DELTA-0215",
     "OMEGA-DELTA-0216",
+    "OMEGA-DELTA-0217",
 ];
 
 /// OMEGA-DELTA-0204. Every control the composer's bar offers, written twice:
@@ -23194,6 +23195,60 @@ mod tests {
             assert!(
                 schema.contains(binding) && fixture.contains(binding),
                 "OMEGA-DELTA-0213: evidence schema or fixture lost binding `{binding}`"
+            );
+        }
+    }
+
+    /// OMEGA-DELTA-0217. Passing LiveKit rows carry their exact observations
+    /// and every public-safe receipt repeats the candidate binding.
+    #[test]
+    fn sarah_livekit_release_rows_require_bound_receipts_and_observed_facts() {
+        let gate = read_repository_file("script/omega-release-gate");
+        for required in [
+            "SARAH_LIVEKIT_PASS_FACTS",
+            "authenticated_desktop_count>=3",
+            "privacy_scope_count>=8",
+            "evidence receipt does not repeat its row and binding",
+            "evidence contains private material",
+            "passing LiveKit evidence without required facts was accepted",
+        ] {
+            assert!(
+                gate.contains(required),
+                "OMEGA-DELTA-0217: the LiveKit evidence gate lost `{required}`"
+            );
+        }
+
+        let assembler = read_repository_file("script/assemble-omega-sarah-livekit-evidence");
+        for required in [
+            "ID=STATUS:PATH",
+            "DMG digest does not match the release record",
+            "row evidence binding mismatch",
+            "row evidence identity/status mismatch",
+            "row evidence is not explicitly public-safe",
+            "omega_package_sha256",
+        ] {
+            assert!(
+                assembler.contains(required),
+                "OMEGA-DELTA-0217: the LiveKit evidence assembler lost `{required}`"
+            );
+        }
+
+        let docs = format!(
+            "{}\n{}",
+            read_repository_file("docs/omega/release-gate.md"),
+            read_repository_file("docs/omega/sarah-realtime-voice.md")
+        );
+        for required in [
+            "script/assemble-omega-sarah-livekit-evidence",
+            "roomRef`/`sarahPresenceLeaseRef`",
+            "`sessionRef:generation`",
+            "stable community-room join contract",
+            "concurrent first joins idempotent",
+            "participantGrant",
+        ] {
+            assert!(
+                docs.contains(required),
+                "OMEGA-DELTA-0217: release-gate instructions lost `{required}`"
             );
         }
     }

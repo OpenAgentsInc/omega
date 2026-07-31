@@ -21,7 +21,13 @@
         }
       ],
       "facts": {
-        "fixture": true
+        "admission_terms_seen": true,
+        "agent_thread_started": true,
+        "bounded_command_confirmed": true,
+        "exact_settlement_reconciled": true,
+        "interruption_completed": true,
+        "reconnect_same_generation": true,
+        "voice_turn_completed": true
       },
       "id": "sarah-livekit-private",
       "status": "owner-assisted-pass"
@@ -35,7 +41,13 @@
         }
       ],
       "facts": {
-        "fixture": true
+        "authenticated_desktop_count": 3,
+        "floor_transfer_completed": true,
+        "moderator_stop_completed": true,
+        "non_floor_refused": true,
+        "removed_member_refused": true,
+        "shared_answer_heard_by_all": true,
+        "verified_sarah_identity_consistent": true
       },
       "id": "sarah-livekit-room",
       "status": "owner-assisted-pass"
@@ -49,7 +61,9 @@
         }
       ],
       "facts": {
-        "fixture": true
+        "direct_udp_completed": true,
+        "tcp_fallback_completed": true,
+        "turn_tls_completed": true
       },
       "id": "sarah-livekit-connectivity",
       "status": "automated-pass"
@@ -63,7 +77,13 @@
         }
       ],
       "facts": {
-        "fixture": true
+        "billing_isolated": true,
+        "capability_isolated": true,
+        "concurrent_rooms": true,
+        "context_isolated": true,
+        "distinct_provider_generations": true,
+        "private_fact_refused": true,
+        "privileged_tool_refused": true
       },
       "id": "sarah-livekit-isolation",
       "status": "automated-pass"
@@ -91,7 +111,10 @@
         }
       ],
       "facts": {
-        "fixture": true
+        "binding_verified": true,
+        "private_journey_repeated": true,
+        "reviewer_distinct_from_producer": true,
+        "room_journey_repeated": true
       },
       "id": "sarah-livekit-independent-review",
       "status": "owner-assisted-pass"
