@@ -1,0 +1,61 @@
+{
+  "agreements": {
+    "binary_declares_receipt_team": true,
+    "gatekeeper_accepted": true,
+    "notarization_ticket_stapled": true,
+    "page_declares_receipt_version": true,
+    "page_published_digest_matches_receipt": true,
+    "release_notes_name_receipt_digest": true,
+    "served_artifact_matches_receipt": true,
+    "signature_valid": true
+  },
+  "artifact": {
+    "bundle_identifier": "com.openagents.omega.rc",
+    "bundle_short_version": "0.2.0",
+    "bundle_version": "20260731.150407",
+    "code_identifier": "com.openagents.omega.rc",
+    "gatekeeper_accepted": true,
+    "gatekeeper_source": "Notarized Developer ID",
+    "notarization_ticket_stapled": true,
+    "served_bytes": 170083787,
+    "served_package_sha256": "116ae5ae542d4d0faed14a59e98ebeac2402ab022927738ed132e6c231e10c34",
+    "signature_valid": true,
+    "signing_authority": "Developer ID Application: OpenAgents, Inc. (HQWSG26L43)",
+    "team_identifier": "HQWSG26L43"
+  },
+  "blocked": [],
+  "candidate": {
+    "expected_package_sha256": "116ae5ae542d4d0faed14a59e98ebeac2402ab022927738ed132e6c231e10c34",
+    "expected_team_id": "HQWSG26L43",
+    "expected_version": "0.2.0-rc29"
+  },
+  "not_observed_here": [
+    "the episode transcript and announcement copy agreeing claim for claim",
+    "a human observation, which `owner-assisted-pass` records by definition"
+  ],
+  "observed_at": "2026-07-31T23:51:37.431842+00:00",
+  "observer": "script/collect-omega-distribution-observations",
+  "page": {
+    "artifact_link": "https://openagents.com/api/public/omega-download/artifact?target=darwin-arm64&format=dmg",
+    "declares_notarized": true,
+    "declares_team_id": true,
+    "declares_version": true,
+    "platforms_declared_unavailable": 5,
+    "published_package_sha256": "116ae5ae542d4d0faed14a59e98ebeac2402ab022927738ed132e6c231e10c34",
+    "url": "https://openagents.com/download"
+  },
+  "promotes_release_gate_row": false,
+  "release_notes": {
+    "asset_names": [
+      "Omega-v0.2.0-rc29-macos-arm64.dmg",
+      "omega-v0.2.0-rc29-macos-arm64.release.json"
+    ],
+    "draft": false,
+    "notes_claim_notarized": true,
+    "notes_name_package_sha256": true,
+    "prerelease": true,
+    "published_at": "2026-07-31T15:17:20Z",
+    "tag": "v0.2.0-rc29"
+  },
+  "schema": "openagents.omega.distribution-observation.v1"
+}

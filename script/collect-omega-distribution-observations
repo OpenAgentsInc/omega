@@ -1,0 +1,285 @@
+#!/usr/bin/env python3
+"""Collect the machine-checkable half of the `distribution` release-gate row.
+
+The row asks whether page identity, version, platform, artifact digest,
+signature and notarization state, release notes, and the installed binary all
+agree with the receipt's candidate binding. Most of that is measurable, and
+none of it was being measured: the row sat `owner-assisted-pending` with no
+collector behind it, so the facts a machine can check were waiting on a human
+alongside the ones that genuinely need one.
+
+Every check here is *performed*. The published digest is not trusted — the
+artifact is downloaded from the public link and hashed, because a page can
+advertise the right digest while serving the wrong bytes, and the whole point
+of the row is that the thing a user actually receives is the thing the receipt
+binds. Signature, Gatekeeper assessment, and the stapled notarization ticket
+are read from the downloaded artifact, not from the local build tree.
+
+This does not promote the row, and it must not. `distribution` is
+`owner-assisted-pass` in the owner-evidence schema, which records a preserved
+*human* observation, and this program is not a human. It also cannot judge the
+half of the row that compares the episode transcript and announcement copy
+claim for claim. What it produces is a public-safe, digest-bound observation
+that an owner or independent reviewer can read, re-run, and disagree with.
+
+A check that cannot be performed records `blocked` and the run refuses. An
+observation nobody made is worse than a missing one, because it looks like
+evidence.
+
+Usage:
+  script/collect-omega-distribution-observations \
+      --expected-package-sha256 <sha256 the receipt binds> \
+      --expected-version 0.2.0-rc29 \
+      --expected-team-id HQWSG26L43 \
+      --out docs/omega/release-gate/<date>-<candidate>.distribution.json
+"""
+
+from __future__ import annotations
+
+import argparse
+import hashlib
+import json
+import plistlib
+import re
+import subprocess
+import sys
+import tempfile
+import urllib.request
+from datetime import datetime, timezone
+from pathlib import Path
+
+DOWNLOAD_PAGE = "https://openagents.com/download"
+ARTIFACT_URL = (
+    "https://openagents.com/api/public/omega-download/artifact"
+    "?target=darwin-arm64&format=dmg"
+)
+USER_AGENT = "omega-distribution-collector/1"
+
+
+class Blocked(Exception):
+    """A check that could not be performed. Never a failure verdict."""
+
+
+def _run(argv: list[str]) -> subprocess.CompletedProcess[str]:
+    return subprocess.run(argv, capture_output=True, text=True, check=False)
+
+
+def _fetch(url: str) -> bytes:
+    request = urllib.request.Request(url, headers={"User-Agent": USER_AGENT})
+    try:
+        with urllib.request.urlopen(request, timeout=300) as response:
+            return response.read()
+    except Exception as error:  # noqa: BLE001 - reported, never swallowed
+        raise Blocked(f"could not fetch {url}: {error}") from error
+
+
+def _visible_text(html: str) -> str:
+    without_scripts = re.sub(r"<script[\s\S]*?</script>", " ", html)
+    without_comments = re.sub(r"<!--[\s\S]*?-->", " ", without_scripts)
+    return re.sub(r"\s+", " ", re.sub(r"<[^>]+>", " ", without_comments))
+
+
+def observe_page(expected_version: str, expected_team_id: str) -> dict:
+    """Read what the public page claims about the Omega candidate."""
+    html = _fetch(DOWNLOAD_PAGE).decode("utf-8", errors="replace")
+    marker = html.find("Omega <!-- -->")
+    if marker < 0:
+        raise Blocked("the download page has no Omega release line")
+    section = html[marker : marker + 6000]
+    text = _visible_text(section)
+
+    digests = re.findall(r"\b[0-9a-f]{64}\b", section)
+    version_claimed = expected_version in text
+    # Platforms the page declines to offer must say so rather than imply a
+    # build exists. That honesty is part of the row, not decoration.
+    unavailable = text.count("Not available")
+    return {
+        "url": DOWNLOAD_PAGE,
+        "declares_version": version_claimed,
+        "declares_team_id": expected_team_id in text,
+        "declares_notarized": "notarized" in text.lower(),
+        "published_package_sha256": digests[0] if digests else None,
+        "platforms_declared_unavailable": unavailable,
+        "artifact_link": ARTIFACT_URL,
+    }
+
+
+def observe_artifact(path: Path) -> dict:
+    """Download, hash, mount, and read the artifact a user would receive."""
+    payload = _fetch(ARTIFACT_URL)
+    path.write_bytes(payload)
+    served_sha256 = hashlib.sha256(payload).hexdigest()
+
+    mountpoint = path.parent / "mnt"
+    mountpoint.mkdir(exist_ok=True)
+    attach = _run(
+        [
+            "hdiutil",
+            "attach",
+            "-nobrowse",
+            "-readonly",
+            "-mountpoint",
+            str(mountpoint),
+            str(path),
+        ]
+    )
+    if attach.returncode != 0:
+        raise Blocked(f"could not mount the served artifact: {attach.stderr.strip()}")
+    try:
+        app = mountpoint / "Omega.app"
+        if not app.is_dir():
+            raise Blocked("the served disk image contains no Omega.app")
+
+        codesign_verify = _run(
+            ["codesign", "--verify", "--deep", "--strict", "--verbose=2", str(app)]
+        )
+        codesign_read = _run(["codesign", "-dv", "--verbose=4", str(app)])
+        gatekeeper = _run(["spctl", "--assess", "--type", "execute", "--verbose=4", str(app)])
+        stapler = _run(["xcrun", "stapler", "validate", str(app)])
+
+        authority = re.findall(r"^Authority=(.+)$", codesign_read.stderr, re.MULTILINE)
+        team = re.search(r"^TeamIdentifier=(.+)$", codesign_read.stderr, re.MULTILINE)
+        identifier = re.search(r"^Identifier=(.+)$", codesign_read.stderr, re.MULTILINE)
+
+        with (app / "Contents" / "Info.plist").open("rb") as handle:
+            info = plistlib.load(handle)
+
+        return {
+            "served_package_sha256": served_sha256,
+            "served_bytes": len(payload),
+            "signature_valid": codesign_verify.returncode == 0,
+            "signing_authority": authority[0] if authority else None,
+            "team_identifier": team.group(1).strip() if team else None,
+            "code_identifier": identifier.group(1).strip() if identifier else None,
+            "gatekeeper_accepted": gatekeeper.returncode == 0,
+            "gatekeeper_source": (
+                re.search(r"^source=(.+)$", gatekeeper.stderr, re.MULTILINE).group(1).strip()
+                if re.search(r"^source=(.+)$", gatekeeper.stderr, re.MULTILINE)
+                else None
+            ),
+            "notarization_ticket_stapled": stapler.returncode == 0,
+            "bundle_short_version": info.get("CFBundleShortVersionString"),
+            "bundle_version": info.get("CFBundleVersion"),
+            "bundle_identifier": info.get("CFBundleIdentifier"),
+        }
+    finally:
+        _run(["hdiutil", "detach", str(mountpoint), "-quiet"])
+
+
+def observe_release_notes(expected_version: str, expected_sha256: str) -> dict:
+    """Read the published release notes and check they name the same artifact."""
+    url = (
+        "https://api.github.com/repos/OpenAgentsInc/omega/releases/tags/"
+        f"v{expected_version}"
+    )
+    release = json.loads(_fetch(url).decode("utf-8", errors="replace"))
+    body = release.get("body") or ""
+    assets = {asset["name"]: asset["size"] for asset in release.get("assets", [])}
+    return {
+        "tag": release.get("tag_name"),
+        "prerelease": release.get("prerelease"),
+        "draft": release.get("draft"),
+        "published_at": release.get("published_at"),
+        "notes_name_package_sha256": expected_sha256 in body,
+        "notes_claim_notarized": "notariz" in body.lower(),
+        "asset_names": sorted(assets),
+    }
+
+
+def main() -> int:
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("--expected-package-sha256", required=True)
+    parser.add_argument("--expected-version", required=True)
+    parser.add_argument("--expected-team-id", required=True)
+    parser.add_argument("--out", required=True)
+    arguments = parser.parse_args()
+
+    expected_sha = arguments.expected_package_sha256.lower()
+    if not re.fullmatch(r"[0-9a-f]{64}", expected_sha):
+        print("--expected-package-sha256 must be a sha256 hex digest", file=sys.stderr)
+        return 2
+
+    blocked: list[str] = []
+    page: dict = {}
+    artifact: dict = {}
+    notes: dict = {}
+
+    with tempfile.TemporaryDirectory(prefix="omega-distribution-") as scratch:
+        for name, thunk in (
+            ("page", lambda: observe_page(arguments.expected_version, arguments.expected_team_id)),
+            ("artifact", lambda: observe_artifact(Path(scratch) / "omega.dmg")),
+            (
+                "release_notes",
+                lambda: observe_release_notes(arguments.expected_version, expected_sha),
+            ),
+        ):
+            try:
+                result = thunk()
+            except Blocked as error:
+                blocked.append(f"{name}: {error}")
+                continue
+            if name == "page":
+                page = result
+            elif name == "artifact":
+                artifact = result
+            else:
+                notes = result
+
+    # Agreement is computed from what was measured, never from what was
+    # expected. A missing measurement is not agreement.
+    agreements = {
+        "served_artifact_matches_receipt": artifact.get("served_package_sha256") == expected_sha,
+        "page_published_digest_matches_receipt": page.get("published_package_sha256")
+        == expected_sha,
+        "release_notes_name_receipt_digest": notes.get("notes_name_package_sha256") is True,
+        "page_declares_receipt_version": page.get("declares_version") is True,
+        "binary_declares_receipt_team": artifact.get("team_identifier")
+        == arguments.expected_team_id,
+        "signature_valid": artifact.get("signature_valid") is True,
+        "gatekeeper_accepted": artifact.get("gatekeeper_accepted") is True,
+        "notarization_ticket_stapled": artifact.get("notarization_ticket_stapled") is True,
+    }
+
+    observation = {
+        "schema": "openagents.omega.distribution-observation.v1",
+        "observed_at": datetime.now(timezone.utc).isoformat(),
+        "observer": "script/collect-omega-distribution-observations",
+        "candidate": {
+            "expected_package_sha256": expected_sha,
+            "expected_version": arguments.expected_version,
+            "expected_team_id": arguments.expected_team_id,
+        },
+        "page": page,
+        "artifact": artifact,
+        "release_notes": notes,
+        "agreements": agreements,
+        "blocked": blocked,
+        # Stated in the artifact itself so no reader can mistake it for a
+        # verdict on the row.
+        "promotes_release_gate_row": False,
+        "not_observed_here": [
+            "the episode transcript and announcement copy agreeing claim for claim",
+            "a human observation, which `owner-assisted-pass` records by definition",
+        ],
+    }
+
+    output = Path(arguments.out)
+    output.parent.mkdir(parents=True, exist_ok=True)
+    output.write_text(json.dumps(observation, indent=2, sort_keys=True) + "\n")
+
+    disagreements = [name for name, agreed in agreements.items() if not agreed]
+    print(json.dumps(observation["agreements"], indent=2, sort_keys=True))
+    print(f"wrote {output}")
+    if blocked:
+        for entry in blocked:
+            print(f"BLOCKED {entry}", file=sys.stderr)
+        return 1
+    if disagreements:
+        for name in disagreements:
+            print(f"DISAGREES {name}", file=sys.stderr)
+        return 1
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())

@@ -733,3 +733,64 @@ serving revision.
 
 Arming is not evidence that the drill passed. Until the owner opens that window,
 `openai_disconnect_bounded` is correctly recorded as `not_observed`.
+
+## The `distribution` row is now measured, and it still needs you
+
+`script/collect-omega-distribution-observations` performs the machine-checkable
+half of this row against the live public download path. Run it for whatever
+candidate is current:
+
+```sh
+script/collect-omega-distribution-observations \
+  --expected-package-sha256 <the digest this receipt binds> \
+  --expected-version 0.2.0-rcNN \
+  --expected-team-id HQWSG26L43 \
+  --out docs/omega/release-gate/<date>-<candidate>.distribution.json
+```
+
+It downloads the artifact from the public link and hashes what is actually
+served, rather than reading the digest the page prints beside it. A page can
+advertise the correct digest while serving different bytes, and the row exists
+to catch exactly that. It then mounts the downloaded image and reads the
+signature, the Gatekeeper assessment, the stapled notarization ticket, and the
+bundle's own version from the artifact a user would receive — not from the
+local build tree, which is a different file that happens to share a name.
+
+For rc29 all eight agreements measured true, recorded in
+[`2026-07-31-omega-v0.2.0-rc29.distribution.json`](release-gate/2026-07-31-omega-v0.2.0-rc29.distribution.json):
+the served bytes, the page's published digest, and the release notes all name
+`116ae5ae…`; the served app is Developer ID signed under team `HQWSG26L43`,
+accepted by Gatekeeper as Notarized Developer ID, and carries a stapled ticket;
+and the page declines to offer Intel, Windows, and Linux builds rather than
+implying they exist.
+
+**None of that promotes the row, and the collector says so in its own output.**
+Two things remain, and neither is something a program can supply:
+
+1. The row refuses to pass unless the episode transcript, website, release
+   notes, installed binary, and announcement copy agree **claim for claim**.
+   Comparing prose claims is a judgment.
+2. `owner-assisted-pass` records a *preserved human observation*. The
+   owner-evidence schema has no other status, so a program that submitted this
+   row would be recording an observation nobody made. That is the one thing
+   this report exists to prevent.
+
+So the row stays `owner-assisted-pending`. What changed is that the human part
+is now only the human part: the digest, signature, notarization, platform
+honesty, and version agreement are already measured, digest-bound, and
+re-runnable against the next candidate.
+
+## `update-safety-lifecycle` was not attempted, and why
+
+This row needs Omega dragged in beside the existing Zed and OpenAgents Desktop
+installs, launched, then upgraded, rolled back, and uninstalled, with only
+Omega paths changing. The filesystem half is automatable. The launch is not:
+starting a GPUI application puts a window on whoever's display is attached, and
+the previous session was stopped precisely because agents drove the owner's
+desktop while he was working. It needs a separate display or host, or the
+owner's own hands.
+
+It was also the wrong candidate to spend a journey on. rc29 is superseded by
+design — the plan is to cut rc30, notarize it, and bind every gate row to that
+digest once rather than run the same journeys against two candidates. Observing
+this row against rc29 would produce evidence that the next candidate discards.
