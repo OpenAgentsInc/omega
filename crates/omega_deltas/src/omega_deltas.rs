@@ -23265,6 +23265,132 @@ mod tests {
         }
     }
 
+    /// OMEGA-DELTA-0219. Every committed Sarah LiveKit evidence manifest still
+    /// digests the row files it names.
+    ///
+    /// The assembler snapshots `sha256_file(row)` into `evidence_refs[].sha256`
+    /// once, at assembly time. `validate_sarah_livekit_evidence` in
+    /// `script/omega-release-gate` can recompute it, but it only runs when an
+    /// operator hand-passes `--sarah-livekit-evidence`, and its self-test only
+    /// exercises fixtures. So editing a row file after assembly — which is the
+    /// normal way a row is corrected — silently leaves the manifest pointing at
+    /// a digest for content that no longer exists, and nothing in the repository
+    /// notices. That happened on 2026-07-31 to the `sarah-livekit-failure` row
+    /// and was found by hand.
+    ///
+    /// This is the check that makes the next one impossible to miss. It reads
+    /// the real committed manifests and the real committed rows, not fixtures,
+    /// and it fails on the exact drift the manual gate would have caught.
+    #[test]
+    fn sarah_livekit_evidence_manifests_still_digest_their_rows() {
+        let manifest_directory = repository_path("docs/omega/release-gate");
+        let mut manifests: Vec<std::path::PathBuf> = std::fs::read_dir(&manifest_directory)
+            .unwrap_or_else(|error| panic!("cannot read {}: {error}", manifest_directory.display()))
+            .filter_map(|entry| entry.ok().map(|entry| entry.path()))
+            .filter(|path| {
+                path.file_name()
+                    .and_then(|name| name.to_str())
+                    .is_some_and(|name| name.ends_with(".sarah-livekit-evidence.json"))
+            })
+            .collect();
+        manifests.sort();
+
+        assert!(
+            !manifests.is_empty(),
+            "OMEGA-DELTA-0219: no `*.sarah-livekit-evidence.json` manifest is committed under \
+             docs/omega/release-gate. Either the manifests moved and this check now proves \
+             nothing, or the release gate lost its evidence. Neither is a passing state."
+        );
+
+        let mut checked_refs = 0_usize;
+        for manifest_path in &manifests {
+            let manifest_name = manifest_path
+                .file_name()
+                .and_then(|name| name.to_str())
+                .unwrap_or("<unnamed>")
+                .to_string();
+            let manifest: serde_json::Value = serde_json::from_str(
+                &std::fs::read_to_string(manifest_path)
+                    .unwrap_or_else(|error| panic!("cannot read {manifest_name}: {error}")),
+            )
+            .unwrap_or_else(|error| panic!("{manifest_name} is not valid JSON: {error}"));
+
+            let rows = manifest
+                .get("rows")
+                .and_then(serde_json::Value::as_array)
+                .unwrap_or_else(|| panic!("OMEGA-DELTA-0219: {manifest_name} has no `rows` array"));
+            assert!(
+                !rows.is_empty(),
+                "OMEGA-DELTA-0219: {manifest_name} records no rows"
+            );
+
+            for row in rows {
+                let row_id = row
+                    .get("id")
+                    .or_else(|| row.get("row_id"))
+                    .and_then(serde_json::Value::as_str)
+                    .unwrap_or_else(|| {
+                        panic!(
+                            "OMEGA-DELTA-0219: {manifest_name} has a row with no `id`. An \
+                             unnamed row cannot be reconciled against its evidence."
+                        )
+                    });
+                let Some(evidence_refs) = row
+                    .get("evidence_refs")
+                    .and_then(serde_json::Value::as_array)
+                else {
+                    continue;
+                };
+                for evidence in evidence_refs {
+                    let relative = evidence
+                        .get("path")
+                        .and_then(serde_json::Value::as_str)
+                        .unwrap_or_else(|| {
+                            panic!(
+                                "OMEGA-DELTA-0219: {manifest_name} row `{row_id}` has an evidence \
+                                 ref without a `path`"
+                            )
+                        });
+                    let recorded = evidence
+                        .get("sha256")
+                        .and_then(serde_json::Value::as_str)
+                        .unwrap_or_else(|| {
+                            panic!(
+                                "OMEGA-DELTA-0219: {manifest_name} row `{row_id}` evidence ref \
+                                 `{relative}` records no `sha256`. An evidence ref without a \
+                                 digest binds the manifest to nothing."
+                            )
+                        });
+
+                    let evidence_path = repository_path(relative);
+                    let bytes = std::fs::read(&evidence_path).unwrap_or_else(|error| {
+                        panic!(
+                            "OMEGA-DELTA-0219: {manifest_name} row `{row_id}` names evidence \
+                             `{relative}`, which cannot be read: {error}"
+                        )
+                    });
+                    let actual = sha256_hex(&bytes);
+                    assert_eq!(
+                        actual, recorded,
+                        "OMEGA-DELTA-0219: {manifest_name} row `{row_id}` records sha256 \
+                         `{recorded}` for `{relative}`, but that file now digests to `{actual}`. \
+                         The row was edited without re-running \
+                         `script/assemble-omega-sarah-livekit-evidence`, so the manifest attests \
+                         to content that no longer exists. Re-assemble the manifest; do not edit \
+                         the digest by hand."
+                    );
+                    checked_refs += 1;
+                }
+            }
+        }
+
+        assert!(
+            checked_refs > 0,
+            "OMEGA-DELTA-0219: the committed manifests named no evidence refs at all, so this \
+             check verified nothing."
+        );
+    }
+
     /// OMEGA-DELTA-0218. The hosted service's cold-start window is re-attempted
     /// on a bounded backoff, and nothing else is.
     ///
