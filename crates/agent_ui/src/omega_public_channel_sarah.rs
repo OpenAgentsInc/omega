@@ -709,7 +709,15 @@ impl CommunitySarahRoom {
     }
 
     pub fn microphone_label(&self) -> &'static str {
-        if self.lifecycle != CommunityCallLifecycle::Joined {
+        let local_holds_floor = self.authority.as_ref().is_some_and(|authority| {
+            matches!(
+                &authority.floor,
+                CommunityFloorState::Held { lease }
+                    if lease.holder_user_ref_digest
+                        == authority.local_participant.user_ref_digest
+            )
+        });
+        if self.lifecycle != CommunityCallLifecycle::Joined || !local_holds_floor {
             "Mic off"
         } else if self.muted {
             "Muted"
@@ -1012,10 +1020,44 @@ mod tests {
 
     #[test]
     fn microphone_status_never_claims_an_unjoined_room_is_live() {
-        let mut room = CommunitySarahRoom::default();
+        let mut room = room();
+        assert_eq!(room.microphone_label(), "Mic off");
+        room.apply_authority(
+            authority(),
+            CommunityRoomRole::Member,
+            CommunitySarahState::Idle,
+            NOW,
+        )
+        .expect("apply available floor");
         assert_eq!(room.microphone_label(), "Mic off");
 
-        room.lifecycle = CommunityCallLifecycle::Joined;
+        let mut authority = authority();
+        authority.revision = 13;
+        let local = authority.local_participant.clone();
+        authority.floor = CommunityFloorState::Held {
+            lease: CommunityFloorLease {
+                schema: ROOM_AUTHORITY_SCHEMA.into(),
+                lease_ref: "lease:microphone".into(),
+                presence_lease_ref: authority.presence_lease_ref.clone(),
+                community_ref: authority.community_ref.clone(),
+                channel_ref: authority.channel_ref.clone(),
+                membership_revision: authority.membership_revision.clone(),
+                room_ref: authority.room_ref.clone(),
+                room_epoch: authority.room_epoch,
+                session_ref: authority.session_ref.clone(),
+                generation: authority.generation,
+                issuance: 4,
+                holder_user_ref_digest: local.user_ref_digest,
+                holder_pubkey: local.pubkey,
+                holder_participant_ref: local.participant_ref,
+                holder_safety_identifier: digest('b'),
+                nonce_digest: digest('b'),
+                issued_at_ms: 950,
+                expires_at_ms: 10_000,
+            },
+        };
+        room.refresh_authority(authority, CommunityRoomRole::Member, NOW)
+            .expect("apply held floor");
         assert_eq!(room.microphone_label(), "Mic on");
         room.muted = true;
         assert_eq!(room.microphone_label(), "Muted");
