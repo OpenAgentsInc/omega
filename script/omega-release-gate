@@ -1179,6 +1179,17 @@ def main() -> int:
     # pending-expansion in docs/omega/control-crawl-registry.json; this row
     # already fails a broken protocol without needing a window.
     crawl_env = os.environ.copy()
+    # The crawl reads the repository through `CARGO_MANIFEST_DIR`, which cargo
+    # compiles into the test binary. A cached binary from a since-deleted
+    # worktree therefore resolves a path that no longer exists and fails a
+    # sound candidate, so this row must report a source state rather than a
+    # build-cache state. Discard the cached artifact first: the crate is small
+    # and the rebuild is cheap next to the rest of this gate.
+    crawl_clean = run(
+        ["cargo", "clean", "-p", "omega_control_crawl"],
+        cwd=str(ROOT),
+        env=crawl_env,
+    )
     crawl = run(
         [
             "cargo",
@@ -1192,7 +1203,12 @@ def main() -> int:
     )
     crawl_output = ((crawl.stdout or "") + (crawl.stderr or "")).strip()
     crawl_facts = {
-        "command": "cargo test -p omega_control_crawl --lib",
+        "command": (
+            "cargo clean -p omega_control_crawl && "
+            "cargo test -p omega_control_crawl --lib"
+        ),
+        "forced_rebuild": True,
+        "clean_exit_code": crawl_clean.returncode,
         "exit_code": crawl.returncode,
         "output_tail": "\n".join(crawl_output.splitlines()[-80:]),
         "protocol": "OMEGA-DELTA-0187",
