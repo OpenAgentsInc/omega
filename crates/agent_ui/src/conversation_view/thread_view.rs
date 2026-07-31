@@ -73,9 +73,13 @@ struct ThreadFeedbackState {
     comments_editor: Option<Entity<Editor>>,
 }
 
+/// `OMEGA-DELTA-0214`. There is exactly one outcome. Admission used to be a
+/// question with a `Cancelled` answer, and the person had to give that answer
+/// through a modal every time two threads shared a root. Isolation resolves
+/// the collision instead, so a send is never turned back at this door and the
+/// prompt-restore path it needed is gone with it.
 pub(crate) enum WorktreeAdmission {
     Accepted(Option<WorktreeClaimToken>),
-    Cancelled,
 }
 
 impl ThreadFeedbackState {
@@ -654,6 +658,12 @@ pub struct ThreadView {
     sandbox_status_key: Option<SandboxStatusKey>,
     pending_sandbox_status_key: Option<SandboxStatusKey>,
     pub multi_root_callout_dismissed: bool,
+    /// The thread Omega is knowingly sharing a checkout with.
+    ///
+    /// `OMEGA-DELTA-0214`. What is left of the collision modal after the
+    /// modal was deleted: the same facts, on the thread, blocking nothing.
+    /// Only set when isolation was unavailable.
+    pub(crate) shared_worktree_disclosure: Option<SharedString>,
     pub generating_indicator_in_list: bool,
     pub skill_loading_issues: Vec<SkillLoadingIssue>,
     /// Issues the user has explicitly dismissed. Each entry is matched against
@@ -1176,6 +1186,7 @@ impl ThreadView {
             sandbox_status_key: None,
             pending_sandbox_status_key: None,
             multi_root_callout_dismissed: false,
+            shared_worktree_disclosure: None,
             generating_indicator_in_list: false,
             skill_loading_issues: Vec::new(),
             dismissed_skill_loading_issues: HashSet::default(),
@@ -1880,45 +1891,128 @@ impl ThreadView {
             .and_then(|project| project.read(cx).remote_connection_options(cx));
         let supervision = AgentSupervision::global(cx);
 
-        match supervision.claim(
+        let collision = match supervision.claim(
             snapshot.clone(),
             work_dirs.clone(),
             remote_connection.as_ref(),
             false,
         ) {
-            Ok(claim) => Task::ready(Ok(WorktreeAdmission::Accepted(Some(claim)))),
-            Err(collision) => {
-                let detail = format!(
-                    "{} is already running with {} in {}. The requested root {} overlaps that worktree. Running two agents in one worktree can overwrite or conflict with changes. Use a separate worktree unless you intentionally want concurrent writes.",
-                    collision.occupant.title,
-                    collision.occupant.executor,
-                    collision.occupied_path.display(),
-                    collision.requested_path.display(),
+            Ok(claim) => return Task::ready(Ok(WorktreeAdmission::Accepted(Some(claim)))),
+            Err(collision) => collision,
+        };
+
+        // `OMEGA-DELTA-0214`. There is no prompt here and there is no
+        // `Cancelled` outcome. The guard's job is to keep two writers out of
+        // one tree, and the way it does that now is to move this turn into a
+        // tree of its own. When it cannot — a session whose working directory
+        // was fixed when it started, a turn already in flight, a project with
+        // no repository to branch from — it says so on the thread and lets
+        // the person keep working. Isolation is the answer; disclosure is
+        // what honesty looks like when isolation is unavailable. Stopping the
+        // person to re-ask a question they already answered in settings is
+        // neither.
+        let can_retarget = {
+            let thread = self.thread.read(cx);
+            crate::omega_thread_worktree::mode(cx) == settings::ThreadWorktreeMode::Isolate
+                && thread.connection().supports_live_work_dir_updates()
+                && thread.status() == ThreadStatus::Idle
+                && !thread.is_waiting_for_confirmation()
+        };
+        let project = self.project.upgrade();
+        let isolation = match project {
+            Some(project)
+                if can_retarget && crate::omega_thread_worktree::can_isolate(&project, cx) =>
+            {
+                let name_hint = crate::omega_thread_worktree::worktree_name_for_thread(
+                    self.thread.read(cx).title().as_deref(),
                 );
-                let prompt = window.prompt(
-                    PromptLevel::Warning,
-                    "Another agent is already using this worktree",
-                    Some(&detail),
-                    &["Cancel", "Run here anyway"],
-                    cx,
-                );
-                cx.spawn(async move |_this, _cx| {
-                    let answer = prompt.await?;
-                    if answer != 1 {
-                        return Ok(WorktreeAdmission::Cancelled);
-                    }
-                    let claim = supervision
-                        .claim(snapshot, work_dirs, remote_connection.as_ref(), true)
-                        .map_err(|collision| {
-                            anyhow::anyhow!(
-                                "failed to override worktree collision for {}",
-                                collision.requested_path.display()
-                            )
-                        })?;
-                    Ok(WorktreeAdmission::Accepted(Some(claim)))
-                })
+                Some(crate::omega_thread_worktree::provision(
+                    project, name_hint, cx,
+                ))
             }
-        }
+            _ => None,
+        };
+
+        // The retarget goes through the conversation, not the thread. Moving
+        // one thread's `work_dirs` while its conversation still records the
+        // old roots would leave the worktree control naming a checkout the
+        // agent is no longer writing — a quieter lie than the modal, but a
+        // lie. `retarget_work_dirs` moves every session in the conversation
+        // as one transaction and rolls back if any of them refuses.
+        let server_view = self.server_view.clone();
+        cx.spawn_in(window, async move |this, cx| {
+            let mut work_dirs = work_dirs;
+            let mut isolated = false;
+            if let Some(isolation) = isolation {
+                match isolation.await {
+                    Ok(paths) => {
+                        let applied = server_view.update(cx, |server_view, cx| {
+                            server_view.retarget_work_dirs(paths.clone(), cx)
+                        });
+                        match applied {
+                            Ok(Ok(())) => {
+                                work_dirs = paths.ordered_paths().cloned().collect();
+                                isolated = true;
+                            }
+                            Ok(Err(error)) => {
+                                log::warn!(
+                                    "could not move this turn into its own worktree: {error:#}"
+                                );
+                            }
+                            Err(error) => {
+                                log::warn!("conversation went away while isolating it: {error:#}");
+                            }
+                        }
+                    }
+                    Err(error) => {
+                        log::warn!("could not provision an isolated worktree: {error:#}");
+                    }
+                }
+            }
+
+            if !isolated {
+                this.update(cx, |this, cx| {
+                    this.disclose_shared_worktree(&collision, cx);
+                })
+                .log_err();
+            }
+
+            // Isolated or disclosed, the turn proceeds. `allow_collision` is
+            // true only because the person's standing decision — the
+            // `agent.thread_worktree` setting — has already been consulted.
+            let claim = supervision
+                .claim(snapshot, work_dirs, remote_connection.as_ref(), true)
+                .map_err(|collision| {
+                    anyhow::anyhow!(
+                        "failed to claim worktree {}",
+                        collision.requested_path.display()
+                    )
+                })?;
+            Ok(WorktreeAdmission::Accepted(Some(claim)))
+        })
+    }
+
+    /// Names the thread Omega is sharing a checkout with.
+    ///
+    /// `OMEGA-DELTA-0214`. This replaces the collision modal. It carries the
+    /// same three facts the modal carried — occupying thread, its executor,
+    /// and the overlapping path — as a dismissible notice on the thread that
+    /// blocks nothing and asks nothing.
+    pub(crate) fn disclose_shared_worktree(
+        &mut self,
+        collision: &crate::omega_agent_supervision::WorktreeCollision,
+        cx: &mut Context<Self>,
+    ) {
+        self.shared_worktree_disclosure = Some(
+            format!(
+                "{} ({}) is also working in {}.",
+                collision.occupant.title,
+                collision.occupant.executor,
+                collision.occupied_path.display(),
+            )
+            .into(),
+        );
+        cx.notify();
     }
 
     pub fn send_content(
@@ -1971,21 +2065,6 @@ impl ThreadView {
                     })?;
                     match admission.await? {
                         WorktreeAdmission::Accepted(claim) => claim,
-                        WorktreeAdmission::Cancelled => {
-                            this.update_in(cx, |this, window, cx| {
-                                if this.message_editor.read(cx).is_empty(cx) {
-                                    this.message_editor.update(cx, |editor, cx| {
-                                        editor.set_message(contents, window, cx);
-                                    });
-                                } else {
-                                    this.message_editor.update(cx, |editor, cx| {
-                                        editor.append_message(contents, Some("\n\n"), window, cx);
-                                    });
-                                }
-                                cx.notify();
-                            })?;
-                            return Ok(());
-                        }
                     }
                 }
             };
@@ -2752,10 +2831,6 @@ impl ThreadView {
                             this.handle_message_queue_error(error, cx);
                         }
                     }
-                }
-                Ok(WorktreeAdmission::Cancelled) => {
-                    this.message_queue.finish_dispatch_attempt(id);
-                    cx.notify();
                 }
                 Err(error) => {
                     this.message_queue.finish_dispatch_attempt(id);
@@ -12682,6 +12757,40 @@ impl ThreadView {
             )
     }
 
+    /// `OMEGA-DELTA-0214`. The disclosure that replaced the collision modal.
+    ///
+    /// `OMEGA-DELTA-0189` law: no exposition. The modal explained at length
+    /// that concurrent writes can conflict; this names the other thread and
+    /// stops. It only ever appears when Omega could not isolate the turn, so
+    /// on the default path it never appears at all.
+    fn render_shared_worktree_disclosure(&self, cx: &mut Context<Self>) -> Option<Callout> {
+        let disclosure = self.shared_worktree_disclosure.clone()?;
+        Some(
+            Callout::new()
+                .severity(Severity::Info)
+                .icon(IconName::Folder)
+                .title("Sharing this worktree")
+                .description(disclosure.clone())
+                .border_position(self.callout_border_position())
+                .dismiss_action(
+                    IconButton::new("dismiss-shared-worktree-disclosure", IconName::Close)
+                        .icon_size(IconSize::Small)
+                        // The notice's copy lives in a `Label`, which carries
+                        // no accessibility node of its own. Assistive
+                        // technology and the sealed visual scene both read the
+                        // disclosure from here, so a silent shared checkout
+                        // fails a test rather than passing one.
+                        .debug_selector(|| "omega.thread.shared-worktree-disclosure".into())
+                        .aria_label(format!("Sharing this worktree. {disclosure}"))
+                        .tooltip(Tooltip::text("Dismiss"))
+                        .on_click(cx.listener(|this, _, _, cx| {
+                            this.shared_worktree_disclosure = None;
+                            cx.notify();
+                        })),
+                ),
+        )
+    }
+
     fn render_multi_root_callout(&self, cx: &mut Context<Self>) -> Option<Callout> {
         if self.multi_root_callout_dismissed {
             return None;
@@ -14711,6 +14820,7 @@ impl Render for ThreadView {
             })
             .child(conversation)
             .children(self.render_multi_root_callout(cx))
+            .children(self.render_shared_worktree_disclosure(cx))
             .children(self.render_activity_bar(window, cx))
             .when(self.show_external_source_prompt_warning, |this| {
                 this.child(self.render_external_source_prompt_warning(cx))

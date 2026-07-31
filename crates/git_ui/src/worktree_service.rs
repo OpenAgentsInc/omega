@@ -8,8 +8,8 @@ use askpass::AskPassDelegate;
 use collections::HashSet;
 use fs::Fs;
 use gpui::{
-    AsyncWindowContext, DismissEvent, Entity, EventEmitter, FocusHandle, Focusable, SharedString,
-    Task, TaskExt, WeakEntity,
+    AsyncApp, AsyncWindowContext, DismissEvent, Entity, EventEmitter, FocusHandle, Focusable,
+    SharedString, Task, TaskExt, WeakEntity,
 };
 use omega_actions::NewWorktreeBranchTarget;
 use project::Project;
@@ -450,7 +450,7 @@ async fn fetch_remote_for_worktree_base(
 /// so we create the new worktree only once and remap every contributing
 /// work directory onto it. Without this dedup, the second `git worktree add`
 /// fails with "already exists".
-fn start_worktree_creations(
+pub fn start_worktree_creations(
     git_repos: &[Entity<Repository>],
     worktree_name: Option<String>,
     existing_worktree_names: &[String],
@@ -508,6 +508,104 @@ fn start_worktree_creations(
     Ok((creation_infos, path_remapping))
 }
 
+/// Creates one linked git worktree per repository and returns their paths,
+/// **without opening a workspace for them**.
+///
+/// `OMEGA-DELTA-0214`. [`create_worktree_workspace`] always ends in
+/// [`open_worktree_workspace`], which adds a workspace tab — correct when a
+/// person asked for a worktree, wrong when Omega is quietly isolating a new
+/// agent thread and must not move anybody's view. This is the same
+/// name-generation, dedup, rollback, and provenance sequence as
+/// [`do_create_worktree`] with that final step removed, so the two paths
+/// cannot drift on what a managed worktree is.
+///
+/// The created worktrees are detached at `base_ref` (or at current HEAD when
+/// it is `None`) and are recorded as Omega-created, which is what makes them
+/// eligible for archival reclamation later.
+pub async fn create_linked_worktrees(
+    git_repos: Vec<Entity<Repository>>,
+    worktree_name: Option<String>,
+    base_ref: Option<String>,
+    remote_connection_options: Option<RemoteConnectionOptions>,
+    cx: &mut AsyncApp,
+) -> anyhow::Result<Vec<PathBuf>> {
+    anyhow::ensure!(
+        !git_repos.is_empty(),
+        "no git repository to create a worktree from"
+    );
+
+    let worktree_receivers: Vec<_> = cx.update(|cx| {
+        git_repos
+            .iter()
+            .map(|repo| repo.update(cx, |repo, _cx| repo.worktrees()))
+            .collect::<Vec<_>>()
+    });
+    let worktree_directory_setting = cx.update(|cx| {
+        ProjectSettings::get_global(cx)
+            .git
+            .worktree_directory
+            .clone()
+    });
+
+    let mut existing_worktree_names = Vec::new();
+    let mut existing_worktree_paths = HashSet::default();
+    for result in futures::future::join_all(worktree_receivers).await {
+        match result {
+            Ok(Ok(worktrees)) => {
+                for worktree in worktrees {
+                    if let Some(name) = worktree
+                        .path
+                        .parent()
+                        .and_then(|path| path.file_name())
+                        .and_then(|name| name.to_str())
+                    {
+                        existing_worktree_names.push(name.to_string());
+                    }
+                    existing_worktree_paths.insert(worktree.path.clone());
+                }
+            }
+            Ok(Err(err)) => {
+                Err::<(), _>(err).log_err();
+            }
+            Err(_) => {}
+        }
+    }
+
+    let mut rng = rand::rng();
+    let (creation_infos, _path_remapping) = cx.update(|cx| {
+        start_worktree_creations(
+            &git_repos,
+            worktree_name,
+            &existing_worktree_names,
+            &existing_worktree_paths,
+            base_ref,
+            &worktree_directory_setting,
+            &mut rng,
+            cx,
+        )
+    })?;
+
+    let fs = cx.update(|cx| <dyn Fs>::global(cx));
+    let creation_pairs: Vec<(Entity<Repository>, PathBuf)> = creation_infos
+        .iter()
+        .map(|(repo, path, _)| (repo.clone(), path.clone()))
+        .collect();
+
+    let created_paths = await_and_rollback_on_failure(creation_infos, fs, cx).await?;
+
+    for (repo, path) in creation_pairs {
+        crate::created_worktrees::record_created_worktree_for_repo(
+            &repo,
+            &path,
+            remote_connection_options.as_ref(),
+            cx,
+        )
+        .await;
+    }
+
+    Ok(created_paths)
+}
+
 /// Waits for every in-flight worktree creation to complete. If any
 /// creation fails, all successfully-created worktrees are rolled back
 /// (removed) so the project isn't left in a half-migrated state.
@@ -518,7 +616,7 @@ pub async fn await_and_rollback_on_failure(
         futures::channel::oneshot::Receiver<anyhow::Result<()>>,
     )>,
     fs: Arc<dyn Fs>,
-    cx: &mut AsyncWindowContext,
+    cx: &mut AsyncApp,
 ) -> anyhow::Result<Vec<PathBuf>> {
     let mut created_paths: Vec<PathBuf> = Vec::new();
     let mut repos_and_paths: Vec<(Entity<Repository>, PathBuf)> = Vec::new();
@@ -550,13 +648,11 @@ pub async fn await_and_rollback_on_failure(
     // Rollback all attempted worktrees
     let mut rollback_futures = Vec::new();
     for (rollback_repo, rollback_path) in &repos_and_paths {
-        let receiver = cx
-            .update(|_, cx| {
-                rollback_repo.update(cx, |repo, _cx| {
-                    repo.remove_worktree(rollback_path.clone(), true)
-                })
+        let receiver = Some(cx.update(|cx| {
+            rollback_repo.update(cx, |repo, _cx| {
+                repo.remove_worktree(rollback_path.clone(), true)
             })
-            .ok();
+        }));
 
         rollback_futures.push((rollback_path.clone(), receiver));
     }

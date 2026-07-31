@@ -27,6 +27,7 @@ use editor::{
 use file_icons::FileIcons;
 use fs::Fs;
 use futures::FutureExt as _;
+use futures::future::Shared;
 use gpui::{
     Action, Animation, AnimationExt, App, ClickEvent, ClipboardItem, CursorStyle, ElementId, Empty,
     Entity, EventEmitter, FocusHandle, Focusable, Hsla, ListOffset, ListState, ObjectFit,
@@ -711,6 +712,15 @@ pub struct ConversationView {
     pub(crate) thread_id: ThreadId,
     pub(crate) root_session_id: Option<acp::SessionId>,
     desired_work_dirs: PathList,
+    /// Working directories still being provisioned for this conversation.
+    ///
+    /// `OMEGA-DELTA-0214`. Isolation has to be settled before `new_session`,
+    /// because every external ACP agent fixes its working directory when the
+    /// session starts (`supports_live_work_dir_updates() == false`) and cannot
+    /// be retargeted afterwards. Rather than delay the new-thread gesture on
+    /// `git worktree add`, the view is created immediately and the session
+    /// load awaits this. `None` — the ordinary case — costs nothing.
+    pending_work_dirs: Option<Shared<Task<Option<PathList>>>>,
     server_state: ServerState,
     focus_handle: FocusHandle,
     notifications: Vec<WindowHandle<AgentNotification>>,
@@ -909,6 +919,20 @@ impl ConversationView {
 
     pub fn work_dirs(&self) -> &PathList {
         &self.desired_work_dirs
+    }
+
+    /// Makes this conversation's session wait for `task` before it starts, and
+    /// adopt the working directories it resolves to.
+    ///
+    /// `OMEGA-DELTA-0214`. The isolation decision is made synchronously when
+    /// the thread is created; the `git worktree add` behind it is not. This is
+    /// how the two are reconciled without either blocking the new-thread
+    /// gesture or letting a session start in an occupied checkout. A task that
+    /// resolves to `None` — provisioning failed, or there was nothing to
+    /// isolate into — leaves the requested roots in place, and the send path
+    /// discloses the collision instead.
+    pub fn set_pending_work_dirs(&mut self, task: Shared<Task<Option<PathList>>>) {
+        self.pending_work_dirs = Some(task);
     }
 
     pub(crate) fn project(&self) -> &Entity<Project> {
@@ -1435,6 +1459,7 @@ impl ConversationView {
             thread_id,
             root_session_id: resume_session_id.clone(),
             desired_work_dirs: desired_work_dirs.clone(),
+            pending_work_dirs: None,
             server_state: Self::initial_state(
                 agent.clone(),
                 connection_store,
@@ -2298,6 +2323,26 @@ impl ConversationView {
                 }
             }
 
+            // `OMEGA-DELTA-0214`. Isolation is settled here, before the
+            // session exists. After `new_session` an external ACP agent's
+            // working directory is fixed for the life of the session, so this
+            // is the last honest moment to move the thread into its own
+            // worktree.
+            if let Ok(Some(pending)) =
+                this.read_with(cx, |this, _cx| this.pending_work_dirs.clone())
+            {
+                if let Some(isolated) = pending.await {
+                    this.update(cx, |this, cx| {
+                        this.set_work_dirs(isolated, cx);
+                    })
+                    .log_err();
+                }
+                this.update(cx, |this, _cx| {
+                    this.pending_work_dirs = None;
+                })
+                .log_err();
+            }
+
             let session_work_dirs =
                 match this.read_with(cx, |this, _cx| this.desired_work_dirs.clone()) {
                     Ok(work_dirs) => work_dirs,
@@ -2926,7 +2971,18 @@ impl ConversationView {
                     lifecycle: crate::omega_agent_supervision::lifecycle_for_thread(&thread),
                 }
             };
-            crate::omega_agent_supervision::AgentSupervision::global(cx).set_snapshot(snapshot);
+            let supervision = crate::omega_agent_supervision::AgentSupervision::global(cx);
+            // `OMEGA-DELTA-0214`. Publish the roots alongside the lifecycle.
+            // Occupancy is asked at thread creation, when the occupying thread
+            // is between turns and holds no claim, so the binding has to be
+            // maintained wherever the lifecycle is.
+            let remote_connection = self.project.read(cx).remote_connection_options(cx);
+            supervision.bind_roots(
+                &snapshot.thread_key,
+                self.desired_work_dirs.ordered_paths().cloned(),
+                remote_connection.as_ref(),
+            );
+            supervision.set_snapshot(snapshot);
         }
         if !is_subagent && affects_thread_metadata(event) {
             cx.emit(RootThreadUpdated);

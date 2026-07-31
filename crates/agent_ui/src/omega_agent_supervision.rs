@@ -121,6 +121,31 @@ impl WorktreeScope {
     }
 }
 
+/// The one path-overlap rule. `OMEGA-DELTA-0214` resolves occupancy before a
+/// session starts and `OMEGA-DELTA-0181` claims it for the turn; both compare
+/// roots through this, so a second rule cannot drift away from the first.
+fn scopes_for(
+    work_dirs: impl IntoIterator<Item = PathBuf>,
+    remote_connection: Option<&RemoteConnectionOptions>,
+) -> Vec<WorktreeScope> {
+    let remote_identity = remote_connection
+        .map(remote_connection_identity)
+        .map(|identity| identity.persistence_key());
+    work_dirs
+        .into_iter()
+        .map(|path| WorktreeScope {
+            remote_identity: remote_identity.clone(),
+            path: if remote_identity.is_none() {
+                std::fs::canonicalize(&path)
+                    .map(|path| normalize_path(&path))
+                    .unwrap_or_else(|_| normalize_path(&path))
+            } else {
+                normalize_path(&path)
+            },
+        })
+        .collect()
+}
+
 #[derive(Clone, Debug)]
 struct WorktreeClaim {
     thread: ThreadSupervisionSnapshot,
@@ -132,6 +157,10 @@ struct SupervisionState {
     next_claim_id: u64,
     snapshots: HashMap<String, ThreadSupervisionSnapshot>,
     claims: HashMap<u64, WorktreeClaim>,
+    /// Every thread's bound roots, independent of whether it is mid-turn.
+    /// `OMEGA-DELTA-0214` needs occupancy *before* the first send, when no
+    /// turn-scoped claim exists yet, so binding outlives the claim.
+    bindings: HashMap<String, Vec<WorktreeScope>>,
 }
 
 #[derive(Clone, Default)]
@@ -161,7 +190,74 @@ impl AgentSupervision {
     }
 
     pub fn remove_snapshot(&self, thread_key: &str) {
-        self.state.lock().snapshots.remove(thread_key);
+        let mut state = self.state.lock();
+        state.snapshots.remove(thread_key);
+        state.bindings.remove(thread_key);
+    }
+
+    /// Records which roots a thread is bound to, whether or not it is running.
+    ///
+    /// `OMEGA-DELTA-0214`. A turn-scoped claim only exists between send and
+    /// turn end, so it cannot answer "is this root occupied?" at the moment a
+    /// thread is created — which is the only moment at which the answer can
+    /// still be acted on for an agent that fixes its cwd when the session
+    /// starts.
+    pub fn bind_roots(
+        &self,
+        thread_key: &str,
+        work_dirs: impl IntoIterator<Item = PathBuf>,
+        remote_connection: Option<&RemoteConnectionOptions>,
+    ) {
+        let scopes = scopes_for(work_dirs, remote_connection);
+        let mut state = self.state.lock();
+        if scopes.is_empty() {
+            state.bindings.remove(thread_key);
+        } else {
+            state.bindings.insert(thread_key.to_string(), scopes);
+        }
+    }
+
+    /// The live thread already occupying any of `work_dirs`, if there is one.
+    ///
+    /// `OMEGA-DELTA-0214`. "Live" is a held turn claim or a non-terminal
+    /// lifecycle: a thread that is running, or waiting on a person mid-turn,
+    /// is a write-capable occupant. A finished thread is not, so ordinary
+    /// sequential work never provisions anything.
+    pub fn occupant_for(
+        &self,
+        thread_key: &str,
+        work_dirs: impl IntoIterator<Item = PathBuf>,
+        remote_connection: Option<&RemoteConnectionOptions>,
+    ) -> Option<WorktreeCollision> {
+        let scopes = scopes_for(work_dirs, remote_connection);
+        if scopes.is_empty() {
+            return None;
+        }
+        let state = self.state.lock();
+
+        let claimed = state.claims.values().filter_map(|claim| {
+            (claim.thread.thread_key != thread_key).then(|| (&claim.thread, &claim.scopes))
+        });
+        let bound = state.bindings.iter().filter_map(|(key, bound_scopes)| {
+            if key == thread_key {
+                return None;
+            }
+            let snapshot = state.snapshots.get(key)?;
+            (!snapshot.lifecycle.is_terminal()).then_some((snapshot, bound_scopes))
+        });
+
+        for (occupant, occupied_scopes) in claimed.chain(bound) {
+            for occupied in occupied_scopes {
+                if let Some(requested) = scopes.iter().find(|scope| scope.overlaps(occupied)) {
+                    return Some(WorktreeCollision {
+                        requested_path: requested.path.clone(),
+                        occupied_path: occupied.path.clone(),
+                        occupant: occupant.clone(),
+                    });
+                }
+            }
+        }
+        None
     }
 
     pub fn claim(
@@ -171,22 +267,7 @@ impl AgentSupervision {
         remote_connection: Option<&RemoteConnectionOptions>,
         allow_collision: bool,
     ) -> Result<WorktreeClaimToken, Box<WorktreeCollision>> {
-        let remote_identity = remote_connection
-            .map(remote_connection_identity)
-            .map(|identity| identity.persistence_key());
-        let scopes = work_dirs
-            .into_iter()
-            .map(|path| WorktreeScope {
-                remote_identity: remote_identity.clone(),
-                path: if remote_identity.is_none() {
-                    std::fs::canonicalize(&path)
-                        .map(|path| normalize_path(&path))
-                        .unwrap_or_else(|_| normalize_path(&path))
-                } else {
-                    normalize_path(&path)
-                },
-            })
-            .collect::<Vec<_>>();
+        let scopes = scopes_for(work_dirs, remote_connection);
 
         let mut state = self.state.lock();
         if !allow_collision
@@ -212,6 +293,11 @@ impl AgentSupervision {
 
         state.next_claim_id = state.next_claim_id.saturating_add(1);
         let claim_id = state.next_claim_id;
+        if !scopes.is_empty() {
+            state
+                .bindings
+                .insert(thread.thread_key.clone(), scopes.clone());
+        }
         state.claims.insert(
             claim_id,
             WorktreeClaim {
@@ -302,6 +388,96 @@ mod tests {
         supervision
             .claim(snapshot("b"), [PathBuf::from("/repo")], None, false)
             .expect("released path");
+    }
+
+    /// `OMEGA-DELTA-0214`. Occupancy has to be answerable at thread creation,
+    /// when the occupying thread holds no turn claim.
+    #[test]
+    fn a_bound_live_thread_occupies_its_root_without_holding_a_claim() {
+        let supervision = AgentSupervision::default();
+        supervision.set_snapshot(snapshot("a"));
+        supervision.bind_roots("a", [PathBuf::from("/repo")], None);
+
+        let collision = supervision
+            .occupant_for("b", [PathBuf::from("/repo/crates")], None)
+            .expect("a live thread bound to the parent root occupies it");
+        assert_eq!(collision.occupant.thread_key, "a");
+        assert_eq!(collision.occupied_path, PathBuf::from("/repo"));
+        assert_eq!(collision.requested_path, PathBuf::from("/repo/crates"));
+
+        assert!(
+            supervision
+                .occupant_for("a", [PathBuf::from("/repo")], None)
+                .is_none(),
+            "a thread never collides with itself"
+        );
+        assert!(
+            supervision
+                .occupant_for("b", [PathBuf::from("/elsewhere")], None)
+                .is_none(),
+            "a disjoint root is not occupied"
+        );
+    }
+
+    /// `OMEGA-DELTA-0214`. Sequential work must not provision anything: once a
+    /// thread is finished it is no longer a write-capable occupant.
+    #[test]
+    fn a_terminal_thread_does_not_occupy_its_root() {
+        let supervision = AgentSupervision::default();
+        for lifecycle in [
+            SupervisedThreadLifecycle::Completed,
+            SupervisedThreadLifecycle::Failed,
+            SupervisedThreadLifecycle::Cancelled,
+        ] {
+            supervision.set_snapshot(ThreadSupervisionSnapshot {
+                lifecycle,
+                ..snapshot("a")
+            });
+            supervision.bind_roots("a", [PathBuf::from("/repo")], None);
+            assert!(
+                supervision
+                    .occupant_for("b", [PathBuf::from("/repo")], None)
+                    .is_none(),
+                "{lifecycle:?} must not occupy a root"
+            );
+        }
+
+        for lifecycle in [
+            SupervisedThreadLifecycle::Running,
+            SupervisedThreadLifecycle::WaitingForPerson,
+        ] {
+            supervision.set_snapshot(ThreadSupervisionSnapshot {
+                lifecycle,
+                ..snapshot("a")
+            });
+            supervision.bind_roots("a", [PathBuf::from("/repo")], None);
+            assert!(
+                supervision
+                    .occupant_for("b", [PathBuf::from("/repo")], None)
+                    .is_some(),
+                "{lifecycle:?} must occupy a root"
+            );
+        }
+    }
+
+    /// `OMEGA-DELTA-0214`. A binding must not outlive its thread, or a closed
+    /// thread would isolate every later thread forever.
+    #[test]
+    fn removing_a_snapshot_releases_its_binding() {
+        let supervision = AgentSupervision::default();
+        supervision.set_snapshot(snapshot("a"));
+        supervision.bind_roots("a", [PathBuf::from("/repo")], None);
+        assert!(
+            supervision
+                .occupant_for("b", [PathBuf::from("/repo")], None)
+                .is_some()
+        );
+        supervision.remove_snapshot("a");
+        assert!(
+            supervision
+                .occupant_for("b", [PathBuf::from("/repo")], None)
+                .is_none()
+        );
     }
 
     #[test]

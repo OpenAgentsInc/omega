@@ -1086,6 +1086,15 @@
     "flexible": true,
     // Where to position the threads sidebar. Can be 'left' or 'right'.
     "sidebar_side": "left",
+    // Where a new thread runs when another live agent already occupies the
+    // worktree it would open against. Can be 'isolate' or 'shared'.
+    //
+    // 'isolate' (default) gives the new thread its own linked git worktree
+    // and runs there. 'shared' runs every thread in the checkout it was
+    // opened against, which is the recorded decision to let concurrent
+    // agents write the same tree. Neither value ever asks. See
+    // OMEGA-DELTA-0214.
+    "thread_worktree": "isolate",
     // Default width when the agent panel is docked to the left or right.
     "default_width": 640,
     // Default height when the agent panel is docked to the bottom.

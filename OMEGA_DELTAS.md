@@ -8055,7 +8055,7 @@ startup recheck — survives unchanged behind that dropdown.
   settlement, reconnect, transcript-recovery, and revocation tests at their
   source boundaries.
 
-### OMEGA-DELTA-0181 — Concurrent agent turns are supervised and isolated
+### OMEGA-DELTA-0181 — Concurrent agent turns are supervised and isolated (amended 2026-07-31)
 
 - **Every direct agent thread exposes one lifecycle.** The Threads Sidebar and
   active-thread header identify the executor and show the lifecycle as a
@@ -8069,12 +8069,30 @@ startup recheck — survives unchanged behind that dropdown.
   thread. Switching threads does not stop background work, and relaunch keeps
   each thread's identity, terminal lifecycle, transcript, and durable queued
   messages independent.
-- **Concurrent writers require an explicit decision.** Before a direct root
-  turn begins, Omega claims every selected worktree for the lifetime of that
-  turn. Local aliases are canonicalized, multi-root overlap is detected, and
-  remote paths are scoped by remote identity. A collision names the occupying
-  thread, executor, and path, then offers **Cancel** or **Run here anyway**.
-  Cancelling restores a direct prompt or leaves a queued prompt untouched.
+- **Concurrent writers are isolated, and the explicit decision is recorded
+  once.** Before a direct root turn begins, Omega claims every selected
+  worktree for the lifetime of that turn. Local aliases are canonicalized,
+  multi-root overlap is detected, and remote paths are scoped by remote
+  identity. When a new thread's root is already held by a live thread, Omega
+  provisions a linked git worktree for the new thread and runs it there —
+  silently. The person's standing decision lives in `agent.thread_worktree`:
+  `isolate` (default) provisions, `shared` declares that concurrent agents may
+  write one checkout. When isolation is genuinely unavailable — a session whose
+  working directory was fixed when it started, a project with no repository to
+  branch from — the collision is disclosed on the thread, naming the occupying
+  thread, its executor, and the overlapping path, and the turn proceeds.
+- **Amended 2026-07-31 by `OMEGA-DELTA-0214`** (owner direction, on being shown
+  the collision modal after pressing New Thread: *"i never want to see that
+  shit. figure out better workflow."*): the safety claim of this delta is
+  **isolation of concurrent writers**. The modal was only the chosen mechanism,
+  and it was the weaker one — it disclosed the hazard and then let a person
+  walk into it with one click, once per turn, forever. Auto-provisioning
+  satisfies the same property more strongly, because it makes the collision
+  impossible rather than merely visible. `Cancel` / `Run here anyway`, the
+  `window.prompt` in `request_worktree_admission`, and the
+  `WorktreeAdmission::Cancelled` outcome with its prompt-restore path are
+  deleted. Nothing about claim scoping, canonicalization, remote identity, or
+  turn-scoped claim lifetime changes.
 - **The queue is durable and fail-closed.** A prompt is acknowledged as queued
   only after its text, executor class, steer capability, disposition inputs,
   ordering identity, and per-thread processing state are atomically persisted.
@@ -9530,3 +9548,93 @@ success is a distinct preserved status, not an automated pass.
   `crates/omega_deltas`; `script/omega-release-gate --self-test`; and the
   checked-in evidence schema and valid fixture under
   `script/fixtures/omega-release-gate`.
+
+### OMEGA-DELTA-0214 — A new thread never asks whose worktree this is
+
+- **Upstream Zed:** no concurrency guard at all. Two agents in one checkout
+  overwrite each other silently.
+- **Omega before:** `OMEGA-DELTA-0181` added the guard and made it a modal.
+  Pressing New Thread while another agent was running produced a blocking
+  dialog titled **"Another agent is already using this worktree"**, four lines
+  explaining that concurrent writes can conflict, and a choice between
+  **Cancel** and **Run here anyway** — at the moment a person had just asked
+  for a thread and wanted to type into it.
+- **Omega now:** the collision is resolved instead of narrated. When a new
+  thread's root is already held by a live, write-capable thread, Omega
+  provisions a linked git worktree for it and runs there. No prompt, no
+  interstitial, no name to invent.
+- **Why:** the owner, shown the modal: *"i never want to see that shit. figure
+  out better workflow."* The guard's intent was right and the UX was wrong.
+  `OMEGA-DELTA-0001` is the same shape — the same owner, the same reaction to
+  a dialog that made a person clear a warning before doing the thing they had
+  already asked for. A guard that stops the person to re-ask a question they
+  can answer once is not a safety mechanism, it is a tax on the safe path.
+- **The safety property is strictly stronger, not relaxed.** The modal
+  disclosed the hazard and then handed the person a button that walked into it.
+  Isolation removes the hazard: after provisioning there is no shared tree to
+  conflict over. `OMEGA-DELTA-0181`'s claim, canonicalization, overlap, and
+  remote-identity rules are untouched and still run.
+- **One setting, not one question per turn.** `agent.thread_worktree` is
+  `isolate` (default) or `shared`. `shared` is the explicit decision
+  `OMEGA-DELTA-0181` demanded, made once in settings: it provisions nothing and
+  asks nothing, because the person has already said that concurrent agents may
+  write one checkout.
+- **Decided at thread creation, because later is too late.** `ConversationView`
+  hands its working directories to `new_session`, and every external ACP agent
+  reports `supports_live_work_dir_updates() == false`, so a Codex, Claude, or
+  Grok session cannot be moved once it has started. The decision is therefore
+  made synchronously in `AgentPanel::create_agent_thread_inner`, before the
+  session exists. The `git worktree add` behind it is not synchronous: the
+  thread opens immediately and the session load awaits
+  `ConversationView::set_pending_work_dirs`, so the new-thread gesture never
+  waits on git.
+- **Occupancy is knowable without a claim.** `OMEGA-DELTA-0181`'s claim is
+  turn-scoped and does not exist between turns, so `AgentSupervision` also
+  records each thread's bound roots and answers `occupant_for` from those
+  bindings plus the lifecycle it already keeps. Live means a held claim or a
+  non-terminal lifecycle; a finished thread does not occupy anything, so
+  ordinary sequential work provisions nothing. The comparison reuses
+  `WorktreeScope::overlaps`, so there is one path-overlap rule, not two.
+- **It reuses the worktree stack rather than growing a second one.**
+  `git_ui::worktree_service::create_linked_worktrees` is the same
+  name-generation, target-path, dedup, rollback, and provenance sequence as the
+  worktree picker's, with `open_worktree_workspace` removed — auto-isolation
+  must not open a workspace tab, because it is a quiet correction and not a
+  navigation. Names come from the thread's title when it has one and from
+  `generate_worktree_name` when it does not, which is almost always: a
+  brand-new thread is still `DEFAULT_THREAD_TITLE`. A person is never asked to
+  name a worktree Omega decided to create.
+- **The guard stays, and never prompts.** `request_worktree_admission` has no
+  `window.prompt` and `WorktreeAdmission` has no `Cancelled` variant. On a
+  collision it isolates when the session can still be retargeted, and otherwise
+  discloses on the thread — occupying thread, executor, and path, one line,
+  dismissible, blocking nothing — then proceeds. `OMEGA-DELTA-0189`'s no-
+  exposition law governs that line: the modal's paragraph about what concurrent
+  writes can do to a checkout is not restated.
+- **Deliberate isolation is a control, not a dialog.** The per-thread worktree
+  picker gains **New worktree**, which provisions through the same path and
+  retargets the active conversation.
+- **Known gap: no reaper.** A worktree provisioned for a draft the person then
+  abandons — switching executor on an empty draft while another agent is live
+  rebuilds the draft — stays on disk. So does an archived thread's.
+  `docs/src/ai/parallel-agents.md` used to promise that archiving a thread
+  saved and removed its worktree and that restoring restored it;
+  `thread_worktree_archive.rs` implements `build_root_plan`,
+  `persist_worktree_state`, `remove_root`, and `restore_worktree_via_git`, and
+  none of them has ever been called outside tests, so that promise was unbacked
+  before this change and the doc no longer makes it. Auto-provisioned worktrees
+  are recorded as Omega-created and are therefore *eligible* for that
+  reclamation, but wiring a destructive archive path is a separate change with
+  its own owner review; see omega#155. Both leaks are bounded by the fact that
+  nothing is provisioned unless a root is genuinely occupied by a live agent.
+- **Enforced by:** `a_new_thread_isolates_instead_of_asking` in
+  `crates/omega_deltas`; the amended
+  `concurrent_agent_supervision_is_visible_durable_and_guarded`, which now
+  asserts the absence of the prompt it used to assert the presence of;
+  `a_bound_live_thread_occupies_its_root_without_holding_a_claim`,
+  `a_terminal_thread_does_not_occupy_its_root`, and
+  `removing_a_snapshot_releases_its_binding` in
+  `crates/agent_ui/src/omega_agent_supervision.rs`; the slug tests in
+  `crates/agent_ui/src/omega_thread_worktree.rs`;
+  `assert_no_worktree_collision_prompt` in the Agent Panel GPUI suite; and the
+  `omega_concurrent_agents_worktree_no_dialog` visual scene.

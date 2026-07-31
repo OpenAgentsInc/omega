@@ -40,6 +40,38 @@ pub enum SidebarSide {
     Right,
 }
 
+/// Where a new agent thread runs when another live agent already occupies the
+/// requested worktree.
+///
+/// `OMEGA-DELTA-0214`. Two write-capable agents in one checkout really do
+/// overwrite each other, so the collision has to be resolved. This setting is
+/// where the person resolves it once, instead of being asked once per turn.
+#[derive(
+    Clone,
+    Copy,
+    Debug,
+    Default,
+    PartialEq,
+    Eq,
+    Serialize,
+    Deserialize,
+    JsonSchema,
+    MergeFrom,
+    strum::VariantArray,
+    strum::VariantNames,
+)]
+#[serde(rename_all = "snake_case")]
+pub enum ThreadWorktreeMode {
+    /// Give the new thread its own linked git worktree and run there. No
+    /// prompt, no interstitial.
+    #[default]
+    Isolate,
+    /// Run every thread in the checkout it was opened against. Concurrent
+    /// writes to one tree are the declared intent, so nothing is provisioned
+    /// and nothing is asked.
+    Shared,
+}
+
 /// How thinking blocks should be displayed by default in the agent panel.
 #[derive(
     Clone,
@@ -211,6 +243,11 @@ pub struct AgentSettingsContent {
     ///
     /// Default: left
     pub sidebar_side: Option<SidebarDockPosition>,
+    /// Where a new thread runs when another live agent already occupies the
+    /// requested worktree. `OMEGA-DELTA-0214`.
+    ///
+    /// Default: isolate
+    pub thread_worktree: Option<ThreadWorktreeMode>,
     /// Default width in pixels when the agent panel is docked to the left or right.
     ///
     /// Default: 640

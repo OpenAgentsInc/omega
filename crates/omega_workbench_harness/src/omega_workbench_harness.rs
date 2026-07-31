@@ -3607,7 +3607,7 @@ pub const HERMETIC_SCENES: &[SceneSpec] = &[
         regions: CONCURRENT_AGENT_REGIONS,
     },
     SceneSpec {
-        name: "omega_concurrent_agents_worktree_collision",
+        name: "omega_concurrent_agents_worktree_no_dialog",
         phase: ScenePhase::Recording,
         viewport: ViewportFixture::new(1180, 760, 2000),
         fixture_version: 1,

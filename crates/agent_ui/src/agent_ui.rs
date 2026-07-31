@@ -54,6 +54,7 @@ pub mod omega_router;
 pub mod omega_send_queue;
 pub mod omega_sidebar;
 pub mod omega_signing_assurance;
+pub mod omega_thread_worktree;
 pub mod omega_threads_sidebar;
 pub mod plan_presentation;
 mod profile_selector;
@@ -1191,6 +1192,7 @@ mod tests {
             show_turn_stats: false,
             show_merge_conflict_indicator: true,
             sidebar_side: Default::default(),
+            thread_worktree: Default::default(),
             thinking_display: Default::default(),
         };
 

@@ -152,11 +152,13 @@ OWNER_ASSISTED_ROWS = [
         "issues": ["omega#155"],
         "owner_instruction": (
             "Run two different direct agents concurrently; switch views "
-            "between them; cancel one and confirm the other continues; point "
-            "a second write-capable agent at the occupied worktree and confirm "
-            "the collision rule fires visibly; relaunch and confirm both "
-            "threads restore with honest Failed/Cancelled lifecycle states "
-            "and independent history."
+            "between them; cancel one and confirm the other continues; press "
+            "New Thread while one is still running and confirm no dialog "
+            "appears and the new thread lands in its own linked worktree; set "
+            "agent.thread_worktree to shared and confirm the next new thread "
+            "stays in the main checkout, still without a dialog; relaunch and "
+            "confirm both threads restore with honest Failed/Cancelled "
+            "lifecycle states and independent history."
         ),
     },
     {

@@ -3870,7 +3870,7 @@ const OMEGA_CONCURRENT_AGENT_PROOF_SCENES: &[&str] = &[
     "omega_concurrent_agents_codex_waiting",
     "omega_concurrent_agents_claude_running",
     "omega_concurrent_agents_cancel_isolated",
-    "omega_concurrent_agents_worktree_collision",
+    "omega_concurrent_agents_worktree_no_dialog",
 ];
 
 #[cfg(all(target_os = "macos", feature = "visual-tests"))]
@@ -10881,7 +10881,11 @@ fn run_omega_concurrent_agent_visual_tests(
     const CODEX_WAITING: &str = "omega_concurrent_agents_codex_waiting";
     const CLAUDE_RUNNING: &str = "omega_concurrent_agents_claude_running";
     const CANCEL_ISOLATED: &str = "omega_concurrent_agents_cancel_isolated";
-    const WORKTREE_COLLISION: &str = "omega_concurrent_agents_worktree_collision";
+    // `OMEGA-DELTA-0214`. The scene used to photograph the collision modal.
+    // The modal is gone, so the name would lie; what is photographed now is
+    // the property that replaced it — a second thread starting in an occupied
+    // worktree with no dialog in the way.
+    const WORKTREE_NO_DIALOG: &str = "omega_concurrent_agents_worktree_no_dialog";
     const CODEX_TITLE: &str = "Codex indexes the migration";
     const CLAUDE_TITLE: &str = "Claude audits the release";
     const CODEX_HISTORY: &str = "Codex history sentinel: inspect the migration.";
@@ -11091,7 +11095,7 @@ fn run_omega_concurrent_agent_visual_tests(
     }
 
     let mut collision_thread = None;
-    if workbench_any_selected(&[WORKTREE_COLLISION]) {
+    if workbench_any_selected(&[WORKTREE_NO_DIALOG]) {
         let collision_capture = (|| -> Result<TestResult> {
             let collision_connection = StubAgentConnection::new()
                 .with_agent_id(AgentId::new(agent_servers::CODEX_ID))
@@ -11111,47 +11115,58 @@ fn run_omega_concurrent_agent_visual_tests(
             send_concurrent_visual_prompt(
                 &panel,
                 workspace_window,
-                "Try to write in Claude's occupied worktree.",
+                "Write in the worktree Claude is already working in.",
                 cx,
             )?;
             cx.set_debug_accessibility_active(workspace_window, true)?;
             let snapshot = cx.debug_render_snapshot(workspace_window)?;
             let accessibility = snapshot
                 .accessibility_tree_json()
-                .context("collision prompt accessibility tree was not active")?;
-            for expected in [
+                .context("concurrent-agent accessibility tree was not active")?;
+
+            // `OMEGA-DELTA-0214`. The whole point of the scene: nothing is in
+            // the way. The fixture roots are not real git repositories, so
+            // this run takes the disclosure branch rather than the isolation
+            // branch — which is the harder case to get right, because it is
+            // the one that still has something to say.
+            for forbidden in [
                 "Another agent is already using this worktree",
                 "Run here anyway",
-                "Cancel",
-                CLAUDE_TITLE,
-                "Claude",
+                "Running two agents in one worktree can overwrite",
             ] {
                 anyhow::ensure!(
+                    !accessibility.contains(forbidden),
+                    "OMEGA-DELTA-0214: the deleted collision modal is back — found {forbidden:?}"
+                );
+            }
+            record_workbench_semantic_check(WORKTREE_NO_DIALOG, "no-collision-dialog");
+
+            // Disclosure, not silence. The occupying thread and the shared
+            // path stay nameable; only the interruption is gone. The notice is
+            // read through its dismiss control, which is the only part of a
+            // `Callout` that carries an accessibility node.
+            anyhow::ensure!(
+                snapshot.selector_count("omega.thread.shared-worktree-disclosure") == 1,
+                "shared-worktree disclosure was not drawn"
+            );
+            for expected in ["Sharing this worktree", CLAUDE_TITLE] {
+                anyhow::ensure!(
                     accessibility.contains(expected),
-                    "collision prompt did not expose {expected:?}"
+                    "shared-worktree disclosure did not expose {expected:?}"
                 );
             }
             record_workbench_semantic_check(
-                WORKTREE_COLLISION,
-                "occupied-worktree-owner-and-risk-visible",
+                WORKTREE_NO_DIALOG,
+                "occupied-worktree-owner-still-named",
             );
-            record_workbench_semantic_check(
-                WORKTREE_COLLISION,
-                "run-here-anyway-and-cancel-visible",
-            );
-            let capture =
-                run_visual_test(WORKTREE_COLLISION, workspace_window, cx, update_baseline)?;
-            cx.simulate_click_selector(workspace_window, "prompt.action.0")?;
-            cx.run_until_parked();
-            Ok(capture)
+
+            run_visual_test(WORKTREE_NO_DIALOG, workspace_window, cx, update_baseline)
         })();
 
         match collision_capture {
             Ok(capture) => results.push(capture),
             Err(error) => {
-                log::error!("concurrent-agent collision visual failed: {error:#}");
-                cx.simulate_click_selector(workspace_window, "prompt.action.0")
-                    .log_err();
+                log::error!("concurrent-agent shared-worktree visual failed: {error:#}");
                 cx.run_until_parked();
                 let mut threads = vec![codex_thread.clone(), claude_thread];
                 threads.extend(collision_thread);

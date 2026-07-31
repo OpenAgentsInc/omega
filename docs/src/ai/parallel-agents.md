@@ -31,7 +31,7 @@ To remove a thread from the sidebar, you can archive it by hovering over it and 
 
 The Thread History view holds all your threads, including ones that you have archived. Toggle it with {#kb agents_sidebar::ToggleThreadHistory} or by clicking the clock icon in the sidebar bottom bar, next to the sidebar toggle.
 
-To restore a thread, open Thread History and click the thread you want to bring back. Zed moves it back to the thread list and opens it in the Agent Panel. If the thread was running in a Git worktree that was removed, Zed restores the worktree automatically.
+To restore a thread, open Thread History and click the thread you want to bring back. Zed moves it back to the thread list and opens it in the Agent Panel.
 
 To permanently delete a thread, open Thread History, hover over the thread, and click the trash icon. This removes the thread's conversation history and cleans up any associated worktree data. Deleted threads cannot be recovered.
 
@@ -77,9 +77,13 @@ A single project can contain multiple folders (a multi-root folder project). Age
 
 ## Worktree Isolation {#worktree-isolation}
 
-If two threads might edit the same files, start one in a new [Git worktree](../git.md#git-worktrees) to give it an isolated checkout.
+Two agents writing the same checkout overwrite each other, so Omega keeps them apart for you.
 
-Before a direct agent begins a root turn, Omega checks whether another direct agent is already writing in any selected worktree. If so, the warning names the occupying thread, agent, and path. Choose **Cancel** to preserve the prompt without starting it, or **Run here anyway** only when concurrent writes are intentional. The same guard applies to queued prompts. Local path aliases and overlapping roots count as the same worktree; identical remote paths on different hosts do not.
+When you start a thread and another agent is already live in the folder it would open against, Omega gives the new thread its own linked worktree and runs it there. Nothing is asked: no dialog, no name to invent, no branch to pick. The thread opens immediately and its first turn waits the moment it takes to create the worktree.
+
+Set `agent.thread_worktree` to `"shared"` if you want every thread to run in the checkout it was opened against. That is the setting for deliberately concurrent writes in one tree, and it turns provisioning off entirely.
+
+Local path aliases and overlapping roots count as the same worktree; identical remote paths on different hosts do not. If Omega cannot isolate a thread — the agent fixed its working directory when its session started, or the project has no Git repository to branch from — it names the other thread, its agent, and the shared path on the thread, and continues. The same handling applies to queued prompts.
 
 Worktrees are managed from the title bar. Click the worktree picker (to the right of the project picker) to switch between existing worktrees or create a new one. New worktrees are created in a detached HEAD state, so you won't accidentally share a branch between worktrees.
 
@@ -87,7 +91,9 @@ Once you're in a new worktree, use the branch picker next to the worktree picker
 
 To automate setup steps whenever a new worktree is created, use a [Task hook](../tasks.md#hooks). The `create_worktree` hook runs automatically after Zed creates a linked worktree, with `ZED_WORKTREE_ROOT` pointing at the new worktree and `ZED_MAIN_GIT_WORKTREE` pointing at the original repository.
 
-After the agent finishes, review the diff and merge the changes through your normal Git workflow. If the thread was running in a linked worktree and no other active threads use it, moving the thread to Thread History saves the worktree's Git state and removes it from disk. Restoring the thread from history restores the worktree.
+To put a thread in its own worktree on purpose, or to move it back, use the worktree picker in the thread header and choose **New worktree**.
+
+After the agent finishes, review the diff and merge the changes through your normal Git workflow.
 
 ## See Also {#see-also}
 

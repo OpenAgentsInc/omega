@@ -7523,6 +7523,97 @@ impl AgentPanel {
         false
     }
 
+    /// Moves the active thread into a freshly provisioned linked worktree.
+    ///
+    /// `OMEGA-DELTA-0214`. The deliberate half of isolation, reached from the
+    /// worktree control. It uses the same provisioning path as the automatic
+    /// case — no workspace tab, no name prompt, no branch question. A session
+    /// whose working directory was fixed when it started refuses the retarget
+    /// with the reason `retarget_work_dirs` already gives; that reason is
+    /// logged rather than raised, because the control is drawn beside a
+    /// tooltip that already says so.
+    pub(crate) fn move_active_thread_to_new_worktree(&mut self, cx: &mut Context<Self>) {
+        let Some(conversation_view) = self.active_conversation_view() else {
+            return;
+        };
+        let project = self.project.clone();
+        if !crate::omega_thread_worktree::can_isolate(&project, cx) {
+            log::warn!("this project has no git repository to create a worktree in");
+            return;
+        }
+        let title = conversation_view.read(cx).title(cx);
+        let name_hint = crate::omega_thread_worktree::worktree_name_for_thread(Some(&title));
+        let provisioning = crate::omega_thread_worktree::provision(project, name_hint, cx);
+        let conversation_view = conversation_view.downgrade();
+        cx.spawn(async move |_this, cx| {
+            let work_dirs = provisioning.await?;
+            conversation_view.update(cx, |conversation_view, cx| {
+                conversation_view.retarget_work_dirs(work_dirs, cx)
+            })?
+        })
+        .detach_and_log_err(cx);
+    }
+
+    /// Gives a new thread its own worktree when the root it opened against is
+    /// already held by a live agent.
+    ///
+    /// `OMEGA-DELTA-0214`. This is the whole of "isolate, don't ask": the
+    /// question the collision modal used to put to a person is answered here,
+    /// from the `agent.thread_worktree` setting, before the session exists.
+    /// The decision is synchronous; the `git worktree add` behind it is not,
+    /// so the thread opens immediately and its session load waits on the
+    /// provisioning task. Provisioning that fails resolves to `None` and the
+    /// thread simply runs where it was going to run — with the send path
+    /// disclosing the shared checkout — because a failed `git worktree add`
+    /// must not cost somebody their new thread.
+    fn isolate_new_thread_if_occupied(
+        &self,
+        thread_id: ThreadId,
+        conversation_view: &Entity<crate::ConversationView>,
+        cx: &mut Context<Self>,
+    ) {
+        let work_dirs = conversation_view.read(cx).work_dirs().clone();
+        // A brand-new thread has no session id yet, so its own `ThreadId` is
+        // the key. Nothing else can be bound under it, which is exactly what
+        // "does anybody else hold this root" needs.
+        let thread_key = thread_id.to_key_string();
+        let project = self.project.clone();
+        let resolution = crate::omega_thread_worktree::resolve(
+            &thread_key,
+            work_dirs.ordered_paths().cloned(),
+            Some(&project),
+            cx,
+        );
+        if resolution.collision().is_none()
+            || !crate::omega_thread_worktree::can_isolate(&project, cx)
+        {
+            return;
+        }
+
+        // The thread is still called "New Agent Thread" here — its title comes
+        // from the first message — so this hint is almost always `None` and the
+        // adjective-noun generator names the worktree. Nobody is asked.
+        let title = conversation_view.read(cx).title(cx);
+        let name_hint = crate::omega_thread_worktree::worktree_name_for_thread(Some(&title));
+        let provisioning = crate::omega_thread_worktree::provision(project, name_hint, cx);
+        let task = cx
+            .background_spawn(async move {
+                match provisioning.await {
+                    Ok(paths) => Some(paths),
+                    Err(error) => {
+                        log::warn!(
+                            "could not isolate this thread into its own worktree: {error:#}"
+                        );
+                        None
+                    }
+                }
+            })
+            .shared();
+        conversation_view.update(cx, |conversation_view, _cx| {
+            conversation_view.set_pending_work_dirs(task);
+        });
+    }
+
     fn update_thread_work_dirs(&self, cx: &mut Context<Self>) {
         let default_work_dirs = self.project.read(cx).default_path_list(cx);
 
@@ -7918,6 +8009,7 @@ impl AgentPanel {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> AgentThread {
+        let is_new_thread = resume_thread_id.is_none() && resume_session_id.is_none();
         let thread_id = resume_thread_id.unwrap_or_else(ThreadId::new);
         let workspace = self.workspace.clone();
         let project = self.project.clone();
@@ -7978,6 +8070,15 @@ impl AgentPanel {
         // Try installing the host eagerly as well, in case the connection is
         // already established by the time the observe fires.
         self.ensure_sibling_host_installed(&conversation_view, window, cx);
+
+        // `OMEGA-DELTA-0214`. Isolate, don't ask. A brand-new thread whose
+        // root is already held by a live agent gets a worktree of its own,
+        // decided here because the session has not started yet and an
+        // external agent's working directory cannot be moved once it has.
+        // A resumed thread keeps the roots it was recorded with.
+        if is_new_thread {
+            self.isolate_new_thread_if_occupied(thread_id, &conversation_view, cx);
+        }
 
         if let Some(model) = model_override {
             // The native thread is constructed asynchronously after the
@@ -9969,7 +10070,8 @@ impl AgentPanel {
         let source_binding_generation = visible.generation;
         let menu_builder =
             |candidates: Vec<ThreadIdentityCandidate>,
-             selector_for: fn(&omega_workbench_state::RepositoryBinding) -> String| {
+             selector_for: fn(&omega_workbench_state::RepositoryBinding) -> String,
+             offer_new_worktree: bool| {
                 let panel = panel.clone();
                 let selected_binding = selected_binding.clone();
                 let source_thread_id = source_thread_id.clone();
@@ -10017,21 +10119,49 @@ impl AgentPanel {
                                         }),
                                 );
                             }
+                            // `OMEGA-DELTA-0214`. Isolation is automatic when
+                            // a root is occupied; this is how a person asks
+                            // for it deliberately, on a thread that is running
+                            // where it was told to. A control, not a dialog:
+                            // no name to invent, no branch to pick, no
+                            // confirmation to clear.
+                            if offer_new_worktree {
+                                menu = menu.separator().item(
+                                    ContextMenuEntry::new("New worktree")
+                                        .debug_selector(
+                                            "omega.workbench.control.worktree.new".to_string(),
+                                        )
+                                        .icon(IconName::Plus)
+                                        .handler(move |_window, cx| {
+                                            panel
+                                                .update(cx, |panel, cx| {
+                                                    panel.move_active_thread_to_new_worktree(cx);
+                                                })
+                                                .log_err();
+                                        }),
+                                );
+                            }
                             menu
                         },
                     ))
                 })
                     as Rc<dyn Fn(&mut Window, &mut App) -> Option<Entity<ContextMenu>> + 'static>
             };
-        let repository_menu_builder = menu_builder(repository_candidates, |binding| {
-            format!(
-                "omega.workbench.control.repository.{}",
-                binding.repository_id
-            )
-        });
-        let worktree_menu_builder = menu_builder(worktree_candidates, |binding| {
-            format!("omega.workbench.control.worktree.{}", binding.worktree_id)
-        });
+        let repository_menu_builder = menu_builder(
+            repository_candidates,
+            |binding| {
+                format!(
+                    "omega.workbench.control.repository.{}",
+                    binding.repository_id
+                )
+            },
+            false,
+        );
+        let worktree_menu_builder = menu_builder(
+            worktree_candidates,
+            |binding| format!("omega.workbench.control.worktree.{}", binding.worktree_id),
+            true,
+        );
 
         let full_identity = selected.accessible_label();
         let target_selection_unavailable_reason =
@@ -16831,7 +16961,7 @@ mod tests {
         let session_id = active_session_id(panel, cx);
         let thread_id = active_thread_id(panel, cx);
         send_message(panel, cx);
-        run_here_anyway_if_worktree_collision(cx);
+        assert_no_worktree_collision_prompt(cx);
         cx.update(|_, cx| {
             connection.send_update(
                 session_id.clone(),
@@ -16843,12 +16973,16 @@ mod tests {
         (session_id, thread_id)
     }
 
-    fn run_here_anyway_if_worktree_collision(cx: &mut VisualTestContext) {
-        let Some((title, _)) = cx.pending_prompt() else {
-            return;
-        };
-        assert_eq!(title, "Another agent is already using this worktree");
-        cx.simulate_prompt_answer("Run here anyway");
+    /// `OMEGA-DELTA-0214`. What used to answer the collision modal now asserts
+    /// there is no modal to answer. Sending into an occupied worktree is a
+    /// silent resolution — isolated where Omega can, disclosed on the thread
+    /// where it cannot — so any pending prompt at this point is a regression
+    /// back to the behavior the owner rejected.
+    fn assert_no_worktree_collision_prompt(cx: &mut VisualTestContext) {
+        assert!(
+            cx.pending_prompt().is_none(),
+            "OMEGA-DELTA-0214: sending must never raise a worktree collision prompt"
+        );
         cx.run_until_parked();
     }
 
@@ -20727,7 +20861,7 @@ mod tests {
         let connection_b = StubAgentConnection::new();
         open_thread_with_connection(&panel, connection_b, &mut cx);
         send_message(&panel, &mut cx);
-        run_here_anyway_if_worktree_collision(&mut cx);
+        assert_no_worktree_collision_prompt(&mut cx);
 
         let thread_id_b = active_thread_id(&panel, &cx);
 
@@ -21276,14 +21410,14 @@ mod tests {
         )]);
         open_thread_with_custom_connection(&panel, connection_c.clone(), &mut cx);
         send_message(&panel, &mut cx);
-        run_here_anyway_if_worktree_collision(&mut cx);
+        assert_no_worktree_collision_prompt(&mut cx);
         let thread_id_c = active_thread_id(&panel, &cx);
 
         // Open thread B — thread C (idle, non-loadable) is retained in background.
         let connection_b = StubAgentConnection::new().with_agent_id("agent-b".into());
         open_thread_with_custom_connection(&panel, connection_b.clone(), &mut cx);
         send_message(&panel, &mut cx);
-        run_here_anyway_if_worktree_collision(&mut cx);
+        assert_no_worktree_collision_prompt(&mut cx);
         let session_id_b = active_session_id(&panel, &cx);
         let _thread_id_b = active_thread_id(&panel, &cx);
 

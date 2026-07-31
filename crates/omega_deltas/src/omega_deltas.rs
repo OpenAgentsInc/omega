@@ -202,6 +202,7 @@ pub const ENFORCED_DELTAS: &[&str] = &[
     "OMEGA-DELTA-0211",
     "OMEGA-DELTA-0212",
     "OMEGA-DELTA-0213",
+    "OMEGA-DELTA-0214",
 ];
 
 /// OMEGA-DELTA-0204. Every control the composer's bar offers, written twice:
@@ -259,6 +260,18 @@ pub const HANG_TRACE_WRITER_PATH: &str =
     "crates/omega/src/reliability/hang_detection/task_traces.rs";
 /// OMEGA-DELTA-0210. gpui's task-timing trace switch and its bounded window.
 pub const GPUI_PROFILER_PATH: &str = "crates/gpui/src/profiler.rs";
+/// OMEGA-DELTA-0214. Where the isolate-don't-ask decision lives.
+pub const OMEGA_THREAD_WORKTREE_PATH: &str = "crates/agent_ui/src/omega_thread_worktree.rs";
+/// OMEGA-DELTA-0214. Where the worktree primitives are reused without the
+/// workspace tab `create_worktree_workspace` always opens.
+pub const WORKTREE_SERVICE_PATH: &str = "crates/git_ui/src/worktree_service.rs";
+/// OMEGA-DELTA-0214. Where the isolation decision is made, before the session
+/// exists.
+pub const AGENT_PANEL_ISOLATION_PATH: &str = "crates/agent_ui/src/agent_panel.rs";
+/// OMEGA-DELTA-0214. Where a thread's bound roots and lifecycle are kept, and
+/// therefore where occupancy can be answered between turns.
+pub const AGENT_SUPERVISION_PATH: &str = "crates/agent_ui/src/omega_agent_supervision.rs";
+
 /// OMEGA-DELTA-0202. Where the executor disclosure record is built from a live
 /// thread, and therefore where a label stops being able to disagree with it.
 pub const OMEGA_EXECUTOR_DISCLOSURE_PATH: &str = "crates/agent_ui/src/omega_executor_disclosure.rs";
@@ -23184,8 +23197,13 @@ mod tests {
     }
 
     /// OMEGA-DELTA-0181. Direct agent turns expose a durable lifecycle, keep
-    /// queued input durable, and require an explicit choice before two writers
-    /// share a worktree.
+    /// queued input durable, and keep two writers out of one worktree.
+    ///
+    /// Amended 2026-07-31 by `OMEGA-DELTA-0214`. The safety property is
+    /// isolation of concurrent writers; the modal was only its first
+    /// mechanism. The assertions that pinned the prompt copy now pin its
+    /// absence, and the isolation that replaced it is asserted by
+    /// `a_new_thread_isolates_instead_of_asking`.
     #[test]
     fn concurrent_agent_supervision_is_visible_durable_and_guarded() {
         let supervision = read_repository_file("crates/agent_ui/src/omega_agent_supervision.rs");
@@ -23208,9 +23226,6 @@ mod tests {
         let thread_view = read_repository_file(ZERO_BASE_THREAD_VIEW_PATH);
         for required in [
             "fn request_worktree_admission",
-            "Another agent is already using this worktree",
-            "Run here anyway",
-            "WorktreeAdmission::Cancelled",
             "dispatch_queued_candidate",
             "promote_for_dispatch",
         ] {
@@ -23219,11 +23234,23 @@ mod tests {
                 "OMEGA-DELTA-0181: guarded dispatch lost `{required}`"
             );
         }
-        assert!(
-            thread_view.contains("&[\"Cancel\", \"Run here anyway\"]")
-                && thread_view.contains("if answer != 1"),
-            "OMEGA-DELTA-0181: the collision prompt must default to Cancel and require the explicit override answer"
-        );
+        // The guard still runs; it just no longer stops anybody. These are the
+        // exact strings this test used to require, kept as the record of what
+        // `OMEGA-DELTA-0214` removed, so a rebase cannot reintroduce the modal
+        // without failing here.
+        for forbidden in [
+            "Another agent is already using this worktree",
+            "Run here anyway",
+            "WorktreeAdmission::Cancelled",
+            "&[\"Cancel\", \"Run here anyway\"]",
+            "if answer != 1",
+        ] {
+            assert!(
+                !thread_view.contains(forbidden),
+                "OMEGA-DELTA-0181, amended by OMEGA-DELTA-0214: the collision prompt is gone; \
+                 `{forbidden}` is back"
+            );
+        }
         assert!(
             thread_view.contains("let reaches_running_turn = entry.disposition()")
                 && thread_view.contains("let cancelled = if reaches_running_turn"),
@@ -23260,7 +23287,11 @@ mod tests {
         assert!(metadata.contains("lifecycle.durable_terminal().token()"));
 
         let docs = read_repository_file("docs/src/ai/parallel-agents.md");
-        assert!(docs.contains("Run here anyway"));
+        assert!(
+            !docs.contains("Run here anyway"),
+            "OMEGA-DELTA-0181, amended by OMEGA-DELTA-0214: the docs still offer the deleted \
+             override button"
+        );
         assert!(docs.contains("Waiting for you"));
     }
 
@@ -26415,6 +26446,215 @@ mod tests {
                  window, an always-on trace grows to `MAX_TASK_TIMINGS` on every \
                  thread.",
                 profiler_path.display()
+            );
+        }
+    }
+
+    /// OMEGA-DELTA-0214. A new thread whose root is occupied gets a worktree of
+    /// its own, silently. It does not get a dialog.
+    ///
+    /// The owner, shown the collision modal after pressing New Thread: *"i
+    /// never want to see that shit. figure out better workflow."* The guard
+    /// that raised it was protecting something real — two writers in one
+    /// checkout do clobber each other — so this delta keeps the protection and
+    /// deletes the interruption. What follows asserts, in order: the setting
+    /// exists and defaults to isolation; occupancy is answerable before a turn
+    /// claim exists; the decision is made at thread creation, where it can
+    /// still bind an external agent's cwd; provisioning reuses the worktree
+    /// stack without opening a workspace tab; and no path from pressing New
+    /// Thread to sending raises a prompt.
+    #[test]
+    fn a_new_thread_isolates_instead_of_asking() {
+        // 1. The decision is a setting, made once, not a question per turn.
+        let schema = read_repository_file("crates/settings_content/src/agent.rs");
+        for required in [
+            "pub enum ThreadWorktreeMode",
+            "    Isolate,",
+            "    Shared,",
+            "pub thread_worktree: Option<ThreadWorktreeMode>",
+        ] {
+            assert!(
+                schema.contains(required),
+                "OMEGA-DELTA-0214: the thread-worktree setting lost `{required}`. Without it \
+                 there is nowhere to record the explicit concurrent-writer decision that \
+                 OMEGA-DELTA-0181 requires, and the modal is the only place left to ask."
+            );
+        }
+        assert!(
+            schema.contains("#[default]\n    Isolate,"),
+            "OMEGA-DELTA-0214: isolation is the default. A default of `shared` would put every \
+             collision back in front of a person."
+        );
+        let defaults = read_repository_file(DEFAULT_SETTINGS_PATH);
+        assert!(
+            defaults.contains("\"thread_worktree\": \"isolate\""),
+            "OMEGA-DELTA-0214: {DEFAULT_SETTINGS_PATH} no longer ships `thread_worktree` as \
+             `isolate`."
+        );
+
+        // 2. Occupancy is knowable between turns. OMEGA-DELTA-0181's claim is
+        //    turn-scoped, so it cannot answer the question at thread creation —
+        //    which is the only moment the answer can still move an external
+        //    agent's working directory.
+        let supervision = read_repository_file(AGENT_SUPERVISION_PATH);
+        for required in [
+            "pub fn bind_roots",
+            "pub fn occupant_for",
+            "fn scopes_for",
+            "bindings: HashMap<String, Vec<WorktreeScope>>",
+            "!snapshot.lifecycle.is_terminal()",
+        ] {
+            assert!(
+                supervision.contains(required),
+                "OMEGA-DELTA-0214: {AGENT_SUPERVISION_PATH} lost `{required}`"
+            );
+        }
+        let occupant_for = function_body(&supervision, "occupant_for")
+            .expect("OMEGA-DELTA-0214: `occupant_for` was removed");
+        assert!(
+            occupant_for.contains("scope.overlaps(occupied)"),
+            "OMEGA-DELTA-0214: occupancy must reuse `WorktreeScope::overlaps`. A second \
+             path-overlap rule is a second answer to the same question, and the two will drift."
+        );
+
+        // 3. The decision is made at thread creation. `retarget_work_dirs`
+        //    refuses unless `supports_live_work_dir_updates()`, which is false
+        //    for every external ACP agent, so deciding at send time would
+        //    isolate only the native agent.
+        let panel = read_repository_file(AGENT_PANEL_ISOLATION_PATH);
+        for required in [
+            "fn isolate_new_thread_if_occupied",
+            "fn move_active_thread_to_new_worktree",
+            "set_pending_work_dirs",
+            "New worktree",
+        ] {
+            assert!(
+                panel.contains(required),
+                "OMEGA-DELTA-0214: {AGENT_PANEL_ISOLATION_PATH} lost `{required}`"
+            );
+        }
+        let create_thread = function_body(&panel, "create_agent_thread_inner")
+            .expect("OMEGA-DELTA-0214: `create_agent_thread_inner` was removed");
+        assert!(
+            create_thread.contains("isolate_new_thread_if_occupied"),
+            "OMEGA-DELTA-0214: isolation must be decided in `create_agent_thread_inner`, before \
+             `new_session` fixes an external agent's working directory for the life of the \
+             session."
+        );
+        let conversation_view = read_repository_file("crates/agent_ui/src/conversation_view.rs");
+        for required in [
+            "pending_work_dirs: Option<Shared<Task<Option<PathList>>>>",
+            "pub fn set_pending_work_dirs",
+            "supervision.bind_roots(",
+        ] {
+            assert!(
+                conversation_view.contains(required),
+                "OMEGA-DELTA-0214: crates/agent_ui/src/conversation_view.rs lost `{required}`"
+            );
+        }
+
+        // 4. Provisioning reuses the worktree stack, minus the workspace tab.
+        //    `create_worktree_workspace` always ends in `open_worktree_workspace`,
+        //    which is right when a person asked for a worktree and wrong when
+        //    Omega is quietly correcting a collision.
+        let service = read_repository_file(WORKTREE_SERVICE_PATH);
+        assert!(
+            service.contains("pub async fn create_linked_worktrees"),
+            "OMEGA-DELTA-0214: {WORKTREE_SERVICE_PATH} lost `create_linked_worktrees`"
+        );
+        let create_linked = function_body(&service, "create_linked_worktrees")
+            .expect("OMEGA-DELTA-0214: `create_linked_worktrees` was removed");
+        for required in [
+            "start_worktree_creations",
+            "await_and_rollback_on_failure",
+            "record_created_worktree_for_repo",
+        ] {
+            assert!(
+                create_linked.contains(required),
+                "OMEGA-DELTA-0214: auto-isolation must reuse `{required}` rather than growing a \
+                 second worktree implementation"
+            );
+        }
+        assert!(
+            !create_linked.contains("open_worktree_workspace"),
+            "OMEGA-DELTA-0214: auto-isolation must not open a workspace tab. Isolation is a \
+             quiet correction, not a navigation."
+        );
+        let isolation = read_repository_file(OMEGA_THREAD_WORKTREE_PATH);
+        for required in [
+            "pub fn resolve",
+            "pub fn provision",
+            "pub fn worktree_name_for_thread",
+            "ThreadWorktreeMode::Shared",
+            "create_linked_worktrees",
+        ] {
+            assert!(
+                isolation.contains(required),
+                "OMEGA-DELTA-0214: {OMEGA_THREAD_WORKTREE_PATH} lost `{required}`"
+            );
+        }
+        assert!(
+            !isolation.contains("window.prompt") && !isolation.contains("PromptLevel"),
+            "OMEGA-DELTA-0214: the isolation path must never raise a prompt. Naming a worktree \
+             is Omega's job; `generate_worktree_name` is the fallback, not a person."
+        );
+
+        // 5. The whole start path is prompt-free. This is the assertion the
+        //    owner's complaint reduces to.
+        let thread_view = read_repository_file(ZERO_BASE_THREAD_VIEW_PATH);
+        let admission = function_body(&thread_view, "request_worktree_admission")
+            .expect("OMEGA-DELTA-0214: `request_worktree_admission` was removed");
+        assert!(
+            !admission.contains("window.prompt"),
+            "OMEGA-DELTA-0214: worktree admission raised a prompt again. The guard's job is to \
+             keep two writers out of one tree, and it does that by isolating the turn — not by \
+             stopping the person to re-ask a question they answered in settings."
+        );
+        for required in [
+            "omega_thread_worktree::provision",
+            "disclose_shared_worktree",
+            "supports_live_work_dir_updates",
+        ] {
+            assert!(
+                admission.contains(required),
+                "OMEGA-DELTA-0214: worktree admission lost `{required}`. Isolate where the \
+                 session can still be moved, disclose where it cannot, prompt nowhere."
+            );
+        }
+        assert!(
+            thread_view.contains("fn render_shared_worktree_disclosure"),
+            "OMEGA-DELTA-0214: the non-blocking disclosure that replaced the modal is gone. \
+             Removing it would make a shared checkout silent, which is the upstream behavior \
+             OMEGA-DELTA-0181 exists to refuse."
+        );
+        assert!(
+            panel.contains("fn assert_no_worktree_collision_prompt")
+                && !panel.contains("fn run_here_anyway_if_worktree_collision"),
+            "OMEGA-DELTA-0214: the Agent Panel suite must assert the prompt's absence, not \
+             answer it"
+        );
+
+        // 6. The docs and the release gate describe the resolution, not the
+        //    dialog.
+        let docs = read_repository_file("docs/src/ai/parallel-agents.md");
+        assert!(
+            docs.contains("Omega gives the new thread its own linked worktree"),
+            "OMEGA-DELTA-0214: docs/src/ai/parallel-agents.md no longer documents isolation"
+        );
+        let panel_docs = read_repository_file("docs/src/ai/agent-panel.md");
+        assert!(
+            !panel_docs.contains("Run here anyway"),
+            "OMEGA-DELTA-0214: docs/src/ai/agent-panel.md still offers the deleted override"
+        );
+        for path in ["script/omega-release-gate", "docs/omega/release-gate.md"] {
+            let gate = read_repository_file(path);
+            assert!(
+                gate.contains("concurrency-supervision"),
+                "OMEGA-DELTA-0185: {path} lost the `concurrency-supervision` row"
+            );
+            assert!(
+                !gate.contains("the collision rule fires visibly"),
+                "OMEGA-DELTA-0214: {path} still asks an operator to confirm the deleted modal"
             );
         }
     }
