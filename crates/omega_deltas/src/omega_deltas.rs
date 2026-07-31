@@ -192,6 +192,39 @@ pub const ENFORCED_DELTAS: &[&str] = &[
     "OMEGA-DELTA-0201",
     "OMEGA-DELTA-0202",
     "OMEGA-DELTA-0203",
+    "OMEGA-DELTA-0204",
+];
+
+/// OMEGA-DELTA-0204. Every control the composer's bar offers, written twice:
+/// what draws it before a session exists, and what draws it after.
+///
+/// The pair is the point. A person meets the pre-session composer first, on the
+/// thread whose first message is the one most likely to be long, and it used to
+/// carry two of these four while the connected bar carried all four. Naming
+/// both sides is what lets a check say which bar lost a control rather than
+/// only that the file changed.
+///
+/// This is a source-text check and it knows what it is: it fails when a listed
+/// control disappears from a bar, not when an unlisted control is added to only
+/// one of them. Adding a control to this list is part of adding a control to
+/// the composer.
+pub const SHARED_COMPOSER_CONTROLS: &[(&str, &str, &str)] = &[
+    (
+        "the executor dropdown",
+        "render_composer_executor_menu(",
+        "render_composer_executor_menu(",
+    ),
+    (
+        "the Luna/Flash/Pro tier dropdown",
+        "render_pre_session_model_tier_selector(",
+        "render_model_tier_selector(",
+    ),
+    (
+        "the microphone",
+        "render_composer_voice_controls(",
+        "render_voice_controls(",
+    ),
+    ("Send", "IconName::Send", "render_send_button("),
 ];
 
 /// The concise product contract adjacent to the delta registry.
@@ -22740,9 +22773,12 @@ mod tests {
             );
         }
 
-        let thread_view =
-            read_repository_file("crates/agent_ui/src/conversation_view/thread_view.rs");
-        let voice_controls = function_body(&thread_view, "render_voice_controls")
+        // `OMEGA-DELTA-0204` moved this body out of `ThreadView` and into
+        // `composer_voice.rs` so both composers could draw the same control.
+        // The policy is unchanged and so is this assertion: the only door the
+        // microphone opens is the bounded admission flow.
+        let composer_voice = read_repository_file("crates/agent_ui/src/composer_voice.rs");
+        let voice_controls = function_body(&composer_voice, "render_composer_voice_controls")
             .expect("OMEGA-DELTA-0180: composer voice controls were removed");
         assert!(voice_controls.contains("OpenSarahAdmission"));
         assert!(!voice_controls.contains("StartVoice"));
@@ -25440,5 +25476,84 @@ mod tests {
                 repository_path(script).display()
             );
         }
+    }
+
+    /// OMEGA-DELTA-0204. The composer offers the same controls before a session
+    /// exists as it does after one does.
+    #[test]
+    fn the_composer_offers_the_same_controls_before_and_after_the_session() {
+        let conversation = read_repository_file(CONVERSATION_VIEW_PATH);
+        let thread_view = read_repository_file(ZERO_BASE_THREAD_VIEW_PATH);
+
+        let pre_session = body_of(&conversation, "render_loading_composer");
+        let connected = body_of(&thread_view, "render_zero_base_executor_bar");
+
+        for (control, pre_session_marker, connected_marker) in SHARED_COMPOSER_CONTROLS {
+            assert!(
+                connected.contains(connected_marker),
+                "OMEGA-DELTA-0204: `render_zero_base_executor_bar` in {} lost \
+                 {control} (`{connected_marker}`). Both bars are supposed to \
+                 offer it; if this one genuinely should not, that is a policy \
+                 change and belongs in the delta, not in a silent removal.",
+                repository_path(ZERO_BASE_THREAD_VIEW_PATH).display()
+            );
+            assert!(
+                pre_session.contains(pre_session_marker),
+                "OMEGA-DELTA-0204: `render_loading_composer` in {} lost \
+                 {control} (`{pre_session_marker}`), which the connected bar \
+                 still offers. This is the reported defect exactly: a new \
+                 thread's composer with fewer controls than the same composer \
+                 one message later, every one of them returning as soon as a \
+                 session existed.",
+                repository_path(CONVERSATION_VIEW_PATH).display()
+            );
+        }
+
+        // The expand control is on the field rather than the bar, so it is
+        // paired against the function that draws the field.
+        let connected_field = body_of(&thread_view, "render_message_editor");
+        for (source, path, body) in [
+            (
+                "render_message_editor",
+                ZERO_BASE_THREAD_VIEW_PATH,
+                connected_field,
+            ),
+            (
+                "render_loading_composer",
+                CONVERSATION_VIEW_PATH,
+                pre_session,
+            ),
+        ] {
+            assert!(
+                body.contains("\"toggle-height\""),
+                "OMEGA-DELTA-0204: `{source}` in {} lost the expand control. \
+                 The first message in a thread is the one most likely to be \
+                 long, because it is the one that states the task, so the \
+                 pre-session field is the last one that should be missing it.",
+                repository_path(path).display()
+            );
+        }
+
+        let voice = read_repository_file("crates/agent_ui/src/composer_voice.rs");
+        assert!(
+            voice.contains("pub fn render_composer_voice_controls("),
+            "OMEGA-DELTA-0204: {} no longer holds the shared voice control. \
+             While it lived as a private method on `ThreadView`, the composer \
+             a person meets first could not draw a microphone at all — not \
+             because voice was unavailable, but because the code that draws it \
+             was out of reach.",
+            repository_path("crates/agent_ui/src/composer_voice.rs").display()
+        );
+
+        let tier = read_repository_file(OMEGA_MODEL_TIER_PATH);
+        assert!(
+            tier.contains("pub fn select_before_session(")
+                && body_of(&tier, "select_before_session").contains("set_model("),
+            "OMEGA-DELTA-0204: {} no longer writes the settings default when a \
+             tier is chosen before the session exists. That control then moves \
+             its own label and nothing else, which is OMEGA-DELTA-0202's defect \
+             reintroduced one composer earlier.",
+            repository_path(OMEGA_MODEL_TIER_PATH).display()
+        );
     }
 }

@@ -1,6 +1,7 @@
 use std::collections::HashMap;
 
-use gpui::{App, AppContext as _, Entity, EntityId, Global, SharedString};
+use gpui::{Action as _, AnyElement, App, AppContext as _, Entity, EntityId, Global, SharedString};
+use ui::{TintColor, Tooltip, prelude::*};
 
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
 pub enum ComposerVoicePhase {
@@ -367,6 +368,110 @@ pub fn remove_sarah_voice_admission(workspace_id: EntityId, cx: &mut App) {
     cx.default_global::<GlobalSarahVoiceAdmission>()
         .0
         .remove(&workspace_id);
+}
+
+/// The composer's voice controls, for every composer.
+///
+/// `OMEGA-DELTA-0204`. This lived as a private method on `ThreadView`, so the
+/// pre-session composer — the one a person meets first, on a brand new thread —
+/// could not render it and did not. Voice is a property of the workspace's
+/// Sarah session, not of an ACP session, so nothing about a thread that has not
+/// connected yet makes the microphone unavailable; it was missing only because
+/// the code that draws it was out of reach.
+pub fn render_composer_voice_controls(workspace_id: EntityId, cx: &mut App) -> AnyElement {
+    use crate::OpenSarahAdmission;
+    use omega_actions::workroom::{EndVoice, ToggleVoiceMute};
+
+    let status = composer_voice_status(workspace_id, cx).read(cx).clone();
+    let phase = status.phase;
+    let detail = status.detail.clone();
+    let label = if status.muted {
+        "Microphone muted"
+    } else {
+        phase.label()
+    };
+    let label_color = match phase {
+        ComposerVoicePhase::AccessRequired
+        | ComposerVoicePhase::Error
+        | ComposerVoicePhase::Reconnecting => Color::Error,
+        phase if phase.is_active() || phase.is_starting() => Color::Accent,
+        _ => Color::Muted,
+    };
+    let primary_icon = if status.muted {
+        IconName::MicMute
+    } else {
+        IconName::Mic
+    };
+
+    h_flex()
+        .id("agent-composer-voice-controls")
+        .debug_selector(|| "agent.composer.voice-controls".into())
+        .gap_0p5()
+        .when(
+            phase.is_active()
+                || phase.is_starting()
+                || matches!(
+                    phase,
+                    ComposerVoicePhase::Ending
+                        | ComposerVoicePhase::AccessRequired
+                        | ComposerVoicePhase::Error
+                ),
+            |this| this.child(Label::new(label).size(LabelSize::XSmall).color(label_color)),
+        )
+        .child(
+            IconButton::new("agent-composer-voice", primary_icon)
+                .debug_selector(|| "agent.composer.voice".into())
+                .icon_size(IconSize::Small)
+                .icon_color(label_color)
+                .style(if phase.is_active() {
+                    ButtonStyle::Tinted(TintColor::Accent)
+                } else {
+                    ButtonStyle::Subtle
+                })
+                .toggle_state(phase.is_active() && !status.muted)
+                .disabled(matches!(
+                    phase,
+                    ComposerVoicePhase::Authenticating | ComposerVoicePhase::Ending
+                ))
+                .aria_label(label)
+                .aria_description(detail.clone())
+                .tooltip(move |_, cx| Tooltip::with_meta(label, None, detail.clone(), cx))
+                .on_click(move |_, window, cx| match phase {
+                    ComposerVoicePhase::Idle
+                    | ComposerVoicePhase::Unavailable
+                    | ComposerVoicePhase::AccessRequired
+                    | ComposerVoicePhase::Error
+                    | ComposerVoicePhase::Reconnecting => {
+                        window.dispatch_action(OpenSarahAdmission.boxed_clone(), cx)
+                    }
+                    phase if phase.is_active() => {
+                        window.dispatch_action(ToggleVoiceMute.boxed_clone(), cx)
+                    }
+                    _ => {}
+                }),
+        )
+        .when(
+            phase.is_active()
+                || phase.is_starting()
+                || matches!(
+                    phase,
+                    ComposerVoicePhase::AccessRequired | ComposerVoicePhase::Error
+                ),
+            |this| {
+                this.child(
+                    IconButton::new("agent-composer-end-voice", IconName::Stop)
+                        .debug_selector(|| "agent.composer.end-voice".into())
+                        .icon_size(IconSize::Small)
+                        .icon_color(Color::Error)
+                        .aria_label("End voice")
+                        .tooltip(Tooltip::text("End Sarah voice"))
+                        .on_click(|_, window, cx| {
+                            window.dispatch_action(EndVoice.boxed_clone(), cx);
+                        }),
+                )
+            },
+        )
+        .into_any_element()
 }
 
 #[cfg(test)]

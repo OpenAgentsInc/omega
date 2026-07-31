@@ -140,6 +140,71 @@ pub fn select(tier: ModelTier) {
         .expect("the model tier selection is never held across a panic") = tier;
 }
 
+/// Choose a tier for a conversation whose session does not exist yet.
+///
+/// `OMEGA-DELTA-0204`. The connected composer's control reaches the running
+/// session through its model selector, which also writes `agent.default_model`.
+/// The pre-session composer has neither, and a control that moved a label
+/// without moving the model would be the exact disagreement `OMEGA-DELTA-0202`
+/// forbids. So this writes the one thing a session that does not exist yet
+/// actually reads: the settings default the registry hands every new thread.
+///
+/// The thinking, effort, and speed fields come from the same
+/// [`agent_settings::language_model_to_selection`] the connected path uses,
+/// when the provider is authenticated and the model is therefore knowable. When
+/// it is not, the pair is still written — a person who picks Pro before their
+/// provider finishes loading gets Pro — with the conservative defaults the
+/// model's own capabilities would otherwise supply.
+pub fn select_before_session(tier: ModelTier, fs: std::sync::Arc<dyn fs::Fs>, cx: &mut App) {
+    use agent_settings::{AgentSettings, language_model_to_selection};
+    use language_model::{LanguageModelId, LanguageModelProviderId, LanguageModelRegistry};
+    use settings::{LanguageModelSelection, Settings as _, update_settings_file};
+
+    select(tier);
+
+    let provider_id = LanguageModelProviderId::from(tier.provider_id().to_owned());
+    let model_id = LanguageModelId::from(tier.model_id().to_owned());
+    // `try_global`, not `read_global`: a tier choice is not worth panicking
+    // over, and a process without a registry — a test harness, or a window
+    // drawn before the providers install — must still write the pair.
+    let model = LanguageModelRegistry::try_global(cx)
+        .and_then(|registry| registry.read(cx).provider(&provider_id))
+        .and_then(|provider| {
+            provider
+                .provided_models(cx)
+                .iter()
+                .find(|model| model.id() == model_id)
+                .cloned()
+        });
+
+    let favorite = AgentSettings::get_global(cx)
+        .favorite_models
+        .iter()
+        .find(|favorite| {
+            favorite.provider.0 == tier.provider_id() && favorite.model == tier.model_id()
+        })
+        .cloned();
+
+    let selection = match model {
+        Some(model) => language_model_to_selection(&model, favorite.as_ref()),
+        None => LanguageModelSelection {
+            provider: tier.provider_id().to_owned().into(),
+            model: tier.model_id().to_owned(),
+            ..favorite.unwrap_or_else(|| LanguageModelSelection {
+                provider: tier.provider_id().to_owned().into(),
+                model: tier.model_id().to_owned(),
+                enable_thinking: false,
+                effort: None,
+                speed: None,
+            })
+        },
+    };
+
+    update_settings_file(fs, cx, move |settings, _cx| {
+        settings.agent.get_or_insert_default().set_model(selection);
+    });
+}
+
 /// Test-only reset to Luna.
 #[cfg(any(test, feature = "test-support"))]
 pub fn clear_selection_for_test() {

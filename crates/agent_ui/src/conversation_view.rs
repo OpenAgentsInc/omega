@@ -722,6 +722,15 @@ pub struct ConversationView {
     /// `OMEGA-DELTA-0122`. Handed to the real composer the moment one exists —
     /// see [`ConversationView::hand_loading_draft_over`] — and dropped there.
     loading_composer: Option<Entity<Editor>>,
+    /// Whether the pre-session composer is expanded to most of the window.
+    ///
+    /// `OMEGA-DELTA-0204`. `ThreadView` keeps the same bit as `editor_expanded`.
+    /// It lives here as well rather than being shared because the two composers
+    /// are different editors with different lifetimes — the expanded state does
+    /// not survive the handover any more than the caret position does — and
+    /// because a person who expands the pre-session field wants that field
+    /// bigger, not a preference recorded for the thread that replaces it.
+    loading_composer_expanded: bool,
     /// One readout shared by the loading composer and every connected thread.
     /// It follows whichever Vim editor in this window most recently focused.
     vim_mode_indicator: Entity<vim::ModeIndicator>,
@@ -1434,6 +1443,7 @@ impl ConversationView {
             auth_task: None,
             loading_status: None,
             loading_composer: None,
+            loading_composer_expanded: false,
             vim_mode_indicator,
             pending_executor_rebuild: None,
             deferred_omega_session: None,
@@ -4184,6 +4194,30 @@ impl ConversationView {
     /// `ExecutorOverride::Auto` and the durable receipt records the decision.
     /// A person who wants one exact executor picks it in the executor
     /// dropdown (`OMEGA-DELTA-0184`).
+    ///
+    /// # The same controls as a connected thread
+    ///
+    /// `OMEGA-DELTA-0204`. The owner, on a screenshot of a new thread beside an
+    /// old one: "new chat threads dont show the dropdowns and voice button that
+    /// existing threads do ... it should be the exact fucking same."
+    ///
+    /// It was not the same. This bar carried the executor dropdown and Send;
+    /// `render_zero_base_executor_bar` carries the executor dropdown, the
+    /// Luna/Flash/Pro tier dropdown, the microphone and Send, and puts them on
+    /// the right. The field had no expand control either. So the composer a
+    /// person meets first — on the thread whose first message is the one most
+    /// likely to be long, because it is the one that states the task — was the
+    /// most reduced composer in the app, and every control returned a moment
+    /// later once a session existed. Nothing about an unconnected session made
+    /// any of them unavailable: voice is a Sarah session on the workspace, the
+    /// tier is a settings default that a session reads when it is created, and
+    /// expanding a text field is local to the field.
+    ///
+    /// The two bars are now the same set in the same order in the same places.
+    /// What genuinely cannot exist before a session — the executor disclosure
+    /// line, the routed model, the turn's phase dot, the Exo inspector — stays
+    /// absent rather than being invented, and the connecting indicator takes
+    /// the space they will occupy.
     fn render_loading_composer(
         &mut self,
         router_ready: bool,
@@ -4208,6 +4242,26 @@ impl ConversationView {
         let max_content_width = AgentSettings::get_global(cx).max_content_width;
         let pending_turns = self.render_pending_connect_messages(false, cx);
 
+        // The executor dropdown is live from the very first paint of a new
+        // conversation, while its session is still connecting.
+        // `OMEGA-DELTA-0184`, omega#165.
+        let conversation_is_bound =
+            !self.pending_connect_messages.is_empty() || !self.omega_route_not_yet_recorded();
+        let executor_menu = crate::omega_composer_executor_menu::render_composer_executor_menu(
+            self.workspace.clone(),
+            self.composer_executor_label(cx),
+            conversation_is_bound,
+            cx,
+        );
+
+        let expanded = self.loading_composer_expanded;
+        let (expand_icon, expand_tooltip) = if expanded {
+            (IconName::Minimize, "Minimize Message Editor")
+        } else {
+            (IconName::Maximize, "Expand Message Editor")
+        };
+        let editor_focus_handle = editor.focus_handle(cx);
+
         v_flex()
             .key_context("AcpThread")
             .flex_1()
@@ -4216,13 +4270,23 @@ impl ConversationView {
             .on_action(cx.listener(|this, _: &Chat, window, cx| {
                 this.submit_before_session(window, cx);
             }))
+            .on_action(cx.listener(|this, _: &ExpandMessageEditor, _window, cx| {
+                this.loading_composer_expanded = !this.loading_composer_expanded;
+                cx.notify();
+            }))
             .children(pending_turns)
             .child(
-                h_flex().pb_2().px_2().justify_center().child(
+                h_flex()
+                    .pb_2()
+                    .px_2()
+                    .justify_center()
+                    .when(expanded, |this| this.h(vh(0.8, window)))
+                    .child(
                     v_flex()
                         .when_some(max_content_width, |this, max_w| this.flex_basis(max_w))
                         .when(max_content_width.is_none(), |this| this.w_full())
                         .min_w_0()
+                        .when(expanded, |this| this.h_full())
                         .bg(cx.theme().colors().editor_background)
                         .border_1()
                         .border_color(cx.theme().colors().border)
@@ -4235,16 +4299,44 @@ impl ConversationView {
                         .child(
                             v_flex()
                                 .debug_selector(|| "omega.workbench.composer".into())
+                                .relative()
                                 .w_full()
                                 .min_h_0()
                                 .min_h(rems_from_px(96.))
+                                .when(expanded, |this| this.flex_1())
                                 .pt_1p5()
                                 .pb_0p5()
                                 .pr_2p5()
                                 .child(EditorElement::new(
                                     &editor,
                                     crate::message_editor::composer_editor_style(cx),
-                                )),
+                                ))
+                                .child(
+                                    h_flex()
+                                        .absolute()
+                                        .top_0()
+                                        .right_0()
+                                        .opacity(0.5)
+                                        .hover(|s| s.opacity(1.0))
+                                        .child(
+                                            IconButton::new("toggle-height", expand_icon)
+                                                .icon_size(IconSize::Small)
+                                                .icon_color(Color::Muted)
+                                                .tooltip(move |_window, cx| {
+                                                    Tooltip::for_action_in(
+                                                        expand_tooltip,
+                                                        &ExpandMessageEditor,
+                                                        &editor_focus_handle,
+                                                        cx,
+                                                    )
+                                                })
+                                                .on_click(cx.listener(|this, _, _window, cx| {
+                                                    this.loading_composer_expanded =
+                                                        !this.loading_composer_expanded;
+                                                    cx.notify();
+                                                })),
+                                        ),
+                                ),
                         )
                         .child(
                             // `flex_wrap` for the same reason the real bar
@@ -4266,25 +4358,6 @@ impl ConversationView {
                                         .when(omega_zero_base::is_active(), |this| {
                                             this.child(self.vim_mode_indicator.clone())
                                         })
-                                        .map(|this| {
-                                            // The executor dropdown is live
-                                            // from the very first paint of a
-                                            // new conversation, while its
-                                            // session is still connecting.
-                                            // `OMEGA-DELTA-0184`, omega#165.
-                                            let conversation_is_bound = !self
-                                                .pending_connect_messages
-                                                .is_empty()
-                                                || !self.omega_route_not_yet_recorded();
-                                            this.children(
-                                                crate::omega_composer_executor_menu::render_composer_executor_menu(
-                                                    self.workspace.clone(),
-                                                    self.composer_executor_label(cx),
-                                                    conversation_is_bound,
-                                                    cx,
-                                                ),
-                                            )
-                                        })
                                         .children(status.map(|status| {
                                             Label::new(status)
                                                 .size(LabelSize::Small)
@@ -4298,20 +4371,55 @@ impl ConversationView {
                                                 )
                                         })),
                                 )
+                                // Same set, same order, same side as
+                                // `render_zero_base_executor_bar`.
+                                // `OMEGA-DELTA-0204`.
                                 .child(
-                                    h_flex().min_w_0().child(
-                                        IconButton::new("send-message", IconName::Send)
-                                            .style(ButtonStyle::Filled)
-                                            .tooltip(Tooltip::text("Send"))
-                                            .on_click(cx.listener(|this, _, window, cx| {
-                                                this.submit_before_session(window, cx);
-                                            })),
-                                    ),
+                                    h_flex()
+                                        .min_w_0()
+                                        .flex_wrap()
+                                        .gap_1()
+                                        .children(executor_menu)
+                                        .child(self.render_pre_session_model_tier_selector(cx))
+                                        .child(
+                                            crate::composer_voice::render_composer_voice_controls(
+                                                self.workspace.entity_id(),
+                                                cx,
+                                            ),
+                                        )
+                                        .child(
+                                            IconButton::new("send-message", IconName::Send)
+                                                .style(ButtonStyle::Filled)
+                                                .tooltip(Tooltip::text("Send"))
+                                                .on_click(cx.listener(|this, _, window, cx| {
+                                                    this.submit_before_session(window, cx);
+                                                })),
+                                        ),
                                 ),
                         ),
                 ),
             )
             .into_any()
+    }
+
+    /// The Luna / Flash / Pro dropdown, before a session exists.
+    ///
+    /// `OMEGA-DELTA-0204`. `RoutedFace::pending` is the documented case for a
+    /// thread that has not routed anything yet: the standing choice is then a
+    /// truthful statement about what the next turn will start on, which is
+    /// exactly what this composer is for. Nothing here names a model as
+    /// *serving* a turn, because no turn has run.
+    fn render_pre_session_model_tier_selector(&self, cx: &mut Context<Self>) -> AnyElement {
+        use crate::omega_model_tier::{RoutedFace, render_model_tier_selector, selected};
+
+        let fs = self.project.read(cx).fs().clone();
+        render_model_tier_selector(
+            RoutedFace::pending(selected()),
+            true,
+            Rc::new(move |tier, _window, cx| {
+                crate::omega_model_tier::select_before_session(tier, fs.clone(), cx);
+            }),
+        )
     }
 
     /// The turns a person sent before the executor finished connecting.
@@ -9533,6 +9641,75 @@ pub(crate) mod tests {
         fn into_any(self: Rc<Self>) -> Rc<dyn Any> {
             self
         }
+    }
+
+    /// `OMEGA-DELTA-0204`. Picking a tier before the session exists moves the
+    /// model, not only the label on the control.
+    ///
+    /// The connected composer's tier control reaches a running session through
+    /// its model selector, which also writes `agent.default_model`. The
+    /// pre-session composer has no session and no selector, so it writes that
+    /// default itself — the one thing a session that does not exist yet
+    /// actually reads when it is created. Without this the control would be
+    /// decoration: the face would say Pro and Luna would answer, which is
+    /// `OMEGA-DELTA-0202`'s defect reintroduced one composer earlier.
+    #[gpui::test]
+    async fn a_tier_chosen_before_the_session_exists_moves_the_model(cx: &mut TestAppContext) {
+        init_test(cx);
+        crate::omega_model_tier::clear_selection_for_test();
+
+        let fs = FakeFs::new(cx.executor());
+        fs.create_dir(
+            paths::settings_file()
+                .parent()
+                .expect("settings have a parent"),
+        )
+        .await
+        .expect("the settings directory is creatable");
+        fs.insert_file(
+            paths::settings_file(),
+            json!({ "agent": { "default_model": { "provider": "openagents", "model": "gpt-5.6-luna" } } })
+                .to_string()
+                .into_bytes(),
+        )
+        .await;
+
+        cx.update(|cx| {
+            crate::omega_model_tier::select_before_session(
+                crate::omega_model_tier::ModelTier::Pro,
+                fs.clone(),
+                cx,
+            );
+        });
+        cx.run_until_parked();
+
+        let settings = fs
+            .load(paths::settings_file())
+            .await
+            .expect("the settings file is readable");
+        let settings: serde_json::Value =
+            serde_json::from_str(&settings).expect("the settings file stays valid JSON");
+
+        assert_eq!(
+            settings["agent"]["default_model"]["provider"],
+            json!("openagents"),
+            "the tier a person picked before connecting must reach the default \
+             every new session reads"
+        );
+        assert_eq!(
+            settings["agent"]["default_model"]["model"],
+            json!("kimi-k3"),
+            "Pro is Kimi K3; a control that only repainted its own label would \
+             leave Luna here and answer as Luna"
+        );
+        assert_eq!(
+            crate::omega_model_tier::selected(),
+            crate::omega_model_tier::ModelTier::Pro,
+            "the standing choice is what the pre-session face reads, so it has \
+             to agree with the default that was just written"
+        );
+
+        crate::omega_model_tier::clear_selection_for_test();
     }
 
     pub(crate) fn init_test(cx: &mut TestAppContext) {

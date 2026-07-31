@@ -6132,103 +6132,12 @@ impl ThreadView {
         }
     }
 
+    /// `OMEGA-DELTA-0204`. The body moved to [`crate::composer_voice`] so the
+    /// pre-session composer draws the same control from the same code. It used
+    /// to live here, private to this view, which is why a thread that had not
+    /// connected yet had no microphone at all.
     fn render_voice_controls(&self, cx: &mut Context<Self>) -> AnyElement {
-        use crate::OpenSarahAdmission;
-        use crate::composer_voice::{ComposerVoicePhase, composer_voice_status};
-        use omega_actions::workroom::{EndVoice, ToggleVoiceMute};
-
-        let status = composer_voice_status(self.workspace.entity_id(), cx)
-            .read(cx)
-            .clone();
-        let phase = status.phase;
-        let detail = status.detail.clone();
-        let label = if status.muted {
-            "Microphone muted"
-        } else {
-            phase.label()
-        };
-        let label_color = match phase {
-            ComposerVoicePhase::AccessRequired
-            | ComposerVoicePhase::Error
-            | ComposerVoicePhase::Reconnecting => Color::Error,
-            phase if phase.is_active() || phase.is_starting() => Color::Accent,
-            _ => Color::Muted,
-        };
-        let primary_icon = if status.muted {
-            IconName::MicMute
-        } else {
-            IconName::Mic
-        };
-
-        h_flex()
-            .id("agent-composer-voice-controls")
-            .debug_selector(|| "agent.composer.voice-controls".into())
-            .gap_0p5()
-            .when(
-                phase.is_active()
-                    || phase.is_starting()
-                    || matches!(
-                        phase,
-                        ComposerVoicePhase::Ending
-                            | ComposerVoicePhase::AccessRequired
-                            | ComposerVoicePhase::Error
-                    ),
-                |this| this.child(Label::new(label).size(LabelSize::XSmall).color(label_color)),
-            )
-            .child(
-                IconButton::new("agent-composer-voice", primary_icon)
-                    .debug_selector(|| "agent.composer.voice".into())
-                    .icon_size(IconSize::Small)
-                    .icon_color(label_color)
-                    .style(if phase.is_active() {
-                        ButtonStyle::Tinted(TintColor::Accent)
-                    } else {
-                        ButtonStyle::Subtle
-                    })
-                    .toggle_state(phase.is_active() && !status.muted)
-                    .disabled(matches!(
-                        phase,
-                        ComposerVoicePhase::Authenticating | ComposerVoicePhase::Ending
-                    ))
-                    .aria_label(label)
-                    .aria_description(detail.clone())
-                    .tooltip(move |_, cx| Tooltip::with_meta(label, None, detail.clone(), cx))
-                    .on_click(move |_, window, cx| match phase {
-                        ComposerVoicePhase::Idle
-                        | ComposerVoicePhase::Unavailable
-                        | ComposerVoicePhase::AccessRequired
-                        | ComposerVoicePhase::Error
-                        | ComposerVoicePhase::Reconnecting => {
-                            window.dispatch_action(OpenSarahAdmission.boxed_clone(), cx)
-                        }
-                        phase if phase.is_active() => {
-                            window.dispatch_action(ToggleVoiceMute.boxed_clone(), cx)
-                        }
-                        _ => {}
-                    }),
-            )
-            .when(
-                phase.is_active()
-                    || phase.is_starting()
-                    || matches!(
-                        phase,
-                        ComposerVoicePhase::AccessRequired | ComposerVoicePhase::Error
-                    ),
-                |this| {
-                    this.child(
-                        IconButton::new("agent-composer-end-voice", IconName::Stop)
-                            .debug_selector(|| "agent.composer.end-voice".into())
-                            .icon_size(IconSize::Small)
-                            .icon_color(Color::Error)
-                            .aria_label("End voice")
-                            .tooltip(Tooltip::text("End Sarah voice"))
-                            .on_click(|_, window, cx| {
-                                window.dispatch_action(EndVoice.boxed_clone(), cx);
-                            }),
-                    )
-                },
-            )
-            .into_any_element()
+        crate::composer_voice::render_composer_voice_controls(self.workspace.entity_id(), cx)
     }
 
     fn render_add_context_button(&mut self, cx: &mut Context<Self>) -> impl IntoElement {
