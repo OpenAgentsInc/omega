@@ -62,8 +62,8 @@ pub use openagents_sarah_voice::{
     SarahVoiceSettlementState, SarahVoiceTransport,
 };
 pub use openagents_session::{
-    HostedSessionProjection, HostedSessionState, OpenAgentsSession, OpenAgentsSessionPhase,
-    VerifiedOpenAgentsSession, init_openagents_session, openagents_session,
+    HostedRetrySchedule, HostedSessionProjection, HostedSessionState, OpenAgentsSession,
+    OpenAgentsSessionPhase, VerifiedOpenAgentsSession, init_openagents_session, openagents_session,
     openagents_session_if_initialized,
 };
 

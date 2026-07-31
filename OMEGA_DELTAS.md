@@ -9720,3 +9720,51 @@ produces the bound three-desktop and failure-drill receipts.
   `sarah_livekit_release_rows_require_bound_receipts_and_observed_facts` in
   `crates/omega_deltas`; and the candidate assembler's digest, binding, row,
   status, size, and public-safe checks.
+
+### OMEGA-DELTA-0218 — A hosted start-up window is ridden out, not shown as a refusal
+
+Every new Cloud Run revision of the hosted OpenAgents service takes traffic
+before its Cloud SQL Auth Proxy sidecar has connected. For 10-70 seconds after
+each deploy, `POST /api/omega/auth/session` answers 503 with a typed
+`omega_nostr_auth_storage_*` code, and it flaps: the same identity gets 200,
+then 503, then 200 within seconds. A single re-attempt a few seconds later
+lands inside that window often enough that the owner saw a red banner for a
+dependency that was about to answer.
+
+**The transient class is named from the server's own code, not guessed from a
+status.** `HostedSessionBlocker::ServiceStorageUnavailable` carries the status
+and the bounded public error code. Any code under the
+`omega_nostr_auth_storage` prefix admits it, and so does a bare 503, because
+the owner's binary talks to whichever revision is live and an older build sends
+only the first of the sibling codes.
+
+**Only that class is re-attempted inside one sign-in.**
+`is_transient_service_window` is deliberately narrower than `is_retryable`:
+401/403, `RequestFramingRejected`, every identity and custody blocker, a
+consumed proof, a challenge rate limit, and a local credential-storage failure
+all return on the first answer, so no owner waits through a backoff for a
+verdict that cannot change.
+
+**The backoff is bounded on both axes.** Five attempts with delays of 1s, 2s,
+4s, and 8s plus additive jitter, and a 30-second wall-clock budget measured
+from the first attempt. The budget counts the failed requests themselves — a
+cold instance burns about 30 seconds server-side before its 503 arrives — so
+the worst case is the budget plus one in-flight request rather than five
+serial timeouts. The schedule is an injectable value, so a test or a
+deterministic harness runs it with no sleeping at all.
+
+**A persistent outage is still honest.** When every attempt fails, the caller
+gets the real blocker from the last attempt, the projection stays `retryable`,
+and the owner sees the real message. Each re-attempt is logged with its number,
+its wait, and the blocker line, which carries a status and a public error code
+and never a token, key, or signature.
+
+- **Enforced by:** `the_hosted_start_up_window_is_ridden_out_not_reported`
+  in `crates/omega_deltas`;
+  `the_hosted_backoff_doubles_and_stops_on_both_attempts_and_wall_clock`,
+  `injected_schedules_never_sleep`, and
+  `jitter_only_lengthens_a_delay_and_stays_bounded` in
+  `crates/omega_effectd/src/openagents_session.rs`; and
+  `the_hosted_storage_start_up_window_is_recognized_from_the_server_code` and
+  `only_the_service_start_up_class_is_re_attempted_inside_one_sign_in` in
+  `crates/omega_effectd/src/openagents_nostr_auth.rs`.

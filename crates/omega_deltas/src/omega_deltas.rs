@@ -206,6 +206,7 @@ pub const ENFORCED_DELTAS: &[&str] = &[
     "OMEGA-DELTA-0215",
     "OMEGA-DELTA-0216",
     "OMEGA-DELTA-0217",
+    "OMEGA-DELTA-0218",
 ];
 
 /// OMEGA-DELTA-0204. Every control the composer's bar offers, written twice:
@@ -1327,6 +1328,16 @@ pub const NIP42_RELAY_PATH: &str = "crates/omega_effectd/src/nostr_websocket_rel
 pub const OPENAGENTS_SESSION_PATH: &str = "crates/omega_effectd/src/openagents_session.rs";
 pub const OPENAGENTS_NOSTR_AUTH_PATH: &str = "crates/omega_effectd/src/openagents_nostr_auth.rs";
 pub const OPENAGENTS_BINDING_PATH: &str = "crates/omega_effectd/src/openagents_binding.rs";
+
+/// OMEGA-DELTA-0218. The public error-code prefix the hosted auth route uses
+/// for every failure of its own session storage.
+///
+/// Written here as well as in the client so the check names the exact contract
+/// it is enforcing. The route emits `..._unavailable`, `..._timeout`, and
+/// `..._unreachable` for one class — a Cloud SQL Auth Proxy that has not
+/// connected yet — so the prefix, not any single code, is what Omega must
+/// recognize.
+pub const HOSTED_STORAGE_ERROR_CODE_PREFIX: &str = "omega_nostr_auth_storage";
 pub const ACCOUNT_SCOPE_PATH: &str = "crates/agent_ui/src/account_scope.rs";
 pub const DRAFT_PROMPT_STORE_PATH: &str = "crates/agent_ui/src/draft_prompt_store.rs";
 pub const IDENTITY_SYNC_PATH: &str = "crates/omega_identity_sync/omega_identity_sync.rs";
@@ -23251,6 +23262,119 @@ mod tests {
                 "OMEGA-DELTA-0217: release-gate instructions lost `{required}`"
             );
         }
+    }
+
+    /// OMEGA-DELTA-0218. The hosted service's cold-start window is re-attempted
+    /// on a bounded backoff, and nothing else is.
+    ///
+    /// omega#160. Each new Cloud Run revision routes traffic before its Cloud
+    /// SQL Auth Proxy sidecar has connected, so hosted sign-in fails for 10-70
+    /// seconds after every deploy and flaps while it does. The exact schedule
+    /// is asserted here because shrinking it is invisible in a diff review — a
+    /// single re-attempt reads like a retry and puts the red banner straight
+    /// back. The terminal classes are asserted absent from the transient set,
+    /// because widening it is the opposite failure: an owner silently waiting
+    /// out a backoff for a 401 that can never change.
+    #[test]
+    fn the_hosted_start_up_window_is_ridden_out_not_reported() {
+        let auth = read_repository_file(OPENAGENTS_NOSTR_AUTH_PATH);
+        for required in [
+            "ServiceStorageUnavailable { status: u16, code: String }",
+            "fn is_transient_storage_refusal(status: u16, public_code: &str) -> bool",
+            "pub fn is_transient_service_window(&self) -> bool",
+        ] {
+            assert!(
+                auth.contains(required),
+                "OMEGA-DELTA-0218: the hosted auth classifier lost `{required}`. Without it \
+                 the cold-start window is indistinguishable from a refusal."
+            );
+        }
+        assert!(
+            auth.contains(&format!(
+                "STORAGE_UNAVAILABLE_CODE_PREFIX: &str = \"{HOSTED_STORAGE_ERROR_CODE_PREFIX}\""
+            )),
+            "OMEGA-DELTA-0218: the client no longer recognizes the route's \
+             `{HOSTED_STORAGE_ERROR_CODE_PREFIX}` code family. Matching one exact code would \
+             miss the sibling codes the route also sends for the same cause."
+        );
+
+        let classifier = function_body(&auth, "is_transient_storage_refusal")
+            .expect("OMEGA-DELTA-0218: `is_transient_storage_refusal` was removed");
+        assert!(
+            classifier.contains("STORAGE_UNAVAILABLE_CODE_PREFIX")
+                && classifier.contains("status == 503"),
+            "OMEGA-DELTA-0218: the storage class must be admitted by the server's typed code \
+             prefix and by a bare 503, because the owner's binary talks to whichever revision \
+             is live and an older build sends only the first sibling code."
+        );
+
+        let transient = function_body(&auth, "is_transient_service_window")
+            .expect("OMEGA-DELTA-0218: `is_transient_service_window` was removed");
+        assert!(
+            transient.contains("ServiceStorageUnavailable"),
+            "OMEGA-DELTA-0218: the transient set no longer contains the storage window, so \
+             nothing is re-attempted at all."
+        );
+        for terminal in [
+            "ProofRejected",
+            "RequestFramingRejected",
+            "Identity",
+            "ChallengeRateLimited",
+            "ProofAlreadyUsed",
+            "CredentialStorageFailed",
+        ] {
+            assert!(
+                !transient.contains(terminal),
+                "OMEGA-DELTA-0218: `{terminal}` entered the transient set. A backoff cannot \
+                 turn any of these into a session, and waiting one out is time the owner \
+                 spends on an answer that is already final."
+            );
+        }
+
+        let session = read_repository_file(OPENAGENTS_SESSION_PATH);
+        for required in [
+            "pub struct HostedRetrySchedule",
+            "HOSTED_RETRY_MAX_ATTEMPTS: u8 = 5",
+            "HOSTED_RETRY_INITIAL_DELAY: Duration = Duration::from_secs(1)",
+            "HOSTED_RETRY_MAX_DELAY: Duration = Duration::from_secs(8)",
+            "HOSTED_RETRY_BUDGET: Duration = Duration::from_secs(30)",
+            "pub fn delay_after(&self, attempt: u8, elapsed: Duration) -> Option<Duration>",
+            "pub fn with_retry_schedule",
+            "pub const fn instant()",
+            "pub const fn single_attempt()",
+            "async fn connect_across_service_start_up",
+        ] {
+            assert!(
+                session.contains(required),
+                "OMEGA-DELTA-0218: the hosted sign-in backoff lost `{required}`"
+            );
+        }
+
+        let loop_body = function_body(&session, "connect_across_service_start_up")
+            .expect("OMEGA-DELTA-0218: `connect_across_service_start_up` was removed");
+        assert!(
+            loop_body.contains("if !blocker.is_transient_service_window()"),
+            "OMEGA-DELTA-0218: the loop must fail fast on every non-transient blocker before \
+             it considers a delay."
+        );
+        assert!(
+            loop_body.contains("self.retry.delay_after(attempt, started_at.elapsed())"),
+            "OMEGA-DELTA-0218: the delay must be decided from the injectable schedule and the \
+             elapsed wall clock. A bare sleep would ignore the budget, and a failing request \
+             already burns about 30 seconds server-side."
+        );
+        assert!(
+            loop_body.contains("return Err(blocker)"),
+            "OMEGA-DELTA-0218: an exhausted schedule must still return the real blocker. A \
+             persistent outage reported as anything else is a swallowed failure."
+        );
+
+        assert!(
+            function_body(&session, "connect")
+                .is_some_and(|body| body.contains("connect_across_service_start_up")),
+            "OMEGA-DELTA-0218: `connect` calls `connect_inner` directly again, so no caller \
+             gets the backoff."
+        );
     }
 
     /// OMEGA-DELTA-0215. Community-room Sarah controls render only verified

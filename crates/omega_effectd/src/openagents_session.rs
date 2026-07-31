@@ -1,4 +1,7 @@
-use std::sync::{Arc, Mutex};
+use std::{
+    sync::{Arc, Mutex},
+    time::{Duration, Instant},
+};
 
 use anyhow::{Context as _, Result, anyhow};
 use base64::Engine as _;
@@ -21,6 +24,123 @@ const OPENAGENTS_CREDENTIAL_USERNAME: &str = "omega";
 const MAX_HTTP_BODY_BYTES: u64 = 64 * 1024;
 const MAX_ACCESS_TOKEN_BYTES: usize = 16 * 1024;
 const COMMUNITY_SARAH_PATH_PREFIX: &str = "/api/sarah/livekit/room/";
+
+/// How many times one `connect` may attempt the hosted sign-in.
+///
+/// omega#160, and every constant below is chosen against that measurement, not
+/// against a round number. Each new Cloud Run revision of the hosted service
+/// takes traffic before its Cloud SQL Auth Proxy sidecar has connected. The
+/// observed window is 10-70 seconds, and it flaps: the same identity gets 200,
+/// then 503, then 200 within seconds. One retry three seconds later lands
+/// inside that window far too often, and the owner sees a red banner for a
+/// dependency that was about to come back on its own.
+///
+/// Five attempts with the delays below spend about 15 seconds of waiting, which
+/// covers the common short end of the window. It deliberately does not try to
+/// cover 70 seconds: past this point the honest answer is the blocker, not a
+/// longer silent spinner.
+const HOSTED_RETRY_MAX_ATTEMPTS: u8 = 5;
+
+/// The first backoff delay. Doubles per attempt: 1s, 2s, 4s, 8s.
+const HOSTED_RETRY_INITIAL_DELAY: Duration = Duration::from_secs(1);
+
+/// The ceiling one delay may reach, so the last waits stay legible rather than
+/// growing past the window they are covering.
+const HOSTED_RETRY_MAX_DELAY: Duration = Duration::from_secs(8);
+
+/// The wall-clock deadline for *starting* another attempt, measured from the
+/// first one.
+///
+/// This is not a sleep budget. A failing request against a cold instance burns
+/// about 30 seconds server-side before its 503 arrives, so counting only the
+/// delays would let five attempts run for two and a half minutes. The budget is
+/// checked against the elapsed time of the whole sign-in, including the slow
+/// requests, and no new attempt starts once it is spent. The worst case is
+/// therefore this budget plus one in-flight request, not an unbounded chain:
+/// with fast typed 503s the full five attempts fit inside it, and with 30-second
+/// failures the loop stops after the second attempt.
+const HOSTED_RETRY_BUDGET: Duration = Duration::from_secs(30);
+
+/// Extra fraction of a delay added at random, to keep several Omega instances
+/// that saw the same deploy from re-attempting in lockstep. Additive only: a
+/// jittered delay is never shorter than the scheduled one.
+const HOSTED_RETRY_JITTER_FRACTION: f64 = 0.25;
+
+/// When Omega re-attempts a hosted sign-in that failed inside the hosted
+/// service's own start-up window.
+///
+/// It is a value rather than a set of constants read at the call site so a test
+/// can inject a schedule that does not sleep. A suite that waited out the
+/// production backoff would be slow and, worse, would make a hermetic proof
+/// harness depend on a real clock.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct HostedRetrySchedule {
+    pub max_attempts: u8,
+    pub initial_delay: Duration,
+    pub max_delay: Duration,
+    pub budget: Duration,
+    pub jitter: bool,
+}
+
+impl Default for HostedRetrySchedule {
+    fn default() -> Self {
+        Self::production()
+    }
+}
+
+impl HostedRetrySchedule {
+    /// The schedule the shipped binary uses.
+    pub const fn production() -> Self {
+        Self {
+            max_attempts: HOSTED_RETRY_MAX_ATTEMPTS,
+            initial_delay: HOSTED_RETRY_INITIAL_DELAY,
+            max_delay: HOSTED_RETRY_MAX_DELAY,
+            budget: HOSTED_RETRY_BUDGET,
+            jitter: true,
+        }
+    }
+
+    /// The same attempt count with no waiting and no randomness, for tests.
+    pub const fn instant() -> Self {
+        Self {
+            max_attempts: HOSTED_RETRY_MAX_ATTEMPTS,
+            initial_delay: Duration::ZERO,
+            max_delay: Duration::ZERO,
+            budget: Duration::from_secs(u64::MAX / 2),
+            jitter: false,
+        }
+    }
+
+    /// One attempt and no re-attempt, for deterministic harnesses that must
+    /// observe the first answer exactly as the service gave it.
+    pub const fn single_attempt() -> Self {
+        Self {
+            max_attempts: 1,
+            ..Self::instant()
+        }
+    }
+
+    /// The scheduled delay after `attempt` (1-based) failed, or `None` when the
+    /// schedule is exhausted by attempt count or by the elapsed budget.
+    pub fn delay_after(&self, attempt: u8, elapsed: Duration) -> Option<Duration> {
+        if attempt >= self.max_attempts {
+            return None;
+        }
+        let mut delay = self.initial_delay;
+        for _ in 1..attempt {
+            delay = delay.saturating_mul(2).min(self.max_delay);
+        }
+        let delay = delay.min(self.max_delay);
+        (elapsed.saturating_add(delay) < self.budget).then_some(delay)
+    }
+
+    fn with_jitter(&self, delay: Duration) -> Duration {
+        if !self.jitter || delay.is_zero() {
+            return delay;
+        }
+        delay.mul_f64(1.0 + HOSTED_RETRY_JITTER_FRACTION * rand::random::<f64>())
+    }
+}
 
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq, Serialize)]
 #[serde(rename_all = "snake_case")]
@@ -100,6 +220,7 @@ pub struct OpenAgentsSession {
     /// specific reason, and reconstructing it from `Unavailable` is impossible.
     blocker: Arc<Mutex<Option<HostedSessionBlocker>>>,
     projection: Arc<Mutex<HostedSessionProjection>>,
+    retry: HostedRetrySchedule,
 }
 
 struct OpenAgentsSessionGlobal(OpenAgentsSession);
@@ -184,6 +305,7 @@ pub fn init_openagents_session(cx: &mut App) {
         phase: Arc::new(Mutex::new(OpenAgentsSessionPhase::SignedOut)),
         blocker: Arc::default(),
         projection: Arc::default(),
+        retry: HostedRetrySchedule::production(),
     }));
 }
 
@@ -198,12 +320,34 @@ pub fn openagents_session(cx: &App) -> OpenAgentsSession {
 /// do not: for them hosted OpenAgents compute is structurally unavailable, and
 /// a provider that read the panicking accessor would turn that absence into a
 /// crash or, worse, a live network sign-in from inside a deterministic proof.
+///
+/// It is also why the backoff added for omega#160 cannot make a proof harness
+/// slow: a harness that never initializes the global never reaches `connect`,
+/// and one that does inject a session uses
+/// [`OpenAgentsSession::with_retry_schedule`] with a schedule that does not
+/// sleep.
 pub fn openagents_session_if_initialized(cx: &App) -> Option<OpenAgentsSession> {
     cx.try_global::<OpenAgentsSessionGlobal>()
         .map(|global| global.0.clone())
 }
 
 impl OpenAgentsSession {
+    /// The same session with a different re-attempt schedule.
+    ///
+    /// Tests and deterministic harnesses pass [`HostedRetrySchedule::instant`]
+    /// or [`HostedRetrySchedule::single_attempt`], so no suite ever waits out a
+    /// production backoff.
+    pub fn with_retry_schedule(&self, retry: HostedRetrySchedule) -> Self {
+        Self {
+            retry,
+            ..self.clone()
+        }
+    }
+
+    pub fn retry_schedule(&self) -> HostedRetrySchedule {
+        self.retry
+    }
+
     pub fn phase(&self) -> OpenAgentsSessionPhase {
         self.phase.lock().map(|phase| *phase).unwrap_or_default()
     }
@@ -251,7 +395,7 @@ impl OpenAgentsSession {
             retryable: true,
             ..HostedSessionProjection::default()
         });
-        let (phase, blocker) = match self.connect_inner().await {
+        let (phase, blocker) = match self.connect_across_service_start_up(cx).await {
             Ok(credential) => {
                 if let Err(error) = self.save_credential(&credential, cx).await {
                     log::error!("hosted OpenAgents session could not be stored: {error:#}");
@@ -671,6 +815,75 @@ impl OpenAgentsSession {
         .await
     }
 
+    /// Sign in, re-attempting only while the hosted service is inside its own
+    /// start-up window.
+    ///
+    /// omega#160. A fresh Cloud Run revision routes traffic before its Cloud
+    /// SQL Auth Proxy sidecar has connected, so a sign-in that is about to work
+    /// fails for 10-70 seconds after each deploy. Everything else — a refused
+    /// proof, a framing bug, a missing identity, a local storage failure —
+    /// returns on the first answer, so no owner waits through a backoff for a
+    /// verdict that cannot change.
+    ///
+    /// Each attempt signs a fresh NIP-98 proof, because
+    /// `mint_openagents_nostr_session_for_identity` re-signs per call and the
+    /// proofs are one-use inside a 60-second freshness window. Re-sending a
+    /// consumed proof would turn a transient outage into `ProofAlreadyUsed`.
+    ///
+    /// When every attempt fails, the caller gets the real blocker from the last
+    /// attempt. Nothing is swallowed: a persistent outage still reaches the
+    /// owner, it just reaches them after the flap has had a chance to clear.
+    async fn connect_across_service_start_up(
+        &self,
+        cx: &mut AsyncApp,
+    ) -> Result<StoredCredential, HostedSessionBlocker> {
+        let started_at = Instant::now();
+        let mut attempt: u8 = 1;
+        loop {
+            let blocker = match self.connect_inner().await {
+                Ok(credential) => {
+                    if attempt > 1 {
+                        log::info!(
+                            "hosted OpenAgents sign-in: succeeded on attempt {attempt} after \
+                             {}ms in the service's start-up window",
+                            started_at.elapsed().as_millis()
+                        );
+                    }
+                    return Ok(credential);
+                }
+                Err(blocker) => blocker,
+            };
+            if !blocker.is_transient_service_window() {
+                return Err(blocker);
+            }
+            let Some(delay) = self.retry.delay_after(attempt, started_at.elapsed()) else {
+                log::error!(
+                    "hosted OpenAgents sign-in: still failing after attempt {attempt} of at \
+                     most {} and {}ms; reporting the blocker: {}",
+                    self.retry.max_attempts,
+                    started_at.elapsed().as_millis(),
+                    blocker.summary()
+                );
+                return Err(blocker);
+            };
+            let delay = self.retry.with_jitter(delay);
+            // A flapping dependency is only diagnosable if each re-attempt is
+            // in the log with its number, its wait, and the answer that caused
+            // it. The summary is a blocker line: a status and a public error
+            // code, never a token, key, or signature.
+            log::warn!(
+                "hosted OpenAgents sign-in: attempt {attempt} of at most {} hit the hosted \
+                 service's start-up window; re-attempting in {}ms: {}",
+                self.retry.max_attempts,
+                delay.as_millis(),
+                blocker.summary()
+            );
+            let timer = cx.background_executor().timer(delay);
+            timer.await;
+            attempt = attempt.saturating_add(1);
+        }
+    }
+
     async fn connect_inner(&self) -> Result<StoredCredential, HostedSessionBlocker> {
         let selection = omega_identity::AccountRegistryService::for_channel(*app_identity::CHANNEL)
             .selection_token()
@@ -1058,6 +1271,92 @@ mod tests {
         assert!(
             !(incomplete.signed_out && incomplete.access_revoked && incomplete.refresh_revoked)
         );
+    }
+
+    /// omega#160. The schedule is the whole fix, so its shape is asserted
+    /// exactly. The defect it replaces was a single re-attempt a few seconds
+    /// later, which lands inside a 10-70 second Cloud SQL Auth Proxy warm-up
+    /// far too often and shows the owner a red banner for a dependency that
+    /// was about to answer.
+    #[test]
+    fn the_hosted_backoff_doubles_and_stops_on_both_attempts_and_wall_clock() {
+        let schedule = HostedRetrySchedule::production();
+        assert_eq!(schedule.max_attempts, 5);
+        assert!(schedule.jitter);
+
+        // Four re-attempts after the first failure: 1s, 2s, 4s, 8s.
+        let delays: Vec<Duration> = (1..=5)
+            .map(|attempt| schedule.delay_after(attempt, Duration::ZERO))
+            .take_while(Option::is_some)
+            .flatten()
+            .collect();
+        assert_eq!(
+            delays,
+            vec![
+                Duration::from_secs(1),
+                Duration::from_secs(2),
+                Duration::from_secs(4),
+                Duration::from_secs(8),
+            ]
+        );
+        assert_eq!(delays.iter().sum::<Duration>(), Duration::from_secs(15));
+
+        // The attempt count is a hard stop even with the whole budget unspent.
+        assert_eq!(schedule.delay_after(5, Duration::ZERO), None);
+
+        // The budget counts the failed requests, not just the sleeping. A
+        // 30-second server-side connect timeout on the first two attempts
+        // spends it, and no third attempt is scheduled — which is the
+        // difference between a bounded wait and a two-and-a-half-minute one.
+        assert_eq!(
+            schedule.delay_after(1, Duration::from_secs(29)),
+            None,
+            "a 1s delay must not start past the budget"
+        );
+        assert_eq!(
+            schedule.delay_after(2, Duration::from_secs(31)),
+            None,
+            "an attempt that already overran the budget schedules nothing"
+        );
+        assert_eq!(
+            schedule.delay_after(2, Duration::from_secs(3)),
+            Some(Duration::from_secs(2)),
+            "a fast typed 503 leaves the budget intact"
+        );
+    }
+
+    /// Requirement from the same issue: a test must never sleep through the
+    /// production backoff, and a deterministic harness must be able to observe
+    /// the first answer exactly as the service gave it.
+    #[test]
+    fn injected_schedules_never_sleep() {
+        let instant = HostedRetrySchedule::instant();
+        assert_eq!(instant.max_attempts, HOSTED_RETRY_MAX_ATTEMPTS);
+        assert!(!instant.jitter);
+        for attempt in 1..instant.max_attempts {
+            assert_eq!(
+                instant.delay_after(attempt, Duration::from_secs(600)),
+                Some(Duration::ZERO)
+            );
+            assert_eq!(instant.with_jitter(Duration::ZERO), Duration::ZERO);
+        }
+
+        let single = HostedRetrySchedule::single_attempt();
+        assert_eq!(single.max_attempts, 1);
+        assert_eq!(single.delay_after(1, Duration::ZERO), None);
+    }
+
+    /// Jitter spreads instances that all saw the same deploy, and must only
+    /// ever lengthen a wait — a shortened one would re-attempt into the same
+    /// unready instance sooner than the schedule says.
+    #[test]
+    fn jitter_only_lengthens_a_delay_and_stays_bounded() {
+        let schedule = HostedRetrySchedule::production();
+        for _ in 0..64 {
+            let jittered = schedule.with_jitter(Duration::from_secs(4));
+            assert!(jittered >= Duration::from_secs(4));
+            assert!(jittered <= Duration::from_secs(5));
+        }
     }
 
     #[test]

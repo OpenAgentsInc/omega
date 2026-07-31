@@ -27,6 +27,18 @@ const NIP98_KIND: u16 = 27_235;
 const NIP98_MAX_CLOCK_SKEW_SECONDS: u64 = 60;
 const MAX_NIP98_ISSUERS: usize = 128;
 
+/// The prefix every public error code the hosted auth route emits for a failure
+/// of its own session-storage path shares.
+///
+/// omega#160. The confirmed production cause is a Cloud Run cold start: a fresh
+/// revision takes traffic before its Cloud SQL Auth Proxy sidecar has
+/// connected, so the first database-touching requests fail on a connect
+/// timeout. The route reported that as `omega_nostr_auth_storage_unavailable`,
+/// and now also as `..._timeout` and `..._unreachable` for the same class, so
+/// the prefix — not any one code — is what Omega recognizes. The owner's binary
+/// talks to whichever revision is live, which may still be the older build.
+const STORAGE_UNAVAILABLE_CODE_PREFIX: &str = "omega_nostr_auth_storage";
+
 static NIP98_ISSUANCE_LEDGER: OnceLock<Mutex<BTreeMap<String, u64>>> = OnceLock::new();
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -124,6 +136,20 @@ pub enum HostedSessionBlocker {
     RequestFramingRejected,
     #[error("OpenAgents could not issue a session right now (HTTP {status}).")]
     ServiceUnavailable { status: u16 },
+    /// The hosted service answered, but its own session storage was not ready.
+    ///
+    /// omega#160. This is a start-up window, not a refusal: a new Cloud Run
+    /// revision routes traffic before its Cloud SQL Auth Proxy sidecar has
+    /// connected, and the same identity that fails here succeeds seconds
+    /// later. It is named apart from [`Self::ServiceUnavailable`] so the retry
+    /// decision is made on the server's own typed code rather than on a guess
+    /// about a status, and the code is carried so the log says which of the
+    /// storage codes was returned.
+    #[error(
+        "OpenAgents is still starting its session storage (HTTP {status}, {code}). \
+         Omega re-attempted across the start-up window and it did not clear. Try again shortly."
+    )]
+    ServiceStorageUnavailable { status: u16, code: String },
     #[error(
         "OpenAgents rejected the Sarah voice session request (HTTP {status}). \
          Check voice access and credits in your OpenAgents account."
@@ -170,10 +196,28 @@ impl HostedSessionBlocker {
                 | Self::ProofAlreadyUsed
                 | Self::VoiceProofExpired
                 | Self::ServiceUnavailable { .. }
+                | Self::ServiceStorageUnavailable { .. }
                 | Self::VoiceSessionRejected { status: 409 | 429 }
                 | Self::InsufficientVoiceCredits { .. }
                 | Self::SessionNotVerified
                 | Self::CredentialStorageFailed
+        )
+    }
+
+    /// Whether this failure is the hosted service's own start-up window: the
+    /// deployment is reachable but its storage path is not ready yet.
+    ///
+    /// omega#160. This is the only class Omega re-attempts on a backoff inside
+    /// a single sign-in. It is deliberately narrower than [`Self::is_retryable`]
+    /// — a rate limit, a consumed proof, or a local storage failure are all
+    /// retryable by a person and none of them clear by waiting a few seconds
+    /// inside one call. Everything outside this set fails on the first answer.
+    pub fn is_transient_service_window(&self) -> bool {
+        matches!(
+            self,
+            Self::ServiceStorageUnavailable { .. }
+                | Self::ServiceUnreachable
+                | Self::ServiceUnavailable { status: 502 | 504 }
         )
     }
 
@@ -640,17 +684,25 @@ pub(crate) async fn mint_openagents_nostr_session_for_identity(
         // (`unauthorized`, `omega_nostr_owner_unavailable`, …). It is the one
         // fact that tells an operator whether the identity was refused or the
         // service was not configured, so keep it.
+        let public_code = public_error_code(&body);
         log::error!(
-            "hosted OpenAgents sign-in: {OPENAGENTS_NOSTR_SESSION_URL} refused {} identity {} with HTTP {status}: {}",
+            "hosted OpenAgents sign-in: {OPENAGENTS_NOSTR_SESSION_URL} refused {} identity {} with HTTP {status}: {public_code}",
             channel_name,
             identity.public_key_hex().as_str(),
-            public_error_code(&body)
         );
         let code = status.as_u16();
         return Err(if code == 411 {
             HostedSessionBlocker::RequestFramingRejected
         } else if status.is_client_error() {
+            // 401/403 and every other client answer stays terminal. Waiting
+            // cannot turn a refused identity into an admitted one, and the
+            // backoff below must never be reached from here.
             HostedSessionBlocker::ProofRejected { status: code }
+        } else if is_transient_storage_refusal(code, &public_code) {
+            HostedSessionBlocker::ServiceStorageUnavailable {
+                status: code,
+                code: public_code,
+            }
         } else {
             HostedSessionBlocker::ServiceUnavailable { status: code }
         });
@@ -671,6 +723,20 @@ pub(crate) async fn mint_openagents_nostr_session_for_identity(
     }
     log::info!("hosted OpenAgents sign-in: session issued (HTTP {status})");
     Ok(session)
+}
+
+/// Whether a server-error answer is the hosted storage start-up class.
+///
+/// Two facts admit it, because the client cannot assume which build is live.
+/// The typed code prefix is the honest signal and is preferred. A bare 503 is
+/// accepted as well: the deployment that produced omega#160 answers 503 with
+/// `omega_nostr_auth_storage_unavailable`, and an older or truncated body must
+/// not cost the owner the re-attempt. Every other 5xx (500, 501, …) keeps the
+/// generic [`HostedSessionBlocker::ServiceUnavailable`] naming and is not
+/// re-attempted inside one sign-in, because it is not evidence of a start-up
+/// window.
+fn is_transient_storage_refusal(status: u16, public_code: &str) -> bool {
+    public_code.starts_with(STORAGE_UNAVAILABLE_CODE_PREFIX) || status == 503
 }
 
 /// Extract the server's short `error` code, and nothing else.
@@ -771,6 +837,10 @@ mod tests {
             HostedSessionBlocker::VoiceProofExpired,
             HostedSessionBlocker::RequestFramingRejected,
             HostedSessionBlocker::ServiceUnavailable { status: 503 },
+            HostedSessionBlocker::ServiceStorageUnavailable {
+                status: 503,
+                code: "omega_nostr_auth_storage_timeout".to_string(),
+            },
             HostedSessionBlocker::VoiceSessionRejected { status: 402 },
             HostedSessionBlocker::InsufficientVoiceCredits { status: 402 },
             HostedSessionBlocker::ResponseInvalid,
@@ -953,6 +1023,83 @@ mod tests {
         assert!(framing.summary().contains("411") || framing.summary().contains("Content-Length"));
         assert!(!framing.summary().to_lowercase().contains("not admitted"));
         assert!(!framing.summary().to_lowercase().contains("gemini_api_key"));
+    }
+
+    /// omega#160. The hosted route's storage window must be recognized from
+    /// the server's own code, across the three sibling codes it can send and
+    /// the older build that only sends the first one.
+    #[test]
+    fn the_hosted_storage_start_up_window_is_recognized_from_the_server_code() {
+        for code in [
+            "omega_nostr_auth_storage_unavailable",
+            "omega_nostr_auth_storage_timeout",
+            "omega_nostr_auth_storage_unreachable",
+        ] {
+            assert!(
+                is_transient_storage_refusal(503, code),
+                "`{code}` is the hosted storage start-up class"
+            );
+            // The typed code is enough on its own: a future revision that
+            // answers 500 or 429-shaped 5xx for the same cause is still the
+            // same window.
+            assert!(is_transient_storage_refusal(500, code));
+        }
+        // A build that answers a bare 503 with no decodable body still gets
+        // the re-attempt: the owner's binary talks to whichever revision is
+        // live, and 503 is what the failing deployment returns.
+        assert!(is_transient_storage_refusal(503, "no public error code"));
+        // Every other server error keeps its generic naming.
+        assert!(!is_transient_storage_refusal(500, "internal_error"));
+        assert!(!is_transient_storage_refusal(502, "no public error code"));
+    }
+
+    /// The whole point of the new variant: it is retryable, it is the transient
+    /// start-up class, and the terminal answers are neither. A regression that
+    /// widened `is_transient_service_window` to a refused proof would put the
+    /// owner into a silent 30-second wait for an answer that cannot change.
+    #[test]
+    fn only_the_service_start_up_class_is_re_attempted_inside_one_sign_in() {
+        let window = HostedSessionBlocker::ServiceStorageUnavailable {
+            status: 503,
+            code: "omega_nostr_auth_storage_timeout".to_string(),
+        };
+        assert!(window.is_retryable());
+        assert!(window.is_transient_service_window());
+        assert!(window.summary().contains("503"));
+        assert!(
+            window
+                .summary()
+                .contains("omega_nostr_auth_storage_timeout")
+        );
+        assert!(HostedSessionBlocker::ServiceUnreachable.is_transient_service_window());
+        assert!(
+            HostedSessionBlocker::ServiceUnavailable { status: 504 }.is_transient_service_window()
+        );
+
+        for terminal in [
+            HostedSessionBlocker::ProofRejected { status: 401 },
+            HostedSessionBlocker::ProofRejected { status: 403 },
+            HostedSessionBlocker::RequestFramingRejected,
+            HostedSessionBlocker::IdentityMissing,
+            HostedSessionBlocker::IdentityAdoptionRequired,
+            HostedSessionBlocker::IdentityUnavailable {
+                custody_state: "Lost".to_string(),
+            },
+            HostedSessionBlocker::ProofInvalid,
+            HostedSessionBlocker::ResponseInvalid,
+            // Retryable by a person, but never by waiting a few seconds inside
+            // one call.
+            HostedSessionBlocker::ChallengeRateLimited,
+            HostedSessionBlocker::ProofAlreadyUsed,
+            HostedSessionBlocker::CredentialStorageFailed,
+            HostedSessionBlocker::SessionNotVerified,
+            HostedSessionBlocker::ServiceUnavailable { status: 500 },
+        ] {
+            assert!(
+                !terminal.is_transient_service_window(),
+                "{terminal:?} must not be re-attempted on a backoff"
+            );
+        }
     }
 
     #[test]
