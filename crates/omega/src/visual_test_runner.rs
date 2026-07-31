@@ -755,7 +755,7 @@ fn workbench_fixture_for_scene(name: &str) -> Result<WorkbenchScene> {
         } else if identity_scene {
             for surface in &mut scene.surfaces {
                 surface.available = name != "omega_workbench_identity_offline_error"
-                    || surface.id == WorkSurfaceId::Plan;
+                    || matches!(surface.id, WorkSurfaceId::Terminal | WorkSurfaceId::Plan);
             }
             scene.project = Some(ProjectFixture {
                 id: "visual-project".into(),
@@ -4889,7 +4889,7 @@ fn run_omega_workbench_shell_visual_capture_in_window(
         // actually appear before clearing, or the clear races the error and
         // loses. The thread reads idle both before the turn starts and after
         // it fails, so idleness cannot stand in for settlement here.
-        for _ in 0..512 {
+        for _ in 0..12288 {
             cx.run_until_parked();
             if cx.read(|cx| fixture_acp_thread.read(cx).plan_interruption().is_some()) {
                 break;
@@ -4897,11 +4897,21 @@ fn run_omega_workbench_shell_visual_capture_in_window(
             cx.advance_clock(Duration::from_millis(10));
             std::thread::sleep(Duration::from_millis(1));
         }
+        anyhow::ensure!(
+            cx.read(|cx| fixture_acp_thread.read(cx).plan_interruption().is_some()),
+            "workbench fixture turn did not reach its deterministic terminal failure"
+        );
         cx.update(|cx| {
             fixture_acp_thread.update(cx, |thread, cx| {
                 thread.set_plan_interruption_for_tests(None, cx);
             });
+            panel.update(cx, |panel, cx| {
+                panel.dismiss_all_notifications(cx);
+            });
         });
+        workspace_window.update(cx, |workspace, _window, cx| {
+            workspace.clear_all_notifications(cx);
+        })?;
         cx.run_until_parked();
     }
 
@@ -4923,6 +4933,15 @@ fn run_omega_workbench_shell_visual_capture_in_window(
         }
         return Err(error);
     }
+    cx.update(|cx| {
+        panel.update(cx, |panel, cx| {
+            panel.dismiss_all_notifications(cx);
+        });
+    });
+    workspace_window.update(cx, |workspace, _window, cx| {
+        workspace.clear_all_notifications(cx);
+    })?;
+    cx.run_until_parked();
     let result = run_visual_test(scene_name, workspace_window.into(), cx, update_baseline);
     if is_workbench_review_scene(scene_name) {
         let cleanup_result = teardown_workbench_review(&panel, cx);
@@ -9166,6 +9185,30 @@ fn run_omega_tester_channel_visual_tests(
 
     const FIRST_LAUNCH_SCENE: &str = "omega_tester_channel_first_launch";
     const RELAY_UNAVAILABLE_SCENE: &str = "omega_tester_channel_relay_unavailable";
+    fn require_fail_closed_room(probe: &mut SemanticProbe<'_>) -> Result<()> {
+        probe.require_visible("omega-public-channel-sarah")?;
+        probe.require_visible("omega-public-channel-sarah-controls")?;
+        probe.require_visible("omega-room-sarah-disclosure-copy")?;
+        probe.require_visible("omega-room-sarah-failure")?;
+        for (element_id, label) in [
+            ("omega-room-voice-join", "Join"),
+            ("omega-room-voice-leave", "Leave"),
+            ("omega-room-voice-mute", "Mute"),
+            ("omega-room-sarah-summon", "Summon Sarah"),
+            ("omega-room-sarah-remove", "Remove Sarah"),
+            ("omega-room-sarah-talk", "Talk to Sarah"),
+            ("omega-room-sarah-stop", "Stop"),
+        ] {
+            probe.require_accessible(element_id, "Button", label)?;
+            probe.require_accessibility_property(
+                element_id,
+                "disabled",
+                serde_json::Value::Bool(true),
+            )?;
+        }
+        Ok(())
+    }
+
     if !workbench_any_selected(&[FIRST_LAUNCH_SCENE, RELAY_UNAVAILABLE_SCENE]) {
         return Ok(Vec::new());
     }
@@ -9212,6 +9255,7 @@ fn run_omega_tester_channel_visual_tests(
         let mut selected_probe = SemanticProbe::new(&selected_snapshot);
         selected_probe.require_visible("omega.public.channel.dock")?;
         selected_probe.require_visible("omega-tester-channel-composer")?;
+        require_fail_closed_room(&mut selected_probe)?;
         selected_probe.require_absent("omega-tester-channel-relay-fallback")?;
         record_workbench_semantic_checks(FIRST_LAUNCH_SCENE, selected_probe.into_checks());
         record_workbench_semantic_check(FIRST_LAUNCH_SCENE, "public-privacy-composer-visible");
@@ -9243,6 +9287,7 @@ fn run_omega_tester_channel_visual_tests(
         let mut outage_probe = SemanticProbe::new(&outage_snapshot);
         outage_probe.require_visible("omega-tester-channel-relay-fallback")?;
         outage_probe.require_visible("omega-tester-channel-composer")?;
+        require_fail_closed_room(&mut outage_probe)?;
         outage_probe.require_accessible(
             "omega-tester-channel-retry-relay",
             "Button",
@@ -9646,11 +9691,7 @@ fn run_omega_agent_visual_tests_inner(
     if capture_sealed_front_door {
         let snapshot = cx.debug_render_snapshot(workspace_window)?;
         let mut probe = SemanticProbe::new(&snapshot);
-        probe.require_accessible(
-            "omega-new-conversation-route-override-trigger",
-            "Button",
-            "Automatic",
-        )?;
+        probe.require_accessible("omega-composer-executor-trigger", "Button", "Omega Agent")?;
         record_workbench_semantic_checks("omega_front_door_typing", probe.into_checks());
     }
 

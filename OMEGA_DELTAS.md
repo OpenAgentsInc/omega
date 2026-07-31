@@ -9657,14 +9657,34 @@ revocation, and server stop clear authority and mute input.
 The 30-second speaking floor remains a canonical OpenAgents lease and LiveKit
 remains media only.
 
-**Unavailable is the current honest production state.** OpenAgents does not
-yet expose the shared-room provisioning, authenticated snapshot/update feed,
-signed Sarah presence, summon/remove path, or worker-side floor enforcement
-required to enable these controls. Hermetic authority fixtures prove the UI
-and model seam; they do not become production authority.
+**Unavailable is the current honest desktop state.** OpenAgents now exposes
+the shared-room provisioning, authenticated snapshot/update feed, signed Sarah
+presence, summon/remove path, and worker-side floor enforcement, but Omega has
+not yet consumed that production contract. Hermetic authority fixtures prove
+the UI and model seam; they do not become production authority. An unjoined or
+unavailable room says **Mic off**, never **Mic on**.
 
 - **Enforced by:** `community_room_sarah_is_verified_bounded_and_fail_closed`
   in `crates/omega_deltas`; the model tests in
   `crates/agent_ui/src/omega_public_channel_sarah.rs`; and
   `community_sarah_controls_are_compact_and_fail_closed_until_verified` in
-  `crates/agent_ui/src/omega_public_channel_view.rs`.
+  `crates/agent_ui/src/omega_public_channel_view.rs`; and both tester-channel
+  visual scenes, which require every authority-bearing room control to remain
+  disabled while the contract is unavailable.
+
+### OMEGA-DELTA-0216 — A broken visual launcher fails the ordinary preflight
+
+The hermetic visual lane was silent after the application package changed from
+`zed` to `omega`: its launcher still built the old package and exited before a
+scene, diff, or receipt existed. Baseline drift then accumulated without a red
+artifact.
+
+The launcher now builds the `omega` package and its reviewed catalog is pinned
+at 95 scenes. The ordinary `omega_deltas` preflight binds the launcher command,
+the application package name, list-mode environment, and exact catalog count.
+A later rename or unreviewed catalog change therefore fails before it can turn
+the visual lane into silence again.
+
+- **Enforced by:** `workbench_visual_launcher_tracks_the_application_package`
+  in `crates/omega_deltas`; `script/omega-workbench-proof --list`; and
+  `omega_workbench_harness::validate_scene_catalog`.

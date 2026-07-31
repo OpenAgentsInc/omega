@@ -588,6 +588,16 @@ impl CommunitySarahRoom {
             .label(&authority.local_participant.user_ref_digest)
     }
 
+    pub fn microphone_label(&self) -> &'static str {
+        if self.lifecycle != CommunityCallLifecycle::Joined {
+            "Mic off"
+        } else if self.muted {
+            "Muted"
+        } else {
+            "Mic on"
+        }
+    }
+
     pub fn has_private_authority(&self) -> bool {
         false
     }
@@ -874,5 +884,16 @@ mod tests {
         .expect("apply authority");
         room.expire(20_000);
         assert_eq!(room.lifecycle, CommunityCallLifecycle::Failed);
+    }
+
+    #[test]
+    fn microphone_status_never_claims_an_unjoined_room_is_live() {
+        let mut room = CommunitySarahRoom::default();
+        assert_eq!(room.microphone_label(), "Mic off");
+
+        room.lifecycle = CommunityCallLifecycle::Joined;
+        assert_eq!(room.microphone_label(), "Mic on");
+        room.muted = true;
+        assert_eq!(room.microphone_label(), "Muted");
     }
 }

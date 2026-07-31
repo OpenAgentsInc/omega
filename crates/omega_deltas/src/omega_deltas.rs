@@ -204,6 +204,7 @@ pub const ENFORCED_DELTAS: &[&str] = &[
     "OMEGA-DELTA-0213",
     "OMEGA-DELTA-0214",
     "OMEGA-DELTA-0215",
+    "OMEGA-DELTA-0216",
 ];
 
 /// OMEGA-DELTA-0204. Every control the composer's bar offers, written twice:
@@ -23215,6 +23216,8 @@ mod tests {
             "false",
             "stale_replay_and_unverified_floor_holder_fail_closed",
             "removal_role_loss_expiry_and_server_stop_revoke_every_control",
+            "microphone_status_never_claims_an_unjoined_room_is_live",
+            "\"Mic off\"",
         ] {
             assert!(
                 model.contains(required),
@@ -23232,6 +23235,8 @@ mod tests {
             "omega-room-sarah-remove",
             "omega-room-sarah-talk",
             "omega-room-sarah-stop",
+            "omega-room-sarah-disclosure-copy",
+            "omega-room-sarah-failure",
             ".tab_index(7isize)",
             "Sarah voice uses OpenAgents and OpenAI.",
             "community_sarah_controls_are_compact_and_fail_closed_until_verified",
@@ -24204,6 +24209,37 @@ mod tests {
                 "OMEGA-DELTA-0191: --omega-send lost `{required}`"
             );
         }
+    }
+
+    /// OMEGA-DELTA-0216. The visual lane's launcher and renamed application
+    /// package are one contract. This check runs in the normal preflight, so a
+    /// future package rename cannot turn every visual invocation into silence.
+    #[test]
+    fn workbench_visual_launcher_tracks_the_application_package() {
+        let launcher = read_repository_file("script/omega-workbench-proof");
+        let application_manifest = read_repository_file("crates/omega/Cargo.toml");
+        for required in [
+            "cargo build --release -p omega --bin zed_visual_test_runner --features visual-tests",
+            "OMEGA_WORKBENCH_LIST_SCENES=1",
+            "OMEGA_WORKBENCH_LIST_FORMAT=\"$list_format\"",
+        ] {
+            assert!(
+                launcher.contains(required),
+                "OMEGA-DELTA-0216: the workbench visual launcher lost `{required}`"
+            );
+        }
+        assert!(
+            application_manifest.contains("name = \"omega\""),
+            "OMEGA-DELTA-0216: the application package was renamed without updating the visual launcher"
+        );
+
+        let harness =
+            read_repository_file("crates/omega_workbench_harness/src/omega_workbench_harness.rs");
+        assert_eq!(
+            harness.matches("        name: \"omega_").count(),
+            95,
+            "OMEGA-DELTA-0216: --list no longer has the reviewed 95-scene catalog"
+        );
     }
 
     /// OMEGA-DELTA-0191. The activity rail is generated from one exact

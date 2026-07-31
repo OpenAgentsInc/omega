@@ -1738,7 +1738,7 @@ impl PublicChannelView {
                             ),
                     )
                     .child(
-                        Label::new(if state.muted { "Muted" } else { "Mic on" })
+                        Label::new(state.microphone_label())
                             .size(LabelSize::XSmall)
                             .color(Color::Muted),
                     ),
@@ -1829,9 +1829,14 @@ impl PublicChannelView {
                     .min_w_0()
                     .gap_2()
                     .child(
-                        Label::new("Sarah voice uses OpenAgents and OpenAI.")
-                            .size(LabelSize::XSmall)
-                            .color(Color::Muted),
+                        div()
+                            .id("omega-room-sarah-disclosure-copy")
+                            .debug_selector(|| "omega-room-sarah-disclosure-copy".to_string())
+                            .child(
+                                Label::new("Sarah voice uses OpenAgents and OpenAI.")
+                                    .size(LabelSize::XSmall)
+                                    .color(Color::Muted),
+                            ),
                     )
                     .child(
                         div()
@@ -1861,9 +1866,14 @@ impl PublicChannelView {
             )
             .when_some(state.failure.clone(), |this, failure| {
                 this.child(
-                    Label::new(failure)
-                        .size(LabelSize::XSmall)
-                        .color(Color::Error),
+                    div()
+                        .id("omega-room-sarah-failure")
+                        .debug_selector(|| "omega-room-sarah-failure".to_string())
+                        .child(
+                            Label::new(failure)
+                                .size(LabelSize::XSmall)
+                                .color(Color::Error),
+                        ),
                 )
             })
             .into_any_element()

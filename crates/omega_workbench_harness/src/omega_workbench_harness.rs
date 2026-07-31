@@ -3521,7 +3521,7 @@ pub const HERMETIC_SCENES: &[SceneSpec] = &[
     SceneSpec {
         name: "omega_workbench_identity_long_narrow",
         phase: ScenePhase::Recording,
-        viewport: ViewportFixture::new(909, 720, 2000),
+        viewport: ViewportFixture::new(879, 720, 2000),
         fixture_version: 1,
         pixel_policy: APPLE_SILICON_METAL_POLICY,
         regions: WORKBENCH_IDENTITY_REGIONS,
