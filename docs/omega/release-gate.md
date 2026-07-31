@@ -11,7 +11,7 @@ admitted until evidence from the exact packaged candidate exists. The
 installed canary collector must use a fresh journey canary and must not record
 its value; an unreadable required secret surface blocks the row.
 
-- Generated: 2026-07-31T15:12:37+00:00
+- Generated: 2026-07-31T15:37:16+00:00
 - Candidate: `Omega-v0.2.0-rc29-macos-arm64.dmg` (version 0.2.0-rc29, channel rc)
 - Package SHA-256: `116ae5ae542d4d0faed14a59e98ebeac2402ab022927738ed132e6c231e10c34`
 - Release-record SHA-256: `48ef3a824cf6326aa02fe3d189adcb14d9ba0b94a5c552c4f1a6dad6ec8ddcfe`
@@ -21,9 +21,10 @@ its value; an unreadable required secret surface blocks the row.
 - Signature verified: `True`
 - Notarization: `{"app_stapled": true, "attempted": true, "stapled": true, "status": "submitted_and_stapled"}`
 - Known limits: `menu-honesty`, `direct-codex`, `direct-claude-code`, `direct-grok`, `generic-acp`, `concurrency-supervision`, `three-mode-journeys`, `omega-routing`, `sarah-journey`, `work-surfaces`, `update-safety-lifecycle`, `distribution`, `independent-review`, `sarah-livekit-private`, `sarah-livekit-room`, `sarah-livekit-connectivity`, `sarah-livekit-isolation`, `sarah-livekit-failure`, `sarah-livekit-independent-review`
-- Harness commit: `c7ecf769e82320b9c43dfccaf7a9ebc4f980b1a6`
+- Harness commit: `e4f0ce91406c3a39b46429fc120ce6a845043d32`
 - Overall status: **automated_green_pending_owner**
-- Receipt digest: `81d28ffa9c8e4e4e18346c466a26d8623b430ce0ddcb3dbdd4fee6b1b3783c21`
+- Receipt digest: `1866cede60b8495ec5785338c1b9aa60a8b5d5933174c246f1918e010319524b`
+- Sarah LiveKit binding SHA-256: `e1ed7f02ae9f298c976e64ec2d87cc7ba45fcffca5e5099274a9db96c4ab4f52`
 
 Regenerate: build the candidate with `script/bundle-omega-rc`, then run `script/omega-release-gate --report docs/omega/release-gate.md --receipt-copy docs/omega/release-gate/<date>-<candidate>.gate.json --sarah-livekit-evidence <public-safe-manifest.json> --owner-evidence <public-safe-owner-observations.json> --require-green`. The final command exits nonzero unless every row is a preserved pass.
 
@@ -50,23 +51,63 @@ review cycle that landed after rc28. Omega issues
 [#185](https://github.com/OpenAgentsInc/omega/issues/185),
 [#186](https://github.com/OpenAgentsInc/omega/issues/186), and
 [#187](https://github.com/OpenAgentsInc/omega/issues/187) still own the
-unfinished LiveKit desktop and installed-evidence journeys, and no
-`--sarah-livekit-evidence` manifest exists for this package, so all six Sarah
-LiveKit rows stay `blocked`. Issue
+unfinished LiveKit desktop and installed-evidence journeys. Issue
 [#189](https://github.com/OpenAgentsInc/omega/issues/189) may now capture
 against this candidate digest instead of rc28. Every row shown below as
 `owner-assisted-pending` still needs observation on this exact package, and the
 distribution and independent-review rows need the strict owner manifest
 described above.
 
-Harness hermeticity note, 2026-07-31: the first `control-crawl` run against
-this candidate reported `automated-fail` because a cached test binary in the
-shared `target/` directory had a deleted worktree's `CARGO_MANIFEST_DIR`
+The six Sarah LiveKit rows are no longer blocked on a missing manifest.
+[`2026-07-31-omega-v0.2.0-rc29.sarah-livekit-evidence.json`](release-gate/2026-07-31-omega-v0.2.0-rc29.sarah-livekit-evidence.json)
+binds them to this exact package digest, source commit, LiveKit server and
+Sarah worker image digests, infrastructure and configuration revisions, and the
+pricing and model inputs in force in production; binding SHA-256
+`e1ed7f02ae9f298c976e64ec2d87cc7ba45fcffca5e5099274a9db96c4ab4f52`. The rows
+now carry their true state, and none of them is green.
+
+The only substantive live artifact behind them is the passing two-room
+acceptance receipt on OpenAgents `main`, preserved here as
+[`openagents-2026-07-31-ep263lk-community-join-acceptance.json`](release-gate/sarah-livekit/openagents-2026-07-31-ep263lk-community-join-acceptance.json)
+(`sha256:fd4381da…`). It proves two concurrent Sarah sessions, one private and
+one community, with real audio and transcription, 67 ms and 110 ms interrupt
+acknowledgements, one accounted cancelled response each, exact provider usage
+reconciled to distinct settled charges of 74368 and 19520 msat, and audible
+fanout to two subscribers. It is a **headless Node harness** run, not the
+packaged candidate, and two headless subscribers are **not** three
+authenticated desktops. On that strength `sarah-livekit-private` and
+`sarah-livekit-isolation` are `inconclusive`; `sarah-livekit-room`,
+`sarah-livekit-connectivity`, `sarah-livekit-failure`, and
+`sarah-livekit-independent-review` stay `blocked`.
+
+What each row is still missing is named exactly in its receipt under
+`docs/omega/release-gate/sarah-livekit/`, together with a `refused_claims` list
+recording what was deliberately not promoted. In summary: no packaged-desktop
+private journey (admission terms before capture, bounded command, agent thread,
+reconnect without a second provider generation); no three-desktop community
+journey (floor transfer, shared answer, moderator stop, and the non-floor,
+stale-grant, replay, and removed-member refusals); zero of the three forced
+UDP / TCP / TURN-TLS transport captures, and an ICE path type the harness never
+records at all; no preserved cross-room provider-generation comparison and no
+live community refusal of a private editor fact or a privileged tool; none of
+the bounded failure drills, whose production route is gated by
+`SARAH_LIVEKIT_PROVIDER_DISCONNECT_ACCEPTANCE_ENABLED`, currently `false`; no
+eight-scope privacy scan, which both acceptance receipts name as a stated
+limitation; no media-key rekey proof; and no reviewer distinct from the
+candidate producer. Two binding fields are deliberately unversioned because
+Sarah has no model catalog revision and no price catalog revision, only pinned
+constants and raw production environment values.
+
+Harness hermeticity note, 2026-07-31, now fixed: the first `control-crawl` run
+against this candidate reported `automated-fail` because a cached test binary in
+the shared `target/` directory had a deleted worktree's `CARGO_MANIFEST_DIR`
 compiled into it, so `CrawlRegistry::load_from_repository` read a path that no
-longer existed. `cargo clean -p omega_control_crawl` and a rerun gave 10 of 10
-tests passing, and the row above is that rerun. The harness does not force a
-rebuild, so this row can report a build-cache state rather than a source state.
-That gap is a defect in the gate, not in the candidate.
+longer existed. The row could therefore report a build-cache state rather than a
+source state, which was a defect in the gate and not in the candidate. The gate
+now runs `cargo clean -p omega_control_crawl` before the test, records
+`forced_rebuild` and the clean exit code in the row facts, and the row above is
+that forced rebuild. The whole gate run still completes in about a minute, so
+the fix costs a known rebuild instead of an unknown cache.
 
 Assemble that manifest with
 `script/assemble-omega-sarah-livekit-evidence`. It takes the DMG and release
@@ -126,12 +167,13 @@ script/assemble-omega-sarah-livekit-evidence \
 | `update-safety-lifecycle` | owner-assisted-pending | — | Drag the DMG's Omega.app beside the existing Zed and OpenAgents Desktop installs, launch it, then upgrade, roll back, and uninstall; confirm only Omega paths change (the automated row already proves a staged run leaves neighbouring app data untouched). |
 | `distribution` | owner-assisted-pending | — | When the public download page exists, confirm page identity, version, platform, artifact digest, signature/notarization state, release notes, and the installed binary agree with this receipt's candidate binding. |
 | `independent-review` | owner-assisted-pending | — | Have a reviewer who did not produce the candidate repeat the held-out journey and record the verdict against this receipt's candidate digest. |
-| `sarah-livekit-private` | blocked | omega#185, openagents#9283, openagents#9285 | no --sarah-livekit-evidence manifest was supplied for this candidate |
-| `sarah-livekit-room` | blocked | omega#186, openagents#9286 | no --sarah-livekit-evidence manifest was supplied for this candidate |
-| `sarah-livekit-connectivity` | blocked | openagents#9284, omega#185 | no --sarah-livekit-evidence manifest was supplied for this candidate |
-| `sarah-livekit-isolation` | blocked | openagents#9283, openagents#9285, omega#186 | no --sarah-livekit-evidence manifest was supplied for this candidate |
-| `sarah-livekit-failure` | blocked | openagents#9284, openagents#9285, openagents#9286 | no --sarah-livekit-evidence manifest was supplied for this candidate |
-| `sarah-livekit-independent-review` | blocked | omega#187 | no --sarah-livekit-evidence manifest was supplied for this candidate |
+| `sarah-livekit-private` | inconclusive | omega#185, openagents#9283, openagents#9285 | No packaged Omega desktop completed the private Sarah LiveKit journey. The only evidence bound to this candidate is a headless Node acceptance harness run against production, which proves a completed voice turn, a 110 ms interrupt acknowledgement with a 170 ms audio tail, one accounted cancelled response, and exact provider usage reconciled to a settled 74368 msat charge. Admission price, hold, rate, and limit shown before capture, one confirmed bounded command, one started agent thread, and an admitted media reconnect without a second provider generation were observed on no client at all. |
+| `sarah-livekit-room` | blocked | omega#186, openagents#9286 | No three-desktop community journey exists for this candidate or any other. The strongest artifact fans one community session out to two headless subscribers (subscriberFanoutCount 2 with audibleFanoutObserved), which is one owner participant plus one headless secondary subscriber, not three authenticated packaged desktops. Server-issued floor transfer, a shared answer heard by all members, moderator stop, and the non-floor, stale-grant, replay, and removed-member refusals exist only as server-side unit tests in openagents; none was observed against this candidate, and the acceptance receipt schema has no field for floor, moderator, membership, or refusal. |
+| `sarah-livekit-connectivity` | blocked | openagents#9284, omega#185 | None of the three forced transport paths was observed. Both production acceptance runs record only a boolean selectedIcePathObserved for one naturally selected ICE path per scenario; the harness reads selectedCandidatePairId and packet counters and never captures candidate type or protocol, so even that one path cannot be classified as direct UDP, WebRTC TCP, or TURN/TLS. No packaged-Omega capture exists with UDP blocked, and none exists with UDP and non-TLS TCP blocked. The openagents read-only production acceptance audit records all three transport rows as blocked. |
+| `sarah-livekit-isolation` | inconclusive | openagents#9283, openagents#9285, omega#186 | Concurrent private and community rooms with two distinct owners, overlapping active-room intervals, and distinct settlement receipts (74368 and 19520 msat) are observed, but provider-generation isolation is not preserved: the harness asserts identity distinctness only within one scenario and strips every generation digest from the public receipt, so no cross-room comparison survives, and the receipt's identityIsolationObserved field is a hard-coded harness literal rather than a measurement. Community Sarah's tool-free capability profile is a source contract plus a source-text assertion, not an observed refusal: no private editor fact and no privileged tool was requested in a live community room and refused. |
+| `sarah-livekit-failure` | blocked | openagents#9284, openagents#9285, openagents#9286 | No failure drill has been executed against this candidate or this infrastructure. The failure-matrix harness states its own limitation that fault actions are observed and not executed by it. The production route that would arm the exact provider-disconnect drill is gated by SARAH_LIVEKIT_PROVIDER_DISCONNECT_ACCEPTANCE_ENABLED, which is "false" in the production deploy bundle and contract-locked to false by a deploy-bundle test, so the route answers 404 before authentication. Worker crash, timeout, hold exhaustion, duplicate participant, membership revocation, and the reconnect-cannot-revive drill have no live receipt, and an SFU-loss scenario is not defined in the failure matrix at all. The eight-scope privacy scan has produced no output: both acceptance receipts carry the limitation harness_retention_only_separate_cluster_privacy_scan_required. No media-key rekey proof exists. |
+| `sarah-livekit-independent-review` | blocked | omega#187 | No reviewer distinct from the candidate producer has repeated the held-out private and three-desktop group journeys against this exact package and infrastructure binding. Both prerequisite journeys are themselves unproven for this candidate, so there is currently no bound journey for an independent reviewer to repeat. |
+
 
 ## Omega 0.2.0 Sarah LiveKit cutover plan
 
@@ -141,10 +183,11 @@ into the self-hosted LiveKit design in the
 [unified LiveKit teardown](https://github.com/OpenAgentsInc/openagents/blob/main/docs/teardowns/2026-07-30-livekit-armada-buzz-zed-teardown.md).
 This section is an accepted release plan, not evidence that the rc29 candidate
 above has been observed on the new transport. rc29 is the first candidate whose
-source carries the `livekit_room_v1` desktop path, but no candidate-bound
-evidence manifest exists for it yet, so all six Sarah LiveKit rows above remain
-`blocked`. A later candidate must regenerate the table and bind every added row
-to its own source and package digest.
+source carries the `livekit_room_v1` desktop path. A candidate-bound evidence
+manifest now exists for it, and it resolves the six Sarah LiveKit rows to
+`inconclusive` or `blocked` rather than to a pass: nothing in this plan has yet
+been observed on the packaged candidate. A later candidate must regenerate the
+table and bind every added row to its own source and package digest.
 
 ### Release decision
 
@@ -389,4 +432,3 @@ before duplicating) · OPEN (nobody holds it).
 3. Fresh worktree off origin/main per item batch; never touch the primary checkout at `~/work/omega` (frequently dirty with another lane's live work); rebase over concurrent pushes and re-run `cargo test -p omega_deltas` + touched-crate tests after every rebase.
 4. Delta discipline: entry + check + test change together; never weaken a check to pass. Keymap edits ride the same commit as any action/crate deletion.
 5. Land = pushed to origin/main + issue comment (+ close where acceptance is met) + worktree removed.
-
