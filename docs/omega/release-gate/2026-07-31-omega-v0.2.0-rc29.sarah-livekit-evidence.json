@@ -1,0 +1,464 @@
+{
+  "binding": {
+    "admitted_model_revision": "unversioned-pinned-constants:gpt-realtime-2.1+gpt-4o-mini-transcribe",
+    "livekit_config_revision": "sha256:b0bf0f0cb801943b789906c615d3277629a8f73bd6d06b52a60aaf2c86eb8a7d",
+    "livekit_image_digest": "sha256:189f7c81b704a36642bc5c7e2d3e1ae83744627c11978a23a251bf19fbec64e0",
+    "livekit_infrastructure_revision": "6094d23a4622bd9f23b46291d57d2b3ca3157cf9",
+    "omega_package_sha256": "116ae5ae542d4d0faed14a59e98ebeac2402ab022927738ed132e6c231e10c34",
+    "omega_source_revision": "c7ecf769e82320b9c43dfccaf7a9ebc4f980b1a6",
+    "openagents_source_revision": "fdd0db9bab10568a97d1ea2d3ddc0f936ea6df66",
+    "price_catalog_revision": "unversioned-production-env:reservation_msat=256000,credit_msat_per_million_tokens=64000000,max_session_seconds=300",
+    "sarah_worker_image_digest": "sha256:41b06de908c45642d4635d5cc3b168e69d08f08c3621f8ea39aecdeeed190227",
+    "sarah_worker_revision": "fdd0db9bab10568a97d1ea2d3ddc0f936ea6df66"
+  },
+  "rows": [
+    {
+      "evidence_refs": [
+        {
+          "path": "docs/omega/release-gate/sarah-livekit/2026-07-31-rc29-sarah-livekit-private.json",
+          "public_safe": true,
+          "sha256": "47e55c318e134ed32c0403141fabe1ef9f45a013dabb023457692872bf746db5"
+        }
+      ],
+      "facts": {
+        "binding_provenance": {
+          "admitted_model_revision": "NO versioned model catalog exists for Sarah. The realtime model is the bare pinned constant SARAH_LIVEKIT_MODEL and the transcription constant SARAH_LIVEKIT_TRANSCRIPTION_MODEL in packages/audio-contract/src/sarah-livekit-worker.ts. This binding names those constants and must not be read as a catalog revision.",
+          "livekit_config_revision": "configurationDigest of infra/livekit/production/livekit.yaml, stable across every production receipt",
+          "livekit_image_digest": "infra/livekit/bundle.json serverImage (livekit-server v1.13.4)",
+          "livekit_infrastructure_revision": "deployedRevision of the last production LiveKit runtime deployment receipt docs/ops/receipts/livekit/production-runtime-signer-worker-20260731T113000Z.json",
+          "omega_package_sha256": "recomputed by script/omega-release-gate from target/omega-rc/Omega-v0.2.0-rc29-macos-arm64.dmg",
+          "openagents_source_revision": "sourceRevision recorded by the acceptance receipt; the receipt states the limitation source_revision_resolved_from_deployed_image_digest, so this revision was resolved from the running worker image rather than reported by the worker process",
+          "price_catalog_revision": "NO versioned price catalog exists for Sarah voice. These are the exact unversioned production environment values SARAH_REALTIME_RESERVATION_MSAT, SARAH_REALTIME_CREDIT_MSAT_PER_MILLION_TOKENS, and SARAH_REALTIME_MAX_SESSION_SECONDS in apps/openagents.com/workers/api/scripts/cloudrun/env-production.yaml.",
+          "sarah_worker_image_digest": "infra/livekit/production/resources/sarah-agent-runtime.yaml and infra/livekit/bundle.json workerImage (pinState pinned); pinned by openagents commit 8489421023, the direct child of worker source fdd0db9bab",
+          "unbound_identifier": "The Cloud Run serving revision openagents-monolith-00349-7q2 was reported to the assembling agent but is recorded nowhere in openagents at c4906fbd89, so it is deliberately absent from this binding. The last serving revision recorded in the repository in a Sarah LiveKit context is openagents-monolith-00347-bds."
+        },
+        "blocked_reason": "No packaged Omega desktop completed the private Sarah LiveKit journey. The only evidence bound to this candidate is a headless Node acceptance harness run against production, which proves a completed voice turn, a 110 ms interrupt acknowledgement with a 170 ms audio tail, one accounted cancelled response, and exact provider usage reconciled to a settled 74368 msat charge. Admission price, hold, rate, and limit shown before capture, one confirmed bounded command, one started agent thread, and an admitted media reconnect without a second provider generation were observed on no client at all.",
+        "issues": [
+          "omega#185",
+          "openagents#9283",
+          "openagents#9285"
+        ],
+        "not_observed": [
+          "packaged_desktop_client_participation",
+          "admission_terms_seen: admission price, hold, rate, and limit displayed before capture",
+          "bounded_command_confirmed",
+          "agent_thread_started",
+          "reconnect_same_generation: an admitted media reconnect that does not open a second provider generation"
+        ],
+        "note": "This receipt records what was actually observed for one Sarah LiveKit release-gate row on Omega v0.2.0-rc29. It never promotes source tests, configuration, deployment-lifecycle receipts, or a headless harness run into an installed packaged-candidate observation.",
+        "observed": {
+          "client_kind": "headless Node acceptance harness, not the packaged candidate",
+          "headless_active_room_duration_ms": 13639,
+          "headless_cancelled_response_count": 1,
+          "headless_exact_provider_usage_reconciled_to_final_charge": true,
+          "headless_final_charge_msat": 74368,
+          "headless_interrupt_ack_latency_ms": 110,
+          "headless_post_interrupt_audio_tail_ms": 170,
+          "headless_sarah_audio_observed": true,
+          "headless_sarah_transcription_observed": true,
+          "headless_settlement_credit_mode": "metered",
+          "headless_settlement_receipt_digest": "sha256:8034c5620e2776f4df5b38be21d20576e3c47fd52be7cc1f1999e8532bacb76b",
+          "headless_settlement_state": "settled",
+          "headless_voice_turn_completed": true
+        },
+        "refused_claims": [
+          "A headless Node harness session is not the packaged candidate and is not promoted to owner-assisted-pass for this row.",
+          "Server-side admission-terms machinery and its production hold, rate, and limit values are source and configuration evidence; they do not prove any client displayed the terms before capture."
+        ],
+        "source_evidence": [
+          {
+            "local_copy": "docs/omega/release-gate/sarah-livekit/openagents-2026-07-31-ep263lk-community-join-acceptance.json",
+            "observed_at": "2026-07-31T14:35:12.871Z",
+            "outcome": "passed",
+            "path": "docs/ops/receipts/livekit/2026-07-31-ep263lk-community-join-acceptance.json",
+            "producer": "headless Node acceptance harness (apps/sarah-livekit-agent/src/acceptance-livekit.ts)",
+            "repository": "https://github.com/OpenAgentsInc/openagents",
+            "result_digest": "sha256:fd4381dad55cd4504d6d7de14dcf508aeeafadecf524047afa8aecf19aa47018",
+            "revision": "c4906fbd89025ba43d96655e12e1e982cc526beb",
+            "schema": "openagents.sarah.livekit-acceptance.v3",
+            "sha256": "f1b47de0669b9509e84670d4622618b478e8f645434a1d82cabb713e6275bc92"
+          },
+          {
+            "path": "docs/ops/2026-07-31-livekit-production-read-only-acceptance-audit.md",
+            "repository": "https://github.com/OpenAgentsInc/openagents",
+            "revision": "c4906fbd89025ba43d96655e12e1e982cc526beb",
+            "role": "read-only production acceptance audit; records the connectivity, load, privacy, cost, and drill rows as blocked or not run"
+          }
+        ],
+        "unblocks_when": "An eligible account runs the full private journey on Omega v0.2.0-rc29 itself and the observation preserves admission terms shown before capture, the bounded command confirmation, the started agent thread, and a media reconnect whose provider generation digest is unchanged."
+      },
+      "id": "sarah-livekit-private",
+      "status": "inconclusive"
+    },
+    {
+      "evidence_refs": [
+        {
+          "path": "docs/omega/release-gate/sarah-livekit/2026-07-31-rc29-sarah-livekit-room.json",
+          "public_safe": true,
+          "sha256": "b5cc803fce44dab28dbd03fbf7f6deb63faf22b5c9c03f75b386ef57ebf55487"
+        }
+      ],
+      "facts": {
+        "binding_provenance": {
+          "admitted_model_revision": "NO versioned model catalog exists for Sarah. The realtime model is the bare pinned constant SARAH_LIVEKIT_MODEL and the transcription constant SARAH_LIVEKIT_TRANSCRIPTION_MODEL in packages/audio-contract/src/sarah-livekit-worker.ts. This binding names those constants and must not be read as a catalog revision.",
+          "livekit_config_revision": "configurationDigest of infra/livekit/production/livekit.yaml, stable across every production receipt",
+          "livekit_image_digest": "infra/livekit/bundle.json serverImage (livekit-server v1.13.4)",
+          "livekit_infrastructure_revision": "deployedRevision of the last production LiveKit runtime deployment receipt docs/ops/receipts/livekit/production-runtime-signer-worker-20260731T113000Z.json",
+          "omega_package_sha256": "recomputed by script/omega-release-gate from target/omega-rc/Omega-v0.2.0-rc29-macos-arm64.dmg",
+          "openagents_source_revision": "sourceRevision recorded by the acceptance receipt; the receipt states the limitation source_revision_resolved_from_deployed_image_digest, so this revision was resolved from the running worker image rather than reported by the worker process",
+          "price_catalog_revision": "NO versioned price catalog exists for Sarah voice. These are the exact unversioned production environment values SARAH_REALTIME_RESERVATION_MSAT, SARAH_REALTIME_CREDIT_MSAT_PER_MILLION_TOKENS, and SARAH_REALTIME_MAX_SESSION_SECONDS in apps/openagents.com/workers/api/scripts/cloudrun/env-production.yaml.",
+          "sarah_worker_image_digest": "infra/livekit/production/resources/sarah-agent-runtime.yaml and infra/livekit/bundle.json workerImage (pinState pinned); pinned by openagents commit 8489421023, the direct child of worker source fdd0db9bab",
+          "unbound_identifier": "The Cloud Run serving revision openagents-monolith-00349-7q2 was reported to the assembling agent but is recorded nowhere in openagents at c4906fbd89, so it is deliberately absent from this binding. The last serving revision recorded in the repository in a Sarah LiveKit context is openagents-monolith-00347-bds."
+        },
+        "blocked_reason": "No three-desktop community journey exists for this candidate or any other. The strongest artifact fans one community session out to two headless subscribers (subscriberFanoutCount 2 with audibleFanoutObserved), which is one owner participant plus one headless secondary subscriber, not three authenticated packaged desktops. Server-issued floor transfer, a shared answer heard by all members, moderator stop, and the non-floor, stale-grant, replay, and removed-member refusals exist only as server-side unit tests in openagents; none was observed against this candidate, and the acceptance receipt schema has no field for floor, moderator, membership, or refusal.",
+        "issues": [
+          "omega#186",
+          "openagents#9286"
+        ],
+        "not_observed": [
+          "authenticated_desktop_count>=3",
+          "floor_transfer_completed: a server-issued floor moved between two members",
+          "shared_answer_heard_by_all",
+          "moderator_stop_completed",
+          "non_floor_refused",
+          "removed_member_refused",
+          "stale_floor_grant_refused",
+          "replayed_floor_grant_refused"
+        ],
+        "note": "This receipt records what was actually observed for one Sarah LiveKit release-gate row on Omega v0.2.0-rc29. It never promotes source tests, configuration, deployment-lifecycle receipts, or a headless harness run into an installed packaged-candidate observation.",
+        "observed": {
+          "authenticated_packaged_desktop_count": 0,
+          "headless_audible_fanout_observed": true,
+          "headless_community_session_completed": true,
+          "headless_final_charge_msat": 19520,
+          "headless_interrupt_ack_latency_ms": 67,
+          "headless_principal_sarah_observed": true,
+          "headless_subscriber_fanout_composition": "one owner participant plus one headless secondary subscriber",
+          "headless_subscriber_fanout_count": 2
+        },
+        "refused_claims": [
+          "A subscriberFanoutCount of 2 headless subscribers is NOT a three-desktop journey and is not reported as one.",
+          "Passing server-side floor-authority unit tests in apps/openagents.com/workers/api are source evidence and cannot promote an installed-candidate row."
+        ],
+        "source_evidence": [
+          {
+            "local_copy": "docs/omega/release-gate/sarah-livekit/openagents-2026-07-31-ep263lk-community-join-acceptance.json",
+            "observed_at": "2026-07-31T14:35:12.871Z",
+            "outcome": "passed",
+            "path": "docs/ops/receipts/livekit/2026-07-31-ep263lk-community-join-acceptance.json",
+            "producer": "headless Node acceptance harness (apps/sarah-livekit-agent/src/acceptance-livekit.ts)",
+            "repository": "https://github.com/OpenAgentsInc/openagents",
+            "result_digest": "sha256:fd4381dad55cd4504d6d7de14dcf508aeeafadecf524047afa8aecf19aa47018",
+            "revision": "c4906fbd89025ba43d96655e12e1e982cc526beb",
+            "schema": "openagents.sarah.livekit-acceptance.v3",
+            "sha256": "f1b47de0669b9509e84670d4622618b478e8f645434a1d82cabb713e6275bc92"
+          },
+          {
+            "path": "docs/ops/2026-07-31-livekit-production-read-only-acceptance-audit.md",
+            "repository": "https://github.com/OpenAgentsInc/openagents",
+            "revision": "c4906fbd89025ba43d96655e12e1e982cc526beb",
+            "role": "read-only production acceptance audit; records the connectivity, load, privacy, cost, and drill rows as blocked or not run"
+          }
+        ],
+        "unblocks_when": "Three authenticated packaged Omega v0.2.0-rc29 desktops join one community room, summon Sarah, transfer the server-issued floor between two members, all hear the shared answer, a moderator stops Sarah, and the preserved observation shows a non-floor participant, a stale grant, a replay, and a removed member each refused."
+      },
+      "id": "sarah-livekit-room",
+      "status": "blocked"
+    },
+    {
+      "evidence_refs": [
+        {
+          "path": "docs/omega/release-gate/sarah-livekit/2026-07-31-rc29-sarah-livekit-connectivity.json",
+          "public_safe": true,
+          "sha256": "000f93556efb579eb3346989c8be2e6f9499c0ff86f47a85cd55744172001142"
+        }
+      ],
+      "facts": {
+        "binding_provenance": {
+          "admitted_model_revision": "NO versioned model catalog exists for Sarah. The realtime model is the bare pinned constant SARAH_LIVEKIT_MODEL and the transcription constant SARAH_LIVEKIT_TRANSCRIPTION_MODEL in packages/audio-contract/src/sarah-livekit-worker.ts. This binding names those constants and must not be read as a catalog revision.",
+          "livekit_config_revision": "configurationDigest of infra/livekit/production/livekit.yaml, stable across every production receipt",
+          "livekit_image_digest": "infra/livekit/bundle.json serverImage (livekit-server v1.13.4)",
+          "livekit_infrastructure_revision": "deployedRevision of the last production LiveKit runtime deployment receipt docs/ops/receipts/livekit/production-runtime-signer-worker-20260731T113000Z.json",
+          "omega_package_sha256": "recomputed by script/omega-release-gate from target/omega-rc/Omega-v0.2.0-rc29-macos-arm64.dmg",
+          "openagents_source_revision": "sourceRevision recorded by the acceptance receipt; the receipt states the limitation source_revision_resolved_from_deployed_image_digest, so this revision was resolved from the running worker image rather than reported by the worker process",
+          "price_catalog_revision": "NO versioned price catalog exists for Sarah voice. These are the exact unversioned production environment values SARAH_REALTIME_RESERVATION_MSAT, SARAH_REALTIME_CREDIT_MSAT_PER_MILLION_TOKENS, and SARAH_REALTIME_MAX_SESSION_SECONDS in apps/openagents.com/workers/api/scripts/cloudrun/env-production.yaml.",
+          "sarah_worker_image_digest": "infra/livekit/production/resources/sarah-agent-runtime.yaml and infra/livekit/bundle.json workerImage (pinState pinned); pinned by openagents commit 8489421023, the direct child of worker source fdd0db9bab",
+          "unbound_identifier": "The Cloud Run serving revision openagents-monolith-00349-7q2 was reported to the assembling agent but is recorded nowhere in openagents at c4906fbd89, so it is deliberately absent from this binding. The last serving revision recorded in the repository in a Sarah LiveKit context is openagents-monolith-00347-bds."
+        },
+        "blocked_reason": "None of the three forced transport paths was observed. Both production acceptance runs record only a boolean selectedIcePathObserved for one naturally selected ICE path per scenario; the harness reads selectedCandidatePairId and packet counters and never captures candidate type or protocol, so even that one path cannot be classified as direct UDP, WebRTC TCP, or TURN/TLS. No packaged-Omega capture exists with UDP blocked, and none exists with UDP and non-TLS TCP blocked. The openagents read-only production acceptance audit records all three transport rows as blocked.",
+        "issues": [
+          "openagents#9284",
+          "omega#185"
+        ],
+        "not_observed": [
+          "direct_udp_completed: a packaged-candidate capture on a direct UDP candidate pair",
+          "tcp_fallback_completed: a packaged-candidate capture with UDP forcibly blocked",
+          "turn_tls_completed: a packaged-candidate capture with UDP and non-TLS TCP forcibly blocked"
+        ],
+        "note": "This receipt records what was actually observed for one Sarah LiveKit release-gate row on Omega v0.2.0-rc29. It never promotes source tests, configuration, deployment-lifecycle receipts, or a headless harness run into an installed packaged-candidate observation.",
+        "observed": {
+          "forced_transport_paths_observed": 0,
+          "forced_transport_paths_required": 3,
+          "publisher_ice_stats_observed": true,
+          "selected_ice_path_observed_per_scenario": true,
+          "selected_ice_path_type_recorded": false,
+          "subscriber_ice_stats_observed": true,
+          "turn_service_and_certificate_live": true,
+          "webrtc_tcp_port_and_udp_range_configured": true
+        },
+        "refused_claims": [
+          "One naturally selected, untyped ICE path per scenario is not promoted into any of the three forced transport rows.",
+          "A reachable TURN address and a valid TURN certificate are infrastructure readiness, not relayed media."
+        ],
+        "source_evidence": [
+          {
+            "local_copy": "docs/omega/release-gate/sarah-livekit/openagents-2026-07-31-ep263lk-community-join-acceptance.json",
+            "observed_at": "2026-07-31T14:35:12.871Z",
+            "outcome": "passed",
+            "path": "docs/ops/receipts/livekit/2026-07-31-ep263lk-community-join-acceptance.json",
+            "producer": "headless Node acceptance harness (apps/sarah-livekit-agent/src/acceptance-livekit.ts)",
+            "repository": "https://github.com/OpenAgentsInc/openagents",
+            "result_digest": "sha256:fd4381dad55cd4504d6d7de14dcf508aeeafadecf524047afa8aecf19aa47018",
+            "revision": "c4906fbd89025ba43d96655e12e1e982cc526beb",
+            "schema": "openagents.sarah.livekit-acceptance.v3",
+            "sha256": "f1b47de0669b9509e84670d4622618b478e8f645434a1d82cabb713e6275bc92"
+          },
+          {
+            "path": "docs/ops/2026-07-31-livekit-production-read-only-acceptance-audit.md",
+            "repository": "https://github.com/OpenAgentsInc/openagents",
+            "revision": "c4906fbd89025ba43d96655e12e1e982cc526beb",
+            "role": "read-only production acceptance audit; records the connectivity, load, privacy, cost, and drill rows as blocked or not run"
+          }
+        ],
+        "unblocks_when": "The packaged candidate runs the private journey three times against this exact infrastructure binding with direct UDP available, with UDP blocked, and with UDP and non-TLS TCP blocked, and each capture preserves the selected candidate pair's type and protocol without room grants, media, or transcripts."
+      },
+      "id": "sarah-livekit-connectivity",
+      "status": "blocked"
+    },
+    {
+      "evidence_refs": [
+        {
+          "path": "docs/omega/release-gate/sarah-livekit/2026-07-31-rc29-sarah-livekit-isolation.json",
+          "public_safe": true,
+          "sha256": "732c4d3c959bb4964ded9c84a248a1296416d7eb928b1914bef3bc9a5b6aa8a5"
+        }
+      ],
+      "facts": {
+        "binding_provenance": {
+          "admitted_model_revision": "NO versioned model catalog exists for Sarah. The realtime model is the bare pinned constant SARAH_LIVEKIT_MODEL and the transcription constant SARAH_LIVEKIT_TRANSCRIPTION_MODEL in packages/audio-contract/src/sarah-livekit-worker.ts. This binding names those constants and must not be read as a catalog revision.",
+          "livekit_config_revision": "configurationDigest of infra/livekit/production/livekit.yaml, stable across every production receipt",
+          "livekit_image_digest": "infra/livekit/bundle.json serverImage (livekit-server v1.13.4)",
+          "livekit_infrastructure_revision": "deployedRevision of the last production LiveKit runtime deployment receipt docs/ops/receipts/livekit/production-runtime-signer-worker-20260731T113000Z.json",
+          "omega_package_sha256": "recomputed by script/omega-release-gate from target/omega-rc/Omega-v0.2.0-rc29-macos-arm64.dmg",
+          "openagents_source_revision": "sourceRevision recorded by the acceptance receipt; the receipt states the limitation source_revision_resolved_from_deployed_image_digest, so this revision was resolved from the running worker image rather than reported by the worker process",
+          "price_catalog_revision": "NO versioned price catalog exists for Sarah voice. These are the exact unversioned production environment values SARAH_REALTIME_RESERVATION_MSAT, SARAH_REALTIME_CREDIT_MSAT_PER_MILLION_TOKENS, and SARAH_REALTIME_MAX_SESSION_SECONDS in apps/openagents.com/workers/api/scripts/cloudrun/env-production.yaml.",
+          "sarah_worker_image_digest": "infra/livekit/production/resources/sarah-agent-runtime.yaml and infra/livekit/bundle.json workerImage (pinState pinned); pinned by openagents commit 8489421023, the direct child of worker source fdd0db9bab",
+          "unbound_identifier": "The Cloud Run serving revision openagents-monolith-00349-7q2 was reported to the assembling agent but is recorded nowhere in openagents at c4906fbd89, so it is deliberately absent from this binding. The last serving revision recorded in the repository in a Sarah LiveKit context is openagents-monolith-00347-bds."
+        },
+        "blocked_reason": "Concurrent private and community rooms with two distinct owners, overlapping active-room intervals, and distinct settlement receipts (74368 and 19520 msat) are observed, but provider-generation isolation is not preserved: the harness asserts identity distinctness only within one scenario and strips every generation digest from the public receipt, so no cross-room comparison survives, and the receipt's identityIsolationObserved field is a hard-coded harness literal rather than a measurement. Community Sarah's tool-free capability profile is a source contract plus a source-text assertion, not an observed refusal: no private editor fact and no privileged tool was requested in a live community room and refused.",
+        "issues": [
+          "openagents#9283",
+          "openagents#9285",
+          "omega#186"
+        ],
+        "not_observed": [
+          "distinct_provider_generations: a preserved comparison showing the concurrent private and community generations differ",
+          "context_isolated: a live observation, as opposed to the generation unit tests",
+          "capability_isolated: a live observation, as opposed to the capability-profile contract and its source-text test",
+          "private_fact_refused: community Sarah asked for a private editor fact and refusing it",
+          "privileged_tool_refused: community Sarah asked for a privileged tool and refusing it"
+        ],
+        "note": "This receipt records what was actually observed for one Sarah LiveKit release-gate row on Omega v0.2.0-rc29. It never promotes source tests, configuration, deployment-lifecycle receipts, or a headless harness run into an installed packaged-candidate observation.",
+        "observed": {
+          "billing_isolated": true,
+          "both_scenarios_terminal_settled": true,
+          "community_final_charge_msat": 19520,
+          "community_settlement_receipt_digest": "sha256:3573479a0db443c6f911620c14035db8081e15e2d60eb3f6d677979ea69b19ea",
+          "concurrent_overlap_observed": true,
+          "concurrent_rooms": true,
+          "distinct_authenticated_owners": 2,
+          "generation_digests_preserved_in_public_receipt": false,
+          "private_final_charge_msat": 74368,
+          "private_settlement_receipt_digest": "sha256:8034c5620e2776f4df5b38be21d20576e3c47fd52be7cc1f1999e8532bacb76b",
+          "receipt_identity_isolation_field_is_a_harness_literal_not_a_measurement": true
+        },
+        "refused_claims": [
+          "Distinct settlement digests prove billing isolation only; they are not promoted into provider-generation isolation.",
+          "A tool-free capability profile that structurally exposes no tools is an architectural argument, not an observed refusal, and is not recorded as private_fact_refused or privileged_tool_refused."
+        ],
+        "source_evidence": [
+          {
+            "local_copy": "docs/omega/release-gate/sarah-livekit/openagents-2026-07-31-ep263lk-community-join-acceptance.json",
+            "observed_at": "2026-07-31T14:35:12.871Z",
+            "outcome": "passed",
+            "path": "docs/ops/receipts/livekit/2026-07-31-ep263lk-community-join-acceptance.json",
+            "producer": "headless Node acceptance harness (apps/sarah-livekit-agent/src/acceptance-livekit.ts)",
+            "repository": "https://github.com/OpenAgentsInc/openagents",
+            "result_digest": "sha256:fd4381dad55cd4504d6d7de14dcf508aeeafadecf524047afa8aecf19aa47018",
+            "revision": "c4906fbd89025ba43d96655e12e1e982cc526beb",
+            "schema": "openagents.sarah.livekit-acceptance.v3",
+            "sha256": "f1b47de0669b9509e84670d4622618b478e8f645434a1d82cabb713e6275bc92"
+          },
+          {
+            "path": "docs/ops/2026-07-31-livekit-production-read-only-acceptance-audit.md",
+            "repository": "https://github.com/OpenAgentsInc/openagents",
+            "revision": "c4906fbd89025ba43d96655e12e1e982cc526beb",
+            "role": "read-only production acceptance audit; records the connectivity, load, privacy, cost, and drill rows as blocked or not run"
+          }
+        ],
+        "unblocks_when": "A concurrent run preserves the private and community generation identifiers so they can be compared, and a live community room requests a known private editor fact and a privileged tool and preserves both refusals."
+      },
+      "id": "sarah-livekit-isolation",
+      "status": "inconclusive"
+    },
+    {
+      "evidence_refs": [
+        {
+          "path": "docs/omega/release-gate/sarah-livekit/2026-07-31-rc29-sarah-livekit-failure.json",
+          "public_safe": true,
+          "sha256": "fea1331ac79c734210c569db391321c0d817f4dfe2e132dfbbff0bbeee8f0443"
+        }
+      ],
+      "facts": {
+        "binding_provenance": {
+          "admitted_model_revision": "NO versioned model catalog exists for Sarah. The realtime model is the bare pinned constant SARAH_LIVEKIT_MODEL and the transcription constant SARAH_LIVEKIT_TRANSCRIPTION_MODEL in packages/audio-contract/src/sarah-livekit-worker.ts. This binding names those constants and must not be read as a catalog revision.",
+          "livekit_config_revision": "configurationDigest of infra/livekit/production/livekit.yaml, stable across every production receipt",
+          "livekit_image_digest": "infra/livekit/bundle.json serverImage (livekit-server v1.13.4)",
+          "livekit_infrastructure_revision": "deployedRevision of the last production LiveKit runtime deployment receipt docs/ops/receipts/livekit/production-runtime-signer-worker-20260731T113000Z.json",
+          "omega_package_sha256": "recomputed by script/omega-release-gate from target/omega-rc/Omega-v0.2.0-rc29-macos-arm64.dmg",
+          "openagents_source_revision": "sourceRevision recorded by the acceptance receipt; the receipt states the limitation source_revision_resolved_from_deployed_image_digest, so this revision was resolved from the running worker image rather than reported by the worker process",
+          "price_catalog_revision": "NO versioned price catalog exists for Sarah voice. These are the exact unversioned production environment values SARAH_REALTIME_RESERVATION_MSAT, SARAH_REALTIME_CREDIT_MSAT_PER_MILLION_TOKENS, and SARAH_REALTIME_MAX_SESSION_SECONDS in apps/openagents.com/workers/api/scripts/cloudrun/env-production.yaml.",
+          "sarah_worker_image_digest": "infra/livekit/production/resources/sarah-agent-runtime.yaml and infra/livekit/bundle.json workerImage (pinState pinned); pinned by openagents commit 8489421023, the direct child of worker source fdd0db9bab",
+          "unbound_identifier": "The Cloud Run serving revision openagents-monolith-00349-7q2 was reported to the assembling agent but is recorded nowhere in openagents at c4906fbd89, so it is deliberately absent from this binding. The last serving revision recorded in the repository in a Sarah LiveKit context is openagents-monolith-00347-bds."
+        },
+        "blocked_reason": "No failure drill has been executed against this candidate or this infrastructure. The failure-matrix harness states its own limitation that fault actions are observed and not executed by it. The production route that would arm the exact provider-disconnect drill is gated by SARAH_LIVEKIT_PROVIDER_DISCONNECT_ACCEPTANCE_ENABLED, which is \"false\" in the production deploy bundle and contract-locked to false by a deploy-bundle test, so the route answers 404 before authentication. Worker crash, timeout, hold exhaustion, duplicate participant, membership revocation, and the reconnect-cannot-revive drill have no live receipt, and an SFU-loss scenario is not defined in the failure matrix at all. The eight-scope privacy scan has produced no output: both acceptance receipts carry the limitation harness_retention_only_separate_cluster_privacy_scan_required. No media-key rekey proof exists.",
+        "issues": [
+          "openagents#9284",
+          "openagents#9285",
+          "openagents#9286"
+        ],
+        "not_observed": [
+          "worker_crash_bounded",
+          "sfu_loss_bounded (no such scenario is even defined)",
+          "openai_disconnect_bounded (its production route is disabled)",
+          "replayed_grant_refused as a live drill",
+          "duplicate_participant_refused as a live drill",
+          "membership_revocation_bounded as a live drill",
+          "hold_exhaustion_bounded",
+          "reconnect_no_overlap: the reconnect-cannot-revive drill",
+          "privacy_scope_count>=8: the eight-scope privacy scan across packaged Omega, packaged clients, pods, logs, redis, object storage, traces, and crash artifacts",
+          "media_key_rekey_proof"
+        ],
+        "note": "This receipt records what was actually observed for one Sarah LiveKit release-gate row on Omega v0.2.0-rc29. It never promotes source tests, configuration, deployment-lifecycle receipts, or a headless harness run into an installed packaged-candidate observation.",
+        "observed": {
+          "failure_drill_scenarios_defined_in_matrix": 7,
+          "failure_drills_executed": 0,
+          "media_key_rekey_proofs_found": 0,
+          "privacy_scan_receipts_found": 0,
+          "privacy_scope_count": 0,
+          "privacy_scopes_required": 8,
+          "provider_disconnect_acceptance_route_enabled": false,
+          "provider_disconnect_flag": "SARAH_LIVEKIT_PROVIDER_DISCONNECT_ACCEPTANCE_ENABLED=false",
+          "sfu_loss_scenario_defined": false,
+          "static_e2ee_key_revision_present": true
+        },
+        "refused_claims": [
+          "Arming, or being able to arm, the provider-disconnect route is not evidence that the drill passed; the flag is false, so it was never even armed.",
+          "A checked-in static E2EE key revision value is configuration, not a rekey proof.",
+          "Unit tests of the failure-matrix contract and of replay, duplicate-claim, and revocation refusals are source evidence and do not stand in for executed drills."
+        ],
+        "source_evidence": [
+          {
+            "local_copy": "docs/omega/release-gate/sarah-livekit/openagents-2026-07-31-ep263lk-community-join-acceptance.json",
+            "observed_at": "2026-07-31T14:35:12.871Z",
+            "outcome": "passed",
+            "path": "docs/ops/receipts/livekit/2026-07-31-ep263lk-community-join-acceptance.json",
+            "producer": "headless Node acceptance harness (apps/sarah-livekit-agent/src/acceptance-livekit.ts)",
+            "repository": "https://github.com/OpenAgentsInc/openagents",
+            "result_digest": "sha256:fd4381dad55cd4504d6d7de14dcf508aeeafadecf524047afa8aecf19aa47018",
+            "revision": "c4906fbd89025ba43d96655e12e1e982cc526beb",
+            "schema": "openagents.sarah.livekit-acceptance.v3",
+            "sha256": "f1b47de0669b9509e84670d4622618b478e8f645434a1d82cabb713e6275bc92"
+          },
+          {
+            "path": "docs/ops/2026-07-31-livekit-production-read-only-acceptance-audit.md",
+            "repository": "https://github.com/OpenAgentsInc/openagents",
+            "revision": "c4906fbd89025ba43d96655e12e1e982cc526beb",
+            "role": "read-only production acceptance audit; records the connectivity, load, privacy, cost, and drill rows as blocked or not run"
+          }
+        ],
+        "unblocks_when": "The eight bounded drills are executed against this infrastructure binding with deterministic settlement preserved for each, the eight-scope privacy scan produces a same-window complete export, and a media-key rekey is observed. Any scenario that cannot be executed is recorded inconclusive rather than passed."
+      },
+      "id": "sarah-livekit-failure",
+      "status": "blocked"
+    },
+    {
+      "evidence_refs": [
+        {
+          "path": "docs/omega/release-gate/sarah-livekit/2026-07-31-rc29-sarah-livekit-independent-review.json",
+          "public_safe": true,
+          "sha256": "cccecdee483c9b608768e4dd2e454fc41479492fbcd4ba320979bc7178d62c4e"
+        }
+      ],
+      "facts": {
+        "binding_provenance": {
+          "admitted_model_revision": "NO versioned model catalog exists for Sarah. The realtime model is the bare pinned constant SARAH_LIVEKIT_MODEL and the transcription constant SARAH_LIVEKIT_TRANSCRIPTION_MODEL in packages/audio-contract/src/sarah-livekit-worker.ts. This binding names those constants and must not be read as a catalog revision.",
+          "livekit_config_revision": "configurationDigest of infra/livekit/production/livekit.yaml, stable across every production receipt",
+          "livekit_image_digest": "infra/livekit/bundle.json serverImage (livekit-server v1.13.4)",
+          "livekit_infrastructure_revision": "deployedRevision of the last production LiveKit runtime deployment receipt docs/ops/receipts/livekit/production-runtime-signer-worker-20260731T113000Z.json",
+          "omega_package_sha256": "recomputed by script/omega-release-gate from target/omega-rc/Omega-v0.2.0-rc29-macos-arm64.dmg",
+          "openagents_source_revision": "sourceRevision recorded by the acceptance receipt; the receipt states the limitation source_revision_resolved_from_deployed_image_digest, so this revision was resolved from the running worker image rather than reported by the worker process",
+          "price_catalog_revision": "NO versioned price catalog exists for Sarah voice. These are the exact unversioned production environment values SARAH_REALTIME_RESERVATION_MSAT, SARAH_REALTIME_CREDIT_MSAT_PER_MILLION_TOKENS, and SARAH_REALTIME_MAX_SESSION_SECONDS in apps/openagents.com/workers/api/scripts/cloudrun/env-production.yaml.",
+          "sarah_worker_image_digest": "infra/livekit/production/resources/sarah-agent-runtime.yaml and infra/livekit/bundle.json workerImage (pinState pinned); pinned by openagents commit 8489421023, the direct child of worker source fdd0db9bab",
+          "unbound_identifier": "The Cloud Run serving revision openagents-monolith-00349-7q2 was reported to the assembling agent but is recorded nowhere in openagents at c4906fbd89, so it is deliberately absent from this binding. The last serving revision recorded in the repository in a Sarah LiveKit context is openagents-monolith-00347-bds."
+        },
+        "blocked_reason": "No reviewer distinct from the candidate producer has repeated the held-out private and three-desktop group journeys against this exact package and infrastructure binding. Both prerequisite journeys are themselves unproven for this candidate, so there is currently no bound journey for an independent reviewer to repeat.",
+        "issues": [
+          "omega#187"
+        ],
+        "not_observed": [
+          "reviewer_distinct_from_producer",
+          "private_journey_repeated",
+          "room_journey_repeated",
+          "binding_verified by that reviewer"
+        ],
+        "note": "This receipt records what was actually observed for one Sarah LiveKit release-gate row on Omega v0.2.0-rc29. It never promotes source tests, configuration, deployment-lifecycle receipts, or a headless harness run into an installed packaged-candidate observation.",
+        "observed": {
+          "binding_verified_by_independent_reviewer": false,
+          "prerequisite_private_row_status": "inconclusive",
+          "prerequisite_room_row_status": "blocked",
+          "private_journey_repeated": false,
+          "reviewer_distinct_from_producer": false,
+          "room_journey_repeated": false
+        },
+        "refused_claims": [
+          "The agent that assembled this manifest is the producer of this evidence and cannot sign its own independent-review row."
+        ],
+        "source_evidence": [
+          {
+            "local_copy": "docs/omega/release-gate/sarah-livekit/openagents-2026-07-31-ep263lk-community-join-acceptance.json",
+            "observed_at": "2026-07-31T14:35:12.871Z",
+            "outcome": "passed",
+            "path": "docs/ops/receipts/livekit/2026-07-31-ep263lk-community-join-acceptance.json",
+            "producer": "headless Node acceptance harness (apps/sarah-livekit-agent/src/acceptance-livekit.ts)",
+            "repository": "https://github.com/OpenAgentsInc/openagents",
+            "result_digest": "sha256:fd4381dad55cd4504d6d7de14dcf508aeeafadecf524047afa8aecf19aa47018",
+            "revision": "c4906fbd89025ba43d96655e12e1e982cc526beb",
+            "schema": "openagents.sarah.livekit-acceptance.v3",
+            "sha256": "f1b47de0669b9509e84670d4622618b478e8f645434a1d82cabb713e6275bc92"
+          },
+          {
+            "path": "docs/ops/2026-07-31-livekit-production-read-only-acceptance-audit.md",
+            "repository": "https://github.com/OpenAgentsInc/openagents",
+            "revision": "c4906fbd89025ba43d96655e12e1e982cc526beb",
+            "role": "read-only production acceptance audit; records the connectivity, load, privacy, cost, and drill rows as blocked or not run"
+          }
+        ],
+        "unblocks_when": "sarah-livekit-private and sarah-livekit-room both hold a preserved pass on this exact package digest, and a reviewer other than the candidate producer repeats both journeys and signs a public-safe verdict receipt bound to this binding digest."
+      },
+      "id": "sarah-livekit-independent-review",
+      "status": "blocked"
+    }
+  ],
+  "schema": "openagents.omega.sarah-livekit-evidence.v1"
+}

@@ -1,0 +1,83 @@
+{
+  "binding": {
+    "admitted_model_revision": "unversioned-pinned-constants:gpt-realtime-2.1+gpt-4o-mini-transcribe",
+    "livekit_config_revision": "sha256:b0bf0f0cb801943b789906c615d3277629a8f73bd6d06b52a60aaf2c86eb8a7d",
+    "livekit_image_digest": "sha256:189f7c81b704a36642bc5c7e2d3e1ae83744627c11978a23a251bf19fbec64e0",
+    "livekit_infrastructure_revision": "6094d23a4622bd9f23b46291d57d2b3ca3157cf9",
+    "omega_package_sha256": "116ae5ae542d4d0faed14a59e98ebeac2402ab022927738ed132e6c231e10c34",
+    "omega_source_revision": "c7ecf769e82320b9c43dfccaf7a9ebc4f980b1a6",
+    "openagents_source_revision": "fdd0db9bab10568a97d1ea2d3ddc0f936ea6df66",
+    "price_catalog_revision": "unversioned-production-env:reservation_msat=256000,credit_msat_per_million_tokens=64000000,max_session_seconds=300",
+    "sarah_worker_image_digest": "sha256:41b06de908c45642d4635d5cc3b168e69d08f08c3621f8ea39aecdeeed190227",
+    "sarah_worker_revision": "fdd0db9bab10568a97d1ea2d3ddc0f936ea6df66"
+  },
+  "facts": {
+    "binding_provenance": {
+      "admitted_model_revision": "NO versioned model catalog exists for Sarah. The realtime model is the bare pinned constant SARAH_LIVEKIT_MODEL and the transcription constant SARAH_LIVEKIT_TRANSCRIPTION_MODEL in packages/audio-contract/src/sarah-livekit-worker.ts. This binding names those constants and must not be read as a catalog revision.",
+      "livekit_config_revision": "configurationDigest of infra/livekit/production/livekit.yaml, stable across every production receipt",
+      "livekit_image_digest": "infra/livekit/bundle.json serverImage (livekit-server v1.13.4)",
+      "livekit_infrastructure_revision": "deployedRevision of the last production LiveKit runtime deployment receipt docs/ops/receipts/livekit/production-runtime-signer-worker-20260731T113000Z.json",
+      "omega_package_sha256": "recomputed by script/omega-release-gate from target/omega-rc/Omega-v0.2.0-rc29-macos-arm64.dmg",
+      "openagents_source_revision": "sourceRevision recorded by the acceptance receipt; the receipt states the limitation source_revision_resolved_from_deployed_image_digest, so this revision was resolved from the running worker image rather than reported by the worker process",
+      "price_catalog_revision": "NO versioned price catalog exists for Sarah voice. These are the exact unversioned production environment values SARAH_REALTIME_RESERVATION_MSAT, SARAH_REALTIME_CREDIT_MSAT_PER_MILLION_TOKENS, and SARAH_REALTIME_MAX_SESSION_SECONDS in apps/openagents.com/workers/api/scripts/cloudrun/env-production.yaml.",
+      "sarah_worker_image_digest": "infra/livekit/production/resources/sarah-agent-runtime.yaml and infra/livekit/bundle.json workerImage (pinState pinned); pinned by openagents commit 8489421023, the direct child of worker source fdd0db9bab",
+      "unbound_identifier": "The Cloud Run serving revision openagents-monolith-00349-7q2 was reported to the assembling agent but is recorded nowhere in openagents at c4906fbd89, so it is deliberately absent from this binding. The last serving revision recorded in the repository in a Sarah LiveKit context is openagents-monolith-00347-bds."
+    },
+    "blocked_reason": "Concurrent private and community rooms with two distinct owners, overlapping active-room intervals, and distinct settlement receipts (74368 and 19520 msat) are observed, but provider-generation isolation is not preserved: the harness asserts identity distinctness only within one scenario and strips every generation digest from the public receipt, so no cross-room comparison survives, and the receipt's identityIsolationObserved field is a hard-coded harness literal rather than a measurement. Community Sarah's tool-free capability profile is a source contract plus a source-text assertion, not an observed refusal: no private editor fact and no privileged tool was requested in a live community room and refused.",
+    "issues": [
+      "openagents#9283",
+      "openagents#9285",
+      "omega#186"
+    ],
+    "not_observed": [
+      "distinct_provider_generations: a preserved comparison showing the concurrent private and community generations differ",
+      "context_isolated: a live observation, as opposed to the generation unit tests",
+      "capability_isolated: a live observation, as opposed to the capability-profile contract and its source-text test",
+      "private_fact_refused: community Sarah asked for a private editor fact and refusing it",
+      "privileged_tool_refused: community Sarah asked for a privileged tool and refusing it"
+    ],
+    "note": "This receipt records what was actually observed for one Sarah LiveKit release-gate row on Omega v0.2.0-rc29. It never promotes source tests, configuration, deployment-lifecycle receipts, or a headless harness run into an installed packaged-candidate observation.",
+    "observed": {
+      "billing_isolated": true,
+      "both_scenarios_terminal_settled": true,
+      "community_final_charge_msat": 19520,
+      "community_settlement_receipt_digest": "sha256:3573479a0db443c6f911620c14035db8081e15e2d60eb3f6d677979ea69b19ea",
+      "concurrent_overlap_observed": true,
+      "concurrent_rooms": true,
+      "distinct_authenticated_owners": 2,
+      "generation_digests_preserved_in_public_receipt": false,
+      "private_final_charge_msat": 74368,
+      "private_settlement_receipt_digest": "sha256:8034c5620e2776f4df5b38be21d20576e3c47fd52be7cc1f1999e8532bacb76b",
+      "receipt_identity_isolation_field_is_a_harness_literal_not_a_measurement": true
+    },
+    "refused_claims": [
+      "Distinct settlement digests prove billing isolation only; they are not promoted into provider-generation isolation.",
+      "A tool-free capability profile that structurally exposes no tools is an architectural argument, not an observed refusal, and is not recorded as private_fact_refused or privileged_tool_refused."
+    ],
+    "source_evidence": [
+      {
+        "local_copy": "docs/omega/release-gate/sarah-livekit/openagents-2026-07-31-ep263lk-community-join-acceptance.json",
+        "observed_at": "2026-07-31T14:35:12.871Z",
+        "outcome": "passed",
+        "path": "docs/ops/receipts/livekit/2026-07-31-ep263lk-community-join-acceptance.json",
+        "producer": "headless Node acceptance harness (apps/sarah-livekit-agent/src/acceptance-livekit.ts)",
+        "repository": "https://github.com/OpenAgentsInc/openagents",
+        "result_digest": "sha256:fd4381dad55cd4504d6d7de14dcf508aeeafadecf524047afa8aecf19aa47018",
+        "revision": "c4906fbd89025ba43d96655e12e1e982cc526beb",
+        "schema": "openagents.sarah.livekit-acceptance.v3",
+        "sha256": "f1b47de0669b9509e84670d4622618b478e8f645434a1d82cabb713e6275bc92"
+      },
+      {
+        "path": "docs/ops/2026-07-31-livekit-production-read-only-acceptance-audit.md",
+        "repository": "https://github.com/OpenAgentsInc/openagents",
+        "revision": "c4906fbd89025ba43d96655e12e1e982cc526beb",
+        "role": "read-only production acceptance audit; records the connectivity, load, privacy, cost, and drill rows as blocked or not run"
+      }
+    ],
+    "unblocks_when": "A concurrent run preserves the private and community generation identifiers so they can be compared, and a live community room requests a known private editor fact and a privileged tool and preserves both refusals."
+  },
+  "public_safe": true,
+  "row_id": "sarah-livekit-isolation",
+  "schema": "openagents.omega.sarah-livekit-row-evidence.v1",
+  "status": "inconclusive"
+}
