@@ -433,3 +433,265 @@ before duplicating) · OPEN (nobody holds it).
 3. Fresh worktree off origin/main per item batch; never touch the primary checkout at `~/work/omega` (frequently dirty with another lane's live work); rebase over concurrent pushes and re-run `cargo test -p omega_deltas` + touched-crate tests after every rebase.
 4. Delta discipline: entry + check + test change together; never weaken a check to pass. Keymap edits ride the same commit as any action/crate deletion.
 5. Land = pushed to origin/main + issue comment (+ close where acceptance is met) + worktree removed.
+
+## Recording the human-only Sarah LiveKit gate journeys
+
+**Added 2026-07-31.** The rc29 evidence manifest resolved all six Sarah LiveKit
+rows to `blocked` or `inconclusive`, and named two of those blockers as
+*harness incapability rather than missing human effort*: the acceptance receipt
+had no field for floor, moderator, membership, or refusal, and ICE observation
+was a bare boolean that never recorded candidate type or protocol. An operator
+could have performed every journey perfectly and the results would have
+evaporated.
+
+That recorder now exists. This section is the operator runbook for the three
+journeys that only a human can perform. Read it end to end before starting a
+run; the ordering matters, and a journey performed without recording its
+observations produces nothing.
+
+**These instructions record evidence. They do not make any row green.** A
+receipt with `"outcome": "observed_pass"` means the observations were preserved
+against a named binding. Admitting a release-gate row remains the evidence
+manifest's decision.
+
+### Where the tools and receipts live
+
+All commands run from a clean `openagents` checkout at current `origin/main`.
+
+| Thing | Path |
+| --- | --- |
+| Journey recorder CLI | `pnpm --dir apps/sarah-livekit-agent gate-observation` |
+| Acceptance run CLI | `pnpm --dir apps/sarah-livekit-agent acceptance` |
+| Failure matrix CLI | `pnpm --dir apps/sarah-livekit-agent failure-matrix` |
+| Journey receipts | `docs/ops/receipts/livekit/gate/<name>.json` |
+| Acceptance receipts | `docs/ops/receipts/livekit/<name>.json` |
+| Recorder contract | `apps/sarah-livekit-agent/src/gate-observation.ts` |
+
+Every live run requires the cost gate in the environment:
+
+```sh
+export OA_LIVEKIT_OWNER_GATE=I_ACCEPT_EP263_LIVEKIT_GCP_COST
+```
+
+### The shape of every journey
+
+The recorder is deliberately unforgiving in one direction: **an observation the
+row requires may not simply be absent.** Every required key must be present,
+either as a real finding or as an explicit `not_observed` with a reason. This is
+what stops a partial run from quietly looking complete.
+
+The three findings are:
+
+- `satisfied` — the journey produced what the row requires.
+- `contradicted` — the journey ran and produced the opposite. **Record this.** A
+  refusal that did not refuse, a bound that was exceeded, or an isolation that
+  did not hold is a finding, not a run to discard.
+- `not_observed` — the journey did not reach this step. Requires a reason.
+
+So every journey is the same three steps:
+
+```sh
+# 1. Get the complete list of what this row needs, as a fillable skeleton.
+pnpm --dir apps/sarah-livekit-agent gate-observation -- \
+  --row sarah-livekit-room \
+  --template ~/sarah-gate/room-observations.json
+
+# 2. Run the journey. Fill in the skeleton as you go, not from memory afterwards.
+
+# 3. Record it.
+pnpm --dir apps/sarah-livekit-agent gate-observation -- \
+  --row sarah-livekit-room \
+  --observations ~/sarah-gate/room-observations.json \
+  --binding ~/sarah-gate/rc29-binding.json \
+  --operator-ref "<your operator identity>" \
+  --receipt docs/ops/receipts/livekit/gate/2026-XX-XX-rc29-room.json \
+  --apply
+```
+
+Observation and binding inputs must live **outside** the repository, so a
+half-filled draft cannot be committed. The operator ref is digested before
+recording and never appears in the receipt. Receipts are written with `wx`, so a
+second run against the same path fails rather than overwriting evidence.
+
+To see what a row needs without writing anything, run it with `--row` alone.
+
+### The binding file
+
+Every journey binds to one exact candidate. Write this once per candidate and
+reuse it for all journeys:
+
+```json
+{
+  "omegaReleaseTag": "v0.2.0-rc29",
+  "omegaPackageSha256": "<sha256 of the installed DMG, bare hex>",
+  "openagentsSourceRevision": "<40-char openagents commit>",
+  "livekitConfigRevision": "sha256:<configurationDigest of infra/livekit/production/livekit.yaml>",
+  "sarahWorkerImageDigest": "sha256:<workerImage digest from infra/livekit/bundle.json>"
+}
+```
+
+An unbound or malformed binding is refused before anything is written.
+
+### Journey A — the three-desktop community room
+
+**Row:** `sarah-livekit-room`. **Needs:** three people, three Macs, three
+authenticated accounts, one installed candidate DMG on each.
+
+A headless subscriber does not count and the recorder will refuse it: the
+`authenticated_desktop_count` check requires at least three participants whose
+`clientKind` is `packaged_omega_desktop` and whose `authenticated` is true. This
+is the exact promotion the rc29 manifest refused, so it is enforced in code.
+
+Run the journey in this order and record as you go:
+
+1. **Join.** All three desktops join one community room. Record every
+   participant under `authenticated_desktop_count` with their
+   `participantRefDigest` (digest the ref, never record it raw), `clientKind`,
+   and the candidate `packageSha256`.
+2. **Summon and take the floor.** Member A summons Sarah and acquires the
+   server-issued floor. Record `floor_acquired` with the floor lease's
+   `issuance` and `toHolderDigest` (the lease's own `holderUserRefDigest`).
+3. **Transfer the floor.** Move the floor from member A to member B. Record
+   `floor_transfer_completed` with both `fromHolderDigest` and `toHolderDigest`
+   and the new `issuance`. The recorder refuses a transfer whose two holders are
+   the same member.
+4. **Shared answer.** Sarah answers while B holds the floor. Confirm on each of
+   the three machines that the answer was audible, then record
+   `shared_answer_heard_by_all` with `audibleSarahOutputObserved: true` for every
+   participant. If one machine did not hear it, that is `contradicted`.
+5. **Moderator stop.** A moderator stops Sarah. Record
+   `moderator_stop_completed` with `state: "stopped"` and `stopReason:
+   "moderator_stop"`. Any other stop reason is refused for this key.
+6. **The four refusals.** Each is a deliberate attempt that the server must
+   refuse. Record the server's own refusal code and HTTP status, not a
+   paraphrase:
+
+   | Observation | Attempt | Expected code |
+   | --- | --- | --- |
+   | `non_floor_refused` | a member without the floor tries to drive Sarah | `not_floor_holder` |
+   | `removed_member_refused` | a removed member tries to claim the floor | `member_removed` |
+   | `stale_floor_grant_refused` | replay a grant from before a membership change | `membership_changed` |
+   | `replayed_floor_grant_refused` | replay a previously used nonce | `nonce_replayed` |
+
+   A 2xx here means the refusal did not happen: record `contradicted`. The
+   recorder rejects a "refusal" filed with a success status.
+
+### Journey B — the forced transport matrix
+
+**Row:** `sarah-livekit-connectivity`. **Needs:** three private-journey
+acceptance runs on the packaged candidate against the same infrastructure
+binding, each under a different imposed network constraint.
+
+ICE paths are now classified rather than counted. The acceptance run records the
+selected candidate pair's candidate type, protocol, and whether it was relayed,
+for both publisher and subscriber. Addresses, ports, and URLs are never
+recorded.
+
+Run the acceptance three times, declaring the constraint you actually imposed:
+
+```sh
+# Cell 1 — no constraint.
+pnpm --dir apps/sarah-livekit-agent acceptance -- \
+  --forced-transport unrestricted \
+  --receipt docs/ops/receipts/livekit/2026-XX-XX-rc29-transport-udp.json --apply
+
+# Cell 2 — block all UDP at the firewall first, then run.
+pnpm --dir apps/sarah-livekit-agent acceptance -- \
+  --forced-transport udp_blocked \
+  --receipt docs/ops/receipts/livekit/2026-XX-XX-rc29-transport-tcp.json --apply
+
+# Cell 3 — block UDP and plaintext TCP, leaving only the TLS relay.
+pnpm --dir apps/sarah-livekit-agent acceptance -- \
+  --forced-transport udp_and_plaintext_tcp_blocked \
+  --receipt docs/ops/receipts/livekit/2026-XX-XX-rc29-transport-turn.json --apply
+```
+
+The declaration is checked against the observation. If you declare `udp_blocked`
+and the capture rode direct UDP, the block did not take effect and the run
+**fails closed** rather than being recorded as a passing cell. That is the
+intended behaviour: a mis-imposed constraint is a run to repeat, not evidence.
+
+Then record the three classified captures into the row, citing each acceptance
+receipt's `resultDigest` as the `acceptanceResultDigest`. The expected
+classifications are `direct_udp`, `tcp_fallback`, and `turn_tls` respectively; a
+capture filed under the wrong cell is refused.
+
+Note the one classification subtlety: a TURN relay negotiated over TLS still
+reports `tcp` at the candidate-pair level, so the classifier reads the relay
+protocol for relay candidates. `relayed_udp` is a distinct observed kind and
+satisfies none of the three cells on its own.
+
+### Journey C — the failure drills
+
+**Row:** `sarah-livekit-failure`. Ten required observations: eight bounded
+drills, the eight-scope privacy scan, and a media-key rekey proof.
+
+Each executed drill records the fault injected, the millisecond bound the system
+recovered within, and the settlement state and receipt digest — settlement must
+stay deterministic under fault, which is the actual claim being tested.
+
+Two of the ten cannot be run today, and both should be recorded as
+`not_observed` with the reason, not quietly skipped:
+
+- **`sfu_loss_bounded`** — no such scenario is defined in the failure matrix at
+  all. Defining it is prerequisite work, not an operator step.
+- **`openai_disconnect_bounded`** — its production route is disabled. See the
+  owner decision below.
+
+The privacy scan requires at least eight distinct scopes, no residue, and a
+same-window complete export. Seven scopes, or a scan that found residue, is
+refused for that key rather than recorded as a partial pass.
+
+### Journey D — the private journey and isolation
+
+**Rows:** `sarah-livekit-private` and `sarah-livekit-isolation`. Both are run on
+the packaged candidate, not the headless harness.
+
+For `sarah-livekit-private`, the ordering of admission terms is the point:
+`admission_terms_seen` requires the price, hold, rate, and limit to have been
+displayed **before** capture began, and the recorder refuses terms whose
+`displayedAtMs` is not strictly earlier than `firstCaptureAtMs`. Also required:
+one confirmed bounded command, one started agent thread, and a media reconnect
+whose provider generation is unchanged.
+
+For `sarah-livekit-isolation`, the concurrent private and community generations
+must be shown to differ. The acceptance receipt now preserves a per-receipt
+salted comparable form of the identity digests, so the comparison survives into
+the public receipt and an independent reviewer can re-verify it; the salt is
+published nowhere, so the values leak nothing outside their own receipt. The
+previously hard-coded `identityIsolationObserved` is now computed from those
+digests, and identical cross-room generations fail the run.
+
+The two capability refusals must be **live**: community Sarah asked for a known
+private editor fact and asked for a privileged tool, and refusing both. The
+tool-free capability profile is an architectural argument and is recorded, if at
+all, with `sourceKind: "operator_attestation"` — never as a live observation.
+
+### Owner decision required: arming the provider-disconnect drill
+
+`openai_disconnect_bounded` cannot be run until an owner decides to arm it. The
+facts, verified against the currently-serving revision:
+
+- `SARAH_LIVEKIT_PROVIDER_DISCONNECT_ACCEPTANCE_ENABLED` is `"false"` in the
+  serving revision, and **has been `"false"` in every revision that has ever
+  carried the key**. The drill has never been armed in production.
+- While false, the route returns `404` before authentication. That is
+  deliberate, not a routing accident.
+- The committed value is contract-locked to `"false"` by a deploy-bundle test.
+  **Flipping the checked-in value is the wrong fix** and breaks the gate.
+- Arming requires **no repository change**. It is one deploy carrying a
+  per-deploy override, and the next ordinary deploy withdraws it automatically:
+
+  ```sh
+  SARAH_LIVEKIT_PROVIDER_DISCONNECT_ACCEPTANCE=on scripts/deploy-cloudrun.sh production
+  ```
+
+The decision the owner must make is **not** whether the code is right — it is
+whether to open a bounded acceptance window. The runbook conditions arming on "a
+separately approved, bounded acceptance window", and the drill itself closes a
+live provider socket on a real connected session, so it is customer-affecting by
+construction. Deploying also ships whatever else has landed on `main` since the
+serving revision.
+
+Arming is not evidence that the drill passed. Until the owner opens that window,
+`openai_disconnect_bounded` is correctly recorded as `not_observed`.
