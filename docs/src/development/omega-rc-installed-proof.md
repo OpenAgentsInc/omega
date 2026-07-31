@@ -77,6 +77,15 @@ release notes, installed binary, and announcement copy. `--require-green`
 turns any pending, blocked, inconclusive, or failed row into a nonzero release
 decision; without it, exit zero means only that no automated check failed.
 
+`--report` rewrites the whole file from the receipt, so operator prose does not
+live in it. Write prose in the sibling authored sources instead —
+`docs/omega/release-gate-overview.md` above the candidate facts,
+`docs/omega/release-gate-evidence.md` between the regeneration command and the
+row table, and `docs/omega/release-gate-operator-notes.md` after it — and the
+gate splices each one back verbatim on every run. A missing, unreadable, or
+blank source stops the run with exit 2 before the report is touched, so a
+section is never emitted silently empty (OMEGA-DELTA-0219).
+
 Harness validation without an installed candidate:
 
 ```sh

@@ -34,6 +34,13 @@ Usage:
                               [--owner-evidence PATH] [--require-green]
                               [--self-test]
 
+`--report` rewrites the whole report from the receipt, so authored prose does
+not live in it. Each authored region is a sibling file named
+`<report stem>-<KEY>.md` for the keys in `AUTHORED_REPORT_SECTIONS`, and the
+generator splices those files back verbatim on every run. A missing,
+unreadable, or blank source refuses the report rather than emitting the
+section empty.
+
 Exit codes: 0 = no automated row failed (or, with --require-green, every row
 passed), 1 = an automated row failed or --require-green found a pending,
 blocked, or inconclusive row, 2 = harness error, 3 = self-test failure.
@@ -92,6 +99,17 @@ TESTER_CHANNEL_LABEL = "Tester channels"
 #: `script/bundle-omega-rc`, so the footer binds to the release record's
 #: `version` field (`0.2.0-rc28`), which in turn binds to the source commit.
 VERSION_FOOTER_PREFIX = "v0.2.0"
+
+#: The authored prose this generator splices into the report, in report order.
+#:
+#: `write_report` rewrites the whole report on every run. Prose typed straight
+#: into `docs/omega/release-gate.md` therefore used to vanish at the next
+#: regeneration with no error and no trace, which is the same silent-loss shape
+#: this harness refuses everywhere else. Every authored paragraph now lives in
+#: a sibling source named `<report stem>-<KEY>.md`, and the generator splices
+#: it back verbatim. A missing, unreadable, or empty source is a harness error:
+#: "nobody wrote it" and "the generator ate it" must never read the same.
+AUTHORED_REPORT_SECTIONS = ("overview", "evidence", "operator-notes")
 
 #: Neighbouring-app data roots the candidate must never touch
 #: (gap analysis section 7, "Update safety").
@@ -971,11 +989,131 @@ def self_test() -> int:
     else:
         print("self-test: divergent release claims were accepted", file=sys.stderr)
         return 3
+
+    authored_result = self_test_authored_report_sections()
+    if authored_result != 0:
+        return authored_result
+
     print(
         "release-gate self-test passed: sweep fires, tampering and "
         "candidate-mismatched and incomplete passing LiveKit evidence, producer "
-        "self-review, and divergent release claims are refused."
+        "self-review, and divergent release claims are refused, and authored "
+        "report prose survives regeneration byte for byte."
     )
+    return 0
+
+
+def self_test_authored_report_sections() -> int:
+    """Prove a regeneration preserves authored prose and refuses to lose it.
+
+    The defect this covers is silent: the writer rebuilt the whole report from
+    the receipt, so an operator's instructions disappeared at the next run with
+    no error. Reading the writer cannot tell whether it preserves them, so this
+    runs a full regeneration cycle against a scratch report and compares bytes.
+    """
+    (ROOT / "target").mkdir(exist_ok=True)
+    receipt = {
+        "generated_at": "2026-07-31T00:00:00+00:00",
+        "candidate": {
+            "artifact_name": "Omega-self-test.dmg",
+            "version": "0.0.0-self-test",
+            "channel": "rc",
+            "package_sha256": "a" * 64,
+            "release_record_sha256": "b" * 64,
+            "source_commit": "c" * 40,
+            "platform": "aarch64-apple-darwin",
+            "signing_identity": "self-test",
+            "team_id": "SELFTEST",
+            "signature_verified": True,
+            "notarization": {"status": "self-test"},
+            "known_limits": [],
+        },
+        "sarah_livekit_binding": None,
+        "harness_commit": "d" * 40,
+        "status": "passed",
+        "evidence_sha256": "e" * 64,
+        "rows": [
+            {
+                "id": "package-integrity",
+                "status": "automated-pass",
+                "facts": {},
+                "evidence_refs": [],
+                "issues": [],
+            }
+        ],
+    }
+    # Prose an operator would really write: headings, fences, and pipes, all of
+    # which a naive splice would reflow, escape, or eat.
+    authored = {
+        key: (
+            f"## Authored {key}\n"
+            "\n"
+            f"Operator instruction for `{key}`:\n"
+            "\n"
+            "```sh\n"
+            "script/omega-release-gate --self-test  # | not a table cell\n"
+            "```\n"
+        )
+        for key in AUTHORED_REPORT_SECTIONS
+    }
+    with tempfile.TemporaryDirectory(
+        prefix="omega-authored-report-self-test-", dir=ROOT / "target"
+    ) as temporary_directory:
+        report = Path(temporary_directory) / "release-gate.md"
+        for key, text in authored.items():
+            authored_section_path(report, key).write_text(text)
+        try:
+            write_report(report, receipt, load_authored_sections(report))
+        except (OSError, ValueError) as error:
+            print(f"self-test: the first regeneration failed: {error}", file=sys.stderr)
+            return 3
+        first = report.read_text()
+        for key, text in authored.items():
+            if text.strip("\n") not in first:
+                print(
+                    f"self-test: regeneration dropped authored section `{key}`",
+                    file=sys.stderr,
+                )
+                return 3
+        # A second cycle reads the report the first one wrote. Preservation
+        # that survives one run and drifts on the next is still loss.
+        write_report(report, receipt, load_authored_sections(report))
+        if report.read_text() != first:
+            print(
+                "self-test: a second regeneration changed the report",
+                file=sys.stderr,
+            )
+            return 3
+
+        missing = authored_section_path(report, "operator-notes")
+        missing.unlink()
+        try:
+            load_authored_sections(report)
+        except ValueError:
+            pass
+        else:
+            print(
+                "self-test: a missing authored section was accepted",
+                file=sys.stderr,
+            )
+            return 3
+        missing.write_text("\n   \n")
+        try:
+            load_authored_sections(report)
+        except ValueError:
+            pass
+        else:
+            print(
+                "self-test: an empty authored section was accepted",
+                file=sys.stderr,
+            )
+            return 3
+        if report.read_text() != first:
+            print(
+                "self-test: a refused regeneration still rewrote the report",
+                file=sys.stderr,
+            )
+            return 3
     return 0
 
 
@@ -1026,6 +1164,16 @@ def main() -> int:
 
     if args.self_test:
         return self_test()
+
+    # The authored prose is read before the run touches anything, so a report
+    # is never rewritten with an authored section silently missing.
+    authored_sections: dict[str, str] = {}
+    if args.report is not None:
+        try:
+            authored_sections = load_authored_sections(args.report)
+        except ValueError as error:
+            print(f"error: {error}", file=sys.stderr)
+            return 2
 
     output_dir: Path = args.output_dir
     output_dir.mkdir(parents=True, exist_ok=True)
@@ -1720,7 +1868,7 @@ def main() -> int:
         shutil.copyfile(receipt_path, args.receipt_copy)
 
     if args.report is not None:
-        write_report(args.report, receipt)
+        write_report(args.report, receipt, authored_sections)
 
     print(f"release gate: {status}")
     for row in rows:
@@ -1731,7 +1879,40 @@ def main() -> int:
     return 1 if automated_failures else 0
 
 
-def write_report(path: Path, receipt: dict) -> None:
+def authored_section_path(report: Path, key: str) -> Path:
+    """The authored source spliced into `report` at `key`."""
+    return report.parent / f"{report.stem}-{key}.md"
+
+
+def load_authored_sections(report: Path) -> dict[str, str]:
+    """Read every authored section, or refuse to write the report at all.
+
+    Raises `ValueError` when a source is missing, unreadable, or blank. The
+    caller loads the sections before the run touches anything, so a report is
+    never rewritten with an authored section silently absent.
+    """
+    sections: dict[str, str] = {}
+    for key in AUTHORED_REPORT_SECTIONS:
+        source = authored_section_path(report, key)
+        try:
+            text = source.read_text()
+        except OSError as error:
+            raise ValueError(
+                f"authored report section `{key}` is unreadable at "
+                f"{portable_path(source)}: {error}. Write the prose there; "
+                "this harness will not emit the report without it."
+            ) from error
+        if not text.strip():
+            raise ValueError(
+                f"authored report section `{key}` is empty at "
+                f"{portable_path(source)}. An empty section is silent loss "
+                "with extra steps; delete the key or write the prose."
+            )
+        sections[key] = text.strip("\n")
+    return sections
+
+
+def write_report(path: Path, receipt: dict, authored: dict[str, str]) -> None:
     lines = [
         "# Omega installed-candidate release gate",
         "",
@@ -1744,6 +1925,8 @@ def write_report(path: Path, receipt: dict) -> None:
         "account, interactive provider auth, a second person, or a judgment "
         "call, and carry the exact instruction; `blocked` and `inconclusive` "
         "rows name what prevented a verdict. No row is ever fabricated.",
+        "",
+        authored["overview"],
         "",
         f"- Generated: {receipt['generated_at']}",
         f"- Candidate: `{receipt['candidate']['artifact_name']}` "
@@ -1787,6 +1970,19 @@ def write_report(path: Path, receipt: dict) -> None:
         "--require-green`. The final command exits nonzero unless every row "
         "is a preserved pass.",
         "",
+        "Every paragraph of this report that is not a generated fact comes "
+        "verbatim from a sibling authored source: "
+        + ", ".join(
+            f"`{authored_section_path(path, key).name}`"
+            for key in AUTHORED_REPORT_SECTIONS
+        )
+        + ". Write operator prose there, never into this file: the harness "
+        "splices those sources back on every run and refuses to write the "
+        "report at all when one is missing or empty, but prose typed directly "
+        "into this generated file is lost at the next regeneration.",
+        "",
+        authored["evidence"],
+        "",
         "| Row | Status | Issues | Evidence / owner instruction |",
         "| --- | --- | --- | --- |",
         ]
@@ -1805,7 +2001,7 @@ def write_report(path: Path, receipt: dict) -> None:
             )
         detail = detail.replace("|", "\\|")
         lines.append(f"| `{row['id']}` | {row['status']} | {issues} | {detail} |")
-    lines.append("")
+    lines.extend(["", authored["operator-notes"]])
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text("\n".join(lines) + "\n")
 

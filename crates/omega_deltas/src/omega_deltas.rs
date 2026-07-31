@@ -207,6 +207,7 @@ pub const ENFORCED_DELTAS: &[&str] = &[
     "OMEGA-DELTA-0216",
     "OMEGA-DELTA-0217",
     "OMEGA-DELTA-0218",
+    "OMEGA-DELTA-0219",
 ];
 
 /// OMEGA-DELTA-0204. Every control the composer's bar offers, written twice:
@@ -26960,5 +26961,87 @@ mod tests {
                 "OMEGA-DELTA-0214: {path} still asks an operator to confirm the deleted modal"
             );
         }
+    }
+
+    /// OMEGA-DELTA-0219. Authored release-gate prose survives regeneration.
+    ///
+    /// `write_report` rebuilds the whole report from the receipt, so prose an
+    /// operator typed into `docs/omega/release-gate.md` was dropped by the
+    /// next run with no error and no trace. Every authored paragraph now has
+    /// a sibling source that the harness splices back verbatim, and a missing
+    /// or empty source refuses the whole report instead of emitting a silent
+    /// gap.
+    #[test]
+    fn authored_release_gate_prose_survives_regeneration() {
+        let gate = read_repository_file("script/omega-release-gate");
+        for required in [
+            "AUTHORED_REPORT_SECTIONS",
+            "def authored_section_path",
+            "def load_authored_sections",
+            "authored report section",
+            "is unreadable at",
+            "is empty at",
+            "self-test: regeneration dropped authored section",
+            "self-test: a second regeneration changed the report",
+            "self-test: a missing authored section was accepted",
+            "self-test: an empty authored section was accepted",
+            "self-test: a refused regeneration still rewrote the report",
+        ] {
+            assert!(
+                gate.contains(required),
+                "OMEGA-DELTA-0219: script/omega-release-gate lost `{required}`. \
+                 Without it a regeneration can drop an operator's prose, which \
+                 is the silent loss this delta exists to refuse."
+            );
+        }
+
+        // The committed report and its authored sources agree. Prose edited
+        // into the generated report alone would still be lost at the next
+        // run, so drift between the two is the defect, caught here.
+        let report = read_repository_file("docs/omega/release-gate.md");
+        for key in ["overview", "evidence", "operator-notes"] {
+            assert!(
+                gate.contains(&format!("\"{key}\"")),
+                "OMEGA-DELTA-0219: script/omega-release-gate no longer splices \
+                 the `{key}` authored section into the report."
+            );
+            let relative = format!("docs/omega/release-gate-{key}.md");
+            let source = read_repository_file(&relative);
+            let body = source.trim_matches('\n');
+            assert!(
+                !body.trim().is_empty(),
+                "OMEGA-DELTA-0219: {relative} is empty. An empty authored \
+                 source refuses the whole report."
+            );
+            assert!(
+                report.contains(body),
+                "OMEGA-DELTA-0219: docs/omega/release-gate.md and {relative} \
+                 have drifted. The report is generated from that source; prose \
+                 that lives only in the report is lost at the next \
+                 regeneration."
+            );
+        }
+
+        // Reading the writer cannot tell whether it preserves anything. The
+        // harness self-test runs a full regeneration cycle and a refused one.
+        let script_path = repository_path("script/omega-release-gate");
+        #[allow(
+            clippy::disallowed_methods,
+            reason = "The preservation and refusal proofs live in the harness \
+                      that owns the report writer; this runs them. There is no \
+                      async runtime here."
+        )]
+        let output = std::process::Command::new(&script_path)
+            .arg("--self-test")
+            .output()
+            .expect("run the release-gate self-test");
+        assert!(
+            output.status.success(),
+            "OMEGA-DELTA-0219: `script/omega-release-gate --self-test` failed, \
+             so authored prose is no longer proven to survive a regeneration:\n\
+             {}{}",
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr)
+        );
     }
 }

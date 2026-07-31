@@ -9768,3 +9768,40 @@ and never a token, key, or signature.
   `the_hosted_storage_start_up_window_is_recognized_from_the_server_code` and
   `only_the_service_start_up_class_is_re_attempted_inside_one_sign_in` in
   `crates/omega_effectd/src/openagents_nostr_auth.rs`.
+
+### OMEGA-DELTA-0219 — The gate report keeps the prose a person wrote in it
+
+**The writer rebuilt the whole file.** `write_report` in
+`script/omega-release-gate` composed the report from the receipt alone and
+wrote it over the old one. Everything a person had typed into
+`docs/omega/release-gate.md` — the nostr-authentication scope note, the
+owner-evidence and Sarah LiveKit evidence instructions, the assembler command,
+the whole cutover plan, the standing review laws `OMEGA-DELTA-0189` asserts
+are still there, and the handoff protocol — was outside the receipt, so the
+next regeneration deleted it. Nothing failed, nothing warned, and the loss was
+visible only to whoever remembered writing it. A harness whose entire purpose
+is that "nothing was found" and "nobody looked" must never read the same was
+itself erasing observations.
+
+**Authored prose has a source of its own.** Each authored region is a sibling
+file named for the report and its section: `docs/omega/release-gate-overview.md`
+above the candidate facts, `docs/omega/release-gate-evidence.md` between the
+regeneration command and the row table, and
+`docs/omega/release-gate-operator-notes.md` after it. `write_report` splices
+each one in verbatim — headings, code fences, and table pipes survive
+untouched — so the committed report stays exactly the generated facts plus its
+authored sources, and the generated text now names those sources so the next
+operator writes in the right place.
+
+**A section that cannot be read refuses the report.** `load_authored_sections`
+runs before the gate touches anything and raises on a missing, unreadable, or
+blank source; `main` prints the path and exits 2 without rewriting the report.
+Replacing silent loss with a silent empty section would have been the same
+defect one step later.
+
+- **Enforced by:** `authored_release_gate_prose_survives_regeneration` in
+  `crates/omega_deltas`, which holds the committed report and its authored
+  sources in agreement and runs the harness self-test; and
+  `self_test_authored_report_sections` in `script/omega-release-gate`, which
+  regenerates a scratch report twice, compares the authored bytes, and proves
+  a missing and an empty section are both refused.
