@@ -452,13 +452,51 @@ Each executed drill records the fault injected, the millisecond bound the system
 recovered within, and the settlement state and receipt digest — settlement must
 stay deterministic under fault, which is the actual claim being tested.
 
-Two of the ten cannot be run today, and both should be recorded as
-`not_observed` with the reason, not quietly skipped:
+**As of 2026-07-31, none of the ten can be run.** The blockers were verified
+against the live production deployment, and they are not all the same kind of
+blocker, so they are listed separately rather than as one wall.
 
-- **`sfu_loss_bounded`** — no such scenario is defined in the failure matrix at
-  all. Defining it is prerequisite work, not an operator step.
+**Every drill is blocked before its own first step.** A drill needs a live
+Sarah session, and a live acceptance run needs the two 24 kHz mono s16 PCM
+prompts. `--private-pcm` and `--community-pcm` are mandatory under `--apply`,
+there is no synthesize-silence path, and the prompts are deliberately not in
+Git. No prompt files exist on the current operator machine. Producing them
+outside the repository is the single highest-leverage unblock: it is what
+stands between the drills and any of the per-drill blockers below actually
+mattering.
+
+Then, per drill:
+
+- **`sfu_loss_bounded`** — the scenario **is now defined** (openagents
+  `af65458919`): fault `delete_exact_sfu_pod`, a 30000 ms bound measured from
+  fault injection, admitted terminal reasons `worker_shutdown`,
+  `participant_left`, and `worker_error`, with `session_expired` and `completed`
+  refused. The executable procedure is in the openagents LiveKit runbook under
+  **The SFU-loss drill**. It is still `not_observed`: an unexecuted defined
+  scenario is worth exactly as much as an undefined one for this row.
+- **`worker_crash_bounded`** and **`sfu_loss_bounded`** both need to delete a
+  pod. `kubectl auth can-i delete pods -n livekit-system` is **no** for the
+  automation identity, which is read-only on the cluster. Granting it is an
+  authority decision, not a configuration detail.
 - **`openai_disconnect_bounded`** — its production route is disabled. See the
   owner decision below.
+- **`duplicate_participant_refused`** — **no production code path exists.**
+  `recordSarahLiveKitParticipantJoin` is exported but called from nothing except
+  its own test, and the live join route is an upsert that does not refuse a
+  re-join. This one is not an access problem and no amount of credential will
+  satisfy it; it is a gap between the gate vocabulary and the implementation.
+- **`membership_revocation_bounded`** — needs a NIP-29 admin key to publish the
+  revoking event, plus a second authenticated identity.
+- **`replayed_grant_refused`** — needs no cluster mutation and no owner window,
+  only a live community session with an active presence lease. It is the
+  closest to reachable once prompts exist.
+- **`privacy_scope_count`** — four independent blockers, enumerated per scope in
+  openagents `docs/ops/2026-07-31-sarah-livekit-privacy-scan-executability.md`.
+  Three are outside what any repository change can fix, and because the
+  collector requires all eight scopes inside one two-hour window, clearing one
+  blocker at a time produces nothing.
+- **`media_key_rekey_proof`** — no proof exists. A checked-in static E2EE key
+  revision is configuration, not a rekey.
 
 The privacy scan requires at least eight distinct scopes, no residue, and a
 same-window complete export. Seven scopes, or a scan that found residue, is

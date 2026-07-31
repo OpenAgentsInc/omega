@@ -173,7 +173,7 @@ script/assemble-omega-sarah-livekit-evidence \
 | `sarah-livekit-room` | blocked | omega#186, openagents#9286 | No three-desktop community journey exists for this candidate or any other. The strongest artifact fans one community session out to two headless subscribers (subscriberFanoutCount 2 with audibleFanoutObserved), which is one owner participant plus one headless secondary subscriber, not three authenticated packaged desktops. Server-issued floor transfer, a shared answer heard by all members, moderator stop, and the non-floor, stale-grant, replay, and removed-member refusals exist only as server-side unit tests in openagents; none was observed against this candidate, and the acceptance receipt schema has no field for floor, moderator, membership, or refusal. |
 | `sarah-livekit-connectivity` | blocked | openagents#9284, omega#185 | None of the three forced transport paths was observed. Both production acceptance runs record only a boolean selectedIcePathObserved for one naturally selected ICE path per scenario; the harness reads selectedCandidatePairId and packet counters and never captures candidate type or protocol, so even that one path cannot be classified as direct UDP, WebRTC TCP, or TURN/TLS. No packaged-Omega capture exists with UDP blocked, and none exists with UDP and non-TLS TCP blocked. The openagents read-only production acceptance audit records all three transport rows as blocked. |
 | `sarah-livekit-isolation` | inconclusive | openagents#9283, openagents#9285, omega#186 | Concurrent private and community rooms with two distinct owners, overlapping active-room intervals, and distinct settlement receipts (74368 and 19520 msat) are observed, but provider-generation isolation is not preserved: the harness asserts identity distinctness only within one scenario and strips every generation digest from the public receipt, so no cross-room comparison survives, and the receipt's identityIsolationObserved field is a hard-coded harness literal rather than a measurement. Community Sarah's tool-free capability profile is a source contract plus a source-text assertion, not an observed refusal: no private editor fact and no privileged tool was requested in a live community room and refused. |
-| `sarah-livekit-failure` | blocked | openagents#9284, openagents#9285, openagents#9286 | No failure drill has been executed against this candidate or this infrastructure. The failure-matrix harness states its own limitation that fault actions are observed and not executed by it. The production route that would arm the exact provider-disconnect drill is gated by SARAH_LIVEKIT_PROVIDER_DISCONNECT_ACCEPTANCE_ENABLED, which is "false" in the production deploy bundle and contract-locked to false by a deploy-bundle test, so the route answers 404 before authentication. Worker crash, timeout, hold exhaustion, duplicate participant, membership revocation, and the reconnect-cannot-revive drill have no live receipt, and an SFU-loss scenario is not defined in the failure matrix at all. The eight-scope privacy scan has produced no output: both acceptance receipts carry the limitation harness_retention_only_separate_cluster_privacy_scan_required. No media-key rekey proof exists. |
+| `sarah-livekit-failure` | blocked | openagents#9284, openagents#9285, openagents#9286 | No failure drill has been executed against this candidate or this infrastructure. The failure-matrix harness states its own limitation that fault actions are observed and not executed by it. The production route that would arm the exact provider-disconnect drill is gated by SARAH_LIVEKIT_PROVIDER_DISCONNECT_ACCEPTANCE_ENABLED, which is "false" in the production deploy bundle and contract-locked to false by a deploy-bundle test, so the route answers 404 before authentication. Worker crash, timeout, hold exhaustion, duplicate participant, membership revocation, the reconnect-cannot-revive drill, and SFU loss have no live receipt. The SFU-loss scenario is now DEFINED in the failure matrix (openagents af65458919): fault delete_exact_sfu_pod, a 30000 ms bound measured from fault injection rather than from session start, admitted terminal reasons worker_shutdown, participant_left, and worker_error, and session_expired and completed explicitly refused. Defining it removes the prerequisite gap this row previously recorded; it does not execute it, and an unexecuted defined scenario is worth exactly as much as an undefined one for this row. The eight-scope privacy scan has still produced no output, and its four blockers are now enumerated per scope (openagents bbf6f9831e): the automation identity cannot read pod logs or exec, Error Reporting is not enabled on the project, Redis has no IAM and no read-only network path, and packaged_clients, object_storage, and traces have no defined in-scope target set. Three of the four are outside what any repository change can fix. No media-key rekey proof exists. |
 | `sarah-livekit-independent-review` | blocked | omega#187 | No reviewer distinct from the candidate producer has repeated the held-out private and three-desktop group journeys against this exact package and infrastructure binding. Both prerequisite journeys are themselves unproven for this candidate, so there is currently no bound journey for an independent reviewer to repeat. |
 
 ## Omega 0.2.0 Sarah LiveKit cutover plan
@@ -630,13 +630,51 @@ Each executed drill records the fault injected, the millisecond bound the system
 recovered within, and the settlement state and receipt digest — settlement must
 stay deterministic under fault, which is the actual claim being tested.
 
-Two of the ten cannot be run today, and both should be recorded as
-`not_observed` with the reason, not quietly skipped:
+**As of 2026-07-31, none of the ten can be run.** The blockers were verified
+against the live production deployment, and they are not all the same kind of
+blocker, so they are listed separately rather than as one wall.
 
-- **`sfu_loss_bounded`** — no such scenario is defined in the failure matrix at
-  all. Defining it is prerequisite work, not an operator step.
+**Every drill is blocked before its own first step.** A drill needs a live
+Sarah session, and a live acceptance run needs the two 24 kHz mono s16 PCM
+prompts. `--private-pcm` and `--community-pcm` are mandatory under `--apply`,
+there is no synthesize-silence path, and the prompts are deliberately not in
+Git. No prompt files exist on the current operator machine. Producing them
+outside the repository is the single highest-leverage unblock: it is what
+stands between the drills and any of the per-drill blockers below actually
+mattering.
+
+Then, per drill:
+
+- **`sfu_loss_bounded`** — the scenario **is now defined** (openagents
+  `af65458919`): fault `delete_exact_sfu_pod`, a 30000 ms bound measured from
+  fault injection, admitted terminal reasons `worker_shutdown`,
+  `participant_left`, and `worker_error`, with `session_expired` and `completed`
+  refused. The executable procedure is in the openagents LiveKit runbook under
+  **The SFU-loss drill**. It is still `not_observed`: an unexecuted defined
+  scenario is worth exactly as much as an undefined one for this row.
+- **`worker_crash_bounded`** and **`sfu_loss_bounded`** both need to delete a
+  pod. `kubectl auth can-i delete pods -n livekit-system` is **no** for the
+  automation identity, which is read-only on the cluster. Granting it is an
+  authority decision, not a configuration detail.
 - **`openai_disconnect_bounded`** — its production route is disabled. See the
   owner decision below.
+- **`duplicate_participant_refused`** — **no production code path exists.**
+  `recordSarahLiveKitParticipantJoin` is exported but called from nothing except
+  its own test, and the live join route is an upsert that does not refuse a
+  re-join. This one is not an access problem and no amount of credential will
+  satisfy it; it is a gap between the gate vocabulary and the implementation.
+- **`membership_revocation_bounded`** — needs a NIP-29 admin key to publish the
+  revoking event, plus a second authenticated identity.
+- **`replayed_grant_refused`** — needs no cluster mutation and no owner window,
+  only a live community session with an active presence lease. It is the
+  closest to reachable once prompts exist.
+- **`privacy_scope_count`** — four independent blockers, enumerated per scope in
+  openagents `docs/ops/2026-07-31-sarah-livekit-privacy-scan-executability.md`.
+  Three are outside what any repository change can fix, and because the
+  collector requires all eight scopes inside one two-hour window, clearing one
+  blocker at a time produces nothing.
+- **`media_key_rekey_proof`** — no proof exists. A checked-in static E2EE key
+  revision is configuration, not a rekey.
 
 The privacy scan requires at least eight distinct scopes, no residue, and a
 same-window complete export. Seven scopes, or a scan that found residue, is

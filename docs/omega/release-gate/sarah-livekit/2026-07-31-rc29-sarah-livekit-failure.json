@@ -23,7 +23,7 @@
       "sarah_worker_image_digest": "infra/livekit/production/resources/sarah-agent-runtime.yaml and infra/livekit/bundle.json workerImage (pinState pinned); pinned by openagents commit 8489421023, the direct child of worker source fdd0db9bab",
       "unbound_identifier": "The Cloud Run serving revision openagents-monolith-00349-7q2 was reported to the assembling agent but is recorded nowhere in openagents at c4906fbd89, so it is deliberately absent from this binding. The last serving revision recorded in the repository in a Sarah LiveKit context is openagents-monolith-00347-bds."
     },
-    "blocked_reason": "No failure drill has been executed against this candidate or this infrastructure. The failure-matrix harness states its own limitation that fault actions are observed and not executed by it. The production route that would arm the exact provider-disconnect drill is gated by SARAH_LIVEKIT_PROVIDER_DISCONNECT_ACCEPTANCE_ENABLED, which is \"false\" in the production deploy bundle and contract-locked to false by a deploy-bundle test, so the route answers 404 before authentication. Worker crash, timeout, hold exhaustion, duplicate participant, membership revocation, and the reconnect-cannot-revive drill have no live receipt, and an SFU-loss scenario is not defined in the failure matrix at all. The eight-scope privacy scan has produced no output: both acceptance receipts carry the limitation harness_retention_only_separate_cluster_privacy_scan_required. No media-key rekey proof exists.",
+    "blocked_reason": "No failure drill has been executed against this candidate or this infrastructure. The failure-matrix harness states its own limitation that fault actions are observed and not executed by it. The production route that would arm the exact provider-disconnect drill is gated by SARAH_LIVEKIT_PROVIDER_DISCONNECT_ACCEPTANCE_ENABLED, which is \"false\" in the production deploy bundle and contract-locked to false by a deploy-bundle test, so the route answers 404 before authentication. Worker crash, timeout, hold exhaustion, duplicate participant, membership revocation, the reconnect-cannot-revive drill, and SFU loss have no live receipt. The SFU-loss scenario is now DEFINED in the failure matrix (openagents af65458919): fault delete_exact_sfu_pod, a 30000 ms bound measured from fault injection rather than from session start, admitted terminal reasons worker_shutdown, participant_left, and worker_error, and session_expired and completed explicitly refused. Defining it removes the prerequisite gap this row previously recorded; it does not execute it, and an unexecuted defined scenario is worth exactly as much as an undefined one for this row. The eight-scope privacy scan has still produced no output, and its four blockers are now enumerated per scope (openagents bbf6f9831e): the automation identity cannot read pod logs or exec, Error Reporting is not enabled on the project, Redis has no IAM and no read-only network path, and packaged_clients, object_storage, and traces have no defined in-scope target set. Three of the four are outside what any repository change can fix. No media-key rekey proof exists.",
     "issues": [
       "openagents#9284",
       "openagents#9285",
@@ -31,27 +31,31 @@
     ],
     "not_observed": [
       "worker_crash_bounded",
-      "sfu_loss_bounded (no such scenario is even defined)",
+      "sfu_loss_bounded: the scenario is now defined in the failure matrix (openagents af65458919) but has not been executed against this binding",
       "openai_disconnect_bounded (its production route is disabled)",
       "replayed_grant_refused as a live drill",
       "duplicate_participant_refused as a live drill",
       "membership_revocation_bounded as a live drill",
       "hold_exhaustion_bounded",
       "reconnect_no_overlap: the reconnect-cannot-revive drill",
-      "privacy_scope_count>=8: the eight-scope privacy scan across packaged Omega, packaged clients, pods, logs, redis, object storage, traces, and crash artifacts",
+      "privacy_scope_count>=8: the eight-scope privacy scan across packaged Omega, packaged clients, pods, logs, redis, object storage, traces, and crash artifacts; four blockers are enumerated per scope in openagents docs/ops/2026-07-31-sarah-livekit-privacy-scan-executability.md and the collector's one-window all-eight requirement means partial remediation produces nothing",
       "media_key_rekey_proof"
     ],
     "note": "This receipt records what was actually observed for one Sarah LiveKit release-gate row on Omega v0.2.0-rc29. It never promotes source tests, configuration, deployment-lifecycle receipts, or a headless harness run into an installed packaged-candidate observation.",
     "observed": {
-      "failure_drill_scenarios_defined_in_matrix": 7,
+      "failure_drill_scenarios_defined_in_matrix": 8,
       "failure_drills_executed": 0,
       "media_key_rekey_proofs_found": 0,
       "privacy_scan_receipts_found": 0,
+      "privacy_scan_scopes_blocked": 3,
+      "privacy_scan_scopes_ready": 2,
+      "privacy_scan_scopes_undefined": 3,
       "privacy_scope_count": 0,
       "privacy_scopes_required": 8,
       "provider_disconnect_acceptance_route_enabled": false,
       "provider_disconnect_flag": "SARAH_LIVEKIT_PROVIDER_DISCONNECT_ACCEPTANCE_ENABLED=false",
-      "sfu_loss_scenario_defined": false,
+      "sfu_loss_bound_ms": 30000,
+      "sfu_loss_scenario_defined": true,
       "static_e2ee_key_revision_present": true
     },
     "refused_claims": [
@@ -77,9 +81,27 @@
         "repository": "https://github.com/OpenAgentsInc/openagents",
         "revision": "c4906fbd89025ba43d96655e12e1e982cc526beb",
         "role": "read-only production acceptance audit; records the connectivity, load, privacy, cost, and drill rows as blocked or not run"
+      },
+      {
+        "path": "apps/sarah-livekit-agent/src/failure-matrix.ts",
+        "repository": "https://github.com/OpenAgentsInc/openagents",
+        "revision": "af6545891971593251c0f955fd5d7ca974bc2119",
+        "role": "defines the sfu_loss scenario, its delete_exact_sfu_pod fault, its SARAH_LIVEKIT_SFU_LOSS_BOUND_MS bound, and the terminal reasons it admits and refuses; the gate recorder reads the same constant so the two cannot drift"
+      },
+      {
+        "path": "docs/ops/2026-07-30-livekit-self-hosted-gcp-runbook.md",
+        "repository": "https://github.com/OpenAgentsInc/openagents",
+        "revision": "af6545891971593251c0f955fd5d7ca974bc2119",
+        "role": "carries the executable SFU-loss procedure: locating the hosting pod from the per-instance livekit_room_total gauge, injecting the fault, the terminal versus abandoned room-binding states, and the two cluster permissions to check before scheduling a window"
+      },
+      {
+        "path": "docs/ops/2026-07-31-sarah-livekit-privacy-scan-executability.md",
+        "repository": "https://github.com/OpenAgentsInc/openagents",
+        "revision": "bbf6f9831e41efb0e39742f0f708afc75fb5621a",
+        "role": "per-scope executability finding for the eight-scope privacy scan, each blocker verified by a read-only command against the live production deployment; a feasibility finding and never a scan result"
       }
     ],
-    "unblocks_when": "The eight bounded drills are executed against this infrastructure binding with deterministic settlement preserved for each, the eight-scope privacy scan produces a same-window complete export, and a media-key rekey is observed. Any scenario that cannot be executed is recorded inconclusive rather than passed."
+    "unblocks_when": "The eight bounded drills are executed against this infrastructure binding with deterministic settlement preserved for each, the eight-scope privacy scan produces a same-window complete export, and a media-key rekey is observed. Any scenario that cannot be executed is recorded inconclusive rather than passed. Two prerequisites are now known and neither is a repository change: the drills that delete a pod need cluster mutation authority the automation identity does not hold, and the privacy scan needs its four enumerated blockers cleared together rather than one at a time."
   },
   "public_safe": true,
   "row_id": "sarah-livekit-failure",
