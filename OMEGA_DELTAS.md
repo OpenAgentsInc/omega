@@ -9029,3 +9029,65 @@ someone left on `PATH`.
   `a_detected_agent_carries_its_launch_spec` and
   `a_binary_beside_the_executable_wins_over_one_on_the_path` in
   `omega_agent_detect`.
+
+### OMEGA-DELTA-0204 — The composer offers the same controls before a session exists as after
+
+- **Origin:** owner evidence 2026-07-31, two screenshots side by side. A brand
+  new thread and a thread one message old. *"new chat threads dont show the
+  dropdowns and voice button that existing threads do, like the input has fewer
+  options on new thread, it should be the exact fucking same."*
+
+There are two composers, not one. `ConversationView::render_loading_composer`
+draws the box while the executor connects; `ThreadView::render_message_editor`
+and `render_zero_base_executor_bar` draw it once a session exists. They are the
+same box in the same place by construction — `OMEGA-DELTA-0122` built the first
+one specifically so a person cannot see the composer change — and their control
+rows had drifted into two different rows.
+
+The pre-session bar carried the executor dropdown and Send, on the left. The
+connected bar carried the executor dropdown, the Luna/Flash/Pro tier dropdown,
+the microphone and Send, on the right, and the field carried an expand control.
+So the composer a person meets **first** was the most reduced composer in the
+app, and three controls appeared a moment later once a session existed.
+
+**Nothing about an unconnected session made any of them unavailable.** That is
+what makes this a defect rather than a limit:
+
+- **Voice** is a Sarah session on the *workspace*, keyed by workspace entity
+  id. It has no relationship to an ACP session at all. It was missing because
+  `render_voice_controls` was a private method on `ThreadView`, so the code
+  that draws it was out of reach — the control was not withheld, it was
+  unreachable. It now lives in `crates/agent_ui/src/composer_voice.rs` beside
+  the status it reads, and both composers call the same function.
+- **The tier** is a settings default that the registry hands every thread when
+  it is created. The connected control reaches the running session through its
+  model selector, which also writes `agent.default_model`; the pre-session
+  control has no session and no selector, so `select_before_session` writes
+  that default itself. This mattered more than the missing pixel: a tier
+  control that moved its face and not the model is exactly the disagreement
+  `OMEGA-DELTA-0202` exists to forbid, one composer earlier. `RoutedFace::pending`
+  is the documented face for a thread that has not routed anything yet, and it
+  is the only place the standing choice is permitted to speak.
+- **Expanding a text field** is local to the field. `OMEGA-DELTA-0100` already
+  argued this exact case for the connected composer — *the first message in a
+  thread is the one most likely to be long, because it is the one that states
+  the task* — and the pre-session field is where that first message is actually
+  typed. `ConversationView` keeps its own expanded bit rather than sharing
+  `ThreadView`'s, because the two composers are different editors with
+  different lifetimes; the state does not survive the handover any more than
+  the caret position does.
+
+**What stays absent.** The executor disclosure line, the routed model, the
+turn's phase dot and the Exo inspector are all reports about work that has
+happened. Before a session there is none, so they are not drawn and not
+invented; the `OMEGA-DELTA-0189` connecting indicator occupies that space
+instead. `OMEGA-DELTA-0175`'s Vim readout stays on the left in both bars.
+
+- **What this does not claim.** The parity check is source text: it fails when
+  a listed control disappears from either bar, and it does not notice a *new*
+  control added to only one of them. `SHARED_COMPOSER_CONTROLS` is the list,
+  and extending it is part of adding a composer control.
+
+- **Enforced by:** `the_composer_offers_the_same_controls_before_and_after_the_session`
+  in `crates/omega_deltas`; and
+  `a_tier_chosen_before_the_session_exists_moves_the_model` in `agent_ui`.
