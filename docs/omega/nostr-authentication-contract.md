@@ -1,7 +1,7 @@
 # Omega Nostr authentication contract
 
-- Status: AUTH-00 contract frozen; AUTH-01 through AUTH-07 implemented
-- Packets: `OMEGA-AUTH-00`, `OMEGA-AUTH-01`, `OMEGA-AUTH-02`, `OMEGA-AUTH-03`, `OMEGA-AUTH-04`, `OMEGA-AUTH-05`, `OMEGA-AUTH-06`, `OMEGA-AUTH-07`
+- Status: AUTH-00 contract frozen; AUTH-01 through AUTH-08 implemented
+- Packets: `OMEGA-AUTH-00`, `OMEGA-AUTH-01`, `OMEGA-AUTH-02`, `OMEGA-AUTH-03`, `OMEGA-AUTH-04`, `OMEGA-AUTH-05`, `OMEGA-AUTH-06`, `OMEGA-AUTH-07`, `OMEGA-AUTH-08`
 - Source baseline: Omega `0136fca2d11900ddc7982665482ed8cd035391c7`
 - Product plan:
   [Omega Nostr authentication and onboarding](https://github.com/OpenAgentsInc/openagents/blob/7010561549ebb46a37257292a9100f990a4a3356/docs/omega/2026-07-30-omega-nostr-authentication-and-onboarding.md)
@@ -417,3 +417,67 @@ Unix directories use mode `0700` and files use mode `0600`. AUTH-07 enables no
 macOS Keychain, Secure Enclave, Windows credential vault, Linux secret service,
 Android keystore, encrypted application vault, native enclave, or
 hardware-backed credential store.
+
+## Device enrollment and platform capabilities
+
+AUTH-08 enrolls a revocable device key without copying the selected person's
+root `nsec`. The versioned introduction contains only an ephemeral endpoint,
+expiry, ephemeral public material, and random one-use secret. It is bound to the
+selected account public key and generation through the verified transcript; it
+contains neither the root secret nor an ambient signing capability.
+
+The desktop preview names the exact endpoint and expiry and states that no root
+key will cross the pairing channel. After both peers authenticate the
+transcript, each screen shows the same short authentication string. Enrollment
+advances only after each side explicitly confirms that value. A wrong value,
+peer substitution, expired introduction, refused confirmation, replay, wrong
+account generation, or duplicate redemption fails closed.
+
+Pairing states remain distinct: pending, awaiting two-screen confirmation,
+confirmed, expired, refused, redeemed, and revoked. A successful target creates
+its own permanent device key in custody admitted by that platform. Omega then
+mints a narrow grant bound to that device public key, account generation,
+declared capability set, creation time, and expiry. Redemption is one-time.
+Neither enrollment nor possession of a device key implies relay membership,
+hosted account ownership, moderation, payment, command, or release authority.
+
+The account dashboard inventory shows each device's public fingerprint,
+platform, admitted capabilities, grant expiry, lifecycle, and last successful
+use. Revocation targets one grant and does not rotate the person identity,
+invalidate unrelated devices, or retract events. A failed revocation remains
+visible and retryable instead of disappearing from the inventory.
+
+Platform capability labels are allowlisted:
+
+- desktop may initiate the ephemeral exchange and use implemented local or
+  NIP-46 signer routes;
+- web advertises NIP-07 or NIP-46 only when the browser exposes the exact
+  adapter, and stores no root key by default;
+- Android advertises NIP-55 only after an admitted Android host implements and
+  verifies that route; and
+- iOS advertises NIP-46 only in this wave. It does not claim NIP-55 parity or a
+  native signer bridge that has not been audited.
+
+Public pairing and inventory projections contain no introduction secret,
+ephemeral private key, device private key, root `nsec`, or bearer. Private
+pairing material and device-grant records use ordinary unencrypted,
+account-partitioned files with atomic writes and owner-only Unix directory mode
+`0700` and file mode `0600`. Redemption clears host exchange secrets, target
+grant persistence deletes the matching pending record, and expiry pruning
+verifies host deletion.
+
+AUTH-08 enables no macOS Keychain, Secure Enclave, Windows credential vault,
+Linux secret service, Android keystore, encrypted application vault, native
+enclave, hardware-backed credential store, or other native key custody.
+
+The concrete store root is `identity/device-enrollment/`. The enrolling host
+uses `host/<owner-public-key>/enrollment.json`. Before it returns a pairing
+response, a joining desktop target durably writes
+`local/<owner-public-key>/pending/<pairing-id>.json`, so it can resume after a
+restart without creating a different device key or transcript. After the host
+returns the grant, the target atomically writes
+`local/<owner-public-key>/devices/<device-public-key>.json` and deletes the
+pending record. The dashboard's copied value is a versioned pairing payload;
+the bridge encodes that payload as an `omega://device-enrollment/v1` deep link
+and parses it back through the same core invitation validator. The dashboard
+does not claim to render a QR code in this wave.

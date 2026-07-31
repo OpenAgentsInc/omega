@@ -107,6 +107,7 @@ omega_workbench_state.workspace = true
 omega_agent_detect.workspace = true
 omega_audience.workspace = true
 omega_community.workspace = true
+omega_device_enrollment.workspace = true
 omega_workdir.workspace = true
 omega_zero_base.workspace = true
 omega_identity.workspace = true

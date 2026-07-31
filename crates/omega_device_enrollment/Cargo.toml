@@ -1,5 +1,5 @@
 [package]
-name = "omega_device_bridge"
+name = "omega_device_enrollment"
 version = "0.1.0"
 edition.workspace = true
 publish.workspace = true
@@ -9,22 +9,19 @@ license = "GPL-3.0-or-later"
 workspace = true
 
 [lib]
-path = "src/omega_device_bridge.rs"
+path = "omega_device_enrollment.rs"
 doctest = false
 
 [dependencies]
-async-io.workspace = true
-async-tungstenite = { workspace = true, features = ["async-std-runtime"] }
-base64.workspace = true
-futures.workspace = true
-log.workspace = true
+atomic-write-file.workspace = true
+hex.workspace = true
+hkdf.workspace = true
+hmac.workspace = true
 nostr.workspace = true
-omega_device_enrollment.workspace = true
-qrcode.workspace = true
+paths.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 sha2.workspace = true
-smol.workspace = true
 thiserror.workspace = true
 url.workspace = true
 

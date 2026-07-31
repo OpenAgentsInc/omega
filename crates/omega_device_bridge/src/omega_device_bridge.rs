@@ -8,6 +8,7 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use async_io::{Async, Timer};
 use async_tungstenite::accept_async_with_config;
 use async_tungstenite::tungstenite::{Message, protocol::WebSocketConfig};
+use base64::{Engine as _, engine::general_purpose::URL_SAFE_NO_PAD};
 use futures::{FutureExt, StreamExt, pin_mut, select};
 use nostr::Event;
 use qrcode::{QrCode, types::Color};
@@ -20,6 +21,7 @@ pub const PROTOCOL: &str = "openagents.omega.device_bridge.v1";
 pub const MAX_FRAME_BYTES: usize = 64 * 1024;
 pub const DEVICE_PROOF_KIND: u16 = 27_272;
 pub const PAIRING_BOOTSTRAP_SCHEMA: &str = "openagents.omega.device_pairing.v1";
+pub const AUTH08_PAIRING_DEEP_LINK_VERSION: &str = "v1";
 const MAX_PROOF_AGE_SECONDS: u64 = 300;
 const MAX_FUTURE_PROOF_SECONDS: u64 = 30;
 const DEFAULT_HEARTBEAT_INTERVAL: Duration = Duration::from_secs(5);
@@ -40,7 +42,7 @@ const MAX_TRANSCRIPT_MESSAGES: usize = 64;
 const MAX_TRANSCRIPT_TEXT_BYTES: usize = 8 * 1024;
 const MAX_RECEIPT_REFS: usize = 32;
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct PairingBootstrap {
     pub schema: String,
@@ -54,10 +56,44 @@ pub struct PairingBootstrap {
     pub expires_at: u64,
 }
 
+impl std::fmt::Debug for PairingBootstrap {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("PairingBootstrap")
+            .field("schema", &self.schema)
+            .field("magic_dns_name", &self.magic_dns_name)
+            .field("port", &self.port)
+            .field("protocol", &self.protocol)
+            .field("host_public_key_hex", &self.host_public_key_hex)
+            .field("pairing_secret", &"[REDACTED]")
+            .field("generation", &self.generation)
+            .field("issued_at", &self.issued_at)
+            .field("expires_at", &self.expires_at)
+            .finish()
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct PairingQr {
     pub width: usize,
     pub modules: Vec<bool>,
+}
+
+impl PairingQr {
+    pub fn from_payload(payload: &[u8]) -> Result<Self, BridgeError> {
+        if payload.is_empty() || payload.len() > MAX_FRAME_BYTES {
+            return Err(BridgeError::PairingQrTooLarge);
+        }
+        let code = QrCode::new(payload).map_err(|_| BridgeError::PairingQrTooLarge)?;
+        Ok(Self {
+            width: code.width(),
+            modules: code
+                .to_colors()
+                .into_iter()
+                .map(|color| color == Color::Dark)
+                .collect(),
+        })
+    }
 }
 
 impl PairingBootstrap {
@@ -106,17 +142,63 @@ impl PairingBootstrap {
     }
 
     pub fn qr(&self) -> Result<PairingQr, BridgeError> {
-        let payload = self.wire_payload()?;
-        let code = QrCode::new(payload).map_err(|_| BridgeError::PairingQrTooLarge)?;
-        Ok(PairingQr {
-            width: code.width(),
-            modules: code
-                .to_colors()
-                .into_iter()
-                .map(|color| color == Color::Dark)
-                .collect(),
-        })
+        PairingQr::from_payload(&self.wire_payload()?)
     }
+}
+
+pub fn auth08_pairing_invite_wire_payload(
+    invite: &omega_device_enrollment::PairingInvite,
+) -> Result<Vec<u8>, BridgeError> {
+    invite
+        .wire_json()
+        .map_err(|_| BridgeError::InvalidPairingBootstrap)
+}
+
+pub fn auth08_pairing_invite_qr(
+    invite: &omega_device_enrollment::PairingInvite,
+) -> Result<PairingQr, BridgeError> {
+    PairingQr::from_payload(&auth08_pairing_invite_wire_payload(invite)?)
+}
+
+pub fn auth08_pairing_invite_deep_link(
+    invite: &omega_device_enrollment::PairingInvite,
+) -> Result<String, BridgeError> {
+    let payload = auth08_pairing_invite_wire_payload(invite)?;
+    Ok(format!(
+        "omega://device-enrollment/{AUTH08_PAIRING_DEEP_LINK_VERSION}?invite={}",
+        URL_SAFE_NO_PAD.encode(payload)
+    ))
+}
+
+pub fn parse_auth08_pairing_invite_deep_link(
+    deep_link: &str,
+    now: u64,
+) -> Result<omega_device_enrollment::PairingInvite, BridgeError> {
+    let url = url::Url::parse(deep_link).map_err(|_| BridgeError::InvalidPairingBootstrap)?;
+    if url.scheme() != "omega"
+        || url.host_str() != Some("device-enrollment")
+        || url.path() != format!("/{AUTH08_PAIRING_DEEP_LINK_VERSION}")
+        || !url.username().is_empty()
+        || url.password().is_some()
+        || url.fragment().is_some()
+    {
+        return Err(BridgeError::InvalidPairingBootstrap);
+    }
+    let mut query = url.query_pairs();
+    let Some((name, encoded)) = query.next() else {
+        return Err(BridgeError::InvalidPairingBootstrap);
+    };
+    if name != "invite" || query.next().is_some() || encoded.len() > MAX_FRAME_BYTES * 2 {
+        return Err(BridgeError::InvalidPairingBootstrap);
+    }
+    let payload = URL_SAFE_NO_PAD
+        .decode(encoded.as_bytes())
+        .map_err(|_| BridgeError::InvalidPairingBootstrap)?;
+    if payload.len() > MAX_FRAME_BYTES {
+        return Err(BridgeError::InvalidPairingBootstrap);
+    }
+    omega_device_enrollment::PairingInvite::parse_wire_json(&payload, now)
+        .map_err(|_| BridgeError::InvalidPairingBootstrap)
 }
 
 fn valid_magic_dns_name(value: &str) -> bool {
@@ -1321,6 +1403,70 @@ mod tests {
         assert_eq!(payload["hostPublicKeyHex"], "1".repeat(64));
         assert_eq!(payload["pairingSecret"], "2".repeat(64));
         assert_eq!(payload["expiresAt"], 301_000);
+    }
+
+    #[test]
+    fn auth08_pairing_introduction_is_versioned_and_redacted_without_a_false_sas() {
+        let directory = tempfile::tempdir().expect("temporary directory");
+        let store = omega_device_enrollment::DeviceEnrollmentStore::for_data_root(directory.path());
+        let account = omega_device_enrollment::EnrollmentAccountFence::new(
+            "omega-account-owner",
+            "1".repeat(64),
+            7,
+        )
+        .expect("account fence");
+        let invite = store
+            .create_pairing_invite(
+                account,
+                "wss://omega-primary.tail1234.ts.net:4317",
+                omega_device_enrollment::DevicePlatform::Android,
+                std::collections::BTreeSet::from([
+                    omega_device_enrollment::DeviceCapability::Nip55,
+                ]),
+                "owner-approved-device",
+                1_000,
+                300,
+            )
+            .expect("AUTH-08 pairing invite");
+        let payload = auth08_pairing_invite_wire_payload(&invite).expect("AUTH-08 payload");
+        let json: serde_json::Value = serde_json::from_slice(&payload).expect("JSON payload");
+        assert_eq!(json["account"]["generation"], 7);
+        assert_eq!(json["account"]["owner_public_key_hex"], "1".repeat(64));
+        assert_eq!(
+            json["host_ephemeral_public_key_hex"]
+                .as_str()
+                .expect("host ephemeral public key")
+                .len(),
+            64
+        );
+        assert!(json.get("sas").is_none());
+        assert!(json.get("transcript_digest").is_none());
+        assert!(json.get("root_secret").is_none());
+        assert!(json.get("nsec").is_none());
+        assert!(
+            !String::from_utf8(payload)
+                .expect("UTF-8 payload")
+                .contains("nsec1")
+        );
+        let invite_debug = format!("{invite:?}");
+        assert!(invite_debug.contains("[REDACTED]"));
+        assert!(
+            !invite_debug.contains(json["pairing_secret_hex"].as_str().expect("pairing secret"))
+        );
+        let qr = auth08_pairing_invite_qr(&invite).expect("AUTH-08 QR");
+        assert_eq!(qr.modules.len(), qr.width * qr.width);
+        let deep_link = auth08_pairing_invite_deep_link(&invite).expect("AUTH-08 deep link");
+        assert!(deep_link.starts_with("omega://device-enrollment/v1?invite="));
+        assert!(!deep_link.contains("nsec1"));
+        assert_eq!(
+            parse_auth08_pairing_invite_deep_link(&deep_link, 1_000)
+                .expect("parsed AUTH-08 deep link"),
+            invite
+        );
+        assert!(
+            parse_auth08_pairing_invite_deep_link(&format!("{deep_link}&unexpected=value"), 1_000,)
+                .is_err()
+        );
     }
 
     #[test]

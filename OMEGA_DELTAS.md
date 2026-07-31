@@ -8728,3 +8728,43 @@ startup recheck — survives unchanged behind that dropdown.
   `omega_invites`; public controller projection tests in `agent_ui`; desktop
   authority and resume affordance assertions in `account_ui`; and the
   `OMEGA-DELTA-0198` source assertions in `crates/omega_deltas`.
+
+### OMEGA-DELTA-0199 — Device enrollment grants a revocable device key, not the root key
+
+- **Origin:** OMEGA-AUTH-08, omega#183. Adapts an ephemeral SAS exchange while
+  keeping the person's root Nostr secret outside every device pairing payload.
+- **Pairing is transcript-bound and two-screen.** The preview names the exact
+  endpoint, approved target platform and capabilities, owner gesture
+  reference, and expiry and discloses that no root key crosses the channel.
+  The bridge formats the versioned core invitation as an
+  `omega://device-enrollment/v1` deep link. Both peers bind their ephemeral
+  keys, account generation, endpoint, approval, expiry, and one-use secret into
+  the transcript, show the same short authentication string, and confirm it
+  independently. Pending, expired, refused, redeemed, replayed,
+  peer-substituted, and wrong-generation outcomes remain distinct.
+- **Grants remain narrow and independently revocable.** A target creates its
+  own permanent device key. Its grant names that key, exact capabilities,
+  account generation, creation time, expiry, and last successful use. Revoking
+  one device neither rotates the person identity nor revokes sibling devices;
+  partial or failed revocation remains visible and retryable.
+- **Platform claims remain exact.** Web exposes detected NIP-07 or NIP-46 only
+  and stores no root key by default. Android exposes NIP-55 only after an
+  admitted host implements it. iOS exposes NIP-46 in this wave and does not
+  claim NIP-55 parity or an unaudited native bridge.
+- **File custody only.** Pairing and grant records remain ordinary unencrypted,
+  account-partitioned files below `identity/device-enrollment/`, with atomic
+  owner-only Unix directory mode `0700` and file mode `0600`. A joining target
+  writes its pending transcript and device key before returning a response,
+  resumes the same record after restart, and replaces it with the permanent
+  device credential only after receiving the redeemed grant. Public
+  projections contain no introduction secret, ephemeral private key, device
+  private key, root `nsec`, or bearer. This delta enables no macOS Keychain,
+  Secure Enclave, Windows credential vault, Linux secret service, Android
+  keystore, encrypted application vault, native enclave, or hardware-backed
+  credential store.
+- **Enforced by:** exchange expiry, SAS mismatch, replay, substitution,
+  generation, redemption, grant scope, platform capability, last-use,
+  independent revocation, verified-delete, redaction, and permission tests in
+  the device enrollment core; preview, inventory, and lifecycle assertions in
+  `account_ui`; and the `OMEGA-DELTA-0199` source assertions in
+  `crates/omega_deltas`.

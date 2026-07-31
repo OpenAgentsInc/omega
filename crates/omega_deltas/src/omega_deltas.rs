@@ -187,6 +187,7 @@ pub const ENFORCED_DELTAS: &[&str] = &[
     "OMEGA-DELTA-0196",
     "OMEGA-DELTA-0197",
     "OMEGA-DELTA-0198",
+    "OMEGA-DELTA-0199",
 ];
 
 /// The concise product contract adjacent to the delta registry.
@@ -1252,6 +1253,12 @@ pub const NOSTR_PROFILE_TRANSPORT_PATH: &str =
     "crates/agent_ui/src/omega_nostr_profile_transport.rs";
 pub const INVITE_INTEROPERABILITY_PATH: &str = "crates/omega_invites/omega_invites.rs";
 pub const INVITE_CONTROL_PATH: &str = "crates/agent_ui/src/omega_invite_control.rs";
+pub const DEVICE_ENROLLMENT_PATH: &str =
+    "crates/omega_device_enrollment/omega_device_enrollment.rs";
+pub const HOST_SIGNER_CAPABILITIES_PATH: &str =
+    "crates/agent_ui/src/omega_host_signer_capabilities.rs";
+pub const DEVICE_ENROLLMENT_CONTROLLER_PATH: &str =
+    "crates/agent_ui/src/omega_device_enrollment_controller.rs";
 
 /// OMEGA-DELTA-0192. The hosted-account link gate.
 pub const WORKROOM_PANEL_PATH: &str = "crates/workroom_ui/src/panel.rs";
@@ -24698,6 +24705,160 @@ mod tests {
                 assert!(
                     documentation.contains(required),
                     "OMEGA-DELTA-0198: {path} lost `{required}`"
+                );
+            }
+        }
+    }
+
+    /// OMEGA-DELTA-0199. Device enrollment is transcript-bound, restart-safe,
+    /// independently revocable, platform-admitted, and file-backed.
+    #[test]
+    fn device_enrollment_is_revocable_platform_admitted_and_root_secret_free() {
+        let enrollment = read_repository_file(DEVICE_ENROLLMENT_PATH);
+        for required in [
+            "pub struct EnrollmentAccountFence",
+            "pub struct PairingInvite",
+            "pub struct PairingResponse",
+            "pub struct SasChallenge",
+            "pub struct EnrollmentGrant",
+            "pub struct DeviceInventoryEntry",
+            "pub enum PairingLifecycle",
+            "pub fn create_pairing_invite",
+            "pub fn begin_device_enrollment",
+            "pub fn resume_pending_device",
+            "pub fn accept_pairing_response",
+            "pub fn redeem_pairing",
+            "pub fn recover_redeemed_grant",
+            "pub fn persist_local_device",
+            "pub fn revoke_device",
+            "pub fn device_inventory",
+            "pub fn pairing_lifecycle",
+            "ExpiredInvite",
+            "WrongSas",
+            "AlreadyRedeemed",
+            "WrongGeneration",
+            "identity",
+            "device-enrollment",
+            "pending",
+            "0o700",
+            "0o600",
+            "[REDACTED]",
+        ] {
+            assert!(
+                enrollment.contains(required),
+                "OMEGA-DELTA-0199: device enrollment lost `{required}`"
+            );
+        }
+
+        let capabilities = read_repository_file(HOST_SIGNER_CAPABILITIES_PATH);
+        for required in [
+            "pub enum HostPlatform",
+            "pub enum HostSignerCapability",
+            "pub enum HostCapabilityAvailability",
+            "pub struct HostCapabilityMatrix",
+            "(HostPlatform::Desktop, HostSignerCapability::DesktopLocal)",
+            "(HostPlatform::Desktop, HostSignerCapability::Nip46)",
+            "(HostPlatform::Web, HostSignerCapability::Nip07)",
+            "(HostPlatform::Web, HostSignerCapability::Nip46)",
+            "(HostPlatform::Android, HostSignerCapability::Nip55)",
+            "(HostPlatform::Ios, HostSignerCapability::Nip46)",
+            "HostCapabilityAvailability::Admitted",
+            "HostCapabilityAvailability::Unsupported",
+        ] {
+            assert!(
+                capabilities.contains(required),
+                "OMEGA-DELTA-0199: host capability admission lost `{required}`"
+            );
+        }
+
+        let controller = read_repository_file(DEVICE_ENROLLMENT_CONTROLLER_PATH);
+        for required in [
+            "pub struct DeviceEnrollmentController",
+            "pub fn create_pairing_introduction",
+            "pub fn begin_target_enrollment",
+            "pub fn resume_target_enrollment",
+            "pub fn accept_target_response",
+            "pub fn confirm_target_sas",
+            "pub fn redeem_confirmed_pairing",
+            "pub fn finalize_target_credential",
+            "pub fn authorize_host_capability",
+            "pub fn record_last_use",
+            "pub fn revoke_device",
+            "pub fn device_inventory",
+            "pub fn pairing_lifecycle",
+        ] {
+            assert!(
+                controller.contains(required),
+                "OMEGA-DELTA-0199: enrollment controller lost `{required}`"
+            );
+        }
+
+        let bridge = read_repository_file(DEVICE_BRIDGE_PATH);
+        for required in [
+            "pub fn auth08_pairing_invite_deep_link",
+            "pub fn parse_auth08_pairing_invite_deep_link",
+            "omega://device-enrollment/",
+        ] {
+            assert!(
+                bridge.contains(required),
+                "OMEGA-DELTA-0199: pairing deep link lost `{required}`"
+            );
+        }
+
+        let dashboard = read_repository_file(ACCOUNT_UI_PATH);
+        for required in [
+            "Device enrollment",
+            "Start device pairing",
+            "Copy pairing deep link",
+            "Root key",
+            "Not included",
+            "Approved platform",
+            "Approved capabilities",
+            "Awaiting two-screen confirmation",
+            "Compare on both screens",
+            "Copy challenge to device",
+            "SAS matches",
+            "Copy grant to device",
+            "Enrolled devices",
+            "Last use",
+            "Grant expires",
+            "Revoke device",
+            "Ordinary unencrypted private files (0700/0600)",
+            "HostCapabilityMatrix::descriptor",
+            "HostCapabilityAvailability::Admitted",
+            "DeviceEnrollmentController::system()",
+            "auth08_pairing_invite_deep_link",
+        ] {
+            assert!(
+                dashboard.contains(required),
+                "OMEGA-DELTA-0199: account UI lost `{required}`"
+            );
+        }
+
+        for path in [
+            IDENTITY_AUTHENTICATION_DOCUMENT_PATH,
+            RUNTIME_CREDENTIAL_STORAGE_DOCUMENT_PATH,
+            APPLICATION_IDENTITY_DOCUMENT_PATH,
+        ] {
+            let documentation = normalize_prose(&read_repository_file(path));
+            for required in [
+                "identity/device-enrollment/",
+                "local/<owner-public-key>/pending/<pairing-id>.json",
+                "ordinary unencrypted",
+                "0700",
+                "0600",
+                "macOS Keychain",
+                "Secure Enclave",
+                "Windows credential vault",
+                "Linux secret service",
+                "Android keystore",
+                "encrypted application vault",
+                "native enclave",
+                "hardware-backed credential store",
+            ] {
+                assert!(
+                    documentation.contains(required),
+                    "OMEGA-DELTA-0199: {path} lost `{required}`"
                 );
             }
         }

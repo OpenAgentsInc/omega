@@ -151,6 +151,36 @@ Windows credential vault, Linux secret service, Android keystore, encrypted
 application vault, native enclave, hardware-backed credential store, or
 another native custody integration.
 
+AUTH-08 stores device enrollment below `identity/device-enrollment/`.
+Host-side pairing state and device-grant inventory live in
+`host/<owner-public-key>/enrollment.json`; target-side permanent device
+credentials live in `local/<owner-public-key>/devices/<device-public-key>.json`.
+Public projections contain the account and device public fingerprints,
+platform, admitted capability names, lifecycle, creation and expiry times,
+last successful use, and public-safe refusal or revocation results. They
+contain no introduction secret, ephemeral private key, device private key,
+root `nsec`, or bearer.
+
+The one-use introduction secret and host ephemeral key remain in the host
+record only while pairing is open. A joining target writes restart-safe
+exchange and device-key material to
+`local/<owner-public-key>/pending/<pairing-id>.json` before returning its
+response. Successful redemption clears the host exchange secrets; persisting
+the returned grant atomically writes the permanent target credential and
+deletes the target pending record. Expiry pruning verifies host deletion and
+removes the matching target pending record when both roles share a data root.
+Revoking one grant does not delete the person identity or another device's
+grant.
+
+These records are ordinary unencrypted files written atomically with directory
+mode `0700` and file mode `0600` on Unix. A permanent device key created and
+owned by Omega is stored in those ordinary local files in this wave. NIP-07,
+NIP-46, and NIP-55 adapters keep their separately managed keys outside Omega;
+Omega does not copy them into its files. This first wave enables no macOS
+Keychain, Secure Enclave, Windows credential vault, Linux secret service,
+Android keystore, encrypted application vault, native enclave, hardware-backed
+credential store, or other native key custody.
+
 Apple code signing and notarization may use a build-machine signing identity.
 That packaging operation is outside the installed application's runtime and
 does not give Omega access to the build machine's credential store.

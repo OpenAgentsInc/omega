@@ -104,6 +104,8 @@ dependencies = [
  "editor",
  "gpui",
  "omega_actions",
+ "omega_device_bridge",
+ "omega_device_enrollment",
  "omega_effectd",
  "omega_identity",
  "omega_identity_sync",
@@ -583,6 +585,7 @@ dependencies = [
  "omega_agent_detect",
  "omega_audience",
  "omega_community",
+ "omega_device_enrollment",
  "omega_effectd",
  "omega_exo_lane",
  "omega_exo_log",
@@ -11039,15 +11042,37 @@ version = "0.1.0"
 dependencies = [
  "async-io",
  "async-tungstenite",
+ "base64 0.22.1",
  "futures 0.3.32",
  "log",
  "nostr",
+ "omega_device_enrollment",
  "qrcode",
  "serde",
  "serde_json",
  "sha2",
  "smol",
+ "tempfile",
  "thiserror 2.0.17",
+ "url",
+]
+
+[[package]]
+name = "omega_device_enrollment"
+version = "0.1.0"
+dependencies = [
+ "atomic-write-file",
+ "hex",
+ "hkdf",
+ "hmac",
+ "nostr",
+ "paths",
+ "serde",
+ "serde_json",
+ "sha2",
+ "tempfile",
+ "thiserror 2.0.17",
+ "url",
 ]
 
 [[package]]

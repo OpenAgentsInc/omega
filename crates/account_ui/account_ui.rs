@@ -1,8 +1,15 @@
 use std::{
+    collections::BTreeSet,
     sync::Arc,
     time::{SystemTime, UNIX_EPOCH},
 };
 
+use agent_ui::omega_device_enrollment_controller::{
+    DeviceEnrollmentController, HostSasChallenge, TargetPairingConfirmation,
+};
+use agent_ui::omega_host_signer_capabilities::{
+    HostCapabilityAvailability, HostCapabilityMatrix, HostPlatform, HostSignerCapability,
+};
 use agent_ui::omega_invite_control::{
     InviteControl, InviteControlState, InvitePreviewProjection, InviteRefusal, InviteTerms,
     JoinStepState, JoinTransactionProjection, join_plan_for_resolved, redacted_invite_input_label,
@@ -17,6 +24,10 @@ use gpui::{
     IntoElement, PromptLevel, Render, SharedString, Task, Window,
 };
 use omega_actions::{OpenIdentityDashboard, OpenOnboarding, OpenRemoteSignerSetup};
+use omega_device_bridge::auth08_pairing_invite_deep_link;
+use omega_device_enrollment::{
+    DeviceCapability, DeviceInventoryEntry, DevicePlatform, EnrollmentError,
+};
 use omega_effectd::{BindingProjection, BindingState, HostedSessionProjection, HostedSessionState};
 use omega_identity::{
     AccountDashboardEntry, AccountDashboardProjection, AccountLifecycleState,
@@ -57,6 +68,8 @@ const NIP46_EXCHANGE_TIMEOUT_SECONDS: u64 = 30;
 const PROFILE_PUBLISH_RELAY: &str = "wss://relay.openagents.com";
 const SIGN_OUT_LABEL: &str = "Sign out";
 const DISCONNECT_SIGNER_LABEL: &str = "Disconnect signer";
+const DEVICE_PAIRING_LIFETIME_SECONDS: u64 = 5 * 60;
+const DEVICE_GRANT_LIFETIME_SECONDS: u64 = 30 * 24 * 60 * 60;
 
 fn unix_time_seconds() -> u64 {
     SystemTime::now()
@@ -646,6 +659,29 @@ enum ProfileEditorState {
     Failed,
 }
 
+#[derive(Debug)]
+enum DevicePairingUiState {
+    NotStarted,
+    Pending {
+        endpoint: String,
+        platform: DevicePlatform,
+        capabilities: Vec<DeviceCapability>,
+        expires_at: u64,
+    },
+    AwaitingConfirmation {
+        challenge: HostSasChallenge,
+        device_label: String,
+        platform: DevicePlatform,
+        capabilities: Vec<DeviceCapability>,
+        expires_at: u64,
+    },
+    Expired,
+    Refused,
+    Redeemed {
+        device_public_key_hex: String,
+    },
+}
+
 struct AccountOperationResult {
     projection: AccountDashboardProjection,
     purge_report: Option<AccountPurgeReport>,
@@ -705,6 +741,15 @@ pub struct IdentityDashboard {
     profile_about_input: Entity<Editor>,
     profile_picture_input: Entity<Editor>,
     invite_input: Entity<SecureInput>,
+    device_endpoint_input: Entity<Editor>,
+    device_response_input: Entity<SecureInput>,
+    device_confirmation_input: Entity<SecureInput>,
+    device_target_platform: HostPlatform,
+    device_pairing_state: DevicePairingUiState,
+    device_pairing_wire: Option<Zeroizing<String>>,
+    device_challenge_wire: Option<Zeroizing<String>>,
+    device_grant_wire: Option<Zeroizing<String>>,
+    device_inventory: Vec<DeviceInventoryEntry>,
     invite_control: InviteControl,
     pending_invite: Option<(ResolvedInvite, Zeroizing<String>)>,
     hydration_receipt: Option<HydrationReceipt>,
@@ -757,6 +802,27 @@ impl IdentityDashboard {
         let invite_input = cx.new(|cx| {
             SecureInput::new("Paste community invite or relay", "Community invite", 1, cx)
         });
+        let device_endpoint_input = cx.new(|cx| {
+            let mut editor = Editor::single_line(window, cx);
+            editor.set_placeholder_text("wss://pairing.example", window, cx);
+            editor
+        });
+        let device_response_input = cx.new(|cx| {
+            SecureInput::new(
+                "Paste pairing response from the other device",
+                "Pairing response",
+                3,
+                cx,
+            )
+        });
+        let device_confirmation_input = cx.new(|cx| {
+            SecureInput::new(
+                "Paste confirmation after both screens match",
+                "Pairing confirmation",
+                3,
+                cx,
+            )
+        });
         let remote_uri_input =
             cx.new(|cx| SecureInput::new("Paste bunker:// connection", "Bunker connection", 1, cx));
         let dashboard = cx.new(|cx| Self {
@@ -782,6 +848,15 @@ impl IdentityDashboard {
             profile_about_input,
             profile_picture_input,
             invite_input,
+            device_endpoint_input,
+            device_response_input,
+            device_confirmation_input,
+            device_target_platform: HostPlatform::Desktop,
+            device_pairing_state: DevicePairingUiState::NotStarted,
+            device_pairing_wire: None,
+            device_challenge_wire: None,
+            device_grant_wire: None,
+            device_inventory: Vec::new(),
             invite_control: InviteControl::default(),
             pending_invite: None,
             hydration_receipt: None,
@@ -834,6 +909,7 @@ impl IdentityDashboard {
                     }
                 }
                 this.busy = false;
+                this.refresh_device_inventory(cx);
                 cx.notify();
             })
             .log_err();
@@ -885,6 +961,338 @@ impl IdentityDashboard {
             .accounts
             .iter()
             .find(|entry| &entry.account_ref == selected)
+    }
+
+    fn refresh_device_inventory(&mut self, cx: &mut Context<Self>) {
+        if !self
+            .selected_entry()
+            .is_some_and(|account| account.is_active)
+        {
+            self.device_inventory.clear();
+            cx.notify();
+            return;
+        }
+        self.task = Some(cx.spawn(async move |this, cx| {
+            let result = cx
+                .background_spawn(async move {
+                    let registry = AccountRegistryService::system(*app_identity::CHANNEL);
+                    let selection = registry
+                        .selection_token()
+                        .map_err(|_| EnrollmentError::Storage)?;
+                    match DeviceEnrollmentController::system().device_inventory(&selection) {
+                        Ok(inventory) => Ok(inventory),
+                        Err(EnrollmentError::NotFound) => Ok(Vec::new()),
+                        Err(error) => Err(error),
+                    }
+                })
+                .await;
+            this.update(cx, |this, cx| {
+                match result {
+                    Ok(inventory) => this.device_inventory = inventory,
+                    Err(error) => {
+                        zlog::error!("device inventory inspection failed: {error}");
+                        this.message = Some("Enrolled devices could not be loaded.".into());
+                    }
+                }
+                cx.notify();
+            })
+            .log_err();
+        }));
+    }
+
+    fn start_device_pairing(&mut self, cx: &mut Context<Self>) {
+        if self.busy {
+            return;
+        }
+        let endpoint = self.device_endpoint_input.read(cx).text(cx);
+        let approved_platform = self.device_target_platform;
+        let approved_capabilities = HostCapabilityMatrix::admitted(approved_platform)
+            .into_iter()
+            .map(|descriptor| descriptor.capability)
+            .collect::<BTreeSet<_>>();
+        self.busy = true;
+        self.message = None;
+        self.device_pairing_wire = None;
+        self.device_challenge_wire = None;
+        self.device_grant_wire = None;
+        self.task = Some(cx.spawn(async move |this, cx| {
+            let result = cx
+                .background_spawn(async move {
+                    let registry = AccountRegistryService::system(*app_identity::CHANNEL);
+                    let selection = registry
+                        .selection_token()
+                        .map_err(|_| EnrollmentError::Storage)?;
+                    let now = unix_time_seconds();
+                    let invite = DeviceEnrollmentController::system().create_pairing_introduction(
+                        &selection,
+                        endpoint,
+                        approved_platform,
+                        approved_capabilities,
+                        format!("dashboard-device-enrollment-{now}"),
+                        now,
+                        DEVICE_PAIRING_LIFETIME_SECONDS,
+                    )?;
+                    let deep_link = auth08_pairing_invite_deep_link(&invite)
+                        .map_err(|_| EnrollmentError::InvalidInvite)?;
+                    Ok::<_, EnrollmentError>((invite, deep_link))
+                })
+                .await;
+            this.update(cx, |this, cx| {
+                match result {
+                    Ok((invite, deep_link)) => {
+                        this.device_pairing_state = DevicePairingUiState::Pending {
+                            endpoint: invite.endpoint,
+                            platform: invite.approved_platform,
+                            capabilities: invite.approved_capabilities.into_iter().collect(),
+                            expires_at: invite.expires_at,
+                        };
+                        this.device_pairing_wire = Some(Zeroizing::new(deep_link));
+                        this.message =
+                            Some("Pairing invitation ready for the other device.".into());
+                    }
+                    Err(error) => {
+                        zlog::error!("device pairing creation failed: {error}");
+                        this.device_pairing_state =
+                            if matches!(error, EnrollmentError::ExpiredInvite) {
+                                DevicePairingUiState::Expired
+                            } else {
+                                DevicePairingUiState::Refused
+                            };
+                        this.message = Some("A pairing invitation could not be created.".into());
+                    }
+                }
+                this.busy = false;
+                cx.notify();
+            })
+            .log_err();
+        }));
+        cx.notify();
+    }
+
+    fn select_device_target_platform(&mut self, platform: HostPlatform, cx: &mut Context<Self>) {
+        if self.busy {
+            return;
+        }
+        self.device_target_platform = platform;
+        self.device_pairing_state = DevicePairingUiState::NotStarted;
+        self.device_pairing_wire = None;
+        self.device_challenge_wire = None;
+        self.device_grant_wire = None;
+        cx.notify();
+    }
+
+    fn copy_device_pairing_invite(&self, cx: &mut Context<Self>) {
+        let Some(wire) = self.device_pairing_wire.as_ref() else {
+            return;
+        };
+        cx.write_to_clipboard(ClipboardItem::new_string(wire.as_str().to_string()));
+    }
+
+    fn accept_device_pairing_response(&mut self, cx: &mut Context<Self>) {
+        if self.busy {
+            return;
+        }
+        let expires_at = match self.device_pairing_state {
+            DevicePairingUiState::Pending { expires_at, .. } => expires_at,
+            _ => {
+                self.message = Some("The pairing invitation is not pending.".into());
+                cx.notify();
+                return;
+            }
+        };
+        let response_input =
+            Zeroizing::new(self.device_response_input.update(cx, SecureInput::take));
+        let response =
+            match DeviceEnrollmentController::parse_target_response(response_input.as_bytes()) {
+                Ok(response) => response,
+                Err(error) => {
+                    zlog::error!("device pairing response parse failed: {error}");
+                    self.device_pairing_state = DevicePairingUiState::Refused;
+                    self.message = Some("The pairing response was refused.".into());
+                    cx.notify();
+                    return;
+                }
+            };
+        let device_label = response.device_label.clone();
+        let platform = response.platform;
+        let capabilities = response.capabilities.iter().copied().collect();
+        self.busy = true;
+        self.message = None;
+        self.task =
+            Some(cx.spawn(async move |this, cx| {
+                let result = cx
+                    .background_spawn(async move {
+                        let registry = AccountRegistryService::system(*app_identity::CHANNEL);
+                        let selection = registry
+                            .selection_token()
+                            .map_err(|_| EnrollmentError::Storage)?;
+                        let challenge = DeviceEnrollmentController::system()
+                            .accept_target_response(&selection, response, unix_time_seconds())?;
+                        let wire = String::from_utf8(challenge.wire_json()?)
+                            .map_err(|_| EnrollmentError::InvalidInvite)?;
+                        Ok::<_, EnrollmentError>((challenge, wire))
+                    })
+                    .await;
+                this.update(cx, |this, cx| {
+                    match result {
+                        Ok((challenge, wire)) => {
+                            this.device_pairing_wire = None;
+                            this.device_challenge_wire = Some(Zeroizing::new(wire));
+                            this.device_pairing_state =
+                                DevicePairingUiState::AwaitingConfirmation {
+                                    challenge,
+                                    device_label,
+                                    platform,
+                                    capabilities,
+                                    expires_at,
+                                };
+                            this.message = Some("Compare the same code on both screens.".into());
+                        }
+                        Err(EnrollmentError::ExpiredInvite) => {
+                            this.device_pairing_state = DevicePairingUiState::Expired;
+                            this.message = Some("The pairing invitation expired.".into());
+                        }
+                        Err(error) => {
+                            zlog::error!("device pairing response refused: {error}");
+                            this.device_pairing_state = DevicePairingUiState::Refused;
+                            this.message = Some("The pairing response was refused.".into());
+                        }
+                    }
+                    this.busy = false;
+                    cx.notify();
+                })
+                .log_err();
+            }));
+        cx.notify();
+    }
+
+    fn confirm_device_pairing(&mut self, cx: &mut Context<Self>) {
+        if self.busy {
+            return;
+        }
+        let sas = match &self.device_pairing_state {
+            DevicePairingUiState::AwaitingConfirmation { challenge, .. } => {
+                challenge.sas().to_string()
+            }
+            _ => return,
+        };
+        let confirmation_input =
+            Zeroizing::new(self.device_confirmation_input.update(cx, SecureInput::take));
+        let confirmation =
+            match TargetPairingConfirmation::parse_wire_json(confirmation_input.as_bytes()) {
+                Ok(confirmation) => confirmation,
+                Err(error) => {
+                    zlog::error!("device pairing confirmation parse failed: {error}");
+                    self.device_challenge_wire = None;
+                    self.device_pairing_state = DevicePairingUiState::Refused;
+                    self.message = Some("The pairing confirmation was refused.".into());
+                    cx.notify();
+                    return;
+                }
+            };
+        self.busy = true;
+        self.message = None;
+        self.task = Some(cx.spawn(async move |this, cx| {
+            let result = cx
+                .background_spawn(async move {
+                    let registry = AccountRegistryService::system(*app_identity::CHANNEL);
+                    let selection = registry
+                        .selection_token()
+                        .map_err(|_| EnrollmentError::Storage)?;
+                    let grant = DeviceEnrollmentController::system().redeem_confirmed_pairing(
+                        &selection,
+                        &confirmation,
+                        &sas,
+                        DEVICE_GRANT_LIFETIME_SECONDS,
+                        unix_time_seconds(),
+                    )?;
+                    let wire =
+                        serde_json::to_string(&grant).map_err(|_| EnrollmentError::Storage)?;
+                    Ok::<_, EnrollmentError>((grant, wire))
+                })
+                .await;
+            this.update(cx, |this, cx| {
+                match result {
+                    Ok((grant, wire)) => {
+                        this.device_challenge_wire = None;
+                        this.device_grant_wire = Some(Zeroizing::new(wire));
+                        this.device_pairing_state = DevicePairingUiState::Redeemed {
+                            device_public_key_hex: grant.device_public_key_hex,
+                        };
+                        this.message = Some("Device enrollment redeemed.".into());
+                        this.refresh_device_inventory(cx);
+                    }
+                    Err(EnrollmentError::ExpiredInvite) => {
+                        this.device_challenge_wire = None;
+                        this.device_pairing_state = DevicePairingUiState::Expired;
+                        this.message = Some("The pairing invitation expired.".into());
+                    }
+                    Err(error) => {
+                        zlog::error!("device pairing redemption refused: {error}");
+                        this.device_challenge_wire = None;
+                        this.device_pairing_state = DevicePairingUiState::Refused;
+                        this.message = Some("The pairing confirmation was refused.".into());
+                    }
+                }
+                this.busy = false;
+                cx.notify();
+            })
+            .log_err();
+        }));
+        cx.notify();
+    }
+
+    fn copy_device_enrollment_grant(&self, cx: &mut Context<Self>) {
+        let Some(wire) = self.device_grant_wire.as_ref() else {
+            return;
+        };
+        cx.write_to_clipboard(ClipboardItem::new_string(wire.as_str().to_string()));
+    }
+
+    fn copy_device_pairing_challenge(&self, cx: &mut Context<Self>) {
+        let Some(wire) = self.device_challenge_wire.as_ref() else {
+            return;
+        };
+        cx.write_to_clipboard(ClipboardItem::new_string(wire.as_str().to_string()));
+    }
+
+    fn revoke_enrolled_device(&mut self, device_public_key_hex: String, cx: &mut Context<Self>) {
+        if self.busy {
+            return;
+        }
+        self.busy = true;
+        self.message = None;
+        self.task = Some(cx.spawn(async move |this, cx| {
+            let result = cx
+                .background_spawn(async move {
+                    let registry = AccountRegistryService::system(*app_identity::CHANNEL);
+                    let selection = registry
+                        .selection_token()
+                        .map_err(|_| EnrollmentError::Storage)?;
+                    DeviceEnrollmentController::system().revoke_device(
+                        &selection,
+                        &device_public_key_hex,
+                        unix_time_seconds(),
+                    )
+                })
+                .await;
+            this.update(cx, |this, cx| {
+                match result {
+                    Ok(()) => {
+                        this.message = Some("Device grant revoked.".into());
+                        this.refresh_device_inventory(cx);
+                    }
+                    Err(error) => {
+                        zlog::error!("device revocation failed: {error}");
+                        this.message = Some("The device could not be revoked.".into());
+                    }
+                }
+                this.busy = false;
+                cx.notify();
+            })
+            .log_err();
+        }));
+        cx.notify();
     }
 
     fn run_operation(&mut self, operation: AccountOperation, cx: &mut Context<Self>) {
@@ -1603,6 +2011,8 @@ impl IdentityDashboard {
             .child(Divider::horizontal())
             .child(self.render_authentication_authority(cx))
             .child(Divider::horizontal())
+            .child(self.render_device_enrollment(cx))
+            .child(Divider::horizontal())
             .child(self.render_community_entry(cx))
             .child(Divider::horizontal())
             .child(
@@ -2295,6 +2705,334 @@ impl IdentityDashboard {
                 "Ordinary unencrypted account files",
                 None,
             ))
+            .into_any_element()
+    }
+
+    fn render_device_enrollment(&self, cx: &mut Context<Self>) -> AnyElement {
+        let active_selected = self
+            .selected_entry()
+            .is_some_and(|account| account.is_active);
+        let pairing = match &self.device_pairing_state {
+            DevicePairingUiState::NotStarted => v_flex()
+                .gap_2()
+                .child(detail_row("Pairing", "Not started", None))
+                .into_any_element(),
+            DevicePairingUiState::Pending {
+                endpoint,
+                platform,
+                capabilities,
+                expires_at,
+            } => v_flex()
+                .gap_2()
+                .child(detail_row(
+                    "Pairing",
+                    "Pending",
+                    Some(
+                        Icon::new(IconName::Clock)
+                            .size(IconSize::Small)
+                            .color(Color::Warning),
+                    ),
+                ))
+                .child(detail_row("Endpoint", endpoint.clone(), None))
+                .child(detail_row(
+                    "Approved platform",
+                    device_platform_label(*platform),
+                    None,
+                ))
+                .child(detail_row(
+                    "Approved capabilities",
+                    admitted_device_capability_labels(*platform, capabilities),
+                    None,
+                ))
+                .child(detail_row(
+                    "Expires",
+                    last_signer_use(Some(*expires_at)),
+                    None,
+                ))
+                .child(detail_row("Root key", "Not included", None))
+                .child(
+                    Button::new("omega-device-copy-invite", "Copy pairing deep link")
+                        .style(ButtonStyle::OutlinedGhost)
+                        .size(ButtonSize::Compact)
+                        .disabled(self.device_pairing_wire.is_none())
+                        .on_click(
+                            cx.listener(|this, _, _, cx| this.copy_device_pairing_invite(cx)),
+                        ),
+                )
+                .child(self.device_response_input.clone())
+                .child(
+                    Button::new("omega-device-accept-response", "Review response")
+                        .style(ButtonStyle::Filled)
+                        .size(ButtonSize::Compact)
+                        .disabled(self.busy)
+                        .on_click(
+                            cx.listener(|this, _, _, cx| this.accept_device_pairing_response(cx)),
+                        ),
+                )
+                .into_any_element(),
+            DevicePairingUiState::AwaitingConfirmation {
+                challenge,
+                device_label,
+                platform,
+                capabilities,
+                expires_at,
+            } => v_flex()
+                .gap_2()
+                .child(detail_row(
+                    "Pairing",
+                    "Awaiting two-screen confirmation",
+                    Some(
+                        Icon::new(IconName::CheckDouble)
+                            .size(IconSize::Small)
+                            .color(Color::Warning),
+                    ),
+                ))
+                .child(detail_row("Device", device_label.clone(), None))
+                .child(detail_row(
+                    "Platform",
+                    device_platform_label(*platform),
+                    None,
+                ))
+                .child(detail_row(
+                    "Capabilities",
+                    admitted_device_capability_labels(*platform, capabilities),
+                    None,
+                ))
+                .child(detail_row(
+                    "Expires",
+                    last_signer_use(Some(*expires_at)),
+                    None,
+                ))
+                .child(
+                    h_flex()
+                        .justify_between()
+                        .gap_4()
+                        .child(
+                            Label::new("Compare on both screens")
+                                .color(Color::Muted)
+                                .size(LabelSize::Small),
+                        )
+                        .child(Label::new(challenge.sas().to_string()).size(LabelSize::Large)),
+                )
+                .child(
+                    Button::new("omega-device-copy-challenge", "Copy challenge to device")
+                        .style(ButtonStyle::OutlinedGhost)
+                        .size(ButtonSize::Compact)
+                        .disabled(self.device_challenge_wire.is_none())
+                        .on_click(
+                            cx.listener(|this, _, _, cx| this.copy_device_pairing_challenge(cx)),
+                        ),
+                )
+                .child(self.device_confirmation_input.clone())
+                .child(
+                    Button::new("omega-device-confirm-sas", "SAS matches")
+                        .style(ButtonStyle::Filled)
+                        .size(ButtonSize::Compact)
+                        .disabled(self.busy)
+                        .on_click(cx.listener(|this, _, _, cx| this.confirm_device_pairing(cx))),
+                )
+                .into_any_element(),
+            DevicePairingUiState::Expired => detail_row(
+                "Pairing",
+                "Expired",
+                Some(
+                    Icon::new(IconName::Clock)
+                        .size(IconSize::Small)
+                        .color(Color::Error),
+                ),
+            ),
+            DevicePairingUiState::Refused => detail_row(
+                "Pairing",
+                "Refused",
+                Some(
+                    Icon::new(IconName::Warning)
+                        .size(IconSize::Small)
+                        .color(Color::Error),
+                ),
+            ),
+            DevicePairingUiState::Redeemed {
+                device_public_key_hex,
+            } => v_flex()
+                .gap_2()
+                .child(detail_row(
+                    "Pairing",
+                    "Redeemed",
+                    Some(
+                        Icon::new(IconName::Check)
+                            .size(IconSize::Small)
+                            .color(Color::Success),
+                    ),
+                ))
+                .child(detail_row(
+                    "Device key",
+                    short_public_key(device_public_key_hex),
+                    None,
+                ))
+                .child(
+                    Button::new("omega-device-copy-grant", "Copy grant to device")
+                        .style(ButtonStyle::OutlinedGhost)
+                        .size(ButtonSize::Compact)
+                        .disabled(self.device_grant_wire.is_none())
+                        .on_click(
+                            cx.listener(|this, _, _, cx| this.copy_device_enrollment_grant(cx)),
+                        ),
+                )
+                .into_any_element(),
+        };
+        let inventory = self
+            .device_inventory
+            .iter()
+            .map(|device| {
+                let device_public_key_hex = device.device_public_key_hex.clone();
+                let revoked = device.revoked_at.is_some();
+                let expired = unix_time_seconds() >= device.expires_at;
+                let (lifecycle, icon, color) = if revoked {
+                    ("Revoked", IconName::Lock, Color::Error)
+                } else if expired {
+                    ("Expired", IconName::Clock, Color::Warning)
+                } else {
+                    ("Active", IconName::Check, Color::Success)
+                };
+                v_flex()
+                    .gap_1()
+                    .p_2()
+                    .border_1()
+                    .border_color(cx.theme().colors().border)
+                    .rounded_md()
+                    .child(
+                        h_flex()
+                            .justify_between()
+                            .child(Label::new(device.device_label.clone()).size(LabelSize::Small))
+                            .child(
+                                h_flex()
+                                    .gap_1()
+                                    .child(Icon::new(icon).size(IconSize::Small).color(color))
+                                    .child(Label::new(lifecycle).size(LabelSize::XSmall)),
+                            ),
+                    )
+                    .child(detail_row(
+                        "Device key",
+                        short_public_key(&device.device_public_key_hex),
+                        None,
+                    ))
+                    .child(detail_row(
+                        "Platform",
+                        device_platform_label(device.platform),
+                        None,
+                    ))
+                    .child(detail_row(
+                        "Capabilities",
+                        admitted_device_capability_labels(
+                            device.platform,
+                            &device.capabilities.iter().copied().collect::<Vec<_>>(),
+                        ),
+                        None,
+                    ))
+                    .child(detail_row(
+                        "Last use",
+                        last_signer_use(device.last_used_at),
+                        None,
+                    ))
+                    .child(detail_row(
+                        "Grant expires",
+                        last_signer_use(Some(device.expires_at)),
+                        None,
+                    ))
+                    .child(
+                        Button::new(
+                            format!("omega-device-revoke-{device_public_key_hex}"),
+                            "Revoke device",
+                        )
+                        .style(ButtonStyle::Tinted(TintColor::Error))
+                        .size(ButtonSize::Compact)
+                        .disabled(self.busy || revoked)
+                        .on_click(cx.listener(move |this, _, _, cx| {
+                            this.revoke_enrolled_device(device_public_key_hex.clone(), cx)
+                        })),
+                    )
+                    .into_any_element()
+            })
+            .collect::<Vec<_>>();
+
+        v_flex()
+            .gap_2()
+            .child(Label::new("Device enrollment").size(LabelSize::Small))
+            .child(
+                h_flex()
+                    .gap_1()
+                    .flex_wrap()
+                    .child(
+                        Button::new("omega-device-platform-desktop", "Desktop")
+                            .style(device_platform_button_style(
+                                self.device_target_platform,
+                                HostPlatform::Desktop,
+                            ))
+                            .size(ButtonSize::Compact)
+                            .disabled(self.busy)
+                            .on_click(cx.listener(|this, _, _, cx| {
+                                this.select_device_target_platform(HostPlatform::Desktop, cx)
+                            })),
+                    )
+                    .child(
+                        Button::new("omega-device-platform-web", "Web")
+                            .style(device_platform_button_style(
+                                self.device_target_platform,
+                                HostPlatform::Web,
+                            ))
+                            .size(ButtonSize::Compact)
+                            .disabled(self.busy)
+                            .on_click(cx.listener(|this, _, _, cx| {
+                                this.select_device_target_platform(HostPlatform::Web, cx)
+                            })),
+                    )
+                    .child(
+                        Button::new("omega-device-platform-android", "Android")
+                            .style(device_platform_button_style(
+                                self.device_target_platform,
+                                HostPlatform::Android,
+                            ))
+                            .size(ButtonSize::Compact)
+                            .disabled(self.busy)
+                            .on_click(cx.listener(|this, _, _, cx| {
+                                this.select_device_target_platform(HostPlatform::Android, cx)
+                            })),
+                    )
+                    .child(
+                        Button::new("omega-device-platform-ios", "iOS")
+                            .style(device_platform_button_style(
+                                self.device_target_platform,
+                                HostPlatform::Ios,
+                            ))
+                            .size(ButtonSize::Compact)
+                            .disabled(self.busy)
+                            .on_click(cx.listener(|this, _, _, cx| {
+                                this.select_device_target_platform(HostPlatform::Ios, cx)
+                            })),
+                    ),
+            )
+            .child(detail_row(
+                "Capabilities to approve",
+                admitted_host_capability_labels(self.device_target_platform),
+                None,
+            ))
+            .child(self.device_endpoint_input.clone())
+            .child(
+                Button::new("omega-device-start-pairing", "Start device pairing")
+                    .style(ButtonStyle::OutlinedGhost)
+                    .size(ButtonSize::Compact)
+                    .disabled(self.busy || !active_selected)
+                    .on_click(cx.listener(|this, _, _, cx| this.start_device_pairing(cx))),
+            )
+            .child(pairing)
+            .child(detail_row(
+                "Local custody",
+                "Ordinary unencrypted private files (0700/0600)",
+                None,
+            ))
+            .when(inventory.is_empty(), |this| {
+                this.child(detail_row("Enrolled devices", "None", None))
+            })
+            .children(inventory)
             .into_any_element()
     }
 
@@ -3552,6 +4290,71 @@ fn last_signer_use(timestamp: Option<u64>) -> String {
     )
 }
 
+fn device_platform_label(platform: DevicePlatform) -> &'static str {
+    match platform {
+        DevicePlatform::Desktop => "Desktop",
+        DevicePlatform::Web => "Web",
+        DevicePlatform::Android => "Android",
+        DevicePlatform::Ios => "iOS",
+    }
+}
+
+fn device_platform_button_style(selected: HostPlatform, platform: HostPlatform) -> ButtonStyle {
+    if selected == platform {
+        ButtonStyle::Filled
+    } else {
+        ButtonStyle::OutlinedGhost
+    }
+}
+
+fn admitted_host_capability_labels(platform: HostPlatform) -> String {
+    HostCapabilityMatrix::admitted(platform)
+        .into_iter()
+        .map(|descriptor| descriptor.label())
+        .collect::<Vec<_>>()
+        .join(", ")
+}
+
+fn admitted_device_capability_labels(
+    platform: DevicePlatform,
+    capabilities: &[DeviceCapability],
+) -> String {
+    let host_platform = match platform {
+        DevicePlatform::Desktop => HostPlatform::Desktop,
+        DevicePlatform::Web => HostPlatform::Web,
+        DevicePlatform::Android => HostPlatform::Android,
+        DevicePlatform::Ios => HostPlatform::Ios,
+    };
+    let labels = capabilities
+        .iter()
+        .filter_map(|capability| {
+            let host_capability = match capability {
+                DeviceCapability::DesktopLocal => HostSignerCapability::DesktopLocal,
+                DeviceCapability::Nip46 => HostSignerCapability::Nip46,
+                DeviceCapability::Nip07 => HostSignerCapability::Nip07,
+                DeviceCapability::Nip55 => HostSignerCapability::Nip55,
+            };
+            let descriptor = HostCapabilityMatrix::descriptor(host_platform, host_capability);
+            (descriptor.availability == HostCapabilityAvailability::Admitted)
+                .then_some(descriptor.label())
+        })
+        .collect::<Vec<_>>();
+    if labels.is_empty() {
+        "None admitted".to_string()
+    } else {
+        labels.join(", ")
+    }
+}
+
+fn short_public_key(public_key_hex: &str) -> String {
+    let prefix = public_key_hex.chars().take(12).collect::<String>();
+    if prefix.len() == public_key_hex.len() {
+        prefix
+    } else {
+        format!("{prefix}…")
+    }
+}
+
 fn retirement_label(state: omega_identity::AccountRetirementState) -> &'static str {
     match state {
         omega_identity::AccountRetirementState::NotRetired => "Not retired",
@@ -3899,5 +4702,32 @@ mod tests {
                 reason: "ciphertext remains".to_string()
             }
         );
+    }
+
+    #[test]
+    fn device_enrollment_labels_only_platform_admitted_capabilities() {
+        assert_eq!(
+            admitted_device_capability_labels(
+                DevicePlatform::Android,
+                &[DeviceCapability::Nip55, DeviceCapability::Nip07],
+            ),
+            "NIP-55 Android signer application"
+        );
+        assert_eq!(
+            admitted_device_capability_labels(
+                DevicePlatform::Ios,
+                &[DeviceCapability::Nip46, DeviceCapability::Nip55],
+            ),
+            "NIP-46 remote signer"
+        );
+        assert_eq!(
+            admitted_device_capability_labels(
+                DevicePlatform::Web,
+                &[DeviceCapability::DesktopLocal],
+            ),
+            "None admitted"
+        );
+        assert_eq!(device_platform_label(DevicePlatform::Ios), "iOS");
+        assert_eq!(short_public_key("1234567890abcdef"), "1234567890ab…");
     }
 }

@@ -125,6 +125,7 @@ members = [
     "crates/omega_deltas",
     "crates/omega_acp_server",
     "crates/omega_device_bridge",
+    "crates/omega_device_enrollment",
     "crates/omega_front_door",
     "crates/omega_harness",
     "crates/omega_workbench_conformance",
@@ -373,6 +374,7 @@ omega_control_crawl = { path = "crates/omega_control_crawl" }
 omega_deltas = { path = "crates/omega_deltas" }
 omega_acp_server = { path = "crates/omega_acp_server" }
 omega_device_bridge = { path = "crates/omega_device_bridge" }
+omega_device_enrollment = { path = "crates/omega_device_enrollment" }
 omega_front_door = { path = "crates/omega_front_door" }
 omega_harness = { path = "crates/omega_harness" }
 omega_workbench_conformance = { path = "crates/omega_workbench_conformance" }
@@ -590,6 +592,8 @@ heck = "0.5"
 hdrhistogram = "7"
 heed = { version = "0.21.0", features = ["read-txn-no-tls"] }
 hex = "0.4.3"
+hkdf = "0.12.4"
+hmac = "0.12.1"
 human_bytes = "0.4.1"
 html5ever = "0.27.0"
 http = "1.1"

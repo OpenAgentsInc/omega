@@ -230,6 +230,56 @@ enables no macOS Keychain, Secure Enclave, Windows credential vault, Linux
 secret service, Android keystore, encrypted application vault, native enclave,
 hardware-backed credential store, or other native key custody.
 
+## Device enrollment
+
+AUTH-08 adds a device enrollment section to the existing account dashboard. The
+desktop creates a versioned, expiring ephemeral introduction for the selected
+account generation. Its preview names the endpoint and expiry and discloses
+that the person's root `nsec` is not included. The target creates its own
+permanent device key; pairing never copies the person's local signer secret.
+
+`DeviceEnrollmentStore` roots this state at
+`identity/device-enrollment/`. The host uses
+`host/<owner-public-key>/enrollment.json`. A joining desktop target calls
+`begin_device_enrollment` before it returns its pairing response, which writes
+`local/<owner-public-key>/pending/<pairing-id>.json`; `resume_pending_device`
+restores the same transcript and device key after restart. Once the host
+redeems the confirmation and returns the grant, `persist_local_device` writes
+`local/<owner-public-key>/devices/<device-public-key>.json` and deletes the
+pending record. The desktop dashboard copies the versioned pairing payload. It
+uses the bridge's `omega://device-enrollment/v1` deep-link formatter and parser
+over the same core invitation type; it does not claim to render a QR code in
+this wave.
+
+Both peers bind the account, endpoint, ephemeral keys, expiry, and one-use
+secret into the transcript. The UI shows the resulting short authentication
+string on both screens and requires an explicit match confirmation on each
+side. Pending, awaiting confirmation, expired, refused, redeemed, replayed, and
+revoked outcomes remain separate. Wrong generation and peer substitution fail
+before a grant is written.
+
+The resulting grant is narrow, expiring, device-key-bound, and independently
+revocable. Inventory projections show public fingerprint, platform, exact
+capability set, expiry, lifecycle, and last successful use. Revocation removes
+only the selected device grant and verifies the result; it never rotates the
+person identity or silently revokes sibling devices.
+
+Capability projection is platform-admitted. Web exposes NIP-07 or NIP-46 only
+when detected and retains no root key by default. Android does not expose
+NIP-55 until an admitted Android host implements it. iOS exposes NIP-46 in this
+wave and does not claim NIP-55 or an unaudited native signer bridge.
+
+Public pairing and inventory types contain no introduction secret, ephemeral
+private key, device private key, root `nsec`, or bearer. Private pairing and
+grant records are ordinary unencrypted account-partitioned files written
+atomically with Unix directory mode `0700` and file mode `0600`. Redemption
+clears host exchange secrets, target grant persistence removes the matching
+pending record, and expiry pruning verifies host deletion.
+
+AUTH-08 enables no macOS Keychain, Secure Enclave, Windows credential vault,
+Linux secret service, Android keystore, encrypted application vault, native
+enclave, hardware-backed credential store, or other native key custody.
+
 ## Onboarding integration
 
 The Omega onboarding identity section renders real `IdentityInspection` and
