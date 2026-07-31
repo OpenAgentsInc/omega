@@ -24,9 +24,20 @@ use sha2::{Digest as _, Sha256};
 use url::Url;
 
 use audio::RodioExt as _;
+use livekit::{
+    Room, RoomEvent, RoomOptions,
+    options::TrackPublishOptions,
+    track::{LocalAudioTrack, LocalTrack, RemoteTrack, TrackKind, TrackSource},
+    webrtc::{
+        audio_frame::AudioFrame,
+        audio_source::{AudioSourceOptions, RtcAudioSource, native::NativeAudioSource},
+        audio_stream::native::NativeAudioStream,
+    },
+};
 use omega_effectd::{
     ManagedSarahVoiceSession, SARAH_VOICE_SESSION_HEADER, SARAH_VOICE_TICKET_HEADER,
-    SarahVoiceAdmissionProjection, SarahVoiceCapabilityId, SarahVoiceSettlementProjection,
+    SarahLiveKitRoomTransport, SarahVoiceAdmissionProjection, SarahVoiceCapabilityId,
+    SarahVoiceSettlementProjection, SarahVoiceTransport,
 };
 
 pub const SARAH_VOICE_MODEL: &str = "gpt-realtime-2.1";
@@ -596,6 +607,25 @@ pub struct PreparedSarahVoiceDevices {
     playback: VoicePlayback,
 }
 
+enum SarahLiveKitMediaControl {
+    Start,
+    Close,
+}
+
+enum SarahLiveKitMediaEvent {
+    Audio(Vec<u8>),
+    Reconnecting,
+    Reconnected,
+    Ended,
+    Error(String),
+}
+
+struct SarahLiveKitMedia {
+    controls: async_channel::Sender<SarahLiveKitMediaControl>,
+    events: async_channel::Receiver<SarahLiveKitMediaEvent>,
+    task: gpui::Task<Result<(), gpui_tokio::JoinError>>,
+}
+
 impl ManagedSarahVoiceClient {
     pub fn from_managed_session(
         managed_session: ManagedSarahVoiceSession,
@@ -646,14 +676,28 @@ impl ManagedSarahVoiceClient {
         Ok(client)
     }
 
-    pub fn connect(self, executor: gpui::BackgroundExecutor) -> SarahVoiceConnection {
+    pub fn connect(self, cx: &gpui::AsyncApp) -> SarahVoiceConnection {
         let (control_sender, control_receiver) = async_channel::bounded(32);
         let (event_sender, event_receiver) = async_channel::bounded(128);
+        let livekit_media = match &self.managed_session.transport {
+            SarahVoiceTransport::LiveKitRoomV1(transport) => self.prepared_devices.as_ref().map(
+                |PreparedSarahVoiceDevices { microphone, .. }| {
+                    start_livekit_media(transport.clone(), microphone.receiver.clone(), cx)
+                },
+            ),
+            SarahVoiceTransport::CustomWssV1 => None,
+        };
+        let executor = cx.background_executor().clone();
         let timer_executor = executor.clone();
         executor
             .spawn(async move {
                 if let Err(error) = self
-                    .run(timer_executor, control_receiver, event_sender.clone())
+                    .run(
+                        timer_executor,
+                        control_receiver,
+                        event_sender.clone(),
+                        livekit_media,
+                    )
                     .await
                 {
                     log::error!("Sarah voice session failed: {error:#}");
@@ -683,7 +727,15 @@ impl ManagedSarahVoiceClient {
         executor: gpui::BackgroundExecutor,
         controls: async_channel::Receiver<SarahVoiceControl>,
         events: async_channel::Sender<SarahVoiceEvent>,
+        mut livekit_media: Option<SarahLiveKitMedia>,
     ) -> Result<()> {
+        let uses_livekit = matches!(
+            self.managed_session.transport,
+            SarahVoiceTransport::LiveKitRoomV1(_)
+        );
+        if uses_livekit && livekit_media.is_none() {
+            bail!("the admitted LiveKit session did not have prepared audio devices");
+        }
         events
             .send(SarahVoiceEvent::State(
                 SarahVoiceState::RequestingMicrophone,
@@ -761,6 +813,7 @@ impl ManagedSarahVoiceClient {
         let mut expected_server_sequence = 0_u64;
         let mut expected_output_audio_sequence = 0_u64;
         let mut pending_tools = HashMap::<String, PendingGatewayTool>::new();
+        let livekit_events = livekit_media.as_ref().map(|media| media.events.clone());
         send_gateway_control(
             &mut socket,
             &identity,
@@ -772,6 +825,7 @@ impl ManagedSarahVoiceClient {
         )
         .await?;
         let mut next_heartbeat_at = Instant::now() + VOICE_HEARTBEAT_INTERVAL;
+        let mut session_ready = false;
 
         // A session failure must still close the WebSocket with a close
         // frame. Dropping the socket on an error path made the gateway record
@@ -781,11 +835,25 @@ impl ManagedSarahVoiceClient {
             loop {
             let incoming = socket.next().fuse();
             let control = controls.recv().fuse();
-            let audio = microphone.receiver.recv().fuse();
+            let audio = async {
+                if uses_livekit {
+                    futures::future::pending().await
+                } else {
+                    microphone.receiver.recv().await.ok()
+                }
+            }
+            .fuse();
+            let livekit_event = async {
+                match &livekit_events {
+                    Some(events) => events.recv().await.ok(),
+                    None => futures::future::pending().await,
+                }
+            }
+            .fuse();
             let heartbeat = futures::FutureExt::fuse(
                 executor.timer(next_heartbeat_at.saturating_duration_since(Instant::now())),
             );
-            pin_mut!(incoming, control, audio, heartbeat);
+            pin_mut!(incoming, control, audio, livekit_event, heartbeat);
             select_biased! {
                 control = control => {
                     match control {
@@ -870,6 +938,21 @@ impl ManagedSarahVoiceClient {
                                 self.managed_session.session_expires_at_ms,
                             ).await? {
                                 GatewayServerAction::Continue => {}
+                                GatewayServerAction::SessionReady => {
+                                    if session_ready {
+                                        bail!("Sarah voice gateway repeated session readiness");
+                                    }
+                                    session_ready = true;
+                                    if let Some(media) = &livekit_media
+                                        && media
+                                            .controls
+                                            .send(SarahLiveKitMediaControl::Start)
+                                            .await
+                                            .is_err()
+                                    {
+                                        bail!("Sarah LiveKit media stopped before session readiness");
+                                    }
+                                }
                                 GatewayServerAction::StopPlayback => {
                                     playback.stop_queued_audio();
                                 }
@@ -916,16 +999,333 @@ impl ManagedSarahVoiceClient {
                         .await
                         .context("sending microphone audio")?;
                 }
+                livekit_event = livekit_event => {
+                    match livekit_event.context("LiveKit media stopped")? {
+                        SarahLiveKitMediaEvent::Audio(audio) => playback.play_pcm16(&audio)?,
+                        SarahLiveKitMediaEvent::Reconnecting => {
+                            events.send(SarahVoiceEvent::State(SarahVoiceState::Reconnecting))
+                                .await
+                                .context("reporting LiveKit reconnect")?;
+                        }
+                        SarahLiveKitMediaEvent::Reconnected => {
+                            events.send(SarahVoiceEvent::State(SarahVoiceState::Listening))
+                                .await
+                                .context("reporting LiveKit reconnect completion")?;
+                        }
+                        SarahLiveKitMediaEvent::Ended => {
+                            events.send(SarahVoiceEvent::Ended {
+                                reason: Some("livekit_disconnected".into()),
+                            }).await.context("reporting LiveKit disconnect")?;
+                            return Ok(());
+                        }
+                        SarahLiveKitMediaEvent::Error(message) => {
+                            bail!("Sarah LiveKit media failed: {message}");
+                        }
+                    }
+                }
             }
             }
         }
         .await;
+        if let Some(media) = livekit_media.take() {
+            if media
+                .controls
+                .send(SarahLiveKitMediaControl::Close)
+                .await
+                .is_err()
+            {
+                log::debug!("Sarah LiveKit media had already stopped");
+            }
+            if let Err(error) = media.task.await {
+                log::debug!("Sarah LiveKit media task failed to join: {error}");
+            }
+        }
         if session_result.is_err()
             && let Err(close_error) = socket.close(None).await
         {
             log::debug!("Sarah voice socket close after a session failure failed: {close_error}");
         }
         session_result
+    }
+}
+
+fn start_livekit_media(
+    transport: SarahLiveKitRoomTransport,
+    microphone: async_channel::Receiver<Vec<u8>>,
+    cx: &gpui::AsyncApp,
+) -> SarahLiveKitMedia {
+    let (control_sender, control_receiver) = async_channel::bounded(4);
+    let (event_sender, event_receiver) = async_channel::bounded(64);
+    let task = gpui_tokio::Tokio::spawn(cx, async move {
+        let result = match control_receiver.recv().await {
+            Ok(SarahLiveKitMediaControl::Start) => {
+                run_livekit_media(
+                    transport,
+                    microphone,
+                    control_receiver,
+                    event_sender.clone(),
+                )
+                .await
+            }
+            Ok(SarahLiveKitMediaControl::Close) | Err(_) => Ok(()),
+        };
+        if result.is_err()
+            && event_sender
+                .send(SarahLiveKitMediaEvent::Error(
+                    "the room or participant contract was not satisfied".into(),
+                ))
+                .await
+                .is_err()
+        {
+            log::debug!("Sarah LiveKit media receiver closed while reporting failure");
+        }
+    });
+    SarahLiveKitMedia {
+        controls: control_sender,
+        events: event_receiver,
+        task,
+    }
+}
+
+async fn run_livekit_media(
+    transport: SarahLiveKitRoomTransport,
+    microphone: async_channel::Receiver<Vec<u8>>,
+    controls: async_channel::Receiver<SarahLiveKitMediaControl>,
+    events: async_channel::Sender<SarahLiveKitMediaEvent>,
+) -> Result<()> {
+    let mut options = RoomOptions::default();
+    options.auto_subscribe = false;
+    let connection = Room::connect(
+        &transport.livekit_url,
+        &transport.participant_grant,
+        options,
+    )
+    .fuse();
+    let close_before_connect = controls.recv().fuse();
+    pin_mut!(connection, close_before_connect);
+    let (room, mut room_events) = select_biased! {
+        control = close_before_connect => {
+            match control {
+                Ok(SarahLiveKitMediaControl::Close) | Err(_) => return Ok(()),
+                Ok(SarahLiveKitMediaControl::Start) => {
+                    bail!("LiveKit media received a duplicate start");
+                }
+            }
+        }
+        connection = connection => {
+            connection.context("connecting the admitted LiveKit room")?
+        }
+    };
+    let source = NativeAudioSource::new(
+        AudioSourceOptions {
+            echo_cancellation: false,
+            noise_suppression: false,
+            auto_gain_control: false,
+        },
+        SARAH_AUDIO_SAMPLE_RATE,
+        1,
+        100,
+    );
+    let mut audio_stream_tasks = tokio::task::JoinSet::new();
+    let session_result: Result<()> = async {
+        if room.name() != transport.room_ref
+            || room.local_participant().identity().to_string() != transport.participant_ref
+        {
+            bail!("LiveKit joined a room or participant outside the admission");
+        }
+        for (identity, participant) in room.remote_participants() {
+            validate_livekit_remote_participant(&transport, &identity.to_string())?;
+            for publication in participant.track_publications().into_values() {
+                if should_subscribe_to_livekit_track(
+                    &transport,
+                    &identity.to_string(),
+                    publication.kind(),
+                )? {
+                    publication.set_subscribed(true);
+                }
+            }
+        }
+
+        let track =
+            LocalAudioTrack::create_audio_track("microphone", RtcAudioSource::Native(source.clone()));
+        let local_participant = room.local_participant();
+        let publish = local_participant
+            .publish_track(
+                LocalTrack::Audio(track),
+                TrackPublishOptions {
+                    source: TrackSource::Microphone,
+                    ..Default::default()
+                },
+            )
+            .fuse();
+        let close_before_publish = controls.recv().fuse();
+        pin_mut!(publish, close_before_publish);
+        select_biased! {
+            control = close_before_publish => {
+                match control {
+                    Ok(SarahLiveKitMediaControl::Close) | Err(_) => return Ok(()),
+                    Ok(SarahLiveKitMediaControl::Start) => {
+                        bail!("LiveKit media received a duplicate start");
+                    }
+                }
+            }
+            result = publish => {
+                result.context("publishing the admitted LiveKit microphone")?;
+            }
+        }
+
+        loop {
+            let control = controls.recv().fuse();
+            let audio = microphone.recv().fuse();
+            let room_event = room_events.recv().fuse();
+            pin_mut!(control, audio, room_event);
+            select_biased! {
+                control = control => {
+                    match control {
+                        Ok(SarahLiveKitMediaControl::Close) | Err(_) => return Ok(()),
+                        Ok(SarahLiveKitMediaControl::Start) => {
+                            bail!("LiveKit media received a duplicate start");
+                        }
+                    }
+                }
+                room_event = room_event => {
+                    let Some(room_event) = room_event else {
+                        send_livekit_media_event(&events, SarahLiveKitMediaEvent::Ended).await;
+                        return Ok(());
+                    };
+                    match room_event {
+                        RoomEvent::ParticipantConnected(participant) => {
+                            validate_livekit_remote_participant(
+                                &transport,
+                                &participant.identity().to_string(),
+                            )?;
+                        }
+                        RoomEvent::ParticipantDisconnected(participant) => {
+                            if participant.identity().to_string() == transport.sarah_participant_ref {
+                                send_livekit_media_event(&events, SarahLiveKitMediaEvent::Ended).await;
+                                return Ok(());
+                            }
+                        }
+                        RoomEvent::TrackPublished { publication, participant } => {
+                            if should_subscribe_to_livekit_track(
+                                &transport,
+                                &participant.identity().to_string(),
+                                publication.kind(),
+                            )? {
+                                publication.set_subscribed(true);
+                            }
+                        }
+                        RoomEvent::TrackSubscribed { track, participant, .. } => {
+                            validate_livekit_remote_participant(
+                                &transport,
+                                &participant.identity().to_string(),
+                            )?;
+                            let RemoteTrack::Audio(track) = track else {
+                                continue;
+                            };
+                            let events = events.clone();
+                            audio_stream_tasks.spawn(async move {
+                                let mut stream = NativeAudioStream::new(
+                                    track.rtc_track(),
+                                    SARAH_AUDIO_SAMPLE_RATE as i32,
+                                    1,
+                                );
+                                while let Some(frame) = stream.next().await {
+                                    let mut bytes = Vec::with_capacity(frame.data.len() * 2);
+                                    for sample in frame.data.iter() {
+                                        bytes.extend_from_slice(&sample.to_le_bytes());
+                                    }
+                                    if events.send(SarahLiveKitMediaEvent::Audio(bytes)).await.is_err() {
+                                        break;
+                                    }
+                                }
+                            });
+                        }
+                        RoomEvent::Reconnecting => {
+                            send_livekit_media_event(
+                                &events,
+                                SarahLiveKitMediaEvent::Reconnecting,
+                            )
+                            .await;
+                        }
+                        RoomEvent::Reconnected => {
+                            send_livekit_media_event(
+                                &events,
+                                SarahLiveKitMediaEvent::Reconnected,
+                            )
+                            .await;
+                        }
+                        RoomEvent::Disconnected { .. } => {
+                            send_livekit_media_event(&events, SarahLiveKitMediaEvent::Ended).await;
+                            return Ok(());
+                        }
+                        _ => {}
+                    }
+                }
+                audio = audio => {
+                    let bytes = audio.context("microphone capture stopped")?;
+                    if !bytes.len().is_multiple_of(2) {
+                        bail!("microphone emitted an invalid sample boundary");
+                    }
+                    let samples = bytes
+                        .chunks_exact(2)
+                        .map(|sample| i16::from_le_bytes([sample[0], sample[1]]))
+                        .collect::<Vec<_>>();
+                    for samples in samples.chunks((SARAH_AUDIO_SAMPLE_RATE / 100) as usize) {
+                        if samples.len() != (SARAH_AUDIO_SAMPLE_RATE / 100) as usize {
+                            continue;
+                        }
+                        source.capture_frame(&AudioFrame {
+                            data: samples.to_vec().into(),
+                            sample_rate: SARAH_AUDIO_SAMPLE_RATE,
+                            num_channels: 1,
+                            samples_per_channel: SARAH_AUDIO_SAMPLE_RATE / 100,
+                        }).await.context("sending a LiveKit microphone frame")?;
+                    }
+                }
+            }
+        }
+    }
+    .await;
+    source.clear_buffer();
+    source_clear_on_close(&room).await;
+    audio_stream_tasks.shutdown().await;
+    session_result
+}
+
+fn validate_livekit_remote_participant(
+    transport: &SarahLiveKitRoomTransport,
+    participant_ref: &str,
+) -> Result<()> {
+    if participant_ref != transport.sarah_participant_ref {
+        bail!("an unexpected LiveKit participant was present");
+    }
+    Ok(())
+}
+
+fn should_subscribe_to_livekit_track(
+    transport: &SarahLiveKitRoomTransport,
+    participant_ref: &str,
+    kind: TrackKind,
+) -> Result<bool> {
+    validate_livekit_remote_participant(transport, participant_ref)?;
+    Ok(kind == TrackKind::Audio)
+}
+
+async fn send_livekit_media_event(
+    events: &async_channel::Sender<SarahLiveKitMediaEvent>,
+    event: SarahLiveKitMediaEvent,
+) {
+    if events.send(event).await.is_err() {
+        log::debug!("Sarah LiveKit media event receiver closed");
+    }
+}
+
+async fn source_clear_on_close(room: &Room) {
+    match tokio::time::timeout(Duration::from_secs(5), room.close()).await {
+        Ok(Ok(())) => {}
+        Ok(Err(error)) => log::debug!("Sarah LiveKit room close failed: {error}"),
+        Err(_) => log::debug!("Sarah LiveKit room close timed out"),
     }
 }
 
@@ -1066,6 +1466,7 @@ async fn send_gateway_tool_decision(
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum GatewayServerAction {
     Continue,
+    SessionReady,
     StopPlayback,
     End,
 }
@@ -1107,6 +1508,7 @@ async fn handle_server_message(
                 })
                 .await
                 .context("reporting Sarah voice readiness")?;
+            return Ok(GatewayServerAction::SessionReady);
         }
         GatewayServerMessage::Lifecycle { state } => {
             let state = match state {
@@ -1978,6 +2380,92 @@ mod tests {
         }
     }
 
+    fn test_livekit_transport() -> SarahLiveKitRoomTransport {
+        SarahLiveKitRoomTransport {
+            livekit_url: "wss://livekit.openagents.com".into(),
+            room_ref: "room-1".into(),
+            room_epoch: 1,
+            participant_ref: "owner-1".into(),
+            sarah_participant_ref: "principal.sarah".into(),
+            participant_grant: "grant-1".into(),
+            join_expires_at_ms: 1_900_000_000_000,
+            dispatch_ref: "dispatch-1".into(),
+            sarah_presence_lease_ref: "presence-1".into(),
+        }
+    }
+
+    fn test_managed_session(transport: SarahVoiceTransport) -> ManagedSarahVoiceSession {
+        ManagedSarahVoiceSession {
+            owner_ref: "owner-1".into(),
+            device_ref: "device-1".into(),
+            thread_ref: "thread-1".into(),
+            session_ref: "session-1".into(),
+            generation: 1,
+            disclosure_ref: "disclosure-1".into(),
+            gateway_url: "wss://openagents.com/v1/sarah/voice".into(),
+            transport,
+            ticket: "ticket-1".into(),
+            ticket_expires_at_ms: 1_900_000_000_000,
+            session_expires_at_ms: 1_900_000_060_000,
+            reserved_credit_msat: 1,
+            max_duration_seconds: 60,
+            admission: Some(test_admission()),
+        }
+    }
+
+    #[gpui::test]
+    fn livekit_subscription_accepts_only_sarah_audio(_cx: &mut gpui::TestAppContext) {
+        let transport = test_livekit_transport();
+
+        assert!(
+            should_subscribe_to_livekit_track(
+                &transport,
+                &transport.sarah_participant_ref,
+                TrackKind::Audio,
+            )
+            .expect("accept Sarah audio")
+        );
+        assert!(
+            !should_subscribe_to_livekit_track(
+                &transport,
+                &transport.sarah_participant_ref,
+                TrackKind::Video,
+            )
+            .expect("ignore Sarah video")
+        );
+        assert!(
+            should_subscribe_to_livekit_track(&transport, "participant.impostor", TrackKind::Audio)
+                .is_err()
+        );
+    }
+
+    #[gpui::test]
+    fn constructing_an_admitted_livekit_client_does_not_open_audio(_cx: &mut gpui::TestAppContext) {
+        let client = ManagedSarahVoiceClient::from_managed_session(
+            test_managed_session(SarahVoiceTransport::LiveKitRoomV1(test_livekit_transport())),
+            None,
+            None,
+        )
+        .expect("construct admitted LiveKit client");
+
+        assert!(client.prepared_devices.is_none());
+        assert!(matches!(
+            client.managed_session.transport,
+            SarahVoiceTransport::LiveKitRoomV1(_)
+        ));
+
+        let rollback_client = ManagedSarahVoiceClient::from_managed_session(
+            test_managed_session(SarahVoiceTransport::CustomWssV1),
+            None,
+            None,
+        )
+        .expect("construct custom WebSocket rollback client");
+        assert!(matches!(
+            rollback_client.managed_session.transport,
+            SarahVoiceTransport::CustomWssV1
+        ));
+    }
+
     #[test]
     fn local_transcript_log_appends_durable_json_lines() {
         let directory = tempfile::tempdir().expect("create transcript test directory");
@@ -2185,7 +2673,7 @@ mod tests {
             .await
             .expect("accept exact entitlement readiness");
 
-            assert_eq!(action, GatewayServerAction::Continue);
+            assert_eq!(action, GatewayServerAction::SessionReady);
             assert!(matches!(
                 received_events.recv().await,
                 Ok(SarahVoiceEvent::Ready { session_id }) if session_id == "session-1"

@@ -56,9 +56,10 @@ pub use openagents_sarah_voice::{
     ManagedSarahVoiceSession, PreparedSarahVoiceAdmission, SARAH_VOICE_ADMISSION_SCHEMA,
     SARAH_VOICE_ADMISSION_URL, SARAH_VOICE_CHALLENGE_PROTOCOL, SARAH_VOICE_DEVICE_HEADER,
     SARAH_VOICE_NOSTR_CHALLENGE_URL, SARAH_VOICE_SESSION_HEADER, SARAH_VOICE_SETTLEMENT_SCHEMA,
-    SARAH_VOICE_SETTLEMENT_URL, SARAH_VOICE_TICKET_HEADER, SarahVoiceAdmissionProjection,
-    SarahVoiceCapabilityId, SarahVoiceCreditMode, SarahVoiceExcludedAuthorities,
-    SarahVoiceProjectionGap, SarahVoiceSettlementProjection, SarahVoiceSettlementState,
+    SARAH_VOICE_SETTLEMENT_URL, SARAH_VOICE_TICKET_HEADER, SarahLiveKitRoomTransport,
+    SarahVoiceAdmissionProjection, SarahVoiceCapabilityId, SarahVoiceCreditMode,
+    SarahVoiceExcludedAuthorities, SarahVoiceProjectionGap, SarahVoiceSettlementProjection,
+    SarahVoiceSettlementState, SarahVoiceTransport,
 };
 pub use openagents_session::{
     HostedSessionProjection, HostedSessionState, OpenAgentsSession, OpenAgentsSessionPhase,

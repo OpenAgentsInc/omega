@@ -199,17 +199,19 @@ controls. Direct setup and authentication errors reveal that same
 external-agent view, with its native controls.
 
 Choosing **Sarah**, **Thread > Sarah voice…**, or **Sarah voice…** in the
-toolbar `+` menu opens the same admission surface inside Agent Panel. Opening
-that surface does not request microphone access or a one-use voice ticket. A
-Ready surface first shows the service-returned admission cohort, effective
+toolbar `+` menu opens the same admission surface inside Agent Panel. The
+composer microphone stays in the conversation: when terms are ready it starts
+voice, otherwise it loads them and shows a short refusal beside the control
+with a link to the detailed Voice settings. Opening admission does not request
+microphone access or a one-use voice ticket. A Ready surface first shows the
+service-returned admission cohort, effective
 rate, credit hold, remaining credit or explicit non-metered owner entitlement,
 maximum duration, transcript policy,
 bounded command list, and the confirmation rule for every command. An
 unavailable surface shows the cohort and refusal reason when supplied; account
-credit does not override `cohort_inactive`. Only **Start voice** starts the
-managed session. The composer microphone control also opens this admission
-surface when voice is idle, unavailable, or needs retry; it cannot bypass the
-terms by starting or retrying audio directly.
+credit does not override `cohort_inactive`. Only an admitted **Start voice** or
+the admitted composer gesture starts the managed session; neither can bypass
+reviewed terms.
 
 Sarah is a bounded voice editor and delegation assistant. The surface lists the
 server's exact exposed subset of context read, reveal range, replace selection,
@@ -217,7 +219,12 @@ save document, and start agent thread, along with the confirmation rule for
 each exposed capability. Direct shell, direct Git, payments, credential access,
 and device control remain explicitly unavailable. Her identity grants none of
 those authorities. Loading and unavailable admission states keep the
-microphone off; after a session, the same surface shows the final charge,
+microphone off. For `livekit_room_v1`, Omega also keeps it off until OpenAgents
+returns the exact generation-bound room, participant grant, Sarah participant,
+dispatch, presence lease, and microphone-only permissions. LiveKit then carries
+only microphone and Sarah audio; the authenticated OpenAgents WebSocket remains
+authoritative for lifecycle, transcripts, commands, interruption, usage, and
+settlement. After a session, the same surface shows the final charge,
 remaining credit when supplied, settlement receipt reference, and transcript
 recovery result rather than retaining an estimate. During an active session it
 also shows the newest 100 attributed transcript rows, exact pending command

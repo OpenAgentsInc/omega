@@ -9474,3 +9474,37 @@ omega#119's existing law about where a refusal belongs, not a second one.
   `the_composer_microphone_never_navigates_to_the_admission_page` in
   `crates/agent_ui/src/agent_panel.rs`, which clicks the rendered control while
   voice is unavailable and asserts `omega.sarah.admission` is never drawn.
+
+### OMEGA-DELTA-0212 — Sarah's admitted LiveKit room carries media, not authority
+
+**The microphone stays off until OpenAgents admits an exact room.** Omega asks
+for `livekit_room_v1` while consuming the terms the person reviewed. It rejects
+unknown transports and malformed, non-OpenAgents, overprivileged, expired, or
+incomplete LiveKit grants. Only after that generation-bound response exists
+does the desktop open its selected audio devices.
+
+**LiveKit is deliberately narrow.** The desktop joins with automatic
+subscription disabled, publishes one microphone source, and subscribes only to
+audio from the exact admitted Sarah participant. An unexpected participant
+fails the session closed. Omega's existing capture, echo cancellation,
+playback, mute, and interruption path remains the single audio owner; raw media
+is not logged or persisted.
+
+**The existing control plane remains authoritative.** Admission review, the
+one-use session ticket, lifecycle, attributed transcripts, bounded command
+proposals, interruption, usage, and settlement continue over the authenticated
+OpenAgents WebSocket and API. LiveKit reconnect changes visible media state but
+does not mint a second generation. `custom_wss_v1` remains an explicit
+rollback transport and cannot be selected silently during an active session.
+
+**Cleanup is part of the contract.** Every end and failure path signals the
+media task, clears queued microphone frames, closes the room, terminates remote
+audio stream tasks, closes the control socket, and releases capture and
+playback.
+
+- **Enforced by:**
+  `sarah_livekit_media_is_generation_bound_narrow_and_beneath_control` in
+  `crates/omega_deltas`; and the focused GPUI tests
+  `livekit_subscription_accepts_only_sarah_audio` and
+  `constructing_an_admitted_livekit_client_does_not_open_audio` in
+  `crates/workroom_ui/src/voice.rs`.

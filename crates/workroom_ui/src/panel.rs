@@ -1910,9 +1910,9 @@ impl SarahWorkroomPanel {
         self.pending_voice_command = None;
         self.voice_retryable = false;
         self.voice_access_required = false;
-        self.voice_state = SarahVoiceState::RequestingMicrophone;
+        self.voice_state = SarahVoiceState::Authenticating;
         self.voice_status =
-            "Opening the selected microphone before requesting a one-use gateway ticket.".into();
+            "Requesting a generation-bound Sarah voice room before opening the microphone…".into();
         let openagents_session = omega_effectd::openagents_session(cx);
         let audio_settings = AudioSettings::get_global(cx);
         let input_device_id = audio_settings.input_audio_device.clone();
@@ -1981,45 +1981,8 @@ impl SarahWorkroomPanel {
                     },
                 };
                 this.update(cx, |panel, cx| {
-                    panel.voice_state = SarahVoiceState::RequestingMicrophone;
-                    panel.voice_status = if reconnect_attempts == 0 {
-                        panel.voice_state.label().into()
-                    } else {
-                        "Admission terms are unchanged. Reopening audio before requesting a fresh one-use ticket…".into()
-                    };
-                    cx.notify();
-                })?;
-                let prepared_devices = cx
-                    .background_executor()
-                    .spawn({
-                        let input_device_id = input_device_id.clone();
-                        let output_device_id = output_device_id.clone();
-                        async move {
-                            ManagedSarahVoiceClient::prepare_devices(
-                                input_device_id,
-                                output_device_id,
-                            )
-                        }
-                    })
-                    .await;
-                let prepared_devices = match prepared_devices {
-                    Ok(prepared_devices) => prepared_devices,
-                    Err(error) => {
-                        this.update(cx, |panel, cx| {
-                            panel.voice_state = SarahVoiceState::Error;
-                            panel.voice_retryable = true;
-                            panel.voice_access_required = false;
-                            panel.voice_status =
-                                format!("Sarah voice could not open audio devices: {error:#}")
-                                    .into();
-                            cx.notify();
-                        })?;
-                        return anyhow::Ok(());
-                    }
-                };
-                this.update(cx, |panel, cx| {
                     panel.voice_state = SarahVoiceState::Authenticating;
-                    panel.voice_status = "Audio devices are ready. Requesting a one-use Sarah voice ticket…".into();
+                    panel.voice_status = "Admission is ready. Requesting a generation-bound Sarah voice room before opening the microphone…".into();
                     cx.notify();
                 })?;
                 let managed_session = match openagents_session
@@ -2064,6 +2027,43 @@ impl SarahWorkroomPanel {
                         return anyhow::Ok(());
                     }
                 };
+                this.update(cx, |panel, cx| {
+                    panel.voice_state = SarahVoiceState::RequestingMicrophone;
+                    panel.voice_status = if reconnect_attempts == 0 {
+                        "The Sarah room is generation-bound. Requesting microphone access…".into()
+                    } else {
+                        "The replacement Sarah room is generation-bound. Reopening audio…".into()
+                    };
+                    cx.notify();
+                })?;
+                let prepared_devices = cx
+                    .background_executor()
+                    .spawn({
+                        let input_device_id = input_device_id.clone();
+                        let output_device_id = output_device_id.clone();
+                        async move {
+                            ManagedSarahVoiceClient::prepare_devices(
+                                input_device_id,
+                                output_device_id,
+                            )
+                        }
+                    })
+                    .await;
+                let prepared_devices = match prepared_devices {
+                    Ok(prepared_devices) => prepared_devices,
+                    Err(error) => {
+                        this.update(cx, |panel, cx| {
+                            panel.voice_state = SarahVoiceState::Error;
+                            panel.voice_retryable = true;
+                            panel.voice_access_required = false;
+                            panel.voice_status =
+                                format!("Sarah voice could not open audio devices: {error:#}")
+                                    .into();
+                            cx.notify();
+                        })?;
+                        return anyhow::Ok(());
+                    }
+                };
                 let settlement_thread_ref = managed_session.thread_ref.clone();
                 let settlement_session_ref = managed_session.session_ref.clone();
                 this.update(cx, |panel, _cx| {
@@ -2090,7 +2090,7 @@ impl SarahWorkroomPanel {
                     }
                 };
                 let connection_started_at = Instant::now();
-                let connection = client.connect(cx.background_executor().clone());
+                let connection = client.connect(cx);
                 let controls = connection.controls;
                 let events = connection.events;
                 this.update(cx, |panel, cx| {

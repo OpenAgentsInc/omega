@@ -200,6 +200,7 @@ pub const ENFORCED_DELTAS: &[&str] = &[
     "OMEGA-DELTA-0209",
     "OMEGA-DELTA-0210",
     "OMEGA-DELTA-0211",
+    "OMEGA-DELTA-0212",
 ];
 
 /// OMEGA-DELTA-0204. Every control the composer's bar offers, written twice:
@@ -23048,6 +23049,72 @@ mod tests {
                 .contains("the_composer_microphone_never_navigates_to_the_admission_page"),
             "OMEGA-DELTA-0211: the rendered proof that a composer voice click \
              cannot reach `omega.sarah.admission` is gone"
+        );
+    }
+
+    /// OMEGA-DELTA-0212. The admitted LiveKit room carries media only; the
+    /// existing OpenAgents WebSocket remains the control and settlement plane.
+    #[test]
+    fn sarah_livekit_media_is_generation_bound_narrow_and_beneath_control() {
+        let effectd = read_repository_file("crates/omega_effectd/src/openagents_sarah_voice.rs");
+        for required in [
+            "requested_transport: \"livekit_room_v1\"",
+            "SarahVoiceTransport::LiveKitRoomV1",
+            "permissions.can_publish_sources == [\"microphone\"]",
+            "host.ends_with(\".openagents.com\")",
+            "participant_grant",
+            "dispatch_ref",
+            "sarah_presence_lease_ref",
+        ] {
+            assert!(
+                effectd.contains(required),
+                "OMEGA-DELTA-0212: the admitted LiveKit contract lost `{required}`"
+            );
+        }
+
+        let panel = read_repository_file("crates/workroom_ui/src/panel.rs");
+        let start = function_body(&panel, "start_voice")
+            .expect("OMEGA-DELTA-0212: Sarah voice start path was removed");
+        let session_position = start
+            .find("create_sarah_voice_session_from_admission")
+            .expect("OMEGA-DELTA-0212: voice no longer consumes reviewed admission");
+        let microphone_position = start
+            .find("ManagedSarahVoiceClient::prepare_devices")
+            .expect("OMEGA-DELTA-0212: voice no longer has an explicit microphone boundary");
+        assert!(
+            session_position < microphone_position,
+            "OMEGA-DELTA-0212: the microphone opens before the generation-bound \
+             session response is admitted"
+        );
+
+        let voice = read_repository_file("crates/workroom_ui/src/voice.rs");
+        for required in [
+            "options.auto_subscribe = false",
+            "source: TrackSource::Microphone",
+            "should_subscribe_to_livekit_track",
+            "validate_livekit_remote_participant",
+            "SarahLiveKitMediaControl::Close",
+            "GatewayServerAction::SessionReady",
+            "SarahLiveKitMediaControl::Start",
+            "source.clear_buffer()",
+            "tokio::time::timeout(Duration::from_secs(5), room.close())",
+            "audio_stream_tasks.shutdown().await",
+            "send_gateway_control",
+            "read_sarah_voice_settlement",
+        ] {
+            assert!(
+                voice.contains(required) || panel.contains(required),
+                "OMEGA-DELTA-0212: the Sarah media/control boundary lost `{required}`"
+            );
+        }
+        assert!(
+            voice.contains("SarahVoiceTransport::CustomWssV1"),
+            "OMEGA-DELTA-0212: the explicit custom WebSocket rollback path disappeared"
+        );
+        assert!(
+            voice.contains("livekit_subscription_accepts_only_sarah_audio")
+                && voice.contains("constructing_an_admitted_livekit_client_does_not_open_audio"),
+            "OMEGA-DELTA-0212: focused GPUI LiveKit contract coverage disappeared"
         );
     }
 

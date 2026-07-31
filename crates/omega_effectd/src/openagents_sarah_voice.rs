@@ -47,12 +47,32 @@ pub struct ManagedSarahVoiceSession {
     pub generation: u32,
     pub disclosure_ref: String,
     pub gateway_url: String,
+    pub transport: SarahVoiceTransport,
     pub ticket: String,
     pub ticket_expires_at_ms: u64,
     pub session_expires_at_ms: u64,
     pub reserved_credit_msat: u64,
     pub max_duration_seconds: u64,
     pub admission: Option<SarahVoiceAdmissionProjection>,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum SarahVoiceTransport {
+    CustomWssV1,
+    LiveKitRoomV1(SarahLiveKitRoomTransport),
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct SarahLiveKitRoomTransport {
+    pub livekit_url: String,
+    pub room_ref: String,
+    pub room_epoch: u64,
+    pub participant_ref: String,
+    pub sarah_participant_ref: String,
+    pub participant_grant: String,
+    pub join_expires_at_ms: u64,
+    pub dispatch_ref: String,
+    pub sarah_presence_lease_ref: String,
 }
 
 #[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
@@ -196,10 +216,18 @@ struct VoiceSessionRequest<'a> {
     identity: VoiceIdentity<'a>,
     disclosure_ref: &'static str,
     client_profile: &'static str,
+    requested_transport: &'static str,
+    room_context: VoiceRoomContext,
     #[serde(skip_serializing_if = "Option::is_none")]
     admission_ref: Option<&'a str>,
     #[serde(skip_serializing_if = "Option::is_none")]
     auth: Option<NostrAuthentication<'a>>,
+}
+
+#[derive(Serialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+enum VoiceRoomContext {
+    Private,
 }
 
 #[derive(Serialize)]
@@ -371,6 +399,7 @@ struct VoiceSessionResponse {
     #[serde(deserialize_with = "deserialize_required_nullable_u64")]
     spendable_remaining_credit_msat: Option<u64>,
     capability_boundary: VoiceCapabilityBoundary,
+    transport: VoiceTransport,
     gateway_url: String,
     ticket: String,
     ticket_expires_at_ms: u64,
@@ -379,6 +408,42 @@ struct VoiceSessionResponse {
     max_duration_seconds: u64,
     input_audio: VoiceAudioFormat,
     output_audio: VoiceAudioFormat,
+}
+
+#[derive(Deserialize)]
+#[serde(
+    tag = "kind",
+    rename_all = "snake_case",
+    rename_all_fields = "camelCase"
+)]
+enum VoiceTransport {
+    CustomWssV1,
+    LivekitRoomV1 {
+        livekit_url: String,
+        room_ref: String,
+        room_epoch: u64,
+        participant_ref: String,
+        sarah_participant_ref: String,
+        participant_grant: String,
+        join_expires_at_ms: u64,
+        dispatch_ref: String,
+        sarah_presence_lease_ref: String,
+        permissions: VoiceLiveKitPermissions,
+    },
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct VoiceLiveKitPermissions {
+    room_join: bool,
+    can_publish: bool,
+    can_subscribe: bool,
+    can_publish_data: bool,
+    can_update_own_metadata: bool,
+    can_publish_sources: Vec<String>,
+    room_admin: bool,
+    room_create: bool,
+    room_list: bool,
 }
 
 #[derive(Deserialize)]
@@ -411,6 +476,8 @@ pub(crate) async fn prepare_bearer_sarah_voice_admission(
         },
         disclosure_ref: SARAH_VOICE_DISCLOSURE_REF,
         client_profile: "omega_editor",
+        requested_transport: "livekit_room_v1",
+        room_context: VoiceRoomContext::Private,
         admission_ref: None,
         auth: None,
     })
@@ -492,6 +559,8 @@ pub(crate) async fn prepare_nostr_sarah_voice_admission(
         },
         disclosure_ref: SARAH_VOICE_DISCLOSURE_REF,
         client_profile: "omega_editor",
+        requested_transport: "livekit_room_v1",
+        room_context: VoiceRoomContext::Private,
         admission_ref: None,
         auth: Some(NostrAuthentication {
             method: "nostr_nip98",
@@ -707,6 +776,8 @@ pub(crate) async fn issue_bearer_sarah_voice_session(
         },
         disclosure_ref: SARAH_VOICE_DISCLOSURE_REF,
         client_profile: "omega_editor",
+        requested_transport: "livekit_room_v1",
+        room_context: VoiceRoomContext::Private,
         admission_ref: Some(&admission.projection.admission_ref),
         auth: None,
     })
@@ -747,6 +818,70 @@ fn parse_voice_session_response(
     };
     let gateway_url =
         Url::parse(&response.gateway_url).map_err(|_| HostedSessionBlocker::ResponseInvalid)?;
+    let managed_transport = match &response.transport {
+        VoiceTransport::CustomWssV1 => SarahVoiceTransport::CustomWssV1,
+        VoiceTransport::LivekitRoomV1 {
+            livekit_url,
+            room_ref,
+            room_epoch,
+            participant_ref,
+            sarah_participant_ref,
+            participant_grant,
+            join_expires_at_ms,
+            dispatch_ref,
+            sarah_presence_lease_ref,
+            permissions,
+        } => {
+            let livekit_url =
+                Url::parse(livekit_url).map_err(|_| HostedSessionBlocker::ResponseInvalid)?;
+            let valid_permissions = permissions.room_join
+                && permissions.can_publish
+                && permissions.can_subscribe
+                && !permissions.can_publish_data
+                && !permissions.can_update_own_metadata
+                && permissions.can_publish_sources == ["microphone"]
+                && !permissions.room_admin
+                && !permissions.room_create
+                && !permissions.room_list;
+            let valid_endpoint = livekit_url.scheme() == "wss"
+                && livekit_url
+                    .host_str()
+                    .is_some_and(|host| host.ends_with(".openagents.com"))
+                && livekit_url.port().is_none()
+                && livekit_url.username().is_empty()
+                && livekit_url.password().is_none()
+                && livekit_url.query().is_none()
+                && livekit_url.fragment().is_none();
+            if !valid_endpoint
+                || !valid_permissions
+                || *room_epoch == 0
+                || !valid_ref(room_ref)
+                || !valid_ref(participant_ref)
+                || !valid_ref(sarah_participant_ref)
+                || participant_ref == sarah_participant_ref
+                || participant_grant.is_empty()
+                || participant_grant.len() > 4 * 1024
+                || *join_expires_at_ms <= now_ms
+                || *join_expires_at_ms > response.session_expires_at_ms
+                || !valid_ref(dispatch_ref)
+                || !valid_ref(sarah_presence_lease_ref)
+            {
+                log::error!("Sarah voice session response failed validation: LiveKit transport");
+                return Err(HostedSessionBlocker::ResponseInvalid);
+            }
+            SarahVoiceTransport::LiveKitRoomV1(SarahLiveKitRoomTransport {
+                livekit_url: livekit_url.to_string(),
+                room_ref: room_ref.clone(),
+                room_epoch: *room_epoch,
+                participant_ref: participant_ref.clone(),
+                sarah_participant_ref: sarah_participant_ref.clone(),
+                participant_grant: participant_grant.clone(),
+                join_expires_at_ms: *join_expires_at_ms,
+                dispatch_ref: dispatch_ref.clone(),
+                sarah_presence_lease_ref: sarah_presence_lease_ref.clone(),
+            })
+        }
+    };
     let echoed_admission = SarahVoiceAdmissionProjection {
         schema: SARAH_VOICE_ADMISSION_SCHEMA.to_string(),
         admission_ref: response.admission_ref.clone(),
@@ -826,6 +961,7 @@ fn parse_voice_session_response(
             generation: admission.generation,
             disclosure_ref: SARAH_VOICE_DISCLOSURE_REF.to_string(),
             gateway_url: response.gateway_url,
+            transport: managed_transport,
             ticket: response.ticket,
             ticket_expires_at_ms: response.ticket_expires_at_ms,
             session_expires_at_ms: response.session_expires_at_ms,
@@ -1138,6 +1274,8 @@ mod tests {
             },
             disclosure_ref: SARAH_VOICE_DISCLOSURE_REF,
             client_profile: "omega_editor",
+            requested_transport: "livekit_room_v1",
+            room_context: VoiceRoomContext::Private,
             admission_ref: None,
             auth: Some(NostrAuthentication {
                 method: "nostr_nip98",
@@ -1172,6 +1310,8 @@ mod tests {
             },
             disclosure_ref: SARAH_VOICE_DISCLOSURE_REF,
             client_profile: "omega_editor",
+            requested_transport: "livekit_room_v1",
+            room_context: VoiceRoomContext::Private,
             admission_ref: Some(&admission.projection.admission_ref),
             auth: None,
         })
@@ -1277,6 +1417,29 @@ mod tests {
                 "credentialAccess": false,
                 "deviceControl": false
             },
+            "transport": {
+                "kind": "livekit_room_v1",
+                "livekitUrl": "wss://livekit.openagents.com",
+                "roomRef": "oa-sarah-room-one",
+                "roomEpoch": 1,
+                "participantRef": "owner-voice-one",
+                "sarahParticipantRef": "principal.sarah",
+                "participantGrant": "livekit.grant.one",
+                "joinExpiresAtMs": now + 60_000,
+                "dispatchRef": "dispatch-one",
+                "sarahPresenceLeaseRef": "presence-one",
+                "permissions": {
+                    "roomJoin": true,
+                    "canPublish": true,
+                    "canSubscribe": true,
+                    "canPublishData": false,
+                    "canUpdateOwnMetadata": false,
+                    "canPublishSources": ["microphone"],
+                    "roomAdmin": false,
+                    "roomCreate": false,
+                    "roomList": false
+                }
+            },
             "gatewayUrl": "wss://openagents.com/api/omega/sarah/voice/connect",
             "ticket": "t".repeat(32),
             "ticketExpiresAtMs": now + 60_000,
@@ -1298,6 +1461,10 @@ mod tests {
         let issued =
             parse_voice_session_response(&response, &admission).expect("parse managed response");
         assert_eq!(issued.voice.session_ref, "voice-session");
+        assert!(matches!(
+            issued.voice.transport,
+            SarahVoiceTransport::LiveKitRoomV1(SarahLiveKitRoomTransport { room_epoch: 1, .. })
+        ));
 
         let mut invalid: serde_json::Value =
             serde_json::from_slice(&response).expect("decode response");
@@ -1325,6 +1492,26 @@ mod tests {
             .expect("response object")
             .remove("spendableRemainingCreditMsat");
         let invalid = serde_json::to_vec(&invalid).expect("serialize missing terms");
+        assert!(parse_voice_session_response(&invalid, &admission).is_err());
+
+        for (field, value) in [
+            ("kind", serde_json::json!("livekit_future_v2")),
+            (
+                "livekitUrl",
+                serde_json::json!("wss://livekit.attacker.example"),
+            ),
+        ] {
+            let mut invalid: serde_json::Value =
+                serde_json::from_slice(&response).expect("decode response");
+            invalid["transport"][field] = value;
+            let invalid = serde_json::to_vec(&invalid).expect("serialize invalid transport");
+            assert!(parse_voice_session_response(&invalid, &admission).is_err());
+        }
+
+        let mut invalid: serde_json::Value =
+            serde_json::from_slice(&response).expect("decode response");
+        invalid["transport"]["permissions"]["canPublishData"] = serde_json::json!(true);
+        let invalid = serde_json::to_vec(&invalid).expect("serialize overprivileged transport");
         assert!(parse_voice_session_response(&invalid, &admission).is_err());
     }
 
@@ -1354,6 +1541,7 @@ mod tests {
                 "credentialAccess": false,
                 "deviceControl": false
             },
+            "transport": { "kind": "custom_wss_v1" },
             "gatewayUrl": "wss://openagents.com/api/omega/sarah/voice/connect",
             "ticket": "t".repeat(32),
             "ticketExpiresAtMs": now + MAX_TICKET_LIFETIME_MS + MAX_SERVER_CLOCK_SKEW_MS,

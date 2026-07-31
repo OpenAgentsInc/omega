@@ -3,9 +3,10 @@
 Sarah voice is an alpha-cohort feature reached through the visible Sarah
 admission surface inside Agent Panel. The hidden Sarah workroom remains the
 runtime owner during the transition, but it is not a public navigation
-destination. It is independent of collaboration calls. It does not join a
-LiveKit room, publish a LiveKit track, or change collaboration mute or deafen
-state.
+destination. It is independent of collaboration calls and does not change
+collaboration mute or deafen state. An admitted `livekit_room_v1` session joins
+one owner-private LiveKit room for media only; the prior `custom_wss_v1` PCM
+transport remains an explicit rollback path.
 
 Opening Sarah from the new-conversation row, Thread menu, toolbar `+` menu, or
 the **Voice** page in Settings only opens admission. The composer microphone
@@ -149,9 +150,14 @@ transaction, so it cannot be replayed and a changed cohort, price, balance,
 hold, duration, profile, capability boundary, or identity fails closed. An
 expired or rejected admission returns the user to admission review rather than
 silently creating a session. This separate request returns the one-use
-WebSocket ticket.
+WebSocket ticket and an explicit transport. Omega requests
+`livekit_room_v1` and rejects unknown transports. A LiveKit response must name
+the exact `wss://*.openagents.com` endpoint, room, room epoch, local
+participant, Sarah participant, bounded participant grant, join expiry,
+dispatch reference, Sarah presence lease, and microphone-only publish
+permissions. The join expiry cannot outlive the voice session.
 
-## Voice session and WebSocket
+## Voice session, control, and media
 
 The session response uses schema `openagents.sarah.voice.v1` and contains
 `sessionRef`, `gatewayUrl`, a one-use `ticket`, ticket/session expiries, credit
@@ -160,7 +166,8 @@ full echo of the consumed admission reference, expiry, cohort, credit mode,
 rate, exact pre-hold spendable balance, and capability boundary. Omega compares
 that echo with every term shown at review and refuses the ticket if any field
 differs. It also requires `gpt-realtime-2.1`, 24 kHz mono PCM16, a same-origin
-`wss` URL, and a ticket that has not expired.
+`wss` URL, and a ticket that has not expired. The selected transport never
+changes during a session.
 
 Omega opens `gatewayUrl` with:
 
@@ -188,11 +195,30 @@ first control frame is sequence zero:
 }
 ```
 
-Control frames carry the exact identity and contiguous sequence numbers. Omega
+The WebSocket remains the control plane for both transports. Control frames
+carry the exact identity and contiguous sequence numbers. Omega
 rejects identity changes, sequence gaps, oversized fields, invalid tool
 digests, and unknown tagged variants.
 
-Audio uses the `OAA1` media envelope. Each binary frame contains:
+With `livekit_room_v1`, Omega opens the microphone only after the reviewed
+admission has produced that generation-bound transport. It joins with
+auto-subscribe disabled, publishes one 24 kHz mono microphone track, and
+subscribes only to audio from the exact admitted Sarah participant. Any other
+participant fails the session closed. Omega's existing capture, echo
+cancellation, playback queue, mute, interruption, and device selection remain
+the single audio owner; the LiveKit source disables its additional audio
+processing. Raw media is neither logged nor persisted.
+
+On end or failure, Omega sends the control close when possible, clears queued
+LiveKit microphone audio, closes the room, terminates Sarah audio stream tasks,
+closes the control socket, and releases capture and playback. LiveKit reconnect
+events drive the existing visible reconnect state without minting a new
+generation. Commands, attributed transcripts, provider usage, and settlement
+remain on the WebSocket/API path and never move into LiveKit data, participant
+metadata, or Redis.
+
+With the explicit `custom_wss_v1` rollback transport, audio continues to use
+the `OAA1` media envelope. Each binary frame contains:
 
 1. Four ASCII bytes `OAA1`.
 2. A four-byte big-endian JSON-header length.
