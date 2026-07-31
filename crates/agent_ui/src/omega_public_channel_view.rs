@@ -10,7 +10,7 @@ use std::{
     collections::{BTreeMap, BTreeSet, VecDeque},
     path::Path,
     sync::Arc,
-    time::{SystemTime, UNIX_EPOCH},
+    time::{Duration, SystemTime, UNIX_EPOCH},
 };
 
 use editor::{Editor, EditorEvent};
@@ -34,6 +34,9 @@ use ui::{
 
 use crate::{
     omega_nostr_activity,
+    omega_public_channel_livekit::{
+        CommunityRoomMediaControl, CommunityRoomMediaEvent, start_community_room_media,
+    },
     omega_public_channel_media::{
         PublicChannelAttachment, PublicChannelMediaFact, PublicChannelMediaIntent,
         PublicChannelMediaKey, PublicChannelMediaLifecycle, PublicChannelMediaState,
@@ -49,7 +52,7 @@ use crate::{
         RelaySessionConfig, RelaySnapshot, run_relay_session,
     },
     omega_public_channel_sarah::{
-        CommunityCallLifecycle, CommunityRoomAdmission, CommunityRoomContext, CommunityRoomRole,
+        CommunityCallLifecycle, CommunityRoomAdmission, CommunityRoomContext,
         CommunitySarahControl, CommunitySarahIntent, CommunitySarahRoom, CommunitySarahState,
     },
     omega_public_channel_timeline::{
@@ -60,6 +63,7 @@ use crate::{
 };
 
 const RETIRED_SESSION_LIMIT: usize = 2;
+const RETIRED_SARAH_MEDIA_LIMIT: usize = 2;
 const FACTS_PANE_WIDTH: gpui::Pixels = px(336.);
 const COMPACT_FACTS_THRESHOLD: gpui::Pixels = px(960.);
 
@@ -182,6 +186,10 @@ pub struct PublicChannelView {
     retired_session_tasks: VecDeque<Task<()>>,
     sarah_room: CommunitySarahRoom,
     sarah_control_task: Option<Task<()>>,
+    sarah_media_controls: Option<async_channel::Sender<CommunityRoomMediaControl>>,
+    sarah_media_task: Option<Task<()>>,
+    sarah_refresh_task: Option<Task<()>>,
+    retired_sarah_media_tasks: VecDeque<Task<()>>,
 }
 
 impl EventEmitter<PublicChannelViewEvent> for PublicChannelView {}
@@ -239,6 +247,10 @@ impl PublicChannelView {
             retired_session_tasks: VecDeque::new(),
             sarah_room,
             sarah_control_task: None,
+            sarah_media_controls: None,
+            sarah_media_task: None,
+            sarah_refresh_task: None,
+            retired_sarah_media_tasks: VecDeque::new(),
         }
     }
 
@@ -350,6 +362,7 @@ impl PublicChannelView {
         }
         self.media_tasks.clear();
         self.sarah_control_task = None;
+        self.stop_sarah_media();
         for state in self.media_states.values_mut() {
             if matches!(state, PublicChannelMediaState::Loading) {
                 *state = PublicChannelMediaState::Gated;
@@ -1713,10 +1726,21 @@ impl PublicChannelView {
     fn execute_sarah_intent(&mut self, intent: CommunitySarahIntent, cx: &mut Context<Self>) {
         if matches!(intent, CommunitySarahIntent::Leave) {
             self.sarah_control_task = None;
+            self.stop_sarah_media();
             self.sarah_room.leave();
             return;
         }
-        if let CommunitySarahIntent::SetMuted(_) = intent {
+        if let CommunitySarahIntent::SetMuted(muted) = intent {
+            if let Some(controls) = &self.sarah_media_controls
+                && let Err(error) = controls.try_send(CommunityRoomMediaControl::SetMuted(
+                    muted || !self.local_participant_holds_floor(),
+                ))
+            {
+                log::debug!("community room mute control was not delivered: {error}");
+                self.sarah_room
+                    .fail_closed("Room voice media stopped unexpectedly.");
+                self.stop_sarah_media();
+            }
             return;
         }
         let Some(session) = omega_effectd::openagents_session_if_initialized(cx) else {
@@ -1805,25 +1829,49 @@ impl PublicChannelView {
             this.update(cx, |this, cx| {
                 match result {
                     Ok(Some(admission)) => {
-                        match this.sarah_room.apply_authority(
-                            admission.authority,
-                            CommunityRoomRole::Member,
-                            CommunitySarahState::Idle,
-                            unix_time_millis(),
-                        ) {
-                            Ok(()) => {}
+                        let role = admission.role;
+                        let media_running = this.sarah_media_controls.is_some();
+                        let authority_result = if media_running {
+                            this.sarah_room.refresh_authority(
+                                admission.authority.clone(),
+                                role,
+                                unix_time_millis(),
+                            )
+                        } else {
+                            this.sarah_room.apply_authority(
+                                admission.authority.clone(),
+                                role,
+                                CommunitySarahState::Idle,
+                                unix_time_millis(),
+                            )
+                        };
+                        match authority_result {
+                            Ok(()) => {
+                                if media_running {
+                                    this.update_sarah_media_authority();
+                                } else if let Err(error) =
+                                    this.start_sarah_media(admission, session.clone(), cx)
+                                {
+                                    log::error!("community Sarah media could not start: {error:#}");
+                                    this.sarah_room
+                                        .fail_closed("Room voice media could not start.");
+                                    this.stop_sarah_media();
+                                }
+                            }
                             Err(error) => {
                                 log::error!("community Sarah authority was refused: {error:#}");
                             }
                         }
                     }
                     Ok(None) => {
+                        this.stop_sarah_media();
                         this.sarah_room.leave();
                     }
                     Err(error) => {
                         log::error!("community Sarah control failed: {error:#}");
                         this.sarah_room
                             .fail_closed("Room voice could not verify its authority.");
+                        this.stop_sarah_media();
                     }
                 }
                 cx.notify();
@@ -1832,6 +1880,242 @@ impl PublicChannelView {
                 log::debug!("public channel disappeared during a Sarah control: {error:#}");
             });
         }));
+    }
+
+    fn start_sarah_media(
+        &mut self,
+        admission: CommunityRoomAdmission,
+        session: omega_effectd::OpenAgentsSession,
+        cx: &mut Context<Self>,
+    ) -> anyhow::Result<()> {
+        self.stop_sarah_media();
+        let context = self
+            .sarah_room
+            .context
+            .clone()
+            .ok_or_else(|| anyhow::anyhow!("community room context is unavailable"))?;
+        let (media, playback) = start_community_room_media(admission, cx)?;
+        let controls = media.controls.clone();
+        let media_events = media.events;
+        let media_runtime_task = media.task;
+        self.sarah_media_controls = Some(controls.clone());
+        self.sarah_room.media_connecting();
+        self.sarah_media_task = Some(cx.spawn(async move |this, cx| {
+            while let Ok(event) = media_events.recv().await {
+                let should_stop = match event {
+                    CommunityRoomMediaEvent::Connected | CommunityRoomMediaEvent::Reconnected => {
+                        if let Err(error) = this.update(cx, |this, cx| {
+                            this.sarah_room.media_connected();
+                            cx.notify();
+                        }) {
+                            log::debug!(
+                                "public channel disappeared during community media connect: {error:#}"
+                            );
+                            break;
+                        }
+                        false
+                    }
+                    CommunityRoomMediaEvent::Reconnecting => {
+                        if let Err(error) = this.update(cx, |this, cx| {
+                            this.sarah_room.media_connecting();
+                            cx.notify();
+                        }) {
+                            log::debug!(
+                                "public channel disappeared during community media reconnect: {error:#}"
+                            );
+                            break;
+                        }
+                        false
+                    }
+                    CommunityRoomMediaEvent::RosterRefreshRequired => false,
+                    CommunityRoomMediaEvent::SarahSpeaking(speaking) => {
+                        if let Err(error) = this.update(cx, |this, cx| {
+                            this.sarah_room.set_sarah_speaking(speaking);
+                            cx.notify();
+                        }) {
+                            log::debug!(
+                                "public channel disappeared during Sarah speaker update: {error:#}"
+                            );
+                            break;
+                        }
+                        false
+                    }
+                    CommunityRoomMediaEvent::Audio(bytes) => {
+                        if let Err(error) = playback.play(&bytes) {
+                            log::error!("community Sarah audio playback failed: {error:#}");
+                            true
+                        } else {
+                            false
+                        }
+                    }
+                    CommunityRoomMediaEvent::Ended => true,
+                    CommunityRoomMediaEvent::Error(message) => {
+                        log::error!("community Sarah media failed: {message}");
+                        true
+                    }
+                };
+                if should_stop {
+                    if let Err(error) = this.update(cx, |this, cx| {
+                        this.sarah_room
+                            .fail_closed("Room voice media disconnected.");
+                        this.sarah_media_controls = None;
+                        this.sarah_refresh_task = None;
+                        cx.notify();
+                    }) {
+                        log::debug!(
+                            "public channel disappeared during community media teardown: {error:#}"
+                        );
+                    }
+                    break;
+                }
+            }
+            if let Err(error) = media_runtime_task.await {
+                log::debug!("community Sarah media task failed to join: {error}");
+            }
+        }));
+        self.sarah_refresh_task = Some(cx.spawn(async move |this, cx| {
+            loop {
+                cx.background_executor().timer(Duration::from_secs(5)).await;
+                let admission = match session
+                    .community_sarah_request::<CommunityRoomAdmission>(
+                        "/api/sarah/livekit/room/join",
+                        &serde_json::json!({
+                            "communityRef": context.community_ref,
+                            "channelRef": context.channel_ref,
+                        }),
+                        cx,
+                    )
+                    .await
+                {
+                    Ok(admission) => admission,
+                    Err(error) => {
+                        log::error!("community Sarah authority refresh failed: {error:#}");
+                        if controls
+                            .send(CommunityRoomMediaControl::Close)
+                            .await
+                            .is_err()
+                        {
+                            log::debug!("community Sarah media stopped before authority failure");
+                        }
+                        if let Err(error) = this.update(cx, |this, cx| {
+                            this.sarah_room
+                                .fail_closed("Room voice authority could not be refreshed.");
+                            this.sarah_media_controls = None;
+                            cx.notify();
+                        }) {
+                            log::debug!(
+                                "public channel disappeared during authority failure: {error:#}"
+                            );
+                        }
+                        return;
+                    }
+                };
+                if let Err(error) = admission.validate(&context, unix_time_millis()) {
+                    log::error!("community Sarah authority refresh was invalid: {error:#}");
+                    if controls
+                        .send(CommunityRoomMediaControl::Close)
+                        .await
+                        .is_err()
+                    {
+                        log::debug!("community Sarah media stopped before invalid authority");
+                    }
+                    if let Err(error) = this.update(cx, |this, cx| {
+                        this.sarah_room
+                            .fail_closed("Room voice authority refresh was invalid.");
+                        this.sarah_media_controls = None;
+                        cx.notify();
+                    }) {
+                        log::debug!(
+                            "public channel disappeared during invalid authority: {error:#}"
+                        );
+                    }
+                    return;
+                }
+                let role = admission.role;
+                let authority = admission.authority;
+                let refresh_accepted = match this.update(cx, |this, cx| {
+                    if let Err(error) =
+                        this.sarah_room
+                            .refresh_authority(authority, role, unix_time_millis())
+                    {
+                        log::error!("community Sarah authority refresh was refused: {error:#}");
+                        this.sarah_media_controls = None;
+                        cx.notify();
+                        false
+                    } else {
+                        this.update_sarah_media_authority();
+                        cx.notify();
+                        true
+                    }
+                }) {
+                    Ok(accepted) => accepted,
+                    Err(_) => return,
+                };
+                if !refresh_accepted {
+                    if controls
+                        .send(CommunityRoomMediaControl::Close)
+                        .await
+                        .is_err()
+                    {
+                        log::debug!("community Sarah media stopped before stale authority");
+                    }
+                    return;
+                }
+            }
+        }));
+        Ok(())
+    }
+
+    fn update_sarah_media_authority(&self) {
+        let Some(controls) = &self.sarah_media_controls else {
+            return;
+        };
+        let Some(authority) = &self.sarah_room.authority else {
+            return;
+        };
+        let participants = authority
+            .verified_participants
+            .iter()
+            .map(|participant| participant.participant_ref.clone())
+            .collect();
+        if let Err(error) = controls.try_send(
+            CommunityRoomMediaControl::UpdateVerifiedParticipants(participants),
+        ) {
+            log::debug!("community Sarah roster update was not delivered: {error}");
+        }
+        if let Err(error) = controls.try_send(CommunityRoomMediaControl::SetMuted(
+            self.sarah_room.muted || !self.local_participant_holds_floor(),
+        )) {
+            log::debug!("community Sarah floor mute was not delivered: {error}");
+        }
+    }
+
+    fn local_participant_holds_floor(&self) -> bool {
+        let Some(authority) = &self.sarah_room.authority else {
+            return false;
+        };
+        matches!(
+            &authority.floor,
+            crate::omega_public_channel_sarah::CommunityFloorState::Held { lease }
+                if lease.holder_participant_ref == authority.local_participant.participant_ref
+                    && lease.holder_user_ref_digest
+                        == authority.local_participant.user_ref_digest
+        )
+    }
+
+    fn stop_sarah_media(&mut self) {
+        if let Some(controls) = self.sarah_media_controls.take()
+            && let Err(error) = controls.try_send(CommunityRoomMediaControl::Close)
+        {
+            log::debug!("community Sarah close control was not delivered: {error}");
+        }
+        if let Some(task) = self.sarah_media_task.take() {
+            self.retired_sarah_media_tasks.push_back(task);
+        }
+        while self.retired_sarah_media_tasks.len() > RETIRED_SARAH_MEDIA_LIMIT {
+            self.retired_sarah_media_tasks.pop_front();
+        }
+        self.sarah_refresh_task = None;
     }
 
     fn render_sarah_room_controls(&self, cx: &mut Context<Self>) -> AnyElement {

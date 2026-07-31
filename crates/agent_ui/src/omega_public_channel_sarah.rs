@@ -17,7 +17,7 @@ pub const PROCESSOR_DISCLOSURE: &str = "sarah_openagents_openai_v1";
 pub const COMMUNITY_COHORT_POLICY: &str = "authenticated_allowlisted";
 pub const FLOOR_LEASE_MS: u64 = 30_000;
 
-#[derive(Clone, Debug, Deserialize, Serialize)]
+#[derive(Clone, Deserialize, Serialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct CommunityRoomAdmission {
     pub schema: String,
@@ -29,6 +29,7 @@ pub struct CommunityRoomAdmission {
     pub participant_grant: String,
     pub join_expires_at_ms: u64,
     pub presence_lease_ref: String,
+    pub role: CommunityRoomRole,
     pub authority: CommunityRoomAuthority,
 }
 
@@ -105,7 +106,8 @@ impl CommunitySarahState {
     }
 }
 
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "snake_case")]
 pub enum CommunityRoomRole {
     Member,
     Moderator,
@@ -461,6 +463,31 @@ impl CommunitySarahRoom {
         Ok(())
     }
 
+    pub fn refresh_authority(
+        &mut self,
+        authority: CommunityRoomAuthority,
+        role: CommunityRoomRole,
+        now_ms: u64,
+    ) -> Result<()> {
+        let Some(context) = self.context.clone() else {
+            self.fail_closed("Room voice context is unavailable.");
+            bail!("community room context is not configured");
+        };
+        if let Err(error) = authority.validate(&context, now_ms) {
+            self.fail_closed("Room voice authority is invalid.");
+            return Err(error);
+        }
+        if authority.revision < self.last_authority_revision {
+            self.fail_closed("Room voice state is stale.");
+            bail!("community Sarah authority revision moved backwards");
+        }
+        self.last_authority_revision = authority.revision;
+        self.role = role;
+        self.failure = None;
+        self.authority = Some(authority);
+        Ok(())
+    }
+
     pub fn fail_closed(&mut self, reason: impl Into<String>) {
         self.lifecycle = CommunityCallLifecycle::Failed;
         self.sarah_state = CommunitySarahState::Failed;
@@ -480,6 +507,29 @@ impl CommunitySarahRoom {
         self.authority = None;
         self.failure = None;
         self.last_authority_revision = 0;
+    }
+
+    pub fn media_connecting(&mut self) {
+        if self.authority.is_some() {
+            self.lifecycle = CommunityCallLifecycle::Joining;
+        }
+    }
+
+    pub fn media_connected(&mut self) {
+        if self.authority.is_some() {
+            self.lifecycle = CommunityCallLifecycle::Joined;
+            self.failure = None;
+        }
+    }
+
+    pub fn set_sarah_speaking(&mut self, speaking: bool) {
+        if self.authority.is_some() {
+            self.sarah_state = if speaking {
+                CommunitySarahState::Speaking
+            } else {
+                CommunitySarahState::Idle
+            };
+        }
     }
 
     pub fn expire(&mut self, now_ms: u64) {
@@ -509,7 +559,10 @@ impl CommunitySarahRoom {
         }
         match control {
             CommunitySarahControl::Join => self.lifecycle == CommunityCallLifecycle::ReadyToJoin,
-            CommunitySarahControl::Leave => self.lifecycle == CommunityCallLifecycle::Joined,
+            CommunitySarahControl::Leave => matches!(
+                self.lifecycle,
+                CommunityCallLifecycle::Joining | CommunityCallLifecycle::Joined
+            ),
             CommunitySarahControl::Mute => self.lifecycle == CommunityCallLifecycle::Joined,
             CommunitySarahControl::Summon => {
                 self.lifecycle == CommunityCallLifecycle::Joined
@@ -981,6 +1034,7 @@ mod tests {
             participant_grant: "signed-livekit-grant".into(),
             join_expires_at_ms: 20_000,
             presence_lease_ref: authority.presence_lease_ref.clone(),
+            role: CommunityRoomRole::Member,
             authority,
         })
         .expect("serialize fixture admission");
@@ -1000,7 +1054,12 @@ mod tests {
             .expect("fixture local participant")
             .insert("ownerUserId".into(), Value::String("private-owner".into()));
         let decoded: CommunityRoomAdmission =
-            serde_json::from_value(value).expect("decode production join response");
+            serde_json::from_value(value.clone()).expect("decode production join response");
+        value
+            .as_object_mut()
+            .expect("fixture admission object")
+            .remove("role");
+        assert!(serde_json::from_value::<CommunityRoomAdmission>(value).is_err());
 
         decoded
             .validate(
@@ -1011,6 +1070,46 @@ mod tests {
                 NOW,
             )
             .expect("validate production admission");
-        assert!(!format!("{decoded:?}").contains("private-owner"));
+        assert!(
+            !serde_json::to_string(&decoded)
+                .expect("encode decoded admission")
+                .contains("private-owner")
+        );
+    }
+
+    #[test]
+    fn same_revision_refreshes_verified_roster_and_role() {
+        let mut room = room();
+        room.apply_authority(
+            authority(),
+            CommunityRoomRole::Member,
+            CommunitySarahState::Idle,
+            NOW,
+        )
+        .expect("apply initial authority");
+        let mut refreshed = authority();
+        refreshed
+            .verified_participants
+            .push(participant('c', "participant:remote"));
+        room.refresh_authority(refreshed, CommunityRoomRole::Moderator, NOW)
+            .expect("refresh current authority");
+
+        assert_eq!(room.role, CommunityRoomRole::Moderator);
+        assert_eq!(
+            room.authority
+                .as_ref()
+                .expect("refreshed authority")
+                .verified_participants
+                .len(),
+            2
+        );
+        room.media_connecting();
+        assert_eq!(room.lifecycle, CommunityCallLifecycle::Joining);
+        assert!(room.control_enabled(CommunitySarahControl::Leave));
+        room.media_connected();
+        assert_eq!(room.lifecycle, CommunityCallLifecycle::Joined);
+        room.leave();
+        assert_eq!(room.lifecycle, CommunityCallLifecycle::ReadyToJoin);
+        assert!(room.authority.is_none());
     }
 }

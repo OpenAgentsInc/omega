@@ -31,7 +31,7 @@ test-support = [
     "workspace/test-support",
     "agent/test-support",
 ]
-audio = ["dep:audio"]
+audio = ["dep:audio", "dep:cpal", "dep:livekit", "dep:rodio", "dep:tokio"]
 unit-eval = []
 
 [dependencies]
@@ -56,6 +56,7 @@ anyhow.workspace = true
 app_identity.workspace = true
 heapless.workspace = true
 audio = { workspace = true, optional = true }
+cpal = { workspace = true, optional = true }
 base64.workspace = true
 buffer_diff.workspace = true
 chrono.workspace = true
@@ -92,6 +93,7 @@ language.workspace = true
 language_model.workspace = true
 language_models.workspace = true
 log.workspace = true
+livekit = { workspace = true, optional = true }
 lru.workspace = true
 lsp.workspace = true
 markdown.workspace = true
@@ -118,6 +120,7 @@ omega_invites.workspace = true
 omega_signer_broker.workspace = true
 nostr.workspace = true
 ordered-float.workspace = true
+rodio = { workspace = true, optional = true }
 parking_lot.workspace = true
 paths.workspace = true
 picker.workspace = true
@@ -156,6 +159,7 @@ ui.workspace = true
 unicode-script.workspace = true
 unicode-segmentation.workspace = true
 url.workspace = true
+tokio = { workspace = true, optional = true }
 util.workspace = true
 uuid.workspace = true
 vim.workspace = true
