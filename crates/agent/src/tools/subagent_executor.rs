@@ -343,6 +343,9 @@ mod tests {
     fn cursor() -> InstalledAgent {
         InstalledAgent::new("cursor", "Cursor")
     }
+    fn scv() -> InstalledAgent {
+        InstalledAgent::new("scv", "SCV")
+    }
 
     fn known() -> Vec<InstalledAgent> {
         vec![codex(), claude(), grok(), cursor()]
@@ -376,6 +379,18 @@ mod tests {
         assert_eq!(
             resolution.resolved().map(SubagentExecutor::class),
             Some(ExecutorClass::ExternalAcp)
+        );
+    }
+
+    #[test]
+    fn scv_resolves_as_an_external_acp_executor() {
+        let resolution = resolve_subagent_executor(Some("scv"), &[scv()], &[scv()]);
+        assert_eq!(
+            resolution,
+            ExecutorResolution::Resolved(SubagentExecutor::ExternalAcp {
+                id: "scv".into(),
+                name: "SCV".into(),
+            })
         );
     }
 

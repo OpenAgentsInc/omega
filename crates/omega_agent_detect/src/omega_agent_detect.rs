@@ -75,6 +75,11 @@ pub const CANDIDATES: &[AgentCandidate] = &[
         name: "Cursor",
         binaries: &["cursor-agent"],
     },
+    AgentCandidate {
+        id: "scv",
+        name: "SCV",
+        binaries: &["scv"],
+    },
 ];
 
 /// An agent found on disk, with the file that was found.

@@ -105,7 +105,10 @@ mod tests {
         let template = SystemPromptTemplate {
             project: &project,
             available_tools: vec!["echo".into(), "spawn_agent".into()],
-            available_executors: vec![crate::InstalledAgent::new("grok", "Grok")],
+            available_executors: vec![
+                crate::InstalledAgent::new("grok", "Grok"),
+                crate::InstalledAgent::new("scv", "SCV"),
+            ],
             model_name: Some("test-model".to_string()),
             date: "2026-01-01".to_string(),
             user_agents_md: None,
@@ -120,6 +123,7 @@ mod tests {
         assert!(rendered.contains("## Fixing Diagnostics"));
         assert!(rendered.contains("test-model"));
         assert!(rendered.contains("`grok` (Grok)"));
+        assert!(rendered.contains("`scv` (SCV)"));
     }
 
     #[test]
@@ -141,6 +145,7 @@ mod tests {
                     crate::InstalledAgent::new("codex-acp", "Codex"),
                     crate::InstalledAgent::new("claude-acp", "Claude"),
                     crate::InstalledAgent::new("grok", "Grok"),
+                    crate::InstalledAgent::new("scv", "SCV"),
                 ],
                 model_name: Some("google/gemini-3.6-flash".to_string()),
                 date: "2026-07-27".to_string(),
@@ -181,6 +186,7 @@ mod tests {
                 crate::InstalledAgent::new("codex-acp", "Codex"),
                 crate::InstalledAgent::new("claude-acp", "Claude"),
                 crate::InstalledAgent::new("grok", "Grok"),
+                crate::InstalledAgent::new("scv", "SCV"),
             ],
             model_name: None,
             date: "2026-07-27".to_string(),
@@ -215,6 +221,7 @@ mod tests {
         assert!(rendered.contains("`codex-acp` (Codex)"));
         assert!(rendered.contains("`claude-acp` (Claude)"));
         assert!(rendered.contains("`grok` (Grok)"));
+        assert!(rendered.contains("`scv` (SCV)"));
         assert!(rendered.contains("Your identity is Omega"));
         assert!(!rendered.contains("Model:"));
     }
