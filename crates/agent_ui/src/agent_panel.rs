@@ -5777,13 +5777,6 @@ impl AgentPanel {
                                     .apply_snapshot(&channel_id_for_snapshot, snapshot.clone());
                                 cx.notify();
                             }
-                            crate::omega_public_channel_view::PublicChannelViewEvent::SarahIntent(
-                                _,
-                            ) => {
-                                log::debug!(
-                                    "community Sarah intent emitted without a production control contract"
-                                );
-                            }
                         }
                     },
                 );

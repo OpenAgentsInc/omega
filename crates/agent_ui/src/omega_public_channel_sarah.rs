@@ -7,6 +7,7 @@
 
 use anyhow::{Result, bail};
 use collections::HashSet;
+use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 
 pub const ROOM_AUTHORITY_SCHEMA: &str = "openagents.sarah.livekit-room-authority.v1";
@@ -15,6 +16,46 @@ pub const COMMUNITY_CAPABILITY_PROFILE: &str = "community_member_v1";
 pub const PROCESSOR_DISCLOSURE: &str = "sarah_openagents_openai_v1";
 pub const COMMUNITY_COHORT_POLICY: &str = "authenticated_allowlisted";
 pub const FLOOR_LEASE_MS: u64 = 30_000;
+
+#[derive(Clone, Debug, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct CommunityRoomAdmission {
+    pub schema: String,
+    pub livekit_url: String,
+    pub room_ref: String,
+    pub room_epoch: u64,
+    pub participant_ref: String,
+    pub sarah_participant_ref: String,
+    pub participant_grant: String,
+    pub join_expires_at_ms: u64,
+    pub presence_lease_ref: String,
+    pub authority: CommunityRoomAuthority,
+}
+
+impl CommunityRoomAdmission {
+    pub fn validate(&self, context: &CommunityRoomContext, now_ms: u64) -> Result<()> {
+        let endpoint = url::Url::parse(&self.livekit_url)?;
+        if self.schema != ROOM_AUTHORITY_SCHEMA
+            || endpoint.scheme() != "wss"
+            || endpoint.host_str() != Some("livekit.openagents.com")
+            || !endpoint.username().is_empty()
+            || endpoint.password().is_some()
+            || endpoint.query().is_some()
+            || endpoint.fragment().is_some()
+            || self.join_expires_at_ms <= now_ms
+            || self.participant_grant.trim().is_empty()
+            || self.participant_grant.len() > 16 * 1024
+            || self.room_ref != self.authority.room_ref
+            || self.room_epoch != self.authority.room_epoch
+            || self.participant_ref != self.authority.local_participant.participant_ref
+            || self.sarah_participant_ref != self.authority.sarah_participant_ref
+            || self.presence_lease_ref != self.authority.presence_lease_ref
+        {
+            bail!("community room admission did not match its authority");
+        }
+        self.authority.validate(context, now_ms)
+    }
+}
 
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
 pub enum CommunityCallLifecycle {
@@ -76,9 +117,11 @@ pub struct CommunityRoomContext {
     pub channel_ref: String,
 }
 
-#[derive(Clone, Debug, Eq, PartialEq)]
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
 pub struct VerifiedParticipantMapping {
     pub user_ref_digest: String,
+    #[serde(rename = "memberPubkey")]
     pub pubkey: String,
     pub participant_ref: String,
     pub membership_revision: String,
@@ -86,7 +129,8 @@ pub struct VerifiedParticipantMapping {
     pub room_epoch: u64,
 }
 
-#[derive(Clone, Debug, Eq, PartialEq)]
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
 pub struct CommunityFloorLease {
     pub schema: String,
     pub lease_ref: String,
@@ -108,13 +152,20 @@ pub struct CommunityFloorLease {
     pub expires_at_ms: u64,
 }
 
-#[derive(Clone, Debug, Eq, PartialEq)]
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(
+    tag = "state",
+    rename_all = "snake_case",
+    rename_all_fields = "camelCase"
+)]
 pub enum CommunityFloorState {
     Available {
         presence_lease_ref: String,
         issuance: u64,
     },
-    Held(CommunityFloorLease),
+    Held {
+        lease: CommunityFloorLease,
+    },
     Stopped {
         presence_lease_ref: String,
         issuance: u64,
@@ -122,7 +173,8 @@ pub enum CommunityFloorState {
     },
 }
 
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "snake_case")]
 pub enum CommunityFloorStopReason {
     ModeratorStop,
     Timeout,
@@ -136,16 +188,17 @@ impl CommunityFloorState {
     pub fn label(&self, local_user_ref_digest: &str) -> String {
         match self {
             Self::Available { .. } => "Floor available".into(),
-            Self::Held(lease) if lease.holder_user_ref_digest == local_user_ref_digest => {
+            Self::Held { lease } if lease.holder_user_ref_digest == local_user_ref_digest => {
                 "You have the floor".into()
             }
-            Self::Held(_) => "Floor held by another member".into(),
+            Self::Held { .. } => "Floor held by another member".into(),
             Self::Stopped { .. } => "Floor stopped".into(),
         }
     }
 }
 
-#[derive(Clone, Debug, Eq, PartialEq)]
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
 pub struct CommunityRoomAuthority {
     pub schema: String,
     pub principal: String,
@@ -154,6 +207,7 @@ pub struct CommunityRoomAuthority {
     pub cohort_policy: String,
     pub revision: u64,
     pub sarah_pubkey: String,
+    #[serde(rename = "leaseRef")]
     pub presence_lease_ref: String,
     pub community_ref: String,
     pub channel_ref: String,
@@ -264,7 +318,7 @@ impl CommunityRoomAuthority {
             } if presence_lease_ref != &self.presence_lease_ref => {
                 bail!("community Sarah floor used another presence lease")
             }
-            CommunityFloorState::Held(lease) => {
+            CommunityFloorState::Held { lease } => {
                 for digest in [
                     lease.membership_revision.as_str(),
                     lease.holder_user_ref_digest.as_str(),
@@ -415,6 +469,19 @@ impl CommunitySarahRoom {
         self.failure = Some(reason.into());
     }
 
+    pub fn leave(&mut self) {
+        self.lifecycle = if self.control_contract_available && self.context.is_some() {
+            CommunityCallLifecycle::ReadyToJoin
+        } else {
+            CommunityCallLifecycle::Unavailable
+        };
+        self.sarah_state = CommunitySarahState::Absent;
+        self.muted = false;
+        self.authority = None;
+        self.failure = None;
+        self.last_authority_revision = 0;
+    }
+
     pub fn expire(&mut self, now_ms: u64) {
         if self
             .authority
@@ -471,7 +538,7 @@ impl CommunitySarahRoom {
                     && self.role == CommunityRoomRole::Moderator
                     && matches!(
                         self.authority.as_ref().map(|authority| &authority.floor),
-                        Some(CommunityFloorState::Held(_))
+                        Some(CommunityFloorState::Held { .. })
                     )
             }
         }
@@ -556,7 +623,7 @@ impl CommunitySarahRoom {
             .authority
             .as_ref()
             .ok_or_else(|| anyhow::anyhow!("community Sarah authority is unavailable"))?;
-        let CommunityFloorState::Held(lease) = &authority.floor else {
+        let CommunityFloorState::Held { lease } = &authority.floor else {
             bail!("community Sarah floor is not held");
         };
         if lease.holder_user_ref_digest != authority.local_participant.user_ref_digest
@@ -737,26 +804,28 @@ mod tests {
         let target = participant('f', "participant:target");
         let mut authority = authority();
         authority.verified_participants.push(target.clone());
-        authority.floor = CommunityFloorState::Held(CommunityFloorLease {
-            schema: ROOM_AUTHORITY_SCHEMA.into(),
-            lease_ref: "lease:local".into(),
-            presence_lease_ref: authority.presence_lease_ref.clone(),
-            community_ref: authority.community_ref.clone(),
-            channel_ref: authority.channel_ref.clone(),
-            membership_revision: authority.membership_revision.clone(),
-            room_ref: authority.room_ref.clone(),
-            room_epoch: authority.room_epoch,
-            session_ref: authority.session_ref.clone(),
-            generation: authority.generation,
-            issuance: 4,
-            holder_user_ref_digest: local.user_ref_digest,
-            holder_pubkey: local.pubkey,
-            holder_participant_ref: local.participant_ref,
-            holder_safety_identifier: digest('b'),
-            nonce_digest: digest('b'),
-            issued_at_ms: 950,
-            expires_at_ms: 10_000,
-        });
+        authority.floor = CommunityFloorState::Held {
+            lease: CommunityFloorLease {
+                schema: ROOM_AUTHORITY_SCHEMA.into(),
+                lease_ref: "lease:local".into(),
+                presence_lease_ref: authority.presence_lease_ref.clone(),
+                community_ref: authority.community_ref.clone(),
+                channel_ref: authority.channel_ref.clone(),
+                membership_revision: authority.membership_revision.clone(),
+                room_ref: authority.room_ref.clone(),
+                room_epoch: authority.room_epoch,
+                session_ref: authority.session_ref.clone(),
+                generation: authority.generation,
+                issuance: 4,
+                holder_user_ref_digest: local.user_ref_digest,
+                holder_pubkey: local.pubkey,
+                holder_participant_ref: local.participant_ref,
+                holder_safety_identifier: digest('b'),
+                nonce_digest: digest('b'),
+                issued_at_ms: 950,
+                expires_at_ms: 10_000,
+            },
+        };
         let mut room = room();
         room.apply_authority(
             authority,
@@ -807,26 +876,28 @@ mod tests {
         assert!(replay_room.authority.is_none());
 
         let mut forged = authority();
-        forged.floor = CommunityFloorState::Held(CommunityFloorLease {
-            schema: ROOM_AUTHORITY_SCHEMA.into(),
-            lease_ref: "lease:forged".into(),
-            presence_lease_ref: forged.presence_lease_ref.clone(),
-            community_ref: forged.community_ref.clone(),
-            channel_ref: forged.channel_ref.clone(),
-            membership_revision: forged.membership_revision.clone(),
-            room_ref: forged.room_ref.clone(),
-            room_epoch: forged.room_epoch,
-            session_ref: forged.session_ref.clone(),
-            generation: forged.generation,
-            issuance: 4,
-            holder_user_ref_digest: digest('f'),
-            holder_pubkey: digest('f'),
-            holder_participant_ref: "participant:other-room".into(),
-            holder_safety_identifier: digest('f'),
-            nonce_digest: digest('f'),
-            issued_at_ms: 950,
-            expires_at_ms: 10_000,
-        });
+        forged.floor = CommunityFloorState::Held {
+            lease: CommunityFloorLease {
+                schema: ROOM_AUTHORITY_SCHEMA.into(),
+                lease_ref: "lease:forged".into(),
+                presence_lease_ref: forged.presence_lease_ref.clone(),
+                community_ref: forged.community_ref.clone(),
+                channel_ref: forged.channel_ref.clone(),
+                membership_revision: forged.membership_revision.clone(),
+                room_ref: forged.room_ref.clone(),
+                room_epoch: forged.room_epoch,
+                session_ref: forged.session_ref.clone(),
+                generation: forged.generation,
+                issuance: 4,
+                holder_user_ref_digest: digest('f'),
+                holder_pubkey: digest('f'),
+                holder_participant_ref: "participant:other-room".into(),
+                holder_safety_identifier: digest('f'),
+                nonce_digest: digest('f'),
+                issued_at_ms: 950,
+                expires_at_ms: 10_000,
+            },
+        };
         let mut forged_room = room();
         assert!(
             forged_room
@@ -895,5 +966,51 @@ mod tests {
         assert_eq!(room.microphone_label(), "Mic on");
         room.muted = true;
         assert_eq!(room.microphone_label(), "Muted");
+    }
+
+    #[test]
+    fn production_join_response_drops_owner_ids_and_validates_admission() {
+        let authority = authority();
+        let mut value = serde_json::to_value(CommunityRoomAdmission {
+            schema: ROOM_AUTHORITY_SCHEMA.into(),
+            livekit_url: "wss://livekit.openagents.com".into(),
+            room_ref: authority.room_ref.clone(),
+            room_epoch: authority.room_epoch,
+            participant_ref: authority.local_participant.participant_ref.clone(),
+            sarah_participant_ref: authority.sarah_participant_ref.clone(),
+            participant_grant: "signed-livekit-grant".into(),
+            join_expires_at_ms: 20_000,
+            presence_lease_ref: authority.presence_lease_ref.clone(),
+            authority,
+        })
+        .expect("serialize fixture admission");
+        let authority = value
+            .get_mut("authority")
+            .and_then(Value::as_object_mut)
+            .expect("fixture authority object");
+        assert!(
+            authority
+                .get("floor")
+                .and_then(Value::as_object)
+                .is_some_and(|floor| floor.contains_key("presenceLeaseRef"))
+        );
+        authority
+            .get_mut("localParticipant")
+            .and_then(Value::as_object_mut)
+            .expect("fixture local participant")
+            .insert("ownerUserId".into(), Value::String("private-owner".into()));
+        let decoded: CommunityRoomAdmission =
+            serde_json::from_value(value).expect("decode production join response");
+
+        decoded
+            .validate(
+                &CommunityRoomContext {
+                    community_ref: "community:testers".into(),
+                    channel_ref: "channel:agent-chat".into(),
+                },
+                NOW,
+            )
+            .expect("validate production admission");
+        assert!(!format!("{decoded:?}").contains("private-owner"));
     }
 }

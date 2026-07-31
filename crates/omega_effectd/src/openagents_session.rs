@@ -5,7 +5,8 @@ use base64::Engine as _;
 use credentials_provider::CredentialsProvider;
 use gpui::{App, AsyncApp, Global};
 use http_client::{AsyncBody, HttpClient, Method, Request, StatusCode};
-use serde::{Deserialize, Serialize};
+use serde::{Deserialize, Serialize, de::DeserializeOwned};
+use serde_json::Value;
 use smol::io::AsyncReadExt as _;
 
 use super::openagents_nostr_auth::HostedSessionBlocker;
@@ -19,6 +20,7 @@ const OPENAGENTS_REFRESH_HEADER: &str = "x-openagents-refresh-token";
 const OPENAGENTS_CREDENTIAL_USERNAME: &str = "omega";
 const MAX_HTTP_BODY_BYTES: u64 = 64 * 1024;
 const MAX_ACCESS_TOKEN_BYTES: usize = 16 * 1024;
+const COMMUNITY_SARAH_PATH_PREFIX: &str = "/api/sarah/livekit/room/";
 
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq, Serialize)]
 #[serde(rename_all = "snake_case")]
@@ -156,6 +158,11 @@ struct RevokedSessionResponse {
     signed_out: bool,
     access_revoked: bool,
     refresh_revoked: bool,
+}
+
+#[derive(Deserialize)]
+struct CommunitySarahErrorResponse {
+    error: String,
 }
 
 enum VerificationResult {
@@ -453,6 +460,52 @@ impl OpenAgentsSession {
                 None
             }
         }
+    }
+
+    pub async fn community_sarah_request<Response>(
+        &self,
+        path: &str,
+        body: &Value,
+        cx: &mut AsyncApp,
+    ) -> Result<Response>
+    where
+        Response: DeserializeOwned,
+    {
+        if !matches!(
+            path,
+            "/api/sarah/livekit/room/join"
+                | "/api/sarah/livekit/room/summon"
+                | "/api/sarah/livekit/room/remove"
+                | "/api/sarah/livekit/room/floor/member"
+                | "/api/sarah/livekit/room/floor/moderator"
+        ) || !path.starts_with(COMMUNITY_SARAH_PATH_PREFIX)
+        {
+            return Err(anyhow!("invalid community Sarah API path"));
+        }
+        let verified = self
+            .resolve_verified(cx)
+            .await
+            .ok_or_else(|| anyhow!("a verified OpenAgents session is required"))?;
+        let endpoint = format!("{}{}", verified.base_url, path);
+        let encoded = serde_json::to_vec(body).context("encoding community Sarah request")?;
+        if encoded.len() > 4_096 {
+            return Err(anyhow!("community Sarah request was too large"));
+        }
+        let request = Request::builder()
+            .method(Method::POST)
+            .uri(endpoint)
+            .header("authorization", format!("Bearer {}", verified.access_token))
+            .header("content-type", "application/json")
+            .body(AsyncBody::from(encoded))?;
+        let (status, response_body) = send_json(&self.http_client, request).await?;
+        if !status.is_success() {
+            let error = serde_json::from_slice::<CommunitySarahErrorResponse>(&response_body)
+                .ok()
+                .map(|response| response.error)
+                .unwrap_or_else(|| format!("HTTP {}", status.as_u16()));
+            return Err(anyhow!("community Sarah request refused: {error}"));
+        }
+        serde_json::from_slice(&response_body).context("decoding community Sarah response")
     }
 
     pub async fn create_sarah_voice_session(
