@@ -1551,6 +1551,37 @@ impl IdentityService {
         }
     }
 
+    /// The account selection this service acts for, resolved live when the
+    /// construction-time capture predates the account.
+    ///
+    /// `for_channel_data_root` snapshots the selection once, at construction.
+    /// A service built before its identity exists — first-run provisioning,
+    /// the startup hydration candidate, every fresh-directory test — carried
+    /// `None` forever and answered every later selection check with
+    /// `StaleAccountSelection`, even though the account it was about to act
+    /// for had become the active selection at the exact custody root this
+    /// service reads (owner outage 2026-07-30, `OMEGA-DELTA-0201`). The live
+    /// resolution only counts when the active account's storage root is the
+    /// root this service was built on; a different root is a genuinely
+    /// different account and stays stale.
+    fn current_selection_token(&self) -> Result<AccountSelectionToken, CustodyError> {
+        if let Some(token) = self.selection_token.as_ref() {
+            return Ok(token.clone());
+        }
+        let data_root = self
+            .selection_data_root
+            .as_ref()
+            .ok_or(CustodyError::StaleAccountSelection)?;
+        let (root, token) =
+            AccountRegistryService::for_channel_data_root(self.channel, data_root.clone())
+                .active_storage()
+                .map_err(|_| CustodyError::StaleAccountSelection)?;
+        if self.paths.account_path != root.join("identity.account.json") {
+            return Err(CustodyError::StaleAccountSelection);
+        }
+        Ok(token)
+    }
+
     fn require_current_account_selection(&self) -> Result<(), CustodyError> {
         if !self.selection_required {
             return Ok(());
@@ -1559,12 +1590,9 @@ impl IdentityService {
             .selection_data_root
             .as_ref()
             .ok_or(CustodyError::StaleAccountSelection)?;
-        let token = self
-            .selection_token
-            .as_ref()
-            .ok_or(CustodyError::StaleAccountSelection)?;
+        let token = self.current_selection_token()?;
         AccountRegistryService::for_channel_data_root(self.channel, data_root.clone())
-            .validate_selection(token)
+            .validate_selection(&token)
             .map_err(|_| CustodyError::StaleAccountSelection)
     }
 
@@ -1592,12 +1620,9 @@ impl IdentityService {
             .selection_data_root
             .as_ref()
             .ok_or(CustodyError::StaleAccountSelection)?;
-        let token = self
-            .selection_token
-            .as_ref()
-            .ok_or(CustodyError::StaleAccountSelection)?;
+        let token = self.current_selection_token()?;
         AccountRegistryService::for_channel_data_root(self.channel, data_root.clone())
-            .validate_signing_selection(token)
+            .validate_signing_selection(&token)
             .map_err(|_| CustodyError::StaleAccountSelection)
     }
 
@@ -1617,12 +1642,9 @@ impl IdentityService {
             .selection_data_root
             .as_ref()
             .ok_or(CustodyError::StaleAccountSelection)?;
-        let token = self
-            .selection_token
-            .as_ref()
-            .ok_or(CustodyError::StaleAccountSelection)?;
+        let token = self.current_selection_token()?;
         AccountRegistryService::for_channel_data_root(self.channel, data_root.clone())
-            .record_signer_use(token, unix_time_now())
+            .record_signer_use(&token, unix_time_now())
             .map(|_| ())
             .map_err(|_| CustodyError::StaleAccountSelection)
     }

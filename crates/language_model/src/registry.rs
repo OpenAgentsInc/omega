@@ -128,6 +128,13 @@ impl LanguageModelRegistry {
         cx.global::<GlobalLanguageModelRegistry>().0.clone()
     }
 
+    /// The registry, in processes that installed one. Some test harnesses do
+    /// not, and an error-recovery path must not panic there.
+    pub fn try_global(cx: &App) -> Option<Entity<Self>> {
+        cx.try_global::<GlobalLanguageModelRegistry>()
+            .map(|global| global.0.clone())
+    }
+
     pub fn read_global(cx: &App) -> &Self {
         cx.global::<GlobalLanguageModelRegistry>().0.read(cx)
     }

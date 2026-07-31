@@ -315,7 +315,45 @@ impl AccountRegistryService {
     }
 
     pub fn partition_identity_service(&self, account_ref: &AccountRef) -> IdentityService {
-        IdentityService::for_account_data_root(self.channel, self.data_root.clone(), account_ref)
+        // A migrated pre-multi-account profile keeps its custody documents at
+        // the legacy identity root, not in an `accounts/<digest>` partition.
+        // Resolving the partition path unconditionally made startup hydration
+        // inspect an empty directory and report custody `Absent` on exactly
+        // the profiles that already had a working identity (owner outage
+        // 2026-07-30). Resolve the registered storage locator first; only a
+        // genuinely partitioned (or unknown) account uses the partition path.
+        let legacy_root = self.inspect_storage_root(account_ref).ok().flatten();
+        match legacy_root {
+            Some(root) => IdentityService::for_identity_root(self.channel, root),
+            None => IdentityService::for_account_data_root(
+                self.channel,
+                self.data_root.clone(),
+                account_ref,
+            ),
+        }
+    }
+
+    /// The custody root for a registered legacy-root account, `Ok(None)` for
+    /// partitioned/remote/unregistered accounts.
+    fn inspect_storage_root(
+        &self,
+        account_ref: &AccountRef,
+    ) -> Result<Option<PathBuf>, AccountRegistryError> {
+        let _guard = IdentityMutationGuard::acquire(&self.locator)
+            .map_err(|_| AccountRegistryError::MutationLock)?;
+        let registry = self.load_or_migrate_registry_locked()?;
+        let Some(entry) = registry
+            .accounts
+            .iter()
+            .find(|entry| &entry.account_ref == account_ref)
+        else {
+            return Ok(None);
+        };
+        match entry.storage {
+            AccountStorageLocator::LegacyRoot => Ok(Some(self.identity_root.clone())),
+            AccountStorageLocator::Partitioned { .. }
+            | AccountStorageLocator::RemoteNip46 { .. } => Ok(None),
+        }
     }
 
     pub fn add_local_account(
@@ -653,16 +691,20 @@ impl AccountRegistryService {
         self.require_selection_locked(&registry, token)?;
         let entry = find_account_mut(&mut registry, &token.account_ref)
             .ok_or(AccountRegistryError::AccountNotFound)?;
-        let recovery_available = match entry.storage {
-            AccountStorageLocator::RemoteNip46 { .. } => {
-                entry.recovery == RecoveryProtectionState::NotApplicable
-            }
-            _ => entry.recovery == RecoveryProtectionState::Protected,
-        };
-        if entry.lifecycle != AccountLifecycleState::Active
-            || entry.signer.availability != SignerAvailability::Ready
-            || !recovery_available
-        {
+        // Mirrors the `validate_signing_selection` gate: candidate and
+        // activating accounts sign (and therefore record use); recovery
+        // protection is not a precondition for recording a successful use.
+        // Requiring `Active` + `Protected` here failed the whole signing call
+        // AFTER a valid signature existed on migrated pre-multi-account
+        // profiles (owner outage 2026-07-30).
+        let lifecycle_signable = matches!(
+            entry.lifecycle,
+            AccountLifecycleState::Active
+                | AccountLifecycleState::CandidateLocal
+                | AccountLifecycleState::CandidateExisting
+                | AccountLifecycleState::Activating
+        );
+        if !lifecycle_signable || entry.signer.availability != SignerAvailability::Ready {
             return Err(AccountRegistryError::AccountUnavailable);
         }
         entry.signer.last_successful_use = Some(used_at);
@@ -891,19 +933,26 @@ impl AccountRegistryService {
             .iter()
             .find(|entry| entry.account_ref == token.account_ref)
             .ok_or(AccountRegistryError::AccountNotFound)?;
-        let recovery_available = match entry.storage {
-            AccountStorageLocator::RemoteNip46 { .. } => {
-                entry.recovery == RecoveryProtectionState::NotApplicable
-            }
-            _ => entry.recovery == RecoveryProtectionState::Protected,
-        };
+        // Signing custody is "the selected account's signer is present and
+        // ready", not "onboarding is finished". A pre-multi-account identity
+        // migrates in as `CandidateExisting` with `recovery: Needed` until the
+        // owner completes the activation ceremony; requiring `Active` +
+        // `Protected` here made every hosted sign-in fail on exactly the
+        // profiles that were already signing before multi-account landed
+        // (owner outage 2026-07-30). Candidate and activating lifecycles stay
+        // signable; recovery protection gates activation and account
+        // switching, not proof signing.
+        let lifecycle_signable = matches!(
+            entry.lifecycle,
+            AccountLifecycleState::Active
+                | AccountLifecycleState::CandidateLocal
+                | AccountLifecycleState::CandidateExisting
+                | AccountLifecycleState::Activating
+        );
         let signer_available = entry.signer.availability == SignerAvailability::Ready
             || (entry.signer.kind == SignerKind::RemoteNip46
                 && entry.signer.availability == SignerAvailability::Offline);
-        if entry.lifecycle != AccountLifecycleState::Active
-            || !signer_available
-            || !recovery_available
-        {
+        if !lifecycle_signable || !signer_available {
             return Err(AccountRegistryError::AccountUnavailable);
         }
         Ok(())
@@ -1921,9 +1970,9 @@ mod tests {
 
     use super::*;
     use crate::{
-        IDENTITY_ACCOUNT_SCHEMA, IDENTITY_ACCOUNT_SCHEMA_VERSION, IdentityActivationState,
-        IdentityCandidateOrigin, RecoveryProtectionRecord, SigningPurpose, UnsignedEventTemplate,
-        secret::SecretKeyMaterial,
+        AdmittedSigningRequest, IDENTITY_ACCOUNT_SCHEMA, IDENTITY_ACCOUNT_SCHEMA_VERSION,
+        IdentityActivationState, IdentityCandidateOrigin, RecoveryProtectionRecord, SigningPurpose,
+        UnsignedEventTemplate, secret::SecretKeyMaterial,
     };
 
     fn active_account(root: &Path, secret_byte: u8) -> IdentityAccountRecord {
@@ -1980,6 +2029,134 @@ mod tests {
             .register_partitioned_account(&account, RecoveryProtectionState::Protected)
             .expect("register fixture account");
         account
+    }
+
+    /// The exact 2026-07-30 owner profile shape: a pre-multi-account identity
+    /// migrated to the registry as `legacy_root` + `candidate_existing` with
+    /// `recovery: needed`. Signing custody exists (the secret is present and
+    /// the signer is ready), so hosted proof signing must work — the
+    /// activation ceremony and recovery protection gate onboarding, not
+    /// signing.
+    fn candidate_existing_account(root: &Path, fixture: &str) -> IdentityAccountRecord {
+        let service = IdentityService::for_identity_root(AppChannel::Dev, root.to_path_buf());
+        service
+            .create(ReceiptRef::new(fixture).expect("receipt"))
+            .expect("create fixture identity");
+        let mut account = service.inspect_account().expect("inspect fixture account");
+        account.state = IdentityActivationState::CandidateExisting;
+        account.candidate_origin = IdentityCandidateOrigin::Existing;
+        account.activation_ref = None;
+        write_json_document(&root.join("identity.account.json"), &account)
+            .expect("write fixture account");
+        account
+    }
+
+    #[test]
+    fn migrated_candidate_existing_account_without_recovery_signs() {
+        let temporary_directory = tempfile::tempdir().expect("temporary directory");
+        let identity_root = temporary_directory.path().join("identity");
+        let account = candidate_existing_account(&identity_root, "owner-shape-41");
+        let service = AccountRegistryService::for_channel_data_root(
+            AppChannel::Dev,
+            temporary_directory.path().to_path_buf(),
+        );
+        let dashboard = service.inspect().expect("migrate registry");
+        assert_eq!(
+            dashboard.accounts[0].lifecycle,
+            AccountLifecycleState::CandidateExisting
+        );
+        assert_eq!(
+            dashboard.accounts[0].recovery,
+            RecoveryProtectionState::Needed
+        );
+
+        let token = service.selection_token().expect("selection token");
+        service
+            .validate_signing_selection(&token)
+            .expect("a migrated candidate account with a ready local signer signs");
+
+        // End to end through custody: the post-signature use recording must
+        // not fail the signature either (it did before 2026-07-30).
+        let identity_service = IdentityService::for_channel_data_root(
+            AppChannel::Dev,
+            temporary_directory.path().to_path_buf(),
+        );
+        let request = AdmittedSigningRequest {
+            request_ref: ReceiptRef::new("nip98.fixture").expect("request ref"),
+            identity_ref: account.identity.identity_ref().clone(),
+            purpose: SigningPurpose::NostrEvent,
+            event: UnsignedEventTemplate {
+                created_at: 1_700_000_000,
+                kind: 27_235,
+                tags: vec![
+                    vec!["u".to_string(), "https://openagents.com/api".to_string()],
+                    vec!["method".to_string(), "POST".to_string()],
+                ],
+                content: String::new(),
+            },
+        };
+        let result = identity_service
+            .sign(&request)
+            .expect("hosted proof signing works on the migrated owner profile shape");
+        assert_eq!(result.identity, account.identity);
+    }
+
+    #[test]
+    fn signing_selection_still_refuses_signed_out_and_unready_accounts() {
+        let temporary_directory = tempfile::tempdir().expect("temporary directory");
+        let identity_root = temporary_directory.path().join("identity");
+        candidate_existing_account(&identity_root, "owner-shape-42");
+        let service = AccountRegistryService::for_channel_data_root(
+            AppChannel::Dev,
+            temporary_directory.path().to_path_buf(),
+        );
+        service.inspect().expect("migrate registry");
+        let token = service.selection_token().expect("selection token");
+        service
+            .sign_out(token.generation)
+            .expect("sign out the active account");
+        assert!(matches!(
+            service.validate_signing_selection(&token),
+            Err(AccountRegistryError::StaleSelection)
+        ));
+    }
+
+    #[test]
+    fn partition_identity_service_resolves_legacy_root_storage() {
+        let temporary_directory = tempfile::tempdir().expect("temporary directory");
+        let identity_root = temporary_directory.path().join("identity");
+        let account = candidate_existing_account(&identity_root, "owner-shape-43");
+        let service = AccountRegistryService::for_channel_data_root(
+            AppChannel::Dev,
+            temporary_directory.path().to_path_buf(),
+        );
+        service.inspect().expect("migrate registry");
+
+        // Before 2026-07-30 this resolved the (empty) partition directory and
+        // reported custody `Absent`, which killed startup identity hydration
+        // on migrated profiles.
+        let inspected = service
+            .partition_identity_service(&account.account_ref)
+            .inspect_account()
+            .expect("legacy-root custody resolves through the account service");
+        assert_eq!(inspected.account_ref, account.account_ref);
+
+        // A genuinely partitioned account still resolves its partition.
+        let dashboard = service
+            .add_local_account(ReceiptRef::new("partition-fixture").expect("receipt"))
+            .expect("add partitioned local account");
+        let added_ref = dashboard
+            .accounts
+            .iter()
+            .find(|entry| entry.account_ref != account.account_ref)
+            .expect("added account")
+            .account_ref
+            .clone();
+        let partitioned = service
+            .partition_identity_service(&added_ref)
+            .inspect_account()
+            .expect("partitioned custody still resolves");
+        assert_eq!(partitioned.account_ref, added_ref);
     }
 
     #[test]
@@ -2310,10 +2487,10 @@ mod tests {
                 .validate_current_account_selection()
                 .is_ok()
         );
-        assert!(matches!(
-            candidate_service.validate_account_selection(),
-            Err(CustodyError::StaleAccountSelection)
-        ));
+        // Owner direction 2026-07-30: a candidate account with a ready local
+        // signer signs (hosted login proofs must not wait on the activation
+        // ceremony); the ceremony below still gates durable identity actions.
+        assert!(candidate_service.validate_account_selection().is_ok());
         let now = unix_time_now();
         assert!(
             candidate_service

@@ -189,6 +189,7 @@ pub const ENFORCED_DELTAS: &[&str] = &[
     "OMEGA-DELTA-0198",
     "OMEGA-DELTA-0199",
     "OMEGA-DELTA-0200",
+    "OMEGA-DELTA-0201",
 ];
 
 /// The concise product contract adjacent to the delta registry.
@@ -3984,19 +3985,21 @@ mod tests {
     /// OMEGA-DELTA-0013. The shipped default model is pinned by name.
     ///
     /// The service-isolation test asserts only that the default provider is
-    /// `google`, because what it protects is that the default never points at
-    /// a Zed service. That leaves the model string free: a rebase could swap
-    /// `gemini-3.6-flash` for any other Google model and every existing check
-    /// would still pass. The owner chose this model specifically, so it is
-    /// pinned here by name.
+    /// `openagents`, because what it protects is that the default never
+    /// points at a Zed service. That leaves the model string free: a rebase
+    /// could swap `gpt-5.6-luna` for any other hosted model and every
+    /// existing check would still pass. The owner chose this model
+    /// specifically (2026-07-30: the core Omega Agent defaults to GPT-5.6
+    /// Luna through the OpenAgents hosted API; see `OMEGA-DELTA-0201`), so it
+    /// is pinned here by name.
     ///
     /// Changing the default model is a real decision. Update this constant and
     /// the `OMEGA-DELTA-0013` entry together, so the registry never disagrees
     /// with what ships.
     #[test]
     fn the_default_model_is_pinned() {
-        const EXPECTED_PROVIDER: &str = "google";
-        const EXPECTED_MODEL: &str = "gemini-3.6-flash";
+        const EXPECTED_PROVIDER: &str = "openagents";
+        const EXPECTED_MODEL: &str = "gpt-5.6-luna";
 
         let settings = default_settings().expect("default settings parse");
         let default_model = default_setting(&settings, "agent.default_model")
@@ -20454,8 +20457,21 @@ mod tests {
         let inspection = account_identity
             .find(".inspect()")
             .expect("OMEGA-DELTA-0159: hosted sign-in stopped inspecting custody");
-        let signing = function_body(&proof, "sign_nip98_request")
+        // Amended with OMEGA-DELTA-0201: the exact-signing body moved into
+        // `sign_nip98_request_once`, and the public `sign_nip98_request`
+        // wrapper re-resolves and retries exactly once when the account
+        // generation advanced mid-proof.
+        let signing = function_body(&proof, "sign_nip98_request_once")
             .expect("OMEGA-DELTA-0159: the signing step is gone");
+        let retry_wrapper = function_body(&proof, "sign_nip98_request")
+            .expect("OMEGA-DELTA-0159: the retry-once signing wrapper is gone");
+        assert!(
+            retry_wrapper.contains("STALE_SELECTION_REASON")
+                && retry_wrapper.matches("sign_nip98_request_once(").count() >= 2,
+            "OMEGA-DELTA-0201: a mid-proof account-generation bump no longer \
+             re-resolves and retries once, so one benign race dead-ends the \
+             hosted lane again."
+        );
         assert!(
             inspection < account_identity.len()
                 && mint.contains("ready_account_identity()")
@@ -21108,9 +21124,11 @@ mod tests {
         );
     }
 
-    /// OMEGA-DELTA-0172. Zero base offers Flash / Pro in the input bar.
-    /// Flash is google/gemini-3.6-flash; Pro is openagents/kimi-k3 via the
-    /// OpenAgents hosted chat-completions provider.
+    /// OMEGA-DELTA-0172 (amended 2026-07-30). Zero base offers the model tier
+    /// control in the input bar: Luna (default, openagents/gpt-5.6-luna),
+    /// Flash (google/gemini-3.6-flash, the backup), and Pro
+    /// (openagents/kimi-k3) via the OpenAgents hosted chat-completions
+    /// provider.
     #[test]
     fn zero_base_input_bar_offers_flash_and_pro_hosted_lanes() {
         let tier = read_repository_file(OMEGA_MODEL_TIER_PATH);
@@ -21119,21 +21137,24 @@ mod tests {
 
         assert!(
             tier.contains("enum ModelTier")
+                && tier.contains("Luna")
                 && tier.contains("Flash")
                 && tier.contains("Pro")
+                && tier.contains("openagents/gpt-5.6-luna")
                 && tier.contains("google/gemini-3.6-flash")
                 && tier.contains("openagents/kimi-k3")
                 && tier.contains("render_model_tier_selector"),
-            "OMEGA-DELTA-0172: {} lost the Flash/Pro tier mapping or renderer.",
+            "OMEGA-DELTA-0172: {} lost the Luna/Flash/Pro tier mapping or renderer.",
             repository_path(OMEGA_MODEL_TIER_PATH).display()
         );
         assert!(
-            provider.contains("kimi-k3")
+            provider.contains("gpt-5.6-luna")
+                && provider.contains("kimi-k3")
                 && provider.contains("/api/v1")
                 && provider.contains("openagents_session")
                 && provider.contains("stream_completion"),
-            "OMEGA-DELTA-0172: {} no longer streams Kimi K3 through the \
-             OpenAgents hosted chat-completions path.",
+            "OMEGA-DELTA-0172: {} no longer streams the hosted Luna and Kimi \
+             K3 lanes through the OpenAgents chat-completions path.",
             repository_path(OPENAGENTS_PROVIDER_PATH).display()
         );
         assert!(
@@ -25128,5 +25149,69 @@ mod tests {
                 );
             }
         }
+    }
+
+    /// OMEGA-DELTA-0201. The core Omega Agent defaults to the hosted
+    /// OpenAgents Luna lane and a dead-ended completion lane falls down the
+    /// provider chain automatically instead of surfacing a dead turn.
+    #[test]
+    fn the_core_agent_defaults_to_hosted_luna_and_always_falls_back() {
+        let settings = default_settings().expect("default settings parse");
+        let default_model = default_setting(&settings, "agent.default_model")
+            .expect("agent.default_model must be present in the shipped defaults");
+        assert_eq!(
+            default_model
+                .get("provider")
+                .and_then(serde_json::Value::as_str),
+            Some("openagents"),
+            "OMEGA-DELTA-0201: the shipped default must be the hosted \
+             OpenAgents lane (owner direction 2026-07-30)."
+        );
+        assert_eq!(
+            default_model
+                .get("model")
+                .and_then(serde_json::Value::as_str),
+            Some("gpt-5.6-luna"),
+            "OMEGA-DELTA-0201: the shipped default model must be GPT-5.6 Luna \
+             (owner direction 2026-07-30)."
+        );
+
+        let provider = read_repository_file(OPENAGENTS_PROVIDER_PATH);
+        assert!(
+            provider.contains("Gpt56Luna")
+                && provider.contains("gpt-5.6-luna")
+                && provider.contains("HostedModel::Gpt56Luna))"),
+            "OMEGA-DELTA-0201: {} no longer serves GPT-5.6 Luna as the hosted \
+             provider default.",
+            repository_path(OPENAGENTS_PROVIDER_PATH).display()
+        );
+
+        let thread = read_repository_file(AGENT_THREAD_PATH);
+        assert!(
+            thread.contains("next_turn_fallback_model"),
+            "OMEGA-DELTA-0201: {} lost the automatic provider fallback walk; \
+             a hosted-auth failure dead-ends the turn again.",
+            repository_path(AGENT_THREAD_PATH).display()
+        );
+        let luna = thread
+            .find("(\"openagents\", \"gpt-5.6-luna\")")
+            .expect("OMEGA-DELTA-0201: the fallback chain lost the hosted Luna rung");
+        let gemini = thread
+            .find("(\"google\", \"gemini-3.6-flash\")")
+            .expect("OMEGA-DELTA-0201: the fallback chain lost the Gemini backup rung");
+        let kimi = thread
+            .find("(\"openagents\", \"kimi-k3\")")
+            .expect("OMEGA-DELTA-0201: the fallback chain lost the Kimi K3 rung");
+        assert!(
+            luna < gemini && gemini < kimi,
+            "OMEGA-DELTA-0201: the fallback order changed. The owner-directed \
+             order is hosted Luna, then Gemini, then Kimi K3, then any other \
+             authenticated direct-key provider."
+        );
+        assert!(
+            thread.contains("is_authenticated(cx)"),
+            "OMEGA-DELTA-0201: the fallback walk no longer reaches configured \
+             direct-key providers after the hosted rungs."
+        );
     }
 }

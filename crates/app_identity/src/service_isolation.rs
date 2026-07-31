@@ -128,9 +128,10 @@ fn default_settings_enable_registry_acp_without_enabling_zed_production() {
     assert_eq!(settings["telemetry"]["diagnostics"], false);
     assert_eq!(settings["telemetry"]["metrics"], false);
     assert!(!text.contains("\"server_url\": \"https://zed.dev\""));
-    // A direct provider, not a Zed-hosted one. What this assertion protects is
-    // that the default never points at a Zed service; it is not a claim about
-    // which direct provider the owner prefers.
-    assert_eq!(settings["agent"]["default_model"]["provider"], "google");
+    // The OpenAgents hosted lane, not a Zed-hosted one. What this assertion
+    // protects is that the default never points at a Zed service; it is not a
+    // claim about which non-Zed provider the owner prefers (owner direction
+    // 2026-07-30 moved the default from `google` to `openagents`).
+    assert_eq!(settings["agent"]["default_model"]["provider"], "openagents");
     assert!(!super::zed_production_services_enabled());
 }

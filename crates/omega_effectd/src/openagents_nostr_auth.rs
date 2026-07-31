@@ -291,6 +291,35 @@ pub async fn sign_nip98_request(
             reason: "the request URL or uppercase HTTP method is invalid".to_string(),
         });
     }
+    // A generation bump between resolving the selection token and the broker's
+    // validation (an account refresh, a profile hydration commit) is a benign
+    // race, not a refusal: re-resolve and retry exactly once. The identity
+    // binding below still pins the retry to the account the sign-in started
+    // with, so a genuine account switch fails instead of silently signing as
+    // someone else. Without this, one mid-proof bump dead-ended the whole
+    // hosted lane (owner outage 2026-07-30).
+    match sign_nip98_request_once(url, method, payload, expected_public_key_hex).await {
+        Err(HostedSessionBlocker::ProofSigningFailed { reason })
+            if reason == STALE_SELECTION_REASON =>
+        {
+            log::info!(
+                "hosted OpenAgents sign-in: the account selection advanced mid-proof; \
+                 re-resolving and retrying once"
+            );
+            sign_nip98_request_once(url, method, payload, expected_public_key_hex).await
+        }
+        result => result,
+    }
+}
+
+const STALE_SELECTION_REASON: &str = "the active account selection changed";
+
+async fn sign_nip98_request_once(
+    url: &str,
+    method: &str,
+    payload: &[u8],
+    expected_public_key_hex: Option<&str>,
+) -> Result<String, HostedSessionBlocker> {
     let registry = AccountRegistryService::for_channel(*app_identity::CHANNEL);
     let selection =
         registry
@@ -682,6 +711,25 @@ mod tests {
             format!("{:x}", Sha256::digest([])),
             "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
         );
+    }
+
+    /// The retry-once wrapper recognizes a mid-proof selection bump by the
+    /// broker's exact refusal line. If that line drifts, the retry silently
+    /// stops firing, which is how one benign generation bump dead-ended the
+    /// hosted lane on 2026-07-30.
+    #[test]
+    fn the_stale_selection_retry_reason_matches_the_broker_refusal() {
+        assert_eq!(
+            omega_signer_broker::SignerBrokerError::StaleAccountSelection.to_string(),
+            STALE_SELECTION_REASON
+        );
+        // The registry's other refusals must NOT be narrated as a selection
+        // change: they carry their own reason and are not retried as a race.
+        let not_signable = omega_signer_broker::SignerBrokerError::AccountNotSignable {
+            reason: "the account is not available for switching".to_string(),
+        };
+        assert_ne!(not_signable.to_string(), STALE_SELECTION_REASON);
+        assert!(not_signable.to_string().contains("cannot sign right now"));
     }
 
     /// The defect this replaces: a 401 was reported as "send the message again

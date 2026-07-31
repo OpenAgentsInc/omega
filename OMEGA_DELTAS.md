@@ -296,17 +296,19 @@ cargo test -p omega_deltas
 - **`cmd-shift-a` / `ctrl-shift-a`** now opens a new agent thread globally.
   `agent::NewThread` previously existed only in panel-scoped contexts bound to
   `cmd-n`, so it could not start a thread unless the panel already had focus.
-- **The default model is `google/gemini-3.6-flash`.** An earlier revision of
-  this entry recorded `ollama/llama3.1` and said the agent needed a local
-  Ollama to work out of the box. That stopped being true when the owner set the
-  Google default, and this text is corrected rather than left to mislead.
-  The agent now needs a Google API key, not a local model server.
+- **The default model is `openagents/gpt-5.6-luna`** (owner direction
+  2026-07-30: the core Omega Agent always hits the OpenAgents hosted API
+  first; Gemini is the backup — see `OMEGA-DELTA-0201`). Earlier revisions of
+  this entry recorded `ollama/llama3.1` and then `google/gemini-3.6-flash`;
+  each correction is recorded rather than left to mislead. The hosted default
+  authenticates with the signed-in OpenAgents session, so a fresh install
+  needs no local API key or model server.
 - **Why the isolation test alone was not enough.** The service-isolation test
-  asserts only that the default provider is `google`
+  asserts only that the default provider is `openagents`
   (`crates/app_identity/src/service_isolation.rs`), because what it protects is
   that the default never points at a *Zed* service. That is the right scope for
   that test, but it leaves the model string unpinned: a rebase could change
-  `gemini-3.6-flash` to any other Google model and every check would stay
+  `gpt-5.6-luna` to any other hosted model and every check would stay
   green.
 - **Enforced by:** `the_agent_ships_enabled`, `the_default_model_is_pinned`, and
   `the_new_thread_chord_is_window_global`, which asserts the chord is bound
@@ -6551,9 +6553,10 @@ Persisted permission rules therefore keep their meaning.
 The former `write` surface remains available as the explicit `editor` profile,
 including its broad built-in and context-server tool sets. No tool was deleted.
 
-`OMEGA-DELTA-0013` already pins the fresh-install model to
-`google/gemini-3.6-flash`; this delta composes that provider default with the
-six-tool profile instead of duplicating the model check.
+`OMEGA-DELTA-0013` already pins the fresh-install model (now
+`openagents/gpt-5.6-luna`, owner direction 2026-07-30); this delta composes
+that provider default with the six-tool profile instead of duplicating the
+model check.
 
 - **Enforced by:** `the_basic_profile_is_the_default_six_tool_surface` in
   `crates/omega_deltas`.
@@ -7704,19 +7707,26 @@ current image build does not decode it inline.
   `live_tailnet_is_parsed_from_tailscale_status_json` in `agent_ui`, plus
   `phone_pairing_prefers_the_live_tailnet` in `crates/omega_deltas`.
 
-### OMEGA-DELTA-0172 — Flash / Pro model tier in the zero-base input bar
+### OMEGA-DELTA-0172 — Model tier control in the zero-base input bar (amended 2026-07-30)
 
 - **Upstream Zed:** full model picker with every provider model.
 - **Omega before:** zero base hid the model picker; the default stayed
   `google/gemini-3.6-flash` with no Pro path to hosted Kimi K3.
-- **Omega now:** the zero-base composer bar has a **Flash | Pro** dropdown.
-  Flash (default) selects `google/gemini-3.6-flash`. Pro selects
-  `openagents/kimi-k3` through the new OpenAgents language-model provider,
-  which streams OpenAI-compatible completions via the signed-in OpenAgents
-  session to `POST /api/v1/chat/completions`. OpenAgents cloud accepts the
-  user bearer for those exact hosted lanes.
+- **Omega originally:** a **Flash | Pro** dropdown. Flash (default) selected
+  `google/gemini-3.6-flash`; Pro selected `openagents/kimi-k3` through the
+  OpenAgents language-model provider, which streams OpenAI-compatible
+  completions via the signed-in OpenAgents session to
+  `POST /api/v1/chat/completions`.
+- **Amended 2026-07-30 (owner direction: "CORE OMEGA AGENT MUST ALWAYS HIT
+  OUR API AND WORK"):** the control is now **Luna | Flash | Pro**. Luna
+  (default) selects `openagents/gpt-5.6-luna` on the hosted OpenAgents lane.
+  Flash stays reachable as the `google/gemini-3.6-flash` backup. Pro stays
+  `openagents/kimi-k3`. OpenAgents cloud accepts the user bearer for those
+  exact hosted lanes (gemini-3.6-flash, kimi-k3, gpt-5.6-luna).
 - **Enforced by:** `omega_model_tier` unit tests, `language_models` openagents
-  provider tests, and the OpenAgents chat-completions dual-auth path.
+  provider tests, the OpenAgents chat-completions dual-auth path, and
+  `zero_base_input_bar_offers_flash_and_pro_hosted_lanes` in
+  `crates/omega_deltas`.
 
 ### OMEGA-DELTA-0173 — One flag-free surface creates three kinds of conversation
 
@@ -8810,3 +8820,51 @@ startup recheck — survives unchanged behind that dropdown.
   `account_ui`; the installed tripwire collector; the assurance document and
   host matrix; and the `OMEGA-DELTA-0200` source assertions in
   `crates/omega_deltas`.
+
+### OMEGA-DELTA-0201 — Hosted Luna default and the always-work provider fallback chain
+
+- **Origin:** owner directive 2026-07-30, after every Omega Agent turn on a
+  fresh dev build died with *"Permission error with Google AI's API: Omega
+  could not sign the hosted sign-in proof (the active account selection
+  changed). Set GEMINI_API_KEY…"*. Verbatim intensity: *"NEVER LET ME SEE THIS
+  BULLSHIT AGAIN, ALWAYS WORK — CORE OMEGA AGENT MUST ALWAYS HIT OUR API AND
+  WORK."*
+- **Default:** the core Omega Agent defaults to `openagents/gpt-5.6-luna` —
+  GPT-5.6 Luna served through the OpenAgents hosted API
+  (`POST /api/v1/chat/completions`, OpenAI passthrough lane armed by the
+  platform key). Gemini becomes the backup, not the front door. The
+  `OMEGA-DELTA-0013` pin and the service-isolation provider assertion moved
+  with it.
+- **Always-work chain:** when a completion lane dead-ends — a non-retryable
+  hosted-auth/permission refusal, or same-lane retries exhausted — the turn
+  automatically falls down the provider chain instead of surfacing a dead
+  turn: hosted Luna (`openagents/gpt-5.6-luna`), then Gemini
+  (`google/gemini-3.6-flash`), then hosted Kimi K3 (`openagents/kimi-k3`),
+  then the default model of any other authenticated provider (a configured
+  direct key). Each rung is tried at most once per turn; the fallback is a
+  turn-local override that never rewrites the person's configured default
+  model; the turn fails only when every rung has failed, with the last honest
+  one-line error.
+- **Copy:** no hosted failure message offers "Set GEMINI_API_KEY" or "send the
+  message again" as the primary remedy; the fallback owns recovery and a
+  direct key is mentioned only as an optional extra lane.
+- **Root cause, fixed alongside:** the multi-account registry migration left
+  pre-existing identities `candidate_existing` with `recovery: needed`, and
+  the signing gate (`validate_signing_selection`, `record_signer_use`)
+  required `Active` + `Protected`, while the broker collapsed every registry
+  refusal into "the active account selection changed". Candidate lifecycles
+  are signable, recovery protection gates onboarding rather than proof
+  signing, the broker names the real refusal
+  (`SignerBrokerError::AccountNotSignable`), a genuine mid-proof generation
+  bump re-resolves and retries once, and startup hydration resolves
+  legacy-root custody instead of reporting `Absent`.
+- **Enforced by:** `the_core_agent_defaults_to_hosted_luna_and_always_falls_back`
+  and the amended `the_default_model_is_pinned` /
+  `zero_base_input_bar_offers_flash_and_pro_hosted_lanes` in
+  `crates/omega_deltas`; `primary_hosted_model_is_gpt_56_luna` in
+  `language_models`; `luna_is_the_default` in `agent_ui`;
+  `migrated_candidate_existing_account_without_recovery_signs` and
+  `partition_identity_service_resolves_legacy_root_storage` in
+  `omega_identity`; and
+  `hosted_failure_copy_names_the_automatic_fallback_not_a_key` in
+  `language_models`.

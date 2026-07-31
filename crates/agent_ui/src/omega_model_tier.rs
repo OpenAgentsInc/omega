@@ -1,12 +1,15 @@
-//! Omega model tier selector. Flash (default) and Pro.
+//! Omega model tier selector. Luna (default), Flash, and Pro.
 //!
-//! Product surface for the two hosted OpenAgents inference lanes:
-//! - **Flash** — `google/gemini-3.6-flash` (default; hosted Gemini path)
+//! Product surface for the hosted OpenAgents inference lanes:
+//! - **Luna** — `openagents/gpt-5.6-luna` (default; hosted OpenAI passthrough
+//!   through OUR API — owner direction 2026-07-30: the core Omega Agent always
+//!   hits our API first, Gemini is the backup)
+//! - **Flash** — `google/gemini-3.6-flash` (backup; hosted Gemini path)
 //! - **Pro** — `openagents/kimi-k3` (Fireworks via OpenAgents chat completions)
 //!
-//! The zero-base composer bar owns this control. It is a closed two-item menu
-//! rather than the full model picker, matching the owner's "dropdowns inside
-//! the input bar" direction without reopening the full model catalog.
+//! The zero-base composer bar owns this control. It is a closed menu rather
+//! than the full model picker, matching the owner's "dropdowns inside the
+//! input bar" direction without reopening the full model catalog.
 
 use std::rc::Rc;
 use std::sync::Mutex;
@@ -14,25 +17,28 @@ use std::sync::Mutex;
 use gpui::{AnyElement, App, Window};
 use ui::{Button, ContextMenu, ContextMenuEntry, PopoverMenu, Tooltip, prelude::*};
 
-/// Process-wide standing tier choice. Defaults to Flash.
-static SELECTED: Mutex<ModelTier> = Mutex::new(ModelTier::Flash);
+/// Process-wide standing tier choice. Defaults to Luna.
+static SELECTED: Mutex<ModelTier> = Mutex::new(ModelTier::Luna);
 
-/// The two product tiers Omega offers on the native loop.
+/// The product tiers Omega offers on the native loop.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum ModelTier {
-    /// Gemini 3.6 Flash — default, hosted through OpenAgents when zero base.
+    /// GPT-5.6 Luna — default, hosted through the OpenAgents API.
+    Luna,
+    /// Gemini 3.6 Flash — backup, hosted through OpenAgents when zero base.
     Flash,
     /// Kimi K3 — stronger coding lane through OpenAgents Fireworks.
     Pro,
 }
 
 impl ModelTier {
-    pub const ALL: &'static [Self] = &[Self::Flash, Self::Pro];
+    pub const ALL: &'static [Self] = &[Self::Luna, Self::Flash, Self::Pro];
 
     /// Label shown on the trigger and menu.
     #[must_use]
     pub const fn name(self) -> &'static str {
         match self {
+            Self::Luna => "Luna",
             Self::Flash => "Flash",
             Self::Pro => "Pro",
         }
@@ -42,7 +48,8 @@ impl ModelTier {
     #[must_use]
     pub const fn description(self) -> &'static str {
         match self {
-            Self::Flash => "Gemini 3.6 Flash — default, fast hosted lane.",
+            Self::Luna => "GPT-5.6 Luna — default, hosted through the OpenAgents API.",
+            Self::Flash => "Gemini 3.6 Flash — fast hosted backup lane.",
             Self::Pro => "Kimi K3 — stronger coding lane via OpenAgents Fireworks.",
         }
     }
@@ -53,6 +60,7 @@ impl ModelTier {
     #[must_use]
     pub const fn agent_model_id(self) -> &'static str {
         match self {
+            Self::Luna => "openagents/gpt-5.6-luna",
             Self::Flash => "google/gemini-3.6-flash",
             Self::Pro => "openagents/kimi-k3",
         }
@@ -62,8 +70,8 @@ impl ModelTier {
     #[must_use]
     pub const fn provider_id(self) -> &'static str {
         match self {
+            Self::Luna | Self::Pro => "openagents",
             Self::Flash => "google",
-            Self::Pro => "openagents",
         }
     }
 
@@ -71,13 +79,14 @@ impl ModelTier {
     #[must_use]
     pub const fn model_id(self) -> &'static str {
         match self {
+            Self::Luna => "gpt-5.6-luna",
             Self::Flash => "gemini-3.6-flash",
             Self::Pro => "kimi-k3",
         }
     }
 }
 
-/// Current standing tier. Flash when nobody has chosen.
+/// Current standing tier. Luna when nobody has chosen.
 #[must_use]
 pub fn selected() -> ModelTier {
     *SELECTED
@@ -97,12 +106,12 @@ pub fn select(tier: ModelTier) {
         .expect("the model tier selection is never held across a panic") = tier;
 }
 
-/// Test-only reset to Flash.
+/// Test-only reset to Luna.
 #[cfg(any(test, feature = "test-support"))]
 pub fn clear_selection_for_test() {
     *SELECTED
         .lock()
-        .expect("the model tier selection is never held across a panic") = ModelTier::Flash;
+        .expect("the model tier selection is never held across a panic") = ModelTier::Luna;
 }
 
 /// Test-only setter without log side effects beyond select.
@@ -113,7 +122,7 @@ pub fn select_for_test(tier: ModelTier) {
 
 const MENU_HEADER: &str = "Omega model";
 
-/// Composer-bar Flash / Pro dropdown.
+/// Composer-bar Luna / Flash / Pro dropdown.
 pub fn render_model_tier_selector(
     current: ModelTier,
     enabled: bool,
@@ -132,7 +141,7 @@ pub fn render_model_tier_selector(
 
     let tooltip = SharedString::from(if enabled {
         format!(
-            "{}. Switch between Flash (Gemini 3.6) and Pro (Kimi K3).",
+            "{}. Switch between Luna (GPT-5.6), Flash (Gemini 3.6) and Pro (Kimi K3).",
             current.description()
         )
     } else {
@@ -196,10 +205,17 @@ mod tests {
     use super::*;
 
     #[test]
-    fn flash_is_the_default() {
+    fn luna_is_the_default() {
         clear_selection_for_test();
-        assert_eq!(selected(), ModelTier::Flash);
+        assert_eq!(selected(), ModelTier::Luna);
+        assert_eq!(ModelTier::Luna.agent_model_id(), "openagents/gpt-5.6-luna");
+    }
+
+    #[test]
+    fn flash_stays_reachable_as_the_gemini_backup() {
         assert_eq!(ModelTier::Flash.agent_model_id(), "google/gemini-3.6-flash");
+        assert_eq!(ModelTier::Flash.provider_id(), "google");
+        assert_eq!(ModelTier::Flash.model_id(), "gemini-3.6-flash");
     }
 
     #[test]
@@ -214,16 +230,16 @@ mod tests {
         clear_selection_for_test();
         select(ModelTier::Pro);
         assert_eq!(selected(), ModelTier::Pro);
-        select(ModelTier::Flash);
-        assert_eq!(selected(), ModelTier::Flash);
+        select(ModelTier::Luna);
+        assert_eq!(selected(), ModelTier::Luna);
         clear_selection_for_test();
     }
 
     #[test]
-    fn there_are_exactly_two_tiers() {
+    fn the_tier_order_leads_with_luna() {
         assert_eq!(
             ModelTier::ALL.iter().map(|t| t.name()).collect::<Vec<_>>(),
-            vec!["Flash", "Pro"]
+            vec!["Luna", "Flash", "Pro"]
         );
     }
 }

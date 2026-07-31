@@ -410,23 +410,20 @@ fn hosted_sign_in_completion_error(
 /// with no identity at all — both halves were false, and the log said nothing,
 /// so the only diagnosis available was guesswork.
 fn hosted_sign_in_failure_message(blocker: Option<&HostedSessionBlocker>) -> String {
+    // Owner direction 2026-07-30: a hosted-auth failure is handled by the
+    // turn's automatic provider fallback, so this line stays short and never
+    // offers "Set GEMINI_API_KEY" as the primary remedy. A direct key remains
+    // an optional extra lane, mentioned only as such.
     let Some(blocker) = blocker else {
-        return format!(
-            "Hosted Omega did not sign in, and reported no reason. \
-             Check the Omega log, or set {GEMINI_API_KEY_VAR_NAME} to send through a direct key."
-        );
+        return "Hosted Gemini sign-in failed and reported no reason. \
+             Omega falls back to another model automatically."
+            .to_string();
     };
-    if blocker.is_retryable() {
-        format!(
-            "{} Send the message again, or set {GEMINI_API_KEY_VAR_NAME} to send through a direct key.",
-            blocker.summary()
-        )
-    } else {
-        format!(
-            "{} Set {GEMINI_API_KEY_VAR_NAME} to send through a direct key instead.",
-            blocker.summary()
-        )
-    }
+    format!(
+        "{} Omega falls back to another model automatically; \
+         a {GEMINI_API_KEY_VAR_NAME} key optionally enables the direct Gemini lane.",
+        blocker.summary()
+    )
 }
 
 #[derive(Clone, Deserialize)]
@@ -601,12 +598,17 @@ mod tests {
         assert!(!message.contains("Send the message again"));
     }
 
+    /// Owner direction 2026-07-30: the automatic provider fallback owns
+    /// recovery, so no hosted failure copy pushes "Set GEMINI_API_KEY" or
+    /// "send the message again" as the remedy.
     #[test]
-    fn a_transient_failure_keeps_the_retry_advice() {
+    fn hosted_failure_copy_names_the_automatic_fallback_not_a_key() {
         let message =
             hosted_sign_in_failure_message(Some(&HostedSessionBlocker::ServiceUnreachable));
 
-        assert!(message.contains("Send the message again"));
+        assert!(message.contains("falls back to another model automatically"));
+        assert!(!message.contains("Send the message again"));
+        assert!(!message.starts_with("Set "));
     }
 }
 

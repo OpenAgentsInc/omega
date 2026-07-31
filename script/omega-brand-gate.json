@@ -367,10 +367,6 @@
         "class": "omega_contrast",
         "reason": "Omega-authored comment stating how this default differs from upstream."
       },
-      "// Zed host, so this does not weaken the service isolation the ollama": {
-        "class": "omega_contrast",
-        "reason": "Omega-authored comment naming the upstream host the isolation rule is about."
-      },
       "// Omega defaults to \"allow\". Upstream Zed defaults to \"confirm\".": {
         "class": "omega_contrast",
         "reason": "Omega-authored comment stating how this default differs from upstream."

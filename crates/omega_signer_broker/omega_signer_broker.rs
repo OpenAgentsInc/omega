@@ -633,7 +633,22 @@ impl SelectionValidator for RegistrySelectionValidator {
     fn validate(&self, token: &AccountSelectionToken) -> Result<(), SignerBrokerError> {
         AccountRegistryService::for_channel(*app_identity::CHANNEL)
             .validate_signing_selection(token)
-            .map_err(|_| SignerBrokerError::StaleAccountSelection)
+            .map_err(map_selection_error)
+    }
+}
+
+/// Keep the registry's refusal reason instead of collapsing every failure to
+/// "the active account selection changed". That collapse sent the 2026-07-30
+/// owner outage hunting for a selection race when the actual refusal was an
+/// account-state gate that never mentions selection at all.
+fn map_selection_error(error: omega_identity::AccountRegistryError) -> SignerBrokerError {
+    match error {
+        omega_identity::AccountRegistryError::StaleSelection => {
+            SignerBrokerError::StaleAccountSelection
+        }
+        other => SignerBrokerError::AccountNotSignable {
+            reason: other.to_string(),
+        },
     }
 }
 
@@ -793,6 +808,8 @@ impl Default for SignerBroker {
 pub enum SignerBrokerError {
     #[error("the active account selection changed")]
     StaleAccountSelection,
+    #[error("the active account cannot sign right now ({reason})")]
+    AccountNotSignable { reason: String },
     #[error("the signing request targets a different identity")]
     WrongIdentity,
     #[error("NIP-46 signing was not declared for event kind {kind}")]

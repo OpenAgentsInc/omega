@@ -3066,8 +3066,12 @@ impl Thread {
     ) -> Result<()> {
         let mut attempt = 0;
         let mut intent = CompletionIntent::UserPrompt;
-        // Set when a refusal fallback occurs so subsequent iterations use the fallback model.
+        // Set when a refusal or provider fallback occurs so subsequent
+        // iterations use the fallback model for the rest of this turn.
         let mut refusal_fallback_model: Option<Arc<dyn LanguageModel>> = None;
+        // Provider+model ids this turn has already tried (or found missing)
+        // while walking the provider fallback chain, so the chain never loops.
+        let mut provider_fallback_attempted: Vec<(String, String)> = Vec::new();
         loop {
             match Self::perform_compaction_if_needed(
                 this,
@@ -3381,10 +3385,50 @@ impl Thread {
                     attempt,
                     cx,
                 )
-                .await?
+                .await
                 {
-                    ControlFlow::Break(_) => return Ok(()),
-                    ControlFlow::Continue(_) => {}
+                    Ok(ControlFlow::Break(_)) => return Ok(()),
+                    Ok(ControlFlow::Continue(_)) => {}
+                    Err(turn_error) => {
+                        // The current lane is out of options: the error is not
+                        // retryable (a hosted-auth or permission refusal) or
+                        // its retries are exhausted. Owner mandate 2026-07-30
+                        // ("ALWAYS WORK"): fall down the provider chain
+                        // instead of dead-ending the turn. The turn fails only
+                        // when every rung has failed.
+                        let failed_model = model.clone();
+                        let maybe_fallback = this.update(cx, |_, cx| {
+                            Self::next_turn_fallback_model(
+                                &failed_model,
+                                &mut provider_fallback_attempted,
+                                cx,
+                            )
+                        })?;
+                        let Some(fallback) = maybe_fallback else {
+                            return Err(turn_error);
+                        };
+                        log::warn!(
+                            "provider fallback: {}/{} failed ({}); retrying the turn with {}/{}",
+                            failed_model.provider_id(),
+                            failed_model.id().0,
+                            turn_error,
+                            fallback.provider_id(),
+                            fallback.id().0
+                        );
+                        event_stream.send_retry(acp_thread::RetryStatus {
+                            last_error: format!("{} is unavailable", failed_model.name().0).into(),
+                            attempt: 1,
+                            max_attempts: 1,
+                            started_at: Instant::now(),
+                            duration: Duration::MAX,
+                            meta: Some(acp_thread::meta_with_refusal_fallback(&fallback.name().0)),
+                        });
+                        // Turn-local override only: the person's configured
+                        // default model is not rewritten by an automatic
+                        // fallback.
+                        refusal_fallback_model = Some(fallback);
+                        attempt = 0;
+                    }
                 }
                 this.update(cx, |this, _cx| {
                     if let Some(Message::Agent(message)) = this.last_message() {
@@ -3437,6 +3481,66 @@ impl Thread {
             }
         }
         Ok(ControlFlow::Continue(()))
+    }
+
+    /// The next model the turn should try after its current lane dead-ends.
+    ///
+    /// Owner mandate 2026-07-30 ("CORE OMEGA AGENT MUST ALWAYS HIT OUR API AND
+    /// WORK"): the ordered chain is the hosted OpenAgents Luna lane, the
+    /// hosted/direct Gemini lane, the hosted Kimi K3 lane, and then the
+    /// default model of any other authenticated provider (a configured direct
+    /// key). Each rung is tried at most once per turn, so the walk always
+    /// terminates; `None` means every rung was tried and the turn may fail
+    /// with the last honest error.
+    fn next_turn_fallback_model(
+        failed_model: &Arc<dyn LanguageModel>,
+        attempted: &mut Vec<(String, String)>,
+        cx: &App,
+    ) -> Option<Arc<dyn LanguageModel>> {
+        const TURN_PROVIDER_FALLBACK_CHAIN: &[(&str, &str)] = &[
+            ("openagents", "gpt-5.6-luna"),
+            ("google", "gemini-3.6-flash"),
+            ("openagents", "kimi-k3"),
+        ];
+
+        let failed_key = (
+            failed_model.provider_id().0.to_string(),
+            failed_model.id().0.to_string(),
+        );
+        if !attempted.contains(&failed_key) {
+            attempted.push(failed_key);
+        }
+        // Absent in some harnesses; a missing registry means no fallback, not
+        // a panic in the error path.
+        let registry = LanguageModelRegistry::try_global(cx)?;
+        let registry = registry.read(cx);
+        for (provider_id, model_id) in TURN_PROVIDER_FALLBACK_CHAIN {
+            let key = ((*provider_id).to_string(), (*model_id).to_string());
+            if attempted.contains(&key) {
+                continue;
+            }
+            attempted.push(key);
+            if let Some(found) = registry.available_models(cx).find(|model| {
+                model.provider_id().0.as_ref() == *provider_id && model.id().0.as_ref() == *model_id
+            }) {
+                return Some(found);
+            }
+        }
+        for provider in registry.providers() {
+            if !provider.is_authenticated(cx) {
+                continue;
+            }
+            let Some(model) = provider.default_model(cx) else {
+                continue;
+            };
+            let key = (model.provider_id().0.to_string(), model.id().0.to_string());
+            if attempted.contains(&key) {
+                continue;
+            }
+            attempted.push(key);
+            return Some(model);
+        }
+        None
     }
 
     async fn perform_compaction_if_needed(

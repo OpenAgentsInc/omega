@@ -1,10 +1,13 @@
 //! OpenAgents hosted inference provider.
 //!
 //! Serves the hosted lanes from `openagents.com` that Omega selects through the
-//! Flash / Pro tier control. Pro maps to Kimi K3 on Fireworks; Flash stays on
-//! the Google provider's hosted Gemini path. Authentication reuses the verified
-//! OpenAgents session from zero base — no local Fireworks or Gemini key is
-//! required when that session is ready.
+//! model tier control. The primary tier is GPT-5.6 Luna through the hosted
+//! OpenAgents passthrough lane (owner direction 2026-07-30: the core Omega
+//! Agent always hits our API first; Gemini is the backup). Pro maps to Kimi K3
+//! on Fireworks; Flash stays on the Google provider's hosted Gemini path.
+//! Authentication reuses the verified OpenAgents session from zero base — no
+//! local OpenAI, Fireworks, or Gemini key is required when that session is
+//! ready.
 
 use anyhow::{Context as _, Result};
 use futures::{FutureExt, StreamExt, future::BoxFuture};
@@ -30,41 +33,51 @@ const PROVIDER_NAME: LanguageModelProviderName = LanguageModelProviderName::new(
 /// Wire model id for the Pro tier (Fireworks Kimi K3).
 pub const KIMI_K3_MODEL_ID: &str = "kimi-k3";
 
+/// Wire model id for the primary tier (GPT-5.6 Luna over the hosted OpenAI
+/// passthrough lane).
+pub const GPT_56_LUNA_MODEL_ID: &str = "gpt-5.6-luna";
+
 /// OpenAI-compatible chat completions path under the OpenAgents base URL.
 const CHAT_COMPLETIONS_PREFIX: &str = "/api/v1";
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum HostedModel {
+    Gpt56Luna,
     KimiK3,
 }
 
 impl HostedModel {
     fn id(self) -> &'static str {
         match self {
+            Self::Gpt56Luna => GPT_56_LUNA_MODEL_ID,
             Self::KimiK3 => KIMI_K3_MODEL_ID,
         }
     }
 
     fn display_name(self) -> &'static str {
         match self {
+            Self::Gpt56Luna => "GPT-5.6 Luna",
             Self::KimiK3 => "Kimi K3",
         }
     }
 
     fn max_tokens(self) -> u64 {
         match self {
+            // Matches open_ai::Model::FivePointSixLuna.
+            Self::Gpt56Luna => 1_050_000,
             Self::KimiK3 => 131_072,
         }
     }
 
     fn max_output_tokens(self) -> Option<u64> {
         match self {
+            Self::Gpt56Luna => Some(128_000),
             Self::KimiK3 => Some(16_384),
         }
     }
 
     fn all() -> &'static [Self] {
-        &[Self::KimiK3]
+        &[Self::Gpt56Luna, Self::KimiK3]
     }
 }
 
@@ -119,7 +132,9 @@ impl LanguageModelProvider for OpenAgentsLanguageModelProvider {
     }
 
     fn default_model(&self, _cx: &App) -> Option<Arc<dyn LanguageModel>> {
-        Some(self.create_language_model(HostedModel::KimiK3))
+        // Owner direction 2026-07-30: the core Omega Agent defaults to
+        // GPT-5.6 Luna through the hosted OpenAgents lane.
+        Some(self.create_language_model(HostedModel::Gpt56Luna))
     }
 
     fn default_fast_model(&self, _cx: &App) -> Option<Arc<dyn LanguageModel>> {
@@ -273,11 +288,8 @@ impl OpenAgentsLanguageModel {
 
 fn hosted_sign_in_failure_message(blocker: Option<&omega_effectd::HostedSessionBlocker>) -> String {
     match blocker {
-        Some(blocker) => format!(
-            "OpenAgents hosted Pro (Kimi K3) needs a signed-in account. {}",
-            blocker.summary()
-        ),
-        None => "OpenAgents hosted Pro (Kimi K3) needs a signed-in OpenAgents account.".to_string(),
+        Some(blocker) => format!("OpenAgents hosted sign-in failed. {}", blocker.summary()),
+        None => "OpenAgents hosted sign-in is not ready.".to_string(),
     }
 }
 
@@ -374,6 +386,15 @@ mod tests {
     fn pro_model_id_is_kimi_k3() {
         assert_eq!(HostedModel::KimiK3.id(), "kimi-k3");
         assert_eq!(KIMI_K3_MODEL_ID, "kimi-k3");
+    }
+
+    /// Owner direction 2026-07-30: the core Omega Agent defaults to
+    /// GPT-5.6 Luna over the hosted OpenAgents lane; Gemini is the backup.
+    #[test]
+    fn primary_hosted_model_is_gpt_56_luna() {
+        assert_eq!(HostedModel::Gpt56Luna.id(), "gpt-5.6-luna");
+        assert_eq!(GPT_56_LUNA_MODEL_ID, "gpt-5.6-luna");
+        assert_eq!(HostedModel::all().first(), Some(&HostedModel::Gpt56Luna));
     }
 
     #[test]
