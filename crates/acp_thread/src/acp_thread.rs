@@ -5117,8 +5117,9 @@ impl AcpThread {
         };
         let env = cx.spawn(async move |_, _| {
             let mut env = env.await.unwrap_or_default();
-            // Disables paging for `git` and hopefully other commands
-            env.insert("PAGER".into(), "".into());
+
+            disable_pagers_through_env(&mut env);
+
             for var in extra_env {
                 env.insert(var.name, var.value);
             }
