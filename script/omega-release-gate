@@ -54,7 +54,8 @@ import tempfile
 import time
 from pathlib import Path
 
-SCHEMA = "openagents.omega.release-gate.v1"
+SCHEMA = "openagents.omega.release-gate.v2"
+SARAH_LIVEKIT_EVIDENCE_SCHEMA = "openagents.omega.sarah-livekit-evidence.v1"
 
 ROOT = Path(__file__).resolve().parent.parent
 
@@ -252,6 +253,92 @@ OWNER_ASSISTED_ROWS = [
     },
 ]
 
+SARAH_LIVEKIT_BINDING_FIELDS = (
+    "omega_source_revision",
+    "omega_package_sha256",
+    "openagents_source_revision",
+    "livekit_infrastructure_revision",
+    "livekit_config_revision",
+    "livekit_image_digest",
+    "sarah_worker_revision",
+    "sarah_worker_image_digest",
+    "admitted_model_revision",
+    "price_catalog_revision",
+)
+
+SARAH_LIVEKIT_ROWS = [
+    {
+        "id": "sarah-livekit-private",
+        "title": "Private Sarah LiveKit admission, voice, interruption, reconnect, and settlement",
+        "issues": ["omega#185", "openagents#9283", "openagents#9285"],
+        "owner_instruction": (
+            "In the exact packaged candidate, use an eligible desktop account "
+            "to verify admission price, hold, rate, and limit before capture; "
+            "complete a voice turn; confirm one bounded command; start one "
+            "agent thread; interrupt Sarah; force one admitted media reconnect "
+            "without a second provider generation; end; and reconcile exact "
+            "provider usage to the final charge."
+        ),
+    },
+    {
+        "id": "sarah-livekit-room",
+        "title": "Three authenticated desktops share Sarah identity, floor, and answer",
+        "issues": ["omega#186", "openagents#9286"],
+        "owner_instruction": (
+            "Join one tester/community room from three authenticated packaged "
+            "desktops, summon Sarah, verify one Sarah identity, transfer the "
+            "server-issued floor between two members, hear the shared answer, "
+            "moderator-stop Sarah, and prove a non-floor participant, stale "
+            "grant, replay, and removed member cannot feed the model."
+        ),
+    },
+    {
+        "id": "sarah-livekit-connectivity",
+        "title": "Packaged Sarah media succeeds over direct UDP, TCP, and TURN/TLS",
+        "issues": ["openagents#9284", "omega#185"],
+        "owner_instruction": (
+            "Run the same packaged private journey against the exact Google "
+            "Cloud candidate over direct UDP, forced TCP fallback, and forced "
+            "TURN/TLS; preserve ICE-pair and transport receipts without room "
+            "tokens, media, or transcripts."
+        ),
+    },
+    {
+        "id": "sarah-livekit-isolation",
+        "title": "Concurrent private and community rooms keep generation, context, capability, and billing isolated",
+        "issues": ["openagents#9283", "openagents#9285", "omega#186"],
+        "owner_instruction": (
+            "Run private and community Sarah rooms concurrently and prove "
+            "distinct provider generations, context, holds, exact usage, and "
+            "settlement; verify a private editor fact and privileged tool are "
+            "unavailable to community Sarah."
+        ),
+    },
+    {
+        "id": "sarah-livekit-failure",
+        "title": "Sarah LiveKit failures close boundedly without overlap, leakage, or accounting ambiguity",
+        "issues": ["openagents#9284", "openagents#9285", "openagents#9286"],
+        "owner_instruction": (
+            "Exercise worker crash, SFU loss, OpenAI disconnect, replayed "
+            "grant, duplicate participant, membership revocation, hold "
+            "exhaustion, and reconnect. Record deterministic settlement and "
+            "the eight-scope privacy scan, or mark any unobserved scenario "
+            "inconclusive rather than passing it."
+        ),
+    },
+    {
+        "id": "sarah-livekit-independent-review",
+        "title": "An independent reviewer repeats the bound private and group Sarah journeys",
+        "issues": ["omega#187"],
+        "owner_instruction": (
+            "A reviewer other than the candidate producer repeats the held-out "
+            "private and three-desktop group journeys against this exact "
+            "package and infrastructure binding and signs the public-safe "
+            "verdict receipt."
+        ),
+    },
+]
+
 
 def portable_path(path: Path) -> str:
     """Repo-relative rendering so a preserved receipt never leaks the
@@ -273,6 +360,100 @@ def sha256_file(path: Path) -> str:
 def canonical_digest(payload: dict) -> str:
     encoded = json.dumps(payload, sort_keys=True, separators=(",", ":")).encode()
     return hashlib.sha256(encoded).hexdigest()
+
+
+def validate_sarah_livekit_evidence(
+    payload: dict,
+    package_sha256: str,
+    source_revision: str,
+    *,
+    allow_unresolved_refs: bool = False,
+) -> tuple[dict, dict[str, dict]]:
+    if payload.get("schema") != SARAH_LIVEKIT_EVIDENCE_SCHEMA:
+        raise ValueError(
+            f"expected schema {SARAH_LIVEKIT_EVIDENCE_SCHEMA!r}, "
+            f"got {payload.get('schema')!r}"
+        )
+
+    binding = payload.get("binding")
+    if not isinstance(binding, dict):
+        raise ValueError("binding must be an object")
+    missing = [
+        field
+        for field in SARAH_LIVEKIT_BINDING_FIELDS
+        if not isinstance(binding.get(field), str) or not binding[field].strip()
+    ]
+    if missing:
+        raise ValueError("binding is missing: " + ", ".join(missing))
+    if binding["omega_package_sha256"] != package_sha256:
+        raise ValueError("binding omega_package_sha256 does not match the candidate")
+    if binding["omega_source_revision"] != source_revision:
+        raise ValueError("binding omega_source_revision does not match the candidate")
+    for field in ("livekit_image_digest", "sarah_worker_image_digest"):
+        if re.fullmatch(r"sha256:[0-9a-f]{64}", binding[field]) is None:
+            raise ValueError(f"binding {field} must be an immutable sha256 digest")
+
+    raw_rows = payload.get("rows")
+    if not isinstance(raw_rows, list):
+        raise ValueError("rows must be an array")
+    rows: dict[str, dict] = {}
+    allowed_statuses = {
+        "automated-pass",
+        "automated-fail",
+        "owner-assisted-pass",
+        "blocked",
+        "inconclusive",
+    }
+    expected_ids = {spec["id"] for spec in SARAH_LIVEKIT_ROWS}
+    for row in raw_rows:
+        if not isinstance(row, dict) or not isinstance(row.get("id"), str):
+            raise ValueError("every row must be an object with an id")
+        row_id = row["id"]
+        if row_id in rows:
+            raise ValueError(f"duplicate row {row_id}")
+        if row_id not in expected_ids:
+            raise ValueError(f"unexpected row {row_id}")
+        if row.get("status") not in allowed_statuses:
+            raise ValueError(f"row {row_id} has unsupported status {row.get('status')!r}")
+        facts = row.get("facts")
+        if not isinstance(facts, dict):
+            raise ValueError(f"row {row_id} facts must be an object")
+        refs = row.get("evidence_refs")
+        if not isinstance(refs, list) or not refs:
+            raise ValueError(f"row {row_id} must preserve at least one evidence ref")
+        for ref in refs:
+            if not isinstance(ref, dict):
+                raise ValueError(f"row {row_id} evidence refs must be objects")
+            path = ref.get("path")
+            if (
+                not isinstance(path, str)
+                or not path
+                or Path(path).is_absolute()
+                or ".." in Path(path).parts
+            ):
+                raise ValueError(f"row {row_id} evidence path must be repository-relative")
+            if re.fullmatch(r"[0-9a-f]{64}", str(ref.get("sha256", ""))) is None:
+                raise ValueError(f"row {row_id} evidence ref must carry a sha256")
+            if ref.get("public_safe") is not True:
+                raise ValueError(f"row {row_id} evidence ref is not marked public_safe")
+            evidence_path = ROOT / path
+            if not allow_unresolved_refs:
+                if not evidence_path.is_file():
+                    raise ValueError(
+                        f"row {row_id} evidence does not exist in this repository"
+                    )
+                if sha256_file(evidence_path) != ref["sha256"]:
+                    raise ValueError(f"row {row_id} evidence sha256 does not match")
+        rows[row_id] = row
+
+    absent = sorted(expected_ids - rows.keys())
+    if absent:
+        raise ValueError("evidence is missing rows: " + ", ".join(absent))
+
+    serialized = json.dumps(payload, sort_keys=True)
+    if re.search(r"(?i)(bearer\s+[a-z0-9._-]+|sk-[a-z0-9_-]{12,})", serialized):
+        raise ValueError("evidence contains a secret-shaped value")
+    return binding, rows
 
 
 def now_utc() -> str:
@@ -409,7 +590,45 @@ def self_test() -> int:
     if canonical_digest(unbound) == tampered["evidence_sha256"]:
         print("self-test: tampering was not detected", file=sys.stderr)
         return 3
-    print("release-gate self-test passed: sweep fires, tampering is refused.")
+
+    fixture_path = (
+        ROOT / "script/fixtures/omega-release-gate/sarah-livekit-evidence-valid.json"
+    )
+    schema_path = (
+        ROOT
+        / "script/fixtures/omega-release-gate/sarah-livekit-evidence.schema.json"
+    )
+    try:
+        schema = json.loads(schema_path.read_text())
+        fixture = json.loads(fixture_path.read_text())
+        binding, livekit_rows = validate_sarah_livekit_evidence(
+            fixture, "a" * 64, "b" * 40, allow_unresolved_refs=True
+        )
+    except (OSError, json.JSONDecodeError, ValueError) as error:
+        print(f"self-test: valid LiveKit evidence fixture failed: {error}", file=sys.stderr)
+        return 3
+    if schema.get("title") != "Omega Sarah LiveKit installed-candidate evidence":
+        print("self-test: LiveKit evidence schema title changed", file=sys.stderr)
+        return 3
+    if len(livekit_rows) != len(SARAH_LIVEKIT_ROWS):
+        print("self-test: valid LiveKit fixture did not cover every row", file=sys.stderr)
+        return 3
+    tampered_fixture = json.loads(json.dumps(fixture))
+    tampered_fixture["binding"]["omega_package_sha256"] = "c" * 64
+    try:
+        validate_sarah_livekit_evidence(tampered_fixture, "a" * 64, "b" * 40)
+    except ValueError:
+        pass
+    else:
+        print("self-test: candidate-mismatched LiveKit evidence was accepted", file=sys.stderr)
+        return 3
+    if canonical_digest(binding) == "":
+        print("self-test: LiveKit binding digest is empty", file=sys.stderr)
+        return 3
+    print(
+        "release-gate self-test passed: sweep fires, tampering and "
+        "candidate-mismatched LiveKit evidence are refused."
+    )
     return 0
 
 
@@ -432,6 +651,15 @@ def main() -> int:
     parser.add_argument("--launch-settle", type=float, default=20.0)
     parser.add_argument("--report", type=Path, default=None)
     parser.add_argument("--receipt-copy", type=Path, default=None)
+    parser.add_argument(
+        "--sarah-livekit-evidence",
+        type=Path,
+        default=None,
+        help=(
+            "public-safe evidence manifest binding all six Sarah LiveKit rows "
+            "to this exact package and infrastructure"
+        ),
+    )
     parser.add_argument("--self-test", action="store_true")
     args = parser.parse_args()
 
@@ -476,6 +704,27 @@ def main() -> int:
     package_digest = sha256_file(args.dmg)
     recorded_digest = record.get("digests", {}).get("package_sha256")
     commit = record.get("source", {}).get("commit", "")
+    livekit_binding: dict | None = None
+    livekit_evidence_rows: dict[str, dict] | None = None
+    livekit_evidence_error: str | None = None
+    livekit_evidence_ref: dict | None = None
+    if args.sarah_livekit_evidence is None:
+        livekit_evidence_error = (
+            "no --sarah-livekit-evidence manifest was supplied for this candidate"
+        )
+    else:
+        try:
+            livekit_payload = json.loads(args.sarah_livekit_evidence.read_text())
+            livekit_binding, livekit_evidence_rows = validate_sarah_livekit_evidence(
+                livekit_payload, package_digest, commit
+            )
+            livekit_evidence_ref = {
+                "path": portable_path(args.sarah_livekit_evidence),
+                "sha256": sha256_file(args.sarah_livekit_evidence),
+                "public_safe": True,
+            }
+        except (OSError, json.JSONDecodeError, ValueError) as error:
+            livekit_evidence_error = str(error)
     integrity_facts = {
         "artifact": args.dmg.name,
         "package_sha256": package_digest,
@@ -946,9 +1195,51 @@ def main() -> int:
             owner_instruction=spec["owner_instruction"],
         )
 
+    for spec in SARAH_LIVEKIT_ROWS:
+        evidence_row = (
+            livekit_evidence_rows.get(spec["id"])
+            if livekit_evidence_rows is not None
+            else None
+        )
+        if evidence_row is None or livekit_binding is None:
+            add_row(
+                spec["id"],
+                spec["title"],
+                "blocked",
+                {
+                    "blocked_reason": livekit_evidence_error
+                    or "the Sarah LiveKit evidence row is absent",
+                },
+                [],
+                issues=spec["issues"],
+                owner_instruction=spec["owner_instruction"],
+            )
+            continue
+        facts = dict(evidence_row["facts"])
+        facts["candidate_and_infrastructure_binding"] = livekit_binding
+        facts["binding_sha256"] = canonical_digest(livekit_binding)
+        refs = list(evidence_row["evidence_refs"])
+        if livekit_evidence_ref is not None:
+            refs.append(livekit_evidence_ref)
+        add_row(
+            spec["id"],
+            spec["title"],
+            evidence_row["status"],
+            facts,
+            refs,
+            issues=spec["issues"],
+            owner_instruction=(
+                spec["owner_instruction"]
+                if evidence_row["status"] in {"blocked", "inconclusive"}
+                else None
+            ),
+        )
+
     automated_failures = [r["id"] for r in rows if r["status"] == "automated-fail"]
     pending = [r["id"] for r in rows if r["status"] == "owner-assisted-pending"]
-    blocked = [r["id"] for r in rows if r["status"] == "blocked"]
+    blocked = [
+        r["id"] for r in rows if r["status"] in {"blocked", "inconclusive"}
+    ]
     status = (
         "failed"
         if automated_failures
@@ -964,6 +1255,7 @@ def main() -> int:
             "version": record.get("version"),
             "channel": record.get("channel"),
         },
+        "sarah_livekit_binding": livekit_binding,
         "harness_commit": run(
             ["git", "-C", str(ROOT), "rev-parse", "HEAD"]
         ).stdout.strip(),
@@ -998,10 +1290,11 @@ def write_report(path: Path, receipt: dict) -> None:
         "(OMEGA-DELTA-0185) from a packaged candidate produced by "
         "`script/bundle-omega-rc` and launched from a clean profile. Row "
         "meanings: `automated-pass`/`automated-fail` were observed end-to-end "
-        "by the harness; `owner-assisted-pending` rows require a human "
+        "by the harness; `owner-assisted-pass` records a preserved human "
+        "observation; `owner-assisted-pending` rows require a human "
         "account, interactive provider auth, a second person, or a judgment "
-        "call, and carry the exact instruction; `blocked` rows name the host "
-        "condition that refused observation. No row is ever fabricated.",
+        "call, and carry the exact instruction; `blocked` and `inconclusive` "
+        "rows name what prevented a verdict. No row is ever fabricated.",
         "",
         f"- Generated: {receipt['generated_at']}",
         f"- Candidate: `{receipt['candidate']['artifact_name']}` "
@@ -1012,20 +1305,36 @@ def write_report(path: Path, receipt: dict) -> None:
         f"- Harness commit: `{receipt['harness_commit']}`",
         f"- Overall status: **{receipt['status']}**",
         f"- Receipt digest: `{receipt['evidence_sha256']}`",
-        "",
+    ]
+    if receipt.get("sarah_livekit_binding") is not None:
+        lines.extend(
+            [
+                "- Sarah LiveKit binding SHA-256: "
+                f"`{canonical_digest(receipt['sarah_livekit_binding'])}`",
+                "",
+            ]
+        )
+    else:
+        lines.append("")
+    lines.extend(
+        [
         "Regenerate: build the candidate with `script/bundle-omega-rc`, then "
         "run `script/omega-release-gate --report docs/omega/release-gate.md "
-        "--receipt-copy docs/omega/release-gate/<date>-<candidate>.gate.json`.",
+        "--receipt-copy docs/omega/release-gate/<date>-<candidate>.gate.json "
+        "--sarah-livekit-evidence <public-safe-manifest.json>`.",
         "",
         "| Row | Status | Issues | Evidence / owner instruction |",
         "| --- | --- | --- | --- |",
-    ]
+        ]
+    )
     for row in receipt["rows"]:
         issues = ", ".join(row.get("issues", [])) or "—"
         if row["status"] == "owner-assisted-pending":
             detail = row.get("owner_instruction", "")
-        elif row["status"] == "blocked":
-            detail = row["facts"].get("blocked_reason", "")
+        elif row["status"] in {"blocked", "inconclusive"}:
+            detail = row["facts"].get(
+                "blocked_reason", row.get("owner_instruction", "")
+            )
         else:
             detail = "; ".join(
                 Path(ref["path"]).name for ref in row.get("evidence_refs", [])

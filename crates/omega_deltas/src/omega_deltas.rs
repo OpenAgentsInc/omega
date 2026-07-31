@@ -201,6 +201,7 @@ pub const ENFORCED_DELTAS: &[&str] = &[
     "OMEGA-DELTA-0210",
     "OMEGA-DELTA-0211",
     "OMEGA-DELTA-0212",
+    "OMEGA-DELTA-0213",
 ];
 
 /// OMEGA-DELTA-0204. Every control the composer's bar offers, written twice:
@@ -23118,6 +23119,70 @@ mod tests {
         );
     }
 
+    /// OMEGA-DELTA-0213. Installed Sarah LiveKit claims require one immutable
+    /// candidate-and-infrastructure binding and public-safe preserved evidence.
+    #[test]
+    fn sarah_livekit_release_rows_refuse_unbound_or_private_evidence() {
+        let gate = read_repository_file("script/omega-release-gate");
+        for required in [
+            "openagents.omega.release-gate.v2",
+            "openagents.omega.sarah-livekit-evidence.v1",
+            "--sarah-livekit-evidence",
+            "omega_package_sha256 does not match the candidate",
+            "omega_source_revision does not match the candidate",
+            "evidence does not exist in this repository",
+            "evidence sha256 does not match",
+            "public_safe",
+            "inconclusive",
+        ] {
+            assert!(
+                gate.contains(required),
+                "OMEGA-DELTA-0213: the installed Sarah LiveKit gate lost `{required}`"
+            );
+        }
+        for row in [
+            "sarah-livekit-private",
+            "sarah-livekit-room",
+            "sarah-livekit-connectivity",
+            "sarah-livekit-isolation",
+            "sarah-livekit-failure",
+            "sarah-livekit-independent-review",
+        ] {
+            assert!(
+                gate.contains(row),
+                "OMEGA-DELTA-0213: release-gate script lost `{row}`"
+            );
+            assert!(
+                read_repository_file("docs/omega/release-gate.md").contains(row),
+                "OMEGA-DELTA-0213: committed release report lost `{row}`"
+            );
+        }
+
+        let schema = read_repository_file(
+            "script/fixtures/omega-release-gate/sarah-livekit-evidence.schema.json",
+        );
+        let fixture = read_repository_file(
+            "script/fixtures/omega-release-gate/sarah-livekit-evidence-valid.json",
+        );
+        for binding in [
+            "omega_source_revision",
+            "omega_package_sha256",
+            "openagents_source_revision",
+            "livekit_infrastructure_revision",
+            "livekit_config_revision",
+            "livekit_image_digest",
+            "sarah_worker_revision",
+            "sarah_worker_image_digest",
+            "admitted_model_revision",
+            "price_catalog_revision",
+        ] {
+            assert!(
+                schema.contains(binding) && fixture.contains(binding),
+                "OMEGA-DELTA-0213: evidence schema or fixture lost binding `{binding}`"
+            );
+        }
+    }
+
     /// OMEGA-DELTA-0181. Direct agent turns expose a durable lifecycle, keep
     /// queued input durable, and require an explicit choice before two writers
     /// share a worktree.
@@ -23719,11 +23784,13 @@ mod tests {
             );
         }
         for honesty in [
-            "openagents.omega.release-gate.v1",
+            "openagents.omega.release-gate.v2",
             "automated-pass",
             "automated-fail",
+            "owner-assisted-pass",
             "owner-assisted-pending",
             "blocked",
+            "inconclusive",
         ] {
             assert!(
                 gate.contains(honesty),

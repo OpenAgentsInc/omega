@@ -1,0 +1,101 @@
+{
+  "binding": {
+    "admitted_model_revision": "model-catalog-fixture-revision",
+    "livekit_config_revision": "livekit-config-fixture-revision",
+    "livekit_image_digest": "sha256:cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+    "livekit_infrastructure_revision": "livekit-infrastructure-fixture-revision",
+    "omega_package_sha256": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+    "omega_source_revision": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+    "openagents_source_revision": "openagents-fixture-revision",
+    "price_catalog_revision": "price-catalog-fixture-revision",
+    "sarah_worker_image_digest": "sha256:dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd",
+    "sarah_worker_revision": "sarah-worker-fixture-revision"
+  },
+  "rows": [
+    {
+      "evidence_refs": [
+        {
+          "path": "docs/omega/release-gate/fixture-private.json",
+          "public_safe": true,
+          "sha256": "eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee"
+        }
+      ],
+      "facts": {
+        "fixture": true
+      },
+      "id": "sarah-livekit-private",
+      "status": "owner-assisted-pass"
+    },
+    {
+      "evidence_refs": [
+        {
+          "path": "docs/omega/release-gate/fixture-room.json",
+          "public_safe": true,
+          "sha256": "eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee"
+        }
+      ],
+      "facts": {
+        "fixture": true
+      },
+      "id": "sarah-livekit-room",
+      "status": "owner-assisted-pass"
+    },
+    {
+      "evidence_refs": [
+        {
+          "path": "docs/omega/release-gate/fixture-connectivity.json",
+          "public_safe": true,
+          "sha256": "eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee"
+        }
+      ],
+      "facts": {
+        "fixture": true
+      },
+      "id": "sarah-livekit-connectivity",
+      "status": "automated-pass"
+    },
+    {
+      "evidence_refs": [
+        {
+          "path": "docs/omega/release-gate/fixture-isolation.json",
+          "public_safe": true,
+          "sha256": "eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee"
+        }
+      ],
+      "facts": {
+        "fixture": true
+      },
+      "id": "sarah-livekit-isolation",
+      "status": "automated-pass"
+    },
+    {
+      "evidence_refs": [
+        {
+          "path": "docs/omega/release-gate/fixture-failure.json",
+          "public_safe": true,
+          "sha256": "eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee"
+        }
+      ],
+      "facts": {
+        "fixture": true
+      },
+      "id": "sarah-livekit-failure",
+      "status": "inconclusive"
+    },
+    {
+      "evidence_refs": [
+        {
+          "path": "docs/omega/release-gate/fixture-independent-review.json",
+          "public_safe": true,
+          "sha256": "eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee"
+        }
+      ],
+      "facts": {
+        "fixture": true
+      },
+      "id": "sarah-livekit-independent-review",
+      "status": "owner-assisted-pass"
+    }
+  ],
+  "schema": "openagents.omega.sarah-livekit-evidence.v1"
+}

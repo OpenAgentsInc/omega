@@ -9508,3 +9508,25 @@ playback.
   `livekit_subscription_accepts_only_sarah_audio` and
   `constructing_an_admitted_livekit_client_does_not_open_audio` in
   `crates/workroom_ui/src/voice.rs`.
+
+### OMEGA-DELTA-0213 — Sarah LiveKit release claims require one immutable evidence binding
+
+The installed-candidate gate always emits separate rows for private voice,
+authenticated community rooms, UDP/TCP/TURN connectivity, concurrent-room
+isolation, the failure/privacy matrix, and independent review. Those rows do
+not inherit a verdict from source tests or from one successful headless room.
+
+To promote a row, the gate requires a public-safe evidence manifest bound to
+the exact Omega source and package digest, OpenAgents source revision, LiveKit
+infrastructure/config/server-image revisions, Sarah worker source/image
+revisions, admitted model revision, and price-catalog revision. Evidence paths
+must exist in the repository, remain repository-relative, match their SHA-256,
+and be marked public-safe. A manifest for another package is rejected; absent
+evidence is blocked; incomplete observation is inconclusive. Owner-assisted
+success is a distinct preserved status, not an automated pass.
+
+- **Enforced by:**
+  `sarah_livekit_release_rows_refuse_unbound_or_private_evidence` in
+  `crates/omega_deltas`; `script/omega-release-gate --self-test`; and the
+  checked-in evidence schema and valid fixture under
+  `script/fixtures/omega-release-gate`.

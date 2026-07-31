@@ -1,0 +1,139 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "additionalProperties": false,
+  "properties": {
+    "binding": {
+      "additionalProperties": false,
+      "properties": {
+        "admitted_model_revision": {
+          "minLength": 1,
+          "type": "string"
+        },
+        "livekit_config_revision": {
+          "minLength": 1,
+          "type": "string"
+        },
+        "livekit_image_digest": {
+          "pattern": "^sha256:[0-9a-f]{64}$",
+          "type": "string"
+        },
+        "livekit_infrastructure_revision": {
+          "minLength": 1,
+          "type": "string"
+        },
+        "omega_package_sha256": {
+          "pattern": "^[0-9a-f]{64}$",
+          "type": "string"
+        },
+        "omega_source_revision": {
+          "minLength": 1,
+          "type": "string"
+        },
+        "openagents_source_revision": {
+          "minLength": 1,
+          "type": "string"
+        },
+        "price_catalog_revision": {
+          "minLength": 1,
+          "type": "string"
+        },
+        "sarah_worker_image_digest": {
+          "pattern": "^sha256:[0-9a-f]{64}$",
+          "type": "string"
+        },
+        "sarah_worker_revision": {
+          "minLength": 1,
+          "type": "string"
+        }
+      },
+      "required": [
+        "omega_source_revision",
+        "omega_package_sha256",
+        "openagents_source_revision",
+        "livekit_infrastructure_revision",
+        "livekit_config_revision",
+        "livekit_image_digest",
+        "sarah_worker_revision",
+        "sarah_worker_image_digest",
+        "admitted_model_revision",
+        "price_catalog_revision"
+      ],
+      "type": "object"
+    },
+    "rows": {
+      "items": {
+        "additionalProperties": false,
+        "properties": {
+          "evidence_refs": {
+            "items": {
+              "additionalProperties": false,
+              "properties": {
+                "path": {
+                  "minLength": 1,
+                  "type": "string"
+                },
+                "public_safe": {
+                  "const": true
+                },
+                "sha256": {
+                  "pattern": "^[0-9a-f]{64}$",
+                  "type": "string"
+                }
+              },
+              "required": [
+                "path",
+                "sha256",
+                "public_safe"
+              ],
+              "type": "object"
+            },
+            "minItems": 1,
+            "type": "array"
+          },
+          "facts": {
+            "type": "object"
+          },
+          "id": {
+            "enum": [
+              "sarah-livekit-private",
+              "sarah-livekit-room",
+              "sarah-livekit-connectivity",
+              "sarah-livekit-isolation",
+              "sarah-livekit-failure",
+              "sarah-livekit-independent-review"
+            ]
+          },
+          "status": {
+            "enum": [
+              "automated-pass",
+              "automated-fail",
+              "owner-assisted-pass",
+              "blocked",
+              "inconclusive"
+            ]
+          }
+        },
+        "required": [
+          "id",
+          "status",
+          "facts",
+          "evidence_refs"
+        ],
+        "type": "object"
+      },
+      "maxItems": 6,
+      "minItems": 6,
+      "type": "array"
+    },
+    "schema": {
+      "const": "openagents.omega.sarah-livekit-evidence.v1"
+    }
+  },
+  "required": [
+    "schema",
+    "binding",
+    "rows"
+  ],
+  "title": "Omega Sarah LiveKit installed-candidate evidence",
+  "type": "object"
+}
