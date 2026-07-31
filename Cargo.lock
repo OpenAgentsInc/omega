@@ -11056,6 +11056,7 @@ dependencies = [
  "omega_exo_lane",
  "omega_exo_log",
  "omega_zero_base",
+ "scv",
  "serde_json",
  "sha2",
 ]
@@ -14791,6 +14792,7 @@ name = "scv"
 version = "0.1.0"
 dependencies = [
  "agent-client-protocol",
+ "omega_agent_detect",
  "serde",
  "serde_json",
  "tempfile",

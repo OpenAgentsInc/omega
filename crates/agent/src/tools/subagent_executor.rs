@@ -79,6 +79,20 @@ impl SubagentExecutor {
         matches!(self, Self::ExternalAcp { .. } | Self::Exo(_))
     }
 
+    /// OMEGA-DELTA-0209. The external agent's id and name, when it is one.
+    ///
+    /// The pair the prompt contract is looked up by, before anything is
+    /// started. Exo is deliberately not folded in: its identity is a derived
+    /// lane rather than a catalog id, and `omega_agent_detect` declares no
+    /// contract for it.
+    #[must_use]
+    pub fn external_acp(&self) -> Option<(&str, &str)> {
+        match self {
+            Self::ExternalAcp { id, name } => Some((id, name)),
+            _ => None,
+        }
+    }
+
     #[must_use]
     pub fn engine_lane(&self) -> Option<&str> {
         match self {

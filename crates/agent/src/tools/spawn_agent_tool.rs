@@ -16,38 +16,57 @@ use crate::{
     resolve_requested_executor,
 };
 
-/// Spawn a sub-agent for a well-scoped task.
+/// What the delegating model is told this tool does.
 ///
-/// ### Designing delegated subtasks
-/// - An agent does not see your conversation history. Include all relevant context (file paths, requirements, constraints) in the message.
-/// - Subtasks must be concrete, well-defined, and self-contained.
-/// - Delegated subtasks must materially advance the main task.
-/// - Do not duplicate work between your work and delegated subtasks.
-/// - Do not use this tool for tasks you could accomplish directly with one or two tool calls. For example, don't ask the agent to read a single file and return the contents, you can do this yourself.
-/// - When you delegate work, focus on coordinating and synthesizing results instead of duplicating the same work yourself.
-/// - Avoid issuing multiple delegate calls for the same unresolved subproblem unless the new delegated task is genuinely different and necessary.
-/// - Narrow the delegated ask to the concrete output you need next.
-/// - For code-edit subtasks, decompose work so each delegated task has a disjoint write set.
-/// - When sending a follow-up using an existing agent session_id, the agent already has the context from the previous turn. Send only a short, direct message. Do NOT repeat the original task or context.
+/// OMEGA-DELTA-0209. A constant rather than a doc comment on the input type,
+/// because a doc comment on that type reaches nobody. `AgentTool::description`
+/// reads the input's JSON schema, `efdc784fa9` replaced the derived
+/// `JsonSchema` for `SpawnAgentToolInput` with a hand-written one to pin the
+/// delegate contract, and a hand-written `json_schema!` carries no doc comment
+/// — so every word of this guidance had been absent from the tool the model
+/// sees ever since. It was found while checking that a *new* line of guidance
+/// arrived, which is the only way an empty string is ever noticed.
 ///
-/// ### Parallel delegation patterns
-/// - Run multiple independent information-seeking subtasks in parallel when you have distinct questions that can be answered independently.
-/// - Split implementation into disjoint codebase slices and spawn multiple agents for them in parallel when the write scopes do not overlap.
-/// - When a plan has multiple independent steps, prefer delegating those steps in parallel rather than serializing them unnecessarily.
-/// - Reuse the returned session_id when you want to follow up on the same delegated subproblem instead of creating a duplicate session.
-///
-/// ### Choosing what runs the agent
-/// - Use `native` (or omit `executor` for stored-call compatibility) to run on Omega's own loop.
-/// - Set `executor` to run the sub-agent as a *different* agent entirely — Codex, Claude Code, or Grok, each with its own login, its own tools and its own loop. Use this when the task suits another agent better, or when you want a second opinion from a genuinely independent one.
-/// - Accepted values are installed agent ids such as `codex-acp`, `claude-acp`, and `grok`, plus `exo` and `engine:<lane>`. `auto` is not accepted.
-/// - `executor` names an agent, not a language model. A model name such as `gpt-5` is not accepted and will fail rather than silently running on your own model.
-/// - You may give different sub-agents different executors in the same turn, and they run concurrently.
-///
-/// ### Output
-/// - You will receive only the agent's final message as output.
-/// - The result also carries an `executor` record naming what actually produced it — its `class` (`native_loop` or `external_acp`) and its `agent_id` — so you can tell which agent gave you which answer. An external agent does not report its model, and `provider`/`model` are absent rather than guessed when it does not.
-/// - Successful calls return a session_id that you can use for follow-up messages.
-/// - Error results may also include a session_id if a session was already created.
+/// `SpawnAgentTool::description` is what serves this, with the structured
+/// contracts appended from the catalog.
+const DELEGATE_GUIDANCE: &str = r#"Spawn a sub-agent for a well-scoped task.
+
+### Designing delegated subtasks
+- An agent does not see your conversation history. Include all relevant context (file paths, requirements, constraints) in the message.
+- Subtasks must be concrete, well-defined, and self-contained.
+- Delegated subtasks must materially advance the main task.
+- Do not duplicate work between your work and delegated subtasks.
+- Do not use this tool for tasks you could accomplish directly with one or two tool calls. For example, don't ask the agent to read a single file and return the contents, you can do this yourself.
+- When you delegate work, focus on coordinating and synthesizing results instead of duplicating the same work yourself.
+- Avoid issuing multiple delegate calls for the same unresolved subproblem unless the new delegated task is genuinely different and necessary.
+- Narrow the delegated ask to the concrete output you need next.
+- For code-edit subtasks, decompose work so each delegated task has a disjoint write set.
+- When sending a follow-up using an existing agent session_id, the agent already has the context from the previous turn. Send only a short, direct message. Do NOT repeat the original task or context.
+
+### Parallel delegation patterns
+- Run multiple independent information-seeking subtasks in parallel when you have distinct questions that can be answered independently.
+- Split implementation into disjoint codebase slices and spawn multiple agents for them in parallel when the write scopes do not overlap.
+- When a plan has multiple independent steps, prefer delegating those steps in parallel rather than serializing them unnecessarily.
+- Reuse the returned session_id when you want to follow up on the same delegated subproblem instead of creating a duplicate session.
+
+### Choosing what runs the agent
+- Use `native` (or omit `executor` for stored-call compatibility) to run on Omega's own loop.
+- Set `executor` to run the sub-agent as a *different* agent entirely — Codex, Claude Code, or Grok, each with its own login, its own tools and its own loop. Use this when the task suits another agent better, or when you want a second opinion from a genuinely independent one.
+- Accepted values are installed agent ids such as `codex-acp`, `claude-acp`, and `grok`, plus `exo` and `engine:<lane>`. `auto` is not accepted.
+- `executor` names an agent, not a language model. A model name such as `gpt-5` is not accepted and will fail rather than silently running on your own model.
+- You may give different sub-agents different executors in the same turn, and they run concurrently.
+
+### Agents that take a structured request
+- Most executors have a model and read the `task` as prose. A few do not: they are deterministic tool servers, and their `task` must be exactly one JSON request with your values filled in — no prose around it, no explanation, nothing else.
+- Which executors those are, and the exact request each one takes, is listed at the end of this description. That list is generated from the same catalog the delegation is offered from, so an executor named there does take that shape.
+- Send anything else to one of them and the delegation is refused before the agent is started, naming the shape it wanted.
+
+### Output
+- You will receive only the agent's final message as output.
+- The result also carries an `executor` record naming what actually produced it — its `class` (`native_loop` or `external_acp`) and its `agent_id` — so you can tell which agent gave you which answer. An external agent does not report its model, and `provider`/`model` are absent rather than guessed when it does not.
+- Successful calls return a session_id that you can use for follow-up messages.
+- Error results may also include a session_id if a session was already created."#;
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub struct SpawnAgentToolInput {
@@ -189,8 +208,65 @@ pub enum DelegateFailureClass {
     AccountExhausted,
     AccountRateLimited,
     EngineUnavailable,
+    /// OMEGA-DELTA-0209. The executor exists, starts, and cannot answer *this*
+    /// task, because it takes a structured request and the task is not one.
+    ///
+    /// Its own class rather than an `ExecutionError`, because the two ask for
+    /// different things: an execution error is retried or escalated, and this
+    /// one is fixed by rewriting the task into the shape the refusal names.
+    TaskNotInContract,
     #[default]
     ExecutionError,
+}
+
+/// OMEGA-DELTA-0209. The structured-contract catalog, as the model reads it.
+///
+/// Generated from `omega_agent_detect::CANDIDATES` rather than written into the
+/// description by hand, so an agent added to the catalog is described by the
+/// same edit that adds it. A model that is not told a target's contract writes
+/// prose at it, which is what the owner saw.
+fn structured_contract_section() -> String {
+    let structured: Vec<String> = omega_agent_detect::CANDIDATES
+        .iter()
+        .filter_map(|candidate| match candidate.prompt {
+            omega_agent_detect::AgentPromptContract::Structured(contract) => Some(format!(
+                "- `{}` ({}) takes exactly: {}",
+                candidate.id, candidate.name, contract.request
+            )),
+            omega_agent_detect::AgentPromptContract::Prose => None,
+        })
+        .collect();
+
+    if structured.is_empty() {
+        return String::new();
+    }
+
+    format!(
+        "\n\n### Executors whose `task` is a JSON request\n{}\n",
+        structured.join("\n")
+    )
+}
+
+/// The task as the resolved executor will accept it, or the refusal to send.
+///
+/// OMEGA-DELTA-0209. A prose executor takes the task unchanged; a structured
+/// one takes only what `shape_delegated_task` can shape. An executor Omega does
+/// not have in its catalog — a settings-declared custom agent — takes the task
+/// unchanged too, because Omega knows nothing about its contract and inventing
+/// one would be worse than sending what the parent wrote.
+fn task_for_executor(agent_id: &str, task: String) -> Result<String, String> {
+    let Some(candidate) = omega_agent_detect::CANDIDATES
+        .iter()
+        .find(|candidate| candidate.id == agent_id)
+    else {
+        return Ok(task);
+    };
+    match candidate.prompt {
+        omega_agent_detect::AgentPromptContract::Structured(contract) => {
+            omega_agent_detect::shape_delegated_task(candidate.name, &contract, &task)
+        }
+        omega_agent_detect::AgentPromptContract::Prose => Ok(task),
+    }
 }
 
 fn classify_execution_failure(error: &str) -> DelegateFailureClass {
@@ -347,6 +423,21 @@ impl AgentTool for SpawnAgentTool {
 
     const NAME: &'static str = "spawn_agent";
 
+    /// OMEGA-DELTA-0209. The written guidance, plus the contract catalog.
+    ///
+    /// Two reasons this is not the default implementation. The default reads
+    /// the input's JSON schema, and this tool's schema is hand-written and
+    /// carries no description — so the default served an empty string, and had
+    /// since `efdc784fa9`. And the structured contracts cannot be written into
+    /// prose that a person maintains: a hand-kept list of which executors take
+    /// JSON is a copy of the catalog, and a copy goes stale without saying so.
+    fn description() -> SharedString {
+        SharedString::new(format!(
+            "{DELEGATE_GUIDANCE}{}",
+            structured_contract_section()
+        ))
+    }
+
     fn kind() -> acp::ToolKind {
         acp::ToolKind::Other
     }
@@ -384,6 +475,15 @@ impl AgentTool for SpawnAgentTool {
                     executor: None,
                 })?;
 
+            // OMEGA-DELTA-0209. What will actually be sent, decided before
+            // anything is started.
+            //
+            // A structured executor has no model, so a task it cannot parse is
+            // not a task it can attempt: launching a process and opening a
+            // session for it only moves the failure later and leaves the reader
+            // with the agent's parse error instead of the shape it wanted.
+            let mut task = input.task;
+
             let subagent = if let Some(session_id) = input.session {
                 let subagent = cx
                     .update(|cx| self.environment.resume_subagent(session_id.clone(), cx))
@@ -410,6 +510,23 @@ impl AgentTool for SpawnAgentTool {
                         });
                     }
                 }
+                // Shaped from the live disclosure rather than from the request,
+                // and whether or not the follow-up named an executor: a second
+                // turn on an SCV session is another tool request, and a
+                // follow-up that omits `executor` is still going to SCV.
+                let disclosure = cx.update(|cx| subagent.executor_disclosure(cx));
+                task = match task_for_executor(&disclosure.agent_id, task) {
+                    Ok(task) => task,
+                    Err(refusal) => {
+                        return Err(SpawnAgentToolOutput::Error {
+                            session_id: Some(session_id),
+                            error: refusal,
+                            class: DelegateFailureClass::TaskNotInContract,
+                            session_info: None,
+                            executor: Some(SubagentExecutorReport::from(&disclosure)),
+                        });
+                    }
+                };
                 subagent
             } else {
                 // Decide what runs this before creating anything. A named
@@ -427,6 +544,23 @@ impl AgentTool for SpawnAgentTool {
                         });
                     }
                 };
+                // Before `create_subagent`, deliberately. A task the target
+                // cannot parse is refused without spending a process launch, an
+                // ACP handshake and a session on it.
+                if let Some((agent_id, _)) = executor.external_acp() {
+                    task = match task_for_executor(agent_id, task) {
+                        Ok(task) => task,
+                        Err(refusal) => {
+                            return Err(SpawnAgentToolOutput::Error {
+                                session_id: None,
+                                error: refusal,
+                                class: DelegateFailureClass::TaskNotInContract,
+                                session_info: None,
+                                executor: None,
+                            });
+                        }
+                    };
+                }
                 if let Some(lane) = executor.engine_lane() {
                     return Err(SpawnAgentToolOutput::Error {
                         session_id: None,
@@ -486,7 +620,7 @@ impl AgentTool for SpawnAgentTool {
                 session_info
             });
 
-            let send_result = subagent.send(input.task, cx).await;
+            let send_result = subagent.send(task, cx).await;
 
             let status = if send_result.is_ok() {
                 "completed"
@@ -690,6 +824,134 @@ mod tests {
         assert_eq!(value["disclosure"]["class"], "external_acp");
         assert_eq!(value["disclosure"]["agent_id"], "claude-acp");
         assert!(value["error"].is_string());
+    }
+
+    /// OMEGA-DELTA-0209. The model is told every structured target's contract.
+    ///
+    /// Generated from the catalog, so this is not a check that somebody
+    /// remembered to write SCV into a doc comment — it is a check that the
+    /// generation happens at all and reaches the string the model reads.
+    #[test]
+    fn the_delegate_description_names_every_structured_contract() {
+        let description = SpawnAgentTool::description();
+
+        let mut structured = 0;
+        for candidate in omega_agent_detect::CANDIDATES {
+            let omega_agent_detect::AgentPromptContract::Structured(contract) = candidate.prompt
+            else {
+                continue;
+            };
+            structured += 1;
+            assert!(
+                description.contains(candidate.id),
+                "a delegating model is never told that `{}` takes a structured \
+                 request, so it writes prose at it: {description}",
+                candidate.id
+            );
+            assert!(
+                description.contains(contract.request),
+                "`{}`'s description names no request, and a model handed a \
+                 sentence about JSON writes a sentence: {description}",
+                candidate.id
+            );
+        }
+        assert!(structured > 0, "the catalog holds no structured target");
+
+        // The written description survives the generation.
+        assert!(
+            description.contains("Spawn a sub-agent for a well-scoped task."),
+            "{description}"
+        );
+    }
+
+    /// OMEGA-DELTA-0209. The tool describes itself at all.
+    ///
+    /// `efdc784fa9` replaced this input's derived `JsonSchema` with a
+    /// hand-written one, and a hand-written `json_schema!` carries no doc
+    /// comment — so the default `AgentTool::description`, which reads the
+    /// schema, served an empty string and every word of the delegate guidance
+    /// was absent from the tool the model sees. Nothing failed, because an
+    /// empty description is a valid description of nothing.
+    #[test]
+    fn the_delegate_tool_is_described_to_the_model() {
+        let description = SpawnAgentTool::description();
+        assert!(
+            description.len() > 1000,
+            "the delegate guidance is missing or truncated: {description:?}"
+        );
+        for written in [
+            "### Designing delegated subtasks",
+            "### Choosing what runs the agent",
+            "### Output",
+            "`auto` is not accepted",
+        ] {
+            assert!(description.contains(written), "{written} is not served");
+        }
+        // And the schema this tool pins is still the delegate contract, which is
+        // why the description cannot come from it.
+        let schema = serde_json::to_value(schemars::schema_for!(SpawnAgentToolInput)).unwrap();
+        assert!(
+            schema.get("description").is_none(),
+            "if the schema ever carries the description, serve it from there \
+             instead of from two places: {schema}"
+        );
+    }
+
+    /// OMEGA-DELTA-0209. The owner's task, at the seam that refuses it.
+    ///
+    /// Prose is not shaped into a request, and the refusal is the shape rather
+    /// than a parser position. The prose case is what the owner sent three
+    /// times; the JSON case is what has to keep working.
+    #[test]
+    fn a_task_a_structured_target_cannot_parse_is_refused_by_naming_the_shape() {
+        let refusal = task_for_executor(
+            "scv",
+            "Perform a read-only test delegation: report the project root path \
+             and list one or two top-level entries. Do not modify files."
+                .to_owned(),
+        )
+        .expect_err("SCV has no model and this is prose");
+
+        assert!(
+            refusal.contains(omega_agent_detect::SCV_REQUEST),
+            "{refusal}"
+        );
+        assert_eq!(refusal.lines().count(), 1, "one line: {refusal}");
+        assert!(
+            refusal.contains("SCV"),
+            "the refusal names the agent: {refusal}"
+        );
+
+        let request = r#"{"tool":"read","arguments":{"path":"/tmp/a"}}"#;
+        assert_eq!(
+            task_for_executor("scv", request.to_owned()),
+            Ok(request.to_owned()),
+            "a request in the advertised shape must pass through unchanged"
+        );
+
+        // A prose target is untouched, and so is an agent Omega has no
+        // declaration for: inventing a contract would be worse than sending
+        // what the parent wrote.
+        for agent_id in ["codex-acp", "some-custom-agent"] {
+            assert_eq!(
+                task_for_executor(agent_id, "do the thing".to_owned()),
+                Ok("do the thing".to_owned()),
+                "{agent_id}"
+            );
+        }
+    }
+
+    /// The refusal is its own class, because it asks for its own fix.
+    #[test]
+    fn an_unshapeable_task_is_not_an_execution_error() {
+        let value = model_reads(SpawnAgentToolOutput::Error {
+            session_id: None,
+            error: "SCV takes a JSON tool request as the task, not prose.".into(),
+            class: DelegateFailureClass::TaskNotInContract,
+            session_info: None,
+            executor: None,
+        });
+        assert_eq!(value["class"], "task_not_in_contract", "{value}");
     }
 
     #[test]

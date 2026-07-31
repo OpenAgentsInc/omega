@@ -9270,3 +9270,86 @@ since it is a model's name rather than a line.
   `the_chrome_line_names_one_model_once_and_never_by_its_wire_id`,
   `folding_the_line_kept_every_other_part_of_it` in
   `crates/agent_ui/src/omega_routed_model.rs`.
+
+### OMEGA-DELTA-0209 — An agent Omega offers to delegate to is one Omega sends a shape it accepts
+
+- **Origin:** owner evidence 2026-07-31, omega#160, on dev build `d45a3b214c`
+  — the build that carried `OMEGA-DELTA-0203`. Three test delegations to SCV,
+  three failures: *"The SCV subagent failed: Invalid params:
+  {"code":"invalid_params","message":"invalid tool request: expected value at
+  line 1 column 1","path":""}"*. The delegated task was the prose *"Perform a
+  read-only test delegation: report the project root path and list one or two
+  top-level entries. Do not modify files."*
+
+**Starting it was only half the law.** `OMEGA-DELTA-0203` closed the gap
+between the catalog a delegation is offered from and the launcher that starts
+it, and the owner's next three delegations still failed — further along, on the
+first turn, with the agent running and the session open. The remaining gap was
+the other end of the same seam: `spawn_agent` sends `task` to every ACP agent
+uniformly, as prose, because every agent Omega had ever delegated to had a model
+to read prose with. `scv` does not. It is a deterministic tool server whose
+prompt must *be* a JSON tool request, `PromptToolRequest::parse` is
+`serde_json::from_str` on the prompt text, and a sentence fails it at line 1
+column 1 every time.
+
+Neither side was wrong alone, which is why nothing caught it. `scv` parsed JSON
+correctly and refused non-JSON correctly; Omega sent the parent's task
+faithfully. The defect existed only between them, and only a test that crossed
+the boundary could see it.
+
+- **Upstream Zed:** delegates to model-backed agents only, so "the task is
+  prose" is true of every target it has. It has no modelless agent to be wrong
+  about.
+- **Omega:** each candidate declares its prompt contract, as
+  `AgentPromptContract::Prose` or `AgentPromptContract::Structured`. There is no
+  third case and no default, so a candidate added without a contract does not
+  compile — the same shape `AgentLaunch` takes, for the same reason. `scv` is
+  `Structured`, and its request is `omega_agent_detect::SCV_REQUEST`.
+- **The model is told.** `SpawnAgentTool::description` appends the structured
+  targets and their exact requests, generated from the catalog rather than
+  written into the doc comment, so an agent added to the catalog is described by
+  the edit that adds it. A model handed the request writes the request; a model
+  handed a sentence about JSON writes a sentence.
+- **The shaping is not interpretation.** `shape_delegated_task` removes
+  surrounding whitespace and one Markdown code fence — a model told to emit JSON
+  very often emits JSON in a fence, and unwrapping a fence decides nothing — and
+  then requires a JSON object. It never invents a request from prose. A `read`
+  of a file nobody named would be an answer to a question nobody asked.
+- **The refusal is honest and early.** A task a structured target cannot parse
+  is refused before the process is launched, as
+  `DelegateFailureClass::TaskNotInContract`, in one line that names the shape.
+  Its own class because it asks for something different from an execution error:
+  not a retry, a rewrite. A follow-up turn on an existing session is shaped from
+  the live disclosure, whether or not it names an executor again.
+- **SCV says it too.** A client that is not Omega still reaches `scv` directly,
+  so its own refusal now names the request as well. `expected value at line 1
+  column 1` states where a parser stopped and nothing a reader can act on.
+
+**The tool described itself to nobody.** Checking that a *new* line of guidance
+reached the model found that none of it had. `AgentTool::description` reads the
+input type's JSON schema; `efdc784fa9` replaced `SpawnAgentToolInput`'s derived
+`JsonSchema` with a hand-written one to pin the delegate contract, and a
+hand-written `json_schema!` carries no doc comment. So `spawn_agent` had shipped
+with an empty description ever since — every word about designing subtasks,
+parallel delegation, choosing an executor and reading the result was written,
+reviewed, and served to nothing. It is load-bearing here, because telling the
+model a target's contract is the whole of the fix, so the guidance is now a
+constant the description serves rather than a doc comment nothing reads.
+
+- **Known consequence, stated plainly:** a structured agent still cannot be
+  delegated a task in prose, and no error message can give it a model. What the
+  delta guarantees is that Omega tells the delegating model the shape before it
+  writes the task, and says the shape again if it writes the wrong one.
+- **Enforced by:** `every_delegable_agent_accepts_the_shape_omega_sends` in
+  `crates/omega_deltas`; `a_delegated_read_emits_the_content_as_a_completed_tool_call`,
+  `a_delegated_read_returns_the_file_it_asked_for`,
+  `the_shape_omega_advertises_is_the_shape_scv_documents` and
+  `the_advertised_commands_are_the_catalogs_tools` in `crates/scv/tests/omega_delegation.rs`,
+  against the real binary; `every_candidate_declares_the_shape_of_a_task`,
+  `prose_is_refused_by_naming_the_shape` and
+  `a_request_buried_in_prose_is_not_dug_out` in `omega_agent_detect`;
+  `the_delegate_description_names_every_structured_contract`,
+  `the_delegate_tool_is_described_to_the_model`,
+  `an_unshapeable_task_is_not_an_execution_error` and
+  `a_task_a_structured_target_cannot_parse_is_refused_by_naming_the_shape` in
+  `agent`.

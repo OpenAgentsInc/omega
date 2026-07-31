@@ -77,7 +77,11 @@ impl ScvServer {
         let text = extract_prompt_text(&request).ok_or_else(|| {
             Error::invalid_params().data(serde_json::json!({
                 "code": "invalid_params",
-                "message": "prompt must include a text content block with a JSON tool request",
+                "message": format!(
+                    "prompt must include a text content block holding a JSON tool \
+                     request. Send: {}",
+                    crate::protocol::PROMPT_REQUEST_SHAPE
+                ),
             }))
         })?;
 

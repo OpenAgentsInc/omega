@@ -32,3 +32,9 @@ tracing-subscriber = { version = "0.3", default-features = false, features = [
 
 [dev-dependencies]
 tempfile.workspace = true
+
+# OMEGA-DELTA-0209. The delegable-agent catalog, so the live delegation test
+# drives SCV with the contract Omega actually advertises and the shaping Omega
+# actually applies, rather than with a copy of them. A dev-dependency only: the
+# shipped `scv` binary stays a leaf that depends on nothing of Omega's.
+omega_agent_detect.workspace = true

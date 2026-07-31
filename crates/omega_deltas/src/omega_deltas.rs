@@ -197,6 +197,7 @@ pub const ENFORCED_DELTAS: &[&str] = &[
     "OMEGA-DELTA-0206",
     "OMEGA-DELTA-0207",
     "OMEGA-DELTA-0208",
+    "OMEGA-DELTA-0209",
 ];
 
 /// OMEGA-DELTA-0204. Every control the composer's bar offers, written twice:
@@ -25927,6 +25928,122 @@ mod tests {
                  duplication the owner rejected; render \
                  `omega_routed_model::chrome_line` instead.",
                 repository_path(path).display()
+            );
+        }
+    }
+
+    /// OMEGA-DELTA-0209. Every agent Omega offers to delegate to is one Omega
+    /// sends a shape it accepts.
+    ///
+    /// The sibling of `every_delegable_agent_can_be_started`, and the other
+    /// half of the same law. That check closed "listed but unstartable"; the
+    /// owner's next three delegations failed anyway, further along — SCV
+    /// started, opened a session, and refused every prose task with
+    /// `invalid tool request: expected value at line 1 column 1`, because it
+    /// has no model and its prompt must be a JSON tool request.
+    ///
+    /// `AgentPromptContract` has no default, so a candidate cannot be added
+    /// without declaring a contract. What a test still has to prove is that the
+    /// declaration reaches the two places it has to reach: the delegating model,
+    /// which writes the task, and the delegate path, which refuses one it cannot
+    /// shape. A declaration nothing reads is a comment.
+    #[test]
+    fn every_delegable_agent_accepts_the_shape_omega_sends() {
+        use omega_agent_detect::AgentPromptContract;
+
+        let mut structured = 0;
+        let mut prose = 0;
+        for candidate in omega_agent_detect::CANDIDATES {
+            match candidate.prompt {
+                AgentPromptContract::Prose => prose += 1,
+                AgentPromptContract::Structured(contract) => {
+                    structured += 1;
+                    // The advertised request must be a request. A shape a model
+                    // copies verbatim and the agent then rejects would be worse
+                    // than no shape at all.
+                    let request: serde_json::Value = serde_json::from_str(contract.request)
+                        .unwrap_or_else(|error| {
+                            panic!(
+                                "OMEGA-DELTA-0209: `{}` advertises a request that is not JSON \
+                                 ({error}), so a model that emits it exactly is still refused.",
+                                candidate.id
+                            )
+                        });
+                    let named = request
+                        .get("tool")
+                        .or_else(|| request.get("name"))
+                        .and_then(serde_json::Value::as_str)
+                        .unwrap_or_else(|| {
+                            panic!(
+                                "OMEGA-DELTA-0209: `{}`'s advertised request names no tool.",
+                                candidate.id
+                            )
+                        });
+                    assert!(
+                        contract.tools.contains(&named),
+                        "OMEGA-DELTA-0209: `{}` advertises a request for `{named}`, which is \
+                         not one of the tools it declares: {:?}",
+                        candidate.id,
+                        contract.tools
+                    );
+                    // And prose must not shape into it. `shape_delegated_task`
+                    // refusing prose is the whole guard; a version that accepted
+                    // it would send SCV a sentence again.
+                    assert!(
+                        omega_agent_detect::shape_delegated_task(
+                            candidate.name,
+                            &contract,
+                            "Perform a read-only test delegation: report the project root \
+                             path and list one or two top-level entries.",
+                        )
+                        .is_err(),
+                        "OMEGA-DELTA-0209: prose shaped into a request for `{}`. Nothing may \
+                         invent a call a structured agent was never asked to make.",
+                        candidate.id
+                    );
+                }
+            }
+        }
+        assert!(
+            structured > 0 && prose > 0,
+            "OMEGA-DELTA-0209: both prompt contracts must remain exercised by the \
+             shipped catalog, or one arm of this check stops being tested."
+        );
+
+        // SCV's two spellings of its own request. `omega_agent_detect` is a
+        // leaf and `scv` is hyper-lightweight, so neither depends on the other
+        // and each holds the string; what Omega tells a model to send has to be
+        // what SCV accepts.
+        assert_eq!(
+            omega_agent_detect::SCV_REQUEST,
+            scv::PROMPT_REQUEST_SHAPE,
+            "OMEGA-DELTA-0209: the request Omega advertises for SCV has drifted from the \
+             one SCV accepts."
+        );
+        assert!(
+            scv::PromptToolRequest::parse(omega_agent_detect::SCV_REQUEST).is_ok(),
+            "OMEGA-DELTA-0209: the request Omega advertises for SCV is one SCV refuses."
+        );
+
+        // The declaration has to reach the model that writes the task, and the
+        // path that sends it.
+        let delegate = without_comments(&read_repository_file(SUBAGENT_SPAWN_TOOL_PATH));
+        for required in [
+            "fn structured_contract_section",
+            "fn description() -> SharedString",
+            "structured_contract_section()",
+            "DELEGATE_GUIDANCE",
+            "fn task_for_executor",
+            "task_for_executor(",
+            "DelegateFailureClass::TaskNotInContract",
+            "shape_delegated_task",
+        ] {
+            assert!(
+                delegate.contains(required),
+                "OMEGA-DELTA-0209: the delegate path in {} lost `{required}`. Without it \
+                 either the model is never told a structured target's contract, or a task \
+                 it cannot parse is sent anyway.",
+                repository_path(SUBAGENT_SPAWN_TOOL_PATH).display()
             );
         }
     }

@@ -19,6 +19,16 @@ pub const AGENT_TITLE: &str = "Space Construction Vehicle";
 pub const AGENT_VERSION: &str = env!("CARGO_PKG_VERSION");
 pub const READ_TOOL_NAME: &str = "read";
 
+/// The request SCV answers, as a caller must write it.
+///
+/// OMEGA-DELTA-0209. One string, used three times: it is the hint on the
+/// `available_commands` update a client sees at `session/new`, it is what a
+/// refusal names, and `omega_agent_detect::SCV_REQUEST` is checked against it
+/// so the shape Omega tells a delegating model to emit is this one and not a
+/// copy that drifted.
+pub const PROMPT_REQUEST_SHAPE: &str =
+    r#"{"tool":"read","arguments":{"path":"/absolute/path","offset":1,"limit":2000}}"#;
+
 /// Tool request envelope accepted in `session/prompt` text blocks.
 ///
 /// ACP v1 has no client→agent tool-call method. SCV accepts JSON text of either:
@@ -40,9 +50,27 @@ pub struct NamedToolRequest {
 }
 
 impl PromptToolRequest {
+    /// OMEGA-DELTA-0209. Parse the prompt text as a tool request.
+    ///
+    /// One Markdown code fence around the whole text is removed first. A caller
+    /// with a model behind it emits JSON in a fence often enough that refusing
+    /// it would be refusing the right request over its wrapping, and removing a
+    /// fence is an unwrapping rather than a reading — SCV has no model and
+    /// interprets nothing.
+    ///
+    /// A refusal names the shape. `invalid tool request: expected value at line
+    /// 1 column 1` was what a prose prompt produced, and it tells the reader
+    /// neither what SCV wanted nor that it wanted anything in particular.
     pub fn parse(text: &str) -> Result<Self, ToolError> {
+        let text = strip_one_code_fence(text.trim()).trim();
         serde_json::from_str(text).map_err(|error| {
-            ToolError::invalid_params(format!("invalid tool request: {error}"), "")
+            ToolError::invalid_params(
+                format!(
+                    "invalid tool request: {error}. SCV has no model and takes a \
+                     JSON tool request, not prose. Send: {PROMPT_REQUEST_SHAPE}"
+                ),
+                "",
+            )
         })
     }
 
@@ -59,6 +87,25 @@ impl PromptToolRequest {
                 parse_read_input(&named.arguments).map_err(|error| error.to_jsonrpc())
             }
         }
+    }
+}
+
+/// The body of a single Markdown code fence, or the input unchanged.
+///
+/// Only a fence that opens the text and closes it is removed. Text that merely
+/// *contains* a fenced block is left alone: taking a block out of the middle of
+/// a message would be deciding which part of it was the request, and deciding
+/// is exactly what an agent with no model must not do.
+fn strip_one_code_fence(text: &str) -> &str {
+    let Some(rest) = text.strip_prefix("```") else {
+        return text;
+    };
+    let Some((_language, body)) = rest.split_once('\n') else {
+        return text;
+    };
+    match body.trim_end().strip_suffix("```") {
+        Some(body) => body,
+        None => text,
     }
 }
 
@@ -96,9 +143,11 @@ pub fn read_available_commands() -> Vec<AvailableCommand> {
         "Read a bounded range of lines from a regular UTF-8 text file below configured read roots.",
     )
     .input(AvailableCommandInput::Unstructured(
-        UnstructuredCommandInput::new(
-            r#"{"path":"/absolute/path","offset":1,"limit":2000}"#,
-        ),
+        // OMEGA-DELTA-0209. The whole request rather than only its arguments.
+        // The hint is what a client reads to learn what to send, and what it
+        // sends is a tool request — a hint showing the inner object described
+        // the half that is not the envelope.
+        UnstructuredCommandInput::new(PROMPT_REQUEST_SHAPE),
     ))]
 }
 
@@ -212,6 +261,72 @@ mod tests {
             .into_read_input()
             .expect_err("unknown");
         assert!(matches!(error.code, ErrorCode::MethodNotFound));
+    }
+
+    /// OMEGA-DELTA-0209. The owner's defect, at SCV's own edge.
+    ///
+    /// A prose prompt still fails — SCV has no model and cannot be given one by
+    /// a better error message. What changes is that the failure says what SCV
+    /// wanted, so a reader (a person or the model that wrote the task) can fix
+    /// it. `expected value at line 1 column 1` alone could not be acted on.
+    #[test]
+    fn a_prose_prompt_is_refused_by_naming_the_shape() {
+        let error = PromptToolRequest::parse(
+            "Perform a read-only test delegation: report the project root path \
+             and list one or two top-level entries. Do not modify files.",
+        )
+        .expect_err("SCV cannot read prose");
+
+        assert!(
+            error.message.contains(PROMPT_REQUEST_SHAPE),
+            "{}",
+            error.message
+        );
+    }
+
+    /// A caller with a model behind it emits JSON in a fence often enough that
+    /// refusing it would be refusing the right request over its wrapping.
+    #[test]
+    fn one_surrounding_code_fence_is_unwrapped() {
+        for fenced in [
+            "```json\n{\"tool\":\"read\",\"arguments\":{\"path\":\"/tmp/a\"}}\n```",
+            "```\n{\"tool\":\"read\",\"arguments\":{\"path\":\"/tmp/a\"}}\n```",
+            "  ```json\n{\"tool\":\"read\",\"arguments\":{\"path\":\"/tmp/a\"}}\n```\n",
+        ] {
+            let input = PromptToolRequest::parse(fenced)
+                .expect("a fenced request is the request")
+                .into_read_input()
+                .expect("input");
+            assert_eq!(input.path, "/tmp/a", "{fenced}");
+        }
+    }
+
+    /// And nothing is dug out of the middle of a message.
+    #[test]
+    fn a_request_inside_prose_is_not_extracted() {
+        PromptToolRequest::parse(
+            "Please run this:\n```json\n{\"tool\":\"read\",\"arguments\":{\"path\":\"/tmp/a\"}}\n```\nThanks.",
+        )
+        .expect_err(
+            "choosing which part of a message was the request is interpretation, \
+             and an agent with no model must not interpret",
+        );
+    }
+
+    /// The hint a client is given is the request it must send.
+    #[test]
+    fn the_advertised_hint_is_the_whole_request() {
+        let commands = read_available_commands();
+        let AvailableCommandInput::Unstructured(input) = commands[0]
+            .input
+            .clone()
+            .expect("the read command has a hint")
+        else {
+            panic!("the hint is unstructured text");
+        };
+        assert_eq!(input.hint, PROMPT_REQUEST_SHAPE);
+        // The hint is a request SCV itself accepts, not a sketch of one.
+        assert!(PromptToolRequest::parse(PROMPT_REQUEST_SHAPE).is_ok());
     }
 
     #[test]

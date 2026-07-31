@@ -50,6 +50,44 @@ pub enum AgentLaunch {
     DetectedBinary { args: &'static [&'static str] },
 }
 
+/// What a delegated task has to look like before this agent can answer it.
+///
+/// OMEGA-DELTA-0209. `AgentLaunch` made "offered" and "startable" one fact, and
+/// the next one was still two: Omega sent every delegation as prose, because
+/// every agent it had ever delegated to had a model to read prose with. `scv`
+/// does not. It is a deterministic tool server, its prompt must *be* a JSON
+/// tool request, and a prose task reached it as
+/// `invalid tool request: expected value at line 1 column 1` — a launched
+/// agent, a live session, and nothing it could do with what it was sent.
+///
+/// This field is the third half of the same law: an agent Omega offers to
+/// delegate to must be one Omega can start **and** one Omega sends a shape it
+/// accepts. There is no default and no third case, so a candidate added without
+/// a contract does not compile.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum AgentPromptContract {
+    /// A model-backed agent. The task is prose and the agent interprets it.
+    Prose,
+    /// A deterministic server with no model. The task must be exactly one JSON
+    /// request, and nothing else will do.
+    Structured(StructuredPrompt),
+}
+
+/// The exact request a [`AgentPromptContract::Structured`] agent answers.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct StructuredPrompt {
+    /// The tools the agent will answer, so a declaration that drifts from what
+    /// the agent advertises over ACP can be caught rather than discovered by a
+    /// delegation that fails.
+    pub tools: &'static [&'static str],
+    /// The request, spelled the way the delegating model is told to emit it.
+    ///
+    /// This is the string that reaches the model, so it is the shape and not a
+    /// description of the shape: a model handed a sentence about JSON writes a
+    /// sentence, and a model handed JSON writes JSON.
+    pub request: &'static str,
+}
+
 /// An agent Omega knows how to drive, and the executables it might be called.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct AgentCandidate {
@@ -64,6 +102,8 @@ pub struct AgentCandidate {
     pub binaries: &'static [&'static str],
     /// OMEGA-DELTA-0203. How the launcher starts it once it is found.
     pub launch: AgentLaunch,
+    /// OMEGA-DELTA-0209. What a delegated task must look like for it.
+    pub prompt: AgentPromptContract,
 }
 
 /// The set Omega offers, in the order it prefers them.
@@ -75,41 +115,59 @@ pub const CANDIDATES: &[AgentCandidate] = &[
         name: "Codex",
         binaries: &["codex"],
         launch: AgentLaunch::AgentServerStore,
+        prompt: AgentPromptContract::Prose,
     },
     AgentCandidate {
         id: "claude-acp",
         name: "Claude",
         binaries: &["claude"],
         launch: AgentLaunch::AgentServerStore,
+        prompt: AgentPromptContract::Prose,
     },
     AgentCandidate {
         id: "grok",
         name: "Grok",
         binaries: &["grok"],
         launch: AgentLaunch::AgentServerStore,
+        prompt: AgentPromptContract::Prose,
     },
     AgentCandidate {
         id: "github-copilot-cli",
         name: "GitHub Copilot",
         binaries: &["copilot"],
         launch: AgentLaunch::AgentServerStore,
+        prompt: AgentPromptContract::Prose,
     },
     AgentCandidate {
         id: "cursor",
         name: "Cursor",
         binaries: &["cursor-agent"],
         launch: AgentLaunch::AgentServerStore,
+        prompt: AgentPromptContract::Prose,
     },
     // `scv` is first-party and ships beside the `omega` executable, so it is
     // started as the file detection found rather than through a settings entry
     // naming a bare `scv` that only a shell `PATH` could resolve.
+    // `scv` has no model, so it is the one candidate whose task is a request
+    // rather than a sentence. `SCV_REQUEST` is `scv::PROMPT_REQUEST_SHAPE`,
+    // spelled here because this crate is a leaf and the hyper-lightweight agent
+    // must not gain a dependency on Omega's catalog to be described by it;
+    // `omega_deltas` asserts the two spellings agree by calling both.
     AgentCandidate {
         id: "scv",
         name: "SCV",
         binaries: &["scv"],
         launch: AgentLaunch::DetectedBinary { args: &[] },
+        prompt: AgentPromptContract::Structured(StructuredPrompt {
+            tools: &["read"],
+            request: SCV_REQUEST,
+        }),
     },
 ];
+
+/// SCV's request, as the delegating model is told to write it.
+pub const SCV_REQUEST: &str =
+    r#"{"tool":"read","arguments":{"path":"/absolute/path","offset":1,"limit":2000}}"#;
 
 /// An agent found on disk, with the file that was found.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -121,6 +179,10 @@ pub struct DetectedAgent {
     /// `DetectedAgent` knows how to start it without a second lookup, which is
     /// where the two registries got to disagree.
     pub launch: AgentLaunch,
+    /// OMEGA-DELTA-0209. Carried for the same reason as `launch`: the caller
+    /// that is about to send this agent a task must not have to look up
+    /// elsewhere what shape it takes.
+    pub prompt: AgentPromptContract,
 }
 
 /// Everything in [`CANDIDATES`] present on the given `PATH`, in preference
@@ -152,6 +214,7 @@ pub fn detect_with(sibling_dir: Option<&Path>, path_var: &str) -> Vec<DetectedAg
                     name: candidate.name,
                     binary,
                     launch: candidate.launch,
+                    prompt: candidate.prompt,
                 })
         })
         .collect()
@@ -242,6 +305,73 @@ pub fn launch_for(id: &str) -> Option<AgentLaunch> {
         .iter()
         .find(|candidate| candidate.id == id)
         .map(|candidate| candidate.launch)
+}
+
+/// The prompt contract [`CANDIDATES`] declares for `id`, if Omega knows it.
+///
+/// `None` means Omega has never heard of this id, which is a different answer
+/// from [`AgentPromptContract::Prose`]. An unknown id is not assumed to read
+/// prose: the caller decides what to do with an agent nobody declared.
+pub fn prompt_contract_for(id: &str) -> Option<AgentPromptContract> {
+    CANDIDATES
+        .iter()
+        .find(|candidate| candidate.id == id)
+        .map(|candidate| candidate.prompt)
+}
+
+/// Turn a task written for a [`AgentPromptContract::Structured`] agent into the
+/// exact text that agent accepts, or say why it cannot be turned into one.
+///
+/// OMEGA-DELTA-0209. Shaping, not interpreting. A structured agent has no
+/// model, so there is nothing here that could read a sentence and decide what
+/// it meant — and inventing a request from prose would be worse than failing,
+/// because a `read` of a file nobody asked for is an answer to a question
+/// nobody asked. Exactly two things happen:
+///
+/// - surrounding whitespace and **one** Markdown code fence are removed, because
+///   a model told to emit JSON very often emits JSON in a fence, and stripping a
+///   fence is a deterministic unwrapping rather than a guess about meaning;
+/// - what is left must parse as a JSON object.
+///
+/// Anything else is refused in one line that names the shape, which is the line
+/// the delegating model reads. `expected value at line 1 column 1` — what the
+/// owner was shown — says nothing a reader can act on.
+pub fn shape_delegated_task(
+    agent_name: &str,
+    contract: &StructuredPrompt,
+    task: &str,
+) -> Result<String, String> {
+    let refusal = || {
+        format!(
+            "{agent_name} takes a JSON tool request as the task, not prose. Send: {}",
+            contract.request
+        )
+    };
+
+    let text = strip_one_code_fence(task.trim()).trim();
+    match serde_json::from_str::<serde_json::Value>(text) {
+        Ok(serde_json::Value::Object(_)) => Ok(text.to_owned()),
+        Ok(_) | Err(_) => Err(refusal()),
+    }
+}
+
+/// The body of a single Markdown code fence, or the input unchanged.
+///
+/// Only a fence that opens on the first line and closes on the last is removed,
+/// so text that merely *contains* a fenced block is left alone: taking a block
+/// out of the middle of prose would be choosing which part of a message was the
+/// request, and that is interpretation.
+fn strip_one_code_fence(text: &str) -> &str {
+    let Some(rest) = text.strip_prefix("```") else {
+        return text;
+    };
+    let Some((_language, body)) = rest.split_once('\n') else {
+        return text;
+    };
+    match body.trim_end().strip_suffix("```") {
+        Some(body) => body,
+        None => text,
+    }
 }
 
 /// Find `binary` beside the running executable first, then on `path_var`.
@@ -521,6 +651,139 @@ mod tests {
             "a caller holding a DetectedAgent must not need a second lookup to \
              learn how to start it"
         );
+    }
+
+    /// OMEGA-DELTA-0209. Every candidate declares what a task must look like.
+    ///
+    /// The enum has no default, so this is not checking that the field is set —
+    /// it cannot be unset. It is checking that both arms stay populated by the
+    /// shipped catalog, because an arm no candidate takes is an arm nothing
+    /// exercises.
+    #[test]
+    fn every_candidate_declares_the_shape_of_a_task() {
+        assert_eq!(
+            prompt_contract_for("scv"),
+            Some(AgentPromptContract::Structured(StructuredPrompt {
+                tools: &["read"],
+                request: SCV_REQUEST,
+            })),
+            "SCV has no model, so a task it can answer is a request and not a \
+             sentence"
+        );
+        assert_eq!(
+            prompt_contract_for("codex-acp"),
+            Some(AgentPromptContract::Prose)
+        );
+        assert_eq!(
+            prompt_contract_for("not-an-agent"),
+            None,
+            "an id nobody declared must not be assumed to read prose"
+        );
+
+        let structured = CANDIDATES
+            .iter()
+            .filter(|candidate| matches!(candidate.prompt, AgentPromptContract::Structured(_)))
+            .count();
+        let prose = CANDIDATES.len() - structured;
+        assert!(
+            structured > 0 && prose > 0,
+            "both prompt contracts must remain exercised by the shipped catalog"
+        );
+    }
+
+    #[test]
+    fn a_detected_agent_carries_its_prompt_contract() {
+        let directory = tempfile::tempdir().expect("a temporary directory");
+        write_executable(directory.path(), "scv");
+
+        let detected = detect_on_path(&directory.path().to_string_lossy());
+
+        assert!(matches!(
+            detected[0].prompt,
+            AgentPromptContract::Structured(_)
+        ));
+    }
+
+    fn scv_contract() -> StructuredPrompt {
+        match prompt_contract_for("scv").expect("SCV is in the catalog") {
+            AgentPromptContract::Structured(contract) => contract,
+            AgentPromptContract::Prose => panic!("SCV has no model to read prose with"),
+        }
+    }
+
+    #[test]
+    fn a_json_task_is_sent_as_written() {
+        let request = r#"{"tool":"read","arguments":{"path":"/tmp/a","limit":2}}"#;
+        assert_eq!(
+            shape_delegated_task("SCV", &scv_contract(), request),
+            Ok(request.to_owned())
+        );
+    }
+
+    /// A model told to emit JSON very often emits JSON in a fence.
+    #[test]
+    fn one_surrounding_code_fence_is_removed() {
+        let request = r#"{"tool":"read","arguments":{"path":"/tmp/a"}}"#;
+        for fenced in [
+            format!("```json\n{request}\n```"),
+            format!("```\n{request}\n```"),
+            format!("  ```json\n{request}\n```  "),
+        ] {
+            assert_eq!(
+                shape_delegated_task("SCV", &scv_contract(), &fenced),
+                Ok(request.to_owned()),
+                "{fenced}"
+            );
+        }
+    }
+
+    /// The owner's defect, at the seam that now catches it.
+    ///
+    /// The refusal names the shape. `expected value at line 1 column 1` was
+    /// what a person and a model both got, and neither could act on it.
+    #[test]
+    fn prose_is_refused_by_naming_the_shape() {
+        let error = shape_delegated_task(
+            "SCV",
+            &scv_contract(),
+            "Perform a read-only test delegation: report the project root path \
+             and list one or two top-level entries. Do not modify files.",
+        )
+        .expect_err("prose is not a tool request");
+
+        assert!(error.contains(SCV_REQUEST), "{error}");
+        assert_eq!(
+            error.lines().count(),
+            1,
+            "one line, not a paragraph: {error}"
+        );
+    }
+
+    /// Nothing is invented from prose that happens to hold a request.
+    ///
+    /// Choosing which part of a message was the request is interpretation, and
+    /// a `read` of a file nobody asked for is an answer to a question nobody
+    /// asked.
+    #[test]
+    fn a_request_buried_in_prose_is_not_dug_out() {
+        let error = shape_delegated_task(
+            "SCV",
+            &scv_contract(),
+            "Please run this for me:\n```json\n{\"tool\":\"read\"}\n```\nThanks.",
+        )
+        .expect_err("a fence in the middle of a message is not the message");
+        assert!(error.contains(SCV_REQUEST), "{error}");
+    }
+
+    /// JSON that is not an object is not a tool request either.
+    #[test]
+    fn a_json_scalar_is_not_a_request() {
+        for task in ["42", "\"read\"", "[1,2]", "null"] {
+            assert!(
+                shape_delegated_task("SCV", &scv_contract(), task).is_err(),
+                "{task}"
+            );
+        }
     }
 
     #[test]
