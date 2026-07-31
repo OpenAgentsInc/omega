@@ -37,10 +37,11 @@
 //!
 //! The answer is not to hope the window is wide. It is [`layout`]: the sidebar
 //! is a real column, and it **yields** rather than squeezing. Below the width
-//! at which the content column can still hold a composer, the sidebar renders
-//! as a rail — a strip with the control that brings it back — and the content
-//! gets everything else. The person's preference is not overwritten when this
-//! happens, so widening the window restores the sidebar they asked for.
+//! at which the content column can still hold a composer, the sidebar column is
+//! not drawn; expand/collapse and Settings live on the workbench activity rail
+//! (`OMEGA-DELTA-0205`), and the content gets everything else. The person's
+//! preference is not overwritten when this happens, so widening the window
+//! restores the sidebar they asked for.
 //!
 //! That is a stronger promise than the overlay's, not a weaker one. The overlay
 //! never narrowed the composer and always covered it; this never covers it and
@@ -79,11 +80,11 @@ pub const SIDEBAR_WIDTH: Pixels = px(280.);
 
 /// The width the sidebar takes when it is collapsed.
 ///
-/// Not zero. "Persistent" was the owner's word, and a sidebar that vanishes
-/// entirely leaves the control that brings it back inside a menu — which is
-/// where `OMEGA-DELTA-0118` found it, and how it stayed broken long enough for
-/// the owner to report it.
-pub const RAIL_WIDTH: Pixels = px(30.);
+/// Zero. `OMEGA-DELTA-0205` moved expand/collapse and Settings onto the
+/// workbench activity rail, so a collapsed sidebar no longer keeps its own
+/// vertical strip. "Persistent" is kept by those controls remaining drawn —
+/// not by a second empty rail beside the activity rail.
+pub const RAIL_WIDTH: Pixels = px(0.);
 
 /// The width the content column may never be reduced below.
 ///
@@ -110,7 +111,7 @@ pub const STATE_KEY: &str = "omega-zero-base-sidebar";
 pub enum Layout {
     /// Drawn in full, at [`SIDEBAR_WIDTH`].
     Expanded,
-    /// Drawn as a strip carrying the control that expands it again.
+    /// Collapsed: no column of its own. Expand lives on the activity rail.
     Rail,
 }
 
@@ -357,14 +358,15 @@ mod tests {
     }
 
     #[test]
-    fn a_collapsed_sidebar_still_occupies_a_rail() {
-        assert!(
-            Layout::Rail.width() > px(0.),
-            "'persistent' was the word. A sidebar that vanishes puts the control \
-             that brings it back inside a menu, which is where OMEGA-DELTA-0118 \
-             found it broken."
+    fn a_collapsed_sidebar_takes_no_column_of_its_own() {
+        assert_eq!(
+            Layout::Rail.width(),
+            px(0.),
+            "OMEGA-DELTA-0205: the collapsed sidebar must not keep a separate \
+             rail. Expand and Settings live on the workbench activity rail."
         );
         assert!(Layout::Expanded.width() > Layout::Rail.width());
+        assert_eq!(RAIL_WIDTH, px(0.));
     }
 
     #[test]

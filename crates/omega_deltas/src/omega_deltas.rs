@@ -193,6 +193,7 @@ pub const ENFORCED_DELTAS: &[&str] = &[
     "OMEGA-DELTA-0202",
     "OMEGA-DELTA-0203",
     "OMEGA-DELTA-0204",
+    "OMEGA-DELTA-0205",
 ];
 
 /// OMEGA-DELTA-0204. Every control the composer's bar offers, written twice:
@@ -19884,11 +19885,14 @@ mod tests {
 
         let panel_path = repository_path(AGENT_PANEL_PATH);
         let panel = without_comments(&read_repository_file(AGENT_PANEL_PATH));
-        let sidebar = method_body(
+        // OMEGA-DELTA-0205 moved Settings onto the activity rail so a collapsed
+        // sidebar does not need its own strip, and so the expanded footer is
+        // not a second Settings control.
+        let activity_rail = method_body(
             &panel,
-            "fn render_sidebar(",
+            "fn render_activity_rail(",
             &panel_path,
-            "The zero-base sidebar owns persistent Settings navigation.",
+            "The activity rail owns persistent Settings navigation.",
         );
         for required in [
             "\"open-omega-settings\"",
@@ -19896,9 +19900,10 @@ mod tests {
             "omega_actions::OpenSettings.boxed_clone()",
         ] {
             assert!(
-                sidebar.contains(required),
-                "OMEGA-DELTA-0142: the zero-base sidebar in {} lost \
-                 `{required}`, so Settings is no longer persistent navigation.",
+                activity_rail.contains(required),
+                "OMEGA-DELTA-0142 (as OMEGA-DELTA-0205 carries it): the \
+                 activity rail in {} lost `{required}`, so Settings is no \
+                 longer persistent navigation.",
                 panel_path.display()
             );
         }
@@ -23758,6 +23763,7 @@ mod tests {
     /// OMEGA-DELTA-0191. The activity rail is generated from one exact
     /// six-surface inventory, every generated action is admitted, and the
     /// shipped startup path loads both its handlers and panel dependencies.
+    /// OMEGA-DELTA-0205 also hosts sidebar toggle and Settings on this rail.
     #[test]
     fn drawn_activity_rail_controls_are_admitted_and_loaded() {
         let panel = without_comments(&read_repository_file(AGENT_PANEL_PATH));
@@ -23766,6 +23772,8 @@ mod tests {
             "WorkSurface::FALLBACK_ORDER",
             "workbench_shell::select_action(surface)",
             "window.dispatch_action(action.boxed_clone(), cx)",
+            "\"toggle-omega-sidebar\"",
+            "\"open-omega-settings\"",
         ] {
             assert!(
                 render.contains(required),
@@ -25554,6 +25562,84 @@ mod tests {
              its own label and nothing else, which is OMEGA-DELTA-0202's defect \
              reintroduced one composer earlier.",
             repository_path(OMEGA_MODEL_TIER_PATH).display()
+        );
+    }
+
+    /// OMEGA-DELTA-0205. Collapsed threads sidebar shares the activity rail:
+    /// no separate rail column, expand/collapse at the top, Settings at the
+    /// bottom, and no duplicate Settings in the expanded sidebar footer.
+    #[test]
+    fn collapsed_threads_sidebar_controls_live_on_the_activity_rail() {
+        let panel_path = repository_path(AGENT_PANEL_PATH);
+        let panel = without_comments(&read_repository_file(AGENT_PANEL_PATH));
+        let sidebar_path = repository_path(SIDEBAR_PATH);
+        let sidebar = without_comments(&read_repository_file(SIDEBAR_PATH));
+
+        assert!(
+            sidebar.contains("pub const RAIL_WIDTH: Pixels = px(0.)"),
+            "OMEGA-DELTA-0205: collapsed sidebar width in {} is not zero. A \
+             non-zero rail reintroduces a second left strip beside the \
+             activity rail.",
+            sidebar_path.display()
+        );
+
+        let render_sidebar = body_of(&panel, "render_sidebar");
+        assert!(
+            render_sidebar.contains("if !layout.is_expanded()")
+                && render_sidebar.contains("return None;"),
+            "OMEGA-DELTA-0205: `render_sidebar` in {} still draws something when \
+             collapsed. The collapsed path must return `None` so the activity \
+             rail is the only left control column.",
+            panel_path.display()
+        );
+        assert!(
+            !render_sidebar.contains("\"omega-sidebar-rail\"")
+                && !render_sidebar.contains("\"open-omega-settings-rail\""),
+            "OMEGA-DELTA-0205: `render_sidebar` in {} still names the retired \
+             collapsed rail or its Settings icon.",
+            panel_path.display()
+        );
+        assert!(
+            !render_sidebar.contains("ListItem::new(\"open-omega-settings\")"),
+            "OMEGA-DELTA-0205: `render_sidebar` in {} still draws Settings in \
+             the footer. Settings lives once, on the activity rail.",
+            panel_path.display()
+        );
+        assert!(
+            render_sidebar.contains("\"collapse-omega-sidebar\"")
+                && render_sidebar.contains("\"Collapse Sidebar\""),
+            "OMEGA-DELTA-0205: the expanded sidebar in {} lost its header \
+             collapse control.",
+            panel_path.display()
+        );
+
+        let activity_rail = body_of(&panel, "render_activity_rail");
+        for required in [
+            "\"toggle-omega-sidebar\"",
+            "\"Expand Sidebar\"",
+            "\"Collapse Sidebar\"",
+            "\"open-omega-settings\"",
+            "\"Open Settings\"",
+            "\"Settings\"",
+            "omega_actions::OpenSettings.boxed_clone()",
+            "this.toggle_threads_sidebar(cx)",
+        ] {
+            assert!(
+                activity_rail.contains(required),
+                "OMEGA-DELTA-0205: `render_activity_rail` in {} lost \
+                 `{required}`. Expand/collapse belongs at the top of this rail \
+                 and Settings at the bottom.",
+                panel_path.display()
+            );
+        }
+
+        let panel_render = body_of(&panel, "render");
+        assert!(
+            panel_render.contains("render_activity_rail(layout.sidebar")
+                && panel_render.contains("render_sidebar(layout.sidebar"),
+            "OMEGA-DELTA-0205: `render` in {} no longer passes the shared \
+             sidebar layout into the activity rail and the sidebar column.",
+            panel_path.display()
         );
     }
 }

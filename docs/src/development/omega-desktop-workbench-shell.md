@@ -47,8 +47,9 @@ The Agent Panel builds the toolbar, transcript, composer, drag target, and
 legacy terminal content once. The shell wraps that completed content in one
 horizontal allocation:
 
-1. The existing threads sidebar or its collapsed rail.
-2. The 40-pixel workbench activity rail.
+1. The 40-pixel workbench activity rail (sidebar toggle at top, Settings at
+   bottom; work-surface icons between).
+2. The threads sidebar when expanded (no separate column when collapsed).
 3. The work-surface dock when it is logically open and fits.
 4. The existing transcript column with flexible width.
 
@@ -708,32 +709,36 @@ dock. The current dimensions are:
 | Allocation                      | Size       |
 | ------------------------------- | ---------- |
 | Threads sidebar, expanded       | 280 pixels |
-| Threads sidebar, collapsed rail | 30 pixels  |
+| Threads sidebar, collapsed      | 0 pixels   |
 | Workbench activity rail         | 40 pixels  |
 | Transcript reservation          | 600 pixels |
 | Work-surface dock minimum       | 240 pixels |
 | Work-surface dock default       | 320 pixels |
 | Work-surface dock maximum       | 480 pixels |
 
+When the threads sidebar is collapsed, it does not draw a separate vertical
+rail. Expand/collapse sits at the top of the activity rail, and Settings sits
+at the bottom of that same rail.
+
 At the default dock width, an expanded threads sidebar, activity rail, dock,
 and reserved transcript fit at 1,240 pixels. Below that width, the threads
 sidebar collapses before the work-surface dock. The dock can shrink to 240
-pixels and remains present through 910 pixels:
+pixels and remains present through 880 pixels:
 
 ```text
-30 thread rail + 40 activity rail + 240 dock + 600 transcript = 910
+40 activity rail + 240 dock + 600 transcript = 880
 ```
 
-Below 910 pixels, the shell applies a real dock-collapse transition and returns
+Below 880 pixels, the shell applies a real dock-collapse transition and returns
 focus to the transcript. It does not merely hide a logically open dock. When
 the window widens again, the dock stays collapsed until the person explicitly
 reopens it. The retained host is then reused.
 
-At widths too small for the 600-pixel transcript reservation, both rails remain
-visible, the dock remains closed, and the transcript receives the remaining
-width. The reservation controls when optional columns collapse; it is not an
-application minimum width. The composer must remain reachable and columns must
-not overlap.
+At widths too small for the 600-pixel transcript reservation, the activity rail
+remains visible, the dock remains closed, and the transcript receives the
+remaining width. The reservation controls when optional columns collapse; it is
+not an application minimum width. The composer must remain reachable and
+columns must not overlap.
 
 The dock's right edge is an accessible vertical splitter. Drag it to resize the
 dock, or double-click it to return to the 320-pixel default. The splitter and

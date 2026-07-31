@@ -6312,13 +6312,14 @@ question rather than leaving it to whoever next reads the menu.
   variant is named in that match, so a section added and forgotten fails the
   suite rather than drawing a heading over blank space.
 
-- **Settings is persistent navigation, not editor escape.** The sidebar footer
-  opens Omega's real Settings window, and the collapsed rail keeps the same
-  control as an icon at its bottom. Zero base admits only `OpenSettings`,
-  `OpenSettingsAt`, and `OpenSettingsPage`; this makes provider-recovery buttons,
-  Skills, Add Server, and Settings work without admitting Extensions or the
-  rest of the editor-facing `omega` namespace. The Settings window is a separate
-  visible window, so the sealed centre pane cannot hide it.
+- **Settings is persistent navigation, not editor escape.** Settings lives on
+  the workbench activity rail (see `OMEGA-DELTA-0205`), so it remains reachable
+  when the threads sidebar is collapsed and is not duplicated in the sidebar
+  footer. Zero base admits only `OpenSettings`, `OpenSettingsAt`, and
+  `OpenSettingsPage`; this makes provider-recovery buttons, Skills, Add Server,
+  and Settings work without admitting Extensions or the rest of the
+  editor-facing `omega` namespace. The Settings window is a separate visible
+  window, so the sealed centre pane cannot hide it.
 
 - **Enforced by:** `zero_bases_sidebar_is_persistent_sectioned_and_silent_when_it_fails`,
   `the_legacy_activity_preview_remains_read_only_and_the_tester_registry_is_pinned`, and
@@ -6396,8 +6397,8 @@ the time nothing else stood between the header and the window controls. Then
 `OMEGA-DELTA-0157` installed the platform titlebar, which spans the window
 above this header and owns that safe area, so the reservation became a wide
 blank strip in front of the label with no control in it. The header now draws
-**Omega** flush left with the same padding as the rows under it, and the
-collapsed rail's expand control starts at the top of the column.
+**Omega** flush left with the same padding as the rows under it. Expand lives
+on the activity rail when the sidebar is collapsed (`OMEGA-DELTA-0205`).
 
 **The immediate repair built every new zero-base thread on Omega's router.**
 That historical clamp made the displayed choice and actual connection agree,
@@ -9091,3 +9092,36 @@ instead. `OMEGA-DELTA-0175`'s Vim readout stays on the left in both bars.
 - **Enforced by:** `the_composer_offers_the_same_controls_before_and_after_the_session`
   in `crates/omega_deltas`; and
   `a_tier_chosen_before_the_session_exists_moves_the_model` in `agent_ui`.
+
+### OMEGA-DELTA-0205 — Collapsed threads sidebar shares the activity rail
+
+**When the threads sidebar is collapsed, it does not draw a second vertical
+rail.** Expand/collapse sits at the top of the workbench activity rail, and
+Settings sits at the bottom of that same rail. The expanded sidebar keeps its
+header collapse control, sections, Pair phone, and version label; only the
+duplicate Settings row leaves the sidebar footer.
+
+**Why.** A collapsed 30-pixel rail beside the 40-pixel activity rail was two
+left columns answering one question — "where are the navigation controls?" —
+and wasted width without adding capability. The activity rail is already the
+leftmost control strip; hosting the sidebar toggle and Settings there removes
+the empty strip while keeping both controls drawn (so they never retreat into a
+menu, which is the defect `OMEGA-DELTA-0118` repaired).
+
+**Layout.** Collapsed sidebar width is zero. Dock clamping and the shared
+allocator therefore reserve only the activity rail plus the transcript floor
+when the sidebar is not expanded. The narrow dock-visible boundary is:
+
+```text
+40 activity rail + 240 dock + 600 transcript = 880
+```
+
+**Labels.** Expand keeps tooltip and accessible name `Expand Sidebar`; collapse
+on the activity rail uses `Collapse Sidebar` (the expanded header still has its
+own collapse control). Settings keeps tooltip `Settings` and accessible name
+`Open Settings`, and still dispatches `omega::OpenSettings`.
+
+- **Enforced by:** `collapsed_threads_sidebar_controls_live_on_the_activity_rail`
+  in `crates/omega_deltas`; `a_collapsed_sidebar_takes_no_column_of_its_own` in
+  `crates/agent_ui/src/omega_sidebar.rs`; and the workbench layout unit tests in
+  `workbench_shell`.

@@ -5483,13 +5483,15 @@ impl AgentPanel {
     /// So the sidebar is a real column and it **yields**. The shared
     /// [`workbench_shell::WorkbenchLayout`] allocator gives it its width only
     /// while the transcript can still keep
-    /// [`omega_sidebar::MIN_CONTENT_WIDTH`], and draws a rail otherwise. The
-    /// person's preference is untouched by that, so a window dragged wide
-    /// again shows the sidebar they asked for.
+    /// [`omega_sidebar::MIN_CONTENT_WIDTH`], and otherwise draws nothing for
+    /// this column. Expand/collapse and Settings live on the activity rail
+    /// (`OMEGA-DELTA-0205`). The person's preference is untouched by that, so a
+    /// window dragged wide again shows the sidebar they asked for.
     ///
-    /// `None` outside zero base. The editor has its own workspace sidebar
-    /// there, and `OMEGA-DELTA-0118`'s menu entry already names one action per
-    /// mode for exactly that reason. The workbench test seam also enables it so
+    /// `None` outside zero base, and `None` when the allocator collapses the
+    /// sidebar. The editor has its own workspace sidebar there, and
+    /// `OMEGA-DELTA-0118`'s menu entry already names one action per mode for
+    /// exactly that reason. The workbench test seam also enables it so
     /// deterministic shell scenes exercise the production column allocation.
     fn render_sidebar(
         &self,
@@ -5498,6 +5500,12 @@ impl AgentPanel {
         cx: &mut Context<Self>,
     ) -> Option<AnyElement> {
         if !omega_zero_base::is_active() && !self.workbench_shell_enabled {
+            return None;
+        }
+
+        // Collapsed: no separate vertical rail. Expand and Settings are on the
+        // activity rail so the shell keeps one left control column.
+        if !layout.is_expanded() {
             return None;
         }
 
@@ -5517,38 +5525,6 @@ impl AgentPanel {
             .bg(background)
             .border_r_1()
             .border_color(border);
-
-        if !layout.is_expanded() {
-            return Some(
-                column
-                    .id("omega-sidebar-rail")
-                    .items_center()
-                    .pt_1p5()
-                    .child(
-                        IconButton::new("expand-omega-sidebar", IconName::ChevronRight)
-                            .icon_size(IconSize::Small)
-                            .tooltip(Tooltip::text("Expand Sidebar"))
-                            .on_click(cx.listener(|this, _, _, cx| {
-                                this.toggle_threads_sidebar(cx);
-                            })),
-                    )
-                    .child(div().flex_1())
-                    .child(
-                        div().pb_1().child(
-                            IconButton::new("open-omega-settings-rail", IconName::Settings)
-                                .icon_size(IconSize::Small)
-                                .tooltip(Tooltip::text("Settings"))
-                                .on_click(|_, window, cx| {
-                                    window.dispatch_action(
-                                        omega_actions::OpenSettings.boxed_clone(),
-                                        cx,
-                                    );
-                                }),
-                        ),
-                    )
-                    .into_any_element(),
-            );
-        }
 
         let sections = omega_sidebar::SectionId::ALL.iter().fold(
             v_flex()
@@ -5618,28 +5594,13 @@ impl AgentPanel {
                                 })),
                         )
                         .child(
-                            ListItem::new("open-omega-settings")
-                                .aria_role(gpui::Role::Button)
-                                .aria_label("Open Settings")
-                                .inset(true)
-                                .spacing(ListItemSpacing::Sparse)
-                                .start_slot(
-                                    Icon::new(IconName::Settings)
-                                        .size(IconSize::Small)
-                                        .color(Color::Muted),
-                                )
-                                .child(Label::new("Settings").size(LabelSize::Small))
-                                .end_slot(
-                                    Label::new(footer_version_label(cx))
-                                        .size(LabelSize::Small)
-                                        .color(Color::Info),
-                                )
-                                .on_click(|_, window, cx| {
-                                    window.dispatch_action(
-                                        omega_actions::OpenSettings.boxed_clone(),
-                                        cx,
-                                    );
-                                }),
+                            // Version stays in the footer; Settings moved to the
+                            // activity rail so it is not drawn twice.
+                            h_flex().w_full().px_2().py_1().justify_end().child(
+                                Label::new(footer_version_label(cx))
+                                    .size(LabelSize::Small)
+                                    .color(Color::Info),
+                            ),
                         ),
                 )
                 .into_any_element(),
@@ -13222,7 +13183,12 @@ impl AgentPanel {
             .into_any_element()
     }
 
-    fn render_activity_rail(&self, window: &mut Window, cx: &mut Context<Self>) -> AnyElement {
+    fn render_activity_rail(
+        &self,
+        sidebar_layout: omega_sidebar::Layout,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
         use omega_workbench_state::WorkSurface;
         use workbench_shell::WorkSurfaceExt as _;
 
@@ -13317,6 +13283,47 @@ impl AgentPanel {
             })
             .collect::<Vec<_>>();
 
+        // `OMEGA-DELTA-0205`. Expand/collapse and Settings share this leftmost
+        // rail so a collapsed threads sidebar does not draw a second strip.
+        let sidebar_expanded = sidebar_layout.is_expanded();
+        let (sidebar_toggle_id, sidebar_toggle_icon, sidebar_toggle_label) = if sidebar_expanded {
+            (
+                "toggle-omega-sidebar",
+                IconName::ChevronLeft,
+                "Collapse Sidebar",
+            )
+        } else {
+            (
+                "toggle-omega-sidebar",
+                IconName::ChevronRight,
+                "Expand Sidebar",
+            )
+        };
+        let sidebar_toggle = IconButton::new(sidebar_toggle_id, sidebar_toggle_icon)
+            .debug_selector(|| "toggle-omega-sidebar".into())
+            .shape(ui::IconButtonShape::Wide)
+            .width(px(28.))
+            .size(ButtonSize::Medium)
+            .icon_size(IconSize::Small)
+            .style(ButtonStyle::Subtle)
+            .aria_label(sidebar_toggle_label)
+            .tooltip(Tooltip::text(sidebar_toggle_label))
+            .on_click(cx.listener(|this, _, _, cx| {
+                this.toggle_threads_sidebar(cx);
+            }));
+        let settings_button = IconButton::new("open-omega-settings", IconName::Settings)
+            .debug_selector(|| "open-omega-settings".into())
+            .shape(ui::IconButtonShape::Wide)
+            .width(px(28.))
+            .size(ButtonSize::Medium)
+            .icon_size(IconSize::Small)
+            .style(ButtonStyle::Subtle)
+            .aria_label("Open Settings")
+            .tooltip(Tooltip::text("Settings"))
+            .on_click(|_, window, cx| {
+                window.dispatch_action(omega_actions::OpenSettings.boxed_clone(), cx);
+            });
+
         v_flex()
             .id("omega.workbench.activity-rail")
             .debug_selector(|| "omega.workbench.activity-rail".into())
@@ -13333,6 +13340,14 @@ impl AgentPanel {
             .role(gpui::Role::Toolbar)
             .aria_label("Work surfaces")
             .aria_orientation(gpui::accesskit::Orientation::Vertical)
+            .child(
+                div()
+                    .size_8()
+                    .flex()
+                    .items_center()
+                    .justify_center()
+                    .child(sidebar_toggle),
+            )
             .children(items)
             .child(div().flex_1())
             .children(self.workbench_shell.last_error().map(|error| {
@@ -13349,6 +13364,15 @@ impl AgentPanel {
                             .color(Color::Warning),
                     )
             }))
+            .child(
+                div()
+                    .size_8()
+                    .flex()
+                    .items_center()
+                    .justify_center()
+                    .mb_2()
+                    .child(settings_button),
+            )
             .into_any_element()
     }
 
@@ -14037,9 +14061,11 @@ impl Render for AgentPanel {
                     },
                 ))
                 // The activity rail hugs the window's left edge, with the
-                // threads sidebar beside it and the dock and content after —
-                // an icon rail floating between two panels reads as broken.
-                .child(self.render_activity_rail(window, cx))
+                // threads sidebar beside it when expanded and the dock and
+                // content after — an icon rail floating between two panels
+                // reads as broken. Collapsed sidebar controls live on this
+                // rail (`OMEGA-DELTA-0205`).
+                .child(self.render_activity_rail(layout.sidebar, window, cx))
                 .children(self.render_sidebar(layout.sidebar, window, cx))
                 .children(self.render_work_surface_dock(layout, window, cx))
                 .child(v_flex().flex_1().min_w_0().h_full().child(content))
