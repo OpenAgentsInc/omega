@@ -7365,7 +7365,31 @@ mod workbench_front_door_tests {
             .surface_host_entity_id(omega_workbench_state::WorkSurface::Plan, cx)
             .expect("Plan host should exist");
 
-        front_door.resize(909, 720, cx);
+        // `OMEGA-DELTA-0205`. The shared boundary is the activity rail, the
+        // collapsed sidebar (which now takes no column of its own), the
+        // minimum dock and the transcript floor. Read it off the same
+        // constants the allocator uses rather than writing the number here:
+        // this test carried the literal 909 — one below the pre-0205 boundary
+        // of 910 — because the collapsed sidebar used to keep a 30px rail, and
+        // a literal cannot follow a constant that moves.
+        let dock_boundary = crate::workbench_shell::ACTIVITY_RAIL_WIDTH
+            + crate::omega_sidebar::RAIL_WIDTH
+            + crate::workbench_shell::MIN_DOCK_WIDTH
+            + crate::omega_sidebar::MIN_CONTENT_WIDTH;
+        let dock_boundary = dock_boundary.to_f64() as u32;
+        assert_eq!(dock_boundary, 880, "OMEGA-DELTA-0205's stated boundary");
+
+        // At the boundary itself the dock is still drawn. Without this the
+        // assertion below would also pass for a boundary that had quietly
+        // moved wider, which is exactly how the stale 909 stopped meaning
+        // "one pixel below".
+        front_door.resize(dock_boundary, 720, cx);
+        let at_boundary = front_door.snapshot(cx);
+        SemanticProbe::new(&at_boundary)
+            .require_visible(WORKBENCH_DOCK_SELECTOR)
+            .expect("dock should still be drawn at its shared boundary");
+
+        front_door.resize(dock_boundary - 1, 720, cx);
         let snapshot = front_door.snapshot(cx);
         let mut probe = SemanticProbe::new(&snapshot);
         probe
