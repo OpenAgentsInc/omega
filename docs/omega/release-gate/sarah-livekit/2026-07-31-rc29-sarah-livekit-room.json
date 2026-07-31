@@ -14,6 +14,7 @@
   "facts": {
     "binding_provenance": {
       "admitted_model_revision": "NO versioned model catalog exists for Sarah. The realtime model is the bare pinned constant SARAH_LIVEKIT_MODEL and the transcription constant SARAH_LIVEKIT_TRANSCRIPTION_MODEL in packages/audio-contract/src/sarah-livekit-worker.ts. This binding names those constants and must not be read as a catalog revision.",
+      "community_admission": "The community admin key was reported by an earlier lane as absent from Secret Manager with no signer. It was not absent. openagents-nostr-relay-private-key derives to e841147f262799821bbaa2930fcca982a575458f0e043e064a26ed8aba2046ed, the exact pubkey the deployed SARAH_LIVEKIT_COMMUNITY_AUTHORITY_JSON lists as group admin and the same value committed beside it as PUBLIC_NOSTR_CHAT_RELAY_SELF_PUBKEY. Kind-9000 admission succeeds with it once the connection completes NIP-42 AUTH; without AUTH the relay answers auth-required, which reads like a missing permission. A second, purpose-built admin key is now stored as oa-livekit-community-admin-nostr-key, granted relay-side put-user by the existing admin, and added beside it in the authority config. Nothing was replaced.",
       "livekit_config_revision": "configurationDigest of infra/livekit/production/livekit.yaml, stable across every production receipt",
       "livekit_image_digest": "infra/livekit/bundle.json serverImage (livekit-server v1.13.4)",
       "livekit_infrastructure_revision": "deployedRevision of the last production LiveKit runtime deployment receipt docs/ops/receipts/livekit/production-runtime-signer-worker-20260731T113000Z.json",
@@ -21,9 +22,9 @@
       "openagents_source_revision": "sourceRevision recorded by the acceptance receipt; the receipt states the limitation source_revision_resolved_from_deployed_image_digest, so this revision was resolved from the running worker image rather than reported by the worker process",
       "price_catalog_revision": "NO versioned price catalog exists for Sarah voice. These are the exact unversioned production environment values SARAH_REALTIME_RESERVATION_MSAT, SARAH_REALTIME_CREDIT_MSAT_PER_MILLION_TOKENS, and SARAH_REALTIME_MAX_SESSION_SECONDS in apps/openagents.com/workers/api/scripts/cloudrun/env-production.yaml.",
       "sarah_worker_image_digest": "infra/livekit/production/resources/sarah-agent-runtime.yaml and infra/livekit/bundle.json workerImage (pinState pinned); pinned by openagents commit 8489421023, the direct child of worker source fdd0db9bab",
-      "unbound_identifier": "The Cloud Run serving revision openagents-monolith-00349-7q2 was reported to the assembling agent but is recorded nowhere in openagents at c4906fbd89, so it is deliberately absent from this binding. The last serving revision recorded in the repository in a Sarah LiveKit context is openagents-monolith-00347-bds."
+      "unbound_identifier": "The Cloud Run serving revision that answered these probes is openagents-monolith-00374-h4p, an env-var-only update over the image serving 00373. That image's source revision is recorded in neither repository and is not recoverable from the registry, so it is deliberately absent from this binding. The openagents_source_revision recorded above is the one the earlier acceptance receipt resolved; the repository claims cited in this row are newer than the serving image."
     },
-    "blocked_reason": "The three-desktop journey was attempted against this exact candidate and did not reach step one. Three packaged rc29 desktops ran concurrently on one host, each with an isolated profile and its own self-provisioned Nostr identity, so the three-distinct-identities precondition is satisfiable without three machines. Admission is what blocks: a Sarah voice session requires an active alpha-cohort row written only by the owner-run admit-sarah-voice-npub script, and community room access requires NIP-29 kind-9000 admission signed by the group admin key. Both are owner-only and out of band, and no HTTP surface exists for either. With no member admitted, the floor, moderator, shared-answer, and all four refusal observations are unreachable in order. Two of the four refusals are additionally not satisfiable with their expected codes: removeSarahLiveKitRoomMember is the only producer of member_removed and membership_changed and has no non-test caller, and production resolveMember returns undefined for a removed member, which the routes map to 403 room_membership_required.",
+    "blocked_reason": "Admission is cleared and is no longer what blocks this row. All three journey identities hold an active sarah_voice_cohort:alpha_v1 row, and all three are admitted to NIP-29 group openagents-public by kind-9000 records the deployed authority config folds. Membership resolution is proven end to end: POST /api/sarah/livekit/room/join answers community_room_not_active (404) for each identity rather than community_membership_required (403). A moderator is reachable too: the access resolver derives isGroupAdmin solely from the authority config adminPubkeys, and Cloud Run revision openagents-monolith-00374-h4p adds an owned admin pubkey beside the existing one. What blocks the row now is the packaged client. rc29 exposes Join room, Summon Sarah, Talk to Sarah and Stop only as GPUI on_click closures in crates/agent_ui/src/omega_public_channel_view.rs. They are not registered GPUI actions, no keymap binding reaches them, the omega CLI flags target the agent-thread composer, the zed URL scheme has no route for them, omega-effectd is a private stdio pipe between the app and its own child process, and omega-device-bridge is an authenticated read-only mirror that refuses every command frame by design. So there is no unattended driver for the five controls this journey needs, and no packaged desktop reached a room join. Driving the HTTP routes directly instead would not be a packaged-desktop participant and is refused as evidence for this row.",
     "issues": [
       "omega#186",
       "openagents#9286"
@@ -41,8 +42,11 @@
     ],
     "note": "This receipt records what was actually observed for one Sarah LiveKit release-gate row on Omega v0.2.0-rc29. It never promotes source tests, configuration, deployment-lifecycle receipts, or a headless harness run into an installed packaged-candidate observation.",
     "observed": {
+      "alpha_cohort_admitted_identities": 3,
       "authenticated_packaged_desktop_count": 0,
       "authenticated_room_joins": 0,
+      "community_admin_pubkeys_configured": 2,
+      "community_membership_resolves_for_journey_identities": true,
       "concurrent_packaged_desktop_instances_launched": 3,
       "distinct_self_provisioned_identities": 3,
       "headless_audible_fanout_observed": true,
@@ -52,13 +56,17 @@
       "headless_principal_sarah_observed": true,
       "headless_subscriber_fanout_composition": "one owner participant plus one headless secondary subscriber",
       "headless_subscriber_fanout_count": 2,
+      "nip29_admitted_identities": 3,
+      "packaged_client_identity_preseed_proven": true,
+      "packaged_client_unattended_driver_available": false,
       "packaged_desktop_profile_isolation_route": "HOME and --user-data-dir co-located at <root>/Library/Application Support/Omega RC, which makes the rc29 provisioning root and registry root coincide"
     },
     "refused_claims": [
       "A subscriberFanoutCount of 2 headless subscribers is NOT a three-desktop journey and is not reported as one.",
       "Passing server-side floor-authority unit tests in apps/openagents.com/workers/api are source evidence and cannot promote an installed-candidate row.",
-      "Three launched packaged desktops are NOT three authenticated room participants. Instance count is not admission, and this row records authenticated_room_joins 0.",
-      "A self-provisioned Nostr identity is NOT an admitted community member. Self-provisioning clears identity creation only; the alpha-cohort row and the NIP-29 group admission remain owner-only.",
+      "Three launched packaged desktops are NOT three authenticated room participants. Instance count is not admission, and this row still records authenticated_room_joins 0.",
+      "A cleared admission is NOT a journey. Every identity being admitted removes a precondition; it does not observe a single one of the nine required facts.",
+      "Driving /api/sarah/livekit/room/* directly with an identity's bearer is NOT a packaged-desktop participant, however authentic the identity. This row requires the client, not the contract.",
       "The rc29 candidate does NOT carry the --user-data-dir identity fix. Omega ba6cc833b1 landed after the rc29 source c7ecf769e8, so isolated profiles authenticate on this candidate only through the co-located HOME route recorded above, not through the fix."
     ],
     "source_evidence": [
@@ -88,9 +96,18 @@
         "revision": "c5b595a42037ee6fa8f44e5a7632962ff5ffde11",
         "role": "the gate observation receipt for this row; records all nine observations as not_observed with the specific obstruction for each, produced by an attempted three-desktop run against this exact package digest",
         "schema": "openagents.sarah.livekit-gate-observation.v1"
+      },
+      {
+        "outcome": "incomplete",
+        "path": "docs/ops/receipts/livekit/gate/2026-07-31-rc29-room-admission-cleared.json",
+        "repository": "https://github.com/OpenAgentsInc/openagents",
+        "result_digest": "sha256:006af7ee4262d46e92db62d67c3653d6f728427c91aff43b25ad06c68042e5bc",
+        "revision": "9a4e1e1c3b",
+        "role": "second gate observation for this row after both admissions were cleared; all nine observations remain not_observed, with the blocker relocated from admission to the absence of an unattended driver for the packaged client",
+        "schema": "openagents.sarah.livekit-gate-observation.v1"
       }
     ],
-    "unblocks_when": "Three authenticated packaged Omega v0.2.0-rc29 desktops join one community room, summon Sarah, transfer the server-issued floor between two members, all hear the shared answer, a moderator stops Sarah, and a non-floor participant, a stale grant, a replay, and a removed member are each refused. Reaching step one first requires three identities to hold both an active sarah_voice_cohort:alpha_v1 row and NIP-29 group admission on the configured community, one of them as group admin so the moderator stop is reachable. The removed-member and stale-grant refusals additionally require member_removed and membership_changed to acquire a production emitter, or the expected codes to be amended to the codes the deployed routes actually return."
+    "unblocks_when": "Three authenticated packaged Omega v0.2.0-rc29 desktops join one community room, summon Sarah, transfer the server-issued floor between two distinct members, all hear the shared answer, a moderator stops Sarah, and a non-floor participant, a stale grant, a replay, and a removed member are each refused. Admission no longer blocks step one. Two things do. First, the five community-room controls need a driver: either a human clicking them, or an unattended path that does not exist today. The only mechanism found is macOS Accessibility automation after opting each instance into ZED_EXPERIMENTAL_A11Y=1, which is undocumented, off by default, and named experimental; treat a run that needs it as a disclosed environment deviation. Second, the removed-member and stale-grant refusals need the serving image to carry openagents de475872af, which gives member_removed and membership_changed their first production emitter. That is a normal source deploy, not a credential."
   },
   "public_safe": true,
   "row_id": "sarah-livekit-room",
