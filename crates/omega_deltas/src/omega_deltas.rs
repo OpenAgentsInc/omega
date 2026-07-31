@@ -203,6 +203,7 @@ pub const ENFORCED_DELTAS: &[&str] = &[
     "OMEGA-DELTA-0212",
     "OMEGA-DELTA-0213",
     "OMEGA-DELTA-0214",
+    "OMEGA-DELTA-0215",
 ];
 
 /// OMEGA-DELTA-0204. Every control the composer's bar offers, written twice:
@@ -23194,6 +23195,59 @@ mod tests {
                 "OMEGA-DELTA-0213: evidence schema or fixture lost binding `{binding}`"
             );
         }
+    }
+
+    /// OMEGA-DELTA-0215. Community-room Sarah controls render only verified
+    /// server authority and never inherit private-session capabilities.
+    #[test]
+    fn community_room_sarah_is_verified_bounded_and_fail_closed() {
+        let model = read_repository_file("crates/agent_ui/src/omega_public_channel_sarah.rs");
+        for required in [
+            "openagents.sarah.livekit-room-authority.v1",
+            "community_member_v1",
+            "sarah_openagents_openai_v1",
+            "verified_participants",
+            "CommunityAuthorityLoss",
+            "requestedLeaseMs\": FLOOR_LEASE_MS",
+            "\"targetUserRefDigest\"",
+            "canonical_floor_transfer_requires_a_verified_target_and_local_lease",
+            "pub fn has_private_authority(&self) -> bool",
+            "false",
+            "stale_replay_and_unverified_floor_holder_fail_closed",
+            "removal_role_loss_expiry_and_server_stop_revoke_every_control",
+        ] {
+            assert!(
+                model.contains(required),
+                "OMEGA-DELTA-0215: community-room Sarah lost `{required}`"
+            );
+        }
+
+        let view = read_repository_file("crates/agent_ui/src/omega_public_channel_view.rs");
+        for required in [
+            "omega-public-channel-sarah",
+            "omega-room-voice-join",
+            "omega-room-voice-leave",
+            "omega-room-voice-mute",
+            "omega-room-sarah-summon",
+            "omega-room-sarah-remove",
+            "omega-room-sarah-talk",
+            "omega-room-sarah-stop",
+            ".tab_index(7isize)",
+            "Sarah voice uses OpenAgents and OpenAI.",
+            "community_sarah_controls_are_compact_and_fail_closed_until_verified",
+        ] {
+            assert!(
+                view.contains(required),
+                "OMEGA-DELTA-0215: tester-channel Sarah surface lost `{required}`"
+            );
+        }
+
+        let registry = read_repository_file("docs/omega/control-crawl-registry.json");
+        assert!(
+            registry
+                .contains("community_sarah_controls_are_compact_and_fail_closed_until_verified"),
+            "OMEGA-DELTA-0215: the community Sarah scene lost its control-crawl registration"
+        );
     }
 
     /// OMEGA-DELTA-0181. Direct agent turns expose a durable lifecycle, keep

@@ -5769,12 +5769,22 @@ impl AgentPanel {
                           _view,
                           event: &crate::omega_public_channel_view::PublicChannelViewEvent,
                           cx| {
-                        let crate::omega_public_channel_view::PublicChannelViewEvent::SnapshotChanged(
-                            snapshot,
-                        ) = event;
-                        this.public_channels
-                            .apply_snapshot(&channel_id_for_snapshot, snapshot.clone());
-                        cx.notify();
+                        match event {
+                            crate::omega_public_channel_view::PublicChannelViewEvent::SnapshotChanged(
+                                snapshot,
+                            ) => {
+                                this.public_channels
+                                    .apply_snapshot(&channel_id_for_snapshot, snapshot.clone());
+                                cx.notify();
+                            }
+                            crate::omega_public_channel_view::PublicChannelViewEvent::SarahIntent(
+                                _,
+                            ) => {
+                                log::debug!(
+                                    "community Sarah intent emitted without a production control contract"
+                                );
+                            }
+                        }
                     },
                 );
                 self._public_channel_view_subscriptions

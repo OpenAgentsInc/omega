@@ -46,6 +46,7 @@ pub mod omega_nostr_profile_transport;
 pub mod omega_public_channel_media;
 pub mod omega_public_channel_publish;
 pub mod omega_public_channel_relay;
+pub mod omega_public_channel_sarah;
 pub mod omega_public_channel_timeline;
 pub mod omega_public_channel_view;
 pub mod omega_public_channels;

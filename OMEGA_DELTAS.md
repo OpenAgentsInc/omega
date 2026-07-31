@@ -9638,3 +9638,33 @@ success is a distinct preserved status, not an automated pass.
   `crates/agent_ui/src/omega_thread_worktree.rs`;
   `assert_no_worktree_collision_prompt` in the Agent Panel GPUI suite; and the
   `omega_concurrent_agents_worktree_no_dialog` visual scene.
+### OMEGA-DELTA-0215 — Community Sarah never manufactures room authority
+
+**The tester channel can draw the whole journey without pretending it is
+live.** The compact surface names room voice, Sarah state, and the speaking
+floor, and exposes join, leave, mute, summon, remove, Talk to Sarah, and
+moderator stop. Disclosure is visible before Sarah may listen.
+
+**Every enabled control comes from one exact server projection.** The
+projection binds the community and channel, membership and E2EE revisions,
+room epoch, Sarah identity and participant, dispatch and provider generation,
+and a verified Nostr-user-to-LiveKit-participant roster. The floor holder must
+be in that roster. Replays, cross-room mappings, expiry, removal, role loss,
+revocation, and server stop clear authority and mute input.
+
+**Community is not private voice.** Its fixed capability profile is
+`community_member_v1`; no owner-private workspace or command authority exists.
+The 30-second speaking floor remains a canonical OpenAgents lease and LiveKit
+remains media only.
+
+**Unavailable is the current honest production state.** OpenAgents does not
+yet expose the shared-room provisioning, authenticated snapshot/update feed,
+signed Sarah presence, summon/remove path, or worker-side floor enforcement
+required to enable these controls. Hermetic authority fixtures prove the UI
+and model seam; they do not become production authority.
+
+- **Enforced by:** `community_room_sarah_is_verified_bounded_and_fail_closed`
+  in `crates/omega_deltas`; the model tests in
+  `crates/agent_ui/src/omega_public_channel_sarah.rs`; and
+  `community_sarah_controls_are_compact_and_fail_closed_until_verified` in
+  `crates/agent_ui/src/omega_public_channel_view.rs`.

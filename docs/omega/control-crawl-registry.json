@@ -59,9 +59,10 @@
     {
       "id": "omega-tester-channel",
       "kind": "hermetic-scene",
-      "status": "pending-expansion",
-      "description": "Tester-channel first-launch and relay-unavailable scenes.",
-      "follow_up": "Crawl channel rows and empty states."
+      "status": "complete",
+      "crate": "agent_ui",
+      "description": "Tester-channel lifecycle, relay fallback, and compact community-room Sarah controls.",
+      "coverage": "rendered_empty_and_error_states_keep_lifecycle_and_metadata_visible crawls all relay lifecycle scenes; community_sarah_controls_are_compact_and_fail_closed_until_verified asserts the room voice surface and join/leave/mute/summon/remove/Talk-to-Sarah/moderator-stop controls remain discoverable at compact width and verifies authority-dependent controls stay disabled until an exact server snapshot and disclosure acknowledgement exist; the controls carry an explicit sequential keyboard tab order; omega_public_channel_sarah model tests cover stale replay, forged participant/floor mappings, expiry, removal, role loss, revocation, and server stop"
     },
     {
       "id": "settings-window",

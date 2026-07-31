@@ -233,6 +233,46 @@ Mute stops new microphone content. Interrupt discards queued playback and sends
 an `interrupt` control. End sends a `close` control, closes the socket, stops
 capture, and releases playback. Dropping the panel performs the same cleanup.
 
+## Community-room desktop projection
+
+The tester-channel surface has a separate, compact room-voice projection for
+**Join**, **Leave**, **Mute**, **Summon Sarah**, **Remove Sarah**, **Talk to
+Sarah**, and moderator **Stop**. It shows the call lifecycle, Sarah's
+absent/summoning/idle/listening/speaking/failed state, and the speaking floor.
+It discloses OpenAgents and OpenAI processing before summon or speech is
+enabled. This is not the owner-private editor session: its exact capability
+profile is `community_member_v1`, and it cannot inherit private workspace
+context or editor command authority.
+
+Every usable projection must be schema
+`openagents.sarah.livekit-room-authority.v1` and bind the current community,
+channel, membership revision, E2EE revision, room, room epoch, Sarah principal
+and participant, dispatch, provider generation, admission digest, expiry, and
+the verified Nostr-user-to-LiveKit-participant roster. The desktop accepts only
+monotonically newer revisions. A floor holder must match one exact verified
+roster entry. Replay, expiry, forged or cross-room participant mapping,
+membership change, participant removal, role loss, revocation, and server stop
+drop authority, mute input, and disable every control.
+
+**Talk to Sarah** requests the canonical server-owned 30-second floor lease; it
+does not infer authority from a LiveKit display name, participant metadata, or
+active-speaker state. Moderators may request an immediate server stop. LiveKit
+continues to carry media only.
+
+The production projection intentionally remains unavailable until OpenAgents
+provides all of the following as a consumable contract:
+
+- shared community-room provisioning instead of one room per private
+  `sessionRef:generation`;
+- authenticated current presence/floor snapshots plus monotonic updates;
+- published signed Sarah presence and the verified participant roster;
+- summon/remove operations and cross-member floor transfer;
+- worker enforcement of floor state and immediate moderator stop.
+
+Until those exist, Omega draws the surface and its unavailable reason but does
+not emit join, summon, removal, or floor requests. The UI model seam and
+hermetic fixtures are not production authority.
+
 ## Editor command bridge
 
 The gateway and Omega both decode a closed command enum. Unknown variants,

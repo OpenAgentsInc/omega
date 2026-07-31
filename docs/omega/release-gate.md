@@ -179,6 +179,15 @@ document remains legible before and after GitHub assigns issue numbers:
 | [`EP263-LK-06`](https://github.com/OpenAgentsInc/omega/issues/186) | Omega | Let Sarah join authenticated desktop community rooms and talk through the explicit floor. |
 | [`EP263-LK-07`](https://github.com/OpenAgentsInc/omega/issues/187) | Omega | Extend the installed release gate and prove the private, group, connectivity, isolation, failure, and independent-review rows. |
 
+The #186 desktop slice is intentionally gated at the server boundary. Omega
+now has the compact tester-channel projection, verified epoch/participant
+model, canonical floor request, and fail-closed test scenes, but production
+controls remain unavailable until OpenAgents publishes an authenticated
+shared-room authority snapshot/update feed and worker-enforced floor,
+summon/remove, and moderator-stop operations. Installation alone is not
+evidence for any release row; the installed three-desktop journey above must
+still pass.
+
 
 ---
 
