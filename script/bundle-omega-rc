@@ -1263,8 +1263,8 @@ find_openagents_signing_identity
 set_channel_and_version
 
 echo "Preparing Omega RC ${OMEGA_RC_VERSION} (channel=${OMEGA_RC_CHANNEL})"
-echo "Updating temporary Cargo.lock for zed ${OMEGA_RC_SEMVER}"
-cargo update --package zed --precise "${OMEGA_RC_SEMVER}"
+echo "Updating temporary Cargo.lock for omega ${OMEGA_RC_SEMVER}"
+cargo update --package omega --precise "${OMEGA_RC_SEMVER}"
 cp Cargo.lock "${BUILD_LOCK_SNAPSHOT_PATH}"
 BUILD_LOCK_SNAPSHOT_NAME="${OMEGA_BUILD_LOCK_SNAPSHOT_NAME}"
 BUILD_LOCK_SNAPSHOT_DIGEST="$(sha256_file "${BUILD_LOCK_SNAPSHOT_PATH}")"
@@ -1291,7 +1291,7 @@ echo "Compiling omega binaries for ${TARGET_TRIPLE}"
 # the application, because it is a first-party agent Omega offers to delegate
 # to. Nothing built it before, so the only machines that could start it were
 # the ones where somebody had compiled and copied it onto PATH by hand.
-cargo build --locked --release --package zed --package cli --package omega_identity --package scv --target "${TARGET_TRIPLE}"
+cargo build --locked --release --package omega --package cli --package omega_identity --package scv --target "${TARGET_TRIPLE}"
 cargo build --locked --release --package remote_server --target "${TARGET_TRIPLE}"
 
 echo "Creating application bundle"
