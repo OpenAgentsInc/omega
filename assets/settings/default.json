@@ -2859,6 +2859,17 @@
       "type": "custom",
       "command": "grok",
       "args": ["agent", "stdio"]
+    },
+    // OMEGA-DELTA-0203. Detection offers these two for delegation, and the
+    // agent-server store can only start an id it has an entry for — so without
+    // these, selecting either failed with "is not registered" after being
+    // drawn as available. Both ids are in the ACP registry, which is where
+    // their command comes from.
+    "cursor": {
+      "type": "registry"
+    },
+    "github-copilot-cli": {
+      "type": "registry"
     }
   },
   "debugger": {

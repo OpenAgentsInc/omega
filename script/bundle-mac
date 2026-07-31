@@ -87,7 +87,10 @@ script/generate-licenses
 rustup target add $target_triple
 
 echo "Compiling zed binaries"
-cargo build ${build_flag} --package zed --package cli --target $target_triple
+# OMEGA-DELTA-0203. `scv` is a first-party agent Omega offers to delegate to,
+# so it is built and packaged with the application rather than expected on a
+# shell PATH that a packaged application does not have.
+cargo build ${build_flag} --package zed --package cli --package scv --target $target_triple
 # Build remote_server in separate invocation to prevent feature unification from other crates
 # from influencing dynamic libraries required by it.
 cargo build ${build_flag} --package remote_server --target $target_triple
@@ -202,6 +205,7 @@ function sign_app_binaries() {
         echo "Code signing binaries"
         # sequence of codesign commands modeled after this example: https://developer.apple.com/forums/thread/701514
         /usr/bin/codesign --deep --force --timestamp --options runtime --sign "$IDENTITY" "${app_path}/Contents/MacOS/cli" -v
+        /usr/bin/codesign --deep --force --timestamp --options runtime --sign "$IDENTITY" "${app_path}/Contents/MacOS/scv" -v
         /usr/bin/codesign --deep --force --timestamp --options runtime --sign "$IDENTITY" "${app_path}/Contents/MacOS/git" -v
         /usr/bin/codesign --deep --force --timestamp --options runtime --entitlements crates/omega/resources/zed.entitlements --sign "$IDENTITY" "${app_path}/Contents/MacOS/omega" -v
         /usr/bin/codesign --force --timestamp --options runtime --entitlements crates/omega/resources/zed.entitlements --sign "$IDENTITY" "${app_path}" -v
@@ -350,6 +354,9 @@ upload_debug_symbols
 
 cp target/${target_triple}/${target_dir}/omega "${app_path}/Contents/MacOS/omega"
 cp target/${target_triple}/${target_dir}/cli "${app_path}/Contents/MacOS/cli"
+# Beside the application executable, which is where `omega_agent_detect` looks
+# first.
+cp target/${target_triple}/${target_dir}/scv "${app_path}/Contents/MacOS/scv"
 sign_app_binaries
 
 sign_binary "target/$target_triple/release/remote_server"

@@ -32,6 +32,24 @@ pub mod exo;
 
 use std::path::{Path, PathBuf};
 
+/// How Omega starts this agent's ACP server once it has been detected.
+///
+/// OMEGA-DELTA-0203. Detection and launch were two independent registries, and
+/// an agent could be (and `scv`, `cursor` and `github-copilot-cli` all were)
+/// advertised as delegable while the launcher had no definition for it. This
+/// field is what makes "listed" and "startable" one fact instead of two.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum AgentLaunch {
+    /// Started through the agent-server store, which resolves the id from
+    /// settings and the ACP registry. The id MUST have an entry in
+    /// `assets/settings/default.json`'s `agent_servers`, or the store cannot
+    /// start it; `omega_deltas` checks that mechanically.
+    AgentServerStore,
+    /// The detected executable IS the ACP server, started directly by the path
+    /// detection resolved. Nothing in settings is required.
+    DetectedBinary { args: &'static [&'static str] },
+}
+
 /// An agent Omega knows how to drive, and the executables it might be called.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct AgentCandidate {
@@ -44,6 +62,8 @@ pub struct AgentCandidate {
     /// `cursor` is commonly a shell alias to it, which a `PATH` scan cannot
     /// see — so the real binary is named first.
     pub binaries: &'static [&'static str],
+    /// OMEGA-DELTA-0203. How the launcher starts it once it is found.
+    pub launch: AgentLaunch,
 }
 
 /// The set Omega offers, in the order it prefers them.
@@ -54,31 +74,40 @@ pub const CANDIDATES: &[AgentCandidate] = &[
         id: "codex-acp",
         name: "Codex",
         binaries: &["codex"],
+        launch: AgentLaunch::AgentServerStore,
     },
     AgentCandidate {
         id: "claude-acp",
         name: "Claude",
         binaries: &["claude"],
+        launch: AgentLaunch::AgentServerStore,
     },
     AgentCandidate {
         id: "grok",
         name: "Grok",
         binaries: &["grok"],
+        launch: AgentLaunch::AgentServerStore,
     },
     AgentCandidate {
         id: "github-copilot-cli",
         name: "GitHub Copilot",
         binaries: &["copilot"],
+        launch: AgentLaunch::AgentServerStore,
     },
     AgentCandidate {
         id: "cursor",
         name: "Cursor",
         binaries: &["cursor-agent"],
+        launch: AgentLaunch::AgentServerStore,
     },
+    // `scv` is first-party and ships beside the `omega` executable, so it is
+    // started as the file detection found rather than through a settings entry
+    // naming a bare `scv` that only a shell `PATH` could resolve.
     AgentCandidate {
         id: "scv",
         name: "SCV",
         binaries: &["scv"],
+        launch: AgentLaunch::DetectedBinary { args: &[] },
     },
 ];
 
@@ -88,6 +117,10 @@ pub struct DetectedAgent {
     pub id: &'static str,
     pub name: &'static str,
     pub binary: PathBuf,
+    /// OMEGA-DELTA-0203. Carried from the candidate so a caller holding a
+    /// `DetectedAgent` knows how to start it without a second lookup, which is
+    /// where the two registries got to disagree.
+    pub launch: AgentLaunch,
 }
 
 /// Everything in [`CANDIDATES`] present on the given `PATH`, in preference
@@ -96,32 +129,48 @@ pub struct DetectedAgent {
 /// The order is [`CANDIDATES`]' order, not `PATH`'s, so the choice Omega makes
 /// does not change with the shell that launched it.
 pub fn detect_on_path(path_var: &str) -> Vec<DetectedAgent> {
+    detect_with(None, path_var)
+}
+
+/// [`detect_on_path`], preferring `sibling_dir` over `path_var`.
+///
+/// OMEGA-DELTA-0203. A first-party agent such as `scv` ships beside the `omega`
+/// executable inside the application bundle, so the running executable's own
+/// directory is the authoritative place to find it: a packaged Omega has no
+/// shell `PATH` to rely on, and a stale hand-copied binary on `PATH` must not
+/// beat the one that was shipped and signed with this build.
+pub fn detect_with(sibling_dir: Option<&Path>, path_var: &str) -> Vec<DetectedAgent> {
     CANDIDATES
         .iter()
         .filter_map(|candidate| {
             candidate
                 .binaries
                 .iter()
-                .find_map(|binary| lookup(binary, path_var))
+                .find_map(|binary| lookup_beside_then_on_path(binary, sibling_dir, path_var))
                 .map(|binary| DetectedAgent {
                     id: candidate.id,
                     name: candidate.name,
                     binary,
+                    launch: candidate.launch,
                 })
         })
         .collect()
 }
 
-/// [`detect_on_path`] against the process's own `PATH`.
+/// [`detect_with`] against the running executable's directory and the process's
+/// own `PATH`.
 ///
-/// A missing `PATH` yields nothing rather than falling back to a default set of
-/// directories. Guessing where binaries live would make the empty case
-/// unreachable, and the empty case is the one a new person is in.
+/// A missing `PATH` contributes no directories rather than falling back to a
+/// default set. Guessing where binaries live would make the empty case
+/// unreachable, and the empty case is the one a new person is in. The
+/// executable's own directory is not a guess: it is where this build put the
+/// agents it ships.
 pub fn detect_from_env() -> Vec<DetectedAgent> {
-    match std::env::var("PATH") {
-        Ok(path_var) => detect_on_path(&path_var),
-        Err(_) => Vec::new(),
-    }
+    let executable_directory = std::env::current_exe()
+        .ok()
+        .and_then(|executable| executable.parent().map(Path::to_path_buf));
+    let path_var = std::env::var("PATH").unwrap_or_default();
+    detect_with(executable_directory.as_deref(), &path_var)
 }
 
 /// [`detect_from_env`], computed once for the life of the process.
@@ -185,6 +234,26 @@ pub fn command_resolves_from_env(program: &Path) -> bool {
         Ok(path_var) => command_resolves(program, &path_var),
         Err(_) => false,
     }
+}
+
+/// The launch spec [`CANDIDATES`] declares for `id`, if it is one Omega knows.
+pub fn launch_for(id: &str) -> Option<AgentLaunch> {
+    CANDIDATES
+        .iter()
+        .find(|candidate| candidate.id == id)
+        .map(|candidate| candidate.launch)
+}
+
+/// Find `binary` beside the running executable first, then on `path_var`.
+fn lookup_beside_then_on_path(
+    binary: &str,
+    sibling_dir: Option<&Path>,
+    path_var: &str,
+) -> Option<PathBuf> {
+    sibling_dir
+        .map(|directory| directory.join(binary))
+        .filter(|candidate| is_executable_file(candidate))
+        .or_else(|| lookup(binary, path_var))
 }
 
 /// Find `binary` on `path_var`, returning the first executable match.
@@ -359,6 +428,98 @@ mod tests {
             command_resolves(Path::new("./agents/grok"), ""),
             "presence relative to an unknown launch directory cannot be \
              verified, and a false absence would dim a workable row"
+        );
+    }
+
+    /// OMEGA-DELTA-0203. The shipped binary beside the application wins.
+    ///
+    /// `scv` is first-party and packaged into `Contents/MacOS`. A stale copy
+    /// someone put on `PATH` by hand must not be preferred over the one this
+    /// build shipped, because the two can be different programs.
+    #[test]
+    fn a_binary_beside_the_executable_wins_over_one_on_the_path() {
+        let beside = tempfile::tempdir().expect("a temporary directory");
+        let on_path = tempfile::tempdir().expect("a temporary directory");
+        let shipped = write_executable(beside.path(), "scv");
+        write_executable(on_path.path(), "scv");
+
+        let detected = detect_with(Some(beside.path()), &on_path.path().to_string_lossy());
+
+        assert_eq!(detected.len(), 1);
+        assert_eq!(detected[0].id, "scv");
+        assert_eq!(
+            detected[0].binary, shipped,
+            "the binary shipped with this build is the one that is started"
+        );
+    }
+
+    #[test]
+    fn a_missing_sibling_directory_falls_back_to_the_path() {
+        let absent = tempfile::tempdir().expect("a temporary directory");
+        let on_path = tempfile::tempdir().expect("a temporary directory");
+        let installed = write_executable(on_path.path(), "scv");
+        let sibling = absent.path().join("no-such-directory");
+
+        let detected = detect_with(Some(&sibling), &on_path.path().to_string_lossy());
+
+        assert_eq!(detected.len(), 1, "an unbundled build still finds an agent");
+        assert_eq!(detected[0].binary, installed);
+    }
+
+    #[test]
+    fn a_non_executable_file_beside_the_executable_is_not_accepted() {
+        let beside = tempfile::tempdir().expect("a temporary directory");
+        let on_path = tempfile::tempdir().expect("a temporary directory");
+        fs::write(beside.path().join("scv"), "not a program").expect("the fixture file is written");
+        let installed = write_executable(on_path.path(), "scv");
+
+        let detected = detect_with(Some(beside.path()), &on_path.path().to_string_lossy());
+
+        assert_eq!(
+            detected.len(),
+            1,
+            "a present but non-executable sibling file is not an agent, and must \
+             not shadow the one that can actually be started"
+        );
+        assert_eq!(detected[0].binary, installed);
+    }
+
+    /// OMEGA-DELTA-0203. Listing an agent and being able to start it are one
+    /// fact. `scv` is started as the file that was found; Codex goes through
+    /// the agent-server store, which requires a settings entry.
+    #[test]
+    fn every_candidate_declares_how_it_is_launched() {
+        assert_eq!(
+            launch_for("scv"),
+            Some(AgentLaunch::DetectedBinary { args: &[] }),
+            "SCV ships beside the application, so a settings entry naming a bare \
+             `scv` would only ever resolve from a shell PATH the bundle does not \
+             have"
+        );
+        assert_eq!(launch_for("codex-acp"), Some(AgentLaunch::AgentServerStore));
+        assert_eq!(launch_for("not-an-agent"), None);
+    }
+
+    #[test]
+    fn a_detected_agent_carries_its_launch_spec() {
+        let directory = tempfile::tempdir().expect("a temporary directory");
+        write_executable(directory.path(), "scv");
+        write_executable(directory.path(), "codex");
+
+        let detected = detect_on_path(&directory.path().to_string_lossy());
+
+        let launches: Vec<(&str, AgentLaunch)> = detected
+            .iter()
+            .map(|agent| (agent.id, agent.launch))
+            .collect();
+        assert_eq!(
+            launches,
+            vec![
+                ("codex-acp", AgentLaunch::AgentServerStore),
+                ("scv", AgentLaunch::DetectedBinary { args: &[] }),
+            ],
+            "a caller holding a DetectedAgent must not need a second lookup to \
+             learn how to start it"
         );
     }
 

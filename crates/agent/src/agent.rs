@@ -3433,10 +3433,37 @@ impl NativeThreadEnvironment {
             .upgrade()
             .map(|acp_thread| acp_thread.read(cx).session_id().clone());
 
-        let server: Rc<dyn agent_servers::AgentServer> =
-            Rc::new(agent_servers::CustomAgentServer::new_unattended(
+        // OMEGA-DELTA-0203. How this agent is started is the catalog's answer,
+        // not a second decision made here. `CustomAgentServer` resolves the id
+        // through the agent-server store, which knows only what settings and
+        // the ACP registry declare — so a first-party agent that ships beside
+        // the application, and is named in no registry, could be listed as
+        // delegable and then fail with "is not registered" once selected.
+        let server: Rc<dyn agent_servers::AgentServer> = match omega_agent_detect::detected()
+            .iter()
+            .find(|agent| agent.id == agent_id)
+        {
+            Some(agent) => match agent.launch {
+                omega_agent_detect::AgentLaunch::DetectedBinary { args } => {
+                    Rc::new(agent_servers::CommandAgentServer::new(
+                        project::agent_server_store::AgentId::new(agent_id.clone()),
+                        project::agent_server_store::AgentServerCommand {
+                            path: agent.binary.clone(),
+                            args: args.iter().map(|argument| (*argument).to_owned()).collect(),
+                            env: None,
+                        },
+                    ))
+                }
+                omega_agent_detect::AgentLaunch::AgentServerStore => {
+                    Rc::new(agent_servers::CustomAgentServer::new_unattended(
+                        project::agent_server_store::AgentId::new(agent_id.clone()),
+                    ))
+                }
+            },
+            None => Rc::new(agent_servers::CustomAgentServer::new_unattended(
                 project::agent_server_store::AgentId::new(agent_id.clone()),
-            ));
+            )),
+        };
         let delegate = agent_servers::AgentServerDelegate::new(
             project.read(cx).agent_server_store().clone(),
             None,

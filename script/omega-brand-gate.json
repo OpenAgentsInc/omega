@@ -667,9 +667,14 @@
       "minimum_rendered_invocations is the guard on the rendered-help scan: it",
       "runs the shipped binaries with --help and --version and reads what comes",
       "back, because clap builds the sentence a person sees at run time out of",
-      "doc lines the source scan only ever sees separately."
+      "doc lines the source scan only ever sees separately.",
+      "",
+      "OMEGA-DELTA-0203 raised minimum_executables from 3 to 4: the bundle now",
+      "ships the first-party `scv` agent beside `omega`, `cli` and",
+      "`omega-identity-proof`, and a floor below what ships is the shape",
+      "omega#88 shipped in."
     ],
-    "minimum_executables": 3,
+    "minimum_executables": 4,
     "minimum_rendered_invocations": 6
   }
 }

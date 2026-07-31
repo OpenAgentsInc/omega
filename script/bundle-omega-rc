@@ -48,6 +48,7 @@ BUILD_LOCK_SNAPSHOT_DIGEST=""
 OMEGA_BINARY_DIGEST=""
 CLI_BINARY_DIGEST=""
 IDENTITY_PROOF_BINARY_DIGEST=""
+SCV_BINARY_DIGEST=""
 SOURCE_VERIFIER_DIGEST=""
 SOURCE_VERIFIER_PASSED=false
 PACKAGED_BOUNDARY_SCAN_PASSED=false
@@ -602,6 +603,14 @@ for key, expected in expected_identity_proof.items():
 if identity_proof.get("binary_sha256") is not None and not valid_sha256(identity_proof["binary_sha256"]):
     raise SystemExit("components.identity_proof_driver.binary_sha256 must be null or a SHA-256 digest")
 
+scv_agent = record["components"].get("scv_agent", {})
+if scv_agent.get("path") != "Contents/MacOS/scv":
+    raise SystemExit("components.scv_agent.path is invalid")
+if scv_agent.get("protocol") != "acp":
+    raise SystemExit("components.scv_agent.protocol is invalid")
+if scv_agent.get("binary_sha256") is not None and not valid_sha256(scv_agent["binary_sha256"]):
+    raise SystemExit("components.scv_agent.binary_sha256 must be null or a SHA-256 digest")
+
 boundaries = record["identity_boundaries"]
 source_verifier = boundaries.get("source_verifier", {})
 if source_verifier.get("path") != "script/verify-omega-identity":
@@ -840,6 +849,7 @@ write_release_record() {
   OMEGA_RC_OMEGA_BINARY_DIGEST="${OMEGA_BINARY_DIGEST}" \
   OMEGA_RC_CLI_BINARY_DIGEST="${CLI_BINARY_DIGEST}" \
   OMEGA_RC_IDENTITY_PROOF_BINARY_DIGEST="${IDENTITY_PROOF_BINARY_DIGEST}" \
+  OMEGA_RC_SCV_BINARY_DIGEST="${SCV_BINARY_DIGEST}" \
   OMEGA_RC_EFFECTD_RELEASE_TAG="${OMEGA_EFFECTD_RELEASE_TAG}" \
   OMEGA_RC_EFFECTD_ASSET_NAME="${OMEGA_EFFECTD_ASSET_NAME}" \
   OMEGA_RC_EFFECTD_ARCHIVE_DIGEST="${OMEGA_EFFECTD_ASSET_SHA256}" \
@@ -914,6 +924,7 @@ build_lock_digest = os.environ.get("OMEGA_RC_BUILD_LOCK_SNAPSHOT_DIGEST") or Non
 omega_binary_digest = os.environ.get("OMEGA_RC_OMEGA_BINARY_DIGEST") or None
 cli_binary_digest = os.environ.get("OMEGA_RC_CLI_BINARY_DIGEST") or None
 identity_proof_binary_digest = os.environ.get("OMEGA_RC_IDENTITY_PROOF_BINARY_DIGEST") or None
+scv_binary_digest = os.environ.get("OMEGA_RC_SCV_BINARY_DIGEST") or None
 dry_run = os.environ["OMEGA_RC_DRY_RUN"] == "true"
 notarization_attempted = os.environ["OMEGA_RC_NOTARIZATION_ATTEMPTED"] == "true"
 notarization_stapled = os.environ["OMEGA_RC_NOTARIZATION_STAPLED"] == "true"
@@ -1000,6 +1011,14 @@ record = {
             "protocol": "openagents.omega.identity-proof.v1",
             "keyring_service": "com.openagents.omega.identity-proof.v1",
             "keyring_account": "disposable-proof-only",
+        },
+        # OMEGA-DELTA-0203. The first-party agent Omega offers to delegate to,
+        # recorded so a build that stopped shipping it is visible in the
+        # release record rather than only on the owner's machine.
+        "scv_agent": {
+            "path": "Contents/MacOS/scv",
+            "binary_sha256": scv_binary_digest,
+            "protocol": "acp",
         },
     },
     "identity_boundaries": {
@@ -1268,7 +1287,11 @@ export ZED_BUNDLE=true
 export ZED_COMMIT_SHA="$(git rev-parse HEAD)"
 
 echo "Compiling omega binaries for ${TARGET_TRIPLE}"
-cargo build --locked --release --package zed --package cli --package omega_identity --target "${TARGET_TRIPLE}"
+# OMEGA-DELTA-0203. `scv` is built here, with the same profile and target as
+# the application, because it is a first-party agent Omega offers to delegate
+# to. Nothing built it before, so the only machines that could start it were
+# the ones where somebody had compiled and copied it onto PATH by hand.
+cargo build --locked --release --package zed --package cli --package omega_identity --package scv --target "${TARGET_TRIPLE}"
 cargo build --locked --release --package remote_server --target "${TARGET_TRIPLE}"
 
 echo "Creating application bundle"
@@ -1300,6 +1323,9 @@ rm -f "${app_path}/Contents/embedded.provisionprofile"
 cp "target/${TARGET_TRIPLE}/release/omega" "${app_path}/Contents/MacOS/omega"
 cp "target/${TARGET_TRIPLE}/release/cli" "${app_path}/Contents/MacOS/cli"
 cp "target/${TARGET_TRIPLE}/release/omega-identity-proof" "${app_path}/Contents/MacOS/omega-identity-proof"
+# Beside the application executable, which is where `omega_agent_detect` looks
+# first: a packaged Omega has no shell PATH to fall back on.
+cp "target/${TARGET_TRIPLE}/release/scv" "${app_path}/Contents/MacOS/scv"
 stage_omega_effectd_component "${app_path}"
 verify_packaged_identity_boundaries "${app_path}"
 verify_packaged_brand "${app_path}"
@@ -1326,6 +1352,8 @@ OMEGA_EFFECTD_PACKAGED_NODE_SHA256="$(sha256_file "${app_path}/Contents/Resource
 /usr/bin/codesign --deep --force --timestamp --options runtime \
   --sign "${OMEGA_SIGNING_IDENTITY}" "${app_path}/Contents/MacOS/omega-identity-proof" -v
 /usr/bin/codesign --deep --force --timestamp --options runtime \
+  --sign "${OMEGA_SIGNING_IDENTITY}" "${app_path}/Contents/MacOS/scv" -v
+/usr/bin/codesign --deep --force --timestamp --options runtime \
   --entitlements "${entitlements_path}" \
   --sign "${OMEGA_SIGNING_IDENTITY}" "${app_path}/Contents/MacOS/omega" -v
 /usr/bin/codesign --force --timestamp --options runtime \
@@ -1334,6 +1362,11 @@ OMEGA_EFFECTD_PACKAGED_NODE_SHA256="$(sha256_file "${app_path}/Contents/Resource
 OMEGA_BINARY_DIGEST="$(sha256_file "${app_path}/Contents/MacOS/omega")"
 CLI_BINARY_DIGEST="$(sha256_file "${app_path}/Contents/MacOS/cli")"
 IDENTITY_PROOF_BINARY_DIGEST="$(sha256_file "${app_path}/Contents/MacOS/omega-identity-proof")"
+SCV_BINARY_DIGEST="$(sha256_file "${app_path}/Contents/MacOS/scv")"
+if [[ -z "${SCV_BINARY_DIGEST}" ]]; then
+  echo "error: the SCV agent binary is missing from the packaged application." >&2
+  exit 1
+fi
 if [[ -z "${OMEGA_BINARY_DIGEST}" || -z "${CLI_BINARY_DIGEST}" || -z "${IDENTITY_PROOF_BINARY_DIGEST}" ]]; then
   echo "error: signed Omega binary digests are unavailable." >&2
   exit 1

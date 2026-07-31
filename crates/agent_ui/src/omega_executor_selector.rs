@@ -832,6 +832,8 @@ mod tests {
             id,
             name,
             binary: PathBuf::from("/usr/local/bin").join(name.to_lowercase()),
+            launch: omega_agent_detect::launch_for(id)
+                .expect("the fixture agent is one detection knows about"),
         }
     }
 

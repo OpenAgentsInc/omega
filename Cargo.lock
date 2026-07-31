@@ -11051,6 +11051,7 @@ dependencies = [
 name = "omega_deltas"
 version = "0.1.0"
 dependencies = [
+ "omega_agent_detect",
  "omega_exo_episode",
  "omega_exo_lane",
  "omega_exo_log",

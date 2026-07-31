@@ -8978,3 +8978,54 @@ loading composer, which is the property that delta exists for.
   `test_a_retry_exhausted_stream_lane_advances_to_the_next_rung`,
   `test_a_dead_compaction_lane_advances_to_the_next_rung` and
   `test_the_labels_follow_the_rung_that_is_serving_the_turn` in `agent`.
+
+### OMEGA-DELTA-0203 — An agent Omega offers to delegate to is an agent Omega can start
+
+- **Origin:** owner evidence 2026-07-31. Delegating to the SCV subagent
+  answered *"Could not start the SCV (`scv`) agent server for this
+  subagent"* — on a machine where `scv` was installed, handshakes over ACP,
+  and was found by detection.
+
+**Two registries decided one thing.** The catalog a delegation is offered from
+is `omega_agent_detect::CANDIDATES`, a `PATH` scan. The launcher is
+`CustomAgentServer`, which resolves an id through the agent-server store, and
+that store knows only what `assets/settings/default.json` and the ACP registry
+declare. Nothing held the two together, so an id could be in one and absent
+from the other, and the surface drew a delegation target that could not start.
+`scv` was not the only one: `cursor` and `github-copilot-cli` were both
+offered and both unstartable, and had been since they were added.
+
+- **Upstream Zed:** has neither registry. Its agents are the ones settings and
+  the registry name, and it never draws a delegation target from a `PATH` scan
+  — so it has no way to disagree with itself and nothing to reconcile.
+- **Omega:** each candidate declares how it is started, as
+  `AgentLaunch::AgentServerStore` or `AgentLaunch::DetectedBinary`. There is no
+  third case and no default, so a candidate added without a launch definition
+  does not compile. `AgentServerStore` requires a `default.json` entry, which
+  is checked mechanically; `DetectedBinary` is started as the file detection
+  resolved, through `CommandAgentServer`.
+- **Why the two kinds:** `cursor` and `github-copilot-cli` are in the ACP
+  registry, so a `{"type": "registry"}` entry is the honest wiring for them.
+  `scv` is first-party, in no registry, and ships inside the application — a
+  settings entry naming a bare `scv` would resolve only from a shell `PATH`,
+  which a packaged application does not have.
+
+**The shipped binary was not shipped.** `crates/scv` is first-party and offered
+by the product, and nothing built or installed its binary. The owner had to
+`cargo build -p scv` and copy it to `~/.local/bin` by hand, which is why an
+agent the product advertises was invisible on every other machine. The
+packaging scripts now build it with the same profile and target as `omega` and
+place it beside the application executable, and detection resolves that
+directory before `PATH` so the binary this build shipped wins over a stale copy
+someone left on `PATH`.
+
+- **Known consequence, stated plainly:** an agent-server-store candidate is
+  proven *registered*, not proven *installable*. The registry entry is what the
+  store needs to attempt a launch; whether the ACP registry can then fetch that
+  agent is the agent's own failure to report, and it now reports it instead of
+  Omega refusing before trying.
+- **Enforced by:** `every_delegable_agent_can_be_started` in
+  `crates/omega_deltas`; `every_candidate_declares_how_it_is_launched`,
+  `a_detected_agent_carries_its_launch_spec` and
+  `a_binary_beside_the_executable_wins_over_one_on_the_path` in
+  `omega_agent_detect`.

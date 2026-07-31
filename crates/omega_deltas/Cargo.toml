@@ -24,6 +24,11 @@ omega_exo_episode.workspace = true
 omega_exo_lane.workspace = true
 omega_exo_log.workspace = true
 
+# OMEGA-DELTA-0203. The delegable-agent catalog, so the check that every listed
+# agent can be started reads the list itself rather than a copy of it. Another
+# leaf: no gpui, no process launch.
+omega_agent_detect.workspace = true
+
 # OMEGA-DELTA-0125. The zero-base admitted set, so the check on the thread
 # header's menu asks the gate whether an entry's action is refused rather than
 # keeping a second copy of the answer. A list restated in a test is a list that

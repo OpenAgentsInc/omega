@@ -191,6 +191,7 @@ pub const ENFORCED_DELTAS: &[&str] = &[
     "OMEGA-DELTA-0200",
     "OMEGA-DELTA-0201",
     "OMEGA-DELTA-0202",
+    "OMEGA-DELTA-0203",
 ];
 
 /// The concise product contract adjacent to the delta registry.
@@ -829,6 +830,9 @@ pub const SUBAGENT_SPAWN_TOOL_PATH: &str = "crates/agent/src/tools/spawn_agent_t
 
 /// OMEGA-DELTA-0061. Where an external ACP subagent is opened and driven.
 pub const SUBAGENT_EXTERNAL_HANDLE_PATH: &str = "crates/agent/src/agent.rs";
+
+/// OMEGA-DELTA-0203. Where a delegated external agent is actually started.
+pub const DELEGATE_LAUNCH_PATH: &str = "crates/agent/src/agent.rs";
 
 /// OMEGA-DELTA-0061. Every outcome of resolving a requested executor.
 ///
@@ -25325,5 +25329,116 @@ mod tests {
              authenticate at request time.",
             repository_path(AGENT_THREAD_PATH).display()
         );
+    }
+
+    /// OMEGA-DELTA-0203. Every agent Omega offers to delegate to can be
+    /// started.
+    ///
+    /// The catalog a delegation is offered from and the launcher that starts
+    /// it were two registries with nothing holding them together, so `scv`,
+    /// `cursor` and `github-copilot-cli` were all drawn as delegation targets
+    /// that failed with "is not registered" once selected. Upstream Zed has no
+    /// second registry to disagree with: this is a check on an Omega surface
+    /// that upstream does not have, not a value reverting to an upstream one.
+    ///
+    /// The launch spec is an enum with no default, so a candidate added without
+    /// one does not compile. What a test still has to prove is that each arm
+    /// leads somewhere: a store-launched id has the settings entry the store
+    /// resolves, and the `DetectedBinary` arm is honoured by the launcher
+    /// rather than being a way to opt out of this check.
+    #[test]
+    fn every_delegable_agent_can_be_started() {
+        use omega_agent_detect::AgentLaunch;
+
+        let settings = default_settings().expect("the shipped defaults parse");
+        let agent_servers = default_setting(&settings, "agent_servers")
+            .and_then(serde_json::Value::as_object)
+            .unwrap_or_else(|| {
+                panic!(
+                    "OMEGA-DELTA-0203: {} no longer declares `agent_servers`, so \
+                     no store-launched agent can start at all.",
+                    repository_path(DEFAULT_SETTINGS_PATH).display()
+                )
+            });
+
+        assert!(
+            !omega_agent_detect::CANDIDATES.is_empty(),
+            "OMEGA-DELTA-0203: the delegable-agent catalog is empty, which would \
+             make this check vacuous."
+        );
+
+        let mut store_launched = 0;
+        let mut detected_binary = 0;
+        for candidate in omega_agent_detect::CANDIDATES {
+            match candidate.launch {
+                AgentLaunch::AgentServerStore => {
+                    store_launched += 1;
+                    assert!(
+                        agent_servers.contains_key(candidate.id),
+                        "OMEGA-DELTA-0203: `{}` ({}) is offered for delegation and \
+                         is started through the agent-server store, but {} has no \
+                         `agent_servers.{}` entry — so the store refuses it with \
+                         `is not registered` after the surface has already drawn \
+                         it as available.",
+                        candidate.id,
+                        candidate.name,
+                        repository_path(DEFAULT_SETTINGS_PATH).display(),
+                        candidate.id
+                    );
+                }
+                AgentLaunch::DetectedBinary { .. } => detected_binary += 1,
+            }
+        }
+        assert!(
+            store_launched > 0 && detected_binary > 0,
+            "OMEGA-DELTA-0203: both launch kinds must remain exercised, or one \
+             arm of this check stops being tested by the shipped catalog."
+        );
+
+        // The `DetectedBinary` arm carries no settings obligation, so it is the
+        // arm a future candidate could take to escape the check above. It only
+        // means anything while the launcher honours it.
+        let agent = without_comments(&read_repository_file(DELEGATE_LAUNCH_PATH));
+        let spawn = agent
+            .split_once("fn create_external_acp_subagent")
+            .map(|(_, rest)| rest)
+            .and_then(|rest| rest.split_once("\n    }\n"))
+            .map(|(body, _)| body)
+            .expect("OMEGA-DELTA-0203: `create_external_acp_subagent` is unreadable");
+        for required in [
+            "omega_agent_detect::detected()",
+            "AgentLaunch::DetectedBinary",
+            "CommandAgentServer::new",
+        ] {
+            assert!(
+                spawn.contains(required),
+                "OMEGA-DELTA-0203: the delegate path in {} lost `{required}`. \
+                 Every id then goes through the agent-server store, which cannot \
+                 start a first-party agent that no registry names.",
+                repository_path(DELEGATE_LAUNCH_PATH).display()
+            );
+        }
+
+        // And a `DetectedBinary` agent can only be detected if it is shipped.
+        // `crates/scv` was first-party, offered by the product, and built by
+        // nothing — so the only machine that could start it was one where
+        // somebody had compiled and copied it by hand.
+        for script in ["script/bundle-omega-rc", "script/bundle-mac"] {
+            let source = read_repository_file(script);
+            assert!(
+                source.contains("--package scv"),
+                "OMEGA-DELTA-0203: {} no longer builds the `scv` binary, so the \
+                 agent the product offers is not in the package.",
+                repository_path(script).display()
+            );
+            assert!(
+                source.contains("Contents/MacOS/scv"),
+                "OMEGA-DELTA-0203: {} no longer places `scv` beside the \
+                 application executable, which is the directory detection \
+                 resolves before PATH — a packaged application has no shell \
+                 PATH to fall back on.",
+                repository_path(script).display()
+            );
+        }
     }
 }
