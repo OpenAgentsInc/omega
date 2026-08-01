@@ -62,10 +62,10 @@ use terminal_view::terminal_panel::TerminalPanel;
 use text::Anchor;
 use theme_settings::{AgentBufferFontSize, AgentUiFontSize};
 use ui::{
-    Callout, CircularProgress, CommonAnimationExt, ContextMenu, ContextMenuEntry, CopyButton,
-    DecoratedIcon, DiffStat, Disclosure, Divider, DividerColor, IconDecoration, IconDecorationKind,
-    KeyBinding, PopoverMenu, PopoverMenuHandle, TintColor, Tooltip, WithScrollbar, prelude::*,
-    right_click_menu,
+    ButtonSize, Callout, CircularProgress, CommonAnimationExt, ContextMenu, ContextMenuEntry,
+    CopyButton, DecoratedIcon, DiffStat, Disclosure, Divider, DividerColor, IconDecoration,
+    IconDecorationKind, KeyBinding, PopoverMenu, PopoverMenuHandle, TintColor, Tooltip,
+    WithScrollbar, prelude::*, right_click_menu,
 };
 use util::{
     ResultExt, debug_panic, defer,
@@ -170,6 +170,42 @@ fn apply_work_dir_transaction<T>(
 /// connection exists, because it is the choice that *caused* the connect, so
 /// this field can say what the real one will say and be the same field a
 /// second early.
+const COMPOSER_MAX_WIDTH: f32 = 768.;
+const COMPOSER_COMPACT_HEIGHT: f32 = 49.;
+const COMPOSER_EXPANDED_MIN_HEIGHT: f32 = 124.;
+const COMPOSER_EXPANDED_MAX_HEIGHT: f32 = 308.;
+const COMPOSER_ACTIONS_HEIGHT: f32 = 46.;
+const COMPOSER_RADIUS: f32 = 26.;
+const COMPOSER_TEXT_INSET: f32 = 16.;
+const COMPOSER_SINGLE_LINE_CHARACTER_LIMIT: usize = 96;
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum ComposerLayout {
+    Compact,
+    Expanded,
+    ManuallyExpanded,
+}
+
+fn composer_layout(is_new_thread: bool, manually_expanded: bool, text: &str) -> ComposerLayout {
+    if manually_expanded {
+        ComposerLayout::ManuallyExpanded
+    } else if is_new_thread
+        || text.contains('\n')
+        || text.chars().count() > COMPOSER_SINGLE_LINE_CHARACTER_LIMIT
+    {
+        ComposerLayout::Expanded
+    } else {
+        ComposerLayout::Compact
+    }
+}
+
+fn composer_max_width(configured: Option<Pixels>) -> Pixels {
+    px(configured
+        .map(Pixels::as_f32)
+        .unwrap_or(COMPOSER_MAX_WIDTH)
+        .min(COMPOSER_MAX_WIDTH))
+}
+
 pub(crate) mod elicitation;
 mod message_queue;
 mod thread_search_bar;
@@ -4311,7 +4347,7 @@ impl ConversationView {
                     .unwrap_or_else(|| "Connecting…".into()),
             )
         };
-        let max_content_width = AgentSettings::get_global(cx).max_content_width;
+        let max_content_width = composer_max_width(AgentSettings::get_global(cx).max_content_width);
         let pending_turns = self.render_pending_connect_messages(false, cx);
 
         // The executor dropdown is live from the very first paint of a new
@@ -4333,6 +4369,13 @@ impl ConversationView {
             (IconName::Maximize, "Expand Message Editor")
         };
         let editor_focus_handle = editor.focus_handle(cx);
+        let colors = cx.theme().colors();
+        let pill_background = colors.text.opacity(0.03);
+        let pill_border = colors.text.opacity(0.08);
+        let primary_background = colors.text;
+        let primary_foreground = colors.editor_background;
+        let opaque_window =
+            cx.theme().window_background_appearance() == gpui::WindowBackgroundAppearance::Opaque;
 
         v_flex()
             .key_context("AcpThread")
@@ -4349,128 +4392,173 @@ impl ConversationView {
             .children(pending_turns)
             .child(
                 h_flex()
-                    .pb_2()
-                    .px_2()
+                    .w_full()
                     .justify_center()
-                    .when(expanded, |this| this.h(vh(0.8, window)))
                     .child(
-                    v_flex()
-                        .when_some(max_content_width, |this, max_w| this.flex_basis(max_w))
-                        .when(max_content_width.is_none(), |this| this.w_full())
-                        .min_w_0()
-                        .when(expanded, |this| this.h_full())
-                        .bg(cx.theme().colors().editor_background)
-                        .border_1()
-                        .border_color(cx.theme().colors().border)
-                        .rounded_lg()
-                        .px_2()
-                        .flex_shrink_1()
-                        .flex_grow_0()
-                        .justify_between()
-                        .gap_2()
-                        .child(
+                        div()
+                            .w_full()
+                            .max_w(max_content_width)
+                            .px_6()
+                            .pb_6()
+                            .child(
                             v_flex()
                                 .debug_selector(|| "omega.workbench.composer".into())
-                                .relative()
-                                .w_full()
-                                .min_h_0()
-                                .min_h(rems_from_px(96.))
-                                .when(expanded, |this| this.flex_1())
-                                .pt_1p5()
-                                .pb_0p5()
-                                .pr_2p5()
-                                .child(EditorElement::new(
-                                    &editor,
-                                    crate::message_editor::composer_editor_style(cx),
-                                ))
-                                .child(
-                                    h_flex()
-                                        .absolute()
-                                        .top_0()
-                                        .right_0()
-                                        .opacity(0.5)
-                                        .hover(|s| s.opacity(1.0))
-                                        .child(
-                                            IconButton::new("toggle-height", expand_icon)
-                                                .icon_size(IconSize::Small)
-                                                .icon_color(Color::Muted)
-                                                .tooltip(move |_window, cx| {
-                                                    Tooltip::for_action_in(
-                                                        expand_tooltip,
-                                                        &ExpandMessageEditor,
-                                                        &editor_focus_handle,
-                                                        cx,
-                                                    )
-                                                })
-                                                .on_click(cx.listener(|this, _, _window, cx| {
-                                                    this.loading_composer_expanded =
-                                                        !this.loading_composer_expanded;
-                                                    cx.notify();
-                                                })),
-                                        ),
-                                ),
-                        )
-                        .child(
-                            // `flex_wrap` for the same reason the real bar
-                            // has it: in a narrow window an unwrapped row
-                            // pushes Send off the edge, and a control a
-                            // person cannot see is indistinguishable from
-                            // one that is missing.
-                            h_flex()
                                 .w_full()
                                 .min_w_0()
-                                .flex_none()
-                                .flex_wrap()
-                                .gap_1()
-                                .justify_between()
+                                .min_h(px(COMPOSER_EXPANDED_MIN_HEIGHT))
+                                .max_h(px(COMPOSER_EXPANDED_MAX_HEIGHT))
+                                .when(expanded, |this| {
+                                    this.h(px(COMPOSER_EXPANDED_MAX_HEIGHT))
+                                })
+                                .overflow_hidden()
+                                .rounded(px(COMPOSER_RADIUS))
+                                .bg(pill_background)
+                                .border_1()
+                                .border_color(pill_border)
+                                .when(opaque_window, |this| {
+                                    this.shadow(vec![
+                                        gpui::BoxShadow::new(
+                                            px(0.),
+                                            px(4.),
+                                            gpui::black().opacity(0.12),
+                                        )
+                                        .blur_radius(px(8.)),
+                                    ])
+                                })
                                 .child(
-                                    h_flex()
+                                    v_flex()
+                                        .relative()
+                                        .w_full()
                                         .min_w_0()
-                                        .gap_1()
-                                        .when(omega_zero_base::is_active(), |this| {
-                                            this.child(self.vim_mode_indicator.clone())
-                                        })
-                                        .children(status.map(|status| {
-                                            Label::new(status)
-                                                .size(LabelSize::Small)
-                                                .color(Color::Muted)
-                                                .with_animation(
-                                                    "loading-agent-label",
-                                                    Animation::new(Duration::from_secs(2))
-                                                        .repeat()
-                                                        .with_easing(pulsating_between(0.3, 0.7)),
-                                                    |label, delta| label.alpha(delta),
-                                                )
-                                        })),
+                                        .min_h(px(
+                                            COMPOSER_EXPANDED_MIN_HEIGHT - COMPOSER_ACTIONS_HEIGHT,
+                                        ))
+                                        .flex_1()
+                                        .overflow_hidden()
+                                        .px(px(COMPOSER_TEXT_INSET))
+                                        .pt_4()
+                                        .pb_1()
+                                        .pr(px(COMPOSER_TEXT_INSET + 24.))
+                                        .child(EditorElement::new(
+                                            &editor,
+                                            crate::message_editor::composer_editor_style(cx),
+                                        ))
+                                        .child(
+                                            h_flex()
+                                                .absolute()
+                                                .top_1()
+                                                .right_1()
+                                                .opacity(0.5)
+                                                .hover(|style| style.opacity(1.0))
+                                                .child(
+                                                    IconButton::new(
+                                                        "toggle-height",
+                                                        expand_icon,
+                                                    )
+                                                    .icon_size(IconSize::Small)
+                                                    .icon_color(Color::Muted)
+                                                    .tooltip(move |_window, cx| {
+                                                        Tooltip::for_action_in(
+                                                            expand_tooltip,
+                                                            &ExpandMessageEditor,
+                                                            &editor_focus_handle,
+                                                            cx,
+                                                        )
+                                                    })
+                                                    .on_click(cx.listener(
+                                                        |this, _, _window, cx| {
+                                                            this.loading_composer_expanded =
+                                                                !this.loading_composer_expanded;
+                                                            cx.notify();
+                                                        },
+                                                    )),
+                                                ),
+                                        ),
                                 )
-                                // Same set, same order, same side as
-                                // `render_zero_base_executor_bar`.
-                                // `OMEGA-DELTA-0204`.
                                 .child(
                                     h_flex()
+                                        .w_full()
                                         .min_w_0()
+                                        .h(px(COMPOSER_ACTIONS_HEIGHT))
+                                        .flex_none()
                                         .flex_wrap()
                                         .gap_1()
-                                        .children(executor_menu)
-                                        .child(self.render_pre_session_model_tier_selector(cx))
+                                        .justify_between()
+                                        .px_3()
+                                        .pt_1()
+                                        .pb(px(10.))
                                         .child(
-                                            crate::composer_voice::render_composer_voice_controls(
-                                                self.workspace.entity_id(),
-                                                cx,
-                                            ),
+                                            h_flex()
+                                                .min_w_0()
+                                                .gap_1()
+                                                .when(omega_zero_base::is_active(), |this| {
+                                                    this.child(self.vim_mode_indicator.clone())
+                                                })
+                                                .children(status.map(|status| {
+                                                    Label::new(status)
+                                                        .size(LabelSize::Small)
+                                                        .color(Color::Muted)
+                                                        .with_animation(
+                                                            "loading-agent-label",
+                                                            Animation::new(Duration::from_secs(2))
+                                                                .repeat()
+                                                                .with_easing(pulsating_between(
+                                                                    0.3, 0.7,
+                                                                )),
+                                                            |label, delta| label.alpha(delta),
+                                                        )
+                                                })),
                                         )
                                         .child(
-                                            IconButton::new("send-message", IconName::Send)
-                                                .style(ButtonStyle::Filled)
-                                                .tooltip(Tooltip::text("Send"))
-                                                .on_click(cx.listener(|this, _, window, cx| {
-                                                    this.submit_before_session(window, cx);
-                                                })),
+                                            h_flex()
+                                                .min_w_0()
+                                                .flex_wrap()
+                                                .gap_1()
+                                                .children(executor_menu)
+                                                .child(
+                                                    self.render_pre_session_model_tier_selector(cx),
+                                                )
+                                                .child(
+                                                    crate::composer_voice::render_composer_voice_controls(
+                                                        self.workspace.entity_id(),
+                                                        cx,
+                                                    ),
+                                                )
+                                                .child(
+                                                    div()
+                                                        .size(px(28.))
+                                                        .rounded_full()
+                                                        .overflow_hidden()
+                                                        .bg(primary_background)
+                                                        .hover(|style| style.opacity(0.85))
+                                                        .child(
+                                                            IconButton::new(
+                                                                "send-message",
+                                                                IconName::ArrowUp,
+                                                            )
+                                                            .aria_label("Send Message")
+                                                            .icon_size(IconSize::Small)
+                                                            .icon_color(Color::Custom(
+                                                                primary_foreground,
+                                                            ))
+                                                            .style(ButtonStyle::Transparent)
+                                                            .size(ButtonSize::Medium)
+                                                            .width(rems_from_px(28.))
+                                                            .tooltip(Tooltip::text("Send"))
+                                                            .on_click(cx.listener(
+                                                                |this, _, window, cx| {
+                                                                    this.submit_before_session(
+                                                                        window, cx,
+                                                                    );
+                                                                },
+                                                            )),
+                                                        ),
+                                                ),
                                         ),
                                 ),
+                            ),
                         ),
-                ),
-            )
+                    )
             .into_any()
     }
 
@@ -5767,6 +5855,42 @@ pub(crate) mod tests {
     use crate::thread_metadata_store::ThreadMetadataStore;
 
     use super::*;
+
+    #[test]
+    fn composer_uses_comet_geometry() {
+        assert_eq!(COMPOSER_COMPACT_HEIGHT, 49.);
+        assert_eq!(COMPOSER_EXPANDED_MIN_HEIGHT, 124.);
+        assert_eq!(COMPOSER_EXPANDED_MAX_HEIGHT, 308.);
+        assert_eq!(COMPOSER_RADIUS, 26.);
+        assert_eq!(composer_max_width(None).as_f32(), 768.);
+        assert_eq!(composer_max_width(Some(px(850.))).as_f32(), 768.);
+        assert_eq!(composer_max_width(Some(px(640.))).as_f32(), 640.);
+    }
+
+    #[test]
+    fn composer_layout_keeps_new_and_multiline_prompts_expanded() {
+        assert_eq!(
+            composer_layout(false, false, "one line"),
+            ComposerLayout::Compact
+        );
+        assert_eq!(composer_layout(true, false, ""), ComposerLayout::Expanded);
+        assert_eq!(
+            composer_layout(false, false, "first\nsecond"),
+            ComposerLayout::Expanded
+        );
+        assert_eq!(
+            composer_layout(false, true, "one line"),
+            ComposerLayout::ManuallyExpanded
+        );
+        assert_eq!(
+            composer_layout(
+                false,
+                false,
+                &"x".repeat(COMPOSER_SINGLE_LINE_CHARACTER_LIMIT + 1),
+            ),
+            ComposerLayout::Expanded
+        );
+    }
 
     struct RouterTestServer {
         native: StubAgentConnection,

@@ -2056,7 +2056,7 @@ pub(crate) fn composer_editor_style(cx: &App) -> EditorStyle {
     let settings = ThemeSettings::get_global(cx);
 
     EditorStyle {
-        background: cx.theme().colors().editor_background,
+        background: gpui::transparent_black(),
         local_player: cx.theme().players().local(),
         text: TextStyle {
             color: cx.theme().colors().text,

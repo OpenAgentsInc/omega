@@ -54,8 +54,8 @@ use omega_front_door::ExecutorDisclosure;
 use settings::{update_settings_file, update_settings_file_with_completion};
 use terminal_view::{ContentMode, TerminalView};
 use ui::{
-    ButtonLike, CalloutBorderPosition, Checkbox, SpinnerLabel, SpinnerVariant, SplitButton,
-    SplitButtonStyle, Tab, ToggleState,
+    ButtonLike, ButtonSize, CalloutBorderPosition, Checkbox, SpinnerLabel, SpinnerVariant,
+    SplitButton, SplitButtonStyle, Tab, ToggleState,
 };
 use util::markdown::{source_position_from_fragment, split_local_url_fragment};
 use workspace::{OpenOptions, SERIALIZATION_THROTTLE_TIME};
@@ -4971,7 +4971,7 @@ impl ThreadView {
 
     pub(crate) fn render_message_editor(
         &mut self,
-        window: &mut Window,
+        _window: &mut Window,
         cx: &mut Context<Self>,
     ) -> AnyElement {
         if self.is_subagent() {
@@ -4979,151 +4979,109 @@ impl ThreadView {
         }
 
         let focus_handle = self.message_editor.focus_handle(cx);
-        let editor_bg_color = cx.theme().colors().editor_background;
-
         let editor_expanded = self.editor_expanded;
         let (expand_icon, expand_tooltip) = if editor_expanded {
             (IconName::Minimize, "Minimize Message Editor")
         } else {
             (IconName::Maximize, "Expand Message Editor")
         };
+        let editor_text = self.message_editor.read(cx).text(cx);
+        let is_new_thread = self.thread.read(cx).is_draft_thread();
+        let layout = if omega_zero_base::is_active() {
+            composer_layout(is_new_thread, editor_expanded, &editor_text)
+        } else {
+            ComposerLayout::Expanded
+        };
+        let compact = layout == ComposerLayout::Compact;
+        let manually_expanded = layout == ComposerLayout::ManuallyExpanded;
+        let max_content_width = composer_max_width(AgentSettings::get_global(cx).max_content_width);
+        let pill_background = cx.theme().colors().text.opacity(0.03);
+        let pill_border = cx.theme().colors().text.opacity(0.08);
+        let opaque_window =
+            cx.theme().window_background_appearance() == gpui::WindowBackgroundAppearance::Opaque;
 
-        let max_content_width = AgentSettings::get_global(cx).max_content_width;
-        // omega#99. The composer sits at the bottom, always.
-        //
-        // Upstream's empty thread gives the composer the whole panel —
-        // `flex_1().size_full()` here, `h_full()` on the column below, and
-        // `justify_between()` between them. Zero base first exposed the defect
-        // because its panel fills the window. The same rule is still wrong in
-        // the full editor: an empty thread in a wide split turns the input into
-        // a full-height column, separating the field from its controls with a
-        // field of dead black.
-        //
-        // The composer therefore always hugs its content unless the reader
-        // explicitly expands it. The empty transcript takes the remaining
-        // space in both modes, keeping the field and footer controls together
-        // at the bottom.
-        let fills_container = editor_expanded;
+        let controls = if omega_zero_base::is_active() {
+            self.render_zero_base_executor_bar(compact, cx)
+        } else {
+            h_flex()
+                .w_full()
+                .min_w_0()
+                .flex_none()
+                .flex_wrap()
+                .justify_between()
+                .child(
+                    h_flex()
+                        .min_w_0()
+                        .flex_wrap()
+                        .gap_0p5()
+                        .child(self.render_add_context_button(cx))
+                        .child(self.render_follow_toggle(cx))
+                        .children(self.render_fast_mode_control(cx))
+                        .children(self.render_thinking_control(cx)),
+                )
+                .child(
+                    h_flex()
+                        .min_w_0()
+                        .flex_wrap()
+                        .gap_1()
+                        .children(self.render_token_usage(cx))
+                        .children(self.profile_selector.clone())
+                        .map(|this| match self.config_options_view.clone() {
+                            Some(config_view) => this.child(config_view),
+                            None => this
+                                .children(self.mode_selector.clone())
+                                .children(self.model_selector.clone()),
+                        })
+                        .child(self.render_voice_controls(cx))
+                        .child(self.render_send_button(cx)),
+                )
+                .into_any_element()
+        };
 
-        // omega#100. The composer's surface is the width of the conversation,
-        // not the width of the window.
-        //
-        // The background and the rule above it used to sit on this outer row,
-        // which spans the whole window, while `max_content_width` sat on the
-        // column inside it. So the messages were a readable column down the
-        // middle and the input was a band of colour edge to edge under them,
-        // with a rule running the full width of the screen. In a dock-sized
-        // panel the difference is small. Zoomed to the window, which is what
-        // zero base does, the input read as a separate strip rather than as
-        // part of the conversation. The owner asked for it to end where the
-        // messages end.
-        //
-        // So the colour and the border move onto the column that already
-        // carries the width, and the outer row goes back to being a centring
-        // container with no appearance of its own. The box is closed on all
-        // four sides rather than open-ended with a rule on top, because a
-        // shape that stops has to stop somewhere a person can see.
-        h_flex()
-            // Padding below the box, none above it.
-            //
-            // omega#100. `py_2` put the same gap on both sides, so the
-            // transcript stopped a few pixels short of the composer and the
-            // last line of a reply sat in a band of empty colour. The owner
-            // asked for the text to run up against it. Below the box the
-            // padding stays, because there the gap is the window edge rather
-            // than the conversation.
-            .pb_2()
-            // Without this the box touches the window edges when no
-            // `max_content_width` is configured, and a border that runs into
-            // the frame reads as no border at all.
-            .px_2()
-            .justify_center()
-            .on_action(cx.listener(Self::handle_message_editor_move_up))
-            .on_action(cx.listener(Self::expand_message_editor))
-            .when(editor_expanded, |this| this.h(vh(0.8, window)))
-            .child(
-                v_flex()
-                    .when_some(max_content_width, |this, max_w| this.flex_basis(max_w))
-                    .when(max_content_width.is_none(), |this| this.w_full())
-                    .min_w_0()
-                    .when(fills_container, |this| this.h_full())
-                    .bg(editor_bg_color)
-                    .border_1()
-                    .border_color(cx.theme().colors().border)
-                    .rounded_lg()
-                    .px_2()
-                    .flex_shrink_1()
-                    .flex_grow_0()
-                    .justify_between()
-                    .gap_2()
-                    .child(
-                        v_flex()
-                            .debug_selector(|| "omega.workbench.composer".into())
-                            .relative()
-                            .w_full()
-                            .min_h_0()
-                            // omega#100. The field never collapses below one
-                            // readable line.
-                            //
-                            // `min_h_0` lets this column shrink to nothing,
-                            // which is what allows the expanded composer to
-                            // give its space back. On an empty thread in zero
-                            // base nothing else claims a height here — the
-                            // transcript above takes the remaining space so the
-                            // composer sits at the bottom — so the column
-                            // shrank to a sliver and the placeholder had no
-                            // room to draw. The owner saw a caret and no
-                            // prompt, and only after sending a first message
-                            // did the field look like a field.
-                            //
-                            // A floor rather than a fixed height: the editor
-                            // still grows with what is typed, and the expanded
-                            // state still overrides it.
-                            //
-                            // The floor is the same before and after the first
-                            // message. It was first set at one line, which
-                            // stopped the field collapsing to a caret but left
-                            // the new-thread composer visibly shorter than the
-                            // same composer one message later. The owner read
-                            // that as a bug, and it was: nothing about an empty
-                            // thread justifies a smaller field, and the first
-                            // message is the one most likely to be long,
-                            // because it is the one that states the task.
-                            .min_h(rems_from_px(96.))
-                            .when(fills_container, |this| this.flex_1())
-                            // omega#112. A little more room above and below the
-                            // text than `pt_1` alone gave it — the first line
-                            // sat against the top edge of the field. `pt_1p5`
-                            // is the next step the scale offers; there is no
-                            // literal 1px here because these are rem-derived
-                            // and would drift from every other spacing in the
-                            // composer.
-                            .pt_1p5()
-                            .pb_0p5()
-                            .pr_2p5()
-                            .child(self.message_editor.clone())
-                            // omega#100. The expand control is not conditional
-                            // on the thread having messages.
-                            //
-                            // It was drawn only `when(has_messages)`, so the
-                            // first message in a thread — the one most likely
-                            // to be long, because it is the one that states the
-                            // task — was the one message that could not be
-                            // written in an expanded field. The control
-                            // appeared only after it was no longer needed for
-                            // that message.
+        let pill = v_flex()
+            .debug_selector(|| "omega.workbench.composer".into())
+            .w_full()
+            .min_w_0()
+            .overflow_hidden()
+            .rounded(px(COMPOSER_RADIUS))
+            .bg(pill_background)
+            .border_1()
+            .border_color(pill_border)
+            .when(opaque_window, |this| {
+                this.shadow(vec![
+                    gpui::BoxShadow::new(px(0.), px(4.), gpui::black().opacity(0.12))
+                        .blur_radius(px(8.)),
+                ])
+            })
+            .map(|this| {
+                if compact {
+                    this.h(px(COMPOSER_COMPACT_HEIGHT)).child(
+                        h_flex()
+                            .size_full()
+                            .min_w_0()
+                            .child(
+                                div()
+                                    .flex_1()
+                                    .min_w_0()
+                                    .h_full()
+                                    .overflow_hidden()
+                                    .pl(px(COMPOSER_TEXT_INSET))
+                                    .pr_2()
+                                    .py_3()
+                                    .child(self.message_editor.clone()),
+                            )
                             .child(
                                 h_flex()
-                                    .absolute()
-                                    .top_0()
-                                    .right_0()
-                                    .opacity(0.5)
-                                    .hover(|s| s.opacity(1.0))
+                                    .flex_none()
+                                    .min_w_0()
+                                    .gap_1()
+                                    .pr_2()
                                     .child(
                                         IconButton::new("toggle-height", expand_icon)
                                             .icon_size(IconSize::Small)
                                             .icon_color(Color::Muted)
                                             .tooltip({
+                                                let focus_handle = focus_handle.clone();
                                                 move |_window, cx| {
                                                     Tooltip::for_action_in(
                                                         expand_tooltip,
@@ -5140,61 +5098,86 @@ impl ThreadView {
                                                     cx,
                                                 );
                                             })),
-                                    ),
+                                    )
+                                    .child(controls),
                             ),
                     )
-                    // omega#99. Zero base's composer bar is one row: what this
-                    // thread is talking to, the model, the executor pin, send.
-                    //
-                    // The owner asked for the input bar to be the centre of
-                    // gravity, with "the options of which provider as dropdowns
-                    // inside it kinda", and for minimal knobs. So the ordinary
-                    // row's other controls — add context, follow, fast mode,
-                    // thinking, token usage, profile, mode — are *not rendered*
-                    // here. Not removed: without the flag the `else` below is
-                    // byte-identical to what shipped, and every one of those
-                    // controls keeps its action and its key binding, because an
-                    // unresolvable binding panics Omega before any window opens.
-                    .map(|this| {
-                        if omega_zero_base::is_active() {
-                            this.child(self.render_zero_base_executor_bar(cx))
-                        } else {
-                            this.child(
-                                h_flex()
-                                    .w_full()
-                                    .min_w_0()
-                                    .flex_none()
-                                    .flex_wrap()
-                                    .justify_between()
-                                    .child(
-                                        h_flex()
-                                            .min_w_0()
-                                            .flex_wrap()
-                                            .gap_0p5()
-                                            .child(self.render_add_context_button(cx))
-                                            .child(self.render_follow_toggle(cx))
-                                            .children(self.render_fast_mode_control(cx))
-                                            .children(self.render_thinking_control(cx)),
-                                    )
-                                    .child(
-                                        h_flex()
-                                            .min_w_0()
-                                            .flex_wrap()
-                                            .gap_1()
-                                            .children(self.render_token_usage(cx))
-                                            .children(self.profile_selector.clone())
-                                            .map(|this| match self.config_options_view.clone() {
-                                                Some(config_view) => this.child(config_view),
-                                                None => this
-                                                    .children(self.mode_selector.clone())
-                                                    .children(self.model_selector.clone()),
-                                            })
-                                            .child(self.render_voice_controls(cx))
-                                            .child(self.render_send_button(cx)),
-                                    ),
-                            )
-                        }
-                    }),
+                } else {
+                    this.min_h(px(COMPOSER_EXPANDED_MIN_HEIGHT))
+                        .max_h(px(COMPOSER_EXPANDED_MAX_HEIGHT))
+                        .when(manually_expanded, |this| {
+                            this.h(px(COMPOSER_EXPANDED_MAX_HEIGHT))
+                        })
+                        .child(
+                            v_flex()
+                                .relative()
+                                .w_full()
+                                .min_h(px(COMPOSER_EXPANDED_MIN_HEIGHT - COMPOSER_ACTIONS_HEIGHT))
+                                .min_w_0()
+                                .flex_1()
+                                .overflow_hidden()
+                                .px(px(COMPOSER_TEXT_INSET))
+                                .pt_4()
+                                .pb_1()
+                                .pr(px(COMPOSER_TEXT_INSET + 24.))
+                                .child(self.message_editor.clone())
+                                .child(
+                                    h_flex()
+                                        .absolute()
+                                        .top_1()
+                                        .right_1()
+                                        .opacity(0.5)
+                                        .hover(|style| style.opacity(1.0))
+                                        .child(
+                                            IconButton::new("toggle-height", expand_icon)
+                                                .icon_size(IconSize::Small)
+                                                .icon_color(Color::Muted)
+                                                .tooltip({
+                                                    move |_window, cx| {
+                                                        Tooltip::for_action_in(
+                                                            expand_tooltip,
+                                                            &ExpandMessageEditor,
+                                                            &focus_handle,
+                                                            cx,
+                                                        )
+                                                    }
+                                                })
+                                                .on_click(cx.listener(|this, _, window, cx| {
+                                                    this.expand_message_editor(
+                                                        &ExpandMessageEditor,
+                                                        window,
+                                                        cx,
+                                                    );
+                                                })),
+                                        ),
+                                ),
+                        )
+                        .child(
+                            h_flex()
+                                .w_full()
+                                .min_w_0()
+                                .h(px(COMPOSER_ACTIONS_HEIGHT))
+                                .flex_none()
+                                .px_3()
+                                .pt_1()
+                                .pb(px(10.))
+                                .child(controls),
+                        )
+                }
+            });
+
+        h_flex()
+            .w_full()
+            .justify_center()
+            .on_action(cx.listener(Self::handle_message_editor_move_up))
+            .on_action(cx.listener(Self::expand_message_editor))
+            .child(
+                div()
+                    .w_full()
+                    .max_w(max_content_width)
+                    .px_6()
+                    .pb_6()
+                    .child(pill),
             )
             .into_any()
     }
@@ -6141,77 +6124,111 @@ impl ThreadView {
         let focus_handle = message_editor.focus_handle(cx);
 
         let is_generating = self.thread.read(cx).status() != ThreadStatus::Idle;
+        let primary_background = cx.theme().colors().text;
+        let primary_foreground = cx.theme().colors().editor_background;
 
         if self.is_loading_contents {
             div()
                 .id("loading-message-content")
-                .px_1()
+                .size(px(28.))
+                .flex()
+                .items_center()
+                .justify_center()
+                .rounded_full()
+                .bg(cx.theme().colors().text)
                 .tooltip(Tooltip::text("Loading Added Context…"))
-                .child(loading_contents_spinner(IconSize::default()))
+                .child(loading_contents_spinner(IconSize::Small))
                 .into_any_element()
         } else if is_generating && is_editor_empty {
-            IconButton::new("stop-generation", IconName::Stop)
-                .icon_color(Color::Error)
-                .style(ButtonStyle::Tinted(TintColor::Error))
-                .tooltip(move |_window, cx| {
-                    Tooltip::for_action("Stop Generation", &editor::actions::Cancel, cx)
-                })
-                .on_click(cx.listener(|this, _event, _, cx| this.cancel_generation(cx)))
+            div()
+                .size(px(28.))
+                .rounded_full()
+                .overflow_hidden()
+                .bg(primary_background)
+                .hover(|style| style.opacity(0.85))
+                .child(
+                    IconButton::new("stop-generation", IconName::Stop)
+                        .aria_label("Stop Generation")
+                        .icon_size(IconSize::Small)
+                        .icon_color(Color::Custom(primary_foreground))
+                        .style(ButtonStyle::Transparent)
+                        .size(ButtonSize::Medium)
+                        .width(rems_from_px(28.))
+                        .tooltip(move |_window, cx| {
+                            Tooltip::for_action("Stop Generation", &editor::actions::Cancel, cx)
+                        })
+                        .on_click(cx.listener(|this, _event, _, cx| this.cancel_generation(cx))),
+                )
                 .into_any_element()
         } else {
             let send_icon = if is_generating {
                 IconName::QueueMessage
             } else {
-                IconName::Send
+                IconName::ArrowUp
             };
-            IconButton::new("send-message", send_icon)
-                .style(ButtonStyle::Filled)
-                .map(|this| {
-                    if is_editor_empty && !is_generating {
-                        this.disabled(true).icon_color(Color::Muted)
-                    } else {
-                        this.icon_color(Color::Accent)
-                    }
-                })
-                .tooltip(move |_window, cx| {
-                    if is_editor_empty && !is_generating {
-                        Tooltip::for_action("Type to Send", &Chat, cx)
-                    } else if is_generating {
-                        let focus_handle = focus_handle.clone();
+            let tooltip = move |_window: &mut Window, cx: &mut App| {
+                if is_editor_empty && !is_generating {
+                    Tooltip::for_action("Type to Send", &Chat, cx)
+                } else if is_generating {
+                    let focus_handle = focus_handle.clone();
 
-                        Tooltip::element(move |_window, cx| {
-                            v_flex()
-                                .gap_1()
-                                .child(
-                                    h_flex()
-                                        .gap_2()
-                                        .justify_between()
-                                        .child(Label::new("Queue and Send"))
-                                        .child(KeyBinding::for_action_in(&Chat, &focus_handle, cx)),
-                                )
-                                .child(
-                                    h_flex()
-                                        .pt_1()
-                                        .gap_2()
-                                        .justify_between()
-                                        .border_t_1()
-                                        .border_color(cx.theme().colors().border_variant)
-                                        .child(Label::new("Send Immediately"))
-                                        .child(KeyBinding::for_action_in(
-                                            &SendImmediately,
-                                            &focus_handle,
-                                            cx,
-                                        )),
-                                )
-                                .into_any_element()
-                        })(_window, cx)
-                    } else {
-                        Tooltip::for_action("Send Message", &Chat, cx)
-                    }
+                    Tooltip::element(move |_window, cx| {
+                        v_flex()
+                            .gap_1()
+                            .child(
+                                h_flex()
+                                    .gap_2()
+                                    .justify_between()
+                                    .child(Label::new("Queue and Send"))
+                                    .child(KeyBinding::for_action_in(&Chat, &focus_handle, cx)),
+                            )
+                            .child(
+                                h_flex()
+                                    .pt_1()
+                                    .gap_2()
+                                    .justify_between()
+                                    .border_t_1()
+                                    .border_color(cx.theme().colors().border_variant)
+                                    .child(Label::new("Send Immediately"))
+                                    .child(KeyBinding::for_action_in(
+                                        &SendImmediately,
+                                        &focus_handle,
+                                        cx,
+                                    )),
+                            )
+                            .into_any_element()
+                    })(_window, cx)
+                } else {
+                    Tooltip::for_action("Send Message", &Chat, cx)
+                }
+            };
+
+            div()
+                .size(px(28.))
+                .rounded_full()
+                .overflow_hidden()
+                .bg(primary_background)
+                .when(!is_editor_empty || is_generating, |this| {
+                    this.hover(|style| style.opacity(0.85))
                 })
-                .on_click(cx.listener(|this, _, window, cx| {
-                    this.send(window, cx);
-                }))
+                .child(
+                    IconButton::new("send-message", send_icon)
+                        .aria_label(if is_generating {
+                            "Queue Message"
+                        } else {
+                            "Send Message"
+                        })
+                        .icon_size(IconSize::Small)
+                        .icon_color(Color::Custom(primary_foreground))
+                        .style(ButtonStyle::Transparent)
+                        .size(ButtonSize::Medium)
+                        .width(rems_from_px(28.))
+                        .disabled(is_editor_empty && !is_generating)
+                        .tooltip(tooltip)
+                        .on_click(cx.listener(|this, _, window, cx| {
+                            this.send(window, cx);
+                        })),
+                )
                 .into_any_element()
         }
     }
@@ -13906,9 +13923,10 @@ impl ThreadView {
     /// provider controls, transient turn state, and send.
     ///
     /// `OMEGA-DELTA-0149` removes executor-selection chrome from this row.
-    /// The executor disclosure remains visible, but it is a record rather than
-    /// a control: changing a route after a conversation starts would retarget
-    /// an existing thread.
+    /// The full executor disclosure remains visible in the expanded composer
+    /// and accessible in the compact composer. It is a record rather than a
+    /// control: changing a route after a conversation starts would retarget an
+    /// existing thread.
     ///
     /// Flash / Pro is the model-tier dropdown for Omega's hosted lanes:
     /// Flash → `google/gemini-3.6-flash`, Pro → `openagents/kimi-k3`.
@@ -13926,7 +13944,7 @@ impl ThreadView {
     /// `PinGesture` still has exactly two variants, nothing here calls
     /// `pin_session`, and an engine lane — the only Full Auto authority among
     /// the three — is still reachable by a pin and by nothing else.
-    fn render_zero_base_executor_bar(&self, cx: &mut Context<Self>) -> AnyElement {
+    fn render_zero_base_executor_bar(&self, compact: bool, cx: &mut Context<Self>) -> AnyElement {
         let exo = self.exo_connection(cx);
         let disclosure_line = self.omega_disclosure_line(cx);
         let inspector_open = self.exo_inspector_expanded;
@@ -13934,53 +13952,64 @@ impl ThreadView {
         let turn_running = self.thread.read(cx).status() != ThreadStatus::Idle;
 
         h_flex()
-            .w_full()
+            .when(!compact, |this| this.w_full())
             .min_w_0()
             .flex_none()
-            .flex_wrap()
+            .when(!compact, |this| this.flex_wrap())
             .gap_1()
-            .justify_between()
-            .child(
-                h_flex()
-                    .min_w_0()
-                    .gap_1()
-                    .when(self.owns_shared_vim_indicator(cx), |this| {
-                        this.child(self.vim_mode_indicator.clone())
-                    })
-                    .child(
-                        div()
-                            .id("omega-routed-model")
-                            .role(gpui::Role::Status)
-                            .aria_label(disclosure_line.clone())
-                            .child(
-                                Label::new(disclosure_line)
-                                    .size(LabelSize::XSmall)
-                                    .color(Color::Muted),
-                            ),
-                    )
-                    // omega#99. The turn's own state, only while there is a
-                    // turn. Permanent chrome that says "idle" at a person all
-                    // day is a knob; a dot that appears when the executor
-                    // starts working is the turn talking.
-                    .when_some(turn_phase, |this, phase| {
-                        this.child(
-                            Icon::new(IconName::Circle)
-                                .size(IconSize::XSmall)
-                                .color(Self::exo_status_color(phase)),
-                        )
+            .when(!compact, |this| this.justify_between())
+            .when(compact, |this| {
+                // The executor menu already names the routed agent in the compact
+                // bar. Keep the full route record available to assistive
+                // technology without repeating it visually beside that control.
+                this.child(
+                    div()
+                        .id("omega-routed-model")
+                        .role(gpui::Role::Status)
+                        .aria_label(disclosure_line.clone()),
+                )
+            })
+            .when(!compact, |this| {
+                this.child(
+                    h_flex()
+                        .min_w_0()
+                        .gap_1()
+                        .when(self.owns_shared_vim_indicator(cx), |this| {
+                            this.child(self.vim_mode_indicator.clone())
+                        })
                         .child(
-                            Label::new(phase.label())
-                                .size(LabelSize::XSmall)
-                                .color(Self::exo_status_color(phase)),
+                            div()
+                                .id("omega-routed-model")
+                                .role(gpui::Role::Status)
+                                .aria_label(disclosure_line.clone())
+                                .child(
+                                    Label::new(disclosure_line)
+                                        .size(LabelSize::XSmall)
+                                        .color(Color::Muted),
+                                ),
                         )
-                    }),
-            )
+                        .when_some(turn_phase, |this, phase| {
+                            this.child(
+                                Icon::new(IconName::Circle)
+                                    .size(IconSize::XSmall)
+                                    .color(Self::exo_status_color(phase)),
+                            )
+                            .child(
+                                Label::new(phase.label())
+                                    .size(LabelSize::XSmall)
+                                    .color(Self::exo_status_color(phase)),
+                            )
+                        }),
+                )
+            })
             .child(
                 h_flex()
                     .min_w_0()
-                    .flex_wrap()
+                    .when(!compact, |this| this.flex_wrap())
                     .gap_1()
-                    .children(self.render_zero_base_provider_notice(cx))
+                    .when(!compact, |this| {
+                        this.children(self.render_zero_base_provider_notice(cx))
+                    })
                     // The new-conversation executor dropdown, beside the tier
                     // selector at the same visual weight. `OMEGA-DELTA-0184`,
                     // omega#165: on a bound conversation it starts a new
@@ -13995,7 +14024,7 @@ impl ThreadView {
                     // base they render at the tail of the transcript rather
                     // than in a permanent column, and this is the one knob that
                     // opens them.
-                    .when(exo.is_some(), |this| {
+                    .when(exo.is_some() && !compact, |this| {
                         this.child(
                             IconButton::new("omega-exo-toggle-inspector", IconName::Info)
                                 .icon_size(IconSize::Small)
