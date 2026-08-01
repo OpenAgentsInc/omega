@@ -2178,6 +2178,7 @@ impl Render for MultiWorkspace {
         let text_color = cx.theme().colors().text;
 
         let workspace = self.workspace().clone();
+        let comet_mode = omega_zero_base::is_comet_mode();
         let workspace_key_context = workspace.update(cx, |workspace, cx| workspace.key_context(cx));
         let titlebar_item = workspace.read(cx).titlebar_item();
         let titlebar_focus_handle = workspace.read(cx).titlebar_focus_handle();
@@ -2268,34 +2269,37 @@ impl Render for MultiWorkspace {
                         ))
                     },
                 )
-                .when_some(titlebar_item, |this, item| {
-                    this.child(
-                        div()
-                            .id("titlebar-region")
-                            .track_focus(&titlebar_focus_handle)
-                            .tab_group()
-                            .role(gpui::Role::Toolbar)
-                            .aria_label("Title bar")
-                            .on_key_down(cx.listener(
-                                |multi_workspace, event: &gpui::KeyDownEvent, window, cx| {
-                                    if event.keystroke.modifiers.modified() {
-                                        return;
-                                    }
-                                    let forward = match event.keystroke.key.as_str() {
-                                        "right" => true,
-                                        "left" => false,
-                                        _ => return,
-                                    };
-                                    multi_workspace.workspace().update(cx, |workspace, cx| {
-                                        workspace.move_titlebar_item_focus(forward, window, cx);
-                                    });
-                                    cx.stop_propagation();
-                                },
-                            ))
-                            .w_full()
-                            .child(item),
-                    )
-                })
+                .when_some(
+                    (!comet_mode).then_some(titlebar_item).flatten(),
+                    |this, item| {
+                        this.child(
+                            div()
+                                .id("titlebar-region")
+                                .track_focus(&titlebar_focus_handle)
+                                .tab_group()
+                                .role(gpui::Role::Toolbar)
+                                .aria_label("Title bar")
+                                .on_key_down(cx.listener(
+                                    |multi_workspace, event: &gpui::KeyDownEvent, window, cx| {
+                                        if event.keystroke.modifiers.modified() {
+                                            return;
+                                        }
+                                        let forward = match event.keystroke.key.as_str() {
+                                            "right" => true,
+                                            "left" => false,
+                                            _ => return,
+                                        };
+                                        multi_workspace.workspace().update(cx, |workspace, cx| {
+                                            workspace.move_titlebar_item_focus(forward, window, cx);
+                                        });
+                                        cx.stop_propagation();
+                                    },
+                                ))
+                                .w_full()
+                                .child(item),
+                        )
+                    },
+                )
                 .child(
                     h_flex()
                         .flex()

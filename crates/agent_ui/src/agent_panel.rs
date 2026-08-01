@@ -95,7 +95,7 @@ use gpui::{
     Action, Anchor, Animation, AnimationExt, AnyElement, App, AsyncWindowContext, ClipboardItem,
     Entity, EventEmitter, ExternalPaths, FocusHandle, Focusable, Hsla, ImageSource, KeyContext,
     MouseButton, ObjectFit, Pixels, PlatformDisplay, RenderImage, Subscription, Task, TaskExt,
-    WeakEntity, WindowControlArea, WindowHandle, hsla, img, prelude::*, pulsating_between,
+    WeakEntity, WindowControlArea, WindowHandle, img, prelude::*, pulsating_between,
 };
 use language::LanguageRegistry;
 use language_model::LanguageModelRegistry;
@@ -14224,13 +14224,10 @@ impl AgentPanel {
         id: &'static str,
         icon: IconName,
         disabled: bool,
+        text_color: Hsla,
+        hover_background: Hsla,
         on_click: impl Fn(&gpui::ClickEvent, &mut Window, &mut App) + 'static,
     ) -> AnyElement {
-        let color = if disabled {
-            hsla(0., 0., 0.71, 0.35)
-        } else {
-            hsla(0., 0., 0.71, 0.9)
-        };
         div()
             .id(id)
             .size(px(24.))
@@ -14239,11 +14236,15 @@ impl AgentPanel {
             .items_center()
             .justify_center()
             .rounded(px(6.))
-            .text_color(color)
+            .text_color(if disabled {
+                text_color.opacity(0.35)
+            } else {
+                text_color
+            })
             .when(!disabled, |button| {
                 button
                     .cursor_pointer()
-                    .hover(|style| style.bg(hsla(0., 0., 0.92, 0.14)))
+                    .hover(move |style| style.bg(hover_background))
                     .on_click(move |event, window, cx| {
                         cx.stop_propagation();
                         on_click(event, window, cx);
@@ -14263,6 +14264,19 @@ impl AgentPanel {
         const TITLEBAR_HEIGHT: f32 = 38.;
         const SIDEBAR_WIDTH: f32 = 256.;
         const TAB_WIDTH: f32 = 140.;
+
+        let colors = cx.theme().colors();
+        let shell_background = colors.title_bar_background;
+        let sidebar_background = colors.surface_background;
+        let card_background = colors.background;
+        let selected_background = colors.element_selected;
+        let hover_background = colors.ghost_element_hover;
+        let border = colors.border_variant;
+        let text = colors.text;
+        let text_muted = colors.text_muted;
+        let text_placeholder = colors.text_placeholder;
+        let text_accent = colors.text_accent;
+        let icon_muted = colors.icon_muted;
 
         let sidebar_open = self.sidebar.open;
         let active_thread_id = self.active_thread_id(cx);
@@ -14290,11 +14304,11 @@ impl AgentPanel {
             .pl(px(8.))
             .pr(px(6.))
             .rounded(px(8.))
-            .bg(hsla(0., 0., 0.92, 0.14))
+            .bg(selected_background)
             .border_1()
-            .border_color(hsla(0., 0., 1., 0.09))
+            .border_color(colors.border_selected)
             .text_size(px(12.))
-            .text_color(hsla(0., 0., 0.92, 0.92))
+            .text_color(text)
             .occlude()
             .child(
                 Icon::new(IconName::OmegaAgent)
@@ -14311,9 +14325,9 @@ impl AgentPanel {
             .py(px(7.))
             .gap(px(8.))
             .rounded(px(8.))
-            .bg(hsla(0., 0., 0.92, 0.14))
+            .bg(selected_background)
             .border_1()
-            .border_color(hsla(0., 0., 1., 0.08))
+            .border_color(colors.border_selected)
             .child(
                 Icon::new(IconName::OmegaAgent)
                     .size(IconSize::Small)
@@ -14326,12 +14340,7 @@ impl AgentPanel {
                     .truncate()
                     .child(active_sidebar_title),
             )
-            .child(
-                div()
-                    .size(px(6.))
-                    .rounded_full()
-                    .bg(hsla(0., 0.65, 0.58, 1.)),
-            );
+            .child(div().size(px(6.)).rounded_full().bg(text_accent));
 
         let history_tabs = historical_rows.iter().enumerate().map(|(index, row)| {
             let row = row.clone();
@@ -14347,10 +14356,10 @@ impl AgentPanel {
                 .px(px(8.))
                 .rounded(px(8.))
                 .text_size(px(12.))
-                .text_color(hsla(0., 0., 0.71, 0.68))
+                .text_color(text_muted)
                 .cursor_pointer()
                 .occlude()
-                .hover(|style| style.bg(hsla(0., 0., 0.92, 0.12)))
+                .hover(move |style| style.bg(hover_background))
                 .on_click(cx.listener(move |this, _, window, cx| {
                     this.open_thread_from_threads_sidebar(&row, window, cx);
                 }))
@@ -14370,20 +14379,32 @@ impl AgentPanel {
                 IconName::ThreadsSidebarLeftClosed
             },
             false,
+            icon_muted,
+            hover_background,
             cx.listener(|this, _, _, cx| this.toggle_threads_sidebar(cx)),
         );
-        let back =
-            self.render_comet_control("comet-nav-back", IconName::ArrowLeft, true, |_, _, _| {});
+        let back = self.render_comet_control(
+            "comet-nav-back",
+            IconName::ArrowLeft,
+            true,
+            icon_muted,
+            hover_background,
+            |_, _, _| {},
+        );
         let forward = self.render_comet_control(
             "comet-nav-forward",
             IconName::ArrowRight,
             true,
+            icon_muted,
+            hover_background,
             |_, _, _| {},
         );
         let new_session = self.render_comet_control(
             "comet-new-session",
             IconName::Plus,
             false,
+            icon_muted,
+            hover_background,
             cx.listener(|this, _, window, cx| this.new_thread(&NewThread, window, cx)),
         );
 
@@ -14468,7 +14489,7 @@ impl AgentPanel {
                 .py(px(7.))
                 .rounded(px(8.))
                 .cursor_pointer()
-                .hover(|style| style.bg(hsla(0., 0., 0.92, 0.11)))
+                .hover(move |style| style.bg(hover_background))
                 .on_click(cx.listener(move |this, _, window, cx| {
                     this.open_thread_from_threads_sidebar(&row, window, cx);
                 }))
@@ -14485,7 +14506,7 @@ impl AgentPanel {
                         .child(
                             div()
                                 .text_size(px(10.))
-                                .text_color(hsla(0., 0., 0.56, 0.72))
+                                .text_color(text_placeholder)
                                 .child(age),
                         ),
                 )
@@ -14502,7 +14523,7 @@ impl AgentPanel {
             .px(px(8.))
             .pb(px(8.))
             .text_size(px(12.))
-            .text_color(hsla(0., 0., 0.71, 0.86))
+            .text_color(text_muted)
             .child(
                 h_flex()
                     .h(px(32.))
@@ -14512,7 +14533,7 @@ impl AgentPanel {
                         div()
                             .text_size(px(11.))
                             .font_weight(gpui::FontWeight::MEDIUM)
-                            .text_color(hsla(0., 0., 0.71, 0.6))
+                            .text_color(text_placeholder)
                             .child("Spaces"),
                     )
                     .child(Icon::new(IconName::Plus).size(IconSize::XSmall)),
@@ -14524,15 +14545,15 @@ impl AgentPanel {
                     .py(px(7.))
                     .gap(px(8.))
                     .rounded(px(8.))
-                    .bg(hsla(0., 0., 0.92, 0.14))
+                    .bg(selected_background)
                     .border_1()
-                    .border_color(hsla(0., 0., 1., 0.08))
+                    .border_color(colors.border_selected)
                     .child(Icon::new(IconName::Folder).size(IconSize::Small))
                     .child(div().min_w_0().flex_1().truncate().child("omega"))
                     .child(
                         div()
                             .text_size(px(10.))
-                            .text_color(hsla(0., 0., 0.56, 0.65))
+                            .text_color(text_placeholder)
                             .child("local"),
                     ),
             )
@@ -14545,7 +14566,7 @@ impl AgentPanel {
                     .items_center()
                     .text_size(px(11.))
                     .font_weight(gpui::FontWeight::MEDIUM)
-                    .text_color(hsla(0., 0., 0.71, 0.6))
+                    .text_color(text_placeholder)
                     .child("Sessions"),
             )
             .child(
@@ -14567,8 +14588,8 @@ impl AgentPanel {
                         div()
                             .size(px(24.))
                             .rounded_full()
-                            .bg(hsla(0., 0., 0.92, 0.92))
-                            .text_color(hsla(0., 0., 0.05, 1.))
+                            .bg(text_accent)
+                            .text_color(card_background)
                             .flex()
                             .items_center()
                             .justify_center()
@@ -14578,7 +14599,7 @@ impl AgentPanel {
                         v_flex().child("Omega").child(
                             div()
                                 .text_size(px(10.))
-                                .text_color(hsla(0., 0., 0.56, 0.7))
+                                .text_color(text_placeholder)
                                 .child("Comet mode"),
                         ),
                     ),
@@ -14593,8 +14614,8 @@ impl AgentPanel {
             .overflow_hidden()
             .rounded(px(12.))
             .border_1()
-            .border_color(hsla(0., 0., 1., 0.08))
-            .bg(hsla(0., 0., 6. / 255., 1.))
+            .border_color(border)
+            .bg(card_background)
             .child(content);
 
         div()
@@ -14605,12 +14626,7 @@ impl AgentPanel {
             .flex()
             .flex_col()
             .overflow_hidden()
-            .bg(hsla(
-                0.,
-                0.,
-                8. / 255.,
-                if cfg!(target_os = "macos") { 0.9 } else { 1. },
-            ))
+            .bg(shell_background.opacity(if cfg!(target_os = "macos") { 0.94 } else { 1. }))
             .font_family("Geist")
             .child(
                 div()
@@ -14619,9 +14635,9 @@ impl AgentPanel {
                     .bottom_0()
                     .left_0()
                     .w(px(if sidebar_open { SIDEBAR_WIDTH } else { 0. }))
-                    .bg(hsla(0., 0., 0.92, 0.05))
+                    .bg(sidebar_background)
                     .border_r_1()
-                    .border_color(hsla(0., 0., 1., 0.06)),
+                    .border_color(border),
             )
             .child(titlebar)
             .child(
