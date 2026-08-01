@@ -9211,6 +9211,7 @@ impl Render for Workspace {
         // workspace until the gate is answered and the thread is open, and only
         // then seals.
         let zero_base_sealed = omega_zero_base::is_sealed();
+        let comet_mode = omega_zero_base::is_comet_mode();
 
         let theme = cx.theme().clone();
         let colors = theme.colors();
@@ -9696,7 +9697,9 @@ impl Render for Workspace {
                                     None => div.top_2().bottom_2().left_2().right_2().border_1(),
                                 })
                             }))
-                            .children(self.render_notifications(window, cx)),
+                            .when(!comet_mode, |parent| {
+                                parent.children(self.render_notifications(window, cx))
+                            }),
                     )
                     // OMEGA-DELTA-0053. No status bar in a sealed zero base.
                     // The one control it used to carry was the way out, and
@@ -9705,7 +9708,7 @@ impl Render for Workspace {
                     .when(self.status_bar_visible(cx) && !zero_base_sealed, |parent| {
                         parent.child(self.status_bar.clone())
                     })
-                    .child(self.toast_layer.clone()),
+                    .when(!comet_mode, |parent| parent.child(self.toast_layer.clone())),
             )
     }
 }

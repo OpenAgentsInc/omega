@@ -1,12 +1,11 @@
 //! The Omega surface — one agent thread and the controls that operate it.
 //!
 //! omega#99 built this as a mode: a subtraction of the editor around the
-//! thread, entered from the command line. omega#100 made it the default,
-//! omega#161 removed the mode split entirely. There is no other surface any
-//! more — no `--full-editor`, no mode selector, no second launch shape — so
-//! this crate no longer records *whether* the surface is on. What it still
-//! owns is the action inventory: which namespaces and actions the surface
-//! admits, and the one sentence a refused action answers with.
+//! thread, entered from the command line. omega#100 made it the default and
+//! omega#161 removed the editor split entirely. The additive Comet scaffold
+//! remains inside this seal: it begins with only the canvas and composer, then
+//! admits ported UI one surface at a time. This crate owns that process choice
+//! and the shared action inventory.
 //!
 //! # Why the legacy implementation name survives
 //!
@@ -54,6 +53,13 @@ pub const FLAG: &str = "--zero-base";
 /// startup with omega#161. Proof harnesses that build their own windows call
 /// [`seal`] themselves when a scene photographs the sealed surface.
 static SEALED: AtomicBool = AtomicBool::new(false);
+
+/// Whether this process is rendering the additive Comet porting surface.
+///
+/// Comet mode begins with only the conversation canvas and composer. New
+/// surfaces must be admitted deliberately instead of inheriting the Omega
+/// workbench shell.
+static COMET_MODE: AtomicBool = AtomicBool::new(false);
 
 /// Number of action refusals logged by this process.
 ///
@@ -409,16 +415,28 @@ pub const ADMITTED_ACTIONS: &[&str] = &[
     "workroom::RetryVoice",
 ];
 
-/// Is this the one Omega surface? Constant `true` since omega#161.
+/// Is the zero-base seal active? Constant `true` since omega#161.
 ///
-/// The mode split is gone: there is no flag, no static, and no second launch
-/// shape this could distinguish. The function survives because the call sites
-/// that ask it are the exact inventory of code the mode used to gate — the
-/// map omega#162's crate deletion works from — and because a caller reads
-/// better asking a named question than carrying a bare `true`.
+/// The editor split is gone. Comet mode is a stricter presentation inside the
+/// same zero-base gate, so callers that protect removed editor capabilities
+/// continue to receive `true` in either presentation.
 #[must_use]
 pub fn is_active() -> bool {
     true
+}
+
+/// Select the additive Comet porting surface for this process.
+///
+/// This is one-way because changing the surface after a window has opened
+/// could briefly expose controls that the launch contract excludes.
+pub fn enable_comet_mode() {
+    COMET_MODE.store(true, Ordering::SeqCst);
+}
+
+/// Is this process rendering the additive Comet porting surface?
+#[must_use]
+pub fn is_comet_mode() -> bool {
+    COMET_MODE.load(Ordering::SeqCst)
 }
 
 /// The surface owns the window. One-way for the life of the process.

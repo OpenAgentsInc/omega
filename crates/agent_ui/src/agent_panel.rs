@@ -14214,6 +14214,7 @@ impl AgentPanel {
 impl Render for AgentPanel {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         self.sync_workbench_shell(window, cx);
+        let comet_mode = omega_zero_base::is_comet_mode();
 
         // WARNING: Changes to this element hierarchy can have
         // non-obvious implications to the layout of children.
@@ -14225,6 +14226,18 @@ impl Render for AgentPanel {
         // - Scrolling in all views works as expected
         // - Files can be dropped into the panel
         let content = v_flex()
+            .id(if comet_mode {
+                "omega-comet-surface"
+            } else {
+                "omega-agent-surface"
+            })
+            .debug_selector(move || {
+                if comet_mode {
+                    "omega.comet.surface".into()
+                } else {
+                    "omega.agent.surface".into()
+                }
+            })
             .key_context(self.key_context())
             .relative()
             .size_full()
@@ -14298,15 +14311,19 @@ impl Render for AgentPanel {
                     cx.stop_propagation();
                 }
             }))
-            .child(self.render_toolbar(window, cx))
-            .children(self.render_new_user_onboarding(window, cx))
+            .when(!comet_mode, |parent| {
+                parent
+                    .child(self.render_toolbar(window, cx))
+                    .children(self.render_new_user_onboarding(window, cx))
+            })
             .map(|parent| {
-                if self.showing_sarah_admission {
+                if !comet_mode && self.showing_sarah_admission {
                     return parent.child(self.render_sarah_admission(cx));
                 }
                 // Full Auto is a surface of this panel, not a destination
                 // beside it. `OMEGA-DELTA-0020`.
-                if self.showing_full_auto
+                if !comet_mode
+                    && self.showing_full_auto
                     && let Some(full_auto) = self.full_auto.clone()
                 {
                     return parent.child(full_auto);
@@ -14360,7 +14377,7 @@ impl Render for AgentPanel {
                 }
             });
 
-        let content = if self.workbench_shell_enabled {
+        let content = if self.workbench_shell_enabled && !comet_mode {
             let dock_open = self
                 .workbench_shell
                 .projection()

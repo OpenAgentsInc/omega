@@ -292,11 +292,13 @@ fn main() {
         omega_front_door::enable_exo_from_command_line();
     }
 
-    // omega#161. There is no mode to enter any more: the surface omega#99
-    // built as "zero base" is the application, `--full-editor` is removed, and
-    // no argument, settings key, or environment variable selects a second
-    // launch shape. `--zero-base` is still accepted and does nothing, because
-    // it asks for what it already gets.
+    if args.comet {
+        omega_zero_base::enable_comet_mode();
+    }
+
+    // omega#161. Zero base remains the application and `--zero-base` remains
+    // a compatibility no-op. Comet mode is an additive porting scaffold
+    // inside that seal, not a route back to the removed editor surface.
     //
     // OMEGA-DELTA-0053, amended by omega#161. Seal here, before any window
     // opens, so the editor chrome is never drawn — not even for a frame. The
@@ -311,7 +313,9 @@ fn main() {
     // surface draws no buffer, so the argument is resolved to the directory
     // the thread can see rather than left as a file to open in a pane that is
     // not there.
-    resolve_zero_base_project_arguments(&mut args);
+    if !args.comet {
+        resolve_zero_base_project_arguments(&mut args);
+    }
 
     // OMEGA-DELTA-0093. Read beside zero base, and for the same reason: both
     // are command-line facts that a surface deep in startup has to consult
@@ -1445,6 +1449,22 @@ pub(crate) async fn restore_or_create_workspace(
     cx: &mut AsyncApp,
 ) -> Result<()> {
     await_identity_ready(cx).await?;
+    if omega_zero_base::is_comet_mode() {
+        cx.update(|cx| {
+            workspace::open_new(
+                Default::default(),
+                app_state,
+                cx,
+                |_workspace, window, cx| {
+                    agent_ui::AgentPanel::open_front_door(window, cx);
+                },
+            )
+        })
+        .await?;
+        drive_omega_send(cx).await;
+        return Ok(());
+    }
+
     if let Some(multi_workspaces) = restorable_workspaces(cx, &app_state).await {
         let mut error_count = 0;
         for multi_workspace in multi_workspaces {
@@ -2053,6 +2073,11 @@ struct Args {
     /// keep working.
     #[arg(long)]
     zero_base: bool,
+
+    /// Opens the additive Comet porting surface with only a blank canvas and
+    /// the working composer.
+    #[arg(long)]
+    comet: bool,
 
     /// Enables the optional Exo integration for this process.
     ///
