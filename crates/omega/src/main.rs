@@ -835,7 +835,12 @@ fn main() {
             let client = app_state.client.clone();
             move |cx| {
                 for &mut window in cx.windows().iter_mut() {
-                    let background_appearance = cx.theme().window_background_appearance();
+                    let background_appearance =
+                        if omega_zero_base::is_comet_mode() && cfg!(target_os = "macos") {
+                            gpui::WindowBackgroundAppearance::Blurred
+                        } else {
+                            cx.theme().window_background_appearance()
+                        };
                     window
                         .update(cx, |_, window, _| {
                             window.set_background_appearance(background_appearance)

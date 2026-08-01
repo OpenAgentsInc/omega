@@ -9253,8 +9253,7 @@ impl Render for Workspace {
             // controls remain absent, while the window retains the standard
             // Zed drag and double-click behavior.
             .when_some(
-                self.multi_workspace
-                    .is_none()
+                (self.multi_workspace.is_none() && !comet_mode)
                     .then(|| self.titlebar_item.clone())
                     .flatten(),
                 |this, item| {

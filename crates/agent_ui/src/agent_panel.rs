@@ -94,8 +94,8 @@ use git_ui::git_panel::{
 use gpui::{
     Action, Anchor, Animation, AnimationExt, AnyElement, App, AsyncWindowContext, ClipboardItem,
     Entity, EventEmitter, ExternalPaths, FocusHandle, Focusable, Hsla, ImageSource, KeyContext,
-    ObjectFit, Pixels, PlatformDisplay, RenderImage, Subscription, Task, TaskExt, WeakEntity,
-    WindowHandle, img, prelude::*, pulsating_between,
+    MouseButton, ObjectFit, Pixels, PlatformDisplay, RenderImage, Subscription, Task, TaskExt,
+    WeakEntity, WindowControlArea, WindowHandle, hsla, img, prelude::*, pulsating_between,
 };
 use language::LanguageRegistry;
 use language_model::LanguageModelRegistry;
@@ -2152,6 +2152,7 @@ pub struct AgentPanel {
     _forensics_workbench_subscriptions: Vec<Subscription>,
     workbench_shell: workbench_shell::WorkbenchShell,
     workbench_shell_enabled: bool,
+    comet_titlebar_dragging: bool,
     /// Thread keys whose durable disk selection was already adopted (or
     /// reset), so a render-driven sync does not re-read disk per frame.
     workbench_selection_restore_attempted: HashSet<String>,
@@ -2771,6 +2772,7 @@ impl AgentPanel {
             _forensics_workbench_subscriptions: Vec::new(),
             workbench_shell,
             workbench_shell_enabled: omega_zero_base::is_active(),
+            comet_titlebar_dragging: false,
             workbench_selection_restore_attempted: HashSet::default(),
             workbench_sync_failure_log: DistinctFailureLog::default(),
             workbench_files_panel,
@@ -14216,6 +14218,434 @@ impl AgentPanel {
     }
 }
 
+impl AgentPanel {
+    fn render_comet_control(
+        &self,
+        id: &'static str,
+        icon: IconName,
+        disabled: bool,
+        on_click: impl Fn(&gpui::ClickEvent, &mut Window, &mut App) + 'static,
+    ) -> AnyElement {
+        let color = if disabled {
+            hsla(0., 0., 0.71, 0.35)
+        } else {
+            hsla(0., 0., 0.71, 0.9)
+        };
+        div()
+            .id(id)
+            .size(px(24.))
+            .flex_none()
+            .flex()
+            .items_center()
+            .justify_center()
+            .rounded(px(6.))
+            .text_color(color)
+            .when(!disabled, |button| {
+                button
+                    .cursor_pointer()
+                    .hover(|style| style.bg(hsla(0., 0., 0.92, 0.14)))
+                    .on_click(move |event, window, cx| {
+                        cx.stop_propagation();
+                        on_click(event, window, cx);
+                    })
+            })
+            .occlude()
+            .child(Icon::new(icon).size(IconSize::Small).color(Color::Muted))
+            .into_any_element()
+    }
+
+    fn render_comet_shell(
+        &mut self,
+        content: impl IntoElement,
+        _window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
+        const TITLEBAR_HEIGHT: f32 = 38.;
+        const SIDEBAR_WIDTH: f32 = 256.;
+        const TAB_WIDTH: f32 = 140.;
+
+        let sidebar_open = self.sidebar.open;
+        let active_thread_id = self.active_thread_id(cx);
+        let active_title = self
+            .active_conversation_view()
+            .map(|view| view.read(cx).title(cx))
+            .unwrap_or_else(|| "New session".into());
+        let active_sidebar_title = active_title.clone();
+        let historical_rows = self
+            .threads_sidebar_rows(cx)
+            .into_iter()
+            .filter(|row| Some(row.thread_id) != active_thread_id)
+            .take(8)
+            .collect::<Vec<_>>();
+
+        let active_tab = div()
+            .id("comet-active-session-tab")
+            .debug_selector(|| "omega.comet.session-tab.active".into())
+            .w(px(TAB_WIDTH))
+            .h(px(28.))
+            .flex_none()
+            .flex()
+            .items_center()
+            .gap(px(6.))
+            .pl(px(8.))
+            .pr(px(6.))
+            .rounded(px(8.))
+            .bg(hsla(0., 0., 0.92, 0.14))
+            .border_1()
+            .border_color(hsla(0., 0., 1., 0.09))
+            .text_size(px(12.))
+            .text_color(hsla(0., 0., 0.92, 0.92))
+            .occlude()
+            .child(
+                Icon::new(IconName::OmegaAgent)
+                    .size(IconSize::Small)
+                    .color(Color::Muted),
+            )
+            .child(div().min_w_0().flex_1().truncate().child(active_title));
+
+        let active_sidebar_row = h_flex()
+            .id("comet-sidebar-active-session")
+            .debug_selector(|| "omega.comet.sidebar-session.active".into())
+            .w_full()
+            .px(px(8.))
+            .py(px(7.))
+            .gap(px(8.))
+            .rounded(px(8.))
+            .bg(hsla(0., 0., 0.92, 0.14))
+            .border_1()
+            .border_color(hsla(0., 0., 1., 0.08))
+            .child(
+                Icon::new(IconName::OmegaAgent)
+                    .size(IconSize::Small)
+                    .color(Color::Muted),
+            )
+            .child(
+                div()
+                    .min_w_0()
+                    .flex_1()
+                    .truncate()
+                    .child(active_sidebar_title),
+            )
+            .child(
+                div()
+                    .size(px(6.))
+                    .rounded_full()
+                    .bg(hsla(0., 0.65, 0.58, 1.)),
+            );
+
+        let history_tabs = historical_rows.iter().enumerate().map(|(index, row)| {
+            let row = row.clone();
+            let title = row.title.clone();
+            div()
+                .id(("comet-session-tab", index))
+                .w(px(TAB_WIDTH))
+                .h(px(28.))
+                .flex_none()
+                .flex()
+                .items_center()
+                .gap(px(6.))
+                .px(px(8.))
+                .rounded(px(8.))
+                .text_size(px(12.))
+                .text_color(hsla(0., 0., 0.71, 0.68))
+                .cursor_pointer()
+                .occlude()
+                .hover(|style| style.bg(hsla(0., 0., 0.92, 0.12)))
+                .on_click(cx.listener(move |this, _, window, cx| {
+                    this.open_thread_from_threads_sidebar(&row, window, cx);
+                }))
+                .child(
+                    Icon::new(IconName::OmegaAgent)
+                        .size(IconSize::Small)
+                        .color(Color::Muted),
+                )
+                .child(div().min_w_0().flex_1().truncate().child(title))
+        });
+
+        let toggle = self.render_comet_control(
+            "comet-toggle-sidebar",
+            if sidebar_open {
+                IconName::ThreadsSidebarLeftOpen
+            } else {
+                IconName::ThreadsSidebarLeftClosed
+            },
+            false,
+            cx.listener(|this, _, _, cx| this.toggle_threads_sidebar(cx)),
+        );
+        let back =
+            self.render_comet_control("comet-nav-back", IconName::ArrowLeft, true, |_, _, _| {});
+        let forward = self.render_comet_control(
+            "comet-nav-forward",
+            IconName::ArrowRight,
+            true,
+            |_, _, _| {},
+        );
+        let new_session = self.render_comet_control(
+            "comet-new-session",
+            IconName::Plus,
+            false,
+            cx.listener(|this, _, window, cx| this.new_thread(&NewThread, window, cx)),
+        );
+
+        let tabs_left = if sidebar_open {
+            SIDEBAR_WIDTH + 16.
+        } else {
+            158.
+        };
+        let titlebar = div()
+            .id("comet-titlebar")
+            .debug_selector(|| "omega.comet.titlebar".into())
+            .relative()
+            .h(px(TITLEBAR_HEIGHT))
+            .w_full()
+            .flex_none()
+            .window_control_area(WindowControlArea::Drag)
+            .on_mouse_down(
+                MouseButton::Left,
+                cx.listener(|this, _, _, _| this.comet_titlebar_dragging = true),
+            )
+            .on_mouse_up(
+                MouseButton::Left,
+                cx.listener(|this, _, _, _| this.comet_titlebar_dragging = false),
+            )
+            .on_mouse_move(
+                cx.listener(|this, event: &gpui::MouseMoveEvent, window, _| {
+                    if this.comet_titlebar_dragging
+                        && event.pressed_button == Some(MouseButton::Left)
+                    {
+                        this.comet_titlebar_dragging = false;
+                        window.start_window_move();
+                    }
+                }),
+            )
+            .on_click(|event, window, _| {
+                if event.click_count() == 2 {
+                    if cfg!(target_os = "macos") {
+                        window.titlebar_double_click();
+                    } else {
+                        window.zoom_window();
+                    }
+                }
+            })
+            .child(
+                div()
+                    .absolute()
+                    .left(px(80.))
+                    .top_0()
+                    .h_full()
+                    .flex()
+                    .items_center()
+                    .pt(px(2.))
+                    .gap(px(2.))
+                    .child(toggle)
+                    .child(back)
+                    .child(forward),
+            )
+            .child(
+                div()
+                    .absolute()
+                    .left(px(tabs_left))
+                    .right(px(16.))
+                    .top_0()
+                    .h_full()
+                    .flex()
+                    .items_center()
+                    .pt(px(2.))
+                    .gap(px(4.))
+                    .overflow_hidden()
+                    .child(active_tab)
+                    .children(history_tabs)
+                    .child(new_session),
+            );
+
+        let sidebar_rows = historical_rows.into_iter().enumerate().map(|(index, row)| {
+            let title = row.title.clone();
+            let age = row.age.clone();
+            div()
+                .id(("comet-sidebar-session", index))
+                .w_full()
+                .px(px(8.))
+                .py(px(7.))
+                .rounded(px(8.))
+                .cursor_pointer()
+                .hover(|style| style.bg(hsla(0., 0., 0.92, 0.11)))
+                .on_click(cx.listener(move |this, _, window, cx| {
+                    this.open_thread_from_threads_sidebar(&row, window, cx);
+                }))
+                .child(
+                    h_flex()
+                        .w_full()
+                        .gap(px(8.))
+                        .child(
+                            Icon::new(IconName::OmegaAgent)
+                                .size(IconSize::Small)
+                                .color(Color::Muted),
+                        )
+                        .child(div().min_w_0().flex_1().truncate().child(title))
+                        .child(
+                            div()
+                                .text_size(px(10.))
+                                .text_color(hsla(0., 0., 0.56, 0.72))
+                                .child(age),
+                        ),
+                )
+        });
+
+        let sidebar = div()
+            .id("comet-sidebar")
+            .debug_selector(|| "omega.comet.sidebar".into())
+            .w(px(SIDEBAR_WIDTH))
+            .h_full()
+            .flex_none()
+            .flex()
+            .flex_col()
+            .px(px(8.))
+            .pb(px(8.))
+            .text_size(px(12.))
+            .text_color(hsla(0., 0., 0.71, 0.86))
+            .child(
+                h_flex()
+                    .h(px(32.))
+                    .px(px(8.))
+                    .justify_between()
+                    .child(
+                        div()
+                            .text_size(px(11.))
+                            .font_weight(gpui::FontWeight::MEDIUM)
+                            .text_color(hsla(0., 0., 0.71, 0.6))
+                            .child("Spaces"),
+                    )
+                    .child(Icon::new(IconName::Plus).size(IconSize::XSmall)),
+            )
+            .child(
+                h_flex()
+                    .w_full()
+                    .px(px(8.))
+                    .py(px(7.))
+                    .gap(px(8.))
+                    .rounded(px(8.))
+                    .bg(hsla(0., 0., 0.92, 0.14))
+                    .border_1()
+                    .border_color(hsla(0., 0., 1., 0.08))
+                    .child(Icon::new(IconName::Folder).size(IconSize::Small))
+                    .child(div().min_w_0().flex_1().truncate().child("omega"))
+                    .child(
+                        div()
+                            .text_size(px(10.))
+                            .text_color(hsla(0., 0., 0.56, 0.65))
+                            .child("local"),
+                    ),
+            )
+            .child(
+                div()
+                    .mt(px(12.))
+                    .h(px(28.))
+                    .px(px(8.))
+                    .flex()
+                    .items_center()
+                    .text_size(px(11.))
+                    .font_weight(gpui::FontWeight::MEDIUM)
+                    .text_color(hsla(0., 0., 0.71, 0.6))
+                    .child("Sessions"),
+            )
+            .child(
+                v_flex()
+                    .id("comet-sidebar-sessions")
+                    .flex_1()
+                    .min_h_0()
+                    .overflow_y_scroll()
+                    .gap(px(2.))
+                    .child(active_sidebar_row)
+                    .children(sidebar_rows),
+            )
+            .child(
+                h_flex()
+                    .h(px(42.))
+                    .px(px(8.))
+                    .gap(px(8.))
+                    .child(
+                        div()
+                            .size(px(24.))
+                            .rounded_full()
+                            .bg(hsla(0., 0., 0.92, 0.92))
+                            .text_color(hsla(0., 0., 0.05, 1.))
+                            .flex()
+                            .items_center()
+                            .justify_center()
+                            .child("O"),
+                    )
+                    .child(
+                        v_flex().child("Omega").child(
+                            div()
+                                .text_size(px(10.))
+                                .text_color(hsla(0., 0., 0.56, 0.7))
+                                .child("Comet mode"),
+                        ),
+                    ),
+            );
+
+        let card = div()
+            .id("comet-main-card")
+            .debug_selector(|| "omega.comet.main-card".into())
+            .flex_1()
+            .min_w_0()
+            .h_full()
+            .overflow_hidden()
+            .rounded(px(12.))
+            .border_1()
+            .border_color(hsla(0., 0., 1., 0.08))
+            .bg(hsla(0., 0., 6. / 255., 1.))
+            .child(content);
+
+        div()
+            .id("comet-frost-shell")
+            .debug_selector(|| "omega.comet.frost-shell".into())
+            .relative()
+            .size_full()
+            .flex()
+            .flex_col()
+            .overflow_hidden()
+            .bg(hsla(
+                0.,
+                0.,
+                8. / 255.,
+                if cfg!(target_os = "macos") { 0.9 } else { 1. },
+            ))
+            .font_family("Geist")
+            .child(
+                div()
+                    .absolute()
+                    .top_0()
+                    .bottom_0()
+                    .left_0()
+                    .w(px(if sidebar_open { SIDEBAR_WIDTH } else { 0. }))
+                    .bg(hsla(0., 0., 0.92, 0.05))
+                    .border_r_1()
+                    .border_color(hsla(0., 0., 1., 0.06)),
+            )
+            .child(titlebar)
+            .child(
+                h_flex()
+                    .relative()
+                    .flex_1()
+                    .min_h_0()
+                    .items_stretch()
+                    .when(sidebar_open, |body| body.child(sidebar))
+                    .child(
+                        div()
+                            .flex_1()
+                            .min_w_0()
+                            .h_full()
+                            .pr(px(8.))
+                            .pb(px(8.))
+                            .pl(px(8.))
+                            .child(card),
+                    ),
+            )
+            .into_any_element()
+    }
+}
+
 impl Render for AgentPanel {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         self.sync_workbench_shell(window, cx);
@@ -14382,7 +14812,9 @@ impl Render for AgentPanel {
                 }
             });
 
-        let content = if self.workbench_shell_enabled && !comet_mode {
+        let content = if comet_mode {
+            self.render_comet_shell(content, window, cx)
+        } else if self.workbench_shell_enabled {
             let dock_open = self
                 .workbench_shell
                 .projection()
