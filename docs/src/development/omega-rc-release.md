@@ -79,6 +79,19 @@ target/omega-rc/Omega-v0.2.0-rc30-macos-arm64.dmg
 target/omega-rc/omega-v0.2.0-rc30-macos-arm64.release.json
 ```
 
+The release record keeps `source.dirty` false only when the sole worktree
+change made during packaging is the bundler's exact, unstaged
+`crates/omega/RELEASE_CHANNEL` rewrite. That deterministic transformation is
+listed in `source.build_transformations` with its committed and generated
+digests, and the original porcelain entry remains in
+`source.worktree_entries`. Any different channel contents, staged change,
+unrelated tracked change, or unexpected untracked file aborts release-record
+generation. Exercise those refusal cases without building an application:
+
+```sh
+python3 script/omega_rc_source_state.py --self-test
+```
+
 ## Release record digests
 
 The JSON release record binds at least:

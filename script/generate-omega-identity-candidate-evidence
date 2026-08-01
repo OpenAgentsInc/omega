@@ -727,6 +727,8 @@ def build_record(
         raise EvidenceError(
             f"release record commit {release_commit!r} does not match checkout {commit}"
         )
+    if release_record.get("source", {}).get("dirty") is not False:
+        raise EvidenceError("release record must bind a clean source commit")
 
     artifact_digest = sha256_file(artifact_path)
     digests = release_record.get("digests", {})
@@ -1126,6 +1128,27 @@ def self_test() -> None:
                 raise
         else:
             raise EvidenceError("release record with an unpinned team was accepted")
+
+        dirty_release_record = json.loads(json.dumps(release_record))
+        dirty_release_record["source"]["dirty"] = True
+        dirty_release_record_path = temp / "dirty-release-record.json"
+        dirty_release_record_path.write_text(
+            json.dumps(dirty_release_record) + "\n", encoding="utf-8"
+        )
+        try:
+            build_record(
+                dirty_release_record_path,
+                artifact_path,
+                lock_snapshot,
+                allow_dirty=True,
+                attestations_dir=None,
+                verify_signatures=False,
+            )
+        except EvidenceError as error:
+            if "release record must bind a clean source commit" not in str(error):
+                raise
+        else:
+            raise EvidenceError("dirty release-record source binding was accepted")
 
         try:
             build_record(

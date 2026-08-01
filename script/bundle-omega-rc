@@ -439,14 +439,18 @@ validate_release_record_schema() {
     "${OMEGA_RELEASE_RECORD_SCHEMA_VERSION}" \
     "${OMEGA_RC_VERSION}" \
     "${OMEGA_ARTIFACT_NAME}" \
-    "${OMEGA_BUILD_LOCK_SNAPSHOT_NAME}" <<'PY'
+    "${OMEGA_BUILD_LOCK_SNAPSHOT_NAME}" \
+    "${OMEGA_RC_CHANNEL}" <<'PY'
+import hashlib
 import json
 import re
 import sys
 
 path = sys.argv[1]
 expected_schema = int(sys.argv[2])
-expected_version, expected_artifact, expected_build_lock = sys.argv[3:]
+expected_version, expected_artifact, expected_build_lock, expected_release_channel = (
+    sys.argv[3:]
+)
 with open(path, encoding="utf-8") as handle:
     record = json.load(handle)
 
@@ -514,6 +518,42 @@ if not all(
     raise SystemExit("every legal notice must have a path and SHA-256 digest")
 if "commit" not in record["source"]:
     raise SystemExit("source.commit is required")
+if record["source"].get("dirty") is not False:
+    raise SystemExit("source.dirty must be false")
+worktree_entries = record["source"].get("worktree_entries")
+if not isinstance(worktree_entries, list) or not all(
+    isinstance(entry, str) and entry for entry in worktree_entries
+):
+    raise SystemExit("source.worktree_entries must be a list of non-empty strings")
+transformations = record["source"].get("build_transformations")
+if not isinstance(transformations, list):
+    raise SystemExit("source.build_transformations must be a list")
+if worktree_entries != (
+    [] if not transformations else [" M crates/omega/RELEASE_CHANNEL"]
+):
+    raise SystemExit("source.worktree_entries includes an unowned build change")
+for transformation in transformations:
+    if not isinstance(transformation, dict) or set(transformation) != {
+        "kind",
+        "path",
+        "committed_sha256",
+        "generated_sha256",
+        "generated_value",
+    }:
+        raise SystemExit("source.build_transformations has an invalid entry")
+    if (
+        transformation["kind"] != "temporary_release_channel"
+        or transformation["path"] != "crates/omega/RELEASE_CHANNEL"
+        or transformation["generated_value"] != expected_release_channel
+        or not valid_sha256(transformation["committed_sha256"])
+        or not valid_sha256(transformation["generated_sha256"])
+        or transformation["generated_sha256"]
+        != hashlib.sha256(f"{expected_release_channel}\n".encode()).hexdigest()
+        or transformation["committed_sha256"]
+        == transformation["generated_sha256"]
+        or " M crates/omega/RELEASE_CHANNEL" not in worktree_entries
+    ):
+        raise SystemExit("source.build_transformations is not the owned channel rewrite")
 digests = record["digests"]
 for key in ("cargo_lock_sha256", "icon_family_manifest_sha256"):
     if key not in digests or not valid_sha256(digests[key]):
@@ -830,6 +870,7 @@ write_release_record() {
   OMEGA_RC_RECORD_OUT="${RELEASE_RECORD_PATH}" \
   OMEGA_RC_SCHEMA_VERSION="${OMEGA_RELEASE_RECORD_SCHEMA_VERSION}" \
   OMEGA_RC_VERSION_VALUE="${OMEGA_RC_VERSION}" \
+  OMEGA_RC_CHANNEL_VALUE="${OMEGA_RC_CHANNEL}" \
   OMEGA_RC_BUNDLE_VERSION_VALUE="${OMEGA_RC_SEMVER}" \
   OMEGA_RC_ARTIFACT_NAME="${OMEGA_ARTIFACT_NAME}" \
   OMEGA_RC_VOLUME_NAME="${OMEGA_VOLUME_NAME}" \
@@ -880,38 +921,19 @@ write_release_record() {
   python3 <<'PY'
 import json
 import os
-import subprocess
 from pathlib import Path
 
+from script.omega_rc_source_state import classify_worktree_state
 
-def worktree_state() -> tuple[bool, list[str]]:
-    """Read whether the tree this candidate was built from was recorded.
 
-    `require_clean_checkout` refuses to *start* from a dirty tree, so anything
-    seen here appeared during the build. This runs after packaging, and the
-    build generates `assets/licenses.md` through `script/generate-licenses`,
-    which is untracked — so every candidate recorded `dirty: true` on the
-    strength of its own output.
-
-    That reads as "the commit does not determine these bytes", which is the
-    opposite of true, and an independent reviewer correctly treated it as
-    weakening the source binding. A bare boolean cannot tell a reviewer which
-    reading applies, so the entries are recorded beside it: a tracked
-    modification really does break the commit-to-bytes binding, an untracked
-    build output does not.
-    """
-    status = subprocess.run(
-        ["git", "status", "--porcelain"],
-        capture_output=True,
-        text=True,
-        check=True,
+source_is_dirty, worktree_entries, build_transformations = classify_worktree_state(
+    Path.cwd(), os.environ["OMEGA_RC_CHANNEL_VALUE"]
+)
+if source_is_dirty:
+    raise SystemExit(
+        "working tree changed unexpectedly during the RC build; refusing to write "
+        "a release record"
     )
-    entries = [line for line in status.stdout.splitlines() if line.strip()]
-    tracked = [line for line in entries if not line.startswith("??")]
-    return bool(tracked), entries
-
-
-source_is_dirty, worktree_entries = worktree_state()
 icons = json.loads(os.environ["OMEGA_RC_ICON_JSON"])
 packaged_bindings = json.loads(os.environ["OMEGA_RC_PACKAGED_BINDINGS_JSON"])
 upstream = os.environ.get("OMEGA_RC_UPSTREAM_COMMIT") or None
@@ -954,11 +976,11 @@ record = {
     "source": {
         "commit": os.environ["OMEGA_RC_COMMIT"],
         "upstream_commit": upstream,
-        # True only for a *tracked* modification, which is what actually
-        # breaks the commit-to-bytes binding. The entries are recorded beside
-        # it so a reader never has to guess which kind they are looking at.
+        # The owned channel rewrite is recorded below. Any other entry aborts
+        # before a release record can be written.
         "dirty": source_is_dirty,
         "worktree_entries": worktree_entries,
+        "build_transformations": build_transformations,
         "repository": "https://github.com/OpenAgentsInc/omega",
     },
     "toolchains": {
