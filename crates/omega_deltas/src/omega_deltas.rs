@@ -242,7 +242,7 @@ pub const SHARED_COMPOSER_CONTROLS: &[(&str, &str, &str)] = &[
         "render_composer_voice_controls(",
         "render_voice_controls(",
     ),
-    ("Send", "IconName::Send", "render_send_button("),
+    ("Send", "IconName::ArrowUp", "render_send_button("),
 ];
 
 /// The concise product contract adjacent to the delta registry.
@@ -5418,10 +5418,11 @@ mod tests {
         let openings = source.matches("AgentPanel::open_front_door(").count();
         assert_eq!(
             openings,
-            2,
+            3,
             "{} reaches the front door {openings} time(s); \
              restore_or_create_workspace has two no-restorable-session paths \
-             and both must land there (OMEGA-DELTA-0019).",
+             and both must land there, while Comet mode has one deliberate \
+             fresh-front-door path (OMEGA-DELTA-0019).",
             path.display()
         );
 
@@ -6322,7 +6323,7 @@ mod tests {
             path.display()
         );
         assert!(
-            source.contains(".child(self.render_zero_base_executor_bar(cx))"),
+            source.contains("self.render_zero_base_executor_bar(compact, cx)"),
             "OMEGA-DELTA-0021: {} must draw zero base's composer bar. Defining \
              it without rendering it leaves a zero-base turn unattributed, \
              which is omega#77's falsifier.",
@@ -10507,7 +10508,8 @@ mod tests {
         let source = uncommented(&source);
 
         assert!(
-            source.contains("let fills_container = editor_expanded;")
+            source.contains("composer_layout(editor_expanded, &editor_text)")
+                && source.contains("let compact = layout == ComposerLayout::Compact;")
                 && !source.contains("composer_fills_panel"),
             "OMEGA-DELTA-0100: {} lets the composer absorb an empty thread \
              again. The input must hug its field and controls in both zero base \
@@ -16672,12 +16674,10 @@ mod tests {
 
         // The indicator is in the bar and on the left, which is the half of the
         // owner's sentence that is about where to look.
-        let (status_at, send_at) = (
-            composer.find("Label::new(status)"),
-            composer.find(r#"IconButton::new("send-message""#),
-        );
+        let status_at = composer.rfind(".children(status.map(|status|");
+        let controls_at = composer.rfind(".child(action_controls)");
         assert!(
-            matches!((status_at, send_at), (Some(status), Some(send)) if status < send),
+            matches!((status_at, controls_at), (Some(status), Some(controls)) if status < controls),
             "OMEGA-DELTA-0122: the loading status in {} is no longer the \
              left-hand end of the composer's own bottom row. The owner: \"move \
              the loading indicator to inside the input bar like bottom left\". \
@@ -20251,11 +20251,11 @@ mod tests {
         let compact_workspace = without_whitespace(&workspace);
         assert!(
             compact_workspace.contains(&without_whitespace(
-                "self.multi_workspace.is_none().then(|| self.titlebar_item.clone()).flatten()"
+                "(self.multi_workspace.is_none() && !comet_mode).then(|| self.titlebar_item.clone()).flatten()"
             )),
             "OMEGA-DELTA-0147: a standalone workspace no longer renders its \
-             titlebar view, or a multi-workspace window renders the same \
-             titlebar twice."
+             titlebar view outside Comet mode, or a multi-workspace window \
+             renders the same titlebar twice."
         );
 
         let multi_workspace_path = "crates/workspace/src/multi_workspace.rs";
@@ -20264,13 +20264,30 @@ mod tests {
         assert!(
             compact_multi_workspace.contains(&without_whitespace(
                 "let titlebar_item = workspace.read(cx).titlebar_item();"
-            )) && compact_multi_workspace
-                .contains(&without_whitespace(".when_some(titlebar_item,")),
+            )) && compact_multi_workspace.contains(&without_whitespace(
+                ".when_some((!comet_mode).then_some(titlebar_item).flatten(),"
+            )),
             "OMEGA-DELTA-0147: {} no longer owns the active workspace's \
-             titlebar above the sidebar row, so the drag strip cannot span \
-             the full window.",
+             titlebar above the sidebar row outside Comet mode, so the drag \
+             strip cannot span the full window.",
             repository_path(multi_workspace_path).display()
         );
+
+        let agent_panel_path = "crates/agent_ui/src/agent_panel.rs";
+        let agent_panel = without_comments(&read_repository_file(agent_panel_path));
+        let comet_titlebar = body_of(&agent_panel, "render_comet_shell");
+        for required in [
+            ".window_control_area(WindowControlArea::Drag)",
+            "window.start_window_move()",
+            "window.titlebar_double_click()",
+        ] {
+            assert!(
+                comet_titlebar.contains(required),
+                "OMEGA-DELTA-0147: Comet mode suppresses the shared titlebar, \
+                 so its unified titlebar in {} must retain `{required}`.",
+                repository_path(agent_panel_path).display()
+            );
+        }
 
         let title_bar_path = "crates/title_bar/src/title_bar.rs";
         let title_bar = without_comments(&read_repository_file(title_bar_path));
@@ -22225,14 +22242,12 @@ mod tests {
         let loading_bar = function_body(&conversation, "render_loading_composer")
             .expect("OMEGA-DELTA-0175: loading composer renderer is gone");
         assert_eq!(
-            loading_bar
-                .matches(".child(self.vim_mode_indicator.clone())")
-                .count(),
-            1,
-            "OMEGA-DELTA-0175: the loading composer must render the shared indicator once"
+            loading_bar.matches("self.vim_mode_indicator").count(),
+            2,
+            "OMEGA-DELTA-0175: the loading composer must render the shared indicator once in each mutually exclusive compact/expanded branch"
         );
         assert!(
-            loading_bar.contains(".when(omega_zero_base::is_active(), |this|"),
+            loading_bar.contains("omega_zero_base::is_active()"),
             "OMEGA-DELTA-0175: full editor must leave its shared Vim indicator in the status bar"
         );
 
@@ -22255,8 +22270,8 @@ mod tests {
             connected_bar
                 .matches(".child(self.vim_mode_indicator.clone())")
                 .count(),
-            1,
-            "OMEGA-DELTA-0175: the connected composer must render the shared indicator once"
+            2,
+            "OMEGA-DELTA-0175: the connected composer must render the shared indicator once in each mutually exclusive compact/expanded branch"
         );
         for required in [
             "fn owns_shared_vim_indicator(&self, cx: &App) -> bool",
