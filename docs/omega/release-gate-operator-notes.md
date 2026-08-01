@@ -258,6 +258,65 @@ before duplicating) · OPEN (nobody holds it).
 
 ## Recording the human-only Sarah LiveKit gate journeys
 
+### Prepare one candidate-bound three-instance run
+
+Use `script/omega-sarah-livekit-candidate-run` before the private, room, or
+connectivity observations. Its private run directory must be outside this
+repository. `prepare` recomputes the DMG digest, checks the release record and
+full Sarah infrastructure binding, verifies the exact installed Omega binary
+digest and code signature, and creates three mode-0700 homes and data roots.
+`launch --apply` starts the installed binary three times with those isolated
+`--user-data-dir` roots; it does not reuse the owner's Omega, Codex, Claude, or
+Grok profile.
+
+```sh
+script/omega-sarah-livekit-candidate-run prepare \
+  --dmg target/omega-rc/Omega-v0.2.0-rcNN-macos-arm64.dmg \
+  --release-record target/omega-rc/omega-v0.2.0-rcNN-macos-arm64.release.json \
+  --binding /private/path/rcNN-sarah-binding.json \
+  --run-dir /private/path/rcNN-sarah-run
+
+script/omega-sarah-livekit-candidate-run launch \
+  --plan /private/path/rcNN-sarah-run/run-plan.json \
+  --apply
+```
+
+Perform all three journeys in these exact instances. Fill a private
+`openagents.omega.sarah-livekit-candidate-observations.v1` finding file with
+the three profile-reference digests from the plan, the private reconnect
+session digest, the room findings, and one acceptance-result/session digest
+for each imposed connectivity constraint. Each cell names the corresponding
+OpenAgents `openagents.sarah.livekit-acceptance.v4` receipt path; capture
+recomputes its `resultDigest`, checks its deployed worker revision and declared
+constraint, and emits only the digest. `prepare` writes the complete
+fillable shape to `observations-template.json` in the private run directory;
+copy it there under a run-specific name and fill it while observing the
+journeys. Then preserve the public-safe capture:
+
+```sh
+script/omega-sarah-livekit-candidate-run capture \
+  --plan /private/path/rcNN-sarah-run/run-plan.json \
+  --runtime /private/path/rcNN-sarah-run/runtime.json \
+  --observations /private/path/rcNN-observations.json \
+  --output docs/omega/release-gate/sarah-livekit/rcNN-candidate-capture.json
+```
+
+Capture fails closed unless all three processes are still the exact installed
+binary, all three profiles are authenticated packaged desktops for the bound
+DMG, private `connected` and `reconnected` receipts preserve one provider
+generation, and the three distinct transport sessions exclusively classify as
+direct UDP, TCP fallback, and TURN/TLS under their declared constraints. It
+reads the JSONL from each planned profile rather than accepting copied ICE
+booleans. Addresses, ports, URLs, tokens, raw media, and transcripts are
+rejected from the public capture.
+
+Passing `sarah-livekit-private`, `sarah-livekit-room`, and
+`sarah-livekit-connectivity` row receipts must repeat a
+`facts.candidate_capture_ref` with the repository-relative path, SHA-256, and
+`public_safe: true`. The release gate reopens that capture, recomputes its
+digest and collector binding, and compares each row's facts to the captured
+section. A hand-set pass boolean cannot substitute for this file.
+
 **Added 2026-07-31.** The rc29 evidence manifest resolved all six Sarah LiveKit
 rows to `blocked` or `inconclusive`, and named two of those blockers as
 *harness incapability rather than missing human effort*: the acceptance receipt

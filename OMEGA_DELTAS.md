@@ -9893,3 +9893,40 @@ the room, floor, audio, moderator, identity, and refusal facts.
   `agent_ui`; `community_sarah_default_keybindings_resolve_at_startup` in
   `omega`; `community_room_controls_have_one_governed_dispatch_surface` in
   `omega_deltas`; and the exact-action assertions in `omega_zero_base`.
+
+### OMEGA-DELTA-0222 — Packaged Sarah journeys share one sealed candidate run
+
+The Sarah release rows previously checked structured row receipts but did not
+bind the private, three-desktop, and forced-transport observations to the same
+installed processes and isolated profiles. Three pass booleans and copied ICE
+objects could therefore describe different candidates or an unconstrained
+network path while retaining one manifest binding.
+
+**One private run plan binds the package before launch.** The candidate runner
+recomputes the DMG digest, checks the release record and complete Sarah
+infrastructure binding, and verifies the exact installed Omega binary digest
+and code signature. It creates three private homes and data roots and launches
+the installed binary with three distinct `--user-data-dir` arguments. Capture
+refuses a dead, replaced, or differently hashed process.
+
+**Transport evidence comes from those profile roots.** The runner reads each
+profile's bounded-field transport JSONL. A private pass needs connected and
+reconnected rows with the same session, room, dispatch, and provider-generation
+binding. Connectivity needs three distinct sessions whose selected ICE fields
+exclusively classify as direct UDP, TCP fallback, and TURN/TLS under the three
+declared constraints. Each cell also consumes the corresponding OpenAgents
+acceptance receipt, recomputes its result digest, and checks its deployed
+worker revision and forced-transport declaration. Unexpected transport fields
+are private material and are rejected.
+
+**The release gate reopens the capture.** Passing private, room, and
+connectivity receipts carry a content-addressed `candidate_capture_ref`. The
+gate verifies the collector revision, full binding, three authenticated
+packaged profile references, row facts, and measured transport objects. A
+hand-set pass value or a capture from another candidate cannot promote a row.
+
+- **Enforced by:**
+  `script/omega-sarah-livekit-candidate-run self-test`,
+  `script/omega-release-gate --self-test`, and
+  `sarah_livekit_candidate_run_binds_profiles_and_forced_transports` in
+  `omega_deltas`.

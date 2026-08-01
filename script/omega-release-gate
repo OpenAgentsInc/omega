@@ -289,6 +289,15 @@ SARAH_LIVEKIT_BINDING_FIELDS = (
     "price_catalog_revision",
 )
 
+SARAH_LIVEKIT_CANDIDATE_CAPTURE_SCHEMA = (
+    "openagents.omega.sarah-livekit-candidate-capture.v1"
+)
+SARAH_LIVEKIT_CANDIDATE_CAPTURE_ROWS = {
+    "sarah-livekit-private",
+    "sarah-livekit-room",
+    "sarah-livekit-connectivity",
+}
+
 SARAH_LIVEKIT_ROWS = [
     {
         "id": "sarah-livekit-private",
@@ -417,6 +426,14 @@ SARAH_LIVEKIT_PASS_FACTS = {
 def classify_sarah_livekit_path(path: dict) -> str:
     if not isinstance(path, dict):
         raise ValueError("selected ICE path must be an object")
+    if set(path) != {
+        "classification",
+        "local",
+        "remote",
+        "packetsSent",
+        "packetsReceived",
+    }:
+        raise ValueError("selected ICE path contains private or unsupported fields")
     local = path.get("local")
     remote = path.get("remote")
     if not isinstance(local, dict) or not isinstance(remote, dict):
@@ -425,6 +442,10 @@ def classify_sarah_livekit_path(path: dict) -> str:
     allowed_protocols = {"udp", "tcp"}
     allowed_relay_protocols = {None, "udp", "tcp", "tls"}
     for candidate in (local, remote):
+        if set(candidate) != {"candidateType", "protocol", "relayProtocol"}:
+            raise ValueError(
+                "selected ICE candidate contains private or unsupported fields"
+            )
         if candidate.get("candidateType") not in allowed_candidate_types:
             raise ValueError("selected ICE candidate has an unsupported type")
         if candidate.get("protocol") not in allowed_protocols:
@@ -457,6 +478,22 @@ def classify_sarah_livekit_path(path: dict) -> str:
 def validate_sarah_livekit_transport_observation(observation: dict) -> set[str]:
     if not isinstance(observation, dict):
         raise ValueError("LiveKit transport observation must be an object")
+    if set(observation) != {
+        "schema",
+        "publicSafe",
+        "stage",
+        "sessionRefDigest",
+        "sessionGeneration",
+        "roomRefDigest",
+        "roomEpoch",
+        "dispatchRefDigest",
+        "providerGenerationRefDigest",
+        "publisherPaths",
+        "subscriberPaths",
+    }:
+        raise ValueError(
+            "LiveKit transport observation contains private or unsupported fields"
+        )
     if observation.get("schema") != "openagents.omega.sarah-livekit-transport-evidence.v1":
         raise ValueError("LiveKit transport observation has an unsupported schema")
     if observation.get("publicSafe") is not True:
@@ -524,6 +561,189 @@ def validate_sarah_livekit_transport_facts(row_id: str, facts: dict) -> None:
             raise ValueError(
                 "passing private reconnect changed or overlapped its session/provider generation"
             )
+
+
+def validate_candidate_capture_ref(
+    row_id: str,
+    facts: dict,
+    binding: dict,
+    *,
+    allow_unresolved_refs: bool,
+) -> None:
+    reference = facts.get("candidate_capture_ref")
+    if not isinstance(reference, dict) or set(reference) != {
+        "path",
+        "sha256",
+        "public_safe",
+    }:
+        raise ValueError(f"passing row {row_id} has no candidate capture reference")
+    path = reference["path"]
+    if (
+        not isinstance(path, str)
+        or not path
+        or Path(path).is_absolute()
+        or ".." in Path(path).parts
+    ):
+        raise ValueError(f"passing row {row_id} candidate capture path is unsafe")
+    if re.fullmatch(r"[0-9a-f]{64}", str(reference["sha256"])) is None:
+        raise ValueError(f"passing row {row_id} candidate capture digest is invalid")
+    if reference["public_safe"] is not True:
+        raise ValueError(f"passing row {row_id} candidate capture is not public-safe")
+    capture_path = ROOT / path
+    if not capture_path.is_file() or capture_path.is_symlink():
+        if allow_unresolved_refs:
+            return
+        raise ValueError(f"passing row {row_id} candidate capture is absent or linked")
+    if sha256_file(capture_path) != reference["sha256"]:
+        raise ValueError(f"passing row {row_id} candidate capture digest differs")
+    try:
+        capture = json.loads(capture_path.read_text())
+    except (OSError, UnicodeDecodeError, json.JSONDecodeError) as error:
+        raise ValueError(f"passing row {row_id} candidate capture is unreadable") from error
+    if capture.get("schema") != SARAH_LIVEKIT_CANDIDATE_CAPTURE_SCHEMA:
+        raise ValueError(f"passing row {row_id} candidate capture schema differs")
+    if set(capture) != {
+        "schema",
+        "public_safe",
+        "binding",
+        "binding_digest",
+        "collector",
+        "profiles",
+        "private",
+        "room",
+        "connectivity",
+    }:
+        raise ValueError(
+            f"passing row {row_id} candidate capture has private or unsupported fields"
+        )
+    if capture.get("public_safe") is not True or capture.get("binding") != binding:
+        raise ValueError(f"passing row {row_id} candidate capture binding differs")
+    if capture.get("binding_digest") != canonical_digest(binding):
+        raise ValueError(f"passing row {row_id} candidate capture digest binding differs")
+    collector = capture.get("collector")
+    collector_path = ROOT / "script/omega-sarah-livekit-candidate-run"
+    if collector != {
+        "path": "script/omega-sarah-livekit-candidate-run",
+        "version": 1,
+        "sha256": sha256_file(collector_path),
+    }:
+        raise ValueError(f"passing row {row_id} candidate capture collector differs")
+    profiles = capture.get("profiles")
+    if not isinstance(profiles, list) or len(profiles) != 3:
+        raise ValueError(f"passing row {row_id} candidate capture lacks three profiles")
+    profile_refs = set()
+    for profile in profiles:
+        if not isinstance(profile, dict) or set(profile) != {
+            "profile_ref_digest",
+            "authenticated",
+            "client_kind",
+            "package_sha256",
+        }:
+            raise ValueError(f"passing row {row_id} candidate profile shape differs")
+        profile_ref = profile["profile_ref_digest"]
+        if (
+            re.fullmatch(r"[0-9a-f]{64}", str(profile_ref)) is None
+            or profile_ref in profile_refs
+            or profile["authenticated"] is not True
+            or profile["client_kind"] != "packaged_omega_desktop"
+            or profile["package_sha256"] != binding["omega_package_sha256"]
+        ):
+            raise ValueError(f"passing row {row_id} candidate profile is not bound")
+        profile_refs.add(profile_ref)
+    if row_id == "sarah-livekit-private":
+        section = capture.get("private")
+        if (
+            not isinstance(section, dict)
+            or set(section)
+            != {"profile_ref_digest", "facts", "transport_observations"}
+            or section.get("profile_ref_digest") not in profile_refs
+        ):
+            raise ValueError("passing private row capture profile is not one of the candidate instances")
+        if section.get("facts") != {
+            name: facts.get(name) for name in SARAH_LIVEKIT_PASS_FACTS[row_id]
+        }:
+            raise ValueError("passing private row facts differ from the candidate capture")
+        if section.get("transport_observations") != facts.get("transport_observations"):
+            raise ValueError("passing private row transport differs from the candidate capture")
+    elif row_id == "sarah-livekit-room":
+        section = capture.get("room")
+        if (
+            not isinstance(section, dict)
+            or set(section)
+            != {"profile_ref_digests", "authenticated_desktop_count", "facts"}
+            or set(section.get("profile_ref_digests", [])) != profile_refs
+            or section.get("authenticated_desktop_count") != 3
+        ):
+            raise ValueError("passing room row does not bind the three candidate instances")
+        if section.get("facts") != {
+            name: facts.get(name) for name in SARAH_LIVEKIT_PASS_FACTS[row_id]
+        }:
+            raise ValueError("passing room row facts differ from the candidate capture")
+    else:
+        section = capture.get("connectivity")
+        if not isinstance(section, dict) or set(section) != {"cells"}:
+            raise ValueError("passing connectivity row capture has unsupported fields")
+        cells = section.get("cells") if isinstance(section, dict) else None
+        expected = {
+            "unrestricted": "direct_udp",
+            "udp_blocked": "tcp_fallback",
+            "udp_and_plaintext_tcp_blocked": "turn_tls",
+        }
+        if not isinstance(cells, list) or len(cells) != 3:
+            raise ValueError("passing connectivity row lacks three candidate capture cells")
+        observed_constraints = set()
+        observed_sessions = set()
+        transport_observations = []
+        for cell in cells:
+            if not isinstance(cell, dict) or set(cell) != {
+                "constraint",
+                "profile_ref_digest",
+                "session_ref_digest",
+                "acceptance_result_digest",
+                "classification",
+                "transport_observations",
+            }:
+                raise ValueError("passing connectivity row has an invalid capture cell")
+            constraint = cell.get("constraint")
+            session = cell.get("session_ref_digest")
+            cell_observations = cell.get("transport_observations")
+            if (
+                constraint not in expected
+                or constraint in observed_constraints
+                or cell.get("classification") != expected[constraint]
+                or cell.get("profile_ref_digest") not in profile_refs
+                or re.fullmatch(r"[0-9a-f]{64}", str(session)) is None
+                or session in observed_sessions
+                or re.fullmatch(
+                    r"[0-9a-f]{64}", str(cell.get("acceptance_result_digest", ""))
+                )
+                is None
+                or not isinstance(cell_observations, list)
+                or not cell_observations
+            ):
+                raise ValueError("passing connectivity row capture cell is unbound")
+            classifications = set()
+            for observation in cell_observations:
+                if observation.get("sessionRefDigest") != session:
+                    raise ValueError("passing connectivity cell mixes provider sessions")
+                classifications.update(
+                    validate_sarah_livekit_transport_observation(observation)
+                )
+            if classifications != {expected[constraint]}:
+                raise ValueError("passing connectivity constraint contradicts selected ICE")
+            observed_constraints.add(constraint)
+            observed_sessions.add(session)
+            transport_observations.extend(cell_observations)
+        if observed_constraints != set(expected):
+            raise ValueError("passing connectivity matrix is incomplete")
+        if transport_observations != facts.get("transport_observations"):
+            raise ValueError("passing connectivity row transport differs from the candidate capture")
+    serialized = json.dumps(capture, sort_keys=True)
+    if re.search(
+        r"(?i)(bearer\s+[a-z0-9._-]+|sk-[a-z0-9_-]{12,}|wss?://|access[_-]?token|room[_-]?token)",
+        serialized,
+    ):
+        raise ValueError(f"passing row {row_id} candidate capture contains private material")
 
 
 def validate_sarah_livekit_pass_facts(row_id: str, facts: dict) -> None:
@@ -633,6 +853,13 @@ def validate_sarah_livekit_evidence(
             raise ValueError(f"row {row_id} facts must be an object")
         if row["status"] in {"automated-pass", "owner-assisted-pass"}:
             validate_sarah_livekit_pass_facts(row_id, facts)
+            if row_id in SARAH_LIVEKIT_CANDIDATE_CAPTURE_ROWS:
+                validate_candidate_capture_ref(
+                    row_id,
+                    facts,
+                    binding,
+                    allow_unresolved_refs=allow_unresolved_refs,
+                )
         refs = row.get("evidence_refs")
         if not isinstance(refs, list) or not refs:
             raise ValueError(f"row {row_id} must preserve at least one evidence ref")
@@ -690,6 +917,14 @@ def validate_sarah_livekit_evidence(
     absent = sorted(expected_ids - rows.keys())
     if absent:
         raise ValueError("evidence is missing rows: " + ", ".join(absent))
+    candidate_capture_refs = {
+        json.dumps(row["facts"]["candidate_capture_ref"], sort_keys=True)
+        for row_id, row in rows.items()
+        if row_id in SARAH_LIVEKIT_CANDIDATE_CAPTURE_ROWS
+        and row["status"] in {"automated-pass", "owner-assisted-pass"}
+    }
+    if len(candidate_capture_refs) > 1:
+        raise ValueError("passing packaged rows do not share one candidate capture")
 
     serialized = json.dumps(payload, sort_keys=True)
     if re.search(r"(?i)(bearer\s+[a-z0-9._-]+|sk-[a-z0-9_-]{12,})", serialized):
@@ -1104,6 +1339,58 @@ def self_test() -> int:
     else:
         print(
             "self-test: a revived provider generation was accepted as a reconnect",
+            file=sys.stderr,
+        )
+        return 3
+    unbound_capture_fixture = json.loads(json.dumps(fixture))
+    unbound_capture_fixture["rows"][0]["facts"].pop("candidate_capture_ref")
+    try:
+        validate_sarah_livekit_evidence(
+            unbound_capture_fixture,
+            "a" * 64,
+            "b" * 40,
+            allow_unresolved_refs=True,
+        )
+    except ValueError:
+        pass
+    else:
+        print(
+            "self-test: a passing packaged row without its candidate capture was accepted",
+            file=sys.stderr,
+        )
+        return 3
+    mismatched_capture_fixture = json.loads(json.dumps(fixture))
+    mismatched_capture_fixture["rows"][1]["facts"]["candidate_capture_ref"][
+        "sha256"
+    ] = "0" * 64
+    try:
+        validate_sarah_livekit_evidence(
+            mismatched_capture_fixture, "a" * 64, "b" * 40
+        )
+    except ValueError:
+        pass
+    else:
+        print(
+            "self-test: a passing packaged row accepted a mismatched candidate capture",
+            file=sys.stderr,
+        )
+        return 3
+    divergent_capture_fixture = json.loads(json.dumps(fixture))
+    divergent_capture_fixture["rows"][2]["facts"]["candidate_capture_ref"][
+        "path"
+    ] = "docs/omega/release-gate/missing-divergent-capture.json"
+    try:
+        validate_sarah_livekit_evidence(
+            divergent_capture_fixture,
+            "a" * 64,
+            "b" * 40,
+            allow_unresolved_refs=True,
+        )
+    except ValueError:
+        pass
+    else:
+        print(
+            "self-test: packaged rows accepted divergent candidate captures",
             file=sys.stderr,
         )
         return 3

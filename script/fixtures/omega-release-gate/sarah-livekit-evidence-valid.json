@@ -24,6 +24,11 @@
         "admission_terms_seen": true,
         "agent_thread_started": true,
         "bounded_command_confirmed": true,
+        "candidate_capture_ref": {
+          "path": "script/fixtures/omega-release-gate/sarah-livekit-candidate-capture-valid.json",
+          "public_safe": true,
+          "sha256": "b7815f67f69c808f61c85dfeffd9c045035ef8b16d7d6c546c1a20848bb2d7d0"
+        },
         "exact_settlement_reconciled": true,
         "interruption_completed": true,
         "reconnect_same_generation": true,
@@ -102,6 +107,11 @@
       ],
       "facts": {
         "authenticated_desktop_count": 3,
+        "candidate_capture_ref": {
+          "path": "script/fixtures/omega-release-gate/sarah-livekit-candidate-capture-valid.json",
+          "public_safe": true,
+          "sha256": "b7815f67f69c808f61c85dfeffd9c045035ef8b16d7d6c546c1a20848bb2d7d0"
+        },
         "floor_transfer_completed": true,
         "moderator_stop_completed": true,
         "non_floor_refused": true,
@@ -121,6 +131,11 @@
         }
       ],
       "facts": {
+        "candidate_capture_ref": {
+          "path": "script/fixtures/omega-release-gate/sarah-livekit-candidate-capture-valid.json",
+          "public_safe": true,
+          "sha256": "b7815f67f69c808f61c85dfeffd9c045035ef8b16d7d6c546c1a20848bb2d7d0"
+        },
         "direct_udp_completed": true,
         "tcp_fallback_completed": true,
         "transport_observations": [

@@ -249,6 +249,14 @@ without a preceding `Reconnecting`, and a second simultaneous Sarah audio
 track. These checks keep evidence from treating a revived or overlapping media
 generation as a reconnect and keep playback under one audio owner.
 
+The installed-candidate run is prepared and captured with
+`script/omega-sarah-livekit-candidate-run`. It binds three isolated packaged
+profiles to the DMG, release record, installed binary, and complete Sarah
+infrastructure revision. Passing private, room, and connectivity receipts cite
+the resulting candidate capture; the release gate verifies that the room used
+all three profile references, the reconnect retained one provider generation,
+and each declared network constraint agrees with the selected ICE evidence.
+
 With the explicit `custom_wss_v1` rollback transport, audio continues to use
 the `OAA1` media envelope. Each binary frame contains:
 

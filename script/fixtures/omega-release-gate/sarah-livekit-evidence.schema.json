@@ -1,5 +1,29 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$defs": {
+    "candidate_capture_ref": {
+      "additionalProperties": false,
+      "properties": {
+        "path": {
+          "minLength": 1,
+          "type": "string"
+        },
+        "public_safe": {
+          "const": true
+        },
+        "sha256": {
+          "pattern": "^[0-9a-f]{64}$",
+          "type": "string"
+        }
+      },
+      "required": [
+        "path",
+        "sha256",
+        "public_safe"
+      ],
+      "type": "object"
+    }
+  },
   "additionalProperties": false,
   "properties": {
     "binding": {
@@ -91,6 +115,11 @@
             "type": "array"
           },
           "facts": {
+            "properties": {
+              "candidate_capture_ref": {
+                "$ref": "#/$defs/candidate_capture_ref"
+              }
+            },
             "type": "object"
           },
           "id": {

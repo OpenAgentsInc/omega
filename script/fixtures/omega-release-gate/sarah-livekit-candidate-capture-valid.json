@@ -1,0 +1,208 @@
+{
+  "binding": {
+    "admitted_model_revision": "model-catalog-fixture-revision",
+    "livekit_config_revision": "livekit-config-fixture-revision",
+    "livekit_image_digest": "sha256:cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+    "livekit_infrastructure_revision": "livekit-infrastructure-fixture-revision",
+    "omega_package_sha256": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+    "omega_source_revision": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+    "openagents_source_revision": "openagents-fixture-revision",
+    "price_catalog_revision": "price-catalog-fixture-revision",
+    "sarah_worker_image_digest": "sha256:dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd",
+    "sarah_worker_revision": "sarah-worker-fixture-revision"
+  },
+  "binding_digest": "06e5539d0c1124d5bbb1b1bd76ed0891e553027a70064b0244da1552b1c5fa04",
+  "collector": {
+    "path": "script/omega-sarah-livekit-candidate-run",
+    "sha256": "6ce525b1145af2b160a1523a70dcf99537af5d983ef520550369913512a54b15",
+    "version": 1
+  },
+  "connectivity": {
+    "cells": [
+      {
+        "acceptance_result_digest": "eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee",
+        "classification": "direct_udp",
+        "constraint": "unrestricted",
+        "profile_ref_digest": "dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd",
+        "session_ref_digest": "1111111111111111111111111111111111111111111111111111111111111111",
+        "transport_observations": [
+          {
+            "dispatchRefDigest": "3333333333333333333333333333333333333333333333333333333333333333",
+            "providerGenerationRefDigest": "4444444444444444444444444444444444444444444444444444444444444444",
+            "publicSafe": true,
+            "publisherPaths": [
+              {
+                "classification": "direct_udp",
+                "local": { "candidateType": "host", "protocol": "udp", "relayProtocol": null },
+                "packetsReceived": 8,
+                "packetsSent": 13,
+                "remote": { "candidateType": "server_reflexive", "protocol": "udp", "relayProtocol": null }
+              }
+            ],
+            "roomEpoch": 1,
+            "roomRefDigest": "2222222222222222222222222222222222222222222222222222222222222222",
+            "schema": "openagents.omega.sarah-livekit-transport-evidence.v1",
+            "sessionGeneration": 1,
+            "sessionRefDigest": "1111111111111111111111111111111111111111111111111111111111111111",
+            "stage": "connected",
+            "subscriberPaths": []
+          }
+        ]
+      },
+      {
+        "acceptance_result_digest": "ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff",
+        "classification": "tcp_fallback",
+        "constraint": "udp_blocked",
+        "profile_ref_digest": "eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee",
+        "session_ref_digest": "5555555555555555555555555555555555555555555555555555555555555555",
+        "transport_observations": [
+          {
+            "dispatchRefDigest": "7777777777777777777777777777777777777777777777777777777777777777",
+            "providerGenerationRefDigest": "8888888888888888888888888888888888888888888888888888888888888888",
+            "publicSafe": true,
+            "publisherPaths": [
+              {
+                "classification": "tcp_fallback",
+                "local": { "candidateType": "host", "protocol": "tcp", "relayProtocol": null },
+                "packetsReceived": 8,
+                "packetsSent": 13,
+                "remote": { "candidateType": "host", "protocol": "tcp", "relayProtocol": null }
+              }
+            ],
+            "roomEpoch": 2,
+            "roomRefDigest": "6666666666666666666666666666666666666666666666666666666666666666",
+            "schema": "openagents.omega.sarah-livekit-transport-evidence.v1",
+            "sessionGeneration": 2,
+            "sessionRefDigest": "5555555555555555555555555555555555555555555555555555555555555555",
+            "stage": "connected",
+            "subscriberPaths": []
+          }
+        ]
+      },
+      {
+        "acceptance_result_digest": "9999999999999999999999999999999999999999999999999999999999999999",
+        "classification": "turn_tls",
+        "constraint": "udp_and_plaintext_tcp_blocked",
+        "profile_ref_digest": "ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff",
+        "session_ref_digest": "9999999999999999999999999999999999999999999999999999999999999999",
+        "transport_observations": [
+          {
+            "dispatchRefDigest": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+            "providerGenerationRefDigest": "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+            "publicSafe": true,
+            "publisherPaths": [
+              {
+                "classification": "turn_tls",
+                "local": { "candidateType": "relay", "protocol": "tcp", "relayProtocol": "tls" },
+                "packetsReceived": 8,
+                "packetsSent": 13,
+                "remote": { "candidateType": "host", "protocol": "udp", "relayProtocol": null }
+              }
+            ],
+            "roomEpoch": 3,
+            "roomRefDigest": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+            "schema": "openagents.omega.sarah-livekit-transport-evidence.v1",
+            "sessionGeneration": 3,
+            "sessionRefDigest": "9999999999999999999999999999999999999999999999999999999999999999",
+            "stage": "connected",
+            "subscriberPaths": []
+          }
+        ]
+      }
+    ]
+  },
+  "private": {
+    "facts": {
+      "admission_terms_seen": true,
+      "agent_thread_started": true,
+      "bounded_command_confirmed": true,
+      "exact_settlement_reconciled": true,
+      "interruption_completed": true,
+      "reconnect_same_generation": true,
+      "voice_turn_completed": true
+    },
+    "profile_ref_digest": "dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd",
+    "transport_observations": [
+      {
+        "dispatchRefDigest": "3333333333333333333333333333333333333333333333333333333333333333",
+        "providerGenerationRefDigest": "4444444444444444444444444444444444444444444444444444444444444444",
+        "publicSafe": true,
+        "publisherPaths": [
+          {
+            "classification": "direct_udp",
+            "local": { "candidateType": "host", "protocol": "udp", "relayProtocol": null },
+            "packetsReceived": 8,
+            "packetsSent": 13,
+            "remote": { "candidateType": "server_reflexive", "protocol": "udp", "relayProtocol": null }
+          }
+        ],
+        "roomEpoch": 1,
+        "roomRefDigest": "2222222222222222222222222222222222222222222222222222222222222222",
+        "schema": "openagents.omega.sarah-livekit-transport-evidence.v1",
+        "sessionGeneration": 1,
+        "sessionRefDigest": "1111111111111111111111111111111111111111111111111111111111111111",
+        "stage": "connected",
+        "subscriberPaths": []
+      },
+      {
+        "dispatchRefDigest": "3333333333333333333333333333333333333333333333333333333333333333",
+        "providerGenerationRefDigest": "4444444444444444444444444444444444444444444444444444444444444444",
+        "publicSafe": true,
+        "publisherPaths": [
+          {
+            "classification": "direct_udp",
+            "local": { "candidateType": "host", "protocol": "udp", "relayProtocol": null },
+            "packetsReceived": 21,
+            "packetsSent": 34,
+            "remote": { "candidateType": "server_reflexive", "protocol": "udp", "relayProtocol": null }
+          }
+        ],
+        "roomEpoch": 1,
+        "roomRefDigest": "2222222222222222222222222222222222222222222222222222222222222222",
+        "schema": "openagents.omega.sarah-livekit-transport-evidence.v1",
+        "sessionGeneration": 1,
+        "sessionRefDigest": "1111111111111111111111111111111111111111111111111111111111111111",
+        "stage": "reconnected",
+        "subscriberPaths": []
+      }
+    ]
+  },
+  "profiles": [
+    {
+      "authenticated": true,
+      "client_kind": "packaged_omega_desktop",
+      "package_sha256": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "profile_ref_digest": "dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd"
+    },
+    {
+      "authenticated": true,
+      "client_kind": "packaged_omega_desktop",
+      "package_sha256": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "profile_ref_digest": "eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee"
+    },
+    {
+      "authenticated": true,
+      "client_kind": "packaged_omega_desktop",
+      "package_sha256": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "profile_ref_digest": "ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff"
+    }
+  ],
+  "public_safe": true,
+  "room": {
+    "authenticated_desktop_count": 3,
+    "facts": {
+      "floor_transfer_completed": true,
+      "moderator_stop_completed": true,
+      "non_floor_refused": true,
+      "removed_member_refused": true,
+      "shared_answer_heard_by_all": true,
+      "verified_sarah_identity_consistent": true
+    },
+    "profile_ref_digests": [
+      "dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd",
+      "eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee",
+      "ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff"
+    ]
+  },
+  "schema": "openagents.omega.sarah-livekit-candidate-capture.v1"
+}

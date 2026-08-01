@@ -210,6 +210,7 @@ pub const ENFORCED_DELTAS: &[&str] = &[
     "OMEGA-DELTA-0219",
     "OMEGA-DELTA-0220",
     "OMEGA-DELTA-0221",
+    "OMEGA-DELTA-0222",
 ];
 
 /// OMEGA-DELTA-0204. Every control the composer's bar offers, written twice:
@@ -23215,6 +23216,76 @@ mod tests {
             assert!(
                 docs.contains(required),
                 "OMEGA-DELTA-0220: operator contract lost `{required}`"
+            );
+        }
+    }
+
+    /// OMEGA-DELTA-0222. Packaged Sarah journeys share one sealed candidate run.
+    #[test]
+    fn sarah_livekit_candidate_run_binds_profiles_and_forced_transports() {
+        let runner = read_repository_file("script/omega-sarah-livekit-candidate-run");
+        for required in [
+            "openagents.omega.sarah-livekit-candidate-run.v1",
+            "participant-a",
+            "participant-b",
+            "participant-c",
+            "observations-template.json",
+            "openagents.sarah.livekit-acceptance.v4",
+            "connectivity acceptance result digest does not verify",
+            "--user-data-dir",
+            "installed Omega binary differs from the release record",
+            "private reconnect changed or revived its provider generation",
+            "udp_and_plaintext_tcp_blocked",
+            "did not exclusively observe",
+            "transport observation has private or unsupported fields",
+        ] {
+            assert!(
+                runner.contains(required),
+                "OMEGA-DELTA-0222: candidate-run proof lost `{required}`"
+            );
+        }
+
+        let gate = read_repository_file("script/omega-release-gate");
+        for required in [
+            "candidate_capture_ref",
+            "candidate capture collector differs",
+            "candidate capture lacks three profiles",
+            "connectivity constraint contradicts selected ICE",
+            "candidate capture contains private material",
+            "passing packaged rows do not share one candidate capture",
+        ] {
+            assert!(
+                gate.contains(required),
+                "OMEGA-DELTA-0222: release gate lost candidate capture check `{required}`"
+            );
+        }
+
+        let fixture = read_repository_file(
+            "script/fixtures/omega-release-gate/sarah-livekit-candidate-capture-valid.json",
+        );
+        for required in [
+            "openagents.omega.sarah-livekit-candidate-capture.v1",
+            "direct_udp",
+            "tcp_fallback",
+            "turn_tls",
+            "packaged_omega_desktop",
+        ] {
+            assert!(
+                fixture.contains(required),
+                "OMEGA-DELTA-0222: candidate capture fixture lost `{required}`"
+            );
+        }
+
+        let docs = read_repository_file("docs/omega/release-gate-operator-notes.md");
+        for required in [
+            "omega-sarah-livekit-candidate-run prepare",
+            "omega-sarah-livekit-candidate-run launch",
+            "omega-sarah-livekit-candidate-run capture",
+            "facts.candidate_capture_ref",
+        ] {
+            assert!(
+                docs.contains(required),
+                "OMEGA-DELTA-0222: candidate-run operator contract lost `{required}`"
             );
         }
     }

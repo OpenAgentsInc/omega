@@ -1,0 +1,1138 @@
+#!/usr/bin/env python3
+"""Prepare, launch, and preserve a bound packaged Sarah LiveKit candidate run."""
+
+from __future__ import annotations
+
+import argparse
+import ctypes
+import hashlib
+import json
+import os
+import re
+import stat
+import subprocess
+import sys
+import tempfile
+import time
+from pathlib import Path
+from typing import Any
+
+
+ROOT = Path(__file__).resolve().parent.parent
+INSTALLED_BINARY = Path("/Applications/Omega.app/Contents/MacOS/omega")
+PLAN_SCHEMA = "openagents.omega.sarah-livekit-candidate-run.v1"
+RUNTIME_SCHEMA = "openagents.omega.sarah-livekit-candidate-runtime.v1"
+OBSERVATIONS_SCHEMA = "openagents.omega.sarah-livekit-candidate-observations.v1"
+CAPTURE_SCHEMA = "openagents.omega.sarah-livekit-candidate-capture.v1"
+TRANSPORT_SCHEMA = "openagents.omega.sarah-livekit-transport-evidence.v1"
+COLLECTOR_VERSION = 1
+PROFILE_LABELS = ("participant-a", "participant-b", "participant-c")
+BINDING_FIELDS = (
+    "omega_source_revision",
+    "omega_package_sha256",
+    "openagents_source_revision",
+    "livekit_infrastructure_revision",
+    "livekit_config_revision",
+    "livekit_image_digest",
+    "sarah_worker_revision",
+    "sarah_worker_image_digest",
+    "admitted_model_revision",
+    "price_catalog_revision",
+)
+PRIVATE_FACTS = (
+    "admission_terms_seen",
+    "voice_turn_completed",
+    "bounded_command_confirmed",
+    "agent_thread_started",
+    "interruption_completed",
+    "reconnect_same_generation",
+    "exact_settlement_reconciled",
+)
+ROOM_FACTS = (
+    "verified_sarah_identity_consistent",
+    "floor_transfer_completed",
+    "shared_answer_heard_by_all",
+    "non_floor_refused",
+    "removed_member_refused",
+    "moderator_stop_completed",
+)
+CONSTRAINT_CLASSIFICATIONS = {
+    "unrestricted": "direct_udp",
+    "udp_blocked": "tcp_fallback",
+    "udp_and_plaintext_tcp_blocked": "turn_tls",
+}
+DIGEST = re.compile(r"[0-9a-f]{64}")
+
+
+class CandidateRunError(RuntimeError):
+    pass
+
+
+def sha256_file(path: Path) -> str:
+    digest = hashlib.sha256()
+    with path.open("rb") as source:
+        for chunk in iter(lambda: source.read(1024 * 1024), b""):
+            digest.update(chunk)
+    return digest.hexdigest()
+
+
+def canonical_digest(value: Any) -> str:
+    encoded = json.dumps(value, sort_keys=True, separators=(",", ":")).encode()
+    return hashlib.sha256(encoded).hexdigest()
+
+
+def load_object(path: Path, description: str) -> dict[str, Any]:
+    try:
+        value = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, UnicodeDecodeError, json.JSONDecodeError) as error:
+        raise CandidateRunError(f"cannot read {description} {path}: {error}") from error
+    if not isinstance(value, dict):
+        raise CandidateRunError(f"{description} must be a JSON object")
+    return value
+
+
+def write_exclusive(path: Path, value: dict[str, Any], *, mode: int) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    descriptor = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_EXCL, mode)
+    with os.fdopen(descriptor, "w", encoding="utf-8") as output:
+        json.dump(value, output, indent=2, sort_keys=True)
+        output.write("\n")
+
+
+def collector_binding() -> dict[str, Any]:
+    collector = Path(__file__).resolve()
+    return {
+        "path": "script/omega-sarah-livekit-candidate-run",
+        "version": COLLECTOR_VERSION,
+        "sha256": sha256_file(collector),
+    }
+
+
+def validate_binding(value: Any) -> dict[str, str]:
+    if isinstance(value, dict) and "binding" in value:
+        value = value["binding"]
+    if not isinstance(value, dict) or set(value) != set(BINDING_FIELDS):
+        raise CandidateRunError("candidate binding has the wrong fields")
+    for field in BINDING_FIELDS:
+        if not isinstance(value[field], str) or not value[field].strip():
+            raise CandidateRunError(f"candidate binding has no {field}")
+    if DIGEST.fullmatch(value["omega_package_sha256"]) is None:
+        raise CandidateRunError("candidate package digest is invalid")
+    if re.fullmatch(r"[0-9a-f]{40}", value["omega_source_revision"]) is None:
+        raise CandidateRunError("candidate source revision is invalid")
+    for field in ("livekit_image_digest", "sarah_worker_image_digest"):
+        if re.fullmatch(r"sha256:[0-9a-f]{64}", value[field]) is None:
+            raise CandidateRunError(f"candidate binding {field} is not immutable")
+    return {field: value[field] for field in BINDING_FIELDS}
+
+
+def validate_release_inputs(
+    dmg: Path, release_record_path: Path, binding_path: Path, binary: Path
+) -> tuple[dict[str, str], dict[str, Any]]:
+    release_record = load_object(release_record_path, "release record")
+    binding = validate_binding(load_object(binding_path, "candidate binding"))
+    if not dmg.is_file() or dmg.is_symlink():
+        raise CandidateRunError("candidate DMG is missing or linked")
+    package_digest = sha256_file(dmg)
+    digests = release_record.get("digests")
+    source = release_record.get("source")
+    if not isinstance(digests, dict) or not isinstance(source, dict):
+        raise CandidateRunError("release record omitted source or digests")
+    if digests.get("package_sha256") != package_digest:
+        raise CandidateRunError("candidate DMG differs from the release record")
+    if binding["omega_package_sha256"] != package_digest:
+        raise CandidateRunError("candidate binding names a different DMG")
+    if binding["omega_source_revision"] != source.get("commit"):
+        raise CandidateRunError("candidate binding names a different source revision")
+    expected_binary_digest = digests.get("omega_binary_sha256")
+    if DIGEST.fullmatch(str(expected_binary_digest)) is None:
+        raise CandidateRunError("release record has no packaged Omega binary digest")
+    canonical_binary = binary.resolve(strict=True)
+    if canonical_binary != INSTALLED_BINARY or binary.is_symlink():
+        raise CandidateRunError("candidate must be the exact installed Omega application")
+    if sha256_file(canonical_binary) != expected_binary_digest:
+        raise CandidateRunError("installed Omega binary differs from the release record")
+    verification = subprocess.run(
+        ["/usr/bin/codesign", "--verify", "--deep", "--strict", str(canonical_binary)],
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    if verification.returncode != 0:
+        raise CandidateRunError("installed Omega application failed strict codesign verification")
+    return binding, {
+        "package_sha256": package_digest,
+        "source_revision": source["commit"],
+        "binary_sha256": expected_binary_digest,
+        "installed_binary": str(canonical_binary),
+    }
+
+
+def profile_ref(binding_digest: str, label: str) -> str:
+    return canonical_digest(
+        {"binding_digest": binding_digest, "label": label, "profile_schema": 1}
+    )
+
+
+def build_plan(
+    run_directory: Path,
+    binding: dict[str, str],
+    candidate: dict[str, Any],
+) -> dict[str, Any]:
+    binding_digest = canonical_digest(binding)
+    profiles = []
+    for label in PROFILE_LABELS:
+        profile_root = run_directory / "profiles" / label
+        home = profile_root / "home"
+        data = home / "Library/Application Support/Omega RC"
+        temporary = profile_root / "tmp"
+        profiles.append(
+            {
+                "label": label,
+                "profile_ref_digest": profile_ref(binding_digest, label),
+                "home": str(home),
+                "data_dir": str(data),
+                "temporary_dir": str(temporary),
+                "launch_arguments": [
+                    candidate["installed_binary"],
+                    "--user-data-dir",
+                    str(data),
+                ],
+            }
+        )
+    return {
+        "schema": PLAN_SCHEMA,
+        "binding": binding,
+        "binding_digest": binding_digest,
+        "candidate": candidate,
+        "profiles": profiles,
+        "collector": collector_binding(),
+    }
+
+
+def observation_template(plan: dict[str, Any]) -> dict[str, Any]:
+    profiles = plan["profiles"]
+    return {
+        "schema": OBSERVATIONS_SCHEMA,
+        "binding_digest": plan["binding_digest"],
+        "profiles": [
+            {
+                "profile_ref_digest": profile["profile_ref_digest"],
+                "authenticated": False,
+                "client_kind": "packaged_omega_desktop",
+                "package_sha256": plan["binding"]["omega_package_sha256"],
+            }
+            for profile in profiles
+        ],
+        "private": {
+            "profile_ref_digest": profiles[0]["profile_ref_digest"],
+            "session_ref_digest": "",
+            "facts": {name: False for name in PRIVATE_FACTS},
+        },
+        "room": {
+            "profile_ref_digests": [
+                profile["profile_ref_digest"] for profile in profiles
+            ],
+            "facts": {name: False for name in ROOM_FACTS},
+        },
+        "connectivity": [
+            {
+                "constraint": constraint,
+                "profile_ref_digest": profile["profile_ref_digest"],
+                "session_ref_digest": "",
+                "acceptance_receipt": "",
+            }
+            for constraint, profile in zip(CONSTRAINT_CLASSIFICATIONS, profiles)
+        ],
+    }
+
+
+def ensure_outside_repository(path: Path) -> None:
+    resolved = path.resolve()
+    try:
+        resolved.relative_to(ROOT)
+    except ValueError:
+        return
+    raise CandidateRunError("private candidate run state must live outside the repository")
+
+
+def prepare(arguments: argparse.Namespace) -> int:
+    ensure_outside_repository(arguments.run_dir)
+    binding, candidate = validate_release_inputs(
+        arguments.dmg, arguments.release_record, arguments.binding, INSTALLED_BINARY
+    )
+    try:
+        arguments.run_dir.mkdir(mode=0o700, parents=True, exist_ok=False)
+        plan = build_plan(arguments.run_dir.resolve(), binding, candidate)
+        for profile in plan["profiles"]:
+            for field in ("home", "data_dir", "temporary_dir"):
+                Path(profile[field]).mkdir(mode=0o700, parents=True, exist_ok=True)
+        write_exclusive(arguments.run_dir / "run-plan.json", plan, mode=0o600)
+        write_exclusive(
+            arguments.run_dir / "observations-template.json",
+            observation_template(plan),
+            mode=0o600,
+        )
+    except OSError as error:
+        raise CandidateRunError(f"cannot prepare private run directory: {error}") from error
+    print(f"prepared candidate run: {arguments.run_dir / 'run-plan.json'}")
+    return 0
+
+
+def validate_collector(value: Any) -> None:
+    expected = collector_binding()
+    if value != expected:
+        raise CandidateRunError("candidate run uses a different collector revision")
+
+
+def validate_plan(path: Path, *, live: bool) -> dict[str, Any]:
+    plan = load_object(path, "candidate run plan")
+    if plan.get("schema") != PLAN_SCHEMA:
+        raise CandidateRunError("candidate run plan schema is unsupported")
+    binding = validate_binding(plan.get("binding"))
+    if plan.get("binding_digest") != canonical_digest(binding):
+        raise CandidateRunError("candidate run binding digest is inconsistent")
+    validate_collector(plan.get("collector"))
+    candidate = plan.get("candidate")
+    if not isinstance(candidate, dict) or set(candidate) != {
+        "package_sha256",
+        "source_revision",
+        "binary_sha256",
+        "installed_binary",
+    }:
+        raise CandidateRunError("candidate run has an invalid package binding")
+    if candidate["package_sha256"] != binding["omega_package_sha256"]:
+        raise CandidateRunError("candidate run package binding differs")
+    if candidate["source_revision"] != binding["omega_source_revision"]:
+        raise CandidateRunError("candidate run source binding differs")
+    if live:
+        binary = Path(candidate["installed_binary"])
+        if binary.resolve(strict=True) != INSTALLED_BINARY or binary.is_symlink():
+            raise CandidateRunError("candidate run installed binary path differs")
+        if sha256_file(binary) != candidate["binary_sha256"]:
+            raise CandidateRunError("candidate run installed binary changed")
+    profiles = plan.get("profiles")
+    if not isinstance(profiles, list) or len(profiles) != 3:
+        raise CandidateRunError("candidate run must have exactly three profiles")
+    run_directory = path.resolve().parent
+    seen_refs: set[str] = set()
+    for expected_label, profile in zip(PROFILE_LABELS, profiles):
+        if not isinstance(profile, dict) or profile.get("label") != expected_label:
+            raise CandidateRunError("candidate run profile order or labels differ")
+        expected_ref = profile_ref(plan["binding_digest"], expected_label)
+        if profile.get("profile_ref_digest") != expected_ref or expected_ref in seen_refs:
+            raise CandidateRunError("candidate run profile references are invalid")
+        seen_refs.add(expected_ref)
+        profile_root = run_directory / "profiles" / expected_label
+        expected_home = profile_root / "home"
+        expected_data = expected_home / "Library/Application Support/Omega RC"
+        expected_temporary = profile_root / "tmp"
+        expected_arguments = [
+            candidate["installed_binary"],
+            "--user-data-dir",
+            str(expected_data),
+        ]
+        if profile.get("home") != str(expected_home):
+            raise CandidateRunError("candidate run HOME escaped its profile")
+        if profile.get("data_dir") != str(expected_data):
+            raise CandidateRunError("candidate run data directory escaped its profile")
+        if profile.get("temporary_dir") != str(expected_temporary):
+            raise CandidateRunError("candidate run temporary directory escaped its profile")
+        if profile.get("launch_arguments") != expected_arguments:
+            raise CandidateRunError("candidate run launch arguments differ")
+        if live:
+            for directory in (expected_home, expected_data, expected_temporary):
+                if directory.is_symlink() or not directory.is_dir():
+                    raise CandidateRunError("candidate run profile directory is missing or linked")
+                if stat.S_IMODE(directory.stat().st_mode) & 0o077:
+                    raise CandidateRunError("candidate run profile directory is not private")
+    return plan
+
+
+def process_executable_path(process_id: int) -> Path:
+    library = ctypes.CDLL("/usr/lib/libproc.dylib", use_errno=True)
+    buffer = ctypes.create_string_buffer(4096)
+    library.proc_pidpath.argtypes = [ctypes.c_int, ctypes.c_void_p, ctypes.c_uint32]
+    library.proc_pidpath.restype = ctypes.c_int
+    length = library.proc_pidpath(process_id, buffer, len(buffer))
+    if length <= 0:
+        raise CandidateRunError(f"candidate process {process_id} is not running")
+    return Path(os.fsdecode(buffer.raw[:length].split(b"\0", 1)[0])).resolve(strict=True)
+
+
+def launch(arguments: argparse.Namespace) -> int:
+    if not arguments.apply:
+        raise CandidateRunError("launch requires --apply")
+    plan = validate_plan(arguments.plan, live=True)
+    run_directory = arguments.plan.resolve().parent
+    runtime_path = run_directory / "runtime.json"
+    if runtime_path.exists():
+        raise CandidateRunError("candidate run was already launched")
+    processes: list[subprocess.Popen[bytes]] = []
+    log_handles = []
+    try:
+        for profile in plan["profiles"]:
+            data = Path(profile["data_dir"])
+            if any(data.iterdir()):
+                raise CandidateRunError(f"profile {profile['label']} was already used")
+            log_path = run_directory / f"{profile['label']}.log"
+            log_handle = log_path.open("xb")
+            os.chmod(log_path, 0o600)
+            log_handles.append(log_handle)
+            environment = {
+                "HOME": profile["home"],
+                "TMPDIR": profile["temporary_dir"],
+                "PATH": os.environ.get("PATH", "/usr/bin:/bin:/usr/sbin:/sbin"),
+                "LANG": os.environ.get("LANG", "en_US.UTF-8"),
+            }
+            process = subprocess.Popen(
+                profile["launch_arguments"],
+                env=environment,
+                stdin=subprocess.DEVNULL,
+                stdout=log_handle,
+                stderr=subprocess.STDOUT,
+                start_new_session=True,
+            )
+            processes.append(process)
+        time.sleep(1)
+        if any(process.poll() is not None for process in processes):
+            raise CandidateRunError("one or more packaged candidate instances exited at launch")
+        runtime = {
+            "schema": RUNTIME_SCHEMA,
+            "plan_sha256": sha256_file(arguments.plan),
+            "binding_digest": plan["binding_digest"],
+            "binary_sha256": plan["candidate"]["binary_sha256"],
+            "instances": [
+                {
+                    "profile_ref_digest": profile["profile_ref_digest"],
+                    "pid": process.pid,
+                }
+                for profile, process in zip(plan["profiles"], processes)
+            ],
+        }
+        write_exclusive(runtime_path, runtime, mode=0o600)
+    except (OSError, CandidateRunError):
+        for process in processes:
+            if process.poll() is None:
+                process.terminate()
+        raise
+    finally:
+        for handle in log_handles:
+            handle.close()
+    print(f"launched three isolated candidate instances: {runtime_path}")
+    return 0
+
+
+def validate_runtime(path: Path, plan_path: Path, plan: dict[str, Any]) -> dict[str, Any]:
+    runtime = load_object(path, "candidate runtime")
+    if runtime.get("schema") != RUNTIME_SCHEMA:
+        raise CandidateRunError("candidate runtime schema is unsupported")
+    if runtime.get("plan_sha256") != sha256_file(plan_path):
+        raise CandidateRunError("candidate runtime names a different plan")
+    if runtime.get("binding_digest") != plan["binding_digest"]:
+        raise CandidateRunError("candidate runtime names a different binding")
+    if runtime.get("binary_sha256") != plan["candidate"]["binary_sha256"]:
+        raise CandidateRunError("candidate runtime names a different binary")
+    instances = runtime.get("instances")
+    if not isinstance(instances, list) or len(instances) != 3:
+        raise CandidateRunError("candidate runtime does not have three instances")
+    expected_refs = [profile["profile_ref_digest"] for profile in plan["profiles"]]
+    for expected_ref, instance in zip(expected_refs, instances):
+        if not isinstance(instance, dict) or instance.get("profile_ref_digest") != expected_ref:
+            raise CandidateRunError("candidate runtime profile order differs")
+        process_id = instance.get("pid")
+        if not isinstance(process_id, int) or isinstance(process_id, bool) or process_id < 1:
+            raise CandidateRunError("candidate runtime PID is invalid")
+        executable = process_executable_path(process_id)
+        if executable != INSTALLED_BINARY or sha256_file(executable) != runtime["binary_sha256"]:
+            raise CandidateRunError("candidate runtime process is not the bound installed binary")
+    return runtime
+
+
+def classify_path(path: Any) -> str:
+    if not isinstance(path, dict) or set(path) != {
+        "classification",
+        "local",
+        "remote",
+        "packetsSent",
+        "packetsReceived",
+    }:
+        raise CandidateRunError("selected ICE path has private or unsupported fields")
+    candidates = []
+    for side in ("local", "remote"):
+        candidate = path[side]
+        if not isinstance(candidate, dict) or set(candidate) != {
+            "candidateType",
+            "protocol",
+            "relayProtocol",
+        }:
+            raise CandidateRunError("selected ICE candidate has private or unsupported fields")
+        if candidate["candidateType"] not in {
+            "host",
+            "server_reflexive",
+            "peer_reflexive",
+            "relay",
+        }:
+            raise CandidateRunError("selected ICE candidate type is invalid")
+        if candidate["protocol"] not in {"udp", "tcp"}:
+            raise CandidateRunError("selected ICE candidate protocol is invalid")
+        if candidate["relayProtocol"] not in {None, "udp", "tcp", "tls"}:
+            raise CandidateRunError("selected ICE relay protocol is invalid")
+        candidates.append(candidate)
+    for counter in ("packetsSent", "packetsReceived"):
+        if not isinstance(path[counter], int) or isinstance(path[counter], bool) or path[counter] < 0:
+            raise CandidateRunError("selected ICE packet counter is invalid")
+    if any(item["candidateType"] == "relay" and item["relayProtocol"] == "tls" for item in candidates):
+        classification = "turn_tls"
+    elif any(item["candidateType"] == "relay" for item in candidates):
+        classification = "unclassified"
+    elif all(item["protocol"] == "udp" for item in candidates):
+        classification = "direct_udp"
+    elif any(item["protocol"] == "tcp" for item in candidates):
+        classification = "tcp_fallback"
+    else:
+        classification = "unclassified"
+    if path["classification"] != classification:
+        raise CandidateRunError("selected ICE classification contradicts its candidates")
+    return classification
+
+
+def validate_transport_observation(value: Any) -> set[str]:
+    expected_fields = {
+        "schema",
+        "publicSafe",
+        "stage",
+        "sessionRefDigest",
+        "sessionGeneration",
+        "roomRefDigest",
+        "roomEpoch",
+        "dispatchRefDigest",
+        "providerGenerationRefDigest",
+        "publisherPaths",
+        "subscriberPaths",
+    }
+    if not isinstance(value, dict) or set(value) != expected_fields:
+        raise CandidateRunError("transport observation has private or unsupported fields")
+    if value["schema"] != TRANSPORT_SCHEMA or value["publicSafe"] is not True:
+        raise CandidateRunError("transport observation is not public-safe or supported")
+    if value["stage"] not in {"connected", "reconnected"}:
+        raise CandidateRunError("transport observation stage is invalid")
+    for field in (
+        "sessionRefDigest",
+        "roomRefDigest",
+        "dispatchRefDigest",
+        "providerGenerationRefDigest",
+    ):
+        if DIGEST.fullmatch(str(value[field])) is None:
+            raise CandidateRunError(f"transport observation {field} is invalid")
+    for field in ("sessionGeneration", "roomEpoch"):
+        if not isinstance(value[field], int) or isinstance(value[field], bool) or value[field] < 1:
+            raise CandidateRunError(f"transport observation {field} is invalid")
+    classifications: set[str] = set()
+    path_count = 0
+    for field in ("publisherPaths", "subscriberPaths"):
+        if not isinstance(value[field], list):
+            raise CandidateRunError(f"transport observation omitted {field}")
+        for path in value[field]:
+            classifications.add(classify_path(path))
+            path_count += 1
+    if path_count == 0:
+        raise CandidateRunError("transport observation has no selected ICE path")
+    return classifications
+
+
+def read_transport_log(profile: dict[str, Any]) -> list[dict[str, Any]]:
+    path = Path(profile["data_dir"]) / "voice/livekit-transport-evidence.jsonl"
+    if path.is_symlink() or not path.is_file():
+        raise CandidateRunError(f"profile {profile['label']} has no transport evidence")
+    observations = []
+    try:
+        for line in path.read_text(encoding="utf-8").splitlines():
+            if not line.strip():
+                continue
+            value = json.loads(line)
+            validate_transport_observation(value)
+            observations.append(value)
+    except (OSError, UnicodeDecodeError, json.JSONDecodeError) as error:
+        raise CandidateRunError(f"cannot read profile transport evidence: {error}") from error
+    return observations
+
+
+def require_true_facts(value: Any, names: tuple[str, ...], description: str) -> dict[str, bool]:
+    if not isinstance(value, dict):
+        raise CandidateRunError(f"{description} facts must be an object")
+    result = {}
+    for name in names:
+        if value.get(name) is not True:
+            raise CandidateRunError(f"{description} did not satisfy {name}")
+        result[name] = True
+    return result
+
+
+def select_session(
+    observations: list[dict[str, Any]], session_ref_digest: str
+) -> list[dict[str, Any]]:
+    if DIGEST.fullmatch(str(session_ref_digest)) is None:
+        raise CandidateRunError("requested transport session digest is invalid")
+    selected = [
+        observation
+        for observation in observations
+        if observation["sessionRefDigest"] == session_ref_digest
+    ]
+    if not selected:
+        raise CandidateRunError("requested transport session was not captured by its profile")
+    return selected
+
+
+def validate_acceptance_receipt(
+    path_text: Any, constraint: str, binding: dict[str, str]
+) -> str:
+    if not isinstance(path_text, str) or not path_text:
+        raise CandidateRunError("connectivity cell has no acceptance receipt")
+    path = Path(path_text)
+    if path.is_symlink() or not path.is_file() or path.stat().st_size > 1024 * 1024:
+        raise CandidateRunError("connectivity acceptance receipt is absent, linked, or oversized")
+    receipt = load_object(path, "connectivity acceptance receipt")
+    if receipt.get("schema") != "openagents.sarah.livekit-acceptance.v4":
+        raise CandidateRunError("connectivity acceptance receipt schema is unsupported")
+    if receipt.get("sourceRevision") != binding["sarah_worker_revision"]:
+        raise CandidateRunError("connectivity acceptance receipt names a different worker")
+    if receipt.get("forcedTransportProfile") != constraint:
+        raise CandidateRunError("connectivity acceptance receipt names a different constraint")
+    if (
+        receipt.get("outcome") != "passed"
+        or receipt.get("environment") != "production"
+        or receipt.get("retainedMedia") is not False
+        or receipt.get("retainedTranscript") is not False
+    ):
+        raise CandidateRunError("connectivity acceptance receipt is not a passing public run")
+    expected_transport = CONSTRAINT_CLASSIFICATIONS[constraint]
+    scenarios = receipt.get("scenarios")
+    if not isinstance(scenarios, list) or len(scenarios) != 2:
+        raise CandidateRunError("connectivity acceptance receipt lacks two live scenarios")
+    scenario_kinds = set()
+    for scenario in scenarios:
+        observed_transport = (
+            scenario.get("observedTransportKind") if isinstance(scenario, dict) else None
+        )
+        if (
+            not isinstance(observed_transport, dict)
+            or observed_transport.get("publisher") != expected_transport
+            or observed_transport.get("subscriber") != expected_transport
+        ):
+            raise CandidateRunError(
+                "connectivity acceptance receipt contradicts the selected transport"
+            )
+        scenario_kinds.add(scenario.get("kind"))
+    if scenario_kinds != {"private", "community"}:
+        raise CandidateRunError("connectivity acceptance receipt scenario identities differ")
+    result_digest = receipt.get("resultDigest")
+    if re.fullmatch(r"sha256:[0-9a-f]{64}", str(result_digest)) is None:
+        raise CandidateRunError("connectivity acceptance result digest is invalid")
+    result = {
+        key: value
+        for key, value in receipt.items()
+        if key not in {"receiptRef", "resultDigest"}
+    }
+    encoded = json.dumps(
+        result, ensure_ascii=False, separators=(",", ":")
+    ).encode("utf-8")
+    recomputed = "sha256:" + hashlib.sha256(encoded).hexdigest()
+    if result_digest != recomputed:
+        raise CandidateRunError("connectivity acceptance result digest does not verify")
+    expected_ref = f"receipt.sarah_livekit_acceptance.{result_digest.replace(':', '_')}"
+    if receipt.get("receiptRef") != expected_ref:
+        raise CandidateRunError("connectivity acceptance receipt reference does not verify")
+    return result_digest.removeprefix("sha256:")
+
+
+def build_capture(plan: dict[str, Any], observations: dict[str, Any]) -> dict[str, Any]:
+    if observations.get("schema") != OBSERVATIONS_SCHEMA:
+        raise CandidateRunError("candidate observations schema is unsupported")
+    if observations.get("binding_digest") != plan["binding_digest"]:
+        raise CandidateRunError("candidate observations name a different binding")
+    profiles_by_ref = {
+        profile["profile_ref_digest"]: profile for profile in plan["profiles"]
+    }
+    observed_profiles = observations.get("profiles")
+    if not isinstance(observed_profiles, list) or len(observed_profiles) != 3:
+        raise CandidateRunError("candidate observations need exactly three profiles")
+    safe_profiles = []
+    seen_refs: set[str] = set()
+    for profile in observed_profiles:
+        if not isinstance(profile, dict) or set(profile) != {
+            "profile_ref_digest",
+            "authenticated",
+            "client_kind",
+            "package_sha256",
+        }:
+            raise CandidateRunError("candidate profile observation has unsupported fields")
+        profile_ref_digest = profile["profile_ref_digest"]
+        if profile_ref_digest not in profiles_by_ref or profile_ref_digest in seen_refs:
+            raise CandidateRunError("candidate profile observation is absent or duplicated")
+        if profile["authenticated"] is not True:
+            raise CandidateRunError("candidate profile was not authenticated")
+        if profile["client_kind"] != "packaged_omega_desktop":
+            raise CandidateRunError("candidate profile was not a packaged Omega desktop")
+        if profile["package_sha256"] != plan["binding"]["omega_package_sha256"]:
+            raise CandidateRunError("candidate profile names a different package")
+        seen_refs.add(profile_ref_digest)
+        safe_profiles.append(profile)
+    if seen_refs != set(profiles_by_ref):
+        raise CandidateRunError("candidate observations omitted a prepared profile")
+    transport_by_ref = {
+        profile_ref_digest: read_transport_log(profile)
+        for profile_ref_digest, profile in profiles_by_ref.items()
+    }
+
+    private = observations.get("private")
+    if not isinstance(private, dict) or set(private) != {
+        "profile_ref_digest",
+        "session_ref_digest",
+        "facts",
+    }:
+        raise CandidateRunError("private candidate observation has unsupported fields")
+    if private["profile_ref_digest"] not in profiles_by_ref:
+        raise CandidateRunError("private candidate observation names an unknown profile")
+    private_transport = select_session(
+        transport_by_ref[private["profile_ref_digest"]], private["session_ref_digest"]
+    )
+    if {item["stage"] for item in private_transport} != {"connected", "reconnected"}:
+        raise CandidateRunError("private candidate session lacks a connected/reconnected pair")
+    reconnect_bindings = {
+        (
+            item["sessionRefDigest"],
+            item["sessionGeneration"],
+            item["roomRefDigest"],
+            item["roomEpoch"],
+            item["dispatchRefDigest"],
+            item["providerGenerationRefDigest"],
+        )
+        for item in private_transport
+    }
+    if len(reconnect_bindings) != 1:
+        raise CandidateRunError("private reconnect changed or revived its provider generation")
+    private_capture = {
+        "profile_ref_digest": private["profile_ref_digest"],
+        "facts": require_true_facts(private["facts"], PRIVATE_FACTS, "private journey"),
+        "transport_observations": private_transport,
+    }
+
+    room = observations.get("room")
+    if not isinstance(room, dict) or set(room) != {"profile_ref_digests", "facts"}:
+        raise CandidateRunError("room candidate observation has unsupported fields")
+    if room["profile_ref_digests"] != [
+        profile["profile_ref_digest"] for profile in safe_profiles
+    ]:
+        raise CandidateRunError("room journey did not bind the exact three prepared profiles")
+    room_capture = {
+        "profile_ref_digests": room["profile_ref_digests"],
+        "authenticated_desktop_count": 3,
+        "facts": require_true_facts(room["facts"], ROOM_FACTS, "room journey"),
+    }
+
+    connectivity = observations.get("connectivity")
+    if not isinstance(connectivity, list) or len(connectivity) != 3:
+        raise CandidateRunError("connectivity observations need exactly three cells")
+    cells = []
+    seen_constraints: set[str] = set()
+    seen_sessions: set[str] = set()
+    for cell in connectivity:
+        if not isinstance(cell, dict) or set(cell) != {
+            "constraint",
+            "profile_ref_digest",
+            "session_ref_digest",
+            "acceptance_receipt",
+        }:
+            raise CandidateRunError("connectivity cell has unsupported fields")
+        constraint = cell["constraint"]
+        if constraint not in CONSTRAINT_CLASSIFICATIONS or constraint in seen_constraints:
+            raise CandidateRunError("connectivity constraint is absent or duplicated")
+        profile_ref_digest = cell["profile_ref_digest"]
+        if profile_ref_digest not in profiles_by_ref:
+            raise CandidateRunError("connectivity cell names an unknown profile")
+        session_ref_digest = cell["session_ref_digest"]
+        if session_ref_digest in seen_sessions:
+            raise CandidateRunError("connectivity cells reused a provider session")
+        acceptance_result_digest = validate_acceptance_receipt(
+            cell["acceptance_receipt"], constraint, plan["binding"]
+        )
+        selected = select_session(transport_by_ref[profile_ref_digest], session_ref_digest)
+        classifications: set[str] = set()
+        for observation in selected:
+            classifications.update(validate_transport_observation(observation))
+        expected = CONSTRAINT_CLASSIFICATIONS[constraint]
+        if classifications != {expected}:
+            raise CandidateRunError(
+                f"connectivity cell {constraint} did not exclusively observe {expected}"
+            )
+        cells.append(
+            {
+                "constraint": constraint,
+                "profile_ref_digest": profile_ref_digest,
+                "session_ref_digest": session_ref_digest,
+                "acceptance_result_digest": acceptance_result_digest,
+                "classification": expected,
+                "transport_observations": selected,
+            }
+        )
+        seen_constraints.add(constraint)
+        seen_sessions.add(session_ref_digest)
+    if seen_constraints != set(CONSTRAINT_CLASSIFICATIONS):
+        raise CandidateRunError("connectivity matrix is incomplete")
+    return {
+        "schema": CAPTURE_SCHEMA,
+        "public_safe": True,
+        "binding": plan["binding"],
+        "binding_digest": plan["binding_digest"],
+        "collector": collector_binding(),
+        "profiles": safe_profiles,
+        "private": private_capture,
+        "room": room_capture,
+        "connectivity": {"cells": cells},
+    }
+
+
+def validate_capture(value: dict[str, Any], plan: dict[str, Any]) -> dict[str, Any]:
+    if set(value) != {
+        "schema",
+        "public_safe",
+        "binding",
+        "binding_digest",
+        "collector",
+        "profiles",
+        "private",
+        "room",
+        "connectivity",
+    }:
+        raise CandidateRunError("candidate capture has private or unsupported fields")
+    if value.get("schema") != CAPTURE_SCHEMA or value.get("public_safe") is not True:
+        raise CandidateRunError("candidate capture is not public-safe or supported")
+    if value.get("binding") != plan["binding"]:
+        raise CandidateRunError("candidate capture names a different binding")
+    if value.get("binding_digest") != plan["binding_digest"]:
+        raise CandidateRunError("candidate capture binding digest is inconsistent")
+    validate_collector(value.get("collector"))
+    serialized = json.dumps(value, sort_keys=True)
+    if re.search(r"(?i)(bearer\s+[a-z0-9._-]+|sk-[a-z0-9_-]{12,}|wss?://|access[_-]?token|room[_-]?token)", serialized):
+        raise CandidateRunError("candidate capture contains private or secret-shaped material")
+    if len(value.get("profiles", [])) != 3:
+        raise CandidateRunError("candidate capture does not preserve three profiles")
+    private = value.get("private")
+    room = value.get("room")
+    connectivity = value.get("connectivity")
+    if not isinstance(private, dict) or set(private) != {
+        "profile_ref_digest",
+        "facts",
+        "transport_observations",
+    }:
+        raise CandidateRunError("candidate private capture has unsupported fields")
+    if not isinstance(room, dict) or set(room) != {
+        "profile_ref_digests",
+        "authenticated_desktop_count",
+        "facts",
+    }:
+        raise CandidateRunError("candidate room capture has unsupported fields")
+    if not isinstance(connectivity, dict) or set(connectivity) != {"cells"}:
+        raise CandidateRunError("candidate connectivity capture has unsupported fields")
+    require_true_facts(private.get("facts"), PRIVATE_FACTS, "private capture")
+    require_true_facts(room.get("facts"), ROOM_FACTS, "room capture")
+    private_transport = private.get("transport_observations")
+    if not isinstance(private_transport, list) or not private_transport:
+        raise CandidateRunError("candidate capture omitted private transport evidence")
+    for observation in private_transport:
+        validate_transport_observation(observation)
+    cells = connectivity.get("cells")
+    if not isinstance(cells, list) or len(cells) != 3:
+        raise CandidateRunError("candidate capture omitted connectivity cells")
+    for cell in cells:
+        if not isinstance(cell, dict) or set(cell) != {
+            "constraint",
+            "profile_ref_digest",
+            "session_ref_digest",
+            "acceptance_result_digest",
+            "classification",
+            "transport_observations",
+        }:
+            raise CandidateRunError("candidate connectivity cell has unsupported fields")
+        expected = CONSTRAINT_CLASSIFICATIONS.get(cell.get("constraint"))
+        if expected is None or cell.get("classification") != expected:
+            raise CandidateRunError("candidate capture connectivity classification differs")
+        cell_observations = cell.get("transport_observations")
+        if not isinstance(cell_observations, list) or not cell_observations:
+            raise CandidateRunError("candidate capture connectivity cell has no transport evidence")
+        classifications: set[str] = set()
+        for observation in cell_observations:
+            classifications.update(validate_transport_observation(observation))
+        if classifications != {expected}:
+            raise CandidateRunError("candidate capture connectivity ICE evidence differs")
+    return value
+
+
+def capture(arguments: argparse.Namespace) -> int:
+    plan = validate_plan(arguments.plan, live=True)
+    validate_runtime(arguments.runtime, arguments.plan, plan)
+    observations = load_object(arguments.observations, "candidate observations")
+    value = build_capture(plan, observations)
+    validate_capture(value, plan)
+    write_exclusive(arguments.output, value, mode=0o644)
+    print(f"wrote public-safe candidate capture: {arguments.output}")
+    return 0
+
+
+def validate_command(arguments: argparse.Namespace) -> int:
+    plan = validate_plan(arguments.plan, live=not arguments.offline)
+    value = load_object(arguments.input, "candidate capture")
+    validate_capture(value, plan)
+    print(f"candidate capture valid: {arguments.input}")
+    return 0
+
+
+def fixture_transport(
+    session: str, provider: str, stage: str, classification: str
+) -> dict[str, Any]:
+    protocol = "udp" if classification == "direct_udp" else "tcp"
+    candidate_type = "relay" if classification == "turn_tls" else "host"
+    relay_protocol = "tls" if classification == "turn_tls" else None
+    return {
+        "schema": TRANSPORT_SCHEMA,
+        "publicSafe": True,
+        "stage": stage,
+        "sessionRefDigest": session,
+        "sessionGeneration": 1,
+        "roomRefDigest": "2" * 64,
+        "roomEpoch": 1,
+        "dispatchRefDigest": "3" * 64,
+        "providerGenerationRefDigest": provider,
+        "publisherPaths": [
+            {
+                "classification": classification,
+                "local": {
+                    "candidateType": candidate_type,
+                    "protocol": protocol,
+                    "relayProtocol": relay_protocol,
+                },
+                "remote": {
+                    "candidateType": "host",
+                    "protocol": protocol,
+                    "relayProtocol": None,
+                },
+                "packetsSent": 8,
+                "packetsReceived": 5,
+            }
+        ],
+        "subscriberPaths": [],
+    }
+
+
+def fixture_acceptance_receipt(source_revision: str, constraint: str) -> dict[str, Any]:
+    result = {
+        "schema": "openagents.sarah.livekit-acceptance.v4",
+        "observedAt": "2026-08-01T00:00:00.000Z",
+        "environment": "production",
+        "apiOrigin": "https://openagents.com",
+        "livekitOrigin": "wss://livekit.openagents.com",
+        "sourceRevision": source_revision,
+        "outcome": "passed",
+        "concurrentOverlapObserved": True,
+        "retainedMedia": False,
+        "retainedTranscript": False,
+        "forcedTransportProfile": constraint,
+        "scenarios": [
+            {
+                "kind": kind,
+                "observedTransportKind": {
+                    "publisher": CONSTRAINT_CLASSIFICATIONS[constraint],
+                    "subscriber": CONSTRAINT_CLASSIFICATIONS[constraint],
+                },
+            }
+            for kind in ("private", "community")
+        ],
+        "crossScenarioIdentityDistinctness": {},
+        "limitations": [
+            "source_revision_resolved_from_deployed_image_digest",
+            "one_selected_ice_path_per_scenario_classified",
+            "forced_transport_profile_operator_declared_not_independently_verified",
+            "no_media_or_transcript_content_retained",
+            "harness_retention_only_separate_cluster_privacy_scan_required",
+        ],
+    }
+    encoded = json.dumps(result, ensure_ascii=False, separators=(",", ":")).encode()
+    result_digest = "sha256:" + hashlib.sha256(encoded).hexdigest()
+    return {
+        **result,
+        "receiptRef": f"receipt.sarah_livekit_acceptance.{result_digest.replace(':', '_')}",
+        "resultDigest": result_digest,
+    }
+
+
+def self_test(_arguments: argparse.Namespace) -> int:
+    binding = {
+        "omega_source_revision": "b" * 40,
+        "omega_package_sha256": "a" * 64,
+        "openagents_source_revision": "c" * 40,
+        "livekit_infrastructure_revision": "d" * 40,
+        "livekit_config_revision": "sha256:" + "e" * 64,
+        "livekit_image_digest": "sha256:" + "f" * 64,
+        "sarah_worker_revision": "1" * 40,
+        "sarah_worker_image_digest": "sha256:" + "2" * 64,
+        "admitted_model_revision": "model-fixture",
+        "price_catalog_revision": "price-fixture",
+    }
+    candidate = {
+        "package_sha256": "a" * 64,
+        "source_revision": "b" * 40,
+        "binary_sha256": "9" * 64,
+        "installed_binary": str(INSTALLED_BINARY),
+    }
+    with tempfile.TemporaryDirectory(prefix="omega-candidate-run-self-test-") as temporary:
+        run_directory = Path(temporary).resolve()
+        plan = build_plan(run_directory, binding, candidate)
+        plan_path = run_directory / "run-plan.json"
+        plan_path.write_text(json.dumps(plan) + "\n", encoding="utf-8")
+        for profile in plan["profiles"]:
+            Path(profile["data_dir"]).mkdir(parents=True)
+            Path(profile["temporary_dir"]).mkdir(parents=True)
+        validate_plan(plan_path, live=False)
+        profiles = plan["profiles"]
+        sessions = ("4" * 64, "5" * 64, "6" * 64)
+        classes = ("direct_udp", "tcp_fallback", "turn_tls")
+        for profile, session, classification in zip(profiles, sessions, classes):
+            transport_path = Path(profile["data_dir"]) / "voice/livekit-transport-evidence.jsonl"
+            transport_path.parent.mkdir(parents=True)
+            rows = [fixture_transport(session, "7" * 64, "connected", classification)]
+            if profile is profiles[0]:
+                rows.append(fixture_transport(session, "7" * 64, "reconnected", classification))
+            transport_path.write_text(
+                "".join(json.dumps(row) + "\n" for row in rows), encoding="utf-8"
+            )
+        profile_rows = [
+            {
+                "profile_ref_digest": profile["profile_ref_digest"],
+                "authenticated": True,
+                "client_kind": "packaged_omega_desktop",
+                "package_sha256": "a" * 64,
+            }
+            for profile in profiles
+        ]
+        acceptance_receipts = []
+        for constraint in CONSTRAINT_CLASSIFICATIONS:
+            receipt_path = run_directory / f"acceptance-{constraint}.json"
+            receipt_path.write_text(
+                json.dumps(
+                    fixture_acceptance_receipt(binding["sarah_worker_revision"], constraint),
+                    indent=2,
+                )
+                + "\n"
+            )
+            acceptance_receipts.append(receipt_path)
+        observations = {
+            "schema": OBSERVATIONS_SCHEMA,
+            "binding_digest": plan["binding_digest"],
+            "profiles": profile_rows,
+            "private": {
+                "profile_ref_digest": profiles[0]["profile_ref_digest"],
+                "session_ref_digest": sessions[0],
+                "facts": {name: True for name in PRIVATE_FACTS},
+            },
+            "room": {
+                "profile_ref_digests": [row["profile_ref_digest"] for row in profile_rows],
+                "facts": {name: True for name in ROOM_FACTS},
+            },
+            "connectivity": [
+                {
+                    "constraint": constraint,
+                    "profile_ref_digest": profile["profile_ref_digest"],
+                    "session_ref_digest": session,
+                    "acceptance_receipt": str(acceptance_receipt),
+                }
+                for constraint, profile, session, acceptance_receipt in zip(
+                    CONSTRAINT_CLASSIFICATIONS, profiles, sessions, acceptance_receipts
+                )
+            ],
+        }
+        capture_value = build_capture(plan, observations)
+        validate_capture(capture_value, plan)
+        for mutation, expected in (
+            (("profiles", 2, "package_sha256"), "candidate profile names a different package"),
+            (("connectivity", 1, "constraint"), "connectivity constraint is absent or duplicated"),
+        ):
+            forged = json.loads(json.dumps(observations))
+            if mutation[0] == "profiles":
+                forged["profiles"][mutation[1]][mutation[2]] = "0" * 64
+            else:
+                forged["connectivity"][mutation[1]][mutation[2]] = "unrestricted"
+            try:
+                build_capture(plan, forged)
+            except CandidateRunError as error:
+                if expected not in str(error):
+                    raise
+            else:
+                raise CandidateRunError("self-test accepted a forged candidate observation")
+        forged_transport = json.loads(json.dumps(capture_value))
+        forged_transport["connectivity"]["cells"][0]["transport_observations"][0][
+            "publisherPaths"
+        ][0]["local"]["address"] = "203.0.113.1"
+        try:
+            validate_capture(forged_transport, plan)
+        except CandidateRunError:
+            pass
+        else:
+            raise CandidateRunError("self-test accepted an address in public evidence")
+        revived = json.loads(json.dumps(observations))
+        transport_path = Path(profiles[0]["data_dir"]) / "voice/livekit-transport-evidence.jsonl"
+        rows = [
+            fixture_transport(sessions[0], "7" * 64, "connected", "direct_udp"),
+            fixture_transport(sessions[0], "0" * 64, "reconnected", "direct_udp"),
+        ]
+        transport_path.write_text("".join(json.dumps(row) + "\n" for row in rows))
+        try:
+            build_capture(plan, revived)
+        except CandidateRunError:
+            pass
+        else:
+            raise CandidateRunError("self-test accepted a revived provider generation")
+    print("Omega Sarah LiveKit candidate-run self-test passed")
+    return 0
+
+
+def parse_arguments() -> argparse.Namespace:
+    parser = argparse.ArgumentParser(description=__doc__)
+    subparsers = parser.add_subparsers(dest="command", required=True)
+    prepare_parser = subparsers.add_parser("prepare")
+    prepare_parser.add_argument("--dmg", type=Path, required=True)
+    prepare_parser.add_argument("--release-record", type=Path, required=True)
+    prepare_parser.add_argument("--binding", type=Path, required=True)
+    prepare_parser.add_argument("--run-dir", type=Path, required=True)
+    prepare_parser.set_defaults(handler=prepare)
+    launch_parser = subparsers.add_parser("launch")
+    launch_parser.add_argument("--plan", type=Path, required=True)
+    launch_parser.add_argument("--apply", action="store_true")
+    launch_parser.set_defaults(handler=launch)
+    capture_parser = subparsers.add_parser("capture")
+    capture_parser.add_argument("--plan", type=Path, required=True)
+    capture_parser.add_argument("--runtime", type=Path, required=True)
+    capture_parser.add_argument("--observations", type=Path, required=True)
+    capture_parser.add_argument("--output", type=Path, required=True)
+    capture_parser.set_defaults(handler=capture)
+    validate_parser = subparsers.add_parser("validate")
+    validate_parser.add_argument("--plan", type=Path, required=True)
+    validate_parser.add_argument("--input", type=Path, required=True)
+    validate_parser.add_argument("--offline", action="store_true")
+    validate_parser.set_defaults(handler=validate_command)
+    self_test_parser = subparsers.add_parser("self-test")
+    self_test_parser.set_defaults(handler=self_test)
+    return parser.parse_args()
+
+
+def main() -> int:
+    arguments = parse_arguments()
+    try:
+        return arguments.handler(arguments)
+    except (CandidateRunError, OSError) as error:
+        print(f"error: {error}", file=sys.stderr)
+        return 2
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())
