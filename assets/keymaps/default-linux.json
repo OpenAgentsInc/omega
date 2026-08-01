@@ -237,6 +237,12 @@
     }
   },
   {
+    "context": "AgentPanel && CometMode",
+    "bindings": {
+      "ctrl-w": "omega_workbench::CloseActiveSessionTab"
+    }
+  },
+  {
     "context": "WorkbenchRail",
     "bindings": {
       "up": "omega_workbench::FocusPreviousSurface",

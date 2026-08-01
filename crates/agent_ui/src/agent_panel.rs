@@ -2153,6 +2153,7 @@ pub struct AgentPanel {
     workbench_shell: workbench_shell::WorkbenchShell,
     workbench_shell_enabled: bool,
     comet_titlebar_dragging: bool,
+    comet_closed_session_tabs: HashSet<ThreadId>,
     /// Thread keys whose durable disk selection was already adopted (or
     /// reset), so a render-driven sync does not re-read disk per frame.
     workbench_selection_restore_attempted: HashSet<String>,
@@ -2773,6 +2774,7 @@ impl AgentPanel {
             workbench_shell,
             workbench_shell_enabled: omega_zero_base::is_active(),
             comet_titlebar_dragging: false,
+            comet_closed_session_tabs: HashSet::default(),
             workbench_selection_restore_attempted: HashSet::default(),
             workbench_sync_failure_log: DistinctFailureLog::default(),
             workbench_files_panel,
@@ -5315,6 +5317,7 @@ impl AgentPanel {
             return;
         }
 
+        self.comet_closed_session_tabs.remove(&row.thread_id);
         self.threads_sidebar_refusal = None;
         // OMEGA-DELTA-0130. The sidebar stays. It used to close itself here,
         // because it was an overlay covering the thread it had just opened.
@@ -10864,6 +10867,9 @@ impl AgentPanel {
         if omega_zero_base::is_active() {
             key_context.add("ZeroBase");
         }
+        if omega_zero_base::is_comet_mode() {
+            key_context.add("CometMode");
+        }
         key_context
     }
 
@@ -14219,6 +14225,26 @@ impl AgentPanel {
 }
 
 impl AgentPanel {
+    fn close_active_comet_session_tab(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let active_thread_id = self.active_thread_id(cx);
+        let fallback = self.threads_sidebar_rows(cx).into_iter().find(|row| {
+            Some(row.thread_id) != active_thread_id
+                && !self.comet_closed_session_tabs.contains(&row.thread_id)
+                && row.refusal.is_none()
+        });
+
+        if let Some(active_thread_id) = active_thread_id {
+            self.comet_closed_session_tabs.insert(active_thread_id);
+        }
+
+        if let Some(fallback) = fallback {
+            self.open_thread_from_threads_sidebar(&fallback, window, cx);
+        } else {
+            self.new_thread(&NewThread, window, cx);
+        }
+        cx.notify();
+    }
+
     fn render_comet_control(
         &self,
         id: &'static str,
@@ -14291,6 +14317,11 @@ impl AgentPanel {
             .filter(|row| Some(row.thread_id) != active_thread_id)
             .take(8)
             .collect::<Vec<_>>();
+        let historical_tabs = historical_rows
+            .iter()
+            .filter(|row| !self.comet_closed_session_tabs.contains(&row.thread_id))
+            .cloned()
+            .collect::<Vec<_>>();
 
         let active_tab = div()
             .id("comet-active-session-tab")
@@ -14342,7 +14373,7 @@ impl AgentPanel {
             )
             .child(div().size(px(6.)).rounded_full().bg(text_accent));
 
-        let history_tabs = historical_rows.iter().enumerate().map(|(index, row)| {
+        let history_tabs = historical_tabs.iter().enumerate().map(|(index, row)| {
             let row = row.clone();
             let title = row.title.clone();
             div()
@@ -14698,6 +14729,16 @@ impl Render for AgentPanel {
             .on_action(cx.listener(|this, action: &NewThread, window, cx| {
                 this.new_thread(action, window, cx);
             }))
+            .on_action(cx.listener(
+                |this, _: &workbench_shell::CloseActiveSessionTab, window, cx| {
+                    if omega_zero_base::is_comet_mode() {
+                        cx.stop_propagation();
+                        this.close_active_comet_session_tab(window, cx);
+                    } else {
+                        cx.propagate();
+                    }
+                },
+            ))
             .on_action(cx.listener(|this, _: &NewTerminalThread, window, cx| {
                 cx.stop_propagation();
                 this.new_terminal(None, AgentThreadSource::AgentPanel, window, cx);
