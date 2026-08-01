@@ -11186,6 +11186,7 @@ dependencies = [
  "nostr",
  "omega_acp_server",
  "omega_device_bridge",
+ "omega_forensics",
  "omega_identity",
  "omega_signer_broker",
  "paths",

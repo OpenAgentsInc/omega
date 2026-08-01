@@ -3,6 +3,7 @@
 //! Authority: OpenAgentsInc/omega#21 (`OMEGA-FA-02`).
 //! Durable run truth stays in omega-effectd on disk. GPUI is not run authority.
 
+mod forensics_cloud;
 mod issue31_nostr;
 mod issue31_provider_handoff;
 mod nostr_websocket_relay;
@@ -32,6 +33,7 @@ pub use openagents_binding::{
     init_openagents_binding, openagents_binding, try_openagents_binding,
 };
 
+pub use forensics_cloud::*;
 pub use issue31_nostr::*;
 pub use issue31_provider_handoff::*;
 pub use nostr_websocket_relay::{

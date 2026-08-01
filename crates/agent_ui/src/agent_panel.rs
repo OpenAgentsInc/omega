@@ -134,6 +134,10 @@ const LAST_CREATED_ENTRY_KIND_KEY: &str = "agent_panel__last_created_entry_kind"
 const TERMINAL_AGENT_TELEMETRY_ID: &str = "terminal";
 const TERMINAL_INIT_COMMAND_STARTUP_TIMEOUT: Duration = Duration::from_secs(5);
 
+fn forensics_timestamp() -> String {
+    Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Millis, true)
+}
+
 fn render_thread_lifecycle_badge(
     lifecycle: crate::omega_agent_supervision::SupervisedThreadLifecycle,
     element_id: ElementId,
@@ -2145,6 +2149,7 @@ pub struct AgentPanel {
     /// this only lets the router know whether an engine-lane pin is honourable
     /// before it decides.
     _engine_capacity_poll: Option<Task<()>>,
+    _forensics_workbench_subscriptions: Vec<Subscription>,
     workbench_shell: workbench_shell::WorkbenchShell,
     workbench_shell_enabled: bool,
     /// Thread keys whose durable disk selection was already adopted (or
@@ -2763,6 +2768,7 @@ impl AgentPanel {
             offers_identity_backup_nudge: false,
             _identity_backup_nudge_poll: None,
             _engine_capacity_poll: None,
+            _forensics_workbench_subscriptions: Vec::new(),
             workbench_shell,
             workbench_shell_enabled: omega_zero_base::is_active(),
             workbench_selection_restore_attempted: HashSet::default(),
@@ -12206,7 +12212,308 @@ impl AgentPanel {
                 "Forensics requires an exact Git repository binding"
             ));
         }
-        Ok(cx.new(|cx| crate::forensics_workbench::ForensicsWorkbenchSurface::new(&candidate, cx)))
+        let surface =
+            cx.new(|cx| crate::forensics_workbench::ForensicsWorkbenchSurface::new(&candidate, cx));
+        self._forensics_workbench_subscriptions.push(cx.subscribe(
+            &surface,
+            |this, surface, command, cx| {
+                this.handle_forensics_command(surface, command.clone(), cx);
+            },
+        ));
+        Ok(surface)
+    }
+
+    fn handle_forensics_command(
+        &mut self,
+        surface: Entity<crate::forensics_workbench::ForensicsWorkbenchSurface>,
+        command: crate::forensics_workbench::ForensicsWorkbenchCommand,
+        cx: &mut Context<Self>,
+    ) {
+        let session = omega_effectd::openagents_session_if_initialized(cx);
+        let http_client = cx.http_client();
+        let surface = surface.downgrade();
+        cx.spawn(async move |_, cx| {
+            let requested_at = forensics_timestamp();
+            let verified = match session {
+                Some(session) => session.resolve_verified(cx).await,
+                None => None,
+            };
+            let Some(verified) = verified else {
+                let error = omega_effectd::ForensicsCloudError::Refused {
+                    code: "authentication_required".into(),
+                    message: "connect a verified OpenAgents account before launching forensics"
+                        .into(),
+                };
+                surface.update(cx, |surface, cx| {
+                    surface.apply_failure(error.failure_projection(requested_at), cx)
+                })?;
+                return Ok(());
+            };
+            let client =
+                match omega_effectd::ForensicsCloudClient::new(http_client, &verified.base_url) {
+                    Ok(client) => client,
+                    Err(error) => {
+                        surface.update(cx, |surface, cx| {
+                            surface.apply_failure(error.failure_projection(requested_at), cx)
+                        })?;
+                        return Ok(());
+                    }
+                };
+            match command {
+                crate::forensics_workbench::ForensicsWorkbenchCommand::Launch {
+                    run_ref,
+                    intent: _,
+                } => {
+                    surface.update(cx, |surface, cx| {
+                        surface.mark_admitting(requested_at.clone(), cx)
+                    })?;
+                    let placement = client
+                        .admit(
+                            &verified.access_token,
+                            omega_effectd::ForensicsAdmitRequest {
+                                command_ref: format!("command.{run_ref}.admit"),
+                                idempotency_ref: format!("idempotency.{run_ref}.admit"),
+                                work_unit_ref: run_ref.clone(),
+                                attachment_ref: format!("attachment.{run_ref}"),
+                                placement_ref: format!("placement.{run_ref}"),
+                                requested_at: requested_at.clone(),
+                            },
+                        )
+                        .await;
+                    match placement {
+                        Ok(placement) => {
+                            surface.update(cx, |surface, cx| {
+                                surface.apply_admission(placement, cx)
+                            })??;
+                        }
+                        Err(error) => {
+                            surface.update(cx, |surface, cx| {
+                                surface.apply_failure(
+                                    error.failure_projection(forensics_timestamp()),
+                                    cx,
+                                )
+                            })?;
+                        }
+                    }
+                }
+                crate::forensics_workbench::ForensicsWorkbenchCommand::Refresh => {
+                    let snapshot = surface.read_with(cx, |surface, _| surface.snapshot())?;
+                    let Some(run) = snapshot.run else {
+                        return Ok(());
+                    };
+                    let Some(placement) = run.placement else {
+                        return Ok(());
+                    };
+                    match client
+                        .observe(
+                            &verified.access_token,
+                            &placement,
+                            omega_effectd::ForensicsObserveRequest {
+                                identity: omega_effectd::ForensicsCommandIdentity {
+                                    command_ref: format!(
+                                        "command.{}.observe.{}",
+                                        run.run_ref, run.event_cursor
+                                    ),
+                                    idempotency_ref: format!(
+                                        "idempotency.{}.observe.{}",
+                                        run.run_ref, run.event_cursor
+                                    ),
+                                },
+                                after_sequence: run.event_cursor,
+                                limit: 256,
+                                requested_at,
+                            },
+                        )
+                        .await
+                    {
+                        Ok(observation) => {
+                            surface.update(cx, |surface, cx| {
+                                surface.apply_observation(observation, cx)
+                            })??;
+                        }
+                        Err(error) => {
+                            surface.update(cx, |surface, cx| {
+                                surface.apply_failure(
+                                    error.failure_projection(forensics_timestamp()),
+                                    cx,
+                                )
+                            })?;
+                        }
+                    }
+                }
+                crate::forensics_workbench::ForensicsWorkbenchCommand::Cancel => {
+                    let snapshot = surface.read_with(cx, |surface, _| surface.snapshot())?;
+                    let Some(mut run) = snapshot.run else {
+                        return Ok(());
+                    };
+                    let Some(placement) = run.placement.clone() else {
+                        return Ok(());
+                    };
+                    let Some(turn_ref) = run
+                        .events
+                        .iter()
+                        .rev()
+                        .find_map(|event| event.turn_ref.clone())
+                    else {
+                        let error = omega_effectd::ForensicsCloudError::Refused {
+                            code: "turn_not_observed".into(),
+                            message: "refresh events before cancelling the active turn".into(),
+                        };
+                        surface.update(cx, |surface, cx| {
+                            surface.apply_failure(error.failure_projection(requested_at), cx)
+                        })?;
+                        return Ok(());
+                    };
+                    surface.update(cx, |surface, cx| {
+                        surface.mark_cancel_requested(requested_at.clone(), cx)
+                    })?;
+                    if let Err(error) = client
+                        .cancel(
+                            &verified.access_token,
+                            &placement,
+                            omega_effectd::ForensicsCancelRequest {
+                                identity: omega_effectd::ForensicsCommandIdentity {
+                                    command_ref: format!("command.{}.cancel", run.run_ref),
+                                    idempotency_ref: format!("idempotency.{}.cancel", run.run_ref),
+                                },
+                                inspect_identity: omega_effectd::ForensicsCommandIdentity {
+                                    command_ref: format!("command.{}.cancel.inspect", run.run_ref),
+                                    idempotency_ref: format!(
+                                        "idempotency.{}.cancel.inspect",
+                                        run.run_ref
+                                    ),
+                                },
+                                turn_ref,
+                                reason_ref: "reason.omega.operator_cancel".into(),
+                                requested_at: requested_at.clone(),
+                            },
+                        )
+                        .await
+                    {
+                        surface.update(cx, |surface, cx| {
+                            surface
+                                .apply_failure(error.failure_projection(forensics_timestamp()), cx)
+                        })?;
+                        return Ok(());
+                    }
+                    let observation = client
+                        .observe(
+                            &verified.access_token,
+                            &placement,
+                            omega_effectd::ForensicsObserveRequest {
+                                identity: omega_effectd::ForensicsCommandIdentity {
+                                    command_ref: format!(
+                                        "command.{}.observe.{}",
+                                        run.run_ref, run.event_cursor
+                                    ),
+                                    idempotency_ref: format!(
+                                        "idempotency.{}.observe.{}",
+                                        run.run_ref, run.event_cursor
+                                    ),
+                                },
+                                after_sequence: run.event_cursor,
+                                limit: 256,
+                                requested_at: forensics_timestamp(),
+                            },
+                        )
+                        .await;
+                    match observation {
+                        Ok(observation) => {
+                            run.event_cursor = observation.next_sequence;
+                            surface.update(cx, |surface, cx| {
+                                surface.apply_observation(observation, cx)
+                            })??;
+                        }
+                        Err(error) => {
+                            surface.update(cx, |surface, cx| {
+                                surface.apply_failure(
+                                    error.failure_projection(forensics_timestamp()),
+                                    cx,
+                                )
+                            })?;
+                            return Ok(());
+                        }
+                    }
+                    let deleting_at = forensics_timestamp();
+                    surface.update(cx, |surface, cx| {
+                        surface.mark_deleting(deleting_at.clone(), cx)
+                    })?;
+                    match client
+                        .delete(
+                            &verified.access_token,
+                            &placement,
+                            omega_effectd::ForensicsDeleteRequest {
+                                identity: omega_effectd::ForensicsCommandIdentity {
+                                    command_ref: format!("command.{}.delete", run.run_ref),
+                                    idempotency_ref: format!("idempotency.{}.delete", run.run_ref),
+                                },
+                                reason_ref: "reason.omega.operator_cancel".into(),
+                                requested_at: deleting_at,
+                            },
+                        )
+                        .await
+                    {
+                        Ok(cleaned) => {
+                            surface.update(cx, |surface, cx| {
+                                surface.apply_cleaned_placement(cleaned, cx)
+                            })??;
+                        }
+                        Err(error) => {
+                            surface.update(cx, |surface, cx| {
+                                surface.apply_failure(
+                                    error.failure_projection(forensics_timestamp()),
+                                    cx,
+                                )
+                            })?;
+                        }
+                    }
+                }
+                crate::forensics_workbench::ForensicsWorkbenchCommand::Cleanup => {
+                    let snapshot = surface.read_with(cx, |surface, _| surface.snapshot())?;
+                    let Some(run) = snapshot.run else {
+                        return Ok(());
+                    };
+                    let Some(placement) = run.placement else {
+                        return Ok(());
+                    };
+                    let deleting_at = forensics_timestamp();
+                    surface.update(cx, |surface, cx| {
+                        surface.mark_deleting(deleting_at.clone(), cx)
+                    })?;
+                    match client
+                        .delete(
+                            &verified.access_token,
+                            &placement,
+                            omega_effectd::ForensicsDeleteRequest {
+                                identity: omega_effectd::ForensicsCommandIdentity {
+                                    command_ref: format!("command.{}.delete", run.run_ref),
+                                    idempotency_ref: format!("idempotency.{}.delete", run.run_ref),
+                                },
+                                reason_ref: "reason.omega.operator_cleanup".into(),
+                                requested_at: deleting_at,
+                            },
+                        )
+                        .await
+                    {
+                        Ok(cleaned) => {
+                            surface.update(cx, |surface, cx| {
+                                surface.apply_cleaned_placement(cleaned, cx)
+                            })??;
+                        }
+                        Err(error) => {
+                            surface.update(cx, |surface, cx| {
+                                surface.apply_failure(
+                                    error.failure_projection(forensics_timestamp()),
+                                    cx,
+                                )
+                            })?;
+                        }
+                    }
+                }
+            }
+            Ok::<(), anyhow::Error>(())
+        })
+        .detach_and_log_err(cx);
     }
 
     fn prepare_terminal_surface(

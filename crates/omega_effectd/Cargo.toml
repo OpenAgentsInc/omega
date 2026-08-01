@@ -26,6 +26,7 @@ log.workspace = true
 nostr = { workspace = true, features = ["nip59"] }
 omega_acp_server.workspace = true
 omega_device_bridge.workspace = true
+omega_forensics.workspace = true
 omega_identity.workspace = true
 omega_signer_broker.workspace = true
 paths.workspace = true
@@ -50,4 +51,5 @@ test-support = []
 libc.workspace = true
 
 [dev-dependencies]
+http_client = { workspace = true, features = ["test-support"] }
 tempfile.workspace = true

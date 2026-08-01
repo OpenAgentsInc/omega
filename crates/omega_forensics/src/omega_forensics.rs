@@ -5,13 +5,16 @@ use url::Url;
 
 pub const PREFLIGHT_SCHEMA_V1: &str = "openagents.omega.forensics-preflight.v1";
 pub const LAUNCH_INTENT_SCHEMA_V1: &str = "openagents.omega.forensics-launch-intent.v1";
+pub const RUN_PROJECTION_SCHEMA_V1: &str = "openagents.omega.forensics-run.v1";
+pub const WORKER_PLACEMENT_SCHEMA_V1: &str = "openagents.forensic_worker_placement.v1";
+pub const WORKER_OBSERVATION_SCHEMA_V1: &str = "openagents.forensic_worker_observation.v1";
 pub const MANAGED_TARGET_REF: &str = "target-ref://openagents/managed-sandbox/gce-forensic-v1";
 pub const GCE_ADAPTER_REF: &str = "adapter.oa-codex-control.gce.v1";
 pub const BROKER_NETWORK_POLICY_REF: &str =
     "network-policy-ref://openagents/managed-sandbox/broker-only-v1";
 pub const COLDCARD_REPOSITORY_REF: &str = "repository-ref://coldcard/firmware";
 pub const COLDCARD_CLONE_URL: &str = "https://github.com/Coldcard/firmware.git";
-pub const COLDCARD_VULNERABLE_COMMIT: &str = "bcc2c382a324690a2fcf972c0bac3b79bf923f7b";
+pub const COLDCARD_VULNERABLE_COMMIT: &str = "7abc9a4c680b5623fc8a64f70555dd2d3802e488";
 pub const COLDCARD_FIXED_COMMIT: &str = "ca72463709f4e3f8964952039d5caf955f566a87";
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -418,6 +421,365 @@ pub struct ForensicsLaunchIntent {
     pub budget: ForensicBudgetProjection,
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum WorkerPlacementState {
+    AdmissionRequested,
+    Refused,
+    Provisioning,
+    WorkerReady,
+    Running,
+    Stopping,
+    Deleting,
+    Cleaned,
+    RecoveryRequired,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct ForensicWorkerPlacement {
+    pub schema: String,
+    pub placement_ref: String,
+    pub owner_ref: String,
+    pub tenant_ref: String,
+    pub work_unit_ref: String,
+    pub sandbox_ref: String,
+    pub attachment_generation: u64,
+    pub resource_generation: u64,
+    pub target_class: String,
+    pub provider: String,
+    pub adapter_ref: String,
+    pub isolation: String,
+    pub region_ref: String,
+    pub image_digest: String,
+    pub profile_digest: String,
+    pub network_policy_ref: String,
+    pub lease_ref: String,
+    pub budget_ref: String,
+    pub capability_refs: Vec<String>,
+    pub state: WorkerPlacementState,
+    pub admission_receipt_ref: Option<String>,
+    pub readiness_receipt_ref: Option<String>,
+    pub stop_receipt_ref: Option<String>,
+    pub deletion_receipt_ref: Option<String>,
+    pub cleanup_receipt_ref: Option<String>,
+    pub updated_at: String,
+}
+
+impl ForensicWorkerPlacement {
+    pub fn validate(&self) -> Result<(), ForensicsError> {
+        if self.schema != WORKER_PLACEMENT_SCHEMA_V1
+            || self.target_class != "openagents_managed"
+            || self.provider != "google_cloud"
+            || self.adapter_ref != GCE_ADAPTER_REF
+            || self.isolation != "gce_vm"
+            || self.network_policy_ref != BROKER_NETWORK_POLICY_REF
+            || self.attachment_generation == 0
+            || self.resource_generation == 0
+        {
+            return Err(ForensicsError::InvalidRun(
+                "worker placement is outside the admitted generation-bound GCE contract".into(),
+            ));
+        }
+        for value in [
+            &self.placement_ref,
+            &self.owner_ref,
+            &self.tenant_ref,
+            &self.work_unit_ref,
+            &self.sandbox_ref,
+            &self.region_ref,
+            &self.lease_ref,
+            &self.budget_ref,
+        ] {
+            validate_ref("worker placement", value)?;
+        }
+        validate_digest("worker image", &self.image_digest)?;
+        validate_digest("worker profile", &self.profile_digest)?;
+        if self.capability_refs.is_empty() || self.capability_refs.len() > 64 {
+            return Err(ForensicsError::InvalidRun(
+                "worker placement requires bounded capabilities".into(),
+            ));
+        }
+        if matches!(
+            self.state,
+            WorkerPlacementState::WorkerReady | WorkerPlacementState::Running
+        ) && (self.admission_receipt_ref.is_none() || self.readiness_receipt_ref.is_none())
+        {
+            return Err(ForensicsError::InvalidRun(
+                "ready workers require admission and readiness receipts".into(),
+            ));
+        }
+        if self.state == WorkerPlacementState::Cleaned
+            && (self.deletion_receipt_ref.is_none() || self.cleanup_receipt_ref.is_none())
+        {
+            return Err(ForensicsError::InvalidRun(
+                "cleaned workers require deletion and cleanup receipts".into(),
+            ));
+        }
+        Ok(())
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct ForensicWorkerEvent {
+    pub event_ref: String,
+    pub kind: String,
+    pub sequence: u64,
+    pub resource_generation: u64,
+    pub observed_at: String,
+    pub turn_ref: Option<String>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct ForensicWorkerTurn {
+    pub turn_ref: String,
+    pub status: String,
+    pub last_event_sequence: u64,
+    pub created_at: String,
+    pub started_at: Option<String>,
+    pub settled_at: Option<String>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct ForensicWorkerObservation {
+    pub schema: String,
+    pub placement_ref: String,
+    pub sandbox_ref: String,
+    pub resource_generation: u64,
+    pub lifecycle: String,
+    pub cleanup_complete: bool,
+    pub turn: Option<ForensicWorkerTurn>,
+    pub events: Vec<ForensicWorkerEvent>,
+    pub after_sequence: u64,
+    pub next_sequence: u64,
+    pub terminal_sequence: u64,
+    pub has_more: bool,
+    pub silence_is_terminal: bool,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ForensicsRunPhase {
+    Prepared,
+    Admitting,
+    WorkerReady,
+    Running,
+    CancelRequested,
+    Interrupting,
+    Settled,
+    Deleting,
+    Cleaned,
+    Refused,
+    Failed,
+    RecoveryRequired,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ForensicsFailureClass {
+    Refused,
+    Failed,
+    RecoveryRequired,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct ForensicsFailureProjection {
+    pub class: ForensicsFailureClass,
+    pub reason_ref: String,
+    pub message: String,
+    pub retryable: bool,
+    pub observed_at: String,
+}
+
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct ForensicsRunTimestamps {
+    pub admission_requested_at: Option<String>,
+    pub worker_ready_at: Option<String>,
+    pub run_started_at: Option<String>,
+    pub cancel_requested_at: Option<String>,
+    pub interrupt_observed_at: Option<String>,
+    pub structurally_settled_at: Option<String>,
+    pub deletion_requested_at: Option<String>,
+    pub cleanup_observed_at: Option<String>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct ForensicsRunProjection {
+    pub schema: String,
+    pub run_ref: String,
+    pub phase: ForensicsRunPhase,
+    pub placement: Option<ForensicWorkerPlacement>,
+    pub event_cursor: u64,
+    pub events: Vec<ForensicWorkerEvent>,
+    pub timestamps: ForensicsRunTimestamps,
+    pub failure: Option<ForensicsFailureProjection>,
+}
+
+impl ForensicsRunProjection {
+    pub fn prepared(run_ref: String) -> Result<Self, ForensicsError> {
+        validate_ref("forensic run", &run_ref)?;
+        Ok(Self {
+            schema: RUN_PROJECTION_SCHEMA_V1.into(),
+            run_ref,
+            phase: ForensicsRunPhase::Prepared,
+            placement: None,
+            event_cursor: 0,
+            events: Vec::new(),
+            timestamps: ForensicsRunTimestamps::default(),
+            failure: None,
+        })
+    }
+
+    pub fn mark_admitting(&mut self, requested_at: String) {
+        self.phase = ForensicsRunPhase::Admitting;
+        self.timestamps.admission_requested_at = Some(requested_at);
+        self.failure = None;
+    }
+
+    pub fn apply_admission(
+        &mut self,
+        placement: ForensicWorkerPlacement,
+    ) -> Result<(), ForensicsError> {
+        placement.validate()?;
+        if placement.work_unit_ref != self.run_ref || placement.owner_ref != placement.tenant_ref {
+            return Err(ForensicsError::InvalidRun(
+                "worker placement is not bound to this owner-scoped run".into(),
+            ));
+        }
+        if let Some(current) = &self.placement
+            && (current.placement_ref != placement.placement_ref
+                || current.sandbox_ref != placement.sandbox_ref
+                || current.attachment_generation != placement.attachment_generation
+                || current.resource_generation != placement.resource_generation)
+        {
+            return Err(ForensicsError::DuplicateWorkerGeneration);
+        }
+        self.timestamps.worker_ready_at = Some(placement.updated_at.clone());
+        self.phase = ForensicsRunPhase::WorkerReady;
+        self.placement = Some(placement);
+        Ok(())
+    }
+
+    pub fn mark_cancel_requested(&mut self, requested_at: String) {
+        self.phase = ForensicsRunPhase::CancelRequested;
+        self.timestamps.cancel_requested_at = Some(requested_at);
+    }
+
+    pub fn mark_deleting(&mut self, requested_at: String) {
+        self.phase = ForensicsRunPhase::Deleting;
+        self.timestamps.deletion_requested_at = Some(requested_at);
+    }
+
+    pub fn apply_cleaned_placement(
+        &mut self,
+        placement: ForensicWorkerPlacement,
+    ) -> Result<(), ForensicsError> {
+        placement.validate()?;
+        let current = self
+            .placement
+            .as_ref()
+            .ok_or_else(|| ForensicsError::InvalidRun("worker placement is absent".into()))?;
+        if current.placement_ref != placement.placement_ref
+            || current.sandbox_ref != placement.sandbox_ref
+            || current.attachment_generation != placement.attachment_generation
+            || current.resource_generation != placement.resource_generation
+            || placement.state != WorkerPlacementState::Cleaned
+        {
+            return Err(ForensicsError::InvalidRun(
+                "cleanup belongs to a different worker".into(),
+            ));
+        }
+        self.timestamps.cleanup_observed_at = Some(placement.updated_at.clone());
+        self.phase = ForensicsRunPhase::Cleaned;
+        self.placement = Some(placement);
+        Ok(())
+    }
+
+    pub fn apply_observation(
+        &mut self,
+        observation: ForensicWorkerObservation,
+    ) -> Result<(), ForensicsError> {
+        let placement = self
+            .placement
+            .as_ref()
+            .ok_or_else(|| ForensicsError::InvalidRun("worker placement is absent".into()))?;
+        if observation.schema != WORKER_OBSERVATION_SCHEMA_V1
+            || observation.placement_ref != placement.placement_ref
+            || observation.sandbox_ref != placement.sandbox_ref
+            || observation.resource_generation != placement.resource_generation
+            || observation.after_sequence != self.event_cursor
+            || observation.next_sequence < observation.after_sequence
+            || observation.silence_is_terminal
+        {
+            return Err(ForensicsError::InvalidObservation);
+        }
+        for (index, event) in observation.events.iter().enumerate() {
+            if event.sequence != self.event_cursor + index as u64 + 1
+                || event.resource_generation != placement.resource_generation
+            {
+                return Err(ForensicsError::InvalidObservation);
+            }
+        }
+        if observation.next_sequence
+            != observation
+                .events
+                .last()
+                .map_or(observation.after_sequence, |event| event.sequence)
+        {
+            return Err(ForensicsError::InvalidObservation);
+        }
+        for event in &observation.events {
+            match event.kind.as_str() {
+                "GuestReady" => {
+                    self.phase = ForensicsRunPhase::WorkerReady;
+                    self.timestamps.worker_ready_at = Some(event.observed_at.clone());
+                }
+                "RuntimeStarted" => {
+                    self.phase = ForensicsRunPhase::Running;
+                    self.timestamps.run_started_at = Some(event.observed_at.clone());
+                }
+                "RuntimeInterruptRequested" => {
+                    self.phase = ForensicsRunPhase::Interrupting;
+                    self.timestamps.interrupt_observed_at = Some(event.observed_at.clone());
+                }
+                "RuntimeSettled" | "RuntimeInterrupted" => {
+                    self.phase = ForensicsRunPhase::Settled;
+                    self.timestamps.structurally_settled_at = Some(event.observed_at.clone());
+                }
+                "DeleteRequested" => self.phase = ForensicsRunPhase::Deleting,
+                "CleanupObserved" if observation.cleanup_complete => {
+                    self.phase = ForensicsRunPhase::Cleaned;
+                    self.timestamps.cleanup_observed_at = Some(event.observed_at.clone());
+                }
+                "RuntimeFailed" | "OperationFailed" => self.phase = ForensicsRunPhase::Failed,
+                "RecoveryMarked" => self.phase = ForensicsRunPhase::RecoveryRequired,
+                _ => {}
+            }
+        }
+        self.event_cursor = observation.next_sequence;
+        self.events.extend(observation.events);
+        if self.events.len() > 256 {
+            self.events.drain(..self.events.len() - 256);
+        }
+        Ok(())
+    }
+
+    pub fn apply_failure(&mut self, failure: ForensicsFailureProjection) {
+        self.phase = match failure.class {
+            ForensicsFailureClass::Refused => ForensicsRunPhase::Refused,
+            ForensicsFailureClass::Failed => ForensicsRunPhase::Failed,
+            ForensicsFailureClass::RecoveryRequired => ForensicsRunPhase::RecoveryRequired,
+        };
+        self.failure = Some(failure);
+    }
+}
+
 #[derive(Debug, Error, PartialEq, Eq)]
 pub enum ForensicsError {
     #[error("the forensics schema is unsupported")]
@@ -436,6 +798,12 @@ pub enum ForensicsError {
     CoverageNotTerminal,
     #[error("the incomplete research state requires explicit acknowledgment")]
     IncompleteAcknowledgmentRefused,
+    #[error("the forensic run projection is invalid: {0}")]
+    InvalidRun(String),
+    #[error("the forensic event page is not an exact ordered continuation")]
+    InvalidObservation,
+    #[error("an idempotent retry attempted to bind a duplicate worker generation")]
+    DuplicateWorkerGeneration,
 }
 
 fn validate_ref(label: &str, value: &str) -> Result<(), ForensicsError> {
@@ -535,6 +903,37 @@ mod tests {
         }
     }
 
+    fn admitted_placement() -> ForensicWorkerPlacement {
+        ForensicWorkerPlacement {
+            schema: WORKER_PLACEMENT_SCHEMA_V1.into(),
+            placement_ref: "placement.forensic.fixture".into(),
+            owner_ref: "owner.forensic.fixture".into(),
+            tenant_ref: "owner.forensic.fixture".into(),
+            work_unit_ref: "run.forensic.fixture".into(),
+            sandbox_ref: "sandbox.forensic.fixture".into(),
+            attachment_generation: 1,
+            resource_generation: 1,
+            target_class: "openagents_managed".into(),
+            provider: "google_cloud".into(),
+            adapter_ref: GCE_ADAPTER_REF.into(),
+            isolation: "gce_vm".into(),
+            region_ref: "region.google-cloud.us-central1".into(),
+            image_digest: digest('a'),
+            profile_digest: digest('b'),
+            network_policy_ref: BROKER_NETWORK_POLICY_REF.into(),
+            lease_ref: "lease.forensic.fixture".into(),
+            budget_ref: "budget.forensic.worker.initial.v1".into(),
+            capability_refs: vec!["capability.forensic.fixture.agent_turn".into()],
+            state: WorkerPlacementState::WorkerReady,
+            admission_receipt_ref: Some("receipt.forensic.admission".into()),
+            readiness_receipt_ref: Some("receipt.forensic.readiness".into()),
+            stop_receipt_ref: None,
+            deletion_receipt_ref: None,
+            cleanup_receipt_ref: None,
+            updated_at: "2026-08-01T10:00:00.000Z".into(),
+        }
+    }
+
     fn preflight(arm: ColdcardBenchmarkArm) -> ForensicsPreflightProjection {
         ForensicsPreflightProjection {
             schema: PREFLIGHT_SCHEMA_V1.into(),
@@ -570,6 +969,118 @@ mod tests {
             }),
             Err(ForensicsError::CoverageNotTerminal)
         );
+    }
+
+    #[test]
+    fn idempotent_admission_cannot_bind_a_duplicate_generation() {
+        let mut run =
+            ForensicsRunProjection::prepared("run.forensic.fixture".into()).expect("valid run");
+        let placement = admitted_placement();
+        run.apply_admission(placement.clone())
+            .expect("first admission");
+        run.apply_admission(placement).expect("exact replay");
+        let mut duplicate = admitted_placement();
+        duplicate.resource_generation = 2;
+        assert_eq!(
+            run.apply_admission(duplicate),
+            Err(ForensicsError::DuplicateWorkerGeneration)
+        );
+    }
+
+    #[test]
+    fn reconnect_requires_a_contiguous_cursor_and_silence_is_not_terminal() {
+        let mut run =
+            ForensicsRunProjection::prepared("run.forensic.fixture".into()).expect("valid run");
+        run.apply_admission(admitted_placement())
+            .expect("admission");
+        let observation = ForensicWorkerObservation {
+            schema: WORKER_OBSERVATION_SCHEMA_V1.into(),
+            placement_ref: "placement.forensic.fixture".into(),
+            sandbox_ref: "sandbox.forensic.fixture".into(),
+            resource_generation: 1,
+            lifecycle: "ready".into(),
+            cleanup_complete: false,
+            turn: None,
+            events: vec![ForensicWorkerEvent {
+                event_ref: "event.forensic.runtime-started".into(),
+                kind: "RuntimeStarted".into(),
+                sequence: 1,
+                resource_generation: 1,
+                observed_at: "2026-08-01T10:00:01.000Z".into(),
+                turn_ref: Some("turn.forensic.fixture".into()),
+            }],
+            after_sequence: 0,
+            next_sequence: 1,
+            terminal_sequence: 1,
+            has_more: false,
+            silence_is_terminal: false,
+        };
+        run.apply_observation(observation).expect("ordered page");
+        assert_eq!(run.phase, ForensicsRunPhase::Running);
+        run.apply_observation(ForensicWorkerObservation {
+            schema: WORKER_OBSERVATION_SCHEMA_V1.into(),
+            placement_ref: "placement.forensic.fixture".into(),
+            sandbox_ref: "sandbox.forensic.fixture".into(),
+            resource_generation: 1,
+            lifecycle: "ready".into(),
+            cleanup_complete: false,
+            turn: None,
+            events: Vec::new(),
+            after_sequence: 1,
+            next_sequence: 1,
+            terminal_sequence: 1,
+            has_more: false,
+            silence_is_terminal: false,
+        })
+        .expect("silent reconnect");
+        assert_eq!(run.phase, ForensicsRunPhase::Running);
+    }
+
+    #[test]
+    fn cancellation_tracks_interrupt_settlement_deletion_and_cleanup_separately() {
+        let mut run =
+            ForensicsRunProjection::prepared("run.forensic.fixture".into()).expect("valid run");
+        run.apply_admission(admitted_placement())
+            .expect("admission");
+        run.mark_cancel_requested("2026-08-01T10:01:00.000Z".into());
+        let events = [
+            ("RuntimeInterruptRequested", "2026-08-01T10:01:01.000Z"),
+            ("RuntimeInterrupted", "2026-08-01T10:01:02.000Z"),
+            ("DeleteRequested", "2026-08-01T10:01:03.000Z"),
+            ("CleanupObserved", "2026-08-01T10:01:04.000Z"),
+        ]
+        .into_iter()
+        .enumerate()
+        .map(|(index, (kind, observed_at))| ForensicWorkerEvent {
+            event_ref: format!("event.forensic.{index}"),
+            kind: kind.into(),
+            sequence: index as u64 + 1,
+            resource_generation: 1,
+            observed_at: observed_at.into(),
+            turn_ref: Some("turn.forensic.fixture".into()),
+        })
+        .collect::<Vec<_>>();
+        run.apply_observation(ForensicWorkerObservation {
+            schema: WORKER_OBSERVATION_SCHEMA_V1.into(),
+            placement_ref: "placement.forensic.fixture".into(),
+            sandbox_ref: "sandbox.forensic.fixture".into(),
+            resource_generation: 1,
+            lifecycle: "deleted".into(),
+            cleanup_complete: true,
+            turn: None,
+            events,
+            after_sequence: 0,
+            next_sequence: 4,
+            terminal_sequence: 4,
+            has_more: false,
+            silence_is_terminal: false,
+        })
+        .expect("cancellation page");
+        assert_eq!(run.phase, ForensicsRunPhase::Cleaned);
+        assert!(run.timestamps.cancel_requested_at.is_some());
+        assert!(run.timestamps.interrupt_observed_at.is_some());
+        assert!(run.timestamps.structurally_settled_at.is_some());
+        assert!(run.timestamps.cleanup_observed_at.is_some());
     }
 
     #[test]
@@ -630,17 +1141,26 @@ mod tests {
 
     #[test]
     fn renderer_projection_contains_no_provider_authority_or_secret_fields() {
-        let json = serde_json::to_string(&preflight(ColdcardBenchmarkArm::Fixed))
-            .expect("serialize public projection");
+        let mut run =
+            ForensicsRunProjection::prepared("run.forensic.fixture".into()).expect("valid run");
+        run.apply_admission(admitted_placement())
+            .expect("admission");
+        let json = serde_json::to_string(&(preflight(ColdcardBenchmarkArm::Fixed), run))
+            .expect("serialize public projections");
         for forbidden in [
             "project_id",
             "instance_id",
             "control_token",
+            "access_token",
             "credential",
             "service_account",
             "provider_client",
             "shell",
             "external_ip",
+            "prompt",
+            "source_bytes",
+            "private_evidence",
+            "finding_content",
         ] {
             assert!(!json.contains(forbidden), "projection leaked {forbidden}");
         }

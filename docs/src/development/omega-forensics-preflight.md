@@ -76,8 +76,10 @@ remains denied.
 
 Review the target, managed placement, bounds, and terminal coverage, then press
 **Prepare run**. This explicit action creates a launch intent bound to the
-preflight ref, coverage state, incomplete state, and admitted budgets. It does
-not start analysis. Worker admission and launch are separate follow-up work.
+preflight ref, coverage state, incomplete state, and admitted budgets. The
+host-owned [Omega Forensics cloud control](omega-forensics-cloud-control.md)
+then admits, observes, cancels, and cleans up the worker without moving
+credentials or provider authority into this surface.
 
 The boundary prevents surface selection, benchmark selection, coverage updates,
 or profile delivery from starting a worker as a side effect.

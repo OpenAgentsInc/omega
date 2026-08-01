@@ -1,7 +1,9 @@
-use gpui::{App, Context, FocusHandle, Focusable, Render, SharedString, Window};
+use gpui::{App, Context, EventEmitter, FocusHandle, Focusable, Render, SharedString, Window};
 use omega_forensics::{
     ColdcardBenchmarkArm, CoverageStatus, DependencyPolicy, ExplicitOperatorAction,
-    ForensicsLaunchIntent, ForensicsPreflightProjection, PreflightReadiness, SourceState,
+    ForensicWorkerObservation, ForensicWorkerPlacement, ForensicsFailureProjection,
+    ForensicsLaunchIntent, ForensicsPreflightProjection, ForensicsRunPhase, ForensicsRunProjection,
+    PreflightReadiness, SourceState,
 };
 use omega_workbench_state::RepositoryBinding;
 use ui::{
@@ -27,7 +29,19 @@ pub struct ForensicsWorkbenchSnapshot {
     pub selected_arm: ColdcardBenchmarkArm,
     pub readiness: Option<PreflightReadiness>,
     pub prepared_intent: Option<ForensicsLaunchIntent>,
+    pub run: Option<ForensicsRunProjection>,
     pub status: SharedString,
+}
+
+#[derive(Clone, Debug)]
+pub enum ForensicsWorkbenchCommand {
+    Launch {
+        run_ref: String,
+        intent: ForensicsLaunchIntent,
+    },
+    Refresh,
+    Cancel,
+    Cleanup,
 }
 
 pub struct ForensicsWorkbenchSurface {
@@ -37,6 +51,7 @@ pub struct ForensicsWorkbenchSurface {
     selected_arm: ColdcardBenchmarkArm,
     preflight: Option<ForensicsPreflightProjection>,
     prepared_intent: Option<ForensicsLaunchIntent>,
+    run: Option<ForensicsRunProjection>,
     status: SharedString,
 }
 
@@ -54,6 +69,7 @@ impl ForensicsWorkbenchSurface {
             selected_arm: ColdcardBenchmarkArm::Vulnerable,
             preflight: None,
             prepared_intent: None,
+            run: None,
             status: "Awaiting OpenAgents managed profile".into(),
         }
     }
@@ -79,6 +95,7 @@ impl ForensicsWorkbenchSurface {
             .unwrap_or(ColdcardBenchmarkArm::Vulnerable);
         self.selected_arm = selected_arm;
         self.prepared_intent = None;
+        self.run = None;
         self.status = readiness_label(projection.readiness()).into();
         self.preflight = Some(projection);
         cx.notify();
@@ -88,6 +105,7 @@ impl ForensicsWorkbenchSurface {
     pub fn select_benchmark_arm(&mut self, arm: ColdcardBenchmarkArm, cx: &mut Context<Self>) {
         self.selected_arm = arm;
         self.prepared_intent = None;
+        self.run = None;
         if let Some(preflight) = self.preflight.as_mut() {
             preflight.set_benchmark_arm(arm);
             self.status = "Coverage pending".into();
@@ -120,6 +138,104 @@ impl ForensicsWorkbenchSurface {
         Ok(())
     }
 
+    pub fn launch_run(&mut self, cx: &mut Context<Self>) -> anyhow::Result<()> {
+        let intent = self
+            .prepared_intent
+            .clone()
+            .ok_or_else(|| anyhow::anyhow!("prepare the run before launching a worker"))?;
+        let commit_prefix = self
+            .preflight
+            .as_ref()
+            .and_then(|preflight| preflight.target.commit.get(..12))
+            .ok_or_else(|| anyhow::anyhow!("the repository commit is unavailable"))?;
+        let run_ref = format!(
+            "run.omega.forensics.{commit_prefix}.{}",
+            uuid::Uuid::new_v4().simple()
+        );
+        self.run = Some(ForensicsRunProjection::prepared(run_ref.clone())?);
+        self.status = "Launching one OpenAgents Cloud worker…".into();
+        cx.emit(ForensicsWorkbenchCommand::Launch { run_ref, intent });
+        cx.notify();
+        Ok(())
+    }
+
+    pub fn mark_admitting(&mut self, requested_at: String, cx: &mut Context<Self>) {
+        if let Some(run) = self.run.as_mut() {
+            run.mark_admitting(requested_at);
+            self.status = run_phase_label(run.phase).into();
+            cx.notify();
+        }
+    }
+
+    pub fn apply_admission(
+        &mut self,
+        placement: ForensicWorkerPlacement,
+        cx: &mut Context<Self>,
+    ) -> anyhow::Result<()> {
+        let run = self
+            .run
+            .as_mut()
+            .ok_or_else(|| anyhow::anyhow!("the forensic run is unavailable"))?;
+        run.apply_admission(placement)?;
+        self.status = run_phase_label(run.phase).into();
+        cx.notify();
+        Ok(())
+    }
+
+    pub fn apply_observation(
+        &mut self,
+        observation: ForensicWorkerObservation,
+        cx: &mut Context<Self>,
+    ) -> anyhow::Result<()> {
+        let run = self
+            .run
+            .as_mut()
+            .ok_or_else(|| anyhow::anyhow!("the forensic run is unavailable"))?;
+        run.apply_observation(observation)?;
+        self.status = run_phase_label(run.phase).into();
+        cx.notify();
+        Ok(())
+    }
+
+    pub fn mark_cancel_requested(&mut self, requested_at: String, cx: &mut Context<Self>) {
+        if let Some(run) = self.run.as_mut() {
+            run.mark_cancel_requested(requested_at);
+            self.status = run_phase_label(run.phase).into();
+            cx.notify();
+        }
+    }
+
+    pub fn mark_deleting(&mut self, requested_at: String, cx: &mut Context<Self>) {
+        if let Some(run) = self.run.as_mut() {
+            run.mark_deleting(requested_at);
+            self.status = run_phase_label(run.phase).into();
+            cx.notify();
+        }
+    }
+
+    pub fn apply_cleaned_placement(
+        &mut self,
+        placement: ForensicWorkerPlacement,
+        cx: &mut Context<Self>,
+    ) -> anyhow::Result<()> {
+        let run = self
+            .run
+            .as_mut()
+            .ok_or_else(|| anyhow::anyhow!("the forensic run is unavailable"))?;
+        run.apply_cleaned_placement(placement)?;
+        self.status = run_phase_label(run.phase).into();
+        cx.notify();
+        Ok(())
+    }
+
+    pub fn apply_failure(&mut self, failure: ForensicsFailureProjection, cx: &mut Context<Self>) {
+        if let Some(run) = self.run.as_mut() {
+            run.apply_failure(failure);
+            self.status = run_phase_label(run.phase).into();
+            cx.notify();
+        }
+    }
+
     pub fn snapshot(&self) -> ForensicsWorkbenchSnapshot {
         ForensicsWorkbenchSnapshot {
             binding: self.binding.clone(),
@@ -129,6 +245,7 @@ impl ForensicsWorkbenchSurface {
                 .as_ref()
                 .map(|preflight| preflight.readiness()),
             prepared_intent: self.prepared_intent.clone(),
+            run: self.run.clone(),
             status: self.status.clone(),
         }
     }
@@ -147,6 +264,8 @@ impl ForensicsWorkbenchSurface {
             .child(Label::new(value).size(LabelSize::XSmall).line_clamp(1))
     }
 }
+
+impl EventEmitter<ForensicsWorkbenchCommand> for ForensicsWorkbenchSurface {}
 
 impl Focusable for ForensicsWorkbenchSurface {
     fn focus_handle(&self, _cx: &App) -> FocusHandle {
@@ -193,6 +312,27 @@ impl Render for ForensicsWorkbenchSurface {
         let needs_acknowledgment = self.preflight.as_ref().is_some_and(|preflight| {
             preflight.coverage.status == CoverageStatus::Incomplete
                 && !preflight.incomplete_acknowledged
+        });
+        let run_phase = self.run.as_ref().map(|run| run.phase);
+        let can_launch = self.prepared_intent.is_some() && self.run.is_none();
+        let can_refresh = run_phase.is_some_and(|phase| {
+            !matches!(
+                phase,
+                ForensicsRunPhase::Prepared
+                    | ForensicsRunPhase::Admitting
+                    | ForensicsRunPhase::Cleaned
+                    | ForensicsRunPhase::Refused
+                    | ForensicsRunPhase::Failed
+            )
+        });
+        let can_cancel = run_phase.is_some_and(|phase| matches!(phase, ForensicsRunPhase::Running));
+        let can_cleanup = run_phase.is_some_and(|phase| {
+            matches!(
+                phase,
+                ForensicsRunPhase::WorkerReady
+                    | ForensicsRunPhase::Settled
+                    | ForensicsRunPhase::RecoveryRequired
+            )
         });
 
         v_flex()
@@ -396,6 +536,48 @@ impl Render for ForensicsWorkbenchSurface {
                         }
                     })),
             )
+            .when(can_launch, |this| {
+                this.child(
+                    Button::new("omega.forensics.launch-run", "Launch worker")
+                        .size(ButtonSize::Compact)
+                        .on_click(cx.listener(|this, _, _, cx| {
+                            if let Err(error) = this.launch_run(cx) {
+                                this.status = error.to_string().into();
+                                cx.notify();
+                            }
+                        })),
+                )
+            })
+            .when(can_refresh, |this| {
+                this.child(
+                    Button::new("omega.forensics.refresh-run", "Refresh events")
+                        .size(ButtonSize::Compact)
+                        .style(ButtonStyle::Subtle)
+                        .on_click(cx.listener(|_, _, _, cx| {
+                            cx.emit(ForensicsWorkbenchCommand::Refresh);
+                        })),
+                )
+            })
+            .when(can_cancel, |this| {
+                this.child(
+                    Button::new("omega.forensics.cancel-run", "Cancel and clean up")
+                        .size(ButtonSize::Compact)
+                        .style(ButtonStyle::Subtle)
+                        .on_click(cx.listener(|_, _, _, cx| {
+                            cx.emit(ForensicsWorkbenchCommand::Cancel);
+                        })),
+                )
+            })
+            .when(can_cleanup, |this| {
+                this.child(
+                    Button::new("omega.forensics.cleanup-run", "Delete and verify cleanup")
+                        .size(ButtonSize::Compact)
+                        .style(ButtonStyle::Subtle)
+                        .on_click(cx.listener(|_, _, _, cx| {
+                            cx.emit(ForensicsWorkbenchCommand::Cleanup);
+                        })),
+                )
+            })
     }
 }
 
@@ -422,14 +604,32 @@ fn dependency_policy_label(dependency_policy: DependencyPolicy) -> &'static str 
     }
 }
 
+fn run_phase_label(phase: ForensicsRunPhase) -> &'static str {
+    match phase {
+        ForensicsRunPhase::Prepared => "Run prepared",
+        ForensicsRunPhase::Admitting => "Admitting one managed GCE worker",
+        ForensicsRunPhase::WorkerReady => "Worker ready",
+        ForensicsRunPhase::Running => "Forensic run active",
+        ForensicsRunPhase::CancelRequested => "Cancellation requested",
+        ForensicsRunPhase::Interrupting => "Interrupt observed; awaiting settlement",
+        ForensicsRunPhase::Settled => "Runtime structurally settled",
+        ForensicsRunPhase::Deleting => "Deleting worker and verifying cleanup",
+        ForensicsRunPhase::Cleaned => "Cleanup verified; zero residue",
+        ForensicsRunPhase::Refused => "Run refused",
+        ForensicsRunPhase::Failed => "Run failed",
+        ForensicsRunPhase::RecoveryRequired => "Recovery required",
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::thread_identity::{BranchIdentity, GitIdentitySummary};
     use omega_forensics::{
         BROKER_NETWORK_POLICY_REF, CoverageSummaryProjection, ForensicBudgetProjection,
-        GCE_ADAPTER_REF, MANAGED_TARGET_REF, ManagedIsolation, ManagedProvider, ManagedTargetClass,
-        ManagedWorkerProjection, PREFLIGHT_SCHEMA_V1, RepositoryTargetProjection,
+        ForensicWorkerPlacement, GCE_ADAPTER_REF, MANAGED_TARGET_REF, ManagedIsolation,
+        ManagedProvider, ManagedTargetClass, ManagedWorkerProjection, PREFLIGHT_SCHEMA_V1,
+        RepositoryTargetProjection, WORKER_PLACEMENT_SCHEMA_V1, WorkerPlacementState,
     };
     use std::path::PathBuf;
 
@@ -504,6 +704,37 @@ mod tests {
         }
     }
 
+    fn admitted_placement(run_ref: &str) -> ForensicWorkerPlacement {
+        ForensicWorkerPlacement {
+            schema: WORKER_PLACEMENT_SCHEMA_V1.into(),
+            placement_ref: format!("placement.{run_ref}"),
+            owner_ref: "owner.forensic.fixture".into(),
+            tenant_ref: "owner.forensic.fixture".into(),
+            work_unit_ref: run_ref.into(),
+            sandbox_ref: "sandbox.forensic.fixture".into(),
+            attachment_generation: 1,
+            resource_generation: 1,
+            target_class: "openagents_managed".into(),
+            provider: "google_cloud".into(),
+            adapter_ref: GCE_ADAPTER_REF.into(),
+            isolation: "gce_vm".into(),
+            region_ref: "region.google-cloud.us-central1".into(),
+            image_digest: digest('a'),
+            profile_digest: digest('b'),
+            network_policy_ref: BROKER_NETWORK_POLICY_REF.into(),
+            lease_ref: "lease.forensic.fixture".into(),
+            budget_ref: "budget.forensic.worker.initial.v1".into(),
+            capability_refs: vec!["capability.forensic.fixture.agent_turn".into()],
+            state: WorkerPlacementState::WorkerReady,
+            admission_receipt_ref: Some("receipt.forensic.admission".into()),
+            readiness_receipt_ref: Some("receipt.forensic.readiness".into()),
+            stop_receipt_ref: None,
+            deletion_receipt_ref: None,
+            cleanup_receipt_ref: None,
+            updated_at: "2026-08-01T10:00:00.000Z".into(),
+        }
+    }
+
     #[gpui::test]
     fn benchmark_arms_are_operator_selectable_without_a_managed_profile(
         cx: &mut gpui::TestAppContext,
@@ -555,6 +786,56 @@ mod tests {
                     .map(|intent| intent.operator_action_ref.as_str()),
                 Some(PREPARE_ACTION_REF)
             );
+        });
+    }
+
+    #[gpui::test]
+    fn explicit_launch_projects_the_host_owned_worker_lifecycle(cx: &mut gpui::TestAppContext) {
+        cx.update(|cx| {
+            let binding = RepositoryBinding::new("repo", "worktree").expect("valid binding");
+            let surface =
+                cx.new(|cx| ForensicsWorkbenchSurface::new(&candidate(binding.clone()), cx));
+            surface
+                .update(cx, |surface, cx| {
+                    surface.set_managed_preflight(&binding, complete_preflight(), cx)
+                })
+                .expect("managed preflight");
+            surface
+                .update(cx, |surface, cx| surface.prepare_run(cx))
+                .expect("prepare run");
+            surface
+                .update(cx, |surface, cx| surface.launch_run(cx))
+                .expect("launch intent");
+            assert_eq!(
+                surface
+                    .read(cx)
+                    .snapshot()
+                    .run
+                    .as_ref()
+                    .map(|run| run.phase),
+                Some(ForensicsRunPhase::Prepared)
+            );
+            surface.update(cx, |surface, cx| {
+                surface.mark_admitting("2026-08-01T09:59:59.000Z".into(), cx)
+            });
+            let run_ref = surface
+                .read(cx)
+                .snapshot()
+                .run
+                .as_ref()
+                .map(|run| run.run_ref.clone())
+                .expect("prepared run ref");
+            surface
+                .update(cx, |surface, cx| {
+                    surface.apply_admission(admitted_placement(&run_ref), cx)
+                })
+                .expect("admission projection");
+            let snapshot = surface.read(cx).snapshot();
+            assert_eq!(
+                snapshot.run.as_ref().map(|run| run.phase),
+                Some(ForensicsRunPhase::WorkerReady)
+            );
+            assert_eq!(snapshot.status.as_ref(), "Worker ready");
         });
     }
 }
