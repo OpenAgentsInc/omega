@@ -245,6 +245,7 @@
   - [Omega Forensics review](./development/omega-forensics-review.md)
   - [Omega Forensics prompt artifacts](./development/omega-forensics-prompt-artifacts.md)
   - [Omega Forensics run matrices](./development/omega-forensics-run-matrices.md)
+  - [Omega Coldcard evidence views](./development/omega-coldcard-evidence-views.md)
   - [macOS](./development/macos.md)
   - [Linux](./development/linux.md)
   - [Windows](./development/windows.md)

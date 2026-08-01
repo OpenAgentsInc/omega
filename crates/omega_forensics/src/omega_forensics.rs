@@ -11,6 +11,8 @@ pub const WORKER_PLACEMENT_SCHEMA_V1: &str = "openagents.forensic_worker_placeme
 pub const WORKER_OBSERVATION_SCHEMA_V1: &str = "openagents.forensic_worker_observation.v1";
 pub const REVIEW_PROJECTION_SCHEMA_V1: &str = "openagents.omega.forensics-review.v1";
 pub const MATRIX_PROJECTION_SCHEMA_V1: &str = "openagents.omega.forensics-matrix.v1";
+pub const COLDCARD_EVIDENCE_WORKSPACE_SCHEMA_V1: &str =
+    "openagents.omega.coldcard-evidence-workspace.v1";
 pub const FORENSIC_PROMPT_ARTIFACT_SCHEMA_V1: &str = "openagents.forensic_prompt_artifact.v1";
 pub const FORENSIC_FINDING_SCHEMA_V1: &str = "openagents.forensic_finding.v1";
 pub const FORENSIC_HYPOTHESIS_SCHEMA_V1: &str = "openagents.forensic_hypothesis.v1";
@@ -2302,6 +2304,530 @@ pub struct ForensicsMatrixProjection {
     pub promoted: bool,
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ColdcardClaimRung {
+    Source,
+    Artifact,
+    Generator,
+    Exploitability,
+    OwnedFixture,
+    Fingerprint,
+    Entity,
+    UnauthorizedMovement,
+    Identity,
+}
+
+impl ColdcardClaimRung {
+    pub const ALL: [Self; 9] = [
+        Self::Source,
+        Self::Artifact,
+        Self::Generator,
+        Self::Exploitability,
+        Self::OwnedFixture,
+        Self::Fingerprint,
+        Self::Entity,
+        Self::UnauthorizedMovement,
+        Self::Identity,
+    ];
+
+    pub const fn label(self) -> &'static str {
+        match self {
+            Self::Source => "Source flaw",
+            Self::Artifact => "Artifact reality",
+            Self::Generator => "Generator behavior",
+            Self::Exploitability => "Exploitability",
+            Self::OwnedFixture => "Owned fixture",
+            Self::Fingerprint => "Program fingerprint",
+            Self::Entity => "Entity grouping",
+            Self::UnauthorizedMovement => "Unauthorized movement",
+            Self::Identity => "Identity attribution",
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ColdcardRungState {
+    Missing,
+    Provisional,
+    Qualified,
+    IndependentlyVerified,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct ColdcardEvidenceRungProjection {
+    pub rung: ColdcardClaimRung,
+    pub state: ColdcardRungState,
+    pub time_to_rung: ForensicMetricTruth,
+    pub tokens_to_rung: ForensicMetricTruth,
+    pub evidence_refs: Vec<String>,
+    pub assumptions: Vec<String>,
+    pub verifier_state: String,
+    pub non_implications: Vec<String>,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ColdcardTraceKind {
+    Source,
+    Artifact,
+    Generator,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct ColdcardTraceStepProjection {
+    pub sequence: u32,
+    pub kind: ColdcardTraceKind,
+    pub label: String,
+    pub evidence_ref: String,
+    pub rule_ref: String,
+    pub verifier_state: String,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ColdcardAssumptionKind {
+    Uid,
+    Timer,
+    CallTrace,
+    Firmware,
+    Hardware,
+}
+
+impl ColdcardAssumptionKind {
+    pub const ALL: [Self; 5] = [
+        Self::Uid,
+        Self::Timer,
+        Self::CallTrace,
+        Self::Firmware,
+        Self::Hardware,
+    ];
+
+    pub const fn label(self) -> &'static str {
+        match self {
+            Self::Uid => "UID",
+            Self::Timer => "Timer",
+            Self::CallTrace => "Call trace",
+            Self::Firmware => "Firmware",
+            Self::Hardware => "Hardware",
+        }
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct ColdcardAssumptionDiffProjection {
+    pub kind: ColdcardAssumptionKind,
+    pub baseline: String,
+    pub selected: String,
+    pub lower_bound_bits: u32,
+    pub upper_bound_bits: u32,
+    pub evidence_refs: Vec<String>,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ForensicControlState {
+    Passed,
+    Failed,
+    Missing,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct ColdcardScanRangeProjection {
+    pub range_ref: String,
+    pub start_height: u64,
+    pub end_height: u64,
+    pub completed_height: Option<u64>,
+    pub checkpoint_ref: Option<String>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct ColdcardCandidateStageProjection {
+    pub stage_ref: String,
+    pub label: String,
+    pub count: u64,
+    pub source_receipt_ref: String,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct ColdcardBaseRateProjection {
+    pub stratum_ref: String,
+    pub matches_per_million: u64,
+    pub exactness: ForensicExactness,
+    pub receipt_ref: String,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct ColdcardPrivateScanProjection {
+    pub boundary_ref: String,
+    pub reportable: bool,
+    pub ranges: Vec<ColdcardScanRangeProjection>,
+    pub transactions_per_second: Option<u64>,
+    pub throughput_exactness: ForensicExactness,
+    pub restart_state: String,
+    pub positive_control: ForensicControlState,
+    pub negative_control: ForensicControlState,
+    pub base_rates: Vec<ColdcardBaseRateProjection>,
+    pub candidate_funnel: Vec<ColdcardCandidateStageProjection>,
+    pub missing_data_refs: Vec<String>,
+    pub public_transaction_refs: Vec<String>,
+    pub candidate_cluster_refs: Vec<String>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct ColdcardGraphHealthProjection {
+    pub subject_ref: String,
+    pub complete: bool,
+    pub source_refs: Vec<String>,
+    pub rule_refs: Vec<String>,
+    pub missing_provenance_refs: Vec<String>,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "SCREAMING_SNAKE_CASE")]
+pub enum ColdcardReconciliationStatus {
+    Match,
+    Drift,
+    Unavailable,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct ColdcardReconciliationProjection {
+    pub metric_ref: String,
+    pub status: ColdcardReconciliationStatus,
+    pub derived_value: Option<String>,
+    pub published_value: Option<String>,
+    pub precision_ref: String,
+    pub source_refs: Vec<String>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct ColdcardClaimCorrectionProjection {
+    pub sequence: u32,
+    pub claim_ref: String,
+    pub prior_value: String,
+    pub corrected_value: String,
+    pub reason_ref: String,
+    pub appended_evidence_refs: Vec<String>,
+    pub affected_projection_refs: Vec<String>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct ColdcardEvidenceWorkspaceProjection {
+    pub schema: String,
+    pub workspace_ref: String,
+    pub run_ref: String,
+    pub ladder: Vec<ColdcardEvidenceRungProjection>,
+    pub trace: Vec<ColdcardTraceStepProjection>,
+    pub assumption_diffs: Vec<ColdcardAssumptionDiffProjection>,
+    pub scan: ColdcardPrivateScanProjection,
+    pub graph_health: Vec<ColdcardGraphHealthProjection>,
+    pub reconciliation: Vec<ColdcardReconciliationProjection>,
+    pub corrections: Vec<ColdcardClaimCorrectionProjection>,
+}
+
+impl ColdcardEvidenceWorkspaceProjection {
+    pub fn validate(&self) -> Result<(), ForensicsError> {
+        if self.schema != COLDCARD_EVIDENCE_WORKSPACE_SCHEMA_V1 {
+            return Err(ForensicsError::InvalidSchema);
+        }
+        validate_ref("Coldcard evidence workspace", &self.workspace_ref)?;
+        validate_ref("Coldcard evidence run", &self.run_ref)?;
+        let serialized = serde_json::to_string(self).map_err(|error| {
+            ForensicsError::InvalidColdcardEvidence(format!(
+                "the evidence workspace cannot be inspected for secrets: {error}"
+            ))
+        })?;
+        validate_no_secret_markers(&serialized)?;
+        if self.trace.len() > 256
+            || self.graph_health.len() > 10_000
+            || self.reconciliation.len() > 10_000
+            || self.corrections.len() > 10_000
+        {
+            return Err(ForensicsError::InvalidColdcardEvidence(
+                "evidence view collections exceed their render bounds".into(),
+            ));
+        }
+        let observed_rungs = self.ladder.iter().map(|rung| rung.rung).collect::<Vec<_>>();
+        if observed_rungs != ColdcardClaimRung::ALL {
+            return Err(ForensicsError::InvalidColdcardEvidence(
+                "the evidence ladder must preserve all nine ordered rungs, including missing rungs"
+                    .into(),
+            ));
+        }
+        for rung in &self.ladder {
+            rung.time_to_rung.validate()?;
+            rung.tokens_to_rung.validate()?;
+            validate_bounded_refs("rung evidence", &rung.evidence_refs, 256)?;
+            validate_safe_texts(&rung.assumptions)?;
+            validate_safe_text(&rung.verifier_state)?;
+            validate_safe_texts(&rung.non_implications)?;
+            if rung.non_implications.is_empty()
+                || (rung.state == ColdcardRungState::Missing && !rung.evidence_refs.is_empty())
+                || (rung.state != ColdcardRungState::Missing && rung.evidence_refs.is_empty())
+            {
+                return Err(ForensicsError::InvalidColdcardEvidence(
+                    "rung state, evidence, and non-implications disagree".into(),
+                ));
+            }
+        }
+        validate_dense_sequences(self.trace.iter().map(|step| step.sequence))?;
+        for step in &self.trace {
+            validate_ref("trace evidence", &step.evidence_ref)?;
+            validate_ref("trace rule", &step.rule_ref)?;
+            validate_safe_text(&step.label)?;
+            validate_safe_text(&step.verifier_state)?;
+        }
+        let observed_assumptions = self
+            .assumption_diffs
+            .iter()
+            .map(|assumption| assumption.kind)
+            .collect::<BTreeSet<_>>();
+        if observed_assumptions != ColdcardAssumptionKind::ALL.into_iter().collect() {
+            return Err(ForensicsError::InvalidColdcardEvidence(
+                "UID, timer, call-trace, firmware, and hardware assumptions must remain visible"
+                    .into(),
+            ));
+        }
+        for assumption in &self.assumption_diffs {
+            if assumption.lower_bound_bits > assumption.upper_bound_bits {
+                return Err(ForensicsError::InvalidColdcardEvidence(
+                    "entropy sensitivity bounds are inverted".into(),
+                ));
+            }
+            validate_safe_text(&assumption.baseline)?;
+            validate_safe_text(&assumption.selected)?;
+            validate_bounded_refs("assumption evidence", &assumption.evidence_refs, 64)?;
+        }
+        self.scan.validate()?;
+        for health in &self.graph_health {
+            validate_ref("graph subject", &health.subject_ref)?;
+            validate_bounded_refs("graph source", &health.source_refs, 256)?;
+            validate_bounded_refs("graph rule", &health.rule_refs, 256)?;
+            validate_bounded_refs("missing provenance", &health.missing_provenance_refs, 256)?;
+            if health.complete
+                != (!health.source_refs.is_empty()
+                    && !health.rule_refs.is_empty()
+                    && health.missing_provenance_refs.is_empty())
+            {
+                return Err(ForensicsError::InvalidColdcardEvidence(
+                    "graph health must fail for every provenance gap".into(),
+                ));
+            }
+        }
+        for item in &self.reconciliation {
+            validate_ref("reconciliation metric", &item.metric_ref)?;
+            validate_ref("reconciliation precision", &item.precision_ref)?;
+            validate_bounded_refs("reconciliation source", &item.source_refs, 64)?;
+            if let Some(value) = &item.derived_value {
+                validate_safe_text(value)?;
+            }
+            if let Some(value) = &item.published_value {
+                validate_safe_text(value)?;
+            }
+            if item.status == ColdcardReconciliationStatus::Unavailable
+                && (item.derived_value.is_some() || item.published_value.is_some())
+            {
+                return Err(ForensicsError::InvalidColdcardEvidence(
+                    "unavailable reconciliation cannot invent a comparable value".into(),
+                ));
+            }
+            if item.status != ColdcardReconciliationStatus::Unavailable
+                && (item.derived_value.is_none() || item.published_value.is_none())
+            {
+                return Err(ForensicsError::InvalidColdcardEvidence(
+                    "matched or drifting reconciliation must retain both original values".into(),
+                ));
+            }
+        }
+        validate_dense_sequences(
+            self.corrections
+                .iter()
+                .map(|correction| correction.sequence),
+        )?;
+        for correction in &self.corrections {
+            validate_ref("corrected claim", &correction.claim_ref)?;
+            validate_ref("correction reason", &correction.reason_ref)?;
+            validate_safe_text(&correction.prior_value)?;
+            validate_safe_text(&correction.corrected_value)?;
+            validate_bounded_refs(
+                "appended correction evidence",
+                &correction.appended_evidence_refs,
+                256,
+            )?;
+            validate_bounded_refs(
+                "affected correction projection",
+                &correction.affected_projection_refs,
+                256,
+            )?;
+            if correction.appended_evidence_refs.is_empty()
+                || correction.affected_projection_refs.is_empty()
+            {
+                return Err(ForensicsError::InvalidColdcardEvidence(
+                    "corrections must append evidence and identify affected projections".into(),
+                ));
+            }
+        }
+        Ok(())
+    }
+}
+
+impl ColdcardPrivateScanProjection {
+    fn validate(&self) -> Result<(), ForensicsError> {
+        if self.boundary_ref != "boundary.omega.private-forensic-run.v1" || self.reportable {
+            return Err(ForensicsError::InvalidColdcardEvidence(
+                "transaction and cluster evidence must remain private and non-reportable".into(),
+            ));
+        }
+        if (self.transactions_per_second.is_none())
+            != (self.throughput_exactness == ForensicExactness::Unavailable)
+        {
+            return Err(ForensicsError::InvalidColdcardEvidence(
+                "scan throughput value and exactness disagree".into(),
+            ));
+        }
+        if self.ranges.is_empty() || self.candidate_funnel.is_empty() {
+            return Err(ForensicsError::InvalidColdcardEvidence(
+                "scan ranges and candidate funnel must remain visible".into(),
+            ));
+        }
+        if self.ranges.len() > 10_000
+            || self.candidate_funnel.len() > 256
+            || self.base_rates.len() > 10_000
+            || self.missing_data_refs.len() > 10_000
+            || self.public_transaction_refs.len() > 100_000
+            || self.candidate_cluster_refs.len() > 100_000
+        {
+            return Err(ForensicsError::InvalidColdcardEvidence(
+                "private scan collections exceed their display bounds".into(),
+            ));
+        }
+        for range in &self.ranges {
+            validate_ref("scan range", &range.range_ref)?;
+            if range.start_height > range.end_height
+                || range
+                    .completed_height
+                    .is_some_and(|height| height < range.start_height || height > range.end_height)
+                || (range.completed_height.is_some() != range.checkpoint_ref.is_some())
+            {
+                return Err(ForensicsError::InvalidColdcardEvidence(
+                    "scan range, progress, and checkpoint disagree".into(),
+                ));
+            }
+        }
+        let mut previous_count = None;
+        for stage in &self.candidate_funnel {
+            validate_ref("candidate stage", &stage.stage_ref)?;
+            validate_ref("candidate receipt", &stage.source_receipt_ref)?;
+            validate_safe_text(&stage.label)?;
+            if previous_count.is_some_and(|count| stage.count > count) {
+                return Err(ForensicsError::InvalidColdcardEvidence(
+                    "candidate funnel counts cannot increase".into(),
+                ));
+            }
+            previous_count = Some(stage.count);
+        }
+        for rate in &self.base_rates {
+            validate_ref("base-rate stratum", &rate.stratum_ref)?;
+            validate_ref("base-rate receipt", &rate.receipt_ref)?;
+            if rate.exactness == ForensicExactness::Unavailable {
+                return Err(ForensicsError::InvalidColdcardEvidence(
+                    "unavailable base rates cannot carry a numeric zero".into(),
+                ));
+            }
+        }
+        validate_safe_text(&self.restart_state)?;
+        validate_bounded_refs("scan missing data", &self.missing_data_refs, 256)?;
+        validate_bounded_refs(
+            "private transaction",
+            &self.public_transaction_refs,
+            100_000,
+        )?;
+        validate_bounded_refs(
+            "private candidate cluster",
+            &self.candidate_cluster_refs,
+            100_000,
+        )?;
+        Ok(())
+    }
+}
+
+fn validate_dense_sequences(values: impl Iterator<Item = u32>) -> Result<(), ForensicsError> {
+    for (index, sequence) in values.enumerate() {
+        if sequence as usize != index + 1 {
+            return Err(ForensicsError::InvalidColdcardEvidence(
+                "append-only sequences must be dense and ordered".into(),
+            ));
+        }
+    }
+    Ok(())
+}
+
+fn validate_safe_texts(values: &[String]) -> Result<(), ForensicsError> {
+    for value in values {
+        validate_safe_text(value)?;
+    }
+    Ok(())
+}
+
+fn validate_safe_text(value: &str) -> Result<(), ForensicsError> {
+    let normalized = value.to_ascii_lowercase();
+    let words = value.split_whitespace().collect::<Vec<_>>();
+    let looks_like_mnemonic = matches!(words.len(), 12 | 15 | 18 | 21 | 24)
+        && words
+            .iter()
+            .all(|word| word.bytes().all(|byte| byte.is_ascii_lowercase()));
+    let forbidden = [
+        "xprv",
+        "private-key:",
+        "node-cookie:",
+        "rpc-credential:",
+        "password=",
+        "seed-phrase:",
+    ];
+    if value.trim().is_empty()
+        || value.len() > 2_048
+        || looks_like_mnemonic
+        || forbidden.iter().any(|marker| normalized.contains(marker))
+    {
+        return Err(ForensicsError::InvalidColdcardEvidence(
+            "secret-bearing or unbounded evidence cannot be rendered or exported".into(),
+        ));
+    }
+    Ok(())
+}
+
+fn validate_no_secret_markers(value: &str) -> Result<(), ForensicsError> {
+    let normalized = value.to_ascii_lowercase();
+    for marker in [
+        "xprv",
+        "private-key:",
+        "node-cookie:",
+        "rpc-credential:",
+        "password=",
+        "seed-phrase:",
+    ] {
+        if normalized.contains(marker) {
+            return Err(ForensicsError::InvalidColdcardEvidence(
+                "secret-bearing evidence cannot be rendered or exported".into(),
+            ));
+        }
+    }
+    Ok(())
+}
+
 impl ForensicsMatrixProjection {
     pub fn rebuild(
         matrix_ref: String,
@@ -2610,6 +3136,8 @@ pub enum ForensicsError {
     IncompatiblePrompt,
     #[error("the forensic run matrix is invalid: {0}")]
     InvalidMatrix(String),
+    #[error("the Coldcard evidence workspace is invalid: {0}")]
+    InvalidColdcardEvidence(String),
 }
 
 fn validate_ref(label: &str, value: &str) -> Result<(), ForensicsError> {
@@ -3519,5 +4047,82 @@ mod tests {
             ForensicExactness::Unavailable
         );
         assert_eq!(matrix.rows[0].total_cost_micros, None);
+    }
+
+    fn coldcard_evidence_workspace() -> ColdcardEvidenceWorkspaceProjection {
+        serde_json::from_str(include_str!(
+            "../fixtures/coldcard-evidence-workspace.v1.json"
+        ))
+        .expect("valid Coldcard evidence fixture JSON")
+    }
+
+    #[test]
+    fn coldcard_workspace_preserves_missing_rungs_and_distinct_evidence_views() {
+        let workspace = coldcard_evidence_workspace();
+        workspace.validate().expect("valid Coldcard workspace");
+        assert_eq!(workspace.ladder.len(), 9);
+        assert_eq!(workspace.ladder[6].state, ColdcardRungState::Missing);
+        assert_eq!(workspace.ladder[6].time_to_rung.value, None);
+        assert_eq!(workspace.assumption_diffs.len(), 5);
+        assert_eq!(
+            workspace.scan.positive_control,
+            ForensicControlState::Passed
+        );
+        assert_eq!(
+            workspace.scan.negative_control,
+            ForensicControlState::Passed
+        );
+        assert!(!workspace.graph_health[1].complete);
+        assert_eq!(
+            workspace.reconciliation[0].derived_value.as_deref(),
+            Some("1000000")
+        );
+        assert_eq!(
+            workspace.reconciliation[0].published_value.as_deref(),
+            Some("1.0 million")
+        );
+    }
+
+    #[test]
+    fn coldcard_workspace_rejects_inferred_rungs_and_public_scan_evidence() {
+        let mut missing_rung = coldcard_evidence_workspace();
+        missing_rung.ladder.remove(6);
+        assert!(matches!(
+            missing_rung.validate(),
+            Err(ForensicsError::InvalidColdcardEvidence(_))
+        ));
+
+        let mut reportable = coldcard_evidence_workspace();
+        reportable.scan.reportable = true;
+        assert!(matches!(
+            reportable.validate(),
+            Err(ForensicsError::InvalidColdcardEvidence(_))
+        ));
+    }
+
+    #[test]
+    fn coldcard_workspace_fails_closed_on_provenance_gaps_and_secret_material() {
+        let mut false_green = coldcard_evidence_workspace();
+        false_green.graph_health[1].complete = true;
+        assert!(matches!(
+            false_green.validate(),
+            Err(ForensicsError::InvalidColdcardEvidence(_))
+        ));
+
+        let mut secret = coldcard_evidence_workspace();
+        secret.corrections[0].corrected_value = "xprv9s21ZrQH143K3fixture-secret-material".into();
+        assert!(matches!(
+            secret.validate(),
+            Err(ForensicsError::InvalidColdcardEvidence(_))
+        ));
+
+        let mut mnemonic = coldcard_evidence_workspace();
+        mnemonic.corrections[0].corrected_value =
+            "abandon ability able about above absent absorb abstract absurd abuse access accident"
+                .into();
+        assert!(matches!(
+            mnemonic.validate(),
+            Err(ForensicsError::InvalidColdcardEvidence(_))
+        ));
     }
 }

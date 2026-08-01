@@ -1,0 +1,103 @@
+{
+  "schema": "openagents.omega.coldcard-evidence-workspace.v1",
+  "workspaceRef": "workspace.coldcard.evidence.fixture",
+  "runRef": "run.coldcard.evidence.fixture",
+  "ladder": [
+    {
+      "rung": "source", "state": "qualified",
+      "timeToRung": { "metricRef": "metric.rung.source.time", "label": "Time to source flaw", "unit": "ms", "value": 1200, "exactness": "exact", "sourceEventRefs": ["event.rung.source"], "sourceReceiptRefs": [] },
+      "tokensToRung": { "metricRef": "metric.rung.source.tokens", "label": "Tokens to source flaw", "unit": "tokens", "value": 800, "exactness": "exact", "sourceEventRefs": [], "sourceReceiptRefs": ["receipt.usage.source"] },
+      "evidenceRefs": ["evidence.source.guard"], "assumptions": ["Pinned vulnerable source"], "verifierState": "Source refs resolved", "nonImplications": ["Does not prove the fallback shipped"]
+    },
+    {
+      "rung": "artifact", "state": "independently_verified",
+      "timeToRung": { "metricRef": "metric.rung.artifact.time", "label": "Time to artifact", "unit": "ms", "value": 3100, "exactness": "exact", "sourceEventRefs": ["event.rung.artifact"], "sourceReceiptRefs": [] },
+      "tokensToRung": { "metricRef": "metric.rung.artifact.tokens", "label": "Tokens to artifact", "unit": "tokens", "value": 1400, "exactness": "exact", "sourceEventRefs": [], "sourceReceiptRefs": ["receipt.usage.artifact"] },
+      "evidenceRefs": ["evidence.artifact.link-map"], "assumptions": ["Pinned compiler and submodules"], "verifierState": "Fault build reproduced", "nonImplications": ["Does not prove practical wallet recovery"]
+    },
+    {
+      "rung": "generator", "state": "qualified",
+      "timeToRung": { "metricRef": "metric.rung.generator.time", "label": "Time to generator", "unit": "ms", "value": 4800, "exactness": "exact", "sourceEventRefs": ["event.rung.generator"], "sourceReceiptRefs": [] },
+      "tokensToRung": { "metricRef": "metric.rung.generator.tokens", "label": "Tokens to generator", "unit": "tokens", "value": 2300, "exactness": "exact", "sourceEventRefs": [], "sourceReceiptRefs": ["receipt.usage.generator"] },
+      "evidenceRefs": ["evidence.generator.vector"], "assumptions": ["Exact call trace"], "verifierState": "Golden vectors passed", "nonImplications": ["Does not establish an unknown device state"]
+    },
+    {
+      "rung": "exploitability", "state": "provisional",
+      "timeToRung": { "metricRef": "metric.rung.exploitability.time", "label": "Time to exploitability", "unit": "ms", "value": 7200, "exactness": "upper_bound", "sourceEventRefs": ["event.rung.exploitability"], "sourceReceiptRefs": [] },
+      "tokensToRung": { "metricRef": "metric.rung.exploitability.tokens", "label": "Tokens to exploitability", "unit": "tokens", "value": 4100, "exactness": "upper_bound", "sourceEventRefs": [], "sourceReceiptRefs": ["receipt.usage.exploitability"] },
+      "evidenceRefs": ["evidence.assumption.sensitivity"], "assumptions": ["UID and timer intervals are bounded"], "verifierState": "Sensitivity pending independent review", "nonImplications": ["Does not recover a particular wallet"]
+    },
+    {
+      "rung": "owned_fixture", "state": "qualified",
+      "timeToRung": { "metricRef": "metric.rung.fixture.time", "label": "Time to owned fixture", "unit": "ms", "value": 9800, "exactness": "exact", "sourceEventRefs": ["event.rung.fixture"], "sourceReceiptRefs": [] },
+      "tokensToRung": { "metricRef": "metric.rung.fixture.tokens", "label": "Tokens to owned fixture", "unit": "tokens", "value": 5500, "exactness": "exact", "sourceEventRefs": [], "sourceReceiptRefs": ["receipt.usage.fixture"] },
+      "evidenceRefs": ["evidence.fixture.public-match"], "assumptions": ["Synthetic fixture authorization"], "verifierState": "Public-material digest matched", "nonImplications": ["Does not authorize live-value enumeration"]
+    },
+    {
+      "rung": "fingerprint", "state": "provisional",
+      "timeToRung": { "metricRef": "metric.rung.fingerprint.time", "label": "Time to fingerprint", "unit": "ms", "value": 15000, "exactness": "exact", "sourceEventRefs": ["event.rung.fingerprint"], "sourceReceiptRefs": [] },
+      "tokensToRung": { "metricRef": "metric.rung.fingerprint.tokens", "label": "Tokens to fingerprint", "unit": "tokens", "value": 8200, "exactness": "exact", "sourceEventRefs": [], "sourceReceiptRefs": ["receipt.usage.fingerprint"] },
+      "evidenceRefs": ["evidence.scan.program-pattern"], "assumptions": ["Frozen historical blocks"], "verifierState": "Controls passed", "nonImplications": ["Does not prove identity intent or theft"]
+    },
+    {
+      "rung": "entity", "state": "missing",
+      "timeToRung": { "metricRef": "metric.rung.entity.time", "label": "Time to entity", "unit": "ms", "exactness": "unavailable", "unavailableReasonRef": "reason.rung.entity.missing", "sourceEventRefs": [], "sourceReceiptRefs": [] },
+      "tokensToRung": { "metricRef": "metric.rung.entity.tokens", "label": "Tokens to entity", "unit": "tokens", "exactness": "unavailable", "unavailableReasonRef": "reason.rung.entity.missing", "sourceEventRefs": [], "sourceReceiptRefs": [] },
+      "evidenceRefs": [], "assumptions": ["Pooling threshold not yet admitted"], "verifierState": "Missing", "nonImplications": ["Fingerprint evidence cannot fill this rung"]
+    },
+    {
+      "rung": "unauthorized_movement", "state": "missing",
+      "timeToRung": { "metricRef": "metric.rung.unauthorized.time", "label": "Time to unauthorized movement", "unit": "ms", "exactness": "unavailable", "unavailableReasonRef": "reason.rung.unauthorized.missing", "sourceEventRefs": [], "sourceReceiptRefs": [] },
+      "tokensToRung": { "metricRef": "metric.rung.unauthorized.tokens", "label": "Tokens to unauthorized movement", "unit": "tokens", "exactness": "unavailable", "unavailableReasonRef": "reason.rung.unauthorized.missing", "sourceEventRefs": [], "sourceReceiptRefs": [] },
+      "evidenceRefs": [], "assumptions": ["Owner testimony absent"], "verifierState": "Missing", "nonImplications": ["Coin movement cannot fill this rung"]
+    },
+    {
+      "rung": "identity", "state": "missing",
+      "timeToRung": { "metricRef": "metric.rung.identity.time", "label": "Time to identity", "unit": "ms", "exactness": "unavailable", "unavailableReasonRef": "reason.rung.identity.missing", "sourceEventRefs": [], "sourceReceiptRefs": [] },
+      "tokensToRung": { "metricRef": "metric.rung.identity.tokens", "label": "Tokens to identity", "unit": "tokens", "exactness": "unavailable", "unavailableReasonRef": "reason.rung.identity.missing", "sourceEventRefs": [], "sourceReceiptRefs": [] },
+      "evidenceRefs": [], "assumptions": ["Independent identity evidence absent"], "verifierState": "Missing", "nonImplications": ["Clusters cannot fill this rung"]
+    }
+  ],
+  "trace": [
+    { "sequence": 1, "kind": "source", "label": "Guard disables hardware provider", "evidenceRef": "evidence.source.guard", "ruleRef": "rule.trace.source.v1", "verifierState": "Resolved" },
+    { "sequence": 2, "kind": "artifact", "label": "Fallback symbol is linked", "evidenceRef": "evidence.artifact.link-map", "ruleRef": "rule.trace.artifact.v1", "verifierState": "Verified" },
+    { "sequence": 3, "kind": "generator", "label": "Call trace matches vectors", "evidenceRef": "evidence.generator.vector", "ruleRef": "rule.trace.generator.v1", "verifierState": "Verified" }
+  ],
+  "assumptionDiffs": [
+    { "kind": "uid", "baseline": "Unknown", "selected": "16-bit interval", "lowerBoundBits": 16, "upperBoundBits": 16, "evidenceRefs": ["evidence.assumption.uid"] },
+    { "kind": "timer", "baseline": "Unknown", "selected": "20-bit interval", "lowerBoundBits": 18, "upperBoundBits": 20, "evidenceRefs": ["evidence.assumption.timer"] },
+    { "kind": "call_trace", "baseline": "Unbounded", "selected": "Observed keypad trace", "lowerBoundBits": 8, "upperBoundBits": 12, "evidenceRefs": ["evidence.assumption.call-trace"] },
+    { "kind": "firmware", "baseline": "Multiple revisions", "selected": "Pinned vulnerable revision", "lowerBoundBits": 0, "upperBoundBits": 0, "evidenceRefs": ["evidence.assumption.firmware"] },
+    { "kind": "hardware", "baseline": "Unknown board", "selected": "Pinned board revision", "lowerBoundBits": 0, "upperBoundBits": 2, "evidenceRefs": ["evidence.assumption.hardware"] }
+  ],
+  "scan": {
+    "boundaryRef": "boundary.omega.private-forensic-run.v1", "reportable": false,
+    "ranges": [
+      { "rangeRef": "range.scan.control", "startHeight": 700000, "endHeight": 700099, "completedHeight": 700099, "checkpointRef": "checkpoint.scan.control.700099" },
+      { "rangeRef": "range.scan.wide", "startHeight": 700100, "endHeight": 701000, "completedHeight": 700500, "checkpointRef": "checkpoint.scan.wide.700500" }
+    ],
+    "transactionsPerSecond": 4500, "throughputExactness": "exact", "restartState": "Resumable from block 700500",
+    "positiveControl": "passed", "negativeControl": "passed",
+    "baseRates": [{ "stratumRef": "stratum.fee-2.era-2020.p2wpkh", "matchesPerMillion": 3, "exactness": "estimated", "receiptRef": "receipt.scan.base-rate" }],
+    "candidateFunnel": [
+      { "stageRef": "stage.scan.transactions", "label": "Transactions scanned", "count": 1000000, "sourceReceiptRef": "receipt.scan.transactions" },
+      { "stageRef": "stage.scan.cheap", "label": "Cheap candidates", "count": 420, "sourceReceiptRef": "receipt.scan.cheap" },
+      { "stageRef": "stage.scan.exact", "label": "Exact formula matches", "count": 17, "sourceReceiptRef": "receipt.scan.exact" },
+      { "stageRef": "stage.scan.clusters", "label": "Candidate clusters", "count": 4, "sourceReceiptRef": "receipt.scan.clusters" }
+    ],
+    "missingDataRefs": [],
+    "publicTransactionRefs": ["transaction.public.fixture.001"],
+    "candidateClusterRefs": ["cluster.candidate.fixture.001"]
+  },
+  "graphHealth": [
+    { "subjectRef": "claim.program-fingerprint.fixture", "complete": true, "sourceRefs": ["evidence.scan.program-pattern"], "ruleRefs": ["rule.graph.fingerprint.v1"], "missingProvenanceRefs": [] },
+    { "subjectRef": "projection.entity.fixture", "complete": false, "sourceRefs": [], "ruleRefs": [], "missingProvenanceRefs": ["missing.graph.entity-source", "missing.graph.entity-rule"] }
+  ],
+  "reconciliation": [
+    { "metricRef": "metric.scan.transactions", "status": "MATCH", "derivedValue": "1000000", "publishedValue": "1.0 million", "precisionRef": "precision.one-decimal-million", "sourceRefs": ["receipt.scan.transactions", "source.report.figure-1"] },
+    { "metricRef": "metric.unknown.operators", "status": "UNAVAILABLE", "precisionRef": "precision.unavailable", "sourceRefs": ["reason.unpooled-operators-unmeasurable"] }
+  ],
+  "corrections": [
+    { "sequence": 1, "claimRef": "claim.program-fingerprint.fixture", "priorValue": "5 candidate clusters", "correctedValue": "4 candidate clusters", "reasonRef": "reason.cluster-deduplication", "appendedEvidenceRefs": ["receipt.cluster.deduplication"], "affectedProjectionRefs": ["projection.scan.funnel", "projection.graph.health"] }
+  ]
+}
