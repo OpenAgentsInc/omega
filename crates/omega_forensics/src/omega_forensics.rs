@@ -1,5 +1,6 @@
 use serde::{Deserialize, Serialize};
-use std::collections::BTreeSet;
+use sha2::{Digest, Sha256};
+use std::collections::{BTreeMap, BTreeSet};
 use thiserror::Error;
 use url::Url;
 
@@ -9,6 +10,9 @@ pub const RUN_PROJECTION_SCHEMA_V1: &str = "openagents.omega.forensics-run.v1";
 pub const WORKER_PLACEMENT_SCHEMA_V1: &str = "openagents.forensic_worker_placement.v1";
 pub const WORKER_OBSERVATION_SCHEMA_V1: &str = "openagents.forensic_worker_observation.v1";
 pub const REVIEW_PROJECTION_SCHEMA_V1: &str = "openagents.omega.forensics-review.v1";
+pub const FORENSIC_PROMPT_ARTIFACT_SCHEMA_V1: &str = "openagents.forensic_prompt_artifact.v1";
+pub const FORENSIC_FINDING_SCHEMA_V1: &str = "openagents.forensic_finding.v1";
+pub const FORENSIC_HYPOTHESIS_SCHEMA_V1: &str = "openagents.forensic_hypothesis.v1";
 pub const MANAGED_TARGET_REF: &str = "target-ref://openagents/managed-sandbox/gce-forensic-v1";
 pub const GCE_ADAPTER_REF: &str = "adapter.oa-codex-control.gce.v1";
 pub const BROKER_NETWORK_POLICY_REF: &str =
@@ -409,6 +413,500 @@ impl ForensicsPreflightProjection {
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct ExplicitOperatorAction {
     pub action_ref: String,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct ForensicPromptIr {
+    pub role: String,
+    pub threat_model: String,
+    pub vulnerability_classes: Vec<String>,
+    pub security_invariants: Vec<String>,
+    pub evidence_requirements: Vec<String>,
+    pub dependency_exploration_policy: String,
+    pub uncertainty_policy: String,
+    pub tool_policy_refs: Vec<String>,
+    pub finding_schema_ref: String,
+    pub hypothesis_schema_ref: String,
+    pub poc_policy: String,
+    pub severity_policy: String,
+    pub context_policy: String,
+    pub budget_policy_ref: String,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct ForensicPromptArtifact {
+    pub schema: String,
+    pub prompt_artifact_ref: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub parent_prompt_artifact_ref: Option<String>,
+    pub prompt_ir: ForensicPromptIr,
+    pub example_refs: Vec<String>,
+    pub parameter_refs: Vec<String>,
+    pub canonical_digest: String,
+    pub dataset_revision_ref: String,
+    pub compatibility_refs: Vec<String>,
+    pub created_at: String,
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct PromptDigestInput<'a> {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    parent_prompt_artifact_ref: Option<&'a str>,
+    prompt_ir: &'a ForensicPromptIr,
+    example_refs: &'a [String],
+    parameter_refs: &'a [String],
+    dataset_revision_ref: &'a str,
+    compatibility_refs: &'a [String],
+}
+
+impl ForensicPromptArtifact {
+    pub fn create(
+        prompt_artifact_ref: String,
+        parent_prompt_artifact_ref: Option<String>,
+        prompt_ir: ForensicPromptIr,
+        example_refs: Vec<String>,
+        parameter_refs: Vec<String>,
+        dataset_revision_ref: String,
+        compatibility_refs: Vec<String>,
+        created_at: String,
+    ) -> Result<Self, ForensicsError> {
+        let mut artifact = Self {
+            schema: FORENSIC_PROMPT_ARTIFACT_SCHEMA_V1.into(),
+            prompt_artifact_ref,
+            parent_prompt_artifact_ref,
+            prompt_ir,
+            example_refs,
+            parameter_refs,
+            canonical_digest: String::new(),
+            dataset_revision_ref,
+            compatibility_refs,
+            created_at,
+        };
+        artifact.canonical_digest = artifact.computed_digest()?;
+        artifact.validate()?;
+        Ok(artifact)
+    }
+
+    pub fn computed_digest(&self) -> Result<String, ForensicsError> {
+        forensic_sha256_digest(&PromptDigestInput {
+            parent_prompt_artifact_ref: self.parent_prompt_artifact_ref.as_deref(),
+            prompt_ir: &self.prompt_ir,
+            example_refs: &self.example_refs,
+            parameter_refs: &self.parameter_refs,
+            dataset_revision_ref: &self.dataset_revision_ref,
+            compatibility_refs: &self.compatibility_refs,
+        })
+    }
+
+    pub fn validate(&self) -> Result<(), ForensicsError> {
+        if self.schema != FORENSIC_PROMPT_ARTIFACT_SCHEMA_V1 {
+            return Err(ForensicsError::InvalidSchema);
+        }
+        validate_ref("prompt artifact", &self.prompt_artifact_ref)?;
+        if let Some(parent) = &self.parent_prompt_artifact_ref {
+            validate_ref("parent prompt artifact", parent)?;
+        }
+        validate_prompt_ir(&self.prompt_ir)?;
+        validate_bounded_refs("example", &self.example_refs, 64)?;
+        validate_bounded_refs("parameter", &self.parameter_refs, 64)?;
+        validate_ref("dataset revision", &self.dataset_revision_ref)?;
+        validate_bounded_refs("compatibility", &self.compatibility_refs, 64)?;
+        validate_digest("prompt canonical", &self.canonical_digest)?;
+        if self.canonical_digest != self.computed_digest()? {
+            return Err(ForensicsError::InvalidPrompt(
+                "canonical digest does not bind structured content and lineage".into(),
+            ));
+        }
+        Ok(())
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
+pub enum PromptChangeKind {
+    Section,
+    Example,
+    Schema,
+    Tool,
+    Parameter,
+    Policy,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct PromptSemanticChange {
+    pub kind: PromptChangeKind,
+    pub field: &'static str,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct PromptCompatibilityProfile {
+    pub prompt_artifact_ref: String,
+    pub finding_schema_ref: String,
+    pub hypothesis_schema_ref: String,
+    pub admitted_tool_refs: Vec<String>,
+    pub runtime_tool_refs: Vec<String>,
+    pub compatibility_refs: Vec<String>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ForensicPromptWorkspace {
+    candidates: BTreeMap<String, ForensicPromptArtifact>,
+    active_prompt_artifact_ref: String,
+    draft: Option<ForensicPromptArtifact>,
+    run_prompt_digests: BTreeMap<String, String>,
+}
+
+fn prompt_semantic_diff(
+    parent: &ForensicPromptArtifact,
+    candidate: &ForensicPromptArtifact,
+) -> Vec<PromptSemanticChange> {
+    let mut changes = BTreeSet::new();
+    let parent_ir = &parent.prompt_ir;
+    let candidate_ir = &candidate.prompt_ir;
+    for (different, kind, field) in [
+        (
+            parent_ir.role != candidate_ir.role,
+            PromptChangeKind::Section,
+            "role",
+        ),
+        (
+            parent_ir.threat_model != candidate_ir.threat_model,
+            PromptChangeKind::Section,
+            "threatModel",
+        ),
+        (
+            parent_ir.vulnerability_classes != candidate_ir.vulnerability_classes,
+            PromptChangeKind::Section,
+            "vulnerabilityClasses",
+        ),
+        (
+            parent_ir.security_invariants != candidate_ir.security_invariants,
+            PromptChangeKind::Section,
+            "securityInvariants",
+        ),
+        (
+            parent_ir.evidence_requirements != candidate_ir.evidence_requirements,
+            PromptChangeKind::Section,
+            "evidenceRequirements",
+        ),
+        (
+            parent_ir.finding_schema_ref != candidate_ir.finding_schema_ref,
+            PromptChangeKind::Schema,
+            "findingSchemaRef",
+        ),
+        (
+            parent_ir.hypothesis_schema_ref != candidate_ir.hypothesis_schema_ref,
+            PromptChangeKind::Schema,
+            "hypothesisSchemaRef",
+        ),
+        (
+            parent_ir.tool_policy_refs != candidate_ir.tool_policy_refs,
+            PromptChangeKind::Tool,
+            "toolPolicyRefs",
+        ),
+        (
+            parent_ir.dependency_exploration_policy != candidate_ir.dependency_exploration_policy,
+            PromptChangeKind::Policy,
+            "dependencyExplorationPolicy",
+        ),
+        (
+            parent_ir.uncertainty_policy != candidate_ir.uncertainty_policy,
+            PromptChangeKind::Policy,
+            "uncertaintyPolicy",
+        ),
+        (
+            parent_ir.poc_policy != candidate_ir.poc_policy,
+            PromptChangeKind::Policy,
+            "pocPolicy",
+        ),
+        (
+            parent_ir.severity_policy != candidate_ir.severity_policy,
+            PromptChangeKind::Policy,
+            "severityPolicy",
+        ),
+        (
+            parent_ir.context_policy != candidate_ir.context_policy,
+            PromptChangeKind::Policy,
+            "contextPolicy",
+        ),
+        (
+            parent_ir.budget_policy_ref != candidate_ir.budget_policy_ref,
+            PromptChangeKind::Policy,
+            "budgetPolicyRef",
+        ),
+        (
+            parent.example_refs != candidate.example_refs,
+            PromptChangeKind::Example,
+            "exampleRefs",
+        ),
+        (
+            parent.parameter_refs != candidate.parameter_refs,
+            PromptChangeKind::Parameter,
+            "parameterRefs",
+        ),
+    ] {
+        if different {
+            changes.insert((kind, field));
+        }
+    }
+    changes
+        .into_iter()
+        .map(|(kind, field)| PromptSemanticChange { kind, field })
+        .collect()
+}
+
+fn validate_prompt_ir(prompt: &ForensicPromptIr) -> Result<(), ForensicsError> {
+    for (label, value) in [
+        ("role", &prompt.role),
+        ("threat model", &prompt.threat_model),
+        (
+            "dependency exploration policy",
+            &prompt.dependency_exploration_policy,
+        ),
+        ("uncertainty policy", &prompt.uncertainty_policy),
+        ("PoC policy", &prompt.poc_policy),
+        ("severity policy", &prompt.severity_policy),
+        ("context policy", &prompt.context_policy),
+    ] {
+        if value.trim().is_empty() || value.len() > 16_384 {
+            return Err(ForensicsError::InvalidPrompt(format!(
+                "{label} must contain 1 to 16384 bytes"
+            )));
+        }
+    }
+    for (label, values) in [
+        ("vulnerability class", &prompt.vulnerability_classes),
+        ("security invariant", &prompt.security_invariants),
+        ("evidence requirement", &prompt.evidence_requirements),
+    ] {
+        if values.len() > 64
+            || values
+                .iter()
+                .any(|value| value.trim().is_empty() || value.len() > 512)
+        {
+            return Err(ForensicsError::InvalidPrompt(format!(
+                "invalid {label} list"
+            )));
+        }
+    }
+    validate_bounded_refs("tool policy", &prompt.tool_policy_refs, 64)?;
+    validate_ref("finding schema", &prompt.finding_schema_ref)?;
+    validate_ref("hypothesis schema", &prompt.hypothesis_schema_ref)?;
+    validate_ref("budget policy", &prompt.budget_policy_ref)?;
+    Ok(())
+}
+
+fn forensic_sha256_digest<Value: Serialize>(value: &Value) -> Result<String, ForensicsError> {
+    let value = serde_json::to_value(value)
+        .map_err(|error| ForensicsError::InvalidPrompt(format!("cannot encode prompt: {error}")))?;
+    let canonical = forensic_canonical_json(&value)?;
+    Ok(format!("sha256:{:x}", Sha256::digest(canonical.as_bytes())))
+}
+
+fn forensic_canonical_json(value: &serde_json::Value) -> Result<String, ForensicsError> {
+    Ok(match value {
+        serde_json::Value::Null => "null".into(),
+        serde_json::Value::Bool(value) => value.to_string(),
+        serde_json::Value::Number(value) => value.to_string(),
+        serde_json::Value::String(value) => serde_json::to_string(value).map_err(|error| {
+            ForensicsError::InvalidPrompt(format!("cannot encode prompt string: {error}"))
+        })?,
+        serde_json::Value::Array(values) => format!(
+            "[{}]",
+            values
+                .iter()
+                .map(forensic_canonical_json)
+                .collect::<Result<Vec<_>, _>>()?
+                .join(",")
+        ),
+        serde_json::Value::Object(values) => {
+            let mut keys = values.keys().collect::<Vec<_>>();
+            keys.sort();
+            format!(
+                "{{{}}}",
+                keys.into_iter()
+                    .map(|key| {
+                        let encoded_key = serde_json::to_string(key).map_err(|error| {
+                            ForensicsError::InvalidPrompt(format!(
+                                "cannot encode prompt key: {error}"
+                            ))
+                        })?;
+                        Ok(format!(
+                            "{encoded_key}:{}",
+                            forensic_canonical_json(&values[key])?
+                        ))
+                    })
+                    .collect::<Result<Vec<_>, ForensicsError>>()?
+                    .join(",")
+            )
+        }
+    })
+}
+
+impl ForensicPromptWorkspace {
+    pub fn new(active: ForensicPromptArtifact) -> Result<Self, ForensicsError> {
+        active.validate()?;
+        let active_prompt_artifact_ref = active.prompt_artifact_ref.clone();
+        Ok(Self {
+            candidates: BTreeMap::from([(active_prompt_artifact_ref.clone(), active)]),
+            active_prompt_artifact_ref,
+            draft: None,
+            run_prompt_digests: BTreeMap::new(),
+        })
+    }
+
+    pub fn active(&self) -> &ForensicPromptArtifact {
+        &self.candidates[&self.active_prompt_artifact_ref]
+    }
+
+    pub fn draft(&self) -> Option<&ForensicPromptArtifact> {
+        self.draft.as_ref()
+    }
+
+    pub fn candidates(&self) -> impl Iterator<Item = &ForensicPromptArtifact> {
+        self.candidates.values()
+    }
+
+    pub fn clone_active(
+        &mut self,
+        candidate_ref: String,
+        created_at: String,
+    ) -> Result<(), ForensicsError> {
+        if self.candidates.contains_key(&candidate_ref) {
+            return Err(ForensicsError::InvalidPrompt(
+                "candidate ref already exists".into(),
+            ));
+        }
+        validate_ref("prompt candidate", &candidate_ref)?;
+        let active = self.active();
+        self.draft = Some(ForensicPromptArtifact::create(
+            candidate_ref,
+            Some(active.prompt_artifact_ref.clone()),
+            active.prompt_ir.clone(),
+            active.example_refs.clone(),
+            active.parameter_refs.clone(),
+            active.dataset_revision_ref.clone(),
+            active.compatibility_refs.clone(),
+            created_at,
+        )?);
+        Ok(())
+    }
+
+    pub fn update_draft_ir(&mut self, prompt_ir: ForensicPromptIr) -> Result<(), ForensicsError> {
+        validate_prompt_ir(&prompt_ir)?;
+        let draft = self.draft.as_mut().ok_or(ForensicsError::NoPromptDraft)?;
+        draft.prompt_ir = prompt_ir;
+        draft.canonical_digest = draft.computed_digest()?;
+        Ok(())
+    }
+
+    pub fn update_draft_inputs(
+        &mut self,
+        example_refs: Vec<String>,
+        parameter_refs: Vec<String>,
+        dataset_revision_ref: String,
+        compatibility_refs: Vec<String>,
+    ) -> Result<(), ForensicsError> {
+        validate_bounded_refs("example", &example_refs, 64)?;
+        validate_bounded_refs("parameter", &parameter_refs, 64)?;
+        validate_ref("dataset revision", &dataset_revision_ref)?;
+        validate_bounded_refs("compatibility", &compatibility_refs, 64)?;
+        let draft = self.draft.as_mut().ok_or(ForensicsError::NoPromptDraft)?;
+        draft.example_refs = example_refs;
+        draft.parameter_refs = parameter_refs;
+        draft.dataset_revision_ref = dataset_revision_ref;
+        draft.compatibility_refs = compatibility_refs;
+        draft.canonical_digest = draft.computed_digest()?;
+        Ok(())
+    }
+
+    pub fn save_draft(&mut self) -> Result<String, ForensicsError> {
+        let draft = self.draft.take().ok_or(ForensicsError::NoPromptDraft)?;
+        draft.validate()?;
+        let candidate_ref = draft.prompt_artifact_ref.clone();
+        self.candidates.insert(candidate_ref.clone(), draft);
+        Ok(candidate_ref)
+    }
+
+    pub fn activate(&mut self, candidate_ref: &str) -> Result<(), ForensicsError> {
+        if !self.candidates.contains_key(candidate_ref) {
+            return Err(ForensicsError::InvalidPrompt(
+                "unknown prompt candidate".into(),
+            ));
+        }
+        self.active_prompt_artifact_ref = candidate_ref.into();
+        Ok(())
+    }
+
+    pub fn bind_run(&mut self, run_ref: String) -> Result<String, ForensicsError> {
+        validate_ref("forensic run", &run_ref)?;
+        let digest = self.active().canonical_digest.clone();
+        self.run_prompt_digests.insert(run_ref, digest.clone());
+        Ok(digest)
+    }
+
+    pub fn run_prompt_digest(&self, run_ref: &str) -> Option<&str> {
+        self.run_prompt_digests.get(run_ref).map(String::as_str)
+    }
+
+    pub fn semantic_diff(&self) -> Result<Vec<PromptSemanticChange>, ForensicsError> {
+        let draft = self.draft.as_ref().ok_or(ForensicsError::NoPromptDraft)?;
+        Ok(prompt_semantic_diff(self.active(), draft))
+    }
+
+    pub fn check_compatibility(
+        &self,
+        profile: &PromptCompatibilityProfile,
+    ) -> Result<(), ForensicsError> {
+        let active = self.active();
+        if profile.prompt_artifact_ref != active.prompt_artifact_ref
+            || profile.finding_schema_ref != active.prompt_ir.finding_schema_ref
+            || profile.hypothesis_schema_ref != active.prompt_ir.hypothesis_schema_ref
+            || !active
+                .compatibility_refs
+                .iter()
+                .all(|value| profile.compatibility_refs.contains(value))
+            || !active.prompt_ir.tool_policy_refs.iter().all(|value| {
+                profile.admitted_tool_refs.contains(value)
+                    && profile.runtime_tool_refs.contains(value)
+            })
+        {
+            return Err(ForensicsError::IncompatiblePrompt);
+        }
+        Ok(())
+    }
+}
+
+pub fn baseline_forensic_prompt(
+    created_at: String,
+) -> Result<ForensicPromptArtifact, ForensicsError> {
+    ForensicPromptArtifact::create(
+        "prompt.forensic.omega.baseline.v1".into(),
+        None,
+        ForensicPromptIr {
+            role: "Find security-relevant invariant violations and preserve uncertainty.".into(),
+            threat_model: "Trace attacker-controlled and entropy-sensitive inputs across dependency boundaries.".into(),
+            vulnerability_classes: vec!["entropy downgrade".into(), "trust-boundary violation".into()],
+            security_invariants: vec!["Security claims require source-grounded causal evidence.".into()],
+            evidence_requirements: vec!["Cite exact source locations and every causal link.".into()],
+            dependency_exploration_policy: "Inspect every mounted dependency needed to complete a causal path.".into(),
+            uncertainty_policy: "Use a typed hypothesis when evidence is incomplete.".into(),
+            tool_policy_refs: vec!["tool.source.read".into(), "tool.dependency.inspect".into()],
+            finding_schema_ref: FORENSIC_FINDING_SCHEMA_V1.into(),
+            hypothesis_schema_ref: FORENSIC_HYPOTHESIS_SCHEMA_V1.into(),
+            poc_policy: "Prefer deterministic, fixture-bound reproduction.".into(),
+            severity_policy: "Severity follows demonstrated impact.".into(),
+            context_policy: "Prioritize high-risk paths without changing admitted authority.".into(),
+            budget_policy_ref: "budget.admitted.forensic.v1".into(),
+        },
+        vec!["example.typed.finding.v1".into()],
+        vec!["parameter.reasoning.high".into()],
+        "dataset.omega.forensics.v1".into(),
+        vec!["compatibility.loupe.v1".into()],
+        created_at,
+    )
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -1023,6 +1521,7 @@ pub struct ForensicsReviewProjection {
     pub schema: String,
     pub review_ref: String,
     pub run_ref: String,
+    pub prompt_digest: String,
     pub repository_ref: String,
     pub commit: String,
     pub coverage_status: CoverageStatus,
@@ -1055,6 +1554,7 @@ impl ForensicsReviewProjection {
             validate_ref("review", value)?;
         }
         validate_commit(&self.commit)?;
+        validate_digest("review prompt", &self.prompt_digest)?;
         if self.resource_generation == 0
             || self.findings.len() > 1_024
             || self.hypotheses.len() > 1_024
@@ -1345,6 +1845,12 @@ pub enum ForensicsError {
     DuplicateWorkerGeneration,
     #[error("the forensic review projection is invalid: {0}")]
     InvalidReview(String),
+    #[error("the forensic prompt artifact is invalid: {0}")]
+    InvalidPrompt(String),
+    #[error("clone an active prompt before editing or saving")]
+    NoPromptDraft,
+    #[error("the prompt schema, tool surface, or profile is incompatible")]
+    IncompatiblePrompt,
 }
 
 fn validate_ref(label: &str, value: &str) -> Result<(), ForensicsError> {
@@ -1480,6 +1986,8 @@ mod tests {
             schema: REVIEW_PROJECTION_SCHEMA_V1.into(),
             review_ref: "review.forensic.coldcard.fixture".into(),
             run_ref: "run.forensic.fixture".into(),
+            prompt_digest:
+                "sha256:e59c827a678c1f3867ac410b7af729587e7700ac6fec1830b370a77b2c9e8610".into(),
             repository_ref: COLDCARD_REPOSITORY_REF.into(),
             commit: COLDCARD_VULNERABLE_COMMIT.into(),
             coverage_status: CoverageStatus::Complete,
@@ -1803,7 +2311,8 @@ mod tests {
             "provider_client",
             "shell",
             "external_ip",
-            "prompt",
+            "compiled_prompt",
+            "prompt_text",
             "source_bytes",
             "private_evidence",
             "finding_content",
@@ -1903,5 +2412,119 @@ mod tests {
             }
             review.validate().expect("terminal run remains reviewable");
         }
+    }
+
+    #[test]
+    fn prompt_digest_matches_the_openagents_canonical_contract() {
+        let artifact =
+            baseline_forensic_prompt("2026-08-01T10:00:00.000Z".into()).expect("baseline prompt");
+        assert_eq!(
+            artifact.canonical_digest,
+            "sha256:e59c827a678c1f3867ac410b7af729587e7700ac6fec1830b370a77b2c9e8610"
+        );
+        artifact.validate().expect("canonical artifact");
+    }
+
+    #[test]
+    fn prompt_edits_are_save_as_candidates_with_lineage_and_pointer_only_reverts() {
+        let active =
+            baseline_forensic_prompt("2026-08-01T10:00:00.000Z".into()).expect("baseline prompt");
+        let active_digest = active.canonical_digest.clone();
+        let mut workspace = ForensicPromptWorkspace::new(active).expect("prompt workspace");
+        workspace
+            .clone_active(
+                "prompt.forensic.omega.candidate.v2".into(),
+                "2026-08-01T10:01:00.000Z".into(),
+            )
+            .expect("clone active");
+        let mut prompt_ir = workspace.draft().expect("draft").prompt_ir.clone();
+        prompt_ir.uncertainty_policy = "Retain unsupported claims only as typed hypotheses.".into();
+        workspace.update_draft_ir(prompt_ir).expect("edit draft");
+        let candidate_ref = workspace.save_draft().expect("save candidate");
+        assert_eq!(workspace.active().canonical_digest, active_digest);
+        workspace
+            .activate(&candidate_ref)
+            .expect("activate candidate");
+        let candidate_digest = workspace.active().canonical_digest.clone();
+        assert_ne!(candidate_digest, active_digest);
+        workspace
+            .bind_run("run.prompt-candidate".into())
+            .expect("bind run");
+        workspace
+            .activate("prompt.forensic.omega.baseline.v1")
+            .expect("revert pointer");
+        assert_eq!(workspace.candidates().count(), 2);
+        assert_eq!(
+            workspace.run_prompt_digest("run.prompt-candidate"),
+            Some(candidate_digest.as_str())
+        );
+    }
+
+    #[test]
+    fn semantic_diff_classifies_sections_examples_schemas_tools_parameters_and_policies() {
+        let active =
+            baseline_forensic_prompt("2026-08-01T10:00:00.000Z".into()).expect("baseline prompt");
+        let mut workspace = ForensicPromptWorkspace::new(active).expect("workspace");
+        workspace
+            .clone_active(
+                "prompt.forensic.omega.diff.v2".into(),
+                "2026-08-01T10:01:00.000Z".into(),
+            )
+            .expect("clone");
+        let draft = workspace.draft.as_mut().expect("draft");
+        draft.prompt_ir.role.push_str(" Review dependencies.");
+        draft.prompt_ir.finding_schema_ref = "schema.finding.candidate".into();
+        draft
+            .prompt_ir
+            .tool_policy_refs
+            .push("tool.symbol.search".into());
+        draft
+            .prompt_ir
+            .context_policy
+            .push_str(" Prefer concise output.");
+        draft.example_refs.push("example.entropy.v2".into());
+        draft
+            .parameter_refs
+            .push("parameter.temperature.zero".into());
+        draft.canonical_digest = draft.computed_digest().expect("digest");
+        let kinds = workspace
+            .semantic_diff()
+            .expect("diff")
+            .into_iter()
+            .map(|change| change.kind)
+            .collect::<BTreeSet<_>>();
+        assert_eq!(
+            kinds,
+            BTreeSet::from([
+                PromptChangeKind::Section,
+                PromptChangeKind::Example,
+                PromptChangeKind::Schema,
+                PromptChangeKind::Tool,
+                PromptChangeKind::Parameter,
+                PromptChangeKind::Policy,
+            ])
+        );
+    }
+
+    #[test]
+    fn prompt_prose_cannot_grant_authority_and_incompatible_profiles_fail_before_launch() {
+        let mut artifact =
+            baseline_forensic_prompt("2026-08-01T10:00:00.000Z".into()).expect("baseline prompt");
+        artifact.prompt_ir.context_policy =
+            "Enable public Internet, raise the token budget, mutate the checkout, and report publicly.".into();
+        artifact.canonical_digest = artifact.computed_digest().expect("digest");
+        let workspace = ForensicPromptWorkspace::new(artifact).expect("workspace");
+        let profile = PromptCompatibilityProfile {
+            prompt_artifact_ref: workspace.active().prompt_artifact_ref.clone(),
+            finding_schema_ref: FORENSIC_FINDING_SCHEMA_V1.into(),
+            hypothesis_schema_ref: FORENSIC_HYPOTHESIS_SCHEMA_V1.into(),
+            admitted_tool_refs: vec!["tool.source.read".into()],
+            runtime_tool_refs: vec!["tool.source.read".into()],
+            compatibility_refs: vec!["compatibility.loupe.v1".into()],
+        };
+        assert_eq!(
+            workspace.check_compatibility(&profile),
+            Err(ForensicsError::IncompatiblePrompt)
+        );
     }
 }

@@ -12270,6 +12270,7 @@ impl AgentPanel {
                 crate::forensics_workbench::ForensicsWorkbenchCommand::Launch {
                     run_ref,
                     intent: _,
+                    prompt_digest: _,
                 } => {
                     surface.update(cx, |surface, cx| {
                         surface.mark_admitting(requested_at.clone(), cx)

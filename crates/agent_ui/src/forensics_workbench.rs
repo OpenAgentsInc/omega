@@ -1,11 +1,13 @@
 use gpui::{App, Context, EventEmitter, FocusHandle, Focusable, Render, SharedString, Window};
 use omega_forensics::{
     ColdcardBenchmarkArm, CoverageStatus, DependencyPolicy, ExplicitOperatorAction,
-    ForensicBudgetState, ForensicEvidenceTier, ForensicLifecycleState, ForensicReviewDecisionKind,
-    ForensicReviewOutcome, ForensicSourceCitation, ForensicWorkerObservation,
-    ForensicWorkerPlacement, ForensicsFailureProjection, ForensicsLaunchIntent,
-    ForensicsPreflightProjection, ForensicsReviewProjection, ForensicsRunPhase,
-    ForensicsRunProjection, PreflightReadiness, SourceState,
+    FORENSIC_FINDING_SCHEMA_V1, FORENSIC_HYPOTHESIS_SCHEMA_V1, ForensicBudgetState,
+    ForensicEvidenceTier, ForensicLifecycleState, ForensicPromptIr, ForensicPromptWorkspace,
+    ForensicReviewDecisionKind, ForensicReviewOutcome, ForensicSourceCitation,
+    ForensicWorkerObservation, ForensicWorkerPlacement, ForensicsFailureProjection,
+    ForensicsLaunchIntent, ForensicsPreflightProjection, ForensicsReviewProjection,
+    ForensicsRunPhase, ForensicsRunProjection, PreflightReadiness, PromptChangeKind,
+    PromptCompatibilityProfile, SourceState,
 };
 use omega_workbench_state::RepositoryBinding;
 use ui::{
@@ -33,6 +35,7 @@ pub struct ForensicsWorkbenchSnapshot {
     pub prepared_intent: Option<ForensicsLaunchIntent>,
     pub run: Option<ForensicsRunProjection>,
     pub review: Option<ForensicsReviewProjection>,
+    pub prompt_workspace: ForensicPromptWorkspace,
     pub source_resolutions: std::collections::BTreeMap<String, ForensicSourceResolution>,
     pub status: SharedString,
 }
@@ -49,6 +52,7 @@ pub enum ForensicsWorkbenchCommand {
     Launch {
         run_ref: String,
         intent: ForensicsLaunchIntent,
+        prompt_digest: String,
     },
     Refresh,
     Cancel,
@@ -65,6 +69,7 @@ pub struct ForensicsWorkbenchSurface {
     prepared_intent: Option<ForensicsLaunchIntent>,
     run: Option<ForensicsRunProjection>,
     review: Option<ForensicsReviewProjection>,
+    prompt_workspace: ForensicPromptWorkspace,
     source_resolutions: std::collections::BTreeMap<String, ForensicSourceResolution>,
     status: SharedString,
 }
@@ -85,6 +90,13 @@ impl ForensicsWorkbenchSurface {
             prepared_intent: None,
             run: None,
             review: None,
+            prompt_workspace: ForensicPromptWorkspace::new(
+                omega_forensics::baseline_forensic_prompt(
+                    chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Millis, true),
+                )
+                .expect("the built-in forensic prompt must remain valid"),
+            )
+            .expect("the built-in forensic prompt workspace must remain valid"),
             source_resolutions: std::collections::BTreeMap::new(),
             status: "Awaiting OpenAgents managed profile".into(),
         }
@@ -145,6 +157,17 @@ impl ForensicsWorkbenchSurface {
     }
 
     pub fn prepare_run(&mut self, cx: &mut Context<Self>) -> anyhow::Result<()> {
+        let active_prompt = self.prompt_workspace.active();
+        let supported_tools = vec!["tool.source.read".into(), "tool.dependency.inspect".into()];
+        self.prompt_workspace
+            .check_compatibility(&PromptCompatibilityProfile {
+                prompt_artifact_ref: active_prompt.prompt_artifact_ref.clone(),
+                finding_schema_ref: FORENSIC_FINDING_SCHEMA_V1.into(),
+                hypothesis_schema_ref: FORENSIC_HYPOTHESIS_SCHEMA_V1.into(),
+                admitted_tool_refs: supported_tools.clone(),
+                runtime_tool_refs: supported_tools,
+                compatibility_refs: vec!["compatibility.loupe.v1".into()],
+            })?;
         let preflight = self
             .preflight
             .as_ref()
@@ -172,9 +195,14 @@ impl ForensicsWorkbenchSurface {
             "run.omega.forensics.{commit_prefix}.{}",
             uuid::Uuid::new_v4().simple()
         );
+        let prompt_digest = self.prompt_workspace.bind_run(run_ref.clone())?;
         self.run = Some(ForensicsRunProjection::prepared(run_ref.clone())?);
         self.status = "Launching one OpenAgents Cloud worker…".into();
-        cx.emit(ForensicsWorkbenchCommand::Launch { run_ref, intent });
+        cx.emit(ForensicsWorkbenchCommand::Launch {
+            run_ref,
+            intent,
+            prompt_digest,
+        });
         cx.notify();
         Ok(())
     }
@@ -356,9 +384,54 @@ impl ForensicsWorkbenchSurface {
             prepared_intent: self.prepared_intent.clone(),
             run: self.run.clone(),
             review: self.review.clone(),
+            prompt_workspace: self.prompt_workspace.clone(),
             source_resolutions: self.source_resolutions.clone(),
             status: self.status.clone(),
         }
+    }
+
+    pub fn clone_prompt_candidate(&mut self, cx: &mut Context<Self>) -> anyhow::Result<()> {
+        let candidate_ref = format!(
+            "prompt.forensic.omega.candidate.{}",
+            uuid::Uuid::new_v4().simple()
+        );
+        self.prompt_workspace.clone_active(
+            candidate_ref,
+            chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Millis, true),
+        )?;
+        self.status = "Editing a save-as prompt candidate".into();
+        cx.notify();
+        Ok(())
+    }
+
+    pub fn update_prompt_draft(
+        &mut self,
+        prompt_ir: ForensicPromptIr,
+        cx: &mut Context<Self>,
+    ) -> anyhow::Result<()> {
+        self.prompt_workspace.update_draft_ir(prompt_ir)?;
+        self.status = "Prompt candidate edited; active prompt unchanged".into();
+        cx.notify();
+        Ok(())
+    }
+
+    pub fn save_prompt_candidate(&mut self, cx: &mut Context<Self>) -> anyhow::Result<()> {
+        let candidate_ref = self.prompt_workspace.save_draft()?;
+        self.status = format!("Saved immutable candidate · {candidate_ref}").into();
+        cx.notify();
+        Ok(())
+    }
+
+    pub fn activate_prompt_candidate(
+        &mut self,
+        candidate_ref: &str,
+        cx: &mut Context<Self>,
+    ) -> anyhow::Result<()> {
+        self.prompt_workspace.activate(candidate_ref)?;
+        self.prepared_intent = None;
+        self.status = "Active prompt pointer changed; prepare the run again".into();
+        cx.notify();
+        Ok(())
     }
 
     fn render_fact(
@@ -451,6 +524,10 @@ impl Render for ForensicsWorkbenchSurface {
         });
         let review = self.review.clone();
         let source_resolutions = self.source_resolutions.clone();
+        let prompt_workspace = self.prompt_workspace.clone();
+        let active_prompt = prompt_workspace.active().clone();
+        let prompt_changes = prompt_workspace.semantic_diff().unwrap_or_default();
+        let prompt_candidates = prompt_workspace.candidates().cloned().collect::<Vec<_>>();
 
         v_flex()
             .id("omega.forensics.workbench")
@@ -508,6 +585,114 @@ impl Render for ForensicsWorkbenchSurface {
                                 }))
                         }),
                 ),
+            )
+            .child(div().h_px().bg(cx.theme().colors().border))
+            .child(
+                v_flex()
+                    .gap_1()
+                    .child(
+                        Label::new("Prompt artifacts")
+                            .size(LabelSize::XSmall)
+                            .color(Color::Muted),
+                    )
+                    .child(Self::render_fact(
+                        "Active",
+                        active_prompt.prompt_artifact_ref.clone(),
+                    ))
+                    .child(Self::render_fact(
+                        "Digest",
+                        active_prompt.canonical_digest.clone(),
+                    ))
+                    .child(Self::render_fact(
+                        "Typed output",
+                        "Finding + hypothesis schemas",
+                    ))
+                    .child(Self::render_fact("Authority", "External admitted profile"))
+                    .child(
+                        h_flex()
+                            .gap_1()
+                            .child(
+                                Button::new("omega.forensics.prompt.clone", "Clone active")
+                                    .size(ButtonSize::Compact)
+                                    .style(ButtonStyle::Subtle)
+                                    .on_click(cx.listener(|this, _, _, cx| {
+                                        if let Err(error) = this.clone_prompt_candidate(cx) {
+                                            this.status =
+                                                format!("Prompt clone failed · {error}").into();
+                                            cx.notify();
+                                        }
+                                    })),
+                            )
+                            .when(prompt_workspace.draft().is_some(), |this| {
+                                this.child(
+                                    Button::new("omega.forensics.prompt.save", "Save candidate")
+                                        .size(ButtonSize::Compact)
+                                        .style(ButtonStyle::Tinted(ui::TintColor::Accent))
+                                        .on_click(cx.listener(|this, _, _, cx| {
+                                            if let Err(error) = this.save_prompt_candidate(cx) {
+                                                this.status =
+                                                    format!("Prompt save failed · {error}").into();
+                                                cx.notify();
+                                            }
+                                        })),
+                                )
+                            }),
+                    )
+                    .when_some(prompt_workspace.draft(), |this, draft| {
+                        this.child(Self::render_fact(
+                            "Draft",
+                            draft.prompt_artifact_ref.clone(),
+                        ))
+                        .child(Self::render_fact(
+                            "Parent",
+                            draft.parent_prompt_artifact_ref.clone().unwrap_or_default(),
+                        ))
+                        .child(
+                            Label::new(if prompt_changes.is_empty() {
+                                "No semantic changes".to_string()
+                            } else {
+                                prompt_changes
+                                    .iter()
+                                    .map(|change| {
+                                        format!(
+                                            "{} · {}",
+                                            prompt_change_label(change.kind),
+                                            change.field
+                                        )
+                                    })
+                                    .collect::<Vec<_>>()
+                                    .join("  |  ")
+                            })
+                            .size(LabelSize::XSmall)
+                            .color(Color::Muted),
+                        )
+                    })
+                    .children(prompt_candidates.into_iter().enumerate().map(
+                        |(index, candidate)| {
+                            let candidate_ref = candidate.prompt_artifact_ref.clone();
+                            Button::new(
+                                ("omega.forensics.prompt.activate", index),
+                                candidate.prompt_artifact_ref,
+                            )
+                            .size(ButtonSize::Compact)
+                            .style(if candidate_ref == active_prompt.prompt_artifact_ref {
+                                ButtonStyle::Tinted(ui::TintColor::Accent)
+                            } else {
+                                ButtonStyle::Subtle
+                            })
+                            .on_click(cx.listener(
+                                move |this, _, _, cx| {
+                                    if let Err(error) =
+                                        this.activate_prompt_candidate(&candidate_ref, cx)
+                                    {
+                                        this.status =
+                                            format!("Prompt activation failed · {error}").into();
+                                        cx.notify();
+                                    }
+                                },
+                            ))
+                        },
+                    )),
             )
             .child(div().h_px().bg(cx.theme().colors().border))
             .child(
@@ -633,6 +818,7 @@ impl Render for ForensicsWorkbenchSurface {
                                     .color(Color::Muted),
                             )
                             .child(Self::render_fact("Outcome", outcome))
+                            .child(Self::render_fact("Prompt", review.prompt_digest.clone()))
                             .child(Self::render_fact(
                                 "Budget",
                                 budget_state_label(review.budget_state),
@@ -1167,6 +1353,17 @@ fn review_outcome_label(outcome: ForensicReviewOutcome) -> &'static str {
     }
 }
 
+fn prompt_change_label(kind: PromptChangeKind) -> &'static str {
+    match kind {
+        PromptChangeKind::Section => "Section",
+        PromptChangeKind::Example => "Example",
+        PromptChangeKind::Schema => "Schema",
+        PromptChangeKind::Tool => "Tool",
+        PromptChangeKind::Parameter => "Parameter",
+        PromptChangeKind::Policy => "Policy",
+    }
+}
+
 fn budget_state_label(state: ForensicBudgetState) -> &'static str {
     match state {
         ForensicBudgetState::WithinBudget => "Within budget",
@@ -1307,6 +1504,8 @@ mod tests {
             schema: REVIEW_PROJECTION_SCHEMA_V1.into(),
             review_ref: "review.forensic.coldcard.fixture".into(),
             run_ref: "run.forensic.coldcard.fixture".into(),
+            prompt_digest:
+                "sha256:e59c827a678c1f3867ac410b7af729587e7700ac6fec1830b370a77b2c9e8610".into(),
             repository_ref: "repository-ref://coldcard/firmware".into(),
             commit: omega_forensics::COLDCARD_VULNERABLE_COMMIT.into(),
             coverage_status: CoverageStatus::Complete,
@@ -1559,6 +1758,49 @@ mod tests {
                 snapshot.source_resolutions.get("source.coldcard.shared.utils.42"),
                 Some(ForensicSourceResolution::Failed(reason)) if reason == "pinned file is absent"
             ));
+        });
+    }
+
+    #[gpui::test]
+    fn prompt_editor_saves_a_new_candidate_without_mutating_the_active_artifact(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        cx.update(|cx| {
+            let binding = RepositoryBinding::new("repo", "worktree").expect("valid binding");
+            let surface = cx.new(|cx| ForensicsWorkbenchSurface::new(&candidate(binding), cx));
+            let original = surface
+                .read(cx)
+                .snapshot()
+                .prompt_workspace
+                .active()
+                .clone();
+            surface
+                .update(cx, |surface, cx| surface.clone_prompt_candidate(cx))
+                .expect("clone prompt");
+            let mut prompt_ir = surface
+                .read(cx)
+                .snapshot()
+                .prompt_workspace
+                .draft()
+                .expect("draft")
+                .prompt_ir
+                .clone();
+            prompt_ir.evidence_requirements.push(
+                "Reproduce the Coldcard fallback entropy path from its pinned fixture.".into(),
+            );
+            surface
+                .update(cx, |surface, cx| surface.update_prompt_draft(prompt_ir, cx))
+                .expect("edit structured prompt");
+            assert_eq!(
+                surface.read(cx).snapshot().prompt_workspace.active(),
+                &original
+            );
+            surface
+                .update(cx, |surface, cx| surface.save_prompt_candidate(cx))
+                .expect("save candidate");
+            let snapshot = surface.read(cx).snapshot();
+            assert_eq!(snapshot.prompt_workspace.candidates().count(), 2);
+            assert_eq!(snapshot.prompt_workspace.active(), &original);
         });
     }
 }

@@ -243,6 +243,7 @@
   - [Omega Forensics preflight](./development/omega-forensics-preflight.md)
   - [Omega Forensics cloud control](./development/omega-forensics-cloud-control.md)
   - [Omega Forensics review](./development/omega-forensics-review.md)
+  - [Omega Forensics prompt artifacts](./development/omega-forensics-prompt-artifacts.md)
   - [macOS](./development/macos.md)
   - [Linux](./development/linux.md)
   - [Windows](./development/windows.md)
