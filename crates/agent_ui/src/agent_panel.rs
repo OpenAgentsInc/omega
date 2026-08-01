@@ -5064,13 +5064,18 @@ impl AgentPanel {
     /// The wait is a bounded poll rather than a subscription because the agent
     /// panel is added to the dock by an async task in `crates/omega`, this runs
     /// from `Workspace::new_local`'s init callback, and `Workspace` emits no
-    /// "panel added" event to subscribe to. It gives up after a second instead
-    /// of holding a task for the window's lifetime: a window with no agent
-    /// panel a second after opening has AI disabled, and the front door is not
-    /// the right thing to force on it.
+    /// "panel added" event to subscribe to. Normal startup gives up after a
+    /// second instead of holding a task for the window's lifetime. Comet mode
+    /// allows ten seconds because a clean isolated profile can still be
+    /// initializing the only surface it is permitted to render.
     pub fn open_front_door(window: &mut Window, cx: &mut Context<Workspace>) {
         cx.spawn_in(window, async move |workspace, cx| {
-            for _ in 0..40 {
+            let poll_attempts = if omega_zero_base::is_comet_mode() {
+                400
+            } else {
+                40
+            };
+            for _ in 0..poll_attempts {
                 let opened = workspace.update_in(cx, |workspace, window, cx| {
                     let Some(panel) = workspace.panel::<Self>(cx) else {
                         return false;
