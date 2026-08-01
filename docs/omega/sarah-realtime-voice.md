@@ -200,6 +200,18 @@ carry the exact identity and contiguous sequence numbers. Omega
 rejects identity changes, sequence gaps, oversized fields, invalid tool
 digests, and unknown tagged variants.
 
+The first server frame is `session_ready`. In addition to the admitted model,
+expiry, and reserved credit, it must carry a nonempty
+`providerGenerationRef`. That opaque reference names the one provider
+generation already opened for this control session. OpenAgents must keep it
+stable across an allowed LiveKit media reconnect, must never reuse it for a
+new provider generation, and must issue a distinct value for concurrently
+active private and community generations. Omega refuses a repeated
+`session_ready`; a reconnect does not create a second readiness handshake.
+This field is produced by OpenAgents rather than inferred from `dispatchRef`,
+`roomEpoch`, or Omega's client generation, because none of those identifies
+the provider generation.
+
 With `livekit_room_v1`, Omega opens the microphone only after the reviewed
 admission has produced that generation-bound transport. It joins with
 auto-subscribe disabled, publishes one 24 kHz mono microphone track, and
@@ -216,6 +228,26 @@ events drive the existing visible reconnect state without minting a new
 generation. Commands, attributed transcripts, provider usage, and settlement
 remain on the WebSocket/API path and never move into LiveKit data, participant
 metadata, or Redis.
+
+For `livekit_room_v1`, the installed client also writes a bounded-field JSONL
+observation at
+`<Omega data dir>/voice/livekit-transport-evidence.jsonl` after the initial
+publication, after Sarah audio subscription, and after a media reconnect. Each
+`openagents.omega.sarah-livekit-transport-evidence.v1` row records the selected
+publisher/subscriber candidate pair's local and remote candidate type,
+transport protocol, relay protocol, and packet counters. It classifies only
+the measured shapes `direct_udp`, `tcp_fallback`, and `turn_tls`; another relay
+shape remains `unclassified`. The receipt hashes the session, room, dispatch,
+and provider-generation references with domain separation. It never contains
+their raw values, candidate addresses or ports, TURN URLs or credentials,
+participant grants, media, or transcripts.
+
+The initial and `reconnected` rows are comparable because their hashed session,
+room, dispatch, and provider-generation bindings must be identical. Omega
+refuses overlapping reconnect notifications, a `Reconnected` notification
+without a preceding `Reconnecting`, and a second simultaneous Sarah audio
+track. These checks keep evidence from treating a revived or overlapping media
+generation as a reconnect and keep playback under one audio owner.
 
 With the explicit `custom_wss_v1` rollback transport, audio continues to use
 the `OAA1` media envelope. Each binary frame contains:

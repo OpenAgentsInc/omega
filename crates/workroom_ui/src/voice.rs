@@ -32,6 +32,9 @@ use livekit::{
         audio_frame::AudioFrame,
         audio_source::{AudioSourceOptions, RtcAudioSource, native::NativeAudioSource},
         audio_stream::native::NativeAudioStream,
+        stats::{
+            IceCandidateType, IceServerTransportProtocol, RtcStats, dictionaries::IceCandidateStats,
+        },
     },
 };
 use omega_effectd::{
@@ -58,6 +61,8 @@ const MAX_TRANSCRIPT_RECOVERY_BYTES: usize = 1024 * 1024;
 const MAX_ERROR_TEXT_BYTES: usize = 4 * 1024;
 const VOICE_HEARTBEAT_INTERVAL: Duration = Duration::from_secs(15);
 const VOICE_TRANSCRIPT_SCHEMA: &str = "openagents.sarah.voice.transcript.v1";
+const LIVEKIT_TRANSPORT_EVIDENCE_SCHEMA: &str =
+    "openagents.omega.sarah-livekit-transport-evidence.v1";
 
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
 pub enum SarahVoiceState {
@@ -489,6 +494,7 @@ enum GatewayServerMessage {
         model: String,
         expires_at_ms: u64,
         reserved_credit_msat: u64,
+        provider_generation_ref: String,
     },
     Lifecycle {
         state: GatewayLifecycleState,
@@ -607,8 +613,85 @@ pub struct PreparedSarahVoiceDevices {
     playback: VoicePlayback,
 }
 
+#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "snake_case")]
+enum SarahLiveKitEvidenceStage {
+    Connected,
+    Reconnected,
+}
+
+#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "snake_case")]
+enum SarahLiveKitPathKind {
+    DirectUdp,
+    TcpFallback,
+    TurnTls,
+    Unclassified,
+}
+
+#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "snake_case")]
+enum SarahLiveKitCandidateType {
+    Host,
+    ServerReflexive,
+    PeerReflexive,
+    Relay,
+}
+
+#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "snake_case")]
+enum SarahLiveKitRelayProtocol {
+    Udp,
+    Tcp,
+    Tls,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct SarahLiveKitCandidateEvidence {
+    candidate_type: SarahLiveKitCandidateType,
+    protocol: String,
+    relay_protocol: Option<SarahLiveKitRelayProtocol>,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct SarahLiveKitSelectedPathEvidence {
+    classification: SarahLiveKitPathKind,
+    local: SarahLiveKitCandidateEvidence,
+    remote: SarahLiveKitCandidateEvidence,
+    packets_sent: u64,
+    packets_received: u64,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct SarahLiveKitTransportEvidence {
+    schema: String,
+    public_safe: bool,
+    recorded_at: String,
+    stage: SarahLiveKitEvidenceStage,
+    session_ref_digest: String,
+    session_generation: u32,
+    room_ref_digest: String,
+    room_epoch: u64,
+    dispatch_ref_digest: String,
+    provider_generation_ref_digest: String,
+    publisher_paths: Vec<SarahLiveKitSelectedPathEvidence>,
+    subscriber_paths: Vec<SarahLiveKitSelectedPathEvidence>,
+}
+
+#[derive(Clone)]
+struct SarahLiveKitEvidenceBinding {
+    session_ref_digest: String,
+    session_generation: u32,
+    room_ref_digest: String,
+    room_epoch: u64,
+    dispatch_ref_digest: String,
+}
+
 enum SarahLiveKitMediaControl {
-    Start,
+    Start { provider_generation_ref: String },
     Close,
 }
 
@@ -616,8 +699,55 @@ enum SarahLiveKitMediaEvent {
     Audio(Vec<u8>),
     Reconnecting,
     Reconnected,
+    TransportEvidence(SarahLiveKitTransportEvidence),
     Ended,
     Error(String),
+}
+
+#[derive(Default)]
+struct SarahLiveKitAudioOwner {
+    track_ref: Option<String>,
+}
+
+impl SarahLiveKitAudioOwner {
+    fn subscribe(&mut self, track_ref: &str) -> Result<()> {
+        if self.track_ref.is_some() {
+            bail!("Sarah LiveKit attempted to subscribe a second audio track");
+        }
+        self.track_ref = Some(track_ref.to_string());
+        Ok(())
+    }
+
+    fn unsubscribe(&mut self, track_ref: &str) -> Result<()> {
+        if self.track_ref.as_deref() != Some(track_ref) {
+            bail!("Sarah LiveKit unsubscribed an audio track it did not own");
+        }
+        self.track_ref = None;
+        Ok(())
+    }
+}
+
+#[derive(Default)]
+struct SarahLiveKitReconnectFence {
+    reconnecting: bool,
+}
+
+impl SarahLiveKitReconnectFence {
+    fn begin(&mut self) -> Result<()> {
+        if self.reconnecting {
+            bail!("Sarah LiveKit reported overlapping media reconnects");
+        }
+        self.reconnecting = true;
+        Ok(())
+    }
+
+    fn complete(&mut self) -> Result<()> {
+        if !self.reconnecting {
+            bail!("Sarah LiveKit reported a revived reconnect generation");
+        }
+        self.reconnecting = false;
+        Ok(())
+    }
 }
 
 struct SarahLiveKitMedia {
@@ -682,7 +812,12 @@ impl ManagedSarahVoiceClient {
         let livekit_media = match &self.managed_session.transport {
             SarahVoiceTransport::LiveKitRoomV1(transport) => self.prepared_devices.as_ref().map(
                 |PreparedSarahVoiceDevices { microphone, .. }| {
-                    start_livekit_media(transport.clone(), microphone.receiver.clone(), cx)
+                    start_livekit_media(
+                        transport.clone(),
+                        SarahLiveKitEvidenceBinding::new(&self.managed_session, transport),
+                        microphone.receiver.clone(),
+                        cx,
+                    )
                 },
             ),
             SarahVoiceTransport::CustomWssV1 => None,
@@ -938,7 +1073,9 @@ impl ManagedSarahVoiceClient {
                                 self.managed_session.session_expires_at_ms,
                             ).await? {
                                 GatewayServerAction::Continue => {}
-                                GatewayServerAction::SessionReady => {
+                                GatewayServerAction::SessionReady {
+                                    provider_generation_ref,
+                                } => {
                                     if session_ready {
                                         bail!("Sarah voice gateway repeated session readiness");
                                     }
@@ -946,7 +1083,9 @@ impl ManagedSarahVoiceClient {
                                     if let Some(media) = &livekit_media
                                         && media
                                             .controls
-                                            .send(SarahLiveKitMediaControl::Start)
+                                            .send(SarahLiveKitMediaControl::Start {
+                                                provider_generation_ref,
+                                            })
                                             .await
                                             .is_err()
                                     {
@@ -1012,6 +1151,18 @@ impl ManagedSarahVoiceClient {
                                 .await
                                 .context("reporting LiveKit reconnect completion")?;
                         }
+                        SarahLiveKitMediaEvent::TransportEvidence(evidence) => {
+                            if let Err(error) = append_livekit_transport_evidence(
+                                &paths::data_dir()
+                                    .join("voice")
+                                    .join("livekit-transport-evidence.jsonl"),
+                                &evidence,
+                            ) {
+                                log::warn!(
+                                    "could not preserve public-safe Sarah LiveKit transport evidence: {error:#}"
+                                );
+                            }
+                        }
                         SarahLiveKitMediaEvent::Ended => {
                             events.send(SarahVoiceEvent::Ended {
                                 reason: Some("livekit_disconnected".into()),
@@ -1051,6 +1202,7 @@ impl ManagedSarahVoiceClient {
 
 fn start_livekit_media(
     transport: SarahLiveKitRoomTransport,
+    evidence_binding: SarahLiveKitEvidenceBinding,
     microphone: async_channel::Receiver<Vec<u8>>,
     cx: &gpui::AsyncApp,
 ) -> SarahLiveKitMedia {
@@ -1058,9 +1210,13 @@ fn start_livekit_media(
     let (event_sender, event_receiver) = async_channel::bounded(64);
     let task = gpui_tokio::Tokio::spawn(cx, async move {
         let result = match control_receiver.recv().await {
-            Ok(SarahLiveKitMediaControl::Start) => {
+            Ok(SarahLiveKitMediaControl::Start {
+                provider_generation_ref,
+            }) => {
                 run_livekit_media(
                     transport,
+                    evidence_binding,
+                    provider_generation_ref,
                     microphone,
                     control_receiver,
                     event_sender.clone(),
@@ -1089,6 +1245,8 @@ fn start_livekit_media(
 
 async fn run_livekit_media(
     transport: SarahLiveKitRoomTransport,
+    evidence_binding: SarahLiveKitEvidenceBinding,
+    provider_generation_ref: String,
     microphone: async_channel::Receiver<Vec<u8>>,
     controls: async_channel::Receiver<SarahLiveKitMediaControl>,
     events: async_channel::Sender<SarahLiveKitMediaEvent>,
@@ -1107,7 +1265,7 @@ async fn run_livekit_media(
         control = close_before_connect => {
             match control {
                 Ok(SarahLiveKitMediaControl::Close) | Err(_) => return Ok(()),
-                Ok(SarahLiveKitMediaControl::Start) => {
+                Ok(SarahLiveKitMediaControl::Start { .. }) => {
                     bail!("LiveKit media received a duplicate start");
                 }
             }
@@ -1127,6 +1285,8 @@ async fn run_livekit_media(
         100,
     );
     let mut audio_stream_tasks = tokio::task::JoinSet::new();
+    let mut audio_owner = SarahLiveKitAudioOwner::default();
+    let mut reconnect_fence = SarahLiveKitReconnectFence::default();
     let session_result: Result<()> = async {
         if room.name() != transport.room_ref
             || room.local_participant().identity().to_string() != transport.participant_ref
@@ -1164,7 +1324,7 @@ async fn run_livekit_media(
             control = close_before_publish => {
                 match control {
                     Ok(SarahLiveKitMediaControl::Close) | Err(_) => return Ok(()),
-                    Ok(SarahLiveKitMediaControl::Start) => {
+                    Ok(SarahLiveKitMediaControl::Start { .. }) => {
                         bail!("LiveKit media received a duplicate start");
                     }
                 }
@@ -1173,6 +1333,14 @@ async fn run_livekit_media(
                 result.context("publishing the admitted LiveKit microphone")?;
             }
         }
+        preserve_livekit_transport_evidence(
+            &room,
+            &events,
+            &evidence_binding,
+            &provider_generation_ref,
+            SarahLiveKitEvidenceStage::Connected,
+        )
+        .await;
 
         loop {
             let control = controls.recv().fuse();
@@ -1183,7 +1351,7 @@ async fn run_livekit_media(
                 control = control => {
                     match control {
                         Ok(SarahLiveKitMediaControl::Close) | Err(_) => return Ok(()),
-                        Ok(SarahLiveKitMediaControl::Start) => {
+                        Ok(SarahLiveKitMediaControl::Start { .. }) => {
                             bail!("LiveKit media received a duplicate start");
                         }
                     }
@@ -1223,6 +1391,15 @@ async fn run_livekit_media(
                             let RemoteTrack::Audio(track) = track else {
                                 continue;
                             };
+                            audio_owner.subscribe(&track.sid().to_string())?;
+                            preserve_livekit_transport_evidence(
+                                &room,
+                                &events,
+                                &evidence_binding,
+                                &provider_generation_ref,
+                                SarahLiveKitEvidenceStage::Connected,
+                            )
+                            .await;
                             let events = events.clone();
                             audio_stream_tasks.spawn(async move {
                                 let mut stream = NativeAudioStream::new(
@@ -1241,7 +1418,17 @@ async fn run_livekit_media(
                                 }
                             });
                         }
+                        RoomEvent::TrackUnsubscribed { track, participant, .. } => {
+                            validate_livekit_remote_participant(
+                                &transport,
+                                &participant.identity().to_string(),
+                            )?;
+                            if let RemoteTrack::Audio(track) = track {
+                                audio_owner.unsubscribe(&track.sid().to_string())?;
+                            }
+                        }
                         RoomEvent::Reconnecting => {
+                            reconnect_fence.begin()?;
                             send_livekit_media_event(
                                 &events,
                                 SarahLiveKitMediaEvent::Reconnecting,
@@ -1249,6 +1436,15 @@ async fn run_livekit_media(
                             .await;
                         }
                         RoomEvent::Reconnected => {
+                            reconnect_fence.complete()?;
+                            preserve_livekit_transport_evidence(
+                                &room,
+                                &events,
+                                &evidence_binding,
+                                &provider_generation_ref,
+                                SarahLiveKitEvidenceStage::Reconnected,
+                            )
+                            .await;
                             send_livekit_media_event(
                                 &events,
                                 SarahLiveKitMediaEvent::Reconnected,
@@ -1291,6 +1487,217 @@ async fn run_livekit_media(
     source_clear_on_close(&room).await;
     audio_stream_tasks.shutdown().await;
     session_result
+}
+
+impl SarahLiveKitEvidenceBinding {
+    fn new(session: &ManagedSarahVoiceSession, transport: &SarahLiveKitRoomTransport) -> Self {
+        Self {
+            session_ref_digest: digest_livekit_evidence_ref("session", &session.session_ref),
+            session_generation: session.generation,
+            room_ref_digest: digest_livekit_evidence_ref("room", &transport.room_ref),
+            room_epoch: transport.room_epoch,
+            dispatch_ref_digest: digest_livekit_evidence_ref("dispatch", &transport.dispatch_ref),
+        }
+    }
+}
+
+fn digest_livekit_evidence_ref(kind: &str, value: &str) -> String {
+    let mut digest = Sha256::new();
+    digest.update(LIVEKIT_TRANSPORT_EVIDENCE_SCHEMA.as_bytes());
+    digest.update([0]);
+    digest.update(kind.as_bytes());
+    digest.update([0]);
+    digest.update(value.as_bytes());
+    format!("{:x}", digest.finalize())
+}
+
+async fn preserve_livekit_transport_evidence(
+    room: &Room,
+    events: &async_channel::Sender<SarahLiveKitMediaEvent>,
+    binding: &SarahLiveKitEvidenceBinding,
+    provider_generation_ref: &str,
+    stage: SarahLiveKitEvidenceStage,
+) {
+    let stats = match room.get_stats().await {
+        Ok(stats) => stats,
+        Err(error) => {
+            log::warn!("could not read Sarah LiveKit transport statistics: {error}");
+            return;
+        }
+    };
+    let publisher_paths = match selected_livekit_paths(&stats.publisher_stats) {
+        Ok(paths) => paths,
+        Err(error) => {
+            log::warn!("could not classify Sarah LiveKit publisher path: {error:#}");
+            Vec::new()
+        }
+    };
+    let subscriber_paths = match selected_livekit_paths(&stats.subscriber_stats) {
+        Ok(paths) => paths,
+        Err(error) => {
+            log::warn!("could not classify Sarah LiveKit subscriber path: {error:#}");
+            Vec::new()
+        }
+    };
+    if publisher_paths.is_empty() && subscriber_paths.is_empty() {
+        log::warn!("Sarah LiveKit reported no selected candidate pair for evidence");
+        return;
+    }
+    send_livekit_media_event(
+        events,
+        SarahLiveKitMediaEvent::TransportEvidence(SarahLiveKitTransportEvidence {
+            schema: LIVEKIT_TRANSPORT_EVIDENCE_SCHEMA.to_string(),
+            public_safe: true,
+            recorded_at: chrono::Utc::now().to_rfc3339(),
+            stage,
+            session_ref_digest: binding.session_ref_digest.clone(),
+            session_generation: binding.session_generation,
+            room_ref_digest: binding.room_ref_digest.clone(),
+            room_epoch: binding.room_epoch,
+            dispatch_ref_digest: binding.dispatch_ref_digest.clone(),
+            provider_generation_ref_digest: digest_livekit_evidence_ref(
+                "provider_generation",
+                provider_generation_ref,
+            ),
+            publisher_paths,
+            subscriber_paths,
+        }),
+    )
+    .await;
+}
+
+fn selected_livekit_paths(stats: &[RtcStats]) -> Result<Vec<SarahLiveKitSelectedPathEvidence>> {
+    let candidate_pairs = stats
+        .iter()
+        .filter_map(|stats| match stats {
+            RtcStats::CandidatePair(pair) => Some((pair.rtc.id.as_str(), pair)),
+            _ => None,
+        })
+        .collect::<HashMap<_, _>>();
+    let local_candidates = stats
+        .iter()
+        .filter_map(|stats| match stats {
+            RtcStats::LocalCandidate(candidate) => {
+                Some((candidate.rtc.id.as_str(), &candidate.local_candidate))
+            }
+            _ => None,
+        })
+        .collect::<HashMap<_, _>>();
+    let remote_candidates = stats
+        .iter()
+        .filter_map(|stats| match stats {
+            RtcStats::RemoteCandidate(candidate) => {
+                Some((candidate.rtc.id.as_str(), &candidate.remote_candidate))
+            }
+            _ => None,
+        })
+        .collect::<HashMap<_, _>>();
+    let mut paths = Vec::new();
+    for transport in stats.iter().filter_map(|stats| match stats {
+        RtcStats::Transport(transport) => Some(transport),
+        _ => None,
+    }) {
+        let pair_ref = transport.transport.selected_candidate_pair_id.as_str();
+        if pair_ref.is_empty() {
+            continue;
+        }
+        let pair = candidate_pairs
+            .get(pair_ref)
+            .with_context(|| format!("selected candidate pair {pair_ref} was absent"))?;
+        let local = candidate_evidence(
+            local_candidates
+                .get(pair.candidate_pair.local_candidate_id.as_str())
+                .copied()
+                .context("selected local ICE candidate was absent")?,
+        )?;
+        let remote = candidate_evidence(
+            remote_candidates
+                .get(pair.candidate_pair.remote_candidate_id.as_str())
+                .copied()
+                .context("selected remote ICE candidate was absent")?,
+        )?;
+        paths.push(SarahLiveKitSelectedPathEvidence {
+            classification: classify_livekit_path(&local, &remote),
+            local,
+            remote,
+            packets_sent: pair.candidate_pair.packets_sent,
+            packets_received: pair.candidate_pair.packets_received,
+        });
+    }
+    Ok(paths)
+}
+
+fn candidate_evidence(candidate: &IceCandidateStats) -> Result<SarahLiveKitCandidateEvidence> {
+    let candidate_type = match candidate
+        .candidate_type
+        .context("selected ICE candidate omitted its type")?
+    {
+        IceCandidateType::Host => SarahLiveKitCandidateType::Host,
+        IceCandidateType::Srflx => SarahLiveKitCandidateType::ServerReflexive,
+        IceCandidateType::Prflx => SarahLiveKitCandidateType::PeerReflexive,
+        IceCandidateType::Relay => SarahLiveKitCandidateType::Relay,
+    };
+    let protocol = candidate.protocol.trim().to_ascii_lowercase();
+    if !matches!(protocol.as_str(), "udp" | "tcp") {
+        bail!("selected ICE candidate had unsupported protocol {protocol:?}");
+    }
+    let relay_protocol = candidate.relay_protocol.map(|protocol| match protocol {
+        IceServerTransportProtocol::Udp => SarahLiveKitRelayProtocol::Udp,
+        IceServerTransportProtocol::Tcp => SarahLiveKitRelayProtocol::Tcp,
+        IceServerTransportProtocol::Tls => SarahLiveKitRelayProtocol::Tls,
+    });
+    Ok(SarahLiveKitCandidateEvidence {
+        candidate_type,
+        protocol,
+        relay_protocol,
+    })
+}
+
+fn classify_livekit_path(
+    local: &SarahLiveKitCandidateEvidence,
+    remote: &SarahLiveKitCandidateEvidence,
+) -> SarahLiveKitPathKind {
+    if [local, remote].iter().any(|candidate| {
+        candidate.candidate_type == SarahLiveKitCandidateType::Relay
+            && candidate.relay_protocol == Some(SarahLiveKitRelayProtocol::Tls)
+    }) {
+        return SarahLiveKitPathKind::TurnTls;
+    }
+    if [local, remote]
+        .iter()
+        .any(|candidate| candidate.candidate_type == SarahLiveKitCandidateType::Relay)
+    {
+        return SarahLiveKitPathKind::Unclassified;
+    }
+    if local.protocol == "udp" && remote.protocol == "udp" {
+        return SarahLiveKitPathKind::DirectUdp;
+    }
+    if local.protocol == "tcp" || remote.protocol == "tcp" {
+        return SarahLiveKitPathKind::TcpFallback;
+    }
+    SarahLiveKitPathKind::Unclassified
+}
+
+fn append_livekit_transport_evidence(
+    path: &Path,
+    evidence: &SarahLiveKitTransportEvidence,
+) -> Result<()> {
+    let parent = path
+        .parent()
+        .context("Sarah LiveKit evidence path had no parent directory")?;
+    std::fs::create_dir_all(parent).context("creating the Sarah LiveKit evidence directory")?;
+    let mut file = OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(path)
+        .context("opening the Sarah LiveKit evidence log")?;
+    serde_json::to_writer(&mut file, evidence)
+        .context("encoding public-safe Sarah LiveKit transport evidence")?;
+    file.write_all(b"\n")
+        .context("writing public-safe Sarah LiveKit transport evidence")?;
+    file.sync_data()
+        .context("persisting public-safe Sarah LiveKit transport evidence")?;
+    Ok(())
 }
 
 fn validate_livekit_remote_participant(
@@ -1463,10 +1870,10 @@ async fn send_gateway_tool_decision(
     Ok(())
 }
 
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[derive(Clone, Debug, Eq, PartialEq)]
 enum GatewayServerAction {
     Continue,
-    SessionReady,
+    SessionReady { provider_generation_ref: String },
     StopPlayback,
     End,
 }
@@ -1495,6 +1902,7 @@ async fn handle_server_message(
             model,
             expires_at_ms,
             reserved_credit_msat,
+            provider_generation_ref,
         } => {
             if model != SARAH_VOICE_MODEL
                 || expires_at_ms != expected_session_expires_at_ms
@@ -1502,13 +1910,20 @@ async fn handle_server_message(
             {
                 bail!("Sarah voice gateway returned invalid session readiness");
             }
+            validate_gateway_text(
+                "provider generation reference",
+                &provider_generation_ref,
+                MAX_PROTOCOL_ID_BYTES,
+            )?;
             events
                 .send(SarahVoiceEvent::Ready {
                     session_id: identity.session_ref.clone(),
                 })
                 .await
                 .context("reporting Sarah voice readiness")?;
-            return Ok(GatewayServerAction::SessionReady);
+            return Ok(GatewayServerAction::SessionReady {
+                provider_generation_ref,
+            });
         }
         GatewayServerMessage::Lifecycle { state } => {
             let state = match state {
@@ -1856,7 +2271,12 @@ fn decode_gateway_server_envelope(text: &str) -> Result<GatewayServerEnvelope> {
         .and_then(Value::as_str)
         .context("Sarah voice gateway message omitted its tag")?;
     let variant_fields: &[&str] = match tag {
-        "session_ready" => &["model", "expiresAtMs", "reservedCreditMsat"],
+        "session_ready" => &[
+            "model",
+            "expiresAtMs",
+            "reservedCreditMsat",
+            "providerGenerationRef",
+        ],
         "lifecycle" => &["state"],
         "transcript_delta" | "transcript_final" => &["source", "utteranceRef", "text"],
         "interrupt_ack" | "heartbeat" => &[],
@@ -2467,6 +2887,174 @@ mod tests {
     }
 
     #[test]
+    fn selected_ice_pairs_classify_direct_tcp_and_turn_tls_without_addresses() {
+        use livekit::webrtc::stats::{
+            CandidatePairStats, LocalCandidateStats, RemoteCandidateStats, TransportStats,
+            dictionaries,
+        };
+
+        fn stats(
+            local_type: IceCandidateType,
+            local_protocol: &str,
+            relay_protocol: Option<IceServerTransportProtocol>,
+            remote_protocol: &str,
+        ) -> Vec<RtcStats> {
+            vec![
+                RtcStats::Transport(TransportStats {
+                    rtc: dictionaries::RtcStats {
+                        id: "transport-1".into(),
+                        ..Default::default()
+                    },
+                    transport: dictionaries::TransportStats {
+                        selected_candidate_pair_id: "pair-1".into(),
+                        ..Default::default()
+                    },
+                }),
+                RtcStats::CandidatePair(CandidatePairStats {
+                    rtc: dictionaries::RtcStats {
+                        id: "pair-1".into(),
+                        ..Default::default()
+                    },
+                    candidate_pair: dictionaries::CandidatePairStats {
+                        local_candidate_id: "local-1".into(),
+                        remote_candidate_id: "remote-1".into(),
+                        packets_sent: 8,
+                        packets_received: 13,
+                        ..Default::default()
+                    },
+                }),
+                RtcStats::LocalCandidate(LocalCandidateStats {
+                    rtc: dictionaries::RtcStats {
+                        id: "local-1".into(),
+                        ..Default::default()
+                    },
+                    local_candidate: dictionaries::IceCandidateStats {
+                        address: "192.0.2.1".into(),
+                        port: 44_321,
+                        protocol: local_protocol.into(),
+                        candidate_type: Some(local_type),
+                        relay_protocol,
+                        ..Default::default()
+                    },
+                }),
+                RtcStats::RemoteCandidate(RemoteCandidateStats {
+                    rtc: dictionaries::RtcStats {
+                        id: "remote-1".into(),
+                        ..Default::default()
+                    },
+                    remote_candidate: dictionaries::IceCandidateStats {
+                        address: "198.51.100.1".into(),
+                        port: 34_788,
+                        protocol: remote_protocol.into(),
+                        candidate_type: Some(IceCandidateType::Host),
+                        ..Default::default()
+                    },
+                }),
+            ]
+        }
+
+        for (stats, expected) in [
+            (
+                stats(IceCandidateType::Host, "udp", None, "udp"),
+                SarahLiveKitPathKind::DirectUdp,
+            ),
+            (
+                stats(IceCandidateType::Host, "tcp", None, "tcp"),
+                SarahLiveKitPathKind::TcpFallback,
+            ),
+            (
+                stats(
+                    IceCandidateType::Relay,
+                    "tcp",
+                    Some(IceServerTransportProtocol::Tls),
+                    "udp",
+                ),
+                SarahLiveKitPathKind::TurnTls,
+            ),
+        ] {
+            let paths = selected_livekit_paths(&stats).expect("classify selected path");
+            assert_eq!(paths.len(), 1);
+            assert_eq!(paths[0].classification, expected);
+            assert_eq!(paths[0].packets_sent, 8);
+            assert_eq!(paths[0].packets_received, 13);
+            let encoded = serde_json::to_string(&paths).expect("encode selected path");
+            assert!(!encoded.contains("192.0.2.1"));
+            assert!(!encoded.contains("198.51.100.1"));
+            assert!(!encoded.contains("44321"));
+            assert!(!encoded.contains("34788"));
+        }
+    }
+
+    #[test]
+    fn livekit_audio_owner_refuses_overlapping_and_stale_tracks() {
+        let mut owner = SarahLiveKitAudioOwner::default();
+        owner.subscribe("track-one").expect("claim first track");
+        assert!(owner.subscribe("track-two").is_err());
+        assert!(owner.unsubscribe("track-two").is_err());
+        owner
+            .unsubscribe("track-one")
+            .expect("release the owned track");
+        owner
+            .subscribe("track-two")
+            .expect("claim replacement track");
+    }
+
+    #[test]
+    fn livekit_reconnect_fence_refuses_overlap_and_revival() {
+        let mut fence = SarahLiveKitReconnectFence::default();
+        assert!(fence.complete().is_err());
+        fence.begin().expect("begin reconnect");
+        assert!(fence.begin().is_err());
+        fence.complete().expect("complete reconnect");
+        fence.begin().expect("begin a later reconnect");
+        fence.complete().expect("complete a later reconnect");
+    }
+
+    #[test]
+    fn livekit_transport_receipt_hashes_generation_and_room_identity() {
+        let directory = tempfile::tempdir().expect("create transport evidence directory");
+        let path = directory
+            .path()
+            .join("voice/livekit-transport-evidence.jsonl");
+        let session =
+            test_managed_session(SarahVoiceTransport::LiveKitRoomV1(test_livekit_transport()));
+        let SarahVoiceTransport::LiveKitRoomV1(transport) = &session.transport else {
+            panic!("test session lost its LiveKit transport")
+        };
+        let binding = SarahLiveKitEvidenceBinding::new(&session, transport);
+        let evidence = SarahLiveKitTransportEvidence {
+            schema: LIVEKIT_TRANSPORT_EVIDENCE_SCHEMA.into(),
+            public_safe: true,
+            recorded_at: "2026-08-01T00:00:00Z".into(),
+            stage: SarahLiveKitEvidenceStage::Reconnected,
+            session_ref_digest: binding.session_ref_digest,
+            session_generation: binding.session_generation,
+            room_ref_digest: binding.room_ref_digest,
+            room_epoch: binding.room_epoch,
+            dispatch_ref_digest: binding.dispatch_ref_digest,
+            provider_generation_ref_digest: digest_livekit_evidence_ref(
+                "provider_generation",
+                "provider-generation-secret",
+            ),
+            publisher_paths: Vec::new(),
+            subscriber_paths: Vec::new(),
+        };
+        append_livekit_transport_evidence(&path, &evidence).expect("append transport evidence");
+
+        let contents = std::fs::read_to_string(path).expect("read transport evidence");
+        assert!(contents.contains(LIVEKIT_TRANSPORT_EVIDENCE_SCHEMA));
+        assert!(contents.contains("providerGenerationRefDigest"));
+        for private_value in [
+            "session-1",
+            "room-1",
+            "dispatch-1",
+            "provider-generation-secret",
+        ] {
+            assert!(!contents.contains(private_value));
+        }
+    }
+
+    #[test]
     fn local_transcript_log_appends_durable_json_lines() {
         let directory = tempfile::tempdir().expect("create transcript test directory");
         let path = directory.path().join("voice/transcripts.jsonl");
@@ -2657,6 +3245,7 @@ mod tests {
                 "model": SARAH_VOICE_MODEL,
                 "expiresAtMs": 60_000,
                 "reservedCreditMsat": 0,
+                "providerGenerationRef": "provider-generation-1",
             });
 
             let action = handle_server_message(
@@ -2673,7 +3262,12 @@ mod tests {
             .await
             .expect("accept exact entitlement readiness");
 
-            assert_eq!(action, GatewayServerAction::SessionReady);
+            assert_eq!(
+                action,
+                GatewayServerAction::SessionReady {
+                    provider_generation_ref: "provider-generation-1".into(),
+                }
+            );
             assert!(matches!(
                 received_events.recv().await,
                 Ok(SarahVoiceEvent::Ready { session_id }) if session_id == "session-1"
@@ -2879,9 +3473,16 @@ mod tests {
             "_tag": "session_ready",
             "model": SARAH_VOICE_MODEL,
             "expiresAtMs": 100,
-            "reservedCreditMsat": 10
+            "reservedCreditMsat": 10,
+            "providerGenerationRef": "provider-generation-1"
         });
         assert!(decode_gateway_server_envelope(&envelope.to_string()).is_ok());
+        let mut missing_generation = envelope.clone();
+        missing_generation
+            .as_object_mut()
+            .expect("session readiness object")
+            .remove("providerGenerationRef");
+        assert!(decode_gateway_server_envelope(&missing_generation.to_string()).is_err());
         let mut unknown_field = envelope;
         unknown_field["untrusted"] = json!("value");
         assert!(decode_gateway_server_envelope(&unknown_field.to_string()).is_err());

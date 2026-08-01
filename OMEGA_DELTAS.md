@@ -9805,3 +9805,55 @@ defect one step later.
   `self_test_authored_report_sections` in `script/omega-release-gate`, which
   regenerates a scratch report twice, compares the authored bytes, and proves
   a missing and an empty section are both refused.
+
+### OMEGA-DELTA-0220 — The selected media path is evidence, not a checkbox
+
+**The packaged client records what WebRTC selected.** After private Sarah
+publishes its microphone, after it subscribes to Sarah audio, and after a media
+reconnect, Omega reads LiveKit's publisher and subscriber statistics. It joins
+each transport's `selectedCandidatePairId` to the exact candidate pair and its
+local and remote candidates, then records candidate type, protocol, relay
+protocol, and packet counts. From those fields it classifies direct UDP,
+non-relayed TCP fallback, and TURN over TLS. A different relay shape remains
+`unclassified`; it is never promoted because a firewall mode was requested.
+
+**The receipt is useful without becoming a network trace.** Each
+`openagents.omega.sarah-livekit-transport-evidence.v1` JSONL row is written
+under the active Omega profile's `voice` directory. Session, room, dispatch,
+and provider-generation references are domain-separated SHA-256 digests. IP
+addresses, ports, candidate URLs, TURN credentials, participant grants, media,
+and transcripts are not serialized. Publisher and subscriber paths remain
+separate so an operator cannot silently substitute one direction for both.
+
+**A reconnect compares the generation it claims to preserve.** The
+authenticated gateway's first `session_ready` now requires an opaque
+`providerGenerationRef`. OpenAgents owns that reference: it must remain stable
+across an allowed media reconnect, be distinct for concurrently active
+generations, and never name a newly opened or revived provider generation.
+`dispatchRef`, room epoch, and Omega's client generation are not substitutes.
+Omega rejects a repeated readiness frame, overlapping reconnect notifications,
+and a `Reconnected` notification without a preceding `Reconnecting`. The
+release gate requires one connected and one reconnected observation whose
+session, room, dispatch, and provider-generation digests all match.
+
+**One Sarah track still owns playback.** A second simultaneous Sarah audio
+track fails the media session instead of spawning another playback stream. An
+unsubscribe for a track that does not own playback is stale and also fails.
+This makes the no-duplicate-audio claim a runtime invariant rather than an
+assumption about what LiveKit usually publishes.
+
+**Booleans cannot pass the transport rows anymore.** A passing private or
+connectivity row must include the packaged JSON objects in
+`facts.transport_observations`. The gate recomputes every path classification
+from its candidates and requires all three connectivity classes. Setting
+`reconnect_same_generation`, `direct_udp_completed`, `tcp_fallback_completed`,
+or `turn_tls_completed` without the measured objects is refused.
+
+- **Enforced by:**
+  `sarah_livekit_transport_evidence_is_measured_and_generation_bound` in
+  `crates/omega_deltas`; the focused workroom tests
+  `selected_ice_pairs_classify_direct_tcp_and_turn_tls_without_addresses`,
+  `livekit_audio_owner_refuses_overlapping_and_stale_tracks`,
+  `livekit_reconnect_fence_refuses_overlap_and_revival`,
+  and `livekit_transport_receipt_hashes_generation_and_room_identity`; and
+  `script/omega-release-gate --self-test`.

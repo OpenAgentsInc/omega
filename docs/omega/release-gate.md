@@ -125,6 +125,18 @@ failure row requires all eight drills, eight privacy scopes, non-overlap, and
 exact settlement. A public-safe label without that shape cannot promote a
 row.
 
+The private and connectivity rows additionally require the packaged client's
+`openagents.omega.sarah-livekit-transport-evidence.v1` objects in
+`facts.transport_observations`. Omega writes them to
+`<Omega data dir>/voice/livekit-transport-evidence.jsonl`. The gate recomputes
+`direct_udp`, `tcp_fallback`, and `turn_tls` from both candidates' type,
+protocol, and relay protocol; the three booleans cannot pass by themselves.
+For the private reconnect, one `connected` and one `reconnected` object must
+preserve identical session, room, dispatch, and provider-generation digests.
+Addresses, ports, URLs, grants, media, and transcripts are deliberately absent.
+OpenAgents must provide the opaque `providerGenerationRef` in the authenticated
+private `session_ready` frame; Omega cannot infer it from the LiveKit room.
+
 ```sh
 script/assemble-omega-sarah-livekit-evidence \
   --dmg target/omega-rc/Omega-v0.2.0-rcNN-macos-arm64.dmg \
@@ -587,6 +599,16 @@ selected candidate pair's candidate type, protocol, and whether it was relayed,
 for both publisher and subscriber. Addresses, ports, and URLs are never
 recorded.
 
+The packaged Omega candidate itself preserves those observations under its
+profile data directory at
+`voice/livekit-transport-evidence.jsonl`. Copy the exact JSON objects into the
+connectivity row's `facts.transport_observations`; do not transcribe only the
+classification or set the three completion booleans by hand. The release gate
+recomputes each classification from the local and remote candidate type,
+protocol, and relay protocol and refuses a pass unless all three measured
+classes survive. A row from the headless OpenAgents harness may corroborate the
+same run, but it does not substitute for this packaged-client receipt.
+
 Run the acceptance three times, declaring the constraint you actually imposed:
 
 ```sh
@@ -691,6 +713,16 @@ displayed **before** capture began, and the recorder refuses terms whose
 `displayedAtMs` is not strictly earlier than `firstCaptureAtMs`. Also required:
 one confirmed bounded command, one started agent thread, and a media reconnect
 whose provider generation is unchanged.
+
+The reconnect comparison uses two exact packaged-client transport observations:
+one `stage: connected` and one `stage: reconnected`. They must have identical
+`sessionRefDigest`, `sessionGeneration`, `roomRefDigest`, `roomEpoch`,
+`dispatchRefDigest`, and `providerGenerationRefDigest`. The gate rejects a
+boolean-only `reconnect_same_generation` claim and rejects any changed binding.
+OpenAgents supplies the raw opaque `providerGenerationRef` on the authenticated
+`session_ready` frame; Omega hashes it before persistence. `dispatchRef`, room
+epoch, and the Omega session generation are not substitutes for that server
+field.
 
 For `sarah-livekit-isolation`, the concurrent private and community generations
 must be shown to differ. The acceptance receipt now preserves a per-receipt

@@ -93,6 +93,18 @@ failure row requires all eight drills, eight privacy scopes, non-overlap, and
 exact settlement. A public-safe label without that shape cannot promote a
 row.
 
+The private and connectivity rows additionally require the packaged client's
+`openagents.omega.sarah-livekit-transport-evidence.v1` objects in
+`facts.transport_observations`. Omega writes them to
+`<Omega data dir>/voice/livekit-transport-evidence.jsonl`. The gate recomputes
+`direct_udp`, `tcp_fallback`, and `turn_tls` from both candidates' type,
+protocol, and relay protocol; the three booleans cannot pass by themselves.
+For the private reconnect, one `connected` and one `reconnected` object must
+preserve identical session, room, dispatch, and provider-generation digests.
+Addresses, ports, URLs, grants, media, and transcripts are deliberately absent.
+OpenAgents must provide the opaque `providerGenerationRef` in the authenticated
+private `session_ready` frame; Omega cannot infer it from the LiveKit room.
+
 ```sh
 script/assemble-omega-sarah-livekit-evidence \
   --dmg target/omega-rc/Omega-v0.2.0-rcNN-macos-arm64.dmg \

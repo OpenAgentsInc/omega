@@ -208,6 +208,7 @@ pub const ENFORCED_DELTAS: &[&str] = &[
     "OMEGA-DELTA-0217",
     "OMEGA-DELTA-0218",
     "OMEGA-DELTA-0219",
+    "OMEGA-DELTA-0220",
 ];
 
 /// OMEGA-DELTA-0204. Every control the composer's bar offers, written twice:
@@ -23145,6 +23146,76 @@ mod tests {
                 && voice.contains("constructing_an_admitted_livekit_client_does_not_open_audio"),
             "OMEGA-DELTA-0212: focused GPUI LiveKit contract coverage disappeared"
         );
+    }
+
+    /// OMEGA-DELTA-0220. Packaged Sarah transport and reconnect claims carry
+    /// the selected ICE pair and a comparable provider-generation binding.
+    #[test]
+    fn sarah_livekit_transport_evidence_is_measured_and_generation_bound() {
+        let voice = read_repository_file("crates/workroom_ui/src/voice.rs");
+        for required in [
+            "openagents.omega.sarah-livekit-transport-evidence.v1",
+            "providerGenerationRef",
+            "room.get_stats().await",
+            "selected_candidate_pair_id",
+            "candidate_type",
+            "relay_protocol",
+            "SarahLiveKitPathKind::DirectUdp",
+            "SarahLiveKitPathKind::TcpFallback",
+            "SarahLiveKitPathKind::TurnTls",
+            "livekit-transport-evidence.jsonl",
+            "Sarah LiveKit reported overlapping media reconnects",
+            "Sarah LiveKit reported a revived reconnect generation",
+            "Sarah LiveKit attempted to subscribe a second audio track",
+        ] {
+            assert!(
+                voice.contains(required),
+                "OMEGA-DELTA-0220: packaged Sarah evidence lost `{required}`"
+            );
+        }
+        for proof in [
+            "selected_ice_pairs_classify_direct_tcp_and_turn_tls_without_addresses",
+            "livekit_audio_owner_refuses_overlapping_and_stale_tracks",
+            "livekit_reconnect_fence_refuses_overlap_and_revival",
+            "livekit_transport_receipt_hashes_generation_and_room_identity",
+        ] {
+            assert!(
+                voice.contains(proof),
+                "OMEGA-DELTA-0220: focused evidence proof `{proof}` disappeared"
+            );
+        }
+
+        let gate = read_repository_file("script/omega-release-gate");
+        for required in [
+            "needs measured transport_observations, not booleans",
+            "classify_sarah_livekit_path",
+            "providerGenerationRefDigest",
+            "passing private reconnect changed or overlapped its session/provider generation",
+            "passing connectivity row lacks classified selected ICE paths",
+        ] {
+            assert!(
+                gate.contains(required),
+                "OMEGA-DELTA-0220: release evidence validation lost `{required}`"
+            );
+        }
+
+        let docs = format!(
+            "{}\n{}",
+            read_repository_file("docs/omega/sarah-realtime-voice.md"),
+            read_repository_file("docs/omega/release-gate-operator-notes.md")
+        );
+        for required in [
+            "providerGenerationRef",
+            "livekit-transport-evidence.jsonl",
+            "Addresses, ports, and URLs",
+            "`stage: connected`",
+            "`stage: reconnected`",
+        ] {
+            assert!(
+                docs.contains(required),
+                "OMEGA-DELTA-0220: operator contract lost `{required}`"
+            );
+        }
     }
 
     /// OMEGA-DELTA-0213. Installed Sarah LiveKit claims require one immutable

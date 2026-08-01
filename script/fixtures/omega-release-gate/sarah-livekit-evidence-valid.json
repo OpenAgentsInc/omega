@@ -27,6 +27,66 @@
         "exact_settlement_reconciled": true,
         "interruption_completed": true,
         "reconnect_same_generation": true,
+        "transport_observations": [
+          {
+            "dispatchRefDigest": "3333333333333333333333333333333333333333333333333333333333333333",
+            "providerGenerationRefDigest": "4444444444444444444444444444444444444444444444444444444444444444",
+            "publicSafe": true,
+            "publisherPaths": [
+              {
+                "classification": "direct_udp",
+                "local": {
+                  "candidateType": "host",
+                  "protocol": "udp",
+                  "relayProtocol": null
+                },
+                "packetsReceived": 8,
+                "packetsSent": 13,
+                "remote": {
+                  "candidateType": "server_reflexive",
+                  "protocol": "udp",
+                  "relayProtocol": null
+                }
+              }
+            ],
+            "roomEpoch": 1,
+            "roomRefDigest": "2222222222222222222222222222222222222222222222222222222222222222",
+            "schema": "openagents.omega.sarah-livekit-transport-evidence.v1",
+            "sessionGeneration": 1,
+            "sessionRefDigest": "1111111111111111111111111111111111111111111111111111111111111111",
+            "stage": "connected",
+            "subscriberPaths": []
+          },
+          {
+            "dispatchRefDigest": "3333333333333333333333333333333333333333333333333333333333333333",
+            "providerGenerationRefDigest": "4444444444444444444444444444444444444444444444444444444444444444",
+            "publicSafe": true,
+            "publisherPaths": [
+              {
+                "classification": "direct_udp",
+                "local": {
+                  "candidateType": "host",
+                  "protocol": "udp",
+                  "relayProtocol": null
+                },
+                "packetsReceived": 21,
+                "packetsSent": 34,
+                "remote": {
+                  "candidateType": "server_reflexive",
+                  "protocol": "udp",
+                  "relayProtocol": null
+                }
+              }
+            ],
+            "roomEpoch": 1,
+            "roomRefDigest": "2222222222222222222222222222222222222222222222222222222222222222",
+            "schema": "openagents.omega.sarah-livekit-transport-evidence.v1",
+            "sessionGeneration": 1,
+            "sessionRefDigest": "1111111111111111111111111111111111111111111111111111111111111111",
+            "stage": "reconnected",
+            "subscriberPaths": []
+          }
+        ],
         "voice_turn_completed": true
       },
       "id": "sarah-livekit-private",
@@ -63,6 +123,95 @@
       "facts": {
         "direct_udp_completed": true,
         "tcp_fallback_completed": true,
+        "transport_observations": [
+          {
+            "dispatchRefDigest": "3333333333333333333333333333333333333333333333333333333333333333",
+            "providerGenerationRefDigest": "4444444444444444444444444444444444444444444444444444444444444444",
+            "publicSafe": true,
+            "publisherPaths": [
+              {
+                "classification": "direct_udp",
+                "local": {
+                  "candidateType": "host",
+                  "protocol": "udp",
+                  "relayProtocol": null
+                },
+                "packetsReceived": 8,
+                "packetsSent": 13,
+                "remote": {
+                  "candidateType": "server_reflexive",
+                  "protocol": "udp",
+                  "relayProtocol": null
+                }
+              }
+            ],
+            "roomEpoch": 1,
+            "roomRefDigest": "2222222222222222222222222222222222222222222222222222222222222222",
+            "schema": "openagents.omega.sarah-livekit-transport-evidence.v1",
+            "sessionGeneration": 1,
+            "sessionRefDigest": "1111111111111111111111111111111111111111111111111111111111111111",
+            "stage": "connected",
+            "subscriberPaths": []
+          },
+          {
+            "dispatchRefDigest": "7777777777777777777777777777777777777777777777777777777777777777",
+            "providerGenerationRefDigest": "8888888888888888888888888888888888888888888888888888888888888888",
+            "publicSafe": true,
+            "publisherPaths": [
+              {
+                "classification": "tcp_fallback",
+                "local": {
+                  "candidateType": "host",
+                  "protocol": "tcp",
+                  "relayProtocol": null
+                },
+                "packetsReceived": 8,
+                "packetsSent": 13,
+                "remote": {
+                  "candidateType": "host",
+                  "protocol": "tcp",
+                  "relayProtocol": null
+                }
+              }
+            ],
+            "roomEpoch": 2,
+            "roomRefDigest": "6666666666666666666666666666666666666666666666666666666666666666",
+            "schema": "openagents.omega.sarah-livekit-transport-evidence.v1",
+            "sessionGeneration": 2,
+            "sessionRefDigest": "5555555555555555555555555555555555555555555555555555555555555555",
+            "stage": "connected",
+            "subscriberPaths": []
+          },
+          {
+            "dispatchRefDigest": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+            "providerGenerationRefDigest": "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+            "publicSafe": true,
+            "publisherPaths": [
+              {
+                "classification": "turn_tls",
+                "local": {
+                  "candidateType": "relay",
+                  "protocol": "tcp",
+                  "relayProtocol": "tls"
+                },
+                "packetsReceived": 8,
+                "packetsSent": 13,
+                "remote": {
+                  "candidateType": "host",
+                  "protocol": "udp",
+                  "relayProtocol": null
+                }
+              }
+            ],
+            "roomEpoch": 3,
+            "roomRefDigest": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+            "schema": "openagents.omega.sarah-livekit-transport-evidence.v1",
+            "sessionGeneration": 3,
+            "sessionRefDigest": "9999999999999999999999999999999999999999999999999999999999999999",
+            "stage": "connected",
+            "subscriberPaths": []
+          }
+        ],
         "turn_tls_completed": true
       },
       "id": "sarah-livekit-connectivity",

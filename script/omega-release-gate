@@ -414,6 +414,118 @@ SARAH_LIVEKIT_PASS_FACTS = {
 }
 
 
+def classify_sarah_livekit_path(path: dict) -> str:
+    if not isinstance(path, dict):
+        raise ValueError("selected ICE path must be an object")
+    local = path.get("local")
+    remote = path.get("remote")
+    if not isinstance(local, dict) or not isinstance(remote, dict):
+        raise ValueError("selected ICE path must preserve local and remote candidates")
+    allowed_candidate_types = {"host", "server_reflexive", "peer_reflexive", "relay"}
+    allowed_protocols = {"udp", "tcp"}
+    allowed_relay_protocols = {None, "udp", "tcp", "tls"}
+    for candidate in (local, remote):
+        if candidate.get("candidateType") not in allowed_candidate_types:
+            raise ValueError("selected ICE candidate has an unsupported type")
+        if candidate.get("protocol") not in allowed_protocols:
+            raise ValueError("selected ICE candidate has an unsupported protocol")
+        if candidate.get("relayProtocol") not in allowed_relay_protocols:
+            raise ValueError("selected ICE candidate has an unsupported relay protocol")
+    if any(
+        candidate["candidateType"] == "relay"
+        and candidate.get("relayProtocol") == "tls"
+        for candidate in (local, remote)
+    ):
+        classification = "turn_tls"
+    elif any(candidate["candidateType"] == "relay" for candidate in (local, remote)):
+        classification = "unclassified"
+    elif local["protocol"] == "udp" and remote["protocol"] == "udp":
+        classification = "direct_udp"
+    elif local["protocol"] == "tcp" or remote["protocol"] == "tcp":
+        classification = "tcp_fallback"
+    else:
+        classification = "unclassified"
+    if path.get("classification") != classification:
+        raise ValueError("selected ICE path classification does not match its candidates")
+    for counter in ("packetsSent", "packetsReceived"):
+        value = path.get(counter)
+        if not isinstance(value, int) or isinstance(value, bool) or value < 0:
+            raise ValueError(f"selected ICE path has an invalid {counter}")
+    return classification
+
+
+def validate_sarah_livekit_transport_observation(observation: dict) -> set[str]:
+    if not isinstance(observation, dict):
+        raise ValueError("LiveKit transport observation must be an object")
+    if observation.get("schema") != "openagents.omega.sarah-livekit-transport-evidence.v1":
+        raise ValueError("LiveKit transport observation has an unsupported schema")
+    if observation.get("publicSafe") is not True:
+        raise ValueError("LiveKit transport observation is not explicitly public-safe")
+    if observation.get("stage") not in {"connected", "reconnected"}:
+        raise ValueError("LiveKit transport observation has an invalid stage")
+    for digest in (
+        "sessionRefDigest",
+        "roomRefDigest",
+        "dispatchRefDigest",
+        "providerGenerationRefDigest",
+    ):
+        if re.fullmatch(r"[0-9a-f]{64}", str(observation.get(digest, ""))) is None:
+            raise ValueError(f"LiveKit transport observation has an invalid {digest}")
+    for number in ("sessionGeneration", "roomEpoch"):
+        value = observation.get(number)
+        if not isinstance(value, int) or isinstance(value, bool) or value < 1:
+            raise ValueError(f"LiveKit transport observation has an invalid {number}")
+    classifications: set[str] = set()
+    path_count = 0
+    for leg in ("publisherPaths", "subscriberPaths"):
+        paths = observation.get(leg)
+        if not isinstance(paths, list):
+            raise ValueError(f"LiveKit transport observation omitted {leg}")
+        for path in paths:
+            classifications.add(classify_sarah_livekit_path(path))
+            path_count += 1
+    if path_count == 0:
+        raise ValueError("LiveKit transport observation preserved no selected ICE path")
+    return classifications
+
+
+def validate_sarah_livekit_transport_facts(row_id: str, facts: dict) -> None:
+    observations = facts.get("transport_observations")
+    if not isinstance(observations, list) or not observations:
+        raise ValueError(
+            f"passing row {row_id} needs measured transport_observations, not booleans"
+        )
+    classifications: set[str] = set()
+    for observation in observations:
+        classifications.update(validate_sarah_livekit_transport_observation(observation))
+    if row_id == "sarah-livekit-connectivity":
+        missing = {"direct_udp", "tcp_fallback", "turn_tls"} - classifications
+        if missing:
+            raise ValueError(
+                "passing connectivity row lacks classified selected ICE paths: "
+                + ", ".join(sorted(missing))
+            )
+    if row_id == "sarah-livekit-private":
+        stages = {observation["stage"] for observation in observations}
+        if not {"connected", "reconnected"}.issubset(stages):
+            raise ValueError("passing private row lacks both sides of a media reconnect")
+        bindings = {
+            (
+                observation["sessionRefDigest"],
+                observation["sessionGeneration"],
+                observation["roomRefDigest"],
+                observation["roomEpoch"],
+                observation["dispatchRefDigest"],
+                observation["providerGenerationRefDigest"],
+            )
+            for observation in observations
+        }
+        if len(bindings) != 1:
+            raise ValueError(
+                "passing private reconnect changed or overlapped its session/provider generation"
+            )
+
+
 def validate_sarah_livekit_pass_facts(row_id: str, facts: dict) -> None:
     expected = SARAH_LIVEKIT_PASS_FACTS[row_id]
     missing = [name for name, value in expected.items() if facts.get(name) is not value]
@@ -433,6 +545,8 @@ def validate_sarah_livekit_pass_facts(row_id: str, facts: dict) -> None:
             or privacy_scope_count < 8
         ):
             missing.append("privacy_scope_count>=8")
+    if row_id in {"sarah-livekit-private", "sarah-livekit-connectivity"}:
+        validate_sarah_livekit_transport_facts(row_id, facts)
     if missing:
         raise ValueError(
             f"passing row {row_id} is missing observed facts: " + ", ".join(missing)
@@ -947,6 +1061,52 @@ def self_test() -> int:
             file=sys.stderr,
         )
         return 3
+    boolean_only_fixture = json.loads(json.dumps(fixture))
+    boolean_only_fixture["rows"][0]["facts"].pop("transport_observations")
+    try:
+        validate_sarah_livekit_evidence(
+            boolean_only_fixture, "a" * 64, "b" * 40, allow_unresolved_refs=True
+        )
+    except ValueError:
+        pass
+    else:
+        print(
+            "self-test: a boolean-only private reconnect claim was accepted",
+            file=sys.stderr,
+        )
+        return 3
+    misclassified_fixture = json.loads(json.dumps(fixture))
+    misclassified_fixture["rows"][2]["facts"]["transport_observations"][0][
+        "publisherPaths"
+    ][0]["classification"] = "turn_tls"
+    try:
+        validate_sarah_livekit_evidence(
+            misclassified_fixture, "a" * 64, "b" * 40, allow_unresolved_refs=True
+        )
+    except ValueError:
+        pass
+    else:
+        print(
+            "self-test: a transport classification contradicted by its ICE pair was accepted",
+            file=sys.stderr,
+        )
+        return 3
+    revived_generation_fixture = json.loads(json.dumps(fixture))
+    revived_generation_fixture["rows"][0]["facts"]["transport_observations"][1][
+        "providerGenerationRefDigest"
+    ] = "f" * 64
+    try:
+        validate_sarah_livekit_evidence(
+            revived_generation_fixture, "a" * 64, "b" * 40, allow_unresolved_refs=True
+        )
+    except ValueError:
+        pass
+    else:
+        print(
+            "self-test: a revived provider generation was accepted as a reconnect",
+            file=sys.stderr,
+        )
+        return 3
     if canonical_digest(binding) == "":
         print("self-test: LiveKit binding digest is empty", file=sys.stderr)
         return 3
@@ -996,8 +1156,9 @@ def self_test() -> int:
 
     print(
         "release-gate self-test passed: sweep fires, tampering and "
-        "candidate-mismatched and incomplete passing LiveKit evidence, producer "
-        "self-review, and divergent release claims are refused, and authored "
+        "candidate-mismatched, boolean-only, misclassified, revived-generation, "
+        "and incomplete passing LiveKit evidence, producer self-review, and "
+        "divergent release claims are refused, and authored "
         "report prose survives regeneration byte for byte."
     )
     return 0
