@@ -1626,6 +1626,24 @@ impl ThreadView {
             return;
         }
 
+        if omega_zero_base::is_comet_mode()
+            && thread
+                .read(cx)
+                .project()
+                .read(cx)
+                .visible_worktrees(cx)
+                .next()
+                .is_none()
+        {
+            window.dispatch_action(
+                Box::new(workspace::Open {
+                    create_new_window: Some(false),
+                }),
+                cx,
+            );
+            return;
+        }
+
         let message_editor = self.message_editor.clone();
 
         let is_editor_empty = message_editor.read(cx).is_empty(cx);

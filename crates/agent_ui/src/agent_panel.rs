@@ -13133,9 +13133,13 @@ impl AgentPanel {
             return;
         };
         let previous_work_dirs = conversation_view.read(cx).work_dirs().clone();
+        let session_started = conversation_view.read(cx).root_thread(cx).is_some();
         let work_dirs = PathList::new(&[worktree_path]);
         if let Err(error) = conversation_view.update(cx, |conversation_view, cx| {
-            if reconciling_inconsistent {
+            if !session_started {
+                conversation_view.set_work_dirs(work_dirs, cx);
+                Ok(())
+            } else if reconciling_inconsistent {
                 conversation_view.reconcile_work_dirs(work_dirs, cx)
             } else {
                 conversation_view.retarget_work_dirs(work_dirs, cx)
@@ -13207,7 +13211,12 @@ impl AgentPanel {
             }
             Err(error) => {
                 let rollback_result = conversation_view.update(cx, |conversation_view, cx| {
-                    conversation_view.retarget_work_dirs(previous_work_dirs, cx)
+                    if session_started {
+                        conversation_view.retarget_work_dirs(previous_work_dirs, cx)
+                    } else {
+                        conversation_view.set_work_dirs(previous_work_dirs, cx);
+                        Ok(())
+                    }
                 });
                 if let Err(rollback_error) = rollback_result {
                     self.record_thread_identity_operation_error(
@@ -14438,6 +14447,21 @@ impl AgentPanel {
             hover_background,
             cx.listener(|this, _, window, cx| this.new_thread(&NewThread, window, cx)),
         );
+        let open_project = self.render_comet_control(
+            "comet-open-project",
+            IconName::Plus,
+            false,
+            icon_muted,
+            hover_background,
+            |_, window, cx| {
+                window.dispatch_action(
+                    Box::new(workspace::Open {
+                        create_new_window: Some(false),
+                    }),
+                    cx,
+                );
+            },
+        );
 
         let tabs_left = if sidebar_open {
             SIDEBAR_WIDTH + 16.
@@ -14543,6 +14567,79 @@ impl AgentPanel {
                 )
         });
 
+        let project_rows = self
+            .workbench_shell
+            .identity()
+            .cloned()
+            .zip(self.workbench_shell.projection().visible_projection())
+            .filter(|(identity, visible)| visible.binding.as_ref() == identity.binding())
+            .map(|(identity, visible)| {
+                let selected_worktree_id = identity
+                    .selected
+                    .as_ref()
+                    .map(|selected| selected.binding.worktree_id.clone());
+                let mut seen_worktrees = HashSet::default();
+                identity
+                    .candidates
+                    .into_iter()
+                    .filter(|candidate| {
+                        seen_worktrees.insert(candidate.binding.worktree_id.clone())
+                    })
+                    .enumerate()
+                    .map(|(index, candidate)| {
+                        let binding = candidate.binding.clone();
+                        let debug_selector = format!("omega.comet.project.{}", binding.worktree_id);
+                        let selected = selected_worktree_id.as_ref() == Some(&binding.worktree_id);
+                        let source_thread_id = visible.thread_id.clone();
+                        let source_binding = visible.binding.clone();
+                        let source_generation = visible.generation;
+                        let accessible_label = candidate.accessible_label();
+                        let project_name = candidate.project_name.clone();
+                        let branch = candidate.branch.label();
+                        h_flex()
+                            .id(("comet-project", index))
+                            .debug_selector(move || debug_selector)
+                            .w_full()
+                            .px(px(8.))
+                            .py(px(7.))
+                            .gap(px(8.))
+                            .rounded(px(8.))
+                            .cursor_pointer()
+                            .aria_label(accessible_label)
+                            .when(selected, |row| {
+                                row.bg(selected_background)
+                                    .border_1()
+                                    .border_color(colors.border_selected)
+                            })
+                            .when(!selected, |row| {
+                                row.hover(move |style| style.bg(hover_background))
+                            })
+                            .on_click(cx.listener(move |this, _, _, cx| {
+                                this.select_thread_identity(
+                                    &source_thread_id,
+                                    source_binding.as_ref(),
+                                    source_generation,
+                                    binding.clone(),
+                                    cx,
+                                );
+                            }))
+                            .child(Icon::new(IconName::Folder).size(IconSize::Small))
+                            .child(div().min_w_0().flex_1().truncate().child(project_name))
+                            .child(
+                                div()
+                                    .max_w(px(72.))
+                                    .truncate()
+                                    .text_size(px(10.))
+                                    .text_color(text_placeholder)
+                                    .child(branch),
+                            )
+                            .into_any_element()
+                    })
+                    .collect::<Vec<_>>()
+            })
+            .unwrap_or_default();
+        let has_projects = !project_rows.is_empty();
+
         let sidebar = div()
             .id("comet-sidebar")
             .debug_selector(|| "omega.comet.sidebar".into())
@@ -14565,29 +14662,35 @@ impl AgentPanel {
                             .text_size(px(11.))
                             .font_weight(gpui::FontWeight::MEDIUM)
                             .text_color(text_placeholder)
-                            .child("Spaces"),
+                            .child("Projects"),
                     )
-                    .child(Icon::new(IconName::Plus).size(IconSize::XSmall)),
+                    .child(open_project),
             )
-            .child(
-                h_flex()
-                    .w_full()
-                    .px(px(8.))
-                    .py(px(7.))
-                    .gap(px(8.))
-                    .rounded(px(8.))
-                    .bg(selected_background)
-                    .border_1()
-                    .border_color(colors.border_selected)
-                    .child(Icon::new(IconName::Folder).size(IconSize::Small))
-                    .child(div().min_w_0().flex_1().truncate().child("omega"))
-                    .child(
-                        div()
-                            .text_size(px(10.))
-                            .text_color(text_placeholder)
-                            .child("local"),
-                    ),
-            )
+            .when(has_projects, |sidebar| sidebar.children(project_rows))
+            .when(!has_projects, |sidebar| {
+                sidebar.child(
+                    h_flex()
+                        .id("comet-open-project-empty")
+                        .w_full()
+                        .px(px(8.))
+                        .py(px(7.))
+                        .gap(px(8.))
+                        .rounded(px(8.))
+                        .cursor_pointer()
+                        .aria_label("Open a project folder")
+                        .hover(move |style| style.bg(hover_background))
+                        .on_click(|_, window, cx| {
+                            window.dispatch_action(
+                                Box::new(workspace::Open {
+                                    create_new_window: Some(false),
+                                }),
+                                cx,
+                            );
+                        })
+                        .child(Icon::new(IconName::Folder).size(IconSize::Small))
+                        .child("Open folder"),
+                )
+            })
             .child(
                 div()
                     .mt(px(12.))

@@ -1776,6 +1776,17 @@ impl ConversationView {
     }
 
     fn submit_before_session(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if omega_zero_base::is_comet_mode()
+            && self.project.read(cx).visible_worktrees(cx).next().is_none()
+        {
+            window.dispatch_action(
+                Box::new(workspace::Open {
+                    create_new_window: Some(false),
+                }),
+                cx,
+            );
+            return;
+        }
         if !self.submit_while_connecting(window, cx) {
             return;
         }

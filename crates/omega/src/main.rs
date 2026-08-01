@@ -1455,17 +1455,19 @@ pub(crate) async fn restore_or_create_workspace(
 ) -> Result<()> {
     await_identity_ready(cx).await?;
     if omega_zero_base::is_comet_mode() {
-        cx.update(|cx| {
-            workspace::open_new(
-                Default::default(),
-                app_state,
-                cx,
-                |_workspace, window, cx| {
-                    agent_ui::AgentPanel::open_front_door(window, cx);
-                },
-            )
-        })
-        .await?;
+        if !open_zero_base_project(&app_state, cx).await {
+            cx.update(|cx| {
+                workspace::open_new(
+                    Default::default(),
+                    app_state,
+                    cx,
+                    |_workspace, window, cx| {
+                        agent_ui::AgentPanel::open_front_door(window, cx);
+                    },
+                )
+            })
+            .await?;
+        }
         drive_omega_send(cx).await;
         return Ok(());
     }

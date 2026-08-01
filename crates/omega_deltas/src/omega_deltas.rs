@@ -27409,4 +27409,60 @@ mod tests {
             String::from_utf8_lossy(&output.stderr)
         );
     }
+
+    /// OMEGA-DELTA-0223. Comet mode exposes real project roots rather than a
+    /// decorative space, and refuses to launch agent work until one exists.
+    #[test]
+    fn comet_projects_own_the_agent_working_directory() {
+        let main = without_comments(&read_repository_file("crates/omega/src/main.rs"));
+        let restore = body_of(&main, "restore_or_create_workspace");
+        assert!(
+            restore.contains("omega_zero_base::is_comet_mode()")
+                && restore.contains("open_zero_base_project(&app_state, cx).await"),
+            "OMEGA-DELTA-0223: Comet startup no longer adopts the safe chosen-cwd project path"
+        );
+
+        let panel = without_comments(&read_repository_file("crates/agent_ui/src/agent_panel.rs"));
+        let shell = body_of(&panel, "render_comet_shell");
+        for required in [
+            ".child(\"Projects\")",
+            ".identity()",
+            ".candidates",
+            "select_thread_identity(",
+            "workspace::Open",
+        ] {
+            assert!(
+                shell.contains(required),
+                "OMEGA-DELTA-0223: the Comet project sidebar lost `{required}`"
+            );
+        }
+        assert!(
+            !shell.contains(".child(\"Spaces\")"),
+            "OMEGA-DELTA-0223: the decorative Comet Spaces label returned"
+        );
+
+        let selection = body_of(&panel, "select_thread_identity");
+        assert!(
+            selection.contains("root_thread(cx).is_some()")
+                && selection.contains("set_work_dirs(work_dirs, cx)"),
+            "OMEGA-DELTA-0223: selecting a project cannot update an unstarted draft"
+        );
+
+        let conversation = without_comments(&read_repository_file(
+            "crates/agent_ui/src/conversation_view.rs",
+        ));
+        let deferred_send = body_of(&conversation, "submit_before_session");
+        let thread_view = without_comments(&read_repository_file(
+            "crates/agent_ui/src/conversation_view/thread_view.rs",
+        ));
+        let connected_send = body_of(&thread_view, "send");
+        for (boundary, source) in [("deferred", deferred_send), ("connected", connected_send)] {
+            assert!(
+                source.contains("omega_zero_base::is_comet_mode()")
+                    && source.contains("visible_worktrees(cx)")
+                    && source.contains("workspace::Open"),
+                "OMEGA-DELTA-0223: the {boundary} Comet send path can run without a project"
+            );
+        }
+    }
 }
