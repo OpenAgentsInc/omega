@@ -605,6 +605,16 @@ pub fn init(cx: &mut App) {
                         cx,
                     );
                 })
+                .register_action(
+                    |workspace, _: &workbench_shell::SelectForensics, window, cx| {
+                        select_workbench_surface_from_workspace(
+                            workspace,
+                            omega_workbench_state::WorkSurface::Forensics,
+                            window,
+                            cx,
+                        );
+                    },
+                )
                 .register_action(|workspace, _: &workbench_shell::SelectGit, window, cx| {
                     select_workbench_surface_from_workspace(
                         workspace,
@@ -10938,6 +10948,8 @@ impl AgentPanel {
                     worktree_name,
                     worktree_abs_path: worktree_path.as_ref().to_path_buf(),
                     worktree_path: worktree_display,
+                    remote_url: None,
+                    head_commit: None,
                     branch: BranchIdentity::NoGit,
                     git: GitIdentitySummary::default(),
                     source_revision: revision,
@@ -10993,6 +11005,15 @@ impl AgentPanel {
                     worktree_name: worktree_name.clone(),
                     worktree_abs_path: worktree_path.as_ref().to_path_buf(),
                     worktree_path: worktree_display.clone(),
+                    remote_url: snapshot
+                        .remote_upstream_url
+                        .clone()
+                        .or_else(|| snapshot.remote_origin_url.clone())
+                        .map(Into::into),
+                    head_commit: snapshot
+                        .head_commit
+                        .as_ref()
+                        .map(|commit| commit.sha.clone()),
                     branch,
                     git: GitIdentitySummary {
                         dirty_files: summary.count,
@@ -12164,6 +12185,30 @@ impl AgentPanel {
         Ok(plan_surface)
     }
 
+    fn prepare_forensics_surface(
+        &mut self,
+        cx: &mut Context<Self>,
+    ) -> Result<Entity<crate::forensics_workbench::ForensicsWorkbenchSurface>> {
+        if let Some(surface) = self
+            .workbench_shell
+            .forensics_surface_for_active_binding(cx)
+        {
+            return Ok(surface);
+        }
+        let candidate = self
+            .workbench_shell
+            .identity()
+            .and_then(|identity| identity.selected.as_ref())
+            .cloned()
+            .ok_or_else(|| anyhow!("select a Git repository before opening Forensics"))?;
+        if candidate.git_repository_id.is_none() {
+            return Err(anyhow!(
+                "Forensics requires an exact Git repository binding"
+            ));
+        }
+        Ok(cx.new(|cx| crate::forensics_workbench::ForensicsWorkbenchSurface::new(&candidate, cx)))
+    }
+
     fn prepare_terminal_surface(
         &mut self,
         window: &mut Window,
@@ -12895,6 +12940,19 @@ impl AgentPanel {
         } else {
             None
         };
+        let forensics_surface = if surface == omega_workbench_state::WorkSurface::Forensics {
+            match self.prepare_forensics_surface(cx) {
+                Ok(forensics_surface) => Some(forensics_surface),
+                Err(error) => {
+                    log::warn!("could not prepare the Forensics work surface: {error:#}");
+                    self.workbench_shell.record_error(error.to_string());
+                    cx.notify();
+                    return;
+                }
+            }
+        } else {
+            None
+        };
         let previous_git_scope = self
             .workbench_git_panel
             .as_ref()
@@ -12938,7 +12996,10 @@ impl AgentPanel {
         } else {
             None
         };
-        let selection = if let Some(git_surface) = git_surface.clone() {
+        let selection = if let Some(forensics_surface) = forensics_surface {
+            self.workbench_shell
+                .select_forensics_surface(forensics_surface, cx)
+        } else if let Some(git_surface) = git_surface.clone() {
             self.workbench_shell.select_git_surface(git_surface, cx)
         } else if let Some(terminal_surface) = terminal_surface.clone() {
             self.workbench_shell
@@ -14063,6 +14124,15 @@ impl Render for AgentPanel {
                     cx.listener(|this, _: &workbench_shell::SelectReview, window, cx| {
                         this.select_work_surface(
                             omega_workbench_state::WorkSurface::Review,
+                            window,
+                            cx,
+                        );
+                    }),
+                )
+                .on_action(
+                    cx.listener(|this, _: &workbench_shell::SelectForensics, window, cx| {
+                        this.select_work_surface(
+                            omega_workbench_state::WorkSurface::Forensics,
                             window,
                             cx,
                         );

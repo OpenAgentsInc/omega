@@ -24800,7 +24800,7 @@ mod tests {
     }
 
     /// OMEGA-DELTA-0191. The activity rail is generated from one exact
-    /// six-surface inventory, every generated action is admitted, and the
+    /// seven-surface inventory, every generated action is admitted, and the
     /// shipped startup path loads both its handlers and panel dependencies.
     /// OMEGA-DELTA-0205 also hosts sidebar toggle and Settings on this rail.
     #[test]
@@ -24823,13 +24823,13 @@ mod tests {
         let state =
             read_repository_file("crates/omega_workbench_state/src/omega_workbench_state.rs");
         let fallback = state
-            .split_once("pub const FALLBACK_ORDER: [Self; 6] = [")
+            .split_once("pub const FALLBACK_ORDER: [Self; 7] = [")
             .and_then(|(_, rest)| rest.split_once("];"))
             .map(|(body, _)| body)
             .expect("OMEGA-DELTA-0191: cannot isolate WorkSurface::FALLBACK_ORDER");
         assert_eq!(
             fallback.matches("Self::").count(),
-            6,
+            7,
             "OMEGA-DELTA-0191: a rail control was added without updating the exact proof inventory"
         );
 
@@ -24840,6 +24840,7 @@ mod tests {
             ("Files", "SelectFiles"),
             ("Search", "SelectSearch"),
             ("Review", "SelectReview"),
+            ("Forensics", "SelectForensics"),
             ("Git", "SelectGit"),
             ("Terminal", "SelectTerminal"),
             ("Plan", "SelectPlan"),

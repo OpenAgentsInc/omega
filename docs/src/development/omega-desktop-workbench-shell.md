@@ -24,22 +24,25 @@ change review. Issue 132 rehomes the native Git Panel under an exact
 repository/worktree scope. Issue 137 rehomes the Workspace-owned native
 Terminal Panel and gives explicit terminal creation the active thread's exact
 worktree path. Issue 130 mounts the active thread's typed ACP plan in a retained
-native Plan surface.
+native Plan surface. Issue 192 adds a repository-bound Forensics preflight
+surface. Its target, placement, coverage, and operator-action contract is
+documented in [Omega Forensics preflight](./omega-forensics-preflight.md).
 
 The remaining work is deliberately split so each native adapter can prove its
 own identity, behavior, and lifecycle:
 
-| Follow-up                                                      | Responsibility                                     |
-| -------------------------------------------------------------- | -------------------------------------------------- |
-| [Issue 129](https://github.com/OpenAgentsInc/omega/issues/129) | Mounted the existing Project Panel as Files        |
-| [Issue 130](https://github.com/OpenAgentsInc/omega/issues/130) | Present the thread's typed plan                    |
-| [Issue 131](https://github.com/OpenAgentsInc/omega/issues/131) | Persist and cold-restore each thread's selection   |
-| [Issue 132](https://github.com/OpenAgentsInc/omega/issues/132) | Mounted the existing Git Panel                     |
-| [Issue 134](https://github.com/OpenAgentsInc/omega/issues/134) | Mounted an embedded project-search entity          |
-| [Issue 136](https://github.com/OpenAgentsInc/omega/issues/136) | Mounted a thread-bound native review entity        |
+| Follow-up                                                      | Responsibility                                                |
+| -------------------------------------------------------------- | ------------------------------------------------------------- |
+| [Issue 129](https://github.com/OpenAgentsInc/omega/issues/129) | Mounted the existing Project Panel as Files                   |
+| [Issue 130](https://github.com/OpenAgentsInc/omega/issues/130) | Present the thread's typed plan                               |
+| [Issue 131](https://github.com/OpenAgentsInc/omega/issues/131) | Persist and cold-restore each thread's selection              |
+| [Issue 132](https://github.com/OpenAgentsInc/omega/issues/132) | Mounted the existing Git Panel                                |
+| [Issue 134](https://github.com/OpenAgentsInc/omega/issues/134) | Mounted an embedded project-search entity                     |
+| [Issue 136](https://github.com/OpenAgentsInc/omega/issues/136) | Mounted a thread-bound native review entity                   |
 | [Issue 137](https://github.com/OpenAgentsInc/omega/issues/137) | Mounted the existing Terminal Panel without implicit spawning |
 
-Files, Search, Review, Git, Terminal, and Plan are production content.
+Files, Search, Review, Forensics, Git, Terminal, and Plan are production
+content.
 
 ## Composition boundary {#composition-boundary}
 
@@ -631,8 +634,9 @@ no Git repository.
 
 ## Surface registry and identity {#surface-registry}
 
-The registry contains exactly six stable surface identities in this order:
-Files, Search, Review, Git, Terminal, and Plan. Files, Search, Review, Git, and
+The registry contains exactly seven stable surface identities in this order:
+Files, Search, Review, Forensics, Git, Terminal, and Plan. Files, Search,
+Review, Forensics, Git, and
 Terminal require a repository/worktree binding. Plan requires an active thread
 but no repository or live connection. Plan can therefore open, collapse, and
 reopen while offline; repository-bound surfaces and surface commands remain
@@ -706,15 +710,15 @@ unrendered Project Panel cannot remain the keyboard-action owner.
 One allocator decides both the existing threads sidebar and the work-surface
 dock. The current dimensions are:
 
-| Allocation                      | Size       |
-| ------------------------------- | ---------- |
-| Threads sidebar, expanded       | 280 pixels |
-| Threads sidebar, collapsed      | 0 pixels   |
-| Workbench activity rail         | 40 pixels  |
-| Transcript reservation          | 600 pixels |
-| Work-surface dock minimum       | 240 pixels |
-| Work-surface dock default       | 320 pixels |
-| Work-surface dock maximum       | 480 pixels |
+| Allocation                 | Size       |
+| -------------------------- | ---------- |
+| Threads sidebar, expanded  | 280 pixels |
+| Threads sidebar, collapsed | 0 pixels   |
+| Workbench activity rail    | 40 pixels  |
+| Transcript reservation     | 600 pixels |
+| Work-surface dock minimum  | 240 pixels |
+| Work-surface dock default  | 320 pixels |
+| Work-surface dock maximum  | 480 pixels |
 
 When the threads sidebar is collapsed, it does not draw a separate vertical
 rail. Expand/collapse sits at the top of the activity rail, and Settings sits
@@ -838,16 +842,16 @@ Stable selectors include:
 | Files tree       | `omega.project-panel.tree`                    |
 | Files row        | `omega.project-panel.row.<worktree>.<entry>`  |
 | Files scope      | `omega.project-panel.scope.<state>`           |
-| Terminal content | `omega.workbench.terminal.content`             |
-| Terminal create  | `omega.workbench.terminal.new`                 |
-| Terminal owner   | `omega.workbench.terminal.owner`               |
-| Terminal state   | `omega.workbench.terminal.owner-state`         |
-| Plan content     | `omega.workbench.plan.content`                 |
-| Plan summary     | `omega.workbench.plan.summary`                 |
-| Plan lifecycle   | `omega.workbench.plan.lifecycle`               |
-| Plan history     | `omega.workbench.plan.history`                 |
-| Plan step        | `omega.workbench.plan.step.<stable-id>`        |
-| Plan navigation  | `omega.workbench.plan.navigation-status`       |
+| Terminal content | `omega.workbench.terminal.content`            |
+| Terminal create  | `omega.workbench.terminal.new`                |
+| Terminal owner   | `omega.workbench.terminal.owner`              |
+| Terminal state   | `omega.workbench.terminal.owner-state`        |
+| Plan content     | `omega.workbench.plan.content`                |
+| Plan summary     | `omega.workbench.plan.summary`                |
+| Plan lifecycle   | `omega.workbench.plan.lifecycle`              |
+| Plan history     | `omega.workbench.plan.history`                |
+| Plan step        | `omega.workbench.plan.step.<stable-id>`       |
+| Plan navigation  | `omega.workbench.plan.navigation-status`      |
 
 For every interaction, assert logical state and rendered semantics:
 

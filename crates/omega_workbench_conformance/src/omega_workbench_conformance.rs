@@ -33,16 +33,18 @@ pub enum SurfaceId {
     Files,
     Search,
     Review,
+    Forensics,
     Git,
     Terminal,
     Plan,
 }
 
 impl SurfaceId {
-    pub const FALLBACK_PRIORITY: [Self; 6] = [
+    pub const FALLBACK_PRIORITY: [Self; 7] = [
         Self::Files,
         Self::Search,
         Self::Review,
+        Self::Forensics,
         Self::Git,
         Self::Terminal,
         Self::Plan,
@@ -51,7 +53,12 @@ impl SurfaceId {
     pub fn requires_binding(self) -> bool {
         matches!(
             self,
-            Self::Files | Self::Search | Self::Review | Self::Git | Self::Terminal
+            Self::Files
+                | Self::Search
+                | Self::Review
+                | Self::Forensics
+                | Self::Git
+                | Self::Terminal
         )
     }
 }

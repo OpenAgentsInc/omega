@@ -8109,6 +8109,8 @@ fn configure_workbench_shell_scene(
                 worktree_name: worktree_name.into(),
                 worktree_abs_path: std::path::PathBuf::from(worktree_path),
                 worktree_path: worktree_path.into(),
+                remote_url: Some("https://github.com/OpenAgentsInc/omega.git".into()),
+                head_commit: Some("0123456789abcdef0123456789abcdef01234567".into()),
                 branch: BranchIdentity::Branch(
                     if long {
                         "feature/server-projection-consistency-and-reconnect"

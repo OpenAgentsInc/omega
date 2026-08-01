@@ -94,16 +94,18 @@ pub enum WorkSurfaceId {
     Files,
     Search,
     Review,
+    Forensics,
     Git,
     Terminal,
     Plan,
 }
 
 impl WorkSurfaceId {
-    pub const ALL: [Self; 6] = [
+    pub const ALL: [Self; 7] = [
         Self::Files,
         Self::Search,
         Self::Review,
+        Self::Forensics,
         Self::Git,
         Self::Terminal,
         Self::Plan,
@@ -114,6 +116,7 @@ impl WorkSurfaceId {
             Self::Files => "files",
             Self::Search => "search",
             Self::Review => "review",
+            Self::Forensics => "forensics",
             Self::Git => "git",
             Self::Terminal => "terminal",
             Self::Plan => "plan",
@@ -125,6 +128,7 @@ impl WorkSurfaceId {
             Self::Files => "Files",
             Self::Search => "Search",
             Self::Review => "Review",
+            Self::Forensics => "Forensics",
             Self::Git => "Git",
             Self::Terminal => "Terminal",
             Self::Plan => "Plan",
@@ -136,6 +140,7 @@ impl WorkSurfaceId {
             Self::Files => "omega.workbench.control.rail.files",
             Self::Search => "omega.workbench.control.rail.search",
             Self::Review => "omega.workbench.control.rail.review",
+            Self::Forensics => "omega.workbench.control.rail.forensics",
             Self::Git => "omega.workbench.control.rail.git",
             Self::Terminal => "omega.workbench.control.rail.terminal",
             Self::Plan => "omega.workbench.control.rail.plan",
@@ -147,6 +152,7 @@ impl WorkSurfaceId {
             Self::Files => "omega.workbench.surface.files",
             Self::Search => "omega.workbench.surface.search",
             Self::Review => "omega.workbench.surface.review",
+            Self::Forensics => "omega.workbench.surface.forensics",
             Self::Git => "omega.workbench.surface.git",
             Self::Terminal => "omega.workbench.surface.terminal",
             Self::Plan => "omega.workbench.surface.plan",
@@ -158,6 +164,7 @@ impl WorkSurfaceId {
             Self::Files => "omega.workbench.badge.files",
             Self::Search => "omega.workbench.badge.search",
             Self::Review => "omega.workbench.badge.review",
+            Self::Forensics => "omega.workbench.badge.forensics",
             Self::Git => "omega.workbench.badge.git",
             Self::Terminal => "omega.workbench.badge.terminal",
             Self::Plan => "omega.workbench.badge.plan",
@@ -167,7 +174,12 @@ impl WorkSurfaceId {
     pub const fn requires_binding(self) -> bool {
         matches!(
             self,
-            Self::Files | Self::Search | Self::Review | Self::Git | Self::Terminal
+            Self::Files
+                | Self::Search
+                | Self::Review
+                | Self::Forensics
+                | Self::Git
+                | Self::Terminal
         )
     }
 }
@@ -7343,6 +7355,7 @@ fn conformance_surface(surface: projection::WorkSurface) -> conformance::Surface
         projection::WorkSurface::Files => conformance::SurfaceId::Files,
         projection::WorkSurface::Search => conformance::SurfaceId::Search,
         projection::WorkSurface::Review => conformance::SurfaceId::Review,
+        projection::WorkSurface::Forensics => conformance::SurfaceId::Forensics,
         projection::WorkSurface::Git => conformance::SurfaceId::Git,
         projection::WorkSurface::Terminal => conformance::SurfaceId::Terminal,
         projection::WorkSurface::Plan => conformance::SurfaceId::Plan,

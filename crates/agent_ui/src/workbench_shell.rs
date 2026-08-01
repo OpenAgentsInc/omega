@@ -35,6 +35,7 @@ use workspace::{Panel, ToolbarItemView, Workspace, item::Item};
 
 use crate::{
     AgentDiff, AgentDiffBinding, AgentDiffLifecycle, AgentDiffPane, AgentDiffToolbar,
+    forensics_workbench::ForensicsWorkbenchSurface,
     omega_sidebar,
     plan_presentation::{PlanPriorityKind, PlanStatusKind, plan_label_markdown_style},
     thread_identity::{
@@ -60,6 +61,8 @@ actions!(
         SelectSearch,
         /// Select the Review work surface.
         SelectReview,
+        /// Select the Forensics work surface.
+        SelectForensics,
         /// Select the Git work surface.
         SelectGit,
         /// Select the Terminal work surface.
@@ -1838,6 +1841,7 @@ pub struct WorkSurfaceHost {
     files_panel: Option<Entity<ProjectPanel>>,
     search_surface: Option<Entity<NativeSearchSurface>>,
     review_surface: Option<Entity<NativeReviewSurface>>,
+    forensics_surface: Option<Entity<ForensicsWorkbenchSurface>>,
     git_surface: Option<Entity<NativeGitSurface>>,
     terminal_surface: Option<Entity<NativeTerminalSurface>>,
     plan_surface: Option<Entity<NativePlanSurface>>,
@@ -1849,6 +1853,7 @@ impl WorkSurfaceHost {
         files_panel: Option<Entity<ProjectPanel>>,
         search_surface: Option<Entity<NativeSearchSurface>>,
         review_surface: Option<Entity<NativeReviewSurface>>,
+        forensics_surface: Option<Entity<ForensicsWorkbenchSurface>>,
         git_surface: Option<Entity<NativeGitSurface>>,
         terminal_surface: Option<Entity<NativeTerminalSurface>>,
         plan_surface: Option<Entity<NativePlanSurface>>,
@@ -1861,6 +1866,7 @@ impl WorkSurfaceHost {
             files_panel,
             search_surface,
             review_surface,
+            forensics_surface,
             git_surface,
             terminal_surface,
             plan_surface,
@@ -1891,6 +1897,11 @@ impl WorkSurfaceHost {
     }
 
     #[cfg(any(test, feature = "test-support"))]
+    pub fn forensics_surface(&self) -> Option<&Entity<ForensicsWorkbenchSurface>> {
+        self.forensics_surface.as_ref()
+    }
+
+    #[cfg(any(test, feature = "test-support"))]
     pub fn git_surface(&self) -> Option<&Entity<NativeGitSurface>> {
         self.git_surface.as_ref()
     }
@@ -1918,6 +1929,10 @@ impl WorkSurfaceHost {
                 .as_ref()
                 .is_some_and(|surface| surface.read(cx).contains_focus(window, cx))
             || self
+                .forensics_surface
+                .as_ref()
+                .is_some_and(|surface| surface.focus_handle(cx).contains_focused(window, cx))
+            || self
                 .git_surface
                 .as_ref()
                 .is_some_and(|surface| surface.read(cx).contains_focus(window, cx))
@@ -1937,6 +1952,8 @@ impl WorkSurfaceHost {
         } else if let Some(surface) = self.search_surface.as_ref() {
             surface.focus_handle(cx).focus(window, cx);
         } else if let Some(surface) = self.review_surface.as_ref() {
+            surface.focus_handle(cx).focus(window, cx);
+        } else if let Some(surface) = self.forensics_surface.as_ref() {
             surface.focus_handle(cx).focus(window, cx);
         } else if let Some(surface) = self.git_surface.as_ref() {
             surface.focus_handle(cx).focus(window, cx);
@@ -2015,6 +2032,11 @@ impl Render for WorkSurfaceHost {
         } else {
             None
         };
+        let forensics_surface = if matches!(self.content_state, SurfaceContentState::Ready) {
+            self.forensics_surface.clone()
+        } else {
+            None
+        };
         let git_surface = if matches!(self.content_state, SurfaceContentState::Ready) {
             self.git_surface.clone()
         } else {
@@ -2035,6 +2057,7 @@ impl Render for WorkSurfaceHost {
                 if files_panel.is_some()
                     || search_surface.is_some()
                     || review_surface.is_some()
+                    || forensics_surface.is_some()
                     || git_surface.is_some()
                     || terminal_surface.is_some()
                     || plan_surface.is_some() =>
@@ -2095,6 +2118,7 @@ impl Render for WorkSurfaceHost {
             .when_some(files_panel, |this, panel| this.child(panel))
             .when_some(search_surface, |this, surface| this.child(surface))
             .when_some(review_surface, |this, surface| this.child(surface))
+            .when_some(forensics_surface, |this, surface| this.child(surface))
             .when_some(git_surface, |this, surface| this.child(surface))
             .when_some(terminal_surface, |this, surface| this.child(surface))
             .when_some(plan_surface, |this, surface| this.child(surface))
@@ -2721,6 +2745,7 @@ impl WorkbenchShell {
             review_surface,
             None,
             None,
+            None,
             plan_surface,
             cx,
         )
@@ -2733,6 +2758,7 @@ impl WorkbenchShell {
     ) -> Result<SurfaceSelection> {
         self.select_surface_with_native(
             WorkSurface::Git,
+            None,
             None,
             None,
             None,
@@ -2750,6 +2776,7 @@ impl WorkbenchShell {
     ) -> Result<SurfaceSelection> {
         self.select_surface_with_native(
             WorkSurface::Terminal,
+            None,
             None,
             None,
             None,
@@ -2772,7 +2799,26 @@ impl WorkbenchShell {
             None,
             None,
             None,
+            None,
             Some(plan_surface),
+            cx,
+        )
+    }
+
+    pub fn select_forensics_surface(
+        &mut self,
+        forensics_surface: Entity<ForensicsWorkbenchSurface>,
+        cx: &mut Context<crate::AgentPanel>,
+    ) -> Result<SurfaceSelection> {
+        self.select_surface_with_native(
+            WorkSurface::Forensics,
+            None,
+            None,
+            None,
+            Some(forensics_surface),
+            None,
+            None,
+            None,
             cx,
         )
     }
@@ -2783,6 +2829,7 @@ impl WorkbenchShell {
         files_panel: Option<Entity<ProjectPanel>>,
         search_surface: Option<Entity<NativeSearchSurface>>,
         review_surface: Option<Entity<NativeReviewSurface>>,
+        forensics_surface: Option<Entity<ForensicsWorkbenchSurface>>,
         git_surface: Option<Entity<NativeGitSurface>>,
         terminal_surface: Option<Entity<NativeTerminalSurface>>,
         plan_surface: Option<Entity<NativePlanSurface>>,
@@ -2824,6 +2871,7 @@ impl WorkbenchShell {
             files_panel,
             search_surface,
             review_surface,
+            forensics_surface,
             git_surface,
             terminal_surface,
             plan_surface,
@@ -2849,6 +2897,7 @@ impl WorkbenchShell {
         files_panel: Option<Entity<ProjectPanel>>,
         search_surface: Option<Entity<NativeSearchSurface>>,
         review_surface: Option<Entity<NativeReviewSurface>>,
+        forensics_surface: Option<Entity<ForensicsWorkbenchSurface>>,
         git_surface: Option<Entity<NativeGitSurface>>,
         terminal_surface: Option<Entity<NativeTerminalSurface>>,
         plan_surface: Option<Entity<NativePlanSurface>>,
@@ -2862,6 +2911,9 @@ impl WorkbenchShell {
         }
         if surface == WorkSurface::Review && review_surface.is_none() {
             bail!("the native Review surface is unavailable");
+        }
+        if surface == WorkSurface::Forensics && forensics_surface.is_none() {
+            bail!("the native Forensics surface is unavailable");
         }
         if surface == WorkSurface::Git && git_surface.is_none() {
             bail!("the native Git surface is unavailable");
@@ -2900,6 +2952,7 @@ impl WorkbenchShell {
                 files_panel,
                 search_surface,
                 review_surface,
+                forensics_surface,
                 git_surface,
                 terminal_surface,
                 plan_surface,
@@ -2933,6 +2986,7 @@ impl WorkbenchShell {
             None,
             None,
             None,
+            None,
             cx,
         )
         .map(Some)
@@ -2956,6 +3010,24 @@ impl WorkbenchShell {
             .cloned()
     }
 
+    pub fn forensics_surface_for_active_binding(
+        &self,
+        cx: &App,
+    ) -> Option<Entity<ForensicsWorkbenchSurface>> {
+        let visible = self.projection.visible_projection()?;
+        let key = SurfaceHostKey {
+            thread_id: visible.thread_id,
+            binding: visible.binding,
+            surface: WorkSurface::Forensics,
+        };
+        self.hosts
+            .get(&key)?
+            .read(cx)
+            .forensics_surface
+            .as_ref()
+            .cloned()
+    }
+
     pub fn ensure_visible_search_host(
         &mut self,
         search_surface: Entity<NativeSearchSurface>,
@@ -2975,6 +3047,7 @@ impl WorkbenchShell {
             WorkSurface::Search,
             None,
             Some(search_surface),
+            None,
             None,
             None,
             None,
@@ -3025,6 +3098,7 @@ impl WorkbenchShell {
             None,
             None,
             None,
+            None,
             cx,
         )
         .map(Some)
@@ -3057,6 +3131,7 @@ impl WorkbenchShell {
             &thread_id,
             binding,
             WorkSurface::Git,
+            None,
             None,
             None,
             None,
@@ -3107,6 +3182,7 @@ impl WorkbenchShell {
             None,
             None,
             None,
+            None,
             Some(terminal_surface),
             None,
             cx,
@@ -3146,6 +3222,7 @@ impl WorkbenchShell {
             &thread_id,
             binding,
             WorkSurface::Plan,
+            None,
             None,
             None,
             None,
@@ -3568,6 +3645,7 @@ impl WorkSurfaceExt for WorkSurface {
             Self::Files => "Files",
             Self::Search => "Search",
             Self::Review => "Review",
+            Self::Forensics => "Forensics",
             Self::Git => "Git",
             Self::Terminal => "Terminal",
             Self::Plan => "Plan",
@@ -3579,6 +3657,7 @@ impl WorkSurfaceExt for WorkSurface {
             Self::Files => IconName::FileTree,
             Self::Search => IconName::MagnifyingGlass,
             Self::Review => IconName::ListTodo,
+            Self::Forensics => IconName::Crosshair,
             Self::Git => IconName::GitBranch,
             Self::Terminal => IconName::TerminalAlt,
             Self::Plan => IconName::TodoProgress,
@@ -3590,6 +3669,7 @@ impl WorkSurfaceExt for WorkSurface {
             Self::Files => "omega.workbench.control.rail.files",
             Self::Search => "omega.workbench.control.rail.search",
             Self::Review => "omega.workbench.control.rail.review",
+            Self::Forensics => "omega.workbench.control.rail.forensics",
             Self::Git => "omega.workbench.control.rail.git",
             Self::Terminal => "omega.workbench.control.rail.terminal",
             Self::Plan => "omega.workbench.control.rail.plan",
@@ -3601,6 +3681,7 @@ impl WorkSurfaceExt for WorkSurface {
             Self::Files => "omega.workbench.surface.files",
             Self::Search => "omega.workbench.surface.search",
             Self::Review => "omega.workbench.surface.review",
+            Self::Forensics => "omega.workbench.surface.forensics",
             Self::Git => "omega.workbench.surface.git",
             Self::Terminal => "omega.workbench.surface.terminal",
             Self::Plan => "omega.workbench.surface.plan",
@@ -3617,6 +3698,7 @@ pub fn select_action(surface: WorkSurface) -> Box<dyn Action> {
         WorkSurface::Files => SelectFiles.boxed_clone(),
         WorkSurface::Search => SelectSearch.boxed_clone(),
         WorkSurface::Review => SelectReview.boxed_clone(),
+        WorkSurface::Forensics => SelectForensics.boxed_clone(),
         WorkSurface::Git => SelectGit.boxed_clone(),
         WorkSurface::Terminal => SelectTerminal.boxed_clone(),
         WorkSurface::Plan => SelectPlan.boxed_clone(),

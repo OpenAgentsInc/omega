@@ -10,16 +10,18 @@ pub enum WorkSurface {
     Files,
     Search,
     Review,
+    Forensics,
     Git,
     Terminal,
     Plan,
 }
 
 impl WorkSurface {
-    pub const FALLBACK_ORDER: [Self; 6] = [
+    pub const FALLBACK_ORDER: [Self; 7] = [
         Self::Files,
         Self::Search,
         Self::Review,
+        Self::Forensics,
         Self::Git,
         Self::Terminal,
         Self::Plan,
@@ -28,7 +30,12 @@ impl WorkSurface {
     pub const fn requires_binding(self) -> bool {
         matches!(
             self,
-            Self::Files | Self::Search | Self::Review | Self::Git | Self::Terminal
+            Self::Files
+                | Self::Search
+                | Self::Review
+                | Self::Forensics
+                | Self::Git
+                | Self::Terminal
         )
     }
 }
@@ -1193,7 +1200,8 @@ mod tests {
                         thread_id: active_thread_id.into(),
                     },
                     1..=6 => {
-                        let surface = WorkSurface::FALLBACK_ORDER[(action as usize - 1) % 6];
+                        let surface = WorkSurface::FALLBACK_ORDER
+                            [(action as usize - 1) % WorkSurface::FALLBACK_ORDER.len()];
                         ProjectionTransition::RequestSurface {
                             thread_id: active_thread_id.into(),
                             surface,

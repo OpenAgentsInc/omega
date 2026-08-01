@@ -594,6 +594,7 @@ dependencies = [
  "omega_effectd",
  "omega_exo_lane",
  "omega_exo_log",
+ "omega_forensics",
  "omega_front_door",
  "omega_harness",
  "omega_identity",
@@ -11226,6 +11227,16 @@ dependencies = [
  "omega_exo_lane",
  "serde",
  "serde_json",
+]
+
+[[package]]
+name = "omega_forensics"
+version = "0.1.0"
+dependencies = [
+ "serde",
+ "serde_json",
+ "thiserror 2.0.17",
+ "url",
 ]
 
 [[package]]

@@ -128,6 +128,7 @@ members = [
     "crates/omega_device_bridge",
     "crates/omega_device_enrollment",
     "crates/omega_front_door",
+    "crates/omega_forensics",
     "crates/omega_harness",
     "crates/omega_workbench_conformance",
     "crates/omega_workbench_harness",
@@ -379,6 +380,7 @@ omega_acp_server = { path = "crates/omega_acp_server" }
 omega_device_bridge = { path = "crates/omega_device_bridge" }
 omega_device_enrollment = { path = "crates/omega_device_enrollment" }
 omega_front_door = { path = "crates/omega_front_door" }
+omega_forensics = { path = "crates/omega_forensics" }
 omega_harness = { path = "crates/omega_harness" }
 omega_workbench_conformance = { path = "crates/omega_workbench_conformance" }
 omega_workbench_harness = { path = "crates/omega_workbench_harness" }

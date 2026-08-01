@@ -1,0 +1,22 @@
+[package]
+name = "omega_forensics"
+version = "0.1.0"
+edition.workspace = true
+publish.workspace = true
+license = "GPL-3.0-or-later"
+description = "Renderer-safe target and preflight contracts for Omega Forensics"
+
+[lints]
+workspace = true
+
+[lib]
+path = "src/omega_forensics.rs"
+doctest = false
+
+[dependencies]
+serde.workspace = true
+thiserror.workspace = true
+url.workspace = true
+
+[dev-dependencies]
+serde_json.workspace = true

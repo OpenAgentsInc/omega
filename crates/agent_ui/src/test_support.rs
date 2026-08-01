@@ -2191,6 +2191,9 @@ fn dispatch_surface_action(
         omega_workbench_state::WorkSurface::Review => {
             visual.dispatch_action(crate::workbench_shell::SelectReview)
         }
+        omega_workbench_state::WorkSurface::Forensics => {
+            visual.dispatch_action(crate::workbench_shell::SelectForensics)
+        }
         omega_workbench_state::WorkSurface::Git => {
             visual.dispatch_action(crate::workbench_shell::SelectGit)
         }
@@ -2279,6 +2282,7 @@ fn work_surface(surface: WorkSurfaceId) -> omega_workbench_state::WorkSurface {
         WorkSurfaceId::Files => omega_workbench_state::WorkSurface::Files,
         WorkSurfaceId::Search => omega_workbench_state::WorkSurface::Search,
         WorkSurfaceId::Review => omega_workbench_state::WorkSurface::Review,
+        WorkSurfaceId::Forensics => omega_workbench_state::WorkSurface::Forensics,
         WorkSurfaceId::Git => omega_workbench_state::WorkSurface::Git,
         WorkSurfaceId::Terminal => omega_workbench_state::WorkSurface::Terminal,
         WorkSurfaceId::Plan => omega_workbench_state::WorkSurface::Plan,

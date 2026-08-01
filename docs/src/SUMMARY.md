@@ -240,6 +240,7 @@
   - [Deterministic Omega workbench proofs](./development/omega-workbench-proof.md)
   - [Workbench projection consistency](./development/workbench-consistency.md)
   - [Omega desktop workbench shell](./development/omega-desktop-workbench-shell.md)
+  - [Omega Forensics preflight](./development/omega-forensics-preflight.md)
   - [macOS](./development/macos.md)
   - [Linux](./development/linux.md)
   - [Windows](./development/windows.md)
