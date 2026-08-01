@@ -4356,19 +4356,15 @@ impl ConversationView {
         // `OMEGA-DELTA-0184`, omega#165.
         let conversation_is_bound =
             !self.pending_connect_messages.is_empty() || !self.omega_route_not_yet_recorded();
+        let model_picker = self.pre_session_model_picker(cx);
         let executor_menu = crate::omega_composer_executor_menu::render_composer_executor_menu(
             self.workspace.clone(),
             self.composer_executor_label(cx),
             conversation_is_bound,
+            model_picker,
             cx,
         );
 
-        let (expand_icon, expand_tooltip) = if manually_expanded {
-            (IconName::Minimize, "Minimize Message Editor")
-        } else {
-            (IconName::Maximize, "Expand Message Editor")
-        };
-        let editor_focus_handle = editor.focus_handle(cx);
         let colors = cx.theme().colors();
         let pill_background = colors.text.opacity(0.03);
         let pill_border = colors.text.opacity(0.08);
@@ -4376,31 +4372,24 @@ impl ConversationView {
         let primary_foreground = colors.editor_background;
         let opaque_window =
             cx.theme().window_background_appearance() == gpui::WindowBackgroundAppearance::Opaque;
-        let expand_button = IconButton::new("toggle-height", expand_icon)
-            .icon_size(IconSize::Small)
-            .icon_color(Color::Muted)
-            .tooltip(move |_window, cx| {
-                Tooltip::for_action_in(
-                    expand_tooltip,
-                    &ExpandMessageEditor,
-                    &editor_focus_handle,
-                    cx,
-                )
-            })
-            .on_click(cx.listener(|this, _, _window, cx| {
-                this.loading_composer_expanded = !this.loading_composer_expanded;
-                cx.notify();
-            }));
         let action_controls = h_flex()
             .min_w_0()
             .when(!compact, |this| this.flex_wrap())
             .gap_1()
             .children(executor_menu)
-            .child(self.render_pre_session_model_tier_selector(cx))
-            .child(crate::composer_voice::render_composer_voice_controls(
-                self.workspace.entity_id(),
-                cx,
-            ))
+            .child(
+                div()
+                    .id("add-context-connecting")
+                    .size(px(28.))
+                    .flex()
+                    .items_center()
+                    .justify_center()
+                    .child(
+                        Icon::new(IconName::Paperclip)
+                            .size(IconSize::Small)
+                            .color(Color::Muted),
+                    ),
+            )
             .child(
                 div()
                     .size(px(28.))
@@ -4501,7 +4490,6 @@ impl ConversationView {
                                                                     )
                                                                 },
                                                             )
-                                                            .child(expand_button)
                                                             .child(action_controls),
                                                     ),
                                             )
@@ -4525,20 +4513,10 @@ impl ConversationView {
                                                         .px(px(COMPOSER_TEXT_INSET))
                                                         .pt_4()
                                                         .pb_1()
-                                                        .pr(px(COMPOSER_TEXT_INSET + 24.))
                                                         .child(EditorElement::new(
                                                             &editor,
                                                             crate::message_editor::composer_editor_style(cx),
-                                                        ))
-                                                        .child(
-                                                            h_flex()
-                                                                .absolute()
-                                                                .top_1()
-                                                                .right_1()
-                                                                .opacity(0.5)
-                                                                .hover(|style| style.opacity(1.0))
-                                                                .child(expand_button),
-                                                        ),
+                                                        )),
                                                 )
                                                 .child(
                                                     h_flex()
@@ -4608,18 +4586,21 @@ impl ConversationView {
     /// that begins every launch at `Luna` and is never seeded from settings, so
     /// this composer said **Luna** on a thread whose send went to
     /// `openagents/gemini-3.6-flash`.
-    fn render_pre_session_model_tier_selector(&self, cx: &mut Context<Self>) -> AnyElement {
-        use crate::omega_model_tier::{render_model_tier_selector, selected};
+    fn pre_session_model_picker(
+        &self,
+        cx: &mut Context<Self>,
+    ) -> crate::omega_composer_executor_menu::ComposerModelPicker {
+        use crate::omega_model_tier::selected;
         use crate::omega_routed_model::face_for_next_turn;
 
         let fs = self.project.read(cx).fs().clone();
-        render_model_tier_selector(
-            face_for_next_turn(None, selected(), cx),
-            true,
-            Rc::new(move |tier, _window, cx| {
+        crate::omega_composer_executor_menu::ComposerModelPicker {
+            face: face_for_next_turn(None, selected(), cx),
+            enabled: true,
+            on_select: Rc::new(move |tier, _window, cx| {
                 crate::omega_model_tier::select_before_session(tier, fs.clone(), cx);
             }),
-        )
+        }
     }
 
     /// The turns a person sent before the executor finished connecting.

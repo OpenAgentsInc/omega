@@ -2060,12 +2060,12 @@ pub(crate) fn composer_editor_style(cx: &App) -> EditorStyle {
         local_player: cx.theme().players().local(),
         text: TextStyle {
             color: cx.theme().colors().text,
-            font_family: settings.agent_buffer_font_family().clone(),
-            font_fallbacks: settings.buffer_font.fallbacks.clone(),
-            font_features: settings.buffer_font.features.clone(),
-            font_size: settings.agent_buffer_font_size(cx).into(),
-            font_weight: settings.buffer_font.weight,
-            line_height: relative(settings.buffer_line_height.value()),
+            font_family: settings.agent_ui_font_family().clone(),
+            font_fallbacks: settings.ui_font.fallbacks.clone(),
+            font_features: settings.ui_font.features.clone(),
+            font_size: px(14.).into(),
+            font_weight: gpui::FontWeight::NORMAL,
+            line_height: relative(1.625),
             ..Default::default()
         },
         syntax: cx.theme().syntax().clone(),

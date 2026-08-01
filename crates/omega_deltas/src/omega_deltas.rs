@@ -218,7 +218,7 @@ pub const ENFORCED_DELTAS: &[&str] = &[
 ///
 /// The pair is the point. A person meets the pre-session composer first, on the
 /// thread whose first message is the one most likely to be long, and it used to
-/// carry two of these four while the connected bar carried all four. Naming
+/// carry fewer controls than the connected bar. Naming
 /// both sides is what lets a check say which bar lost a control rather than
 /// only that the file changed.
 ///
@@ -233,14 +233,14 @@ pub const SHARED_COMPOSER_CONTROLS: &[(&str, &str, &str)] = &[
         "render_composer_executor_menu(",
     ),
     (
-        "the Luna/Flash/Pro tier dropdown",
-        "render_pre_session_model_tier_selector(",
-        "render_model_tier_selector(",
+        "the combined agent/model picker",
+        "pre_session_model_picker(",
+        "render_composer_executor_menu(",
     ),
     (
-        "the microphone",
-        "render_composer_voice_controls(",
-        "render_voice_controls(",
+        "the attachment control",
+        "IconName::Paperclip",
+        "render_add_context_button(",
     ),
     ("Send", "IconName::ArrowUp", "render_send_button("),
 ];
@@ -21331,7 +21331,7 @@ mod tests {
                 && tier.contains("openagents/gpt-5.6-luna")
                 && tier.contains("openagents/gemini-3.6-flash")
                 && tier.contains("openagents/kimi-k3")
-                && tier.contains("render_model_tier_selector"),
+                && tier.contains("ModelTier::ALL"),
             "OMEGA-DELTA-0172: {} lost the Luna/Flash/Pro tier mapping or renderer.",
             repository_path(OMEGA_MODEL_TIER_PATH).display()
         );
@@ -21347,7 +21347,7 @@ mod tests {
             repository_path(OPENAGENTS_PROVIDER_PATH).display()
         );
         assert!(
-            thread_view.contains("render_model_tier_selector")
+            thread_view.contains("composer_model_picker")
                 && thread_view.contains("render_zero_base_executor_bar"),
             "OMEGA-DELTA-0172: {} no longer mounts the Flash/Pro control on \
              the zero-base input bar.",
@@ -24286,7 +24286,7 @@ mod tests {
         let thread_view = read_repository_file(ZERO_BASE_THREAD_VIEW_PATH);
         let bar = body_of(&thread_view, "render_zero_base_executor_bar");
         assert!(
-            bar.contains("self.render_composer_executor_menu(cx)"),
+            bar.contains("self.render_composer_executor_menu(!turn_running, cx)"),
             "OMEGA-DELTA-0184: the zero-base composer bar no longer offers \
              the executor dropdown beside the tier selector."
         );
@@ -26594,8 +26594,9 @@ mod tests {
             );
         }
 
-        // The expand control is on the field rather than the bar, so it is
-        // paired against the function that draws the field.
+        // Comet grows the field from its content rather than mounting an
+        // extra expand glyph inside the pill. Both lifecycle renderers keep
+        // the same automatic compact/expanded contract.
         let connected_field = body_of(&thread_view, "render_message_editor");
         for (source, path, body) in [
             (
@@ -26610,11 +26611,16 @@ mod tests {
             ),
         ] {
             assert!(
-                body.contains("\"toggle-height\""),
-                "OMEGA-DELTA-0204: `{source}` in {} lost the expand control. \
-                 The first message in a thread is the one most likely to be \
-                 long, because it is the one that states the task, so the \
-                 pre-session field is the last one that should be missing it.",
+                body.contains("ComposerLayout::Compact")
+                    || body.contains("let compact = layout == ComposerLayout::Compact"),
+                "OMEGA-DELTA-0204: `{source}` in {} lost the shared automatic \
+                 compact/expanded layout contract.",
+                repository_path(path).display()
+            );
+            assert!(
+                !body.contains("\"toggle-height\""),
+                "OMEGA-DELTA-0204: `{source}` in {} remounted the extra expand \
+                 glyph that the Comet composer intentionally omits.",
                 repository_path(path).display()
             );
         }

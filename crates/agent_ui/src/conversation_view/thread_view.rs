@@ -4978,13 +4978,7 @@ impl ThreadView {
             return div().into_any_element();
         }
 
-        let focus_handle = self.message_editor.focus_handle(cx);
         let editor_expanded = self.editor_expanded;
-        let (expand_icon, expand_tooltip) = if editor_expanded {
-            (IconName::Minimize, "Minimize Message Editor")
-        } else {
-            (IconName::Maximize, "Expand Message Editor")
-        };
         let editor_text = self.message_editor.read(cx).text(cx);
         let layout = if omega_zero_base::is_active() {
             composer_layout(editor_expanded, &editor_text)
@@ -5075,29 +5069,6 @@ impl ThreadView {
                                     .min_w_0()
                                     .gap_1()
                                     .pr_2()
-                                    .child(
-                                        IconButton::new("toggle-height", expand_icon)
-                                            .icon_size(IconSize::Small)
-                                            .icon_color(Color::Muted)
-                                            .tooltip({
-                                                let focus_handle = focus_handle.clone();
-                                                move |_window, cx| {
-                                                    Tooltip::for_action_in(
-                                                        expand_tooltip,
-                                                        &ExpandMessageEditor,
-                                                        &focus_handle,
-                                                        cx,
-                                                    )
-                                                }
-                                            })
-                                            .on_click(cx.listener(|this, _, window, cx| {
-                                                this.expand_message_editor(
-                                                    &ExpandMessageEditor,
-                                                    window,
-                                                    cx,
-                                                );
-                                            })),
-                                    )
                                     .child(controls),
                             ),
                     )
@@ -5118,38 +5089,7 @@ impl ThreadView {
                                 .px(px(COMPOSER_TEXT_INSET))
                                 .pt_4()
                                 .pb_1()
-                                .pr(px(COMPOSER_TEXT_INSET + 24.))
-                                .child(self.message_editor.clone())
-                                .child(
-                                    h_flex()
-                                        .absolute()
-                                        .top_1()
-                                        .right_1()
-                                        .opacity(0.5)
-                                        .hover(|style| style.opacity(1.0))
-                                        .child(
-                                            IconButton::new("toggle-height", expand_icon)
-                                                .icon_size(IconSize::Small)
-                                                .icon_color(Color::Muted)
-                                                .tooltip({
-                                                    move |_window, cx| {
-                                                        Tooltip::for_action_in(
-                                                            expand_tooltip,
-                                                            &ExpandMessageEditor,
-                                                            &focus_handle,
-                                                            cx,
-                                                        )
-                                                    }
-                                                })
-                                                .on_click(cx.listener(|this, _, window, cx| {
-                                                    this.expand_message_editor(
-                                                        &ExpandMessageEditor,
-                                                        window,
-                                                        cx,
-                                                    );
-                                                })),
-                                        ),
-                                ),
+                                .child(self.message_editor.clone()),
                         )
                         .child(
                             h_flex()
@@ -6246,7 +6186,7 @@ impl ThreadView {
 
         PopoverMenu::new("add-context-menu")
             .trigger_with_tooltip(
-                IconButton::new("add-context", IconName::Plus)
+                IconButton::new("add-context", IconName::Paperclip)
                     .icon_size(IconSize::Small)
                     .icon_color(Color::Muted),
                 {
@@ -13943,7 +13883,11 @@ impl ThreadView {
     /// `PinGesture` still has exactly two variants, nothing here calls
     /// `pin_session`, and an engine lane — the only Full Auto authority among
     /// the three — is still reachable by a pin and by nothing else.
-    fn render_zero_base_executor_bar(&self, compact: bool, cx: &mut Context<Self>) -> AnyElement {
+    fn render_zero_base_executor_bar(
+        &mut self,
+        compact: bool,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
         let exo = self.exo_connection(cx);
         let disclosure_line = self.omega_disclosure_line(cx);
         let inspector_open = self.exo_inspector_expanded;
@@ -14017,9 +13961,7 @@ impl ThreadView {
                     // omega#165: on a bound conversation it starts a new
                     // thread on the picked executor; it never retargets this
                     // transcript.
-                    .children(self.render_composer_executor_menu(cx))
-                    // Flash / Pro — Omega's hosted model tiers.
-                    .child(self.render_model_tier_selector(!turn_running, cx))
+                    .children(self.render_composer_executor_menu(!turn_running, cx))
                     // omega#99. The inspector's contents are the conversation's
                     // — identity, runtime, capabilities and the authority
                     // receipt for the turn a person just watched — so in zero
@@ -14046,7 +13988,7 @@ impl ThreadView {
                     // into a stop control while a turn is generating, so the
                     // Exo header's separate `Stop` was a second button for the
                     // same act.
-                    .child(self.render_voice_controls(cx))
+                    .child(self.render_add_context_button(cx))
                     .child(self.render_send_button(cx)),
             )
             .into_any_element()
@@ -14059,7 +14001,11 @@ impl ThreadView {
     /// is bound comes from this thread's own entries: the first send leaves
     /// an entry, and from then on selection starts a new thread instead of
     /// retargeting this one.
-    fn render_composer_executor_menu(&self, cx: &Context<Self>) -> Option<AnyElement> {
+    fn render_composer_executor_menu(
+        &self,
+        model_picker_enabled: bool,
+        cx: &mut Context<Self>,
+    ) -> Option<AnyElement> {
         let conversation_is_bound = !self.thread.read(cx).is_draft_thread();
         // The face reads this thread's own resolved owner identity, captured
         // at construction — never a separate selection store.
@@ -14073,6 +14019,7 @@ impl ThreadView {
             self.workspace.clone(),
             current_label,
             conversation_is_bound,
+            self.composer_model_picker(model_picker_enabled, cx),
             cx,
         )
     }
@@ -14083,8 +14030,12 @@ impl ThreadView {
     /// authority in `crate::omega_routed_model`, so it cannot name a different
     /// model from the disclosure line and status line beside it. The standing
     /// choice speaks only for a thread that has not routed anything yet.
-    fn render_model_tier_selector(&self, enabled: bool, cx: &mut Context<Self>) -> AnyElement {
-        use crate::omega_model_tier::{render_model_tier_selector, select, selected};
+    fn composer_model_picker(
+        &self,
+        enabled: bool,
+        cx: &mut Context<Self>,
+    ) -> crate::omega_composer_executor_menu::ComposerModelPicker {
+        use crate::omega_model_tier::{select, selected};
         use crate::omega_routed_model::{RoutedModel, face_for_next_turn};
         use acp_thread::AgentModelId;
         use std::rc::Rc;
@@ -14096,10 +14047,10 @@ impl ThreadView {
         let face = face_for_next_turn(routed.as_ref(), selected(), cx);
         let model_selector = self.model_selector.clone();
 
-        render_model_tier_selector(
+        crate::omega_composer_executor_menu::ComposerModelPicker {
             face,
             enabled,
-            Rc::new(move |tier, _window, cx| {
+            on_select: Rc::new(move |tier, _window, cx| {
                 select(tier);
                 if let Some(entity) = model_selector.as_ref() {
                     let agent = entity.read(cx).agent_selector();
@@ -14112,7 +14063,7 @@ impl ThreadView {
                     );
                 }
             }),
-        )
+        }
     }
 
     /// The main dropdown: which executor runs this conversation.

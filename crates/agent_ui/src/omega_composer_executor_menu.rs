@@ -33,15 +33,22 @@
 //! starts a **new** thread on that executor — the existing transcript's
 //! executor never changes underneath its entries (`OMEGA-DELTA-0150`).
 
-use std::collections::HashMap;
+use std::{collections::HashMap, rc::Rc};
 
 use gpui::{AnyElement, App, EntityId, Global, WeakEntity, Window};
 use omega_front_door::ModeReadiness;
-use ui::{Button, ContextMenu, ContextMenuEntry, PopoverMenu, PopoverMenuHandle, prelude::*};
+use ui::{ButtonLike, ContextMenu, ContextMenuEntry, PopoverMenu, PopoverMenuHandle, prelude::*};
 use util::ResultExt as _;
 use workspace::Workspace;
 
 use crate::agent_panel::{AgentPanel, ComposerExecutorRow};
+use crate::omega_model_tier::{ModelTier, RoutedFace};
+
+pub struct ComposerModelPicker {
+    pub face: RoutedFace,
+    pub enabled: bool,
+    pub on_select: Rc<dyn Fn(ModelTier, &mut Window, &mut App)>,
+}
 
 /// The popover handles behind every composer executor dropdown, one per
 /// workspace.
@@ -120,19 +127,50 @@ pub fn render_composer_executor_menu(
     workspace: WeakEntity<Workspace>,
     current_label: SharedString,
     conversation_is_bound: bool,
+    model_picker: ComposerModelPicker,
     cx: &App,
 ) -> Option<AnyElement> {
     let (handle, panel) = menu_handle(workspace.entity_id(), cx)?;
 
-    let trigger = Button::new("omega-composer-executor-trigger", current_label)
-        .debug_selector(|| "omega.composer.executor-menu".into())
-        .label_size(LabelSize::XSmall)
-        .color(Color::Muted)
-        .end_icon(
-            Icon::new(IconName::ChevronDown)
-                .size(IconSize::XSmall)
-                .color(Color::Muted),
+    let trigger_label = current_label.clone();
+    let model_label = model_picker.face.label.clone();
+    let trigger = ButtonLike::new("omega-composer-executor-trigger")
+        .style(ButtonStyle::Transparent)
+        .size(ButtonSize::None)
+        .height(px(32.).into())
+        .aria_label("Choose agent and model")
+        .aria_value(SharedString::from(format!(
+            "{} {}",
+            trigger_label, model_label
+        )))
+        .child(
+            h_flex()
+                .debug_selector(|| "omega.composer.executor-menu".into())
+                .h(px(32.))
+                .max_w(px(208.))
+                .min_w_0()
+                .gap_1p5()
+                .px_2p5()
+                .rounded_lg()
+                .text_size(px(12.))
+                .font_weight(gpui::FontWeight::MEDIUM)
+                .text_color(cx.theme().colors().text.opacity(0.9))
+                .child(
+                    Icon::new(IconName::OmegaAgent)
+                        .size(IconSize::Small)
+                        .color(Color::Accent),
+                )
+                .child(Label::new(current_label).size(LabelSize::XSmall).truncate())
+                .child(
+                    Label::new(model_picker.face.label.clone())
+                        .size(LabelSize::XSmall)
+                        .color(Color::Muted),
+                ),
         );
+
+    let current_model = model_picker.face.tier;
+    let model_picker_enabled = model_picker.enabled;
+    let on_model_select = model_picker.on_select;
 
     Some(
         PopoverMenu::new("omega-composer-executor")
@@ -155,7 +193,16 @@ pub fn render_composer_executor_menu(
                 // leased workspace either.
                 let panel = panel.upgrade()?;
                 let rows = panel.read(cx).composer_executor_rows(cx);
-                Some(build_menu(panel, rows, conversation_is_bound, window, cx))
+                Some(build_menu(
+                    panel,
+                    rows,
+                    conversation_is_bound,
+                    current_model,
+                    model_picker_enabled,
+                    on_model_select.clone(),
+                    window,
+                    cx,
+                ))
             })
             .into_any_element(),
     )
@@ -165,6 +212,9 @@ fn build_menu(
     panel: gpui::Entity<AgentPanel>,
     rows: Vec<ComposerExecutorRow>,
     conversation_is_bound: bool,
+    current_model: Option<ModelTier>,
+    model_picker_enabled: bool,
+    on_model_select: Rc<dyn Fn(ModelTier, &mut Window, &mut App)>,
     window: &mut Window,
     cx: &mut App,
 ) -> gpui::Entity<ContextMenu> {
@@ -222,6 +272,26 @@ fn build_menu(
                         .disabled(true),
                 );
             }
+        }
+
+        menu = menu.separator();
+        for tier in ModelTier::ALL {
+            let tier = *tier;
+            let is_current = current_model == Some(tier);
+            let description = SharedString::from(tier.description());
+            let on_model_select = on_model_select.clone();
+            let entry = ContextMenuEntry::new(SharedString::from(tier.name()))
+                .toggleable(IconPosition::End, is_current)
+                .documentation_aside(ui::DocumentationSide::Left, move |_| {
+                    Label::new(description.clone()).into_any_element()
+                })
+                .disabled(!model_picker_enabled)
+                .handler(move |window, cx| {
+                    if !is_current {
+                        on_model_select(tier, window, cx);
+                    }
+                });
+            menu.push_item(entry);
         }
 
         // The install path for everything the disabled rows name.
