@@ -4986,9 +4986,8 @@ impl ThreadView {
             (IconName::Maximize, "Expand Message Editor")
         };
         let editor_text = self.message_editor.read(cx).text(cx);
-        let is_new_thread = self.thread.read(cx).is_draft_thread();
         let layout = if omega_zero_base::is_active() {
-            composer_layout(is_new_thread, editor_expanded, &editor_text)
+            composer_layout(editor_expanded, &editor_text)
         } else {
             ComposerLayout::Expanded
         };
@@ -13958,6 +13957,9 @@ impl ThreadView {
             .when(!compact, |this| this.flex_wrap())
             .gap_1()
             .when(!compact, |this| this.justify_between())
+            .when(compact && self.owns_shared_vim_indicator(cx), |this| {
+                this.child(self.vim_mode_indicator.clone())
+            })
             .when(compact, |this| {
                 // The executor menu already names the routed agent in the compact
                 // bar. Keep the full route record available to assistive
