@@ -242,6 +242,7 @@
   - [Omega desktop workbench shell](./development/omega-desktop-workbench-shell.md)
   - [Omega Forensics preflight](./development/omega-forensics-preflight.md)
   - [Omega Forensics cloud control](./development/omega-forensics-cloud-control.md)
+  - [Omega Forensics review](./development/omega-forensics-review.md)
   - [macOS](./development/macos.md)
   - [Linux](./development/linux.md)
   - [Windows](./development/windows.md)

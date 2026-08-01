@@ -1,9 +1,11 @@
 use gpui::{App, Context, EventEmitter, FocusHandle, Focusable, Render, SharedString, Window};
 use omega_forensics::{
     ColdcardBenchmarkArm, CoverageStatus, DependencyPolicy, ExplicitOperatorAction,
-    ForensicWorkerObservation, ForensicWorkerPlacement, ForensicsFailureProjection,
-    ForensicsLaunchIntent, ForensicsPreflightProjection, ForensicsRunPhase, ForensicsRunProjection,
-    PreflightReadiness, SourceState,
+    ForensicBudgetState, ForensicEvidenceTier, ForensicLifecycleState, ForensicReviewDecisionKind,
+    ForensicReviewOutcome, ForensicSourceCitation, ForensicWorkerObservation,
+    ForensicWorkerPlacement, ForensicsFailureProjection, ForensicsLaunchIntent,
+    ForensicsPreflightProjection, ForensicsReviewProjection, ForensicsRunPhase,
+    ForensicsRunProjection, PreflightReadiness, SourceState,
 };
 use omega_workbench_state::RepositoryBinding;
 use ui::{
@@ -30,7 +32,16 @@ pub struct ForensicsWorkbenchSnapshot {
     pub readiness: Option<PreflightReadiness>,
     pub prepared_intent: Option<ForensicsLaunchIntent>,
     pub run: Option<ForensicsRunProjection>,
+    pub review: Option<ForensicsReviewProjection>,
+    pub source_resolutions: std::collections::BTreeMap<String, ForensicSourceResolution>,
     pub status: SharedString,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum ForensicSourceResolution {
+    Opening,
+    Opened,
+    Failed(String),
 }
 
 #[derive(Clone, Debug)]
@@ -42,6 +53,7 @@ pub enum ForensicsWorkbenchCommand {
     Refresh,
     Cancel,
     Cleanup,
+    OpenSource(ForensicSourceCitation),
 }
 
 pub struct ForensicsWorkbenchSurface {
@@ -52,6 +64,8 @@ pub struct ForensicsWorkbenchSurface {
     preflight: Option<ForensicsPreflightProjection>,
     prepared_intent: Option<ForensicsLaunchIntent>,
     run: Option<ForensicsRunProjection>,
+    review: Option<ForensicsReviewProjection>,
+    source_resolutions: std::collections::BTreeMap<String, ForensicSourceResolution>,
     status: SharedString,
 }
 
@@ -70,6 +84,8 @@ impl ForensicsWorkbenchSurface {
             preflight: None,
             prepared_intent: None,
             run: None,
+            review: None,
+            source_resolutions: std::collections::BTreeMap::new(),
             status: "Awaiting OpenAgents managed profile".into(),
         }
     }
@@ -96,6 +112,8 @@ impl ForensicsWorkbenchSurface {
         self.selected_arm = selected_arm;
         self.prepared_intent = None;
         self.run = None;
+        self.review = None;
+        self.source_resolutions.clear();
         self.status = readiness_label(projection.readiness()).into();
         self.preflight = Some(projection);
         cx.notify();
@@ -106,6 +124,8 @@ impl ForensicsWorkbenchSurface {
         self.selected_arm = arm;
         self.prepared_intent = None;
         self.run = None;
+        self.review = None;
+        self.source_resolutions.clear();
         if let Some(preflight) = self.preflight.as_mut() {
             preflight.set_benchmark_arm(arm);
             self.status = "Coverage pending".into();
@@ -236,6 +256,95 @@ impl ForensicsWorkbenchSurface {
         }
     }
 
+    pub fn set_review_projection(
+        &mut self,
+        review: ForensicsReviewProjection,
+        cx: &mut Context<Self>,
+    ) -> anyhow::Result<()> {
+        review.validate()?;
+        let expected_commit = self
+            .preflight
+            .as_ref()
+            .map(|preflight| preflight.target.commit.as_str())
+            .or(self.repository.commit.as_deref())
+            .ok_or_else(|| anyhow::anyhow!("the pinned repository commit is unavailable"))?;
+        anyhow::ensure!(
+            review.commit == expected_commit,
+            "the forensic review belongs to a different pinned source"
+        );
+        self.status = format!(
+            "Review ready · {} findings · {} hypotheses",
+            review.findings.len(),
+            review.hypotheses.len()
+        )
+        .into();
+        self.review = Some(review);
+        self.source_resolutions.clear();
+        cx.notify();
+        Ok(())
+    }
+
+    pub fn open_source(&mut self, citation: ForensicSourceCitation, cx: &mut Context<Self>) {
+        self.source_resolutions.insert(
+            citation.source_ref.clone(),
+            ForensicSourceResolution::Opening,
+        );
+        self.status = format!(
+            "Resolving {} at line {}…",
+            citation.path, citation.start_line
+        )
+        .into();
+        cx.emit(ForensicsWorkbenchCommand::OpenSource(citation));
+        cx.notify();
+    }
+
+    pub fn apply_source_resolution(
+        &mut self,
+        source_ref: String,
+        result: Result<(), String>,
+        cx: &mut Context<Self>,
+    ) {
+        let resolution = match result {
+            Ok(()) => {
+                self.status = "Opened exact pinned source".into();
+                ForensicSourceResolution::Opened
+            }
+            Err(error) => {
+                self.status = format!("Source resolution failed: {error}").into();
+                ForensicSourceResolution::Failed(error)
+            }
+        };
+        self.source_resolutions.insert(source_ref, resolution);
+        cx.notify();
+    }
+
+    pub fn record_review_decision(
+        &mut self,
+        finding_ref: &str,
+        decision: ForensicReviewDecisionKind,
+        cx: &mut Context<Self>,
+    ) -> anyhow::Result<()> {
+        let review = self
+            .review
+            .as_mut()
+            .ok_or_else(|| anyhow::anyhow!("the forensic review is unavailable"))?;
+        let decision_label = match decision {
+            ForensicReviewDecisionKind::Accept => "accepted",
+            ForensicReviewDecisionKind::Correct => "marked for correction",
+            ForensicReviewDecisionKind::Reject => "rejected",
+        };
+        review.append_decision(
+            finding_ref,
+            decision,
+            format!("Omega operator {decision_label} this immutable finding."),
+            "reviewer.omega.operator".into(),
+            chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Millis, true),
+        )?;
+        self.status = format!("Review decision appended · {decision_label}").into();
+        cx.notify();
+        Ok(())
+    }
+
     pub fn snapshot(&self) -> ForensicsWorkbenchSnapshot {
         ForensicsWorkbenchSnapshot {
             binding: self.binding.clone(),
@@ -246,11 +355,17 @@ impl ForensicsWorkbenchSurface {
                 .map(|preflight| preflight.readiness()),
             prepared_intent: self.prepared_intent.clone(),
             run: self.run.clone(),
+            review: self.review.clone(),
+            source_resolutions: self.source_resolutions.clone(),
             status: self.status.clone(),
         }
     }
 
-    fn render_fact(label: &'static str, value: impl Into<SharedString>) -> impl IntoElement {
+    fn render_fact(
+        label: impl Into<SharedString>,
+        value: impl Into<SharedString>,
+    ) -> impl IntoElement {
+        let label = label.into();
         let value = value.into();
         h_flex()
             .w_full()
@@ -334,6 +449,8 @@ impl Render for ForensicsWorkbenchSurface {
                     | ForensicsRunPhase::RecoveryRequired
             )
         });
+        let review = self.review.clone();
+        let source_resolutions = self.source_resolutions.clone();
 
         v_flex()
             .id("omega.forensics.workbench")
@@ -499,6 +616,390 @@ impl Render for ForensicsWorkbenchSurface {
                             )),
                     )
             })
+            .when_some(review, |this, review| {
+                let outcome = review_outcome_label(review.outcome);
+                let cleanup = if review.cleanup_state == "observed_zero_residue" {
+                    "Verified · zero residue"
+                } else {
+                    review.cleanup_state.as_str()
+                };
+                this.child(div().h_px().bg(cx.theme().colors().border))
+                    .child(
+                        v_flex()
+                            .gap_1()
+                            .child(
+                                Label::new("Run review")
+                                    .size(LabelSize::XSmall)
+                                    .color(Color::Muted),
+                            )
+                            .child(Self::render_fact("Outcome", outcome))
+                            .child(Self::render_fact(
+                                "Budget",
+                                budget_state_label(review.budget_state),
+                            ))
+                            .child(Self::render_fact(
+                                "Coverage",
+                                coverage_status_label(review.coverage_status),
+                            ))
+                            .child(Self::render_fact("Placement", review.placement_ref.clone()))
+                            .child(Self::render_fact(
+                                "Generation",
+                                review.resource_generation.to_string(),
+                            ))
+                            .child(Self::render_fact("Cleanup", cleanup.to_string())),
+                    )
+                    .child(
+                        v_flex()
+                            .gap_1()
+                            .child(
+                                Label::new("Lifecycle")
+                                    .size(LabelSize::XSmall)
+                                    .color(Color::Muted),
+                            )
+                            .children(review.lifecycle.iter().map(|stage| {
+                                let marker = lifecycle_marker(stage.state);
+                                let timestamp =
+                                    stage.observed_at.as_deref().unwrap_or("Not observed");
+                                h_flex()
+                                    .gap_2()
+                                    .child(
+                                        Label::new(marker)
+                                            .size(LabelSize::XSmall)
+                                            .color(lifecycle_color(stage.state)),
+                                    )
+                                    .child(Label::new(stage.label.clone()).size(LabelSize::XSmall))
+                                    .child(
+                                        Label::new(timestamp.to_string())
+                                            .size(LabelSize::XSmall)
+                                            .color(Color::Muted)
+                                            .line_clamp(1),
+                                    )
+                            })),
+                    )
+                    .child(
+                        v_flex()
+                            .gap_1()
+                            .child(
+                                Label::new("Identification metrics")
+                                    .size(LabelSize::XSmall)
+                                    .color(Color::Muted),
+                            )
+                            .children(review.metrics.iter().map(|metric| {
+                                Self::render_fact(metric.label.clone(), metric.display_value())
+                            })),
+                    )
+                    .child(
+                        v_flex()
+                            .gap_2()
+                            .child(
+                                Label::new(format!("Findings · {}", review.findings.len()))
+                                    .size(LabelSize::XSmall)
+                                    .color(Color::Muted),
+                            )
+                            .children(review.findings.into_iter().enumerate().map(
+                                |(finding_index, finding)| {
+                                    let finding_ref = finding.finding_ref.clone();
+                                    let accept_ref = finding_ref.clone();
+                                    let correct_ref = finding_ref.clone();
+                                    let reject_ref = finding_ref.clone();
+                                    v_flex()
+                                        .id(("omega.forensics.finding", finding_index))
+                                        .gap_2()
+                                        .p_2()
+                                        .border_1()
+                                        .border_color(cx.theme().colors().border)
+                                        .rounded_md()
+                                        .child(
+                                            h_flex()
+                                                .gap_2()
+                                                .child(
+                                                    Label::new(format!(
+                                                        "{} · Finding",
+                                                        finding.severity
+                                                    ))
+                                                    .size(LabelSize::XSmall)
+                                                    .color(Color::Error),
+                                                )
+                                                .child(
+                                                    Label::new(finding.evidence_tier.label())
+                                                        .size(LabelSize::XSmall)
+                                                        .color(evidence_tier_color(
+                                                            finding.evidence_tier,
+                                                        )),
+                                                )
+                                                .child(
+                                                    Label::new(finding.claim_state.clone())
+                                                        .size(LabelSize::XSmall)
+                                                        .color(Color::Muted),
+                                                ),
+                                        )
+                                        .child(
+                                            Label::new(finding.title.clone())
+                                                .size(LabelSize::Small),
+                                        )
+                                        .child(
+                                            Label::new(finding.impact.clone())
+                                                .size(LabelSize::XSmall)
+                                                .color(Color::Muted)
+                                                .line_clamp(4),
+                                        )
+                                        .when_some(
+                                            finding.duplicate_group_ref.clone(),
+                                            |this, group| {
+                                                this.child(Self::render_fact(
+                                                    "Duplicate group",
+                                                    group,
+                                                ))
+                                            },
+                                        )
+                                        .child(
+                                            v_flex()
+                                                .gap_1()
+                                                .child(
+                                                    Label::new("Causal path")
+                                                        .size(LabelSize::XSmall)
+                                                        .color(Color::Muted),
+                                                )
+                                                .children(finding.causal_path.iter().map(|link| {
+                                                    Label::new(format!(
+                                                        "{} {}. {}",
+                                                        if link.supported { "✓" } else { "?" },
+                                                        link.sequence,
+                                                        link.proposition
+                                                    ))
+                                                    .size(LabelSize::XSmall)
+                                                    .color(if link.supported {
+                                                        Color::Success
+                                                    } else {
+                                                        Color::Warning
+                                                    })
+                                                })),
+                                        )
+                                        .child(
+                                            v_flex()
+                                                .gap_1()
+                                                .child(
+                                                    Label::new("Evidence and verification")
+                                                        .size(LabelSize::XSmall)
+                                                        .color(Color::Muted),
+                                                )
+                                                .children(finding.evidence_receipts.iter().map(
+                                                    |receipt| {
+                                                        let verdict = receipt
+                                                            .verifier_verdict
+                                                            .as_deref()
+                                                            .unwrap_or("not verified");
+                                                        Label::new(format!(
+                                                            "{} · {} · {} · {}",
+                                                            receipt.evidence_tier.label(),
+                                                            receipt.outcome,
+                                                            verdict,
+                                                            receipt
+                                                                .artifact_ref
+                                                                .as_deref()
+                                                                .unwrap_or("no artifact")
+                                                        ))
+                                                        .size(LabelSize::XSmall)
+                                                    },
+                                                )),
+                                        )
+                                        .when_some(finding.poc_ref.clone(), |this, poc_ref| {
+                                            this.child(Self::render_fact(
+                                                "PoC / test diff",
+                                                poc_ref,
+                                            ))
+                                        })
+                                        .child(h_flex().flex_wrap().gap_1().children(
+                                            finding.source_refs.into_iter().enumerate().map(
+                                                |(source_index, citation)| {
+                                                    let resolution = source_resolutions
+                                                        .get(&citation.source_ref);
+                                                    let label = match resolution {
+                                                        Some(ForensicSourceResolution::Opening) => {
+                                                            format!(
+                                                                "Opening {}:{}…",
+                                                                citation.path, citation.start_line
+                                                            )
+                                                        }
+                                                        Some(ForensicSourceResolution::Opened) => {
+                                                            format!(
+                                                                "Opened {}:{}",
+                                                                citation.path, citation.start_line
+                                                            )
+                                                        }
+                                                        Some(ForensicSourceResolution::Failed(
+                                                            _,
+                                                        )) => format!(
+                                                            "Resolution failed · {}:{}",
+                                                            citation.path, citation.start_line
+                                                        ),
+                                                        None => format!(
+                                                            "Open {}:{}",
+                                                            citation.path, citation.start_line
+                                                        ),
+                                                    };
+                                                    Button::new(
+                                                        (
+                                                            "omega.forensics.source",
+                                                            finding_index * 512 + source_index,
+                                                        ),
+                                                        label,
+                                                    )
+                                                    .size(ButtonSize::Compact)
+                                                    .style(ButtonStyle::Subtle)
+                                                    .on_click(cx.listener(move |this, _, _, cx| {
+                                                        this.open_source(citation.clone(), cx)
+                                                    }))
+                                                },
+                                            ),
+                                        ))
+                                        .child(
+                                            h_flex()
+                                                .gap_1()
+                                                .child(
+                                                    Button::new(
+                                                        ("omega.forensics.accept", finding_index),
+                                                        "Accept",
+                                                    )
+                                                    .size(ButtonSize::Compact)
+                                                    .on_click(cx.listener(move |this, _, _, cx| {
+                                                        if let Err(error) = this
+                                                            .record_review_decision(
+                                                                &accept_ref,
+                                                                ForensicReviewDecisionKind::Accept,
+                                                                cx,
+                                                            )
+                                                        {
+                                                            this.status = error.to_string().into();
+                                                            cx.notify();
+                                                        }
+                                                    })),
+                                                )
+                                                .child(
+                                                    Button::new(
+                                                        ("omega.forensics.correct", finding_index),
+                                                        "Correct",
+                                                    )
+                                                    .size(ButtonSize::Compact)
+                                                    .style(ButtonStyle::Subtle)
+                                                    .on_click(cx.listener(move |this, _, _, cx| {
+                                                        if let Err(error) = this
+                                                            .record_review_decision(
+                                                                &correct_ref,
+                                                                ForensicReviewDecisionKind::Correct,
+                                                                cx,
+                                                            )
+                                                        {
+                                                            this.status = error.to_string().into();
+                                                            cx.notify();
+                                                        }
+                                                    })),
+                                                )
+                                                .child(
+                                                    Button::new(
+                                                        ("omega.forensics.reject", finding_index),
+                                                        "Reject",
+                                                    )
+                                                    .size(ButtonSize::Compact)
+                                                    .style(ButtonStyle::Subtle)
+                                                    .on_click(cx.listener(move |this, _, _, cx| {
+                                                        if let Err(error) = this
+                                                            .record_review_decision(
+                                                                &reject_ref,
+                                                                ForensicReviewDecisionKind::Reject,
+                                                                cx,
+                                                            )
+                                                        {
+                                                            this.status = error.to_string().into();
+                                                            cx.notify();
+                                                        }
+                                                    })),
+                                                ),
+                                        )
+                                        .child(
+                                            Label::new(format!(
+                                                "{} append-only review decisions",
+                                                review
+                                                    .decisions
+                                                    .iter()
+                                                    .filter(|decision| decision.finding_ref
+                                                        == finding_ref)
+                                                    .count()
+                                            ))
+                                            .size(LabelSize::XSmall)
+                                            .color(Color::Muted),
+                                        )
+                                        .children(
+                                            review
+                                                .decisions
+                                                .iter()
+                                                .filter(|decision| {
+                                                    decision.finding_ref == finding_ref
+                                                })
+                                                .map(|decision| {
+                                                    Label::new(format!(
+                                                        "#{:02} · {:?} · {} · {}",
+                                                        decision.sequence,
+                                                        decision.decision,
+                                                        decision.decided_at,
+                                                        decision.reason
+                                                    ))
+                                                    .size(LabelSize::XSmall)
+                                                    .color(Color::Muted)
+                                                    .line_clamp(2)
+                                                }),
+                                        )
+                                },
+                            )),
+                    )
+                    .child(
+                        v_flex()
+                            .gap_2()
+                            .child(
+                                Label::new(format!(
+                                    "Unverified hypotheses · {}",
+                                    review.hypotheses.len()
+                                ))
+                                .size(LabelSize::XSmall)
+                                .color(Color::Warning),
+                            )
+                            .children(review.hypotheses.into_iter().enumerate().map(
+                                |(index, hypothesis)| {
+                                    v_flex()
+                                        .id(("omega.forensics.hypothesis", index))
+                                        .gap_1()
+                                        .p_2()
+                                        .border_1()
+                                        .border_color(cx.theme().colors().border)
+                                        .rounded_md()
+                                        .child(
+                                            Label::new(format!(
+                                                "Hypothesis · {}",
+                                                hypothesis.state
+                                            ))
+                                            .size(LabelSize::XSmall)
+                                            .color(Color::Warning),
+                                        )
+                                        .child(
+                                            Label::new(hypothesis.suspected_mechanism)
+                                                .size(LabelSize::Small),
+                                        )
+                                        .child(Self::render_fact(
+                                            "Missing evidence",
+                                            hypothesis.missing_evidence.join(" · "),
+                                        ))
+                                        .child(Self::render_fact(
+                                            "Next check",
+                                            hypothesis.next_check,
+                                        ))
+                                        .child(Self::render_fact(
+                                            "If true",
+                                            hypothesis.consequence_if_true,
+                                        ))
+                                },
+                            )),
+                    )
+            })
             .child(div().h_px().bg(cx.theme().colors().border))
             .child(
                 Label::new(self.status.clone())
@@ -621,15 +1122,81 @@ fn run_phase_label(phase: ForensicsRunPhase) -> &'static str {
     }
 }
 
+fn evidence_tier_color(tier: ForensicEvidenceTier) -> Color {
+    match tier {
+        ForensicEvidenceTier::Hypothesis => Color::Warning,
+        ForensicEvidenceTier::SourceObserved => Color::Muted,
+        ForensicEvidenceTier::ArtifactObserved => Color::Accent,
+        ForensicEvidenceTier::Executed | ForensicEvidenceTier::IndependentlyVerified => {
+            Color::Success
+        }
+    }
+}
+
+fn lifecycle_marker(state: ForensicLifecycleState) -> &'static str {
+    match state {
+        ForensicLifecycleState::Pending => "○",
+        ForensicLifecycleState::Active => "●",
+        ForensicLifecycleState::Succeeded => "✓",
+        ForensicLifecycleState::Failed => "×",
+        ForensicLifecycleState::Cancelled => "−",
+        ForensicLifecycleState::Censored => "◐",
+    }
+}
+
+fn lifecycle_color(state: ForensicLifecycleState) -> Color {
+    match state {
+        ForensicLifecycleState::Pending => Color::Muted,
+        ForensicLifecycleState::Active => Color::Accent,
+        ForensicLifecycleState::Succeeded => Color::Success,
+        ForensicLifecycleState::Failed => Color::Error,
+        ForensicLifecycleState::Cancelled | ForensicLifecycleState::Censored => Color::Warning,
+    }
+}
+
+fn review_outcome_label(outcome: ForensicReviewOutcome) -> &'static str {
+    match outcome {
+        ForensicReviewOutcome::Running => "Running",
+        ForensicReviewOutcome::Completed => "Completed",
+        ForensicReviewOutcome::CompletedIncomplete => "Completed · incomplete inputs",
+        ForensicReviewOutcome::Missed => "Missed · budget retained",
+        ForensicReviewOutcome::Cancelled => "Cancelled",
+        ForensicReviewOutcome::Failed => "Failed",
+        ForensicReviewOutcome::Censored => "Right-censored",
+        ForensicReviewOutcome::CleanupFailed => "Cleanup failed",
+    }
+}
+
+fn budget_state_label(state: ForensicBudgetState) -> &'static str {
+    match state {
+        ForensicBudgetState::WithinBudget => "Within budget",
+        ForensicBudgetState::Exhausted => "Exhausted",
+        ForensicBudgetState::Unmeasurable => "Unmeasurable",
+        ForensicBudgetState::Refused => "Refused",
+    }
+}
+
+fn coverage_status_label(status: CoverageStatus) -> &'static str {
+    match status {
+        CoverageStatus::Pending => "Pending",
+        CoverageStatus::Complete => "Complete",
+        CoverageStatus::Incomplete => "Incomplete",
+        CoverageStatus::Denied => "Denied",
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::thread_identity::{BranchIdentity, GitIdentitySummary};
     use omega_forensics::{
         BROKER_NETWORK_POLICY_REF, CoverageSummaryProjection, ForensicBudgetProjection,
-        ForensicWorkerPlacement, GCE_ADAPTER_REF, MANAGED_TARGET_REF, ManagedIsolation,
-        ManagedProvider, ManagedTargetClass, ManagedWorkerProjection, PREFLIGHT_SCHEMA_V1,
-        RepositoryTargetProjection, WORKER_PLACEMENT_SCHEMA_V1, WorkerPlacementState,
+        ForensicCausalLink, ForensicEvidenceReceiptProjection, ForensicExactness,
+        ForensicFindingProjection, ForensicHypothesisProjection, ForensicLifecycleStage,
+        ForensicMetricTruth, ForensicWorkerPlacement, GCE_ADAPTER_REF, MANAGED_TARGET_REF,
+        ManagedIsolation, ManagedProvider, ManagedTargetClass, ManagedWorkerProjection,
+        PREFLIGHT_SCHEMA_V1, REVIEW_PROJECTION_SCHEMA_V1, RepositoryTargetProjection,
+        WORKER_PLACEMENT_SCHEMA_V1, WorkerPlacementState,
     };
     use std::path::PathBuf;
 
@@ -735,6 +1302,107 @@ mod tests {
         }
     }
 
+    fn review_projection() -> ForensicsReviewProjection {
+        ForensicsReviewProjection {
+            schema: REVIEW_PROJECTION_SCHEMA_V1.into(),
+            review_ref: "review.forensic.coldcard.fixture".into(),
+            run_ref: "run.forensic.coldcard.fixture".into(),
+            repository_ref: "repository-ref://coldcard/firmware".into(),
+            commit: omega_forensics::COLDCARD_VULNERABLE_COMMIT.into(),
+            coverage_status: CoverageStatus::Complete,
+            outcome: ForensicReviewOutcome::Completed,
+            budget_state: ForensicBudgetState::WithinBudget,
+            findings: vec![ForensicFindingProjection {
+                finding_ref: "finding.coldcard.rng-fallback".into(),
+                claim_ref: "claim.coldcard.source-flaw".into(),
+                title: "Fallback entropy can repeat wallet secrets".into(),
+                impact: "A repeated fallback state can reproduce generated wallet material.".into(),
+                severity: "critical".into(),
+                claim_state: "qualified".into(),
+                evidence_tier: ForensicEvidenceTier::Executed,
+                duplicate_group_ref: Some("duplicate-group.coldcard.rng-fallback".into()),
+                source_refs: vec![ForensicSourceCitation {
+                    source_ref: "source.coldcard.shared.utils.42".into(),
+                    path: "shared/utils.py".into(),
+                    symbol: Some("get_random_bytes".into()),
+                    start_line: 42,
+                    end_line: 57,
+                    commit: omega_forensics::COLDCARD_VULNERABLE_COMMIT.into(),
+                }],
+                causal_path: vec![ForensicCausalLink {
+                    sequence: 1,
+                    proposition: "The fallback admits insufficient entropy.".into(),
+                    evidence_refs: vec!["evidence.coldcard.source".into()],
+                    supported: true,
+                }],
+                evidence_receipts: vec![ForensicEvidenceReceiptProjection {
+                    receipt_ref: "receipt.coldcard.execution".into(),
+                    evidence_tier: ForensicEvidenceTier::Executed,
+                    outcome: "succeeded".into(),
+                    artifact_ref: Some("artifact.coldcard.poc".into()),
+                    verifier_verdict: Some("confirmed".into()),
+                    observed_at: "2026-08-01T10:03:00.000Z".into(),
+                }],
+                poc_ref: Some("artifact.coldcard.poc".into()),
+                submitted_at: "2026-08-01T10:02:00.000Z".into(),
+            }],
+            hypotheses: vec![ForensicHypothesisProjection {
+                hypothesis_ref: "hypothesis.coldcard.entropy-source".into(),
+                suspected_mechanism: "A second source may share the same state.".into(),
+                supporting_refs: vec!["source.coldcard.shared.utils.42".into()],
+                missing_evidence: vec!["Executed cross-device reproduction".into()],
+                next_check: "Run the trace against two owned fixtures.".into(),
+                consequence_if_true: "More devices could share recoverable state.".into(),
+                state: "unverified".into(),
+                submitted_at: "2026-08-01T10:02:30.000Z".into(),
+            }],
+            metrics: vec![
+                ForensicMetricTruth {
+                    metric_ref: "metric.time-to-qualified-identification".into(),
+                    label: "Time to qualified identification".into(),
+                    unit: "ms".into(),
+                    value: Some(120_000),
+                    exactness: ForensicExactness::Exact,
+                    unavailable_reason_ref: None,
+                    source_event_refs: vec!["event.finding.coldcard".into()],
+                    source_receipt_refs: Vec::new(),
+                },
+                ForensicMetricTruth {
+                    metric_ref: "metric.tokens-to-qualified-identification".into(),
+                    label: "Tokens to qualified identification".into(),
+                    unit: "tokens".into(),
+                    value: None,
+                    exactness: ForensicExactness::Unavailable,
+                    unavailable_reason_ref: Some("reason.provider-usage-unavailable".into()),
+                    source_event_refs: Vec::new(),
+                    source_receipt_refs: Vec::new(),
+                },
+            ],
+            lifecycle: vec![
+                ForensicLifecycleStage {
+                    stage_ref: "stage.request-admitted".into(),
+                    label: "Request admitted".into(),
+                    state: ForensicLifecycleState::Succeeded,
+                    observed_at: Some("2026-08-01T10:00:00.000Z".into()),
+                    receipt_ref: Some("receipt.request-admitted".into()),
+                },
+                ForensicLifecycleStage {
+                    stage_ref: "stage.cleanup-observed".into(),
+                    label: "Cleanup observed".into(),
+                    state: ForensicLifecycleState::Succeeded,
+                    observed_at: Some("2026-08-01T10:04:00.000Z".into()),
+                    receipt_ref: Some("receipt.cleanup-observed".into()),
+                },
+            ],
+            placement_ref: "placement.forensic.fixture".into(),
+            sandbox_ref: "sandbox.forensic.fixture".into(),
+            resource_generation: 1,
+            cleanup_state: "observed_zero_residue".into(),
+            cleanup_receipt_ref: Some("receipt.cleanup-observed".into()),
+            decisions: Vec::new(),
+        }
+    }
+
     #[gpui::test]
     fn benchmark_arms_are_operator_selectable_without_a_managed_profile(
         cx: &mut gpui::TestAppContext,
@@ -836,6 +1504,61 @@ mod tests {
                 Some(ForensicsRunPhase::WorkerReady)
             );
             assert_eq!(snapshot.status.as_ref(), "Worker ready");
+        });
+    }
+
+    #[gpui::test]
+    fn review_keeps_findings_hypotheses_usage_resolution_and_decisions_distinct(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        cx.update(|cx| {
+            let binding = RepositoryBinding::new("repo", "worktree").expect("valid binding");
+            let surface =
+                cx.new(|cx| ForensicsWorkbenchSurface::new(&candidate(binding.clone()), cx));
+            surface
+                .update(cx, |surface, cx| {
+                    surface.set_managed_preflight(&binding, complete_preflight(), cx)
+                })
+                .expect("managed preflight");
+            surface
+                .update(cx, |surface, cx| {
+                    surface.set_review_projection(review_projection(), cx)
+                })
+                .expect("review projection");
+            let original_finding = surface
+                .read(cx)
+                .snapshot()
+                .review
+                .as_ref()
+                .and_then(|review| review.findings.first())
+                .cloned()
+                .expect("review finding");
+            surface
+                .update(cx, |surface, cx| {
+                    surface.record_review_decision(
+                        &original_finding.finding_ref,
+                        ForensicReviewDecisionKind::Correct,
+                        cx,
+                    )
+                })
+                .expect("append review decision");
+            surface.update(cx, |surface, cx| {
+                surface.apply_source_resolution(
+                    original_finding.source_refs[0].source_ref.clone(),
+                    Err("pinned file is absent".into()),
+                    cx,
+                )
+            });
+            let snapshot = surface.read(cx).snapshot();
+            let review = snapshot.review.expect("review");
+            assert_eq!(review.findings[0], original_finding);
+            assert_eq!(review.hypotheses[0].state, "unverified");
+            assert_eq!(review.metrics[1].display_value(), "Unavailable");
+            assert_eq!(review.decisions.len(), 1);
+            assert!(matches!(
+                snapshot.source_resolutions.get("source.coldcard.shared.utils.42"),
+                Some(ForensicSourceResolution::Failed(reason)) if reason == "pinned file is absent"
+            ));
         });
     }
 }

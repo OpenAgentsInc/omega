@@ -8,6 +8,7 @@ pub const LAUNCH_INTENT_SCHEMA_V1: &str = "openagents.omega.forensics-launch-int
 pub const RUN_PROJECTION_SCHEMA_V1: &str = "openagents.omega.forensics-run.v1";
 pub const WORKER_PLACEMENT_SCHEMA_V1: &str = "openagents.forensic_worker_placement.v1";
 pub const WORKER_OBSERVATION_SCHEMA_V1: &str = "openagents.forensic_worker_observation.v1";
+pub const REVIEW_PROJECTION_SCHEMA_V1: &str = "openagents.omega.forensics-review.v1";
 pub const MANAGED_TARGET_REF: &str = "target-ref://openagents/managed-sandbox/gce-forensic-v1";
 pub const GCE_ADAPTER_REF: &str = "adapter.oa-codex-control.gce.v1";
 pub const BROKER_NETWORK_POLICY_REF: &str =
@@ -780,6 +781,544 @@ impl ForensicsRunProjection {
     }
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ForensicEvidenceTier {
+    Hypothesis,
+    SourceObserved,
+    ArtifactObserved,
+    Executed,
+    IndependentlyVerified,
+}
+
+impl ForensicEvidenceTier {
+    pub const fn label(self) -> &'static str {
+        match self {
+            Self::Hypothesis => "Hypothesis",
+            Self::SourceObserved => "Source observed",
+            Self::ArtifactObserved => "Artifact observed",
+            Self::Executed => "Executed",
+            Self::IndependentlyVerified => "Independently verified",
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ForensicExactness {
+    Exact,
+    Estimated,
+    UpperBound,
+    Unavailable,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct ForensicMetricTruth {
+    pub metric_ref: String,
+    pub label: String,
+    pub unit: String,
+    pub value: Option<u64>,
+    pub exactness: ForensicExactness,
+    pub unavailable_reason_ref: Option<String>,
+    pub source_event_refs: Vec<String>,
+    pub source_receipt_refs: Vec<String>,
+}
+
+impl ForensicMetricTruth {
+    pub fn validate(&self) -> Result<(), ForensicsError> {
+        validate_ref("metric", &self.metric_ref)?;
+        if self.label.trim().is_empty() || self.label.len() > 128 || self.unit.len() > 64 {
+            return Err(ForensicsError::InvalidReview(
+                "metric labels and units must be bounded".into(),
+            ));
+        }
+        let unavailable = self.exactness == ForensicExactness::Unavailable;
+        if unavailable != self.value.is_none()
+            || unavailable != self.unavailable_reason_ref.is_some()
+        {
+            return Err(ForensicsError::InvalidReview(
+                "unavailable metrics require a reason and no numeric zero".into(),
+            ));
+        }
+        validate_bounded_refs("metric event", &self.source_event_refs, 256)?;
+        validate_bounded_refs("metric receipt", &self.source_receipt_refs, 256)?;
+        if let Some(reason_ref) = &self.unavailable_reason_ref {
+            validate_ref("metric unavailable reason", reason_ref)?;
+        }
+        Ok(())
+    }
+
+    pub fn display_value(&self) -> String {
+        match (self.value, self.exactness) {
+            (Some(value), ForensicExactness::Exact) => format!("{value} {}", self.unit),
+            (Some(value), ForensicExactness::Estimated) => {
+                format!("≈ {value} {} · estimated", self.unit)
+            }
+            (Some(value), ForensicExactness::UpperBound) => {
+                format!("≤ {value} {} · upper bound", self.unit)
+            }
+            (None, ForensicExactness::Unavailable) => "Unavailable".into(),
+            _ => "Invalid metric truth".into(),
+        }
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct ForensicSourceCitation {
+    pub source_ref: String,
+    pub path: String,
+    pub symbol: Option<String>,
+    pub start_line: u32,
+    pub end_line: u32,
+    pub commit: String,
+}
+
+impl ForensicSourceCitation {
+    pub fn validate(&self, expected_commit: &str) -> Result<(), ForensicsError> {
+        validate_ref("source", &self.source_ref)?;
+        validate_commit(&self.commit)?;
+        if self.commit != expected_commit
+            || self.path.is_empty()
+            || self.path.len() > 1_024
+            || self.path.starts_with('/')
+            || self
+                .path
+                .split('/')
+                .any(|part| part.is_empty() || part == "." || part == "..")
+            || self.start_line == 0
+            || self.end_line < self.start_line
+            || self.end_line - self.start_line > 10_000
+            || self
+                .symbol
+                .as_ref()
+                .is_some_and(|symbol| symbol.trim().is_empty() || symbol.len() > 256)
+        {
+            return Err(ForensicsError::InvalidReview(
+                "source citations must bind a bounded relative path and exact pinned commit".into(),
+            ));
+        }
+        Ok(())
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct ForensicCausalLink {
+    pub sequence: u32,
+    pub proposition: String,
+    pub evidence_refs: Vec<String>,
+    pub supported: bool,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct ForensicEvidenceReceiptProjection {
+    pub receipt_ref: String,
+    pub evidence_tier: ForensicEvidenceTier,
+    pub outcome: String,
+    pub artifact_ref: Option<String>,
+    pub verifier_verdict: Option<String>,
+    pub observed_at: String,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct ForensicFindingProjection {
+    pub finding_ref: String,
+    pub claim_ref: String,
+    pub title: String,
+    pub impact: String,
+    pub severity: String,
+    pub claim_state: String,
+    pub evidence_tier: ForensicEvidenceTier,
+    pub duplicate_group_ref: Option<String>,
+    pub source_refs: Vec<ForensicSourceCitation>,
+    pub causal_path: Vec<ForensicCausalLink>,
+    pub evidence_receipts: Vec<ForensicEvidenceReceiptProjection>,
+    pub poc_ref: Option<String>,
+    pub submitted_at: String,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct ForensicHypothesisProjection {
+    pub hypothesis_ref: String,
+    pub suspected_mechanism: String,
+    pub supporting_refs: Vec<String>,
+    pub missing_evidence: Vec<String>,
+    pub next_check: String,
+    pub consequence_if_true: String,
+    pub state: String,
+    pub submitted_at: String,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ForensicReviewOutcome {
+    Running,
+    Completed,
+    CompletedIncomplete,
+    Missed,
+    Cancelled,
+    Failed,
+    Censored,
+    CleanupFailed,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ForensicBudgetState {
+    WithinBudget,
+    Exhausted,
+    Unmeasurable,
+    Refused,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ForensicLifecycleState {
+    Pending,
+    Active,
+    Succeeded,
+    Failed,
+    Cancelled,
+    Censored,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct ForensicLifecycleStage {
+    pub stage_ref: String,
+    pub label: String,
+    pub state: ForensicLifecycleState,
+    pub observed_at: Option<String>,
+    pub receipt_ref: Option<String>,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ForensicReviewDecisionKind {
+    Accept,
+    Correct,
+    Reject,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct ForensicReviewDecision {
+    pub decision_ref: String,
+    pub sequence: u32,
+    pub finding_ref: String,
+    pub decision: ForensicReviewDecisionKind,
+    pub reason: String,
+    pub reviewer_ref: String,
+    pub decided_at: String,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct ForensicsReviewProjection {
+    pub schema: String,
+    pub review_ref: String,
+    pub run_ref: String,
+    pub repository_ref: String,
+    pub commit: String,
+    pub coverage_status: CoverageStatus,
+    pub outcome: ForensicReviewOutcome,
+    pub budget_state: ForensicBudgetState,
+    pub findings: Vec<ForensicFindingProjection>,
+    pub hypotheses: Vec<ForensicHypothesisProjection>,
+    pub metrics: Vec<ForensicMetricTruth>,
+    pub lifecycle: Vec<ForensicLifecycleStage>,
+    pub placement_ref: String,
+    pub sandbox_ref: String,
+    pub resource_generation: u64,
+    pub cleanup_state: String,
+    pub cleanup_receipt_ref: Option<String>,
+    pub decisions: Vec<ForensicReviewDecision>,
+}
+
+impl ForensicsReviewProjection {
+    pub fn validate(&self) -> Result<(), ForensicsError> {
+        if self.schema != REVIEW_PROJECTION_SCHEMA_V1 {
+            return Err(ForensicsError::InvalidSchema);
+        }
+        for value in [
+            &self.review_ref,
+            &self.run_ref,
+            &self.repository_ref,
+            &self.placement_ref,
+            &self.sandbox_ref,
+        ] {
+            validate_ref("review", value)?;
+        }
+        validate_commit(&self.commit)?;
+        if self.resource_generation == 0
+            || self.findings.len() > 1_024
+            || self.hypotheses.len() > 1_024
+            || self.metrics.len() > 512
+        {
+            return Err(ForensicsError::InvalidReview(
+                "review collections or worker generation are invalid".into(),
+            ));
+        }
+        if self.coverage_status == CoverageStatus::Incomplete
+            && self.outcome == ForensicReviewOutcome::Completed
+        {
+            return Err(ForensicsError::InvalidReview(
+                "incomplete inputs cannot render as a complete run".into(),
+            ));
+        }
+        let cleanup_failed = self.outcome == ForensicReviewOutcome::CleanupFailed;
+        let cleanup_observed = self.cleanup_state == "observed_zero_residue";
+        if cleanup_observed != self.cleanup_receipt_ref.is_some()
+            || (cleanup_failed && cleanup_observed)
+            || (matches!(
+                self.outcome,
+                ForensicReviewOutcome::Completed
+                    | ForensicReviewOutcome::CompletedIncomplete
+                    | ForensicReviewOutcome::Cancelled
+            ) && !cleanup_observed)
+            || (self.outcome == ForensicReviewOutcome::Completed
+                && self.coverage_status != CoverageStatus::Complete)
+            || (self.outcome == ForensicReviewOutcome::CompletedIncomplete
+                && self.coverage_status != CoverageStatus::Incomplete)
+        {
+            return Err(ForensicsError::InvalidReview(
+                "cleanup truth and its receipt disagree".into(),
+            ));
+        }
+        let mut item_refs = BTreeSet::new();
+        for finding in &self.findings {
+            validate_finding(finding, &self.commit)?;
+            if !item_refs.insert(finding.finding_ref.as_str()) {
+                return Err(ForensicsError::InvalidReview(
+                    "duplicate review item ref".into(),
+                ));
+            }
+        }
+        for hypothesis in &self.hypotheses {
+            validate_hypothesis(hypothesis)?;
+            if !item_refs.insert(hypothesis.hypothesis_ref.as_str()) {
+                return Err(ForensicsError::InvalidReview(
+                    "duplicate review item ref".into(),
+                ));
+            }
+        }
+        let mut metric_refs = BTreeSet::new();
+        for metric in &self.metrics {
+            metric.validate()?;
+            if !metric_refs.insert(metric.metric_ref.as_str()) {
+                return Err(ForensicsError::InvalidReview(
+                    "review metrics must have unique refs".into(),
+                ));
+            }
+        }
+        validate_lifecycle(&self.lifecycle)?;
+        validate_decisions(&self.decisions, &self.findings)?;
+        Ok(())
+    }
+
+    pub fn append_decision(
+        &mut self,
+        finding_ref: &str,
+        decision: ForensicReviewDecisionKind,
+        reason: String,
+        reviewer_ref: String,
+        decided_at: String,
+    ) -> Result<(), ForensicsError> {
+        if !self
+            .findings
+            .iter()
+            .any(|finding| finding.finding_ref == finding_ref)
+        {
+            return Err(ForensicsError::InvalidReview(
+                "review decision targets an unknown finding".into(),
+            ));
+        }
+        validate_ref("reviewer", &reviewer_ref)?;
+        if reason.trim().is_empty() || reason.len() > 8_000 {
+            return Err(ForensicsError::InvalidReview(
+                "review decision reason must be bounded".into(),
+            ));
+        }
+        let sequence = u32::try_from(self.decisions.len() + 1)
+            .map_err(|_| ForensicsError::InvalidReview("too many review decisions".into()))?;
+        self.decisions.push(ForensicReviewDecision {
+            decision_ref: format!("decision.{finding_ref}.{sequence}"),
+            sequence,
+            finding_ref: finding_ref.into(),
+            decision,
+            reason,
+            reviewer_ref,
+            decided_at,
+        });
+        Ok(())
+    }
+}
+
+fn validate_finding(
+    finding: &ForensicFindingProjection,
+    expected_commit: &str,
+) -> Result<(), ForensicsError> {
+    validate_ref("finding", &finding.finding_ref)?;
+    validate_ref("claim", &finding.claim_ref)?;
+    if finding.title.trim().is_empty()
+        || finding.title.len() > 512
+        || finding.impact.trim().is_empty()
+        || finding.impact.len() > 8_000
+        || finding.source_refs.is_empty()
+        || finding.source_refs.len() > 256
+        || finding.causal_path.is_empty()
+        || finding.causal_path.len() > 128
+        || finding.evidence_receipts.len() > 256
+    {
+        return Err(ForensicsError::InvalidReview(
+            "finding content or evidence bounds are invalid".into(),
+        ));
+    }
+    for source in &finding.source_refs {
+        source.validate(expected_commit)?;
+    }
+    for (index, link) in finding.causal_path.iter().enumerate() {
+        if link.sequence as usize != index + 1
+            || link.proposition.trim().is_empty()
+            || link.proposition.len() > 512
+            || link.evidence_refs.is_empty()
+        {
+            return Err(ForensicsError::InvalidReview(
+                "causal paths must be ordered and evidenced".into(),
+            ));
+        }
+        validate_bounded_refs("causal evidence", &link.evidence_refs, 64)?;
+    }
+    for receipt in &finding.evidence_receipts {
+        validate_ref("evidence receipt", &receipt.receipt_ref)?;
+        if let Some(artifact_ref) = &receipt.artifact_ref {
+            validate_ref("evidence artifact", artifact_ref)?;
+        }
+        if receipt.outcome.trim().is_empty() {
+            return Err(ForensicsError::InvalidReview(
+                "evidence outcome is absent".into(),
+            ));
+        }
+    }
+    if matches!(
+        finding.evidence_tier,
+        ForensicEvidenceTier::Executed | ForensicEvidenceTier::IndependentlyVerified
+    ) && !finding
+        .evidence_receipts
+        .iter()
+        .any(|receipt| receipt.outcome == "succeeded" && receipt.artifact_ref.is_some())
+    {
+        return Err(ForensicsError::InvalidReview(
+            "executed evidence requires a successful artifact receipt".into(),
+        ));
+    }
+    Ok(())
+}
+
+fn validate_hypothesis(hypothesis: &ForensicHypothesisProjection) -> Result<(), ForensicsError> {
+    validate_ref("hypothesis", &hypothesis.hypothesis_ref)?;
+    if hypothesis.suspected_mechanism.trim().is_empty()
+        || hypothesis.suspected_mechanism.len() > 8_000
+        || hypothesis.missing_evidence.is_empty()
+        || hypothesis.missing_evidence.len() > 128
+        || hypothesis
+            .missing_evidence
+            .iter()
+            .any(|value| value.trim().is_empty() || value.len() > 512)
+        || hypothesis.next_check.trim().is_empty()
+        || hypothesis.next_check.len() > 8_000
+        || hypothesis.consequence_if_true.trim().is_empty()
+        || hypothesis.consequence_if_true.len() > 8_000
+    {
+        return Err(ForensicsError::InvalidReview(
+            "hypotheses require missing evidence, next check, and consequence".into(),
+        ));
+    }
+    validate_bounded_refs("hypothesis support", &hypothesis.supporting_refs, 256)
+}
+
+fn validate_lifecycle(stages: &[ForensicLifecycleStage]) -> Result<(), ForensicsError> {
+    if stages.is_empty() || stages.len() > 32 {
+        return Err(ForensicsError::InvalidReview(
+            "lifecycle waterfall must contain 1 to 32 stages".into(),
+        ));
+    }
+    let mut refs = BTreeSet::new();
+    for stage in stages {
+        validate_ref("lifecycle stage", &stage.stage_ref)?;
+        if !refs.insert(stage.stage_ref.as_str()) || stage.label.trim().is_empty() {
+            return Err(ForensicsError::InvalidReview(
+                "lifecycle stages must be unique and labelled".into(),
+            ));
+        }
+        let observed = stage.observed_at.is_some();
+        if (stage.state == ForensicLifecycleState::Pending && observed)
+            || (stage.state != ForensicLifecycleState::Pending && !observed)
+        {
+            return Err(ForensicsError::InvalidReview(
+                "lifecycle state and observation timestamp disagree".into(),
+            ));
+        }
+    }
+    Ok(())
+}
+
+fn validate_decisions(
+    decisions: &[ForensicReviewDecision],
+    findings: &[ForensicFindingProjection],
+) -> Result<(), ForensicsError> {
+    if decisions.len() > 4_096 {
+        return Err(ForensicsError::InvalidReview(
+            "too many review decisions".into(),
+        ));
+    }
+    let finding_refs = findings
+        .iter()
+        .map(|finding| finding.finding_ref.as_str())
+        .collect::<BTreeSet<_>>();
+    let mut decision_refs = BTreeSet::new();
+    for (index, decision) in decisions.iter().enumerate() {
+        if decision.sequence as usize != index + 1
+            || !finding_refs.contains(decision.finding_ref.as_str())
+            || decision.reason.trim().is_empty()
+            || decision.reason.len() > 8_000
+        {
+            return Err(ForensicsError::InvalidReview(
+                "review decisions must append in order against an immutable finding".into(),
+            ));
+        }
+        validate_ref("review decision", &decision.decision_ref)?;
+        validate_ref("reviewer", &decision.reviewer_ref)?;
+        if !decision_refs.insert(decision.decision_ref.as_str()) {
+            return Err(ForensicsError::InvalidReview(
+                "review decision refs must be unique".into(),
+            ));
+        }
+    }
+    Ok(())
+}
+
+fn validate_bounded_refs(
+    label: &str,
+    refs: &[String],
+    maximum: usize,
+) -> Result<(), ForensicsError> {
+    if refs.len() > maximum {
+        return Err(ForensicsError::InvalidReview(format!(
+            "{label} refs exceed the bound"
+        )));
+    }
+    for value in refs {
+        validate_ref(label, value)?;
+    }
+    Ok(())
+}
+
 #[derive(Debug, Error, PartialEq, Eq)]
 pub enum ForensicsError {
     #[error("the forensics schema is unsupported")]
@@ -804,6 +1343,8 @@ pub enum ForensicsError {
     InvalidObservation,
     #[error("an idempotent retry attempted to bind a duplicate worker generation")]
     DuplicateWorkerGeneration,
+    #[error("the forensic review projection is invalid: {0}")]
+    InvalidReview(String),
 }
 
 fn validate_ref(label: &str, value: &str) -> Result<(), ForensicsError> {
@@ -931,6 +1472,107 @@ mod tests {
             deletion_receipt_ref: None,
             cleanup_receipt_ref: None,
             updated_at: "2026-08-01T10:00:00.000Z".into(),
+        }
+    }
+
+    fn review_projection() -> ForensicsReviewProjection {
+        ForensicsReviewProjection {
+            schema: REVIEW_PROJECTION_SCHEMA_V1.into(),
+            review_ref: "review.forensic.coldcard.fixture".into(),
+            run_ref: "run.forensic.fixture".into(),
+            repository_ref: COLDCARD_REPOSITORY_REF.into(),
+            commit: COLDCARD_VULNERABLE_COMMIT.into(),
+            coverage_status: CoverageStatus::Complete,
+            outcome: ForensicReviewOutcome::Completed,
+            budget_state: ForensicBudgetState::WithinBudget,
+            findings: vec![ForensicFindingProjection {
+                finding_ref: "finding.coldcard.rng-fallback".into(),
+                claim_ref: "claim.coldcard.source-flaw".into(),
+                title: "Fallback entropy can repeat wallet secrets".into(),
+                impact: "A repeated fallback state can reproduce generated wallet material.".into(),
+                severity: "critical".into(),
+                claim_state: "qualified".into(),
+                evidence_tier: ForensicEvidenceTier::Executed,
+                duplicate_group_ref: Some("duplicate-group.coldcard.rng-fallback".into()),
+                source_refs: vec![ForensicSourceCitation {
+                    source_ref: "source.coldcard.shared.utils.42".into(),
+                    path: "shared/utils.py".into(),
+                    symbol: Some("get_random_bytes".into()),
+                    start_line: 42,
+                    end_line: 57,
+                    commit: COLDCARD_VULNERABLE_COMMIT.into(),
+                }],
+                causal_path: vec![ForensicCausalLink {
+                    sequence: 1,
+                    proposition: "The fallback admits insufficient entropy.".into(),
+                    evidence_refs: vec!["evidence.coldcard.source".into()],
+                    supported: true,
+                }],
+                evidence_receipts: vec![ForensicEvidenceReceiptProjection {
+                    receipt_ref: "receipt.coldcard.execution".into(),
+                    evidence_tier: ForensicEvidenceTier::Executed,
+                    outcome: "succeeded".into(),
+                    artifact_ref: Some("artifact.coldcard.poc".into()),
+                    verifier_verdict: Some("confirmed".into()),
+                    observed_at: "2026-08-01T10:03:00.000Z".into(),
+                }],
+                poc_ref: Some("artifact.coldcard.poc".into()),
+                submitted_at: "2026-08-01T10:02:00.000Z".into(),
+            }],
+            hypotheses: vec![ForensicHypothesisProjection {
+                hypothesis_ref: "hypothesis.coldcard.entropy-source".into(),
+                suspected_mechanism: "A second entropy source may share the same state.".into(),
+                supporting_refs: vec!["source.coldcard.shared.utils.42".into()],
+                missing_evidence: vec!["Executed cross-device reproduction".into()],
+                next_check: "Run the generator trace against two owned fixtures.".into(),
+                consequence_if_true: "More devices could share a recoverable state.".into(),
+                state: "unverified".into(),
+                submitted_at: "2026-08-01T10:02:30.000Z".into(),
+            }],
+            metrics: vec![
+                ForensicMetricTruth {
+                    metric_ref: "metric.time-to-qualified-identification".into(),
+                    label: "Time to qualified identification".into(),
+                    unit: "ms".into(),
+                    value: Some(120_000),
+                    exactness: ForensicExactness::Exact,
+                    unavailable_reason_ref: None,
+                    source_event_refs: vec!["event.finding.coldcard".into()],
+                    source_receipt_refs: Vec::new(),
+                },
+                ForensicMetricTruth {
+                    metric_ref: "metric.cost-to-qualified-identification".into(),
+                    label: "Cost to qualified identification".into(),
+                    unit: "µUSD".into(),
+                    value: None,
+                    exactness: ForensicExactness::Unavailable,
+                    unavailable_reason_ref: Some("reason.provider-cost-unavailable".into()),
+                    source_event_refs: Vec::new(),
+                    source_receipt_refs: Vec::new(),
+                },
+            ],
+            lifecycle: vec![
+                ForensicLifecycleStage {
+                    stage_ref: "stage.request-admitted".into(),
+                    label: "Request admitted".into(),
+                    state: ForensicLifecycleState::Succeeded,
+                    observed_at: Some("2026-08-01T10:00:00.000Z".into()),
+                    receipt_ref: Some("receipt.request-admitted".into()),
+                },
+                ForensicLifecycleStage {
+                    stage_ref: "stage.cleanup-observed".into(),
+                    label: "Cleanup observed".into(),
+                    state: ForensicLifecycleState::Succeeded,
+                    observed_at: Some("2026-08-01T10:04:00.000Z".into()),
+                    receipt_ref: Some("receipt.cleanup-observed".into()),
+                },
+            ],
+            placement_ref: "placement.forensic.fixture".into(),
+            sandbox_ref: "sandbox.forensic.fixture".into(),
+            resource_generation: 1,
+            cleanup_state: "observed_zero_residue".into(),
+            cleanup_receipt_ref: Some("receipt.cleanup-observed".into()),
+            decisions: Vec::new(),
         }
     }
 
@@ -1145,8 +1787,12 @@ mod tests {
             ForensicsRunProjection::prepared("run.forensic.fixture".into()).expect("valid run");
         run.apply_admission(admitted_placement())
             .expect("admission");
-        let json = serde_json::to_string(&(preflight(ColdcardBenchmarkArm::Fixed), run))
-            .expect("serialize public projections");
+        let json = serde_json::to_string(&(
+            preflight(ColdcardBenchmarkArm::Fixed),
+            run,
+            review_projection(),
+        ))
+        .expect("serialize public projections");
         for forbidden in [
             "project_id",
             "instance_id",
@@ -1171,5 +1817,91 @@ mod tests {
         let mut candidate = budget();
         candidate.max_tokens = 0;
         assert_eq!(candidate.validate(), Err(ForensicsError::InvalidBudget));
+    }
+
+    #[test]
+    fn review_projection_preserves_distinct_claim_evidence_metric_and_cleanup_truth() {
+        let review = review_projection();
+        review.validate().expect("valid review projection");
+        assert_eq!(
+            review.findings[0].evidence_tier,
+            ForensicEvidenceTier::Executed
+        );
+        assert_eq!(review.hypotheses[0].state, "unverified");
+        assert_eq!(review.metrics[1].display_value(), "Unavailable");
+        assert_eq!(review.cleanup_state, "observed_zero_residue");
+    }
+
+    #[test]
+    fn unavailable_metrics_cannot_render_as_zero_and_incomplete_runs_cannot_render_complete() {
+        let mut review = review_projection();
+        review.metrics[1].value = Some(0);
+        assert!(matches!(
+            review.validate(),
+            Err(ForensicsError::InvalidReview(_))
+        ));
+
+        let mut review = review_projection();
+        review.coverage_status = CoverageStatus::Incomplete;
+        assert!(matches!(
+            review.validate(),
+            Err(ForensicsError::InvalidReview(_))
+        ));
+    }
+
+    #[test]
+    fn review_decisions_append_without_mutating_the_original_finding() {
+        let mut review = review_projection();
+        let finding = review.findings[0].clone();
+        review
+            .append_decision(
+                &finding.finding_ref,
+                ForensicReviewDecisionKind::Correct,
+                "Narrow the impact to affected fallback builds.".into(),
+                "reviewer.omega.operator".into(),
+                "2026-08-01T10:05:00.000Z".into(),
+            )
+            .expect("append decision");
+        review.validate().expect("review remains valid");
+        assert_eq!(review.findings[0], finding);
+        assert_eq!(review.decisions.len(), 1);
+        assert_eq!(review.decisions[0].sequence, 1);
+    }
+
+    #[test]
+    fn citations_cannot_escape_or_drift_from_the_pinned_source() {
+        let mut review = review_projection();
+        review.findings[0].source_refs[0].path = "../private/key".into();
+        assert!(matches!(
+            review.validate(),
+            Err(ForensicsError::InvalidReview(_))
+        ));
+
+        let mut review = review_projection();
+        review.findings[0].source_refs[0].commit = COLDCARD_FIXED_COMMIT.into();
+        assert!(matches!(
+            review.validate(),
+            Err(ForensicsError::InvalidReview(_))
+        ));
+    }
+
+    #[test]
+    fn cancelled_missed_failed_censored_and_cleanup_failed_runs_remain_reviewable() {
+        for outcome in [
+            ForensicReviewOutcome::Cancelled,
+            ForensicReviewOutcome::Missed,
+            ForensicReviewOutcome::Failed,
+            ForensicReviewOutcome::Censored,
+            ForensicReviewOutcome::CleanupFailed,
+        ] {
+            let mut review = review_projection();
+            review.outcome = outcome;
+            if outcome == ForensicReviewOutcome::CleanupFailed {
+                review.cleanup_state = "failed".into();
+                review.cleanup_receipt_ref = None;
+                review.lifecycle[1].state = ForensicLifecycleState::Failed;
+            }
+            review.validate().expect("terminal run remains reviewable");
+        }
     }
 }

@@ -13,8 +13,11 @@ session and passes its bearer only to `ForensicsCloudClient`. The client accepts
 only `https://openagents.com`, calls only the native forensic route, bounds the
 response body, and never stores the credential. The renderer receives worker
 refs, generations, receipt refs, event kinds, sequence numbers, timestamps,
-and typed failure state. It never receives source bytes, prompts, runtime text,
-credentials, findings, or private evidence.
+and typed failure state. The control projection never receives source bytes,
+prompts, runtime text, credentials, findings, or private evidence. The separate
+[Forensics review](omega-forensics-review.md) projection may display bounded
+owner-authorized finding text and evidence metadata after contract validation;
+it still carries no credential or provider authority.
 
 This path does not call the generic cloud-GCP lane and does not use the Box v1
 facade. OpenAgents remains the placement, budget, runtime, and cleanup

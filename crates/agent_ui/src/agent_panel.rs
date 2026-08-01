@@ -12193,6 +12193,7 @@ impl AgentPanel {
 
     fn prepare_forensics_surface(
         &mut self,
+        window: &mut Window,
         cx: &mut Context<Self>,
     ) -> Result<Entity<crate::forensics_workbench::ForensicsWorkbenchSurface>> {
         if let Some(surface) = self
@@ -12214,12 +12215,12 @@ impl AgentPanel {
         }
         let surface =
             cx.new(|cx| crate::forensics_workbench::ForensicsWorkbenchSurface::new(&candidate, cx));
-        self._forensics_workbench_subscriptions.push(cx.subscribe(
-            &surface,
-            |this, surface, command, cx| {
-                this.handle_forensics_command(surface, command.clone(), cx);
-            },
-        ));
+        self._forensics_workbench_subscriptions
+            .push(
+                cx.subscribe_in(&surface, window, |this, surface, command, window, cx| {
+                    this.handle_forensics_command(surface.clone(), command.clone(), window, cx);
+                }),
+            );
         Ok(surface)
     }
 
@@ -12227,8 +12228,14 @@ impl AgentPanel {
         &mut self,
         surface: Entity<crate::forensics_workbench::ForensicsWorkbenchSurface>,
         command: crate::forensics_workbench::ForensicsWorkbenchCommand,
+        window: &mut Window,
         cx: &mut Context<Self>,
     ) {
+        if let crate::forensics_workbench::ForensicsWorkbenchCommand::OpenSource(citation) = command
+        {
+            self.open_forensics_source(surface, citation, window, cx);
+            return;
+        }
         let session = omega_effectd::openagents_session_if_initialized(cx);
         let http_client = cx.http_client();
         let surface = surface.downgrade();
@@ -12510,10 +12517,113 @@ impl AgentPanel {
                         }
                     }
                 }
+                crate::forensics_workbench::ForensicsWorkbenchCommand::OpenSource(_) => {}
             }
             Ok::<(), anyhow::Error>(())
         })
         .detach_and_log_err(cx);
+    }
+
+    fn open_forensics_source(
+        &mut self,
+        surface: Entity<crate::forensics_workbench::ForensicsWorkbenchSurface>,
+        citation: omega_forensics::ForensicSourceCitation,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let candidate = self
+            .workbench_shell
+            .identity()
+            .and_then(|identity| identity.selected.as_ref());
+        let Some(candidate) = candidate else {
+            surface.update(cx, |surface, cx| {
+                surface.apply_source_resolution(
+                    citation.source_ref,
+                    Err("the bound repository is unavailable".into()),
+                    cx,
+                )
+            });
+            return;
+        };
+        if candidate.head_commit.as_deref() != Some(citation.commit.as_str()) {
+            surface.update(cx, |surface, cx| {
+                surface.apply_source_resolution(
+                    citation.source_ref,
+                    Err("the local worktree is not at the cited pinned commit".into()),
+                    cx,
+                )
+            });
+            return;
+        }
+        let repository_root = candidate.worktree_abs_path.clone();
+        let source_path = repository_root.join(&citation.path);
+        let source_ref = citation.source_ref.clone();
+        let start_line = citation.start_line;
+        let end_line = citation.end_line;
+        let symbol = citation.symbol.clone();
+        let workspace = self.workspace.clone();
+        let fs = workspace.read_with(cx, |workspace, cx| {
+            workspace.project().read(cx).fs().clone()
+        });
+        let Ok(fs) = fs else {
+            surface.update(cx, |surface, cx| {
+                surface.apply_source_resolution(
+                    source_ref,
+                    Err("the project filesystem is unavailable".into()),
+                    cx,
+                )
+            });
+            return;
+        };
+        let surface = surface.downgrade();
+        window
+            .spawn(cx, async move |cx| {
+                let result = async {
+                    let canonical_root = fs.canonicalize(&repository_root).await?;
+                    let canonical_source = fs.canonicalize(&source_path).await?;
+                    anyhow::ensure!(
+                        canonical_source.starts_with(&canonical_root),
+                        "the cited path resolves outside the pinned worktree"
+                    );
+                    anyhow::ensure!(
+                        fs.is_file(&canonical_source).await,
+                        "the cited file is absent"
+                    );
+                    if let Some(symbol) = symbol {
+                        let source = fs.load(&canonical_source).await?;
+                        let cited_lines = source
+                            .lines()
+                            .skip((start_line - 1) as usize)
+                            .take((end_line - start_line + 1) as usize)
+                            .collect::<Vec<_>>()
+                            .join("\n");
+                        anyhow::ensure!(
+                            cited_lines.contains(&symbol),
+                            "the cited symbol is absent from the pinned line range"
+                        );
+                    }
+                    workspace.update_in(cx, |workspace, window, cx| {
+                        crate::open_abs_path_at_point(
+                            workspace,
+                            canonical_source,
+                            Some(text::Point::new(start_line - 1, 0)),
+                            window,
+                            cx,
+                        )
+                    })?;
+                    anyhow::Ok(())
+                }
+                .await;
+                surface.update(cx, |surface, cx| {
+                    surface.apply_source_resolution(
+                        source_ref,
+                        result.map_err(|error| error.to_string()),
+                        cx,
+                    )
+                })?;
+                anyhow::Ok(())
+            })
+            .detach_and_log_err(cx);
     }
 
     fn prepare_terminal_surface(
@@ -13248,7 +13358,7 @@ impl AgentPanel {
             None
         };
         let forensics_surface = if surface == omega_workbench_state::WorkSurface::Forensics {
-            match self.prepare_forensics_surface(cx) {
+            match self.prepare_forensics_surface(window, cx) {
                 Ok(forensics_surface) => Some(forensics_surface),
                 Err(error) => {
                     log::warn!("could not prepare the Forensics work surface: {error:#}");
