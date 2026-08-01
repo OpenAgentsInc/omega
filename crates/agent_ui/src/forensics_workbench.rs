@@ -2,12 +2,13 @@ use gpui::{App, Context, EventEmitter, FocusHandle, Focusable, Render, SharedStr
 use omega_forensics::{
     ColdcardBenchmarkArm, CoverageStatus, DependencyPolicy, ExplicitOperatorAction,
     FORENSIC_FINDING_SCHEMA_V1, FORENSIC_HYPOTHESIS_SCHEMA_V1, ForensicBudgetState,
-    ForensicEvidenceTier, ForensicLifecycleState, ForensicPromptIr, ForensicPromptWorkspace,
-    ForensicReviewDecisionKind, ForensicReviewOutcome, ForensicSourceCitation,
-    ForensicWorkerObservation, ForensicWorkerPlacement, ForensicsFailureProjection,
-    ForensicsLaunchIntent, ForensicsPreflightProjection, ForensicsReviewProjection,
-    ForensicsRunPhase, ForensicsRunProjection, PreflightReadiness, PromptChangeKind,
-    PromptCompatibilityProfile, SourceState,
+    ForensicEvidenceTier, ForensicExactness, ForensicLifecycleState, ForensicPromptIr,
+    ForensicPromptWorkspace, ForensicReviewDecisionKind, ForensicReviewOutcome,
+    ForensicSourceCitation, ForensicStatistic, ForensicWorkerObservation, ForensicWorkerPlacement,
+    ForensicsFailureProjection, ForensicsLaunchIntent, ForensicsMatrixProjection,
+    ForensicsPreflightProjection, ForensicsReviewProjection, ForensicsRunPhase,
+    ForensicsRunProjection, PreflightReadiness, PromptChangeKind, PromptCompatibilityProfile,
+    SourceState,
 };
 use omega_workbench_state::RepositoryBinding;
 use ui::{
@@ -36,6 +37,7 @@ pub struct ForensicsWorkbenchSnapshot {
     pub run: Option<ForensicsRunProjection>,
     pub review: Option<ForensicsReviewProjection>,
     pub prompt_workspace: ForensicPromptWorkspace,
+    pub matrix: Option<ForensicsMatrixProjection>,
     pub source_resolutions: std::collections::BTreeMap<String, ForensicSourceResolution>,
     pub status: SharedString,
 }
@@ -70,6 +72,7 @@ pub struct ForensicsWorkbenchSurface {
     run: Option<ForensicsRunProjection>,
     review: Option<ForensicsReviewProjection>,
     prompt_workspace: ForensicPromptWorkspace,
+    matrix: Option<ForensicsMatrixProjection>,
     source_resolutions: std::collections::BTreeMap<String, ForensicSourceResolution>,
     status: SharedString,
 }
@@ -97,6 +100,7 @@ impl ForensicsWorkbenchSurface {
                 .expect("the built-in forensic prompt must remain valid"),
             )
             .expect("the built-in forensic prompt workspace must remain valid"),
+            matrix: None,
             source_resolutions: std::collections::BTreeMap::new(),
             status: "Awaiting OpenAgents managed profile".into(),
         }
@@ -312,6 +316,23 @@ impl ForensicsWorkbenchSurface {
         Ok(())
     }
 
+    pub fn set_matrix_projection(
+        &mut self,
+        matrix: ForensicsMatrixProjection,
+        cx: &mut Context<Self>,
+    ) -> anyhow::Result<()> {
+        matrix.validate()?;
+        self.status = format!(
+            "Matrix ready · {} arms · {} retained runs",
+            matrix.arms.len(),
+            matrix.runs.len()
+        )
+        .into();
+        self.matrix = Some(matrix);
+        cx.notify();
+        Ok(())
+    }
+
     pub fn open_source(&mut self, citation: ForensicSourceCitation, cx: &mut Context<Self>) {
         self.source_resolutions.insert(
             citation.source_ref.clone(),
@@ -385,6 +406,7 @@ impl ForensicsWorkbenchSurface {
             run: self.run.clone(),
             review: self.review.clone(),
             prompt_workspace: self.prompt_workspace.clone(),
+            matrix: self.matrix.clone(),
             source_resolutions: self.source_resolutions.clone(),
             status: self.status.clone(),
         }
@@ -528,6 +550,7 @@ impl Render for ForensicsWorkbenchSurface {
         let active_prompt = prompt_workspace.active().clone();
         let prompt_changes = prompt_workspace.semantic_diff().unwrap_or_default();
         let prompt_candidates = prompt_workspace.candidates().cloned().collect::<Vec<_>>();
+        let matrix = self.matrix.clone();
 
         v_flex()
             .id("omega.forensics.workbench")
@@ -694,6 +717,122 @@ impl Render for ForensicsWorkbenchSurface {
                         },
                     )),
             )
+            .when_some(matrix, |this, matrix| {
+                this.child(div().h_px().bg(cx.theme().colors().border))
+                    .child(
+                        v_flex()
+                            .gap_1()
+                            .child(
+                                Label::new("Run matrix")
+                                    .size(LabelSize::XSmall)
+                                    .color(Color::Muted),
+                            )
+                            .child(Self::render_fact(
+                                "Retained runs",
+                                matrix.runs.len().to_string(),
+                            ))
+                            .child(Self::render_fact(
+                                "Promotion",
+                                if matrix.promoted {
+                                    "Admitted"
+                                } else {
+                                    "Blocked / not requested"
+                                },
+                            ))
+                            .child(Self::render_fact(
+                                "Pareto frontier",
+                                matrix.pareto_frontier_arm_refs.join(", "),
+                            ))
+                            .child(Self::render_fact(
+                                "Common / divergent findings",
+                                format!(
+                                    "{} / {} arms",
+                                    matrix.finding_divergence.common_finding_refs.len(),
+                                    matrix
+                                        .finding_divergence
+                                        .unique_finding_refs_by_arm
+                                        .values()
+                                        .filter(|values| !values.is_empty())
+                                        .count()
+                                ),
+                            ))
+                            .child(Self::render_fact(
+                                "Recall curves",
+                                format!(
+                                    "{} time points · {} token points",
+                                    matrix.recall_time_curve.len(),
+                                    matrix.recall_token_curve.len()
+                                ),
+                            ))
+                            .children(matrix.rows.into_iter().map(|row| {
+                                let hit_rate = row
+                                    .hit_rate_basis_points
+                                    .map(|value| format!("{}.{:02}%", value / 100, value % 100))
+                                    .unwrap_or_else(|| "Not eligible".into());
+                                v_flex()
+                                    .gap_1()
+                                    .p_2()
+                                    .border_1()
+                                    .border_color(cx.theme().colors().border)
+                                    .child(
+                                        Label::new(row.arm_ref)
+                                            .size(LabelSize::XSmall)
+                                            .color(Color::Accent),
+                                    )
+                                    .child(Self::render_fact(
+                                        "Hit / miss / n",
+                                        format!(
+                                            "{} / {} / {} · {hit_rate}",
+                                            row.hit_count, row.miss_count, row.sample_count
+                                        ),
+                                    ))
+                                    .child(Self::render_fact(
+                                        "Identification",
+                                        format!(
+                                            "p50 {} · tail {}",
+                                            statistic_label(&row.p50_identification_milliseconds),
+                                            statistic_label(&row.tail_identification_milliseconds)
+                                        ),
+                                    ))
+                                    .child(Self::render_fact(
+                                        "Tokens / cost",
+                                        format!(
+                                            "{} · {}",
+                                            aggregate_truth_label(
+                                                row.total_tokens,
+                                                row.token_exactness,
+                                                "tokens"
+                                            ),
+                                            aggregate_truth_label(
+                                                row.total_cost_micros,
+                                                row.cost_exactness,
+                                                "µUSD"
+                                            )
+                                        ),
+                                    ))
+                                    .child(Self::render_fact(
+                                        "Evidence / false positives",
+                                        format!(
+                                            "{} · {}",
+                                            row.causal_coverage_basis_points
+                                                .map(|value| format!("{}%", value / 100))
+                                                .unwrap_or_else(|| "N/A".into()),
+                                            row.false_positive_count
+                                        ),
+                                    ))
+                                    .child(Self::render_fact(
+                                        "Cleanup / provenance",
+                                        format!(
+                                            "{}/{} · {} events · {} receipts",
+                                            row.cleanup_count,
+                                            row.sample_count,
+                                            row.event_refs.len(),
+                                            row.receipt_refs.len()
+                                        ),
+                                    ))
+                            })),
+                    )
+            })
             .child(div().h_px().bg(cx.theme().colors().border))
             .child(
                 Label::new("Managed worker")
@@ -1364,6 +1503,27 @@ fn prompt_change_label(kind: PromptChangeKind) -> &'static str {
     }
 }
 
+fn statistic_label(statistic: &ForensicStatistic) -> String {
+    match (statistic.status, statistic.value) {
+        (omega_forensics::ForensicStatisticStatus::NotEstimable, _) => "not estimable".into(),
+        (omega_forensics::ForensicStatisticStatus::Provisional, Some(value)) => {
+            format!("{value} ms · provisional")
+        }
+        (_, Some(value)) => format!("{value} ms"),
+        (_, None) => "unavailable".into(),
+    }
+}
+
+fn aggregate_truth_label(value: Option<u64>, exactness: ForensicExactness, unit: &str) -> String {
+    match (value, exactness) {
+        (None, ForensicExactness::Unavailable) => "unavailable".into(),
+        (Some(value), ForensicExactness::Estimated) => format!("≈ {value} {unit}"),
+        (Some(value), ForensicExactness::UpperBound) => format!("≤ {value} {unit}"),
+        (Some(value), ForensicExactness::Exact) => format!("{value} {unit}"),
+        _ => "invalid metric truth".into(),
+    }
+}
+
 fn budget_state_label(state: ForensicBudgetState) -> &'static str {
     match state {
         ForensicBudgetState::WithinBudget => "Within budget",
@@ -1801,6 +1961,90 @@ mod tests {
             let snapshot = surface.read(cx).snapshot();
             assert_eq!(snapshot.prompt_workspace.candidates().count(), 2);
             assert_eq!(snapshot.prompt_workspace.active(), &original);
+        });
+    }
+
+    #[gpui::test]
+    fn matrix_projection_keeps_retained_run_scorecards_in_workbench_state(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        cx.update(|cx| {
+            let binding = RepositoryBinding::new("repo", "worktree").expect("valid binding");
+            let surface = cx.new(|cx| ForensicsWorkbenchSurface::new(&candidate(binding), cx));
+            let arm = omega_forensics::ForensicMatrixArm {
+                arm_ref: "arm.forensic.candidate".into(),
+                prompt_digest: digest('a'),
+                model_digest: digest('b'),
+                effort_ref: "effort.high".into(),
+                scope_ref: "scope.entropy".into(),
+                dependency_policy_ref: "dependency.pinned".into(),
+                random_seed: 7,
+                tool_surface_digest: digest('c'),
+                analysis_mode_ref: "analysis.static-and-build".into(),
+                worker_image_digest: digest('d'),
+                worker_profile_digest: digest('e'),
+                source_bundle_digest: digest('f'),
+                writable_disk_ref: "disk.candidate".into(),
+                provider_session_ref: "provider-session.candidate".into(),
+                auth_home_ref: "auth-home.candidate".into(),
+                environment_ref: "environment.candidate".into(),
+                worker_state_ref: "worker-state.candidate".into(),
+            };
+            let run = omega_forensics::ForensicMatrixRun {
+                run_ref: "run.matrix.candidate".into(),
+                run_digest: digest('1'),
+                arm_ref: arm.arm_ref.clone(),
+                dataset_split: omega_forensics::ForensicDatasetSplit::Holdout,
+                population: omega_forensics::ForensicMatrixPopulation::Vulnerable,
+                coverage_status: CoverageStatus::Complete,
+                outcome: omega_forensics::ForensicMatrixOutcome::Hit,
+                censored: false,
+                censor_at_milliseconds: None,
+                identification_milliseconds: Some(8_000),
+                identification_tokens: Some(2_000),
+                total_tokens: Some(4_000),
+                token_exactness: ForensicExactness::Exact,
+                cost_micros: Some(200_000),
+                cost_exactness: ForensicExactness::Exact,
+                causal_links_supported: 4,
+                causal_links_required: 4,
+                false_positive_count: 0,
+                reviewer_active_seconds: Some(90),
+                budget_compliant: true,
+                cleanup_observed: true,
+                qualified_finding_refs: vec!["finding.coldcard.entropy-fallback".into()],
+                failure_refs: Vec::new(),
+                event_refs: vec!["event.matrix.finding".into()],
+                receipt_refs: vec!["receipt.matrix.cleanup".into()],
+            };
+            let matrix = ForensicsMatrixProjection::rebuild(
+                "matrix.forensic.workbench".into(),
+                digest('2'),
+                digest('3'),
+                digest('4'),
+                3,
+                vec![arm],
+                vec![run],
+                omega_forensics::ForensicMatrixHardGates {
+                    input_complete: true,
+                    isolation_complete: true,
+                    clean_control: true,
+                    evidence_quality: true,
+                    budget_compliant: true,
+                    cleanup_complete: true,
+                    hit_rate_not_regressed: true,
+                },
+                omega_forensics::ForensicParetoStatus::NonDominated,
+                false,
+            )
+            .expect("matrix projection");
+            surface
+                .update(cx, |surface, cx| surface.set_matrix_projection(matrix, cx))
+                .expect("set matrix");
+            let snapshot = surface.read(cx).snapshot();
+            let matrix = snapshot.matrix.expect("matrix state");
+            assert_eq!(matrix.rows[0].run_refs, vec!["run.matrix.candidate"]);
+            assert_eq!(matrix.rows[0].hit_count, 1);
         });
     }
 }

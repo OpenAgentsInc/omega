@@ -43,6 +43,9 @@ does not. Typed hypotheses remain unverified leads. The launch event carries the
 active canonical prompt digest, and the review projection displays that same
 digest so a result can always be attributed to its exact prompt candidate.
 
+Candidates are evaluated in isolated [run matrices](omega-forensics-run-matrices.md)
+before any promotion decision.
+
 ## Verification
 
 ```sh

@@ -10,6 +10,7 @@ pub const RUN_PROJECTION_SCHEMA_V1: &str = "openagents.omega.forensics-run.v1";
 pub const WORKER_PLACEMENT_SCHEMA_V1: &str = "openagents.forensic_worker_placement.v1";
 pub const WORKER_OBSERVATION_SCHEMA_V1: &str = "openagents.forensic_worker_observation.v1";
 pub const REVIEW_PROJECTION_SCHEMA_V1: &str = "openagents.omega.forensics-review.v1";
+pub const MATRIX_PROJECTION_SCHEMA_V1: &str = "openagents.omega.forensics-matrix.v1";
 pub const FORENSIC_PROMPT_ARTIFACT_SCHEMA_V1: &str = "openagents.forensic_prompt_artifact.v1";
 pub const FORENSIC_FINDING_SCHEMA_V1: &str = "openagents.forensic_finding.v1";
 pub const FORENSIC_HYPOTHESIS_SCHEMA_V1: &str = "openagents.forensic_hypothesis.v1";
@@ -1803,6 +1804,762 @@ fn validate_decisions(
     Ok(())
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ForensicDatasetSplit {
+    Train,
+    Development,
+    Holdout,
+    CleanHoldout,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ForensicMatrixPopulation {
+    Incomplete,
+    Vulnerable,
+    StructuralVariant,
+    FixedControl,
+    CleanControl,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ForensicMatrixOutcome {
+    Hit,
+    Miss,
+    NotEligible,
+    Failed,
+    Cancelled,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct ForensicMatrixArm {
+    pub arm_ref: String,
+    pub prompt_digest: String,
+    pub model_digest: String,
+    pub effort_ref: String,
+    pub scope_ref: String,
+    pub dependency_policy_ref: String,
+    pub random_seed: u64,
+    pub tool_surface_digest: String,
+    pub analysis_mode_ref: String,
+    pub worker_image_digest: String,
+    pub worker_profile_digest: String,
+    pub source_bundle_digest: String,
+    pub writable_disk_ref: String,
+    pub provider_session_ref: String,
+    pub auth_home_ref: String,
+    pub environment_ref: String,
+    pub worker_state_ref: String,
+}
+
+impl ForensicMatrixArm {
+    fn validate(&self) -> Result<(), ForensicsError> {
+        for value in [
+            &self.prompt_digest,
+            &self.model_digest,
+            &self.tool_surface_digest,
+            &self.worker_image_digest,
+            &self.worker_profile_digest,
+            &self.source_bundle_digest,
+        ] {
+            validate_digest("matrix comparison", value)?;
+        }
+        for value in [
+            &self.arm_ref,
+            &self.effort_ref,
+            &self.scope_ref,
+            &self.dependency_policy_ref,
+            &self.analysis_mode_ref,
+            &self.writable_disk_ref,
+            &self.provider_session_ref,
+            &self.auth_home_ref,
+            &self.environment_ref,
+            &self.worker_state_ref,
+        ] {
+            validate_ref("matrix arm", value)?;
+        }
+        Ok(())
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct ForensicMatrixRun {
+    pub run_ref: String,
+    pub run_digest: String,
+    pub arm_ref: String,
+    pub dataset_split: ForensicDatasetSplit,
+    pub population: ForensicMatrixPopulation,
+    pub coverage_status: CoverageStatus,
+    pub outcome: ForensicMatrixOutcome,
+    pub censored: bool,
+    pub censor_at_milliseconds: Option<u64>,
+    pub identification_milliseconds: Option<u64>,
+    pub identification_tokens: Option<u64>,
+    pub total_tokens: Option<u64>,
+    pub token_exactness: ForensicExactness,
+    pub cost_micros: Option<u64>,
+    pub cost_exactness: ForensicExactness,
+    pub causal_links_supported: u32,
+    pub causal_links_required: u32,
+    pub false_positive_count: u32,
+    pub reviewer_active_seconds: Option<u64>,
+    pub budget_compliant: bool,
+    pub cleanup_observed: bool,
+    pub qualified_finding_refs: Vec<String>,
+    pub failure_refs: Vec<String>,
+    pub event_refs: Vec<String>,
+    pub receipt_refs: Vec<String>,
+}
+
+impl ForensicMatrixRun {
+    pub fn eligible_for_identification(&self) -> bool {
+        self.coverage_status == CoverageStatus::Complete
+            && matches!(
+                self.population,
+                ForensicMatrixPopulation::Vulnerable | ForensicMatrixPopulation::StructuralVariant
+            )
+            && matches!(
+                self.dataset_split,
+                ForensicDatasetSplit::Development | ForensicDatasetSplit::Holdout
+            )
+    }
+
+    fn validate(&self) -> Result<(), ForensicsError> {
+        validate_ref("matrix run", &self.run_ref)?;
+        validate_ref("matrix arm", &self.arm_ref)?;
+        validate_digest("matrix run", &self.run_digest)?;
+        validate_bounded_refs("matrix failure", &self.failure_refs, 256)?;
+        validate_bounded_refs(
+            "matrix qualified finding",
+            &self.qualified_finding_refs,
+            1_024,
+        )?;
+        validate_bounded_refs("matrix event", &self.event_refs, 4_096)?;
+        validate_bounded_refs("matrix receipt", &self.receipt_refs, 4_096)?;
+        if self.event_refs.is_empty() || self.receipt_refs.is_empty() {
+            return Err(ForensicsError::InvalidMatrix(
+                "every row requires event and receipt drill-down refs".into(),
+            ));
+        }
+        if self.population == ForensicMatrixPopulation::Incomplete
+            && self.coverage_status == CoverageStatus::Complete
+        {
+            return Err(ForensicsError::InvalidMatrix(
+                "incomplete populations cannot claim complete coverage".into(),
+            ));
+        }
+        if self.population == ForensicMatrixPopulation::CleanControl
+            && self.dataset_split != ForensicDatasetSplit::CleanHoldout
+        {
+            return Err(ForensicsError::InvalidMatrix(
+                "clean controls must remain in clean holdout".into(),
+            ));
+        }
+        let is_hit = self.outcome == ForensicMatrixOutcome::Hit;
+        let is_miss = self.outcome == ForensicMatrixOutcome::Miss;
+        if is_hit
+            && (!self.eligible_for_identification()
+                || self.censored
+                || self.identification_milliseconds.is_none()
+                || self.identification_tokens.is_none()
+                || self.qualified_finding_refs.is_empty())
+        {
+            return Err(ForensicsError::InvalidMatrix(
+                "hits require eligible, uncensored identification observations".into(),
+            ));
+        }
+        if is_miss
+            && (!self.eligible_for_identification()
+                || !self.censored
+                || self.censor_at_milliseconds.is_none())
+        {
+            return Err(ForensicsError::InvalidMatrix(
+                "misses remain eligible right-censored observations".into(),
+            ));
+        }
+        if self.censored != self.censor_at_milliseconds.is_some()
+            || self.censor_at_milliseconds == Some(0)
+        {
+            return Err(ForensicsError::InvalidMatrix(
+                "censoring requires a nonzero declared boundary".into(),
+            ));
+        }
+        if !is_hit
+            && (self.identification_milliseconds.is_some() || self.identification_tokens.is_some())
+        {
+            return Err(ForensicsError::InvalidMatrix(
+                "non-hits cannot invent identification values".into(),
+            ));
+        }
+        if self.causal_links_supported > self.causal_links_required {
+            return Err(ForensicsError::InvalidMatrix(
+                "supported causal links exceed the frozen requirement".into(),
+            ));
+        }
+        for (label, value, exactness) in [
+            ("tokens", self.total_tokens, self.token_exactness),
+            ("cost", self.cost_micros, self.cost_exactness),
+        ] {
+            if (value.is_none()) != (exactness == ForensicExactness::Unavailable) {
+                return Err(ForensicsError::InvalidMatrix(format!(
+                    "{label} availability and exactness disagree"
+                )));
+            }
+        }
+        Ok(())
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ForensicStatisticStatus {
+    Exact,
+    Provisional,
+    NotEstimable,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct ForensicStatistic {
+    pub status: ForensicStatisticStatus,
+    pub value: Option<u64>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct ForensicConfidenceInterval {
+    pub lower_basis_points: u32,
+    pub upper_basis_points: u32,
+    pub provisional: bool,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct ForensicMatrixRow {
+    pub arm_ref: String,
+    pub sample_count: usize,
+    pub eligible_count: usize,
+    pub hit_count: usize,
+    pub miss_count: usize,
+    pub censor_count: usize,
+    pub hit_rate_basis_points: Option<u32>,
+    pub hit_rate_interval: Option<ForensicConfidenceInterval>,
+    pub identification_observations_milliseconds: Vec<Option<u64>>,
+    pub p50_identification_milliseconds: ForensicStatistic,
+    pub tail_identification_milliseconds: ForensicStatistic,
+    pub identification_token_observations: Vec<Option<u64>>,
+    pub total_tokens: Option<u64>,
+    pub token_exactness: ForensicExactness,
+    pub total_cost_micros: Option<u64>,
+    pub cost_exactness: ForensicExactness,
+    pub causal_coverage_basis_points: Option<u32>,
+    pub false_positive_count: u32,
+    pub reviewer_active_seconds: u64,
+    pub cleanup_count: usize,
+    pub run_refs: Vec<String>,
+    pub event_refs: Vec<String>,
+    pub receipt_refs: Vec<String>,
+}
+
+impl ForensicMatrixRow {
+    fn from_runs(
+        arm_ref: String,
+        runs: &[&ForensicMatrixRun],
+        registered_sample_size: usize,
+    ) -> Self {
+        let eligible = runs
+            .iter()
+            .copied()
+            .filter(|run| run.eligible_for_identification())
+            .collect::<Vec<_>>();
+        let hits = eligible
+            .iter()
+            .copied()
+            .filter(|run| run.outcome == ForensicMatrixOutcome::Hit)
+            .collect::<Vec<_>>();
+        let miss_count = eligible
+            .iter()
+            .filter(|run| run.outcome == ForensicMatrixOutcome::Miss)
+            .count();
+        let censor_count = runs.iter().filter(|run| run.censored).count();
+        let hit_rate_basis_points =
+            (!eligible.is_empty()).then(|| ((hits.len() * 10_000) / eligible.len()) as u32);
+        let hit_rate_interval = (!eligible.is_empty()).then(|| {
+            wilson_interval(
+                hits.len(),
+                eligible.len(),
+                eligible.len() < registered_sample_size,
+            )
+        });
+        let identification_observations_milliseconds = eligible
+            .iter()
+            .map(|run| run.identification_milliseconds)
+            .collect::<Vec<_>>();
+        let identification_token_observations = eligible
+            .iter()
+            .map(|run| run.identification_tokens)
+            .collect::<Vec<_>>();
+        let mut durations = hits
+            .iter()
+            .filter_map(|run| run.identification_milliseconds)
+            .collect::<Vec<_>>();
+        durations.sort_unstable();
+        let p50 = durations
+            .get(durations.len().saturating_sub(1) / 2)
+            .copied();
+        let sample_status = if eligible.len() < registered_sample_size {
+            ForensicStatisticStatus::Provisional
+        } else {
+            ForensicStatisticStatus::Exact
+        };
+        let p50_identification_milliseconds = if p50.is_some() && miss_count * 2 < eligible.len() {
+            ForensicStatistic {
+                status: sample_status,
+                value: p50,
+            }
+        } else {
+            ForensicStatistic {
+                status: ForensicStatisticStatus::NotEstimable,
+                value: None,
+            }
+        };
+        let tail_identification_milliseconds =
+            if eligible.len() >= registered_sample_size && durations.len() == eligible.len() {
+                ForensicStatistic {
+                    status: ForensicStatisticStatus::Exact,
+                    value: durations.last().copied(),
+                }
+            } else {
+                ForensicStatistic {
+                    status: ForensicStatisticStatus::NotEstimable,
+                    value: None,
+                }
+            };
+        let supported = runs
+            .iter()
+            .map(|run| u64::from(run.causal_links_supported))
+            .sum::<u64>();
+        let required = runs
+            .iter()
+            .map(|run| u64::from(run.causal_links_required))
+            .sum::<u64>();
+        let (total_tokens, token_exactness) = aggregate_matrix_truth(
+            runs.iter()
+                .map(|run| (run.total_tokens, run.token_exactness)),
+        );
+        let (total_cost_micros, cost_exactness) =
+            aggregate_matrix_truth(runs.iter().map(|run| (run.cost_micros, run.cost_exactness)));
+        Self {
+            arm_ref,
+            sample_count: runs.len(),
+            eligible_count: eligible.len(),
+            hit_count: hits.len(),
+            miss_count,
+            censor_count,
+            hit_rate_basis_points,
+            hit_rate_interval,
+            identification_observations_milliseconds,
+            p50_identification_milliseconds,
+            tail_identification_milliseconds,
+            identification_token_observations,
+            total_tokens,
+            token_exactness,
+            total_cost_micros,
+            cost_exactness,
+            causal_coverage_basis_points: (required > 0)
+                .then(|| ((supported * 10_000) / required) as u32),
+            false_positive_count: runs.iter().map(|run| run.false_positive_count).sum(),
+            reviewer_active_seconds: runs
+                .iter()
+                .filter_map(|run| run.reviewer_active_seconds)
+                .sum(),
+            cleanup_count: runs.iter().filter(|run| run.cleanup_observed).count(),
+            run_refs: runs.iter().map(|run| run.run_ref.clone()).collect(),
+            event_refs: runs
+                .iter()
+                .flat_map(|run| run.event_refs.iter().cloned())
+                .collect(),
+            receipt_refs: runs
+                .iter()
+                .flat_map(|run| run.receipt_refs.iter().cloned())
+                .collect(),
+        }
+    }
+}
+
+fn aggregate_matrix_truth(
+    values: impl Iterator<Item = (Option<u64>, ForensicExactness)>,
+) -> (Option<u64>, ForensicExactness) {
+    let mut total = 0_u64;
+    let mut exactness = ForensicExactness::Exact;
+    for (value, value_exactness) in values {
+        let Some(value) = value else {
+            return (None, ForensicExactness::Unavailable);
+        };
+        total = total.saturating_add(value);
+        exactness = match (exactness, value_exactness) {
+            (_, ForensicExactness::UpperBound) | (ForensicExactness::UpperBound, _) => {
+                ForensicExactness::UpperBound
+            }
+            (_, ForensicExactness::Estimated) | (ForensicExactness::Estimated, _) => {
+                ForensicExactness::Estimated
+            }
+            _ => ForensicExactness::Exact,
+        };
+    }
+    (Some(total), exactness)
+}
+
+fn wilson_interval(hits: usize, samples: usize, provisional: bool) -> ForensicConfidenceInterval {
+    let samples = samples as f64;
+    let proportion = hits as f64 / samples;
+    let z = 1.959_963_984_540_054_f64;
+    let z_squared = z * z;
+    let denominator = 1.0 + z_squared / samples;
+    let center = (proportion + z_squared / (2.0 * samples)) / denominator;
+    let margin = z
+        * ((proportion * (1.0 - proportion) / samples + z_squared / (4.0 * samples * samples))
+            .sqrt())
+        / denominator;
+    ForensicConfidenceInterval {
+        lower_basis_points: ((center - margin).clamp(0.0, 1.0) * 10_000.0).round() as u32,
+        upper_basis_points: ((center + margin).clamp(0.0, 1.0) * 10_000.0).round() as u32,
+        provisional,
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct ForensicMatrixHardGates {
+    pub input_complete: bool,
+    pub isolation_complete: bool,
+    pub clean_control: bool,
+    pub evidence_quality: bool,
+    pub budget_compliant: bool,
+    pub cleanup_complete: bool,
+    pub hit_rate_not_regressed: bool,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct ForensicFindingDivergence {
+    pub common_finding_refs: Vec<String>,
+    pub unique_finding_refs_by_arm: BTreeMap<String, Vec<String>>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct ForensicRecallPoint {
+    pub budget: u64,
+    pub qualified_count: usize,
+    pub eligible_count: usize,
+    pub recall_basis_points: u32,
+}
+
+impl ForensicMatrixHardGates {
+    pub fn all_passed(&self) -> bool {
+        self.input_complete
+            && self.isolation_complete
+            && self.clean_control
+            && self.evidence_quality
+            && self.budget_compliant
+            && self.cleanup_complete
+            && self.hit_rate_not_regressed
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ForensicParetoStatus {
+    Dominates,
+    NonDominated,
+    Dominated,
+    Incomparable,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct ForensicsMatrixProjection {
+    pub schema: String,
+    pub matrix_ref: String,
+    pub dataset_revision_digest: String,
+    pub metric_definition_revision_digest: String,
+    pub evaluator_revision_digest: String,
+    pub registered_sample_size: usize,
+    pub arms: Vec<ForensicMatrixArm>,
+    pub runs: Vec<ForensicMatrixRun>,
+    pub rows: Vec<ForensicMatrixRow>,
+    pub finding_divergence: ForensicFindingDivergence,
+    pub recall_time_curve: Vec<ForensicRecallPoint>,
+    pub recall_token_curve: Vec<ForensicRecallPoint>,
+    pub pareto_frontier_arm_refs: Vec<String>,
+    pub hard_gates: ForensicMatrixHardGates,
+    pub pareto_status: ForensicParetoStatus,
+    pub promoted: bool,
+}
+
+impl ForensicsMatrixProjection {
+    pub fn rebuild(
+        matrix_ref: String,
+        dataset_revision_digest: String,
+        metric_definition_revision_digest: String,
+        evaluator_revision_digest: String,
+        registered_sample_size: usize,
+        arms: Vec<ForensicMatrixArm>,
+        runs: Vec<ForensicMatrixRun>,
+        hard_gates: ForensicMatrixHardGates,
+        pareto_status: ForensicParetoStatus,
+        request_promotion: bool,
+    ) -> Result<Self, ForensicsError> {
+        if registered_sample_size < 3 || arms.is_empty() || runs.is_empty() {
+            return Err(ForensicsError::InvalidMatrix(
+                "matrix requires arms, runs, and a registered sample size of at least three".into(),
+            ));
+        }
+        validate_ref("matrix", &matrix_ref)?;
+        for digest in [
+            &dataset_revision_digest,
+            &metric_definition_revision_digest,
+            &evaluator_revision_digest,
+        ] {
+            validate_digest("matrix revision", digest)?;
+        }
+        let mut arm_refs = BTreeSet::new();
+        let mut isolation_refs = BTreeSet::new();
+        for arm in &arms {
+            arm.validate()?;
+            if !arm_refs.insert(arm.arm_ref.as_str()) {
+                return Err(ForensicsError::InvalidMatrix("duplicate matrix arm".into()));
+            }
+            for isolation_ref in [
+                &arm.writable_disk_ref,
+                &arm.provider_session_ref,
+                &arm.auth_home_ref,
+                &arm.environment_ref,
+                &arm.worker_state_ref,
+                &arm.source_bundle_digest,
+            ] {
+                if !isolation_refs.insert(isolation_ref.as_str()) {
+                    return Err(ForensicsError::InvalidMatrix(
+                        "matrix arms cannot share writable or hidden worker state".into(),
+                    ));
+                }
+            }
+        }
+        let mut run_digests = BTreeSet::new();
+        for run in &runs {
+            run.validate()?;
+            if !arm_refs.contains(run.arm_ref.as_str()) || !run_digests.insert(&run.run_digest) {
+                return Err(ForensicsError::InvalidMatrix(
+                    "runs must bind unique digests to declared arms".into(),
+                ));
+            }
+        }
+        let rows = arms
+            .iter()
+            .map(|arm| {
+                let arm_runs = runs
+                    .iter()
+                    .filter(|run| run.arm_ref == arm.arm_ref)
+                    .collect::<Vec<_>>();
+                ForensicMatrixRow::from_runs(arm.arm_ref.clone(), &arm_runs, registered_sample_size)
+            })
+            .collect::<Vec<_>>();
+        let finding_divergence = finding_divergence(&arms, &runs);
+        let eligible_runs = runs
+            .iter()
+            .filter(|run| run.eligible_for_identification())
+            .collect::<Vec<_>>();
+        let recall_time_curve = recall_curve(&eligible_runs, |run| run.identification_milliseconds);
+        let recall_token_curve = recall_curve(&eligible_runs, |run| run.identification_tokens);
+        let pareto_frontier_arm_refs = pareto_frontier(&rows);
+        let observed_quality = runs.iter().all(|run| {
+            run.false_positive_count == 0
+                && run.cleanup_observed
+                && run.budget_compliant
+                && (run.outcome != ForensicMatrixOutcome::Hit
+                    || run.causal_links_supported == run.causal_links_required)
+        });
+        let promotion_safe = hard_gates.all_passed()
+            && observed_quality
+            && matches!(
+                pareto_status,
+                ForensicParetoStatus::Dominates | ForensicParetoStatus::NonDominated
+            );
+        let projection = Self {
+            schema: MATRIX_PROJECTION_SCHEMA_V1.into(),
+            matrix_ref,
+            dataset_revision_digest,
+            metric_definition_revision_digest,
+            evaluator_revision_digest,
+            registered_sample_size,
+            arms,
+            runs,
+            rows,
+            finding_divergence,
+            recall_time_curve,
+            recall_token_curve,
+            pareto_frontier_arm_refs,
+            hard_gates,
+            pareto_status,
+            promoted: request_promotion && promotion_safe,
+        };
+        projection.validate()?;
+        Ok(projection)
+    }
+
+    pub fn validate(&self) -> Result<(), ForensicsError> {
+        let observed_quality = self.runs.iter().all(|run| {
+            run.false_positive_count == 0
+                && run.cleanup_observed
+                && run.budget_compliant
+                && (run.outcome != ForensicMatrixOutcome::Hit
+                    || run.causal_links_supported == run.causal_links_required)
+        });
+        if self.schema != MATRIX_PROJECTION_SCHEMA_V1
+            || self.rows.len() != self.arms.len()
+            || self.pareto_frontier_arm_refs.is_empty()
+            || (self.promoted
+                && (!self.hard_gates.all_passed()
+                    || !observed_quality
+                    || !matches!(
+                        self.pareto_status,
+                        ForensicParetoStatus::Dominates | ForensicParetoStatus::NonDominated
+                    )))
+        {
+            return Err(ForensicsError::InvalidMatrix(
+                "matrix projection or promotion state is inconsistent".into(),
+            ));
+        }
+        Ok(())
+    }
+}
+
+fn finding_divergence(
+    arms: &[ForensicMatrixArm],
+    runs: &[ForensicMatrixRun],
+) -> ForensicFindingDivergence {
+    let by_arm = arms
+        .iter()
+        .filter_map(|arm| {
+            let eligible_runs = runs
+                .iter()
+                .filter(|run| run.arm_ref == arm.arm_ref && run.eligible_for_identification())
+                .collect::<Vec<_>>();
+            (!eligible_runs.is_empty()).then(|| {
+                (
+                    arm.arm_ref.clone(),
+                    eligible_runs
+                        .into_iter()
+                        .flat_map(|run| run.qualified_finding_refs.iter().cloned())
+                        .collect::<BTreeSet<_>>(),
+                )
+            })
+        })
+        .collect::<BTreeMap<_, _>>();
+    let common_finding_refs = by_arm
+        .values()
+        .cloned()
+        .reduce(|left, right| left.intersection(&right).cloned().collect())
+        .unwrap_or_default()
+        .into_iter()
+        .collect();
+    let unique_finding_refs_by_arm = by_arm
+        .iter()
+        .map(|(arm_ref, findings)| {
+            let other_findings = by_arm
+                .iter()
+                .filter(|(other_ref, _)| *other_ref != arm_ref)
+                .flat_map(|(_, values)| values.iter().cloned())
+                .collect::<BTreeSet<_>>();
+            (
+                arm_ref.clone(),
+                findings.difference(&other_findings).cloned().collect(),
+            )
+        })
+        .collect();
+    ForensicFindingDivergence {
+        common_finding_refs,
+        unique_finding_refs_by_arm,
+    }
+}
+
+fn recall_curve(
+    eligible_runs: &[&ForensicMatrixRun],
+    observation: impl Fn(&ForensicMatrixRun) -> Option<u64>,
+) -> Vec<ForensicRecallPoint> {
+    let mut budgets = eligible_runs
+        .iter()
+        .filter_map(|run| observation(run))
+        .collect::<Vec<_>>();
+    budgets.sort_unstable();
+    budgets.dedup();
+    budgets
+        .into_iter()
+        .map(|budget| {
+            let qualified_count = eligible_runs
+                .iter()
+                .filter(|run| observation(run).is_some_and(|value| value <= budget))
+                .count();
+            ForensicRecallPoint {
+                budget,
+                qualified_count,
+                eligible_count: eligible_runs.len(),
+                recall_basis_points: ((qualified_count * 10_000) / eligible_runs.len()) as u32,
+            }
+        })
+        .collect()
+}
+
+fn pareto_frontier(rows: &[ForensicMatrixRow]) -> Vec<String> {
+    rows.iter()
+        .filter(|candidate| candidate.hit_rate_basis_points.is_some())
+        .filter(|candidate| {
+            !rows.iter().any(|other| {
+                if other.arm_ref == candidate.arm_ref || other.hit_rate_basis_points.is_none() {
+                    return false;
+                }
+                let candidate_hit = candidate.hit_rate_basis_points.unwrap_or_default();
+                let other_hit = other.hit_rate_basis_points.unwrap_or_default();
+                let candidate_causal = candidate.causal_coverage_basis_points.unwrap_or_default();
+                let other_causal = other.causal_coverage_basis_points.unwrap_or_default();
+                let candidate_time = candidate
+                    .p50_identification_milliseconds
+                    .value
+                    .unwrap_or(u64::MAX);
+                let other_time = other
+                    .p50_identification_milliseconds
+                    .value
+                    .unwrap_or(u64::MAX);
+                let no_worse = other_hit >= candidate_hit
+                    && other_causal >= candidate_causal
+                    && other_time <= candidate_time
+                    && other.total_tokens.unwrap_or(u64::MAX)
+                        <= candidate.total_tokens.unwrap_or(u64::MAX)
+                    && other.total_cost_micros.unwrap_or(u64::MAX)
+                        <= candidate.total_cost_micros.unwrap_or(u64::MAX)
+                    && other.false_positive_count <= candidate.false_positive_count
+                    && other.reviewer_active_seconds <= candidate.reviewer_active_seconds;
+                let strictly_better = other_hit > candidate_hit
+                    || other_causal > candidate_causal
+                    || other_time < candidate_time
+                    || other.total_tokens.unwrap_or(u64::MAX)
+                        < candidate.total_tokens.unwrap_or(u64::MAX)
+                    || other.total_cost_micros.unwrap_or(u64::MAX)
+                        < candidate.total_cost_micros.unwrap_or(u64::MAX)
+                    || other.false_positive_count < candidate.false_positive_count
+                    || other.reviewer_active_seconds < candidate.reviewer_active_seconds;
+                no_worse && strictly_better
+            })
+        })
+        .map(|row| row.arm_ref.clone())
+        .collect()
+}
+
 fn validate_bounded_refs(
     label: &str,
     refs: &[String],
@@ -1851,6 +2608,8 @@ pub enum ForensicsError {
     NoPromptDraft,
     #[error("the prompt schema, tool surface, or profile is incompatible")]
     IncompatiblePrompt,
+    #[error("the forensic run matrix is invalid: {0}")]
+    InvalidMatrix(String),
 }
 
 fn validate_ref(label: &str, value: &str) -> Result<(), ForensicsError> {
@@ -2526,5 +3285,239 @@ mod tests {
             workspace.check_compatibility(&profile),
             Err(ForensicsError::IncompatiblePrompt)
         );
+    }
+
+    fn matrix_arm(suffix: &str, digest_character: char) -> ForensicMatrixArm {
+        ForensicMatrixArm {
+            arm_ref: format!("arm.forensic.{suffix}"),
+            prompt_digest: digest(digest_character),
+            model_digest: digest('1'),
+            effort_ref: "effort.high".into(),
+            scope_ref: "scope.entropy".into(),
+            dependency_policy_ref: "dependency.pinned-recursive".into(),
+            random_seed: u64::from(digest_character as u32),
+            tool_surface_digest: digest('2'),
+            analysis_mode_ref: "analysis.static-and-build".into(),
+            worker_image_digest: digest('3'),
+            worker_profile_digest: digest('4'),
+            source_bundle_digest: digest(digest_character),
+            writable_disk_ref: format!("disk.{suffix}"),
+            provider_session_ref: format!("provider-session.{suffix}"),
+            auth_home_ref: format!("auth-home.{suffix}"),
+            environment_ref: format!("environment.{suffix}"),
+            worker_state_ref: format!("worker-state.{suffix}"),
+        }
+    }
+
+    fn matrix_run(
+        suffix: &str,
+        arm_ref: &str,
+        outcome: ForensicMatrixOutcome,
+    ) -> ForensicMatrixRun {
+        let hit = outcome == ForensicMatrixOutcome::Hit;
+        let miss = outcome == ForensicMatrixOutcome::Miss;
+        ForensicMatrixRun {
+            run_ref: format!("run.matrix.{suffix}"),
+            run_digest: digest(match suffix {
+                "hit-a" => '5',
+                "hit-b" => '6',
+                "miss" => '7',
+                _ => '8',
+            }),
+            arm_ref: arm_ref.into(),
+            dataset_split: if outcome == ForensicMatrixOutcome::NotEligible {
+                ForensicDatasetSplit::Development
+            } else {
+                ForensicDatasetSplit::Holdout
+            },
+            population: if outcome == ForensicMatrixOutcome::NotEligible {
+                ForensicMatrixPopulation::Incomplete
+            } else {
+                ForensicMatrixPopulation::Vulnerable
+            },
+            coverage_status: if outcome == ForensicMatrixOutcome::NotEligible {
+                CoverageStatus::Incomplete
+            } else {
+                CoverageStatus::Complete
+            },
+            outcome,
+            censored: miss,
+            censor_at_milliseconds: miss.then_some(60_000),
+            identification_milliseconds: hit.then_some(if suffix == "hit-a" {
+                8_000
+            } else {
+                12_000
+            }),
+            identification_tokens: hit.then_some(if suffix == "hit-a" { 2_000 } else { 3_000 }),
+            total_tokens: Some(if miss { 10_000 } else { 4_000 }),
+            token_exactness: ForensicExactness::Exact,
+            cost_micros: Some(if miss { 500_000 } else { 200_000 }),
+            cost_exactness: ForensicExactness::Exact,
+            causal_links_supported: if hit { 4 } else { 0 },
+            causal_links_required: if hit { 4 } else { 0 },
+            false_positive_count: 0,
+            reviewer_active_seconds: hit.then_some(90),
+            budget_compliant: true,
+            cleanup_observed: true,
+            qualified_finding_refs: if hit {
+                vec!["finding.coldcard.entropy-fallback".into()]
+            } else {
+                Vec::new()
+            },
+            failure_refs: if miss {
+                vec![format!("failure.{suffix}")]
+            } else {
+                Vec::new()
+            },
+            event_refs: vec![format!("event.{suffix}")],
+            receipt_refs: vec![format!("receipt.{suffix}")],
+        }
+    }
+
+    fn matrix_gates() -> ForensicMatrixHardGates {
+        ForensicMatrixHardGates {
+            input_complete: true,
+            isolation_complete: true,
+            clean_control: true,
+            evidence_quality: true,
+            budget_compliant: true,
+            cleanup_complete: true,
+            hit_rate_not_regressed: true,
+        }
+    }
+
+    fn matrix_projection(
+        request_promotion: bool,
+    ) -> Result<ForensicsMatrixProjection, ForensicsError> {
+        let candidate = matrix_arm("candidate", 'a');
+        let incomplete = matrix_arm("incomplete", 'b');
+        ForensicsMatrixProjection::rebuild(
+            "matrix.forensic.fixture".into(),
+            digest('c'),
+            digest('d'),
+            digest('e'),
+            10,
+            vec![candidate.clone(), incomplete.clone()],
+            vec![
+                matrix_run("hit-a", &candidate.arm_ref, ForensicMatrixOutcome::Hit),
+                matrix_run("hit-b", &candidate.arm_ref, ForensicMatrixOutcome::Hit),
+                matrix_run("miss", &candidate.arm_ref, ForensicMatrixOutcome::Miss),
+                matrix_run(
+                    "incomplete",
+                    &incomplete.arm_ref,
+                    ForensicMatrixOutcome::NotEligible,
+                ),
+            ],
+            matrix_gates(),
+            ForensicParetoStatus::NonDominated,
+            request_promotion,
+        )
+    }
+
+    #[test]
+    fn matrix_retains_misses_censoring_small_samples_and_population_separation() {
+        let matrix = matrix_projection(false).expect("matrix");
+        let candidate = &matrix.rows[0];
+        assert_eq!((candidate.hit_count, candidate.miss_count), (2, 1));
+        assert_eq!(candidate.identification_observations_milliseconds.len(), 3);
+        assert_eq!(candidate.identification_observations_milliseconds[2], None);
+        assert_eq!(
+            candidate.p50_identification_milliseconds.status,
+            ForensicStatisticStatus::Provisional
+        );
+        assert_eq!(
+            candidate.tail_identification_milliseconds.status,
+            ForensicStatisticStatus::NotEstimable
+        );
+        assert_eq!(matrix.rows[1].eligible_count, 0);
+        assert_eq!(matrix.rows[1].sample_count, 1);
+        assert_eq!(candidate.event_refs.len(), 3);
+        assert_eq!(candidate.receipt_refs.len(), 3);
+        assert_eq!(matrix.recall_time_curve.len(), 2);
+        assert_eq!(matrix.recall_time_curve[1].recall_basis_points, 6_666);
+        assert_eq!(
+            matrix.finding_divergence.common_finding_refs,
+            vec!["finding.coldcard.entropy-fallback"]
+        );
+        assert_eq!(
+            matrix.pareto_frontier_arm_refs,
+            vec!["arm.forensic.candidate"]
+        );
+    }
+
+    #[test]
+    fn matrix_rejects_shared_writable_or_hidden_state_between_arms() {
+        let first = matrix_arm("first", 'a');
+        let mut second = matrix_arm("second", 'b');
+        second.auth_home_ref = first.auth_home_ref.clone();
+        let result = ForensicsMatrixProjection::rebuild(
+            "matrix.forensic.isolation".into(),
+            digest('c'),
+            digest('d'),
+            digest('e'),
+            3,
+            vec![first.clone(), second],
+            vec![matrix_run(
+                "hit-a",
+                &first.arm_ref,
+                ForensicMatrixOutcome::Hit,
+            )],
+            matrix_gates(),
+            ForensicParetoStatus::NonDominated,
+            false,
+        );
+        assert!(matches!(result, Err(ForensicsError::InvalidMatrix(_))));
+    }
+
+    #[test]
+    fn quality_cleanup_budget_or_hard_gate_regressions_block_promotion() {
+        assert!(matrix_projection(true).expect("safe matrix").promoted);
+
+        let candidate = matrix_arm("candidate", 'a');
+        let mut run = matrix_run("hit-a", &candidate.arm_ref, ForensicMatrixOutcome::Hit);
+        run.false_positive_count = 1;
+        let matrix = ForensicsMatrixProjection::rebuild(
+            "matrix.forensic.blocked".into(),
+            digest('c'),
+            digest('d'),
+            digest('e'),
+            3,
+            vec![candidate],
+            vec![run],
+            matrix_gates(),
+            ForensicParetoStatus::Dominates,
+            true,
+        )
+        .expect("truthful blocked matrix");
+        assert!(!matrix.promoted);
+    }
+
+    #[test]
+    fn unavailable_matrix_usage_never_becomes_numeric_zero() {
+        let candidate = matrix_arm("candidate", 'a');
+        let mut run = matrix_run("hit-a", &candidate.arm_ref, ForensicMatrixOutcome::Hit);
+        run.total_tokens = None;
+        run.token_exactness = ForensicExactness::Unavailable;
+        run.cost_micros = None;
+        run.cost_exactness = ForensicExactness::Unavailable;
+        let matrix = ForensicsMatrixProjection::rebuild(
+            "matrix.forensic.unavailable".into(),
+            digest('c'),
+            digest('d'),
+            digest('e'),
+            3,
+            vec![candidate],
+            vec![run],
+            matrix_gates(),
+            ForensicParetoStatus::NonDominated,
+            false,
+        )
+        .expect("matrix with unavailable usage");
+        assert_eq!(matrix.rows[0].total_tokens, None);
+        assert_eq!(
+            matrix.rows[0].token_exactness,
+            ForensicExactness::Unavailable
+        );
+        assert_eq!(matrix.rows[0].total_cost_micros, None);
     }
 }
