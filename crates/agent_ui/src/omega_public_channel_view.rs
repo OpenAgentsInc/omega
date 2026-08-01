@@ -15,12 +15,18 @@ use std::{
 
 use editor::{Editor, EditorEvent};
 use gpui::{
-    Action as _, AnyElement, Context, Entity, EventEmitter, FollowMode, ImageSource, ListAlignment,
-    ListSizingBehavior, ListState, ObjectFit, ParentElement as _, PromptLevel, Render, Role,
-    SharedString, Styled as _, Task, Window, img, list, px,
+    Action as _, AnyElement, App, Context, Entity, EventEmitter, FocusHandle, Focusable,
+    FollowMode, ImageSource, ListAlignment, ListSizingBehavior, ListState, ObjectFit,
+    ParentElement as _, PromptLevel, Render, Role, SharedString, Styled as _, Task, Window, img,
+    list, px,
 };
 use http_client::HttpClient;
-use omega_actions::{IdentityActivationEvents, IdentityActivationOutcome, OpenOnboarding};
+use omega_actions::{
+    IdentityActivationEvents, IdentityActivationOutcome, OpenOnboarding,
+    community_sarah::{
+        JoinRoom, LeaveRoom, ModeratorStop, RemoveSarah, SummonSarah, TalkToSarah, ToggleMute,
+    },
+};
 use omega_identity::{
     AccountRegistryService, DurableIdentityActionDecision, HeldIdentityAction, SignerKind,
 };
@@ -162,6 +168,7 @@ pub enum PublicChannelViewEvent {
 }
 
 pub struct PublicChannelView {
+    focus_handle: FocusHandle,
     descriptor: ChannelDescriptor,
     http_client: Arc<dyn HttpClient>,
     composer: Entity<Editor>,
@@ -194,6 +201,12 @@ pub struct PublicChannelView {
 
 impl EventEmitter<PublicChannelViewEvent> for PublicChannelView {}
 
+impl Focusable for PublicChannelView {
+    fn focus_handle(&self, _cx: &App) -> FocusHandle {
+        self.focus_handle.clone()
+    }
+}
+
 impl PublicChannelView {
     pub fn new(
         descriptor: ChannelDescriptor,
@@ -223,6 +236,7 @@ impl PublicChannelView {
             omega_effectd::openagents_session_if_initialized(cx).is_some(),
         );
         Self {
+            focus_handle: cx.focus_handle(),
             descriptor,
             http_client,
             composer,
@@ -2178,76 +2192,83 @@ impl PublicChannelView {
                     .gap_1()
                     .child(
                         Button::new("omega-room-voice-join", "Join")
+                            .debug_selector(|| "omega-room-voice-join".to_string())
                             .tab_index(0isize)
                             .size(ButtonSize::Compact)
                             .style(ButtonStyle::Filled)
                             .disabled(!state.control_enabled(CommunitySarahControl::Join))
-                            .on_click(cx.listener(|this, _, _, cx| {
-                                this.begin_sarah_control(CommunitySarahControl::Join, cx);
-                            })),
+                            .on_click(|_, window, cx| {
+                                window.dispatch_action(JoinRoom.boxed_clone(), cx);
+                            }),
                     )
                     .child(
                         Button::new("omega-room-voice-leave", "Leave")
+                            .debug_selector(|| "omega-room-voice-leave".to_string())
                             .tab_index(1isize)
                             .size(ButtonSize::Compact)
                             .style(ButtonStyle::Subtle)
                             .disabled(!state.control_enabled(CommunitySarahControl::Leave))
-                            .on_click(cx.listener(|this, _, _, cx| {
-                                this.begin_sarah_control(CommunitySarahControl::Leave, cx);
-                            })),
+                            .on_click(|_, window, cx| {
+                                window.dispatch_action(LeaveRoom.boxed_clone(), cx);
+                            }),
                     )
                     .child(
                         Button::new(
                             "omega-room-voice-mute",
                             if state.muted { "Unmute" } else { "Mute" },
                         )
+                        .debug_selector(|| "omega-room-voice-mute".to_string())
                         .tab_index(2isize)
                         .size(ButtonSize::Compact)
                         .style(ButtonStyle::Subtle)
                         .disabled(!state.control_enabled(CommunitySarahControl::Mute))
-                        .on_click(cx.listener(|this, _, _, cx| {
-                            this.begin_sarah_control(CommunitySarahControl::Mute, cx);
-                        })),
+                        .on_click(|_, window, cx| {
+                            window.dispatch_action(ToggleMute.boxed_clone(), cx);
+                        }),
                     )
                     .child(
                         Button::new("omega-room-sarah-summon", "Summon Sarah")
+                            .debug_selector(|| "omega-room-sarah-summon".to_string())
                             .tab_index(3isize)
                             .size(ButtonSize::Compact)
                             .style(ButtonStyle::Subtle)
                             .disabled(!state.control_enabled(CommunitySarahControl::Summon))
-                            .on_click(cx.listener(|this, _, _, cx| {
-                                this.begin_sarah_control(CommunitySarahControl::Summon, cx);
-                            })),
+                            .on_click(|_, window, cx| {
+                                window.dispatch_action(SummonSarah.boxed_clone(), cx);
+                            }),
                     )
                     .child(
                         Button::new("omega-room-sarah-remove", "Remove Sarah")
+                            .debug_selector(|| "omega-room-sarah-remove".to_string())
                             .tab_index(4isize)
                             .size(ButtonSize::Compact)
                             .style(ButtonStyle::Subtle)
                             .disabled(!state.control_enabled(CommunitySarahControl::Remove))
-                            .on_click(cx.listener(|this, _, _, cx| {
-                                this.begin_sarah_control(CommunitySarahControl::Remove, cx);
-                            })),
+                            .on_click(|_, window, cx| {
+                                window.dispatch_action(RemoveSarah.boxed_clone(), cx);
+                            }),
                     )
                     .child(
                         Button::new("omega-room-sarah-talk", "Talk to Sarah")
+                            .debug_selector(|| "omega-room-sarah-talk".to_string())
                             .tab_index(5isize)
                             .size(ButtonSize::Compact)
                             .style(ButtonStyle::Filled)
                             .disabled(!state.control_enabled(CommunitySarahControl::Talk))
-                            .on_click(cx.listener(|this, _, _, cx| {
-                                this.begin_sarah_control(CommunitySarahControl::Talk, cx);
-                            })),
+                            .on_click(|_, window, cx| {
+                                window.dispatch_action(TalkToSarah.boxed_clone(), cx);
+                            }),
                     )
                     .child(
                         Button::new("omega-room-sarah-stop", "Stop")
+                            .debug_selector(|| "omega-room-sarah-stop".to_string())
                             .tab_index(6isize)
                             .size(ButtonSize::Compact)
                             .style(ButtonStyle::Subtle)
                             .disabled(!state.control_enabled(CommunitySarahControl::ModeratorStop))
-                            .on_click(cx.listener(|this, _, _, cx| {
-                                this.begin_sarah_control(CommunitySarahControl::ModeratorStop, cx);
-                            })),
+                            .on_click(|_, window, cx| {
+                                window.dispatch_action(ModeratorStop.boxed_clone(), cx);
+                            }),
                     ),
             )
             .child(
@@ -2310,7 +2331,33 @@ impl Render for PublicChannelView {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let facts = self.selected_facts();
         let compact = window.viewport_size().width < COMPACT_FACTS_THRESHOLD;
-        let mut view = v_flex().size_full().min_h_0().overflow_hidden();
+        let mut view = v_flex()
+            .key_context("PublicChannelSarahRoom")
+            .track_focus(&self.focus_handle)
+            .size_full()
+            .min_h_0()
+            .overflow_hidden()
+            .on_action(cx.listener(|this, _: &JoinRoom, _, cx| {
+                this.begin_sarah_control(CommunitySarahControl::Join, cx);
+            }))
+            .on_action(cx.listener(|this, _: &LeaveRoom, _, cx| {
+                this.begin_sarah_control(CommunitySarahControl::Leave, cx);
+            }))
+            .on_action(cx.listener(|this, _: &ToggleMute, _, cx| {
+                this.begin_sarah_control(CommunitySarahControl::Mute, cx);
+            }))
+            .on_action(cx.listener(|this, _: &SummonSarah, _, cx| {
+                this.begin_sarah_control(CommunitySarahControl::Summon, cx);
+            }))
+            .on_action(cx.listener(|this, _: &RemoveSarah, _, cx| {
+                this.begin_sarah_control(CommunitySarahControl::Remove, cx);
+            }))
+            .on_action(cx.listener(|this, _: &TalkToSarah, _, cx| {
+                this.begin_sarah_control(CommunitySarahControl::Talk, cx);
+            }))
+            .on_action(cx.listener(|this, _: &ModeratorStop, _, cx| {
+                this.begin_sarah_control(CommunitySarahControl::ModeratorStop, cx);
+            }));
         if let Some(banner) = self.render_lifecycle_banner() {
             view = view.child(
                 div()
@@ -2723,6 +2770,84 @@ mod tests {
                 .is_some(),
             "the complete room-control row must remain discoverable at compact width"
         );
+    }
+
+    #[gpui::test]
+    fn community_sarah_actions_drive_pointer_keyboard_and_direct_dispatch(cx: &mut TestAppContext) {
+        init_test(cx);
+        let window_handle = cx.add_window(|window, cx| {
+            let http_client: Arc<dyn HttpClient> = FakeHttpClient::with_404_response();
+            PublicChannelView::new(
+                descriptor("agent-chat", "wss://relay.example"),
+                http_client,
+                window,
+                cx,
+            )
+        });
+        cx.update(|cx| {
+            let bindings = settings::KeymapFile::load_asset_allow_partial_failure(
+                "keymaps/default-macos.json",
+                cx,
+            )
+            .expect("the shipped macOS keymap must contain the room actions");
+            cx.bind_keys(bindings);
+        });
+        cx.run_until_parked();
+        let mut cx = VisualTestContext::from_window(window_handle.into(), cx);
+        window_handle
+            .update(&mut cx, |view, window, cx| {
+                view.focus_handle(cx).focus(window, cx);
+            })
+            .expect("focus public channel action boundary");
+
+        let join_for_test = |cx: &mut VisualTestContext| {
+            window_handle
+                .update(cx, |view, _, cx| {
+                    view.sarah_room.configure(
+                        CommunityRoomContext {
+                            community_ref: "community:testers".into(),
+                            channel_ref: "channel:agent-chat".into(),
+                        },
+                        true,
+                    );
+                    view.sarah_room
+                        .apply_authority(
+                            community_sarah_authority(),
+                            CommunityRoomRole::Moderator,
+                            CommunitySarahState::Idle,
+                            1_000,
+                        )
+                        .expect("verified test authority");
+                    cx.notify();
+                })
+                .expect("configure joined room");
+            cx.run_until_parked();
+        };
+        let assert_left = |cx: &mut VisualTestContext| {
+            window_handle
+                .update(cx, |view, _, _| {
+                    assert_eq!(
+                        view.sarah_room.lifecycle,
+                        CommunityCallLifecycle::ReadyToJoin
+                    );
+                })
+                .expect("read room lifecycle");
+        };
+
+        join_for_test(&mut cx);
+        let leave = cx
+            .debug_bounds("omega-room-voice-leave")
+            .expect("leave control");
+        cx.simulate_click(leave.center(), Modifiers::default());
+        assert_left(&mut cx);
+
+        join_for_test(&mut cx);
+        cx.dispatch_action(LeaveRoom);
+        assert_left(&mut cx);
+
+        join_for_test(&mut cx);
+        cx.simulate_keystrokes("cmd-k l");
+        assert_left(&mut cx);
     }
 
     #[gpui::test]

@@ -119,6 +119,16 @@ pub const ADMITTED_NAMESPACES: &[&str] = &[
 /// `OMEGA-DELTA-0011` removed, and `ResetHints` belongs to the welcome-screen
 /// journey zero base does not render.
 pub const ADMITTED_ACTIONS: &[&str] = &[
+    // OMEGA-DELTA-0221. These actions operate only the selected public
+    // channel's bounded community-room model. Admitting them individually
+    // keeps the rest of the community and workspace namespaces closed.
+    "community_sarah::JoinRoom",
+    "community_sarah::LeaveRoom",
+    "community_sarah::ToggleMute",
+    "community_sarah::SummonSarah",
+    "community_sarah::RemoveSarah",
+    "community_sarah::TalkToSarah",
+    "community_sarah::ModeratorStop",
     // OMEGA-DELTA-0175. Clean-profile Vim editor actions, mechanically checked
     // against the shipped keymap. Helix and workspace-management actions stay refused.
     "vim::AngleBrackets",
@@ -535,6 +545,13 @@ mod tests {
     #[test]
     fn the_admitted_set_is_the_exo_surface_and_nothing_else() {
         for admitted in [
+            "community_sarah::JoinRoom",
+            "community_sarah::LeaveRoom",
+            "community_sarah::ToggleMute",
+            "community_sarah::SummonSarah",
+            "community_sarah::RemoveSarah",
+            "community_sarah::TalkToSarah",
+            "community_sarah::ModeratorStop",
             "agent::Chat",
             "agent::ToggleFocus",
             "editor::Backspace",

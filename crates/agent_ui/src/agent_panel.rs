@@ -5790,7 +5790,7 @@ impl AgentPanel {
             self.showing_full_auto = false;
             self.showing_sarah_admission = false;
             self.threads_sidebar_refusal = None;
-            self.focus_handle.focus(window, cx);
+            view.read(cx).focus_handle(cx).focus(window, cx);
             cx.emit(AgentPanelEvent::ActiveViewChanged);
             cx.notify();
         }
@@ -8423,8 +8423,12 @@ impl agent::SiblingThreadHost for AgentPanelSiblingHost {
 
 impl Focusable for AgentPanel {
     fn focus_handle(&self, cx: &App) -> FocusHandle {
-        if self.public_channels.selected_channel().is_some() {
-            return self.focus_handle.clone();
+        if let Some(view) = self
+            .public_channels
+            .selected_channel_id()
+            .and_then(|channel_id| self.public_channel_views.get(channel_id))
+        {
+            return view.read(cx).focus_handle(cx);
         }
         // The Full Auto surface owns focus while it is showing, so its
         // objective editor is what a keystroke reaches. `OMEGA-DELTA-0020`.
@@ -8466,8 +8470,12 @@ impl Panel for AgentPanel {
     }
 
     fn activation_focus_handle(&self, cx: &App) -> FocusHandle {
-        if self.public_channels.selected_channel().is_some() {
-            return self.focus_handle.clone();
+        if let Some(view) = self
+            .public_channels
+            .selected_channel_id()
+            .and_then(|channel_id| self.public_channel_views.get(channel_id))
+        {
+            return view.read(cx).focus_handle(cx);
         }
         match self.visible_surface() {
             VisibleSurface::Uninitialized => self.focus_handle.clone(),

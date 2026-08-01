@@ -5585,6 +5585,37 @@ mod tests {
         });
     }
 
+    #[gpui::test]
+    async fn community_sarah_default_keybindings_resolve_at_startup(cx: &mut gpui::TestAppContext) {
+        init_keymap_test(cx);
+        cx.update(|cx| {
+            let expected = [
+                "community_sarah::JoinRoom",
+                "community_sarah::LeaveRoom",
+                "community_sarah::ModeratorStop",
+                "community_sarah::RemoveSarah",
+                "community_sarah::SummonSarah",
+                "community_sarah::TalkToSarah",
+                "community_sarah::ToggleMute",
+            ];
+            for path in [
+                "keymaps/default-macos.json",
+                "keymaps/default-linux.json",
+                "keymaps/default-windows.json",
+            ] {
+                let bindings = KeymapFile::load_asset(path, Some(KeybindSource::Default), cx)
+                    .unwrap_or_else(|error| panic!("{path} must load at startup: {error}"));
+                let mut observed = bindings
+                    .iter()
+                    .map(|binding| binding.action().name())
+                    .filter(|name| name.starts_with("community_sarah::"))
+                    .collect::<Vec<_>>();
+                observed.sort_unstable();
+                assert_eq!(observed, expected, "{path} lost a room action binding");
+            }
+        });
+    }
+
     /// Checks that action namespaces are the expected set. The purpose of this is to prevent typos
     /// and let you know when introducing a new namespace.
     #[gpui::test]
@@ -5642,6 +5673,7 @@ mod tests {
                 "client",
                 "collab",
                 "command_palette",
+                "community_sarah",
                 "context_server",
                 "copilot",
                 "debug_panel",

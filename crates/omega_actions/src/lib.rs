@@ -1010,6 +1010,31 @@ pub mod workroom {
     );
 }
 
+/// Actions for Sarah voice in the selected tester/community channel.
+pub mod community_sarah {
+    use gpui::actions;
+
+    actions!(
+        community_sarah,
+        [
+            /// Joins voice for the selected tester/community channel.
+            JoinRoom,
+            /// Leaves voice for the selected tester/community channel.
+            LeaveRoom,
+            /// Mutes or unmutes the local community-room microphone.
+            ToggleMute,
+            /// Summons Sarah into the selected community room.
+            SummonSarah,
+            /// Removes Sarah from the selected community room.
+            RemoveSarah,
+            /// Requests or transfers the bounded Sarah speaking floor.
+            TalkToSarah,
+            /// Ends Sarah's community-room presence with moderator authority.
+            ModeratorStop
+        ]
+    );
+}
+
 actions!(
     debugger,
     [

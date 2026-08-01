@@ -291,54 +291,24 @@ does not infer authority from a LiveKit display name, participant metadata, or
 active-speaker state. Moderators may request an immediate server stop. LiveKit
 continues to carry media only.
 
-The production projection intentionally remains unavailable. OpenAgents now
-has authenticated current snapshots, summon/remove, member/moderator floor
-operations, persisted participant bindings, and worker enforcement. The
-remaining blocker is the room rendezvous itself: production provisioning
-derives `roomRef` and `sarahPresenceLeaseRef` from each caller's
-`sessionRef:generation`. There is no authenticated community/channel lookup
-that returns one stable room/presence lease to three independently admitted
-desktops, nor a monotonic update transport for that shared authority.
+The production projection consumes OpenAgents' stable community/channel
+rendezvous through authenticated join, snapshot, summon/remove, member-floor,
+and moderator-floor routes. The join response supplies the shared room and
+presence references, short-lived participant grant, verified mapping, and
+initial authority snapshot before the media adapter connects.
 
-OpenAgents must publish that stable community-room join contract before Omega
-can consume the routes. Otherwise enabling **Join** would place each desktop
-in a different room while presenting a shared-room UI.
+Every drawn operation is also a registered `community_sarah::*` GPUI action.
+Pointer clicks dispatch those actions, the selected channel handles them, and
+zero base admits the seven exact actions without admitting a broad namespace.
+The `PublicChannelSarahRoom` key context binds them behind `Cmd-K` on macOS and
+`Ctrl-K` on Linux/Windows: J join, L leave, M mute, S summon, R remove, T talk,
+and X moderator stop.
 
-The minimum consumable server change is:
-
-1. Persist one active community-room binding under a uniqueness key containing
-   `communityRef`, `channelRef`, `membershipRevision`, and `roomEpoch`.
-   `roomRef` and `sarahPresenceLeaseRef` come from that binding, never from a
-   caller's private session reference.
-2. Add an authenticated join/bootstrap operation accepting
-   `communityRef`/`channelRef`. It verifies current membership, creates or
-   compare-and-swap reuses the active binding, binds the caller's Nostr user to
-   a fresh LiveKit participant, and returns one short-lived participant grant.
-3. Return, in the same response, `livekitUrl`, `roomRef`, `roomEpoch`,
-   `participantRef`, `sarahParticipantRef`, `participantGrant`,
-   `joinExpiresAtMs`, `presenceLeaseRef`, and the current
-   `openagents.sarah.livekit-room-authority.v1` snapshot. This gives Omega no
-   interval in which media is joined but identity/floor authority is unknown.
-4. Keep the existing snapshot, summon/remove, member-floor, and
-   moderator-floor operations keyed by that returned `presenceLeaseRef`.
-   Snapshot reads must expose monotonically increasing revisions; polling is
-   sufficient for the 0.2.0 desktop cut if no push feed is admitted.
-5. On membership-revision change or moderator teardown, atomically retire the
-   binding, stop the worker/provider generation, invalidate every participant
-   grant/floor lease, increment `roomEpoch`, and require a new bootstrap.
-6. Make concurrent first joins idempotent. Only one LiveKit room, Sarah
-   dispatch, provider generation, and accounting owner may win; losing
-   bootstrap attempts read and join that winner rather than provisioning
-   another room.
-
-With that response Omega can implement **Join** as one authenticated bootstrap,
-validate/apply the returned authority, connect the existing pinned LiveKit
-adapter with the returned grant, and then drive the existing operations. No
-display name or LiveKit participant metadata becomes authority.
-
-Until those exist, Omega draws the surface and its unavailable reason but does
-not emit join, summon, removal, or floor requests. The UI model seam and
-hermetic fixtures are not production authority.
+Source readiness is not release evidence. rc29 predates this action surface,
+and no later packaged candidate has preserved the required live three-desktop
+journey. The release row remains blocked until candidate-bound observations
+prove the shared room, floor transfer, audio fanout, moderator stop, identity
+consistency, and refusal cases.
 
 ## Editor command bridge
 

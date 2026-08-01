@@ -68,6 +68,14 @@ candidate producer. Two binding fields are deliberately unversioned because
 Sarah has no model catalog revision and no price catalog revision, only pinned
 constants and raw production environment values.
 
+Source-readiness note, 2026-08-01: the community-room controls after rc29 are
+registered `community_sarah::*` GPUI actions, individually admitted by zero
+base, handled by the selected channel, and bound in all three default keymaps.
+Pointer, keyboard, and direct dispatch therefore reach the same governed
+control path without experimental Accessibility automation. This removes the
+client-driver prerequisite for a later candidate; it does not change any rc29
+row or claim that the live three-desktop journey has occurred.
+
 Harness hermeticity note, 2026-07-31, now fixed: the first `control-crawl` run
 against this candidate reported `automated-fail` because a cached test binary in
 the shared `target/` directory had a deleted worktree's `CARGO_MANIFEST_DIR`

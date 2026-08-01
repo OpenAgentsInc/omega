@@ -9857,3 +9857,39 @@ or `turn_tls_completed` without the measured objects is refused.
   `livekit_reconnect_fence_refuses_overlap_and_revival`,
   and `livekit_transport_receipt_hashes_generation_and_room_identity`; and
   `script/omega-release-gate --self-test`.
+### OMEGA-DELTA-0221 — Community Sarah controls have one governed dispatch surface
+
+The tester-channel room controls were working buttons but not durable product
+actions. Join, Leave, Mute, Summon Sarah, Remove Sarah, Talk to Sarah, and
+moderator Stop lived only inside `on_click` closures. A pointer could reach
+them, but a keymap, accessibility driver, or deterministic packaged-client
+operator could not name the same operation. That made the live three-desktop
+journey depend on somebody clicking five controls in three windows.
+
+**Every room operation is a registered action.** The seven operations live in
+the `community_sarah` action namespace. The selected public channel installs
+all seven handlers beside its `PublicChannelSarahRoom` key context. Buttons
+dispatch the actions instead of mutating the model directly, so pointer,
+keyboard, and direct action dispatch cannot acquire separate authority logic.
+
+**Admission stays narrow.** Zero base admits the seven full action names, not
+the namespace. A community-room control still passes through the process-wide
+action gate while unrelated community or workspace capabilities remain
+closed.
+
+**The default keymaps can drive the complete row.** A context-scoped `Cmd-K`
+chord on macOS and `Ctrl-K` chord on Linux/Windows binds J join, L leave, M
+mute, S summon, R remove, T talk, and X moderator stop. The context exists only
+on the selected tester-channel view, so those mnemonics do not replace editor
+bindings elsewhere.
+
+**Source readiness is not installed evidence.** rc29 predates these actions,
+and the live three-desktop journey has not been observed on a later package.
+The release row remains blocked until one exact packaged candidate preserves
+the room, floor, audio, moderator, identity, and refusal facts.
+
+- **Enforced by:**
+  `community_sarah_actions_drive_pointer_keyboard_and_direct_dispatch` in
+  `agent_ui`; `community_sarah_default_keybindings_resolve_at_startup` in
+  `omega`; `community_room_controls_have_one_governed_dispatch_surface` in
+  `omega_deltas`; and the exact-action assertions in `omega_zero_base`.

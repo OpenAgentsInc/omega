@@ -40,20 +40,18 @@ concluded from. A second admin key we hold outright is now stored as
 `openagents-monolith-00374-h4p`. Admission is repeatable from a reviewed tool:
 `apps/openagents.com/workers/api/scripts/admit-sarah-livekit-community-npub.ts`.
 
-**What still blocks the row is not a credential.** rc29 exposes the five controls this
-journey needs — Join room, Summon Sarah, Talk to Sarah, Stop — only as GPUI `on_click`
-closures in `crates/agent_ui/src/omega_public_channel_view.rs`. They are not registered
-GPUI actions, no keymap reaches them, the `omega` CLI flags target the agent-thread
-composer, the `zed://` URL scheme has no route for them, `omega-effectd` is a private
-stdio pipe between the app and its own child process, and `omega-device-bridge` is a
-read-only mirror that refuses every command frame by design. So the journey currently
-needs **a human clicking through three packaged instances**, and that is the only thing
-an owner could still supply.
+**The client dispatch blocker is fixed in source after rc29.** Join, Leave, Mute,
+Summon Sarah, Remove Sarah, Talk to Sarah, and moderator Stop are registered
+`community_sarah::*` GPUI actions. The selected channel handles pointer, direct action,
+and context-scoped keyboard dispatch through one control path, and zero base admits only
+those seven actions. No Accessibility automation or experimental environment flag is
+needed to drive them.
 
-The closest unattended path found is macOS Accessibility automation after opting each
-instance into `ZED_EXPERIMENTAL_A11Y=1`, which is undocumented, off by default, and named
-experimental. A run that needs it must disclose it as an environment deviation. The
-durable fix is to give these controls a real dispatch surface.
+This does **not** promote the installed row. rc29 predates those actions, and no later
+packaged candidate has completed the three-desktop journey. The next candidate still
+has to preserve the live room joins, floor transfer, shared answer, moderator stop, and
+all refusal observations against its exact package digest before omega#186/#187 can
+close under their acceptance rules.
 
 Two things that no longer need re-deriving: offline identity pre-seed is proven on rc29
 (write the raw 32-byte `identity.secret` plus a consistent `identity.json` /

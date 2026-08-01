@@ -1335,5 +1335,17 @@
       "tab": "skill_creator::FocusNextField",
       "shift-tab": "skill_creator::FocusPreviousField"
     }
+  },
+  {
+    "context": "PublicChannelSarahRoom",
+    "bindings": {
+      "ctrl-k j": "community_sarah::JoinRoom",
+      "ctrl-k l": "community_sarah::LeaveRoom",
+      "ctrl-k m": "community_sarah::ToggleMute",
+      "ctrl-k s": "community_sarah::SummonSarah",
+      "ctrl-k r": "community_sarah::RemoveSarah",
+      "ctrl-k t": "community_sarah::TalkToSarah",
+      "ctrl-k x": "community_sarah::ModeratorStop"
+    }
   }
 ]

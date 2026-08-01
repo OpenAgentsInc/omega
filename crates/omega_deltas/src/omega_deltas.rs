@@ -209,6 +209,7 @@ pub const ENFORCED_DELTAS: &[&str] = &[
     "OMEGA-DELTA-0218",
     "OMEGA-DELTA-0219",
     "OMEGA-DELTA-0220",
+    "OMEGA-DELTA-0221",
 ];
 
 /// OMEGA-DELTA-0204. Every control the composer's bar offers, written twice:
@@ -20789,14 +20790,14 @@ mod tests {
         }
         let selection = body_of(&panel, "select_public_channel");
         assert!(
-            selection.contains("self.focus_handle.focus(window, cx)"),
+            selection.contains("view.read(cx).focus_handle(cx).focus(window, cx)"),
             "OMEGA-DELTA-0160: keyboard or pointer selection no longer moves focus \
              into the selected channel surface in {}.",
             panel_path.display()
         );
         assert!(
             panel
-                .matches("if self.public_channels.selected_channel().is_some()")
+                .matches("return view.read(cx).focus_handle(cx)")
                 .count()
                 >= 2,
             "OMEGA-DELTA-0160: the panel focus and activation-focus contracts do \
@@ -23323,11 +23324,11 @@ mod tests {
         );
         for required in [
             "script/assemble-omega-sarah-livekit-evidence",
-            "roomRef`/`sarahPresenceLeaseRef`",
-            "`sessionRef:generation`",
-            "stable community-room join contract",
-            "concurrent first joins idempotent",
-            "participantGrant",
+            "stable community/channel",
+            "short-lived participant grant",
+            "initial authority snapshot",
+            "Source readiness is not release evidence",
+            "candidate-bound observations",
         ] {
             assert!(
                 docs.contains(required),
@@ -23629,6 +23630,80 @@ mod tests {
             registry
                 .contains("community_sarah_controls_are_compact_and_fail_closed_until_verified"),
             "OMEGA-DELTA-0215: the community Sarah scene lost its control-crawl registration"
+        );
+    }
+
+    /// OMEGA-DELTA-0221. Every community-room control is a registered,
+    /// individually admitted action reached by pointer, keyboard, and direct
+    /// dispatch through the same view handler.
+    #[test]
+    fn community_room_controls_have_one_governed_dispatch_surface() {
+        let actions = read_repository_file("crates/omega_actions/src/lib.rs");
+        let view = read_repository_file("crates/agent_ui/src/omega_public_channel_view.rs");
+        let panel = read_repository_file("crates/agent_ui/src/agent_panel.rs");
+        let startup = read_repository_file("crates/omega/src/zed.rs");
+
+        for (action, control) in [
+            ("JoinRoom", "Join"),
+            ("LeaveRoom", "Leave"),
+            ("ToggleMute", "Mute"),
+            ("SummonSarah", "Summon"),
+            ("RemoveSarah", "Remove"),
+            ("TalkToSarah", "Talk"),
+            ("ModeratorStop", "ModeratorStop"),
+        ] {
+            let action_name = format!("community_sarah::{action}");
+            assert!(
+                actions.contains(action),
+                "OMEGA-DELTA-0221: `{action_name}` is not registered"
+            );
+            assert!(
+                omega_zero_base::admits_action(&action_name),
+                "OMEGA-DELTA-0221: `{action_name}` is refused by zero base"
+            );
+            assert!(
+                view.contains(&format!("_: &{action}"))
+                    && view.contains(&format!(
+                        "begin_sarah_control(CommunitySarahControl::{control}, cx)"
+                    )),
+                "OMEGA-DELTA-0221: `{action_name}` lost its public-channel handler"
+            );
+            assert!(
+                view.contains(&format!(
+                    "window.dispatch_action({action}.boxed_clone(), cx)"
+                )),
+                "OMEGA-DELTA-0221: `{action_name}` is no longer the pointer path"
+            );
+            for keymap in [
+                "assets/keymaps/default-macos.json",
+                "assets/keymaps/default-linux.json",
+                "assets/keymaps/default-windows.json",
+            ] {
+                let keymap_source = read_repository_file(keymap);
+                assert!(
+                    keymap_source.contains("\"context\": \"PublicChannelSarahRoom\"")
+                        && keymap_source.contains(&action_name),
+                    "OMEGA-DELTA-0221: {keymap} cannot dispatch `{action_name}`"
+                );
+            }
+        }
+
+        for required in [
+            "community_sarah_actions_drive_pointer_keyboard_and_direct_dispatch",
+            ".track_focus(&self.focus_handle)",
+            "community_sarah_default_keybindings_resolve_at_startup",
+            "\"community_sarah\"",
+        ] {
+            assert!(
+                view.contains(required) || startup.contains(required),
+                "OMEGA-DELTA-0221: action/startup proof lost `{required}`"
+            );
+        }
+        assert!(
+            panel.contains("view.read(cx).focus_handle(cx).focus(window, cx)")
+                && panel.contains("return view.read(cx).focus_handle(cx)"),
+            "OMEGA-DELTA-0221: selecting a public channel no longer places its key context in \
+             the active dispatch path"
         );
     }
 
