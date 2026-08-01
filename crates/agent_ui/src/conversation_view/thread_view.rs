@@ -614,6 +614,7 @@ pub struct ThreadView {
     pub list_state: ListState,
     pub session_capabilities: SharedSessionCapabilities,
     pub expanded_tool_call_raw_inputs: HashSet<acp::ToolCallId>,
+    collapsed_comet_tool_groups: HashSet<acp::ToolCallId>,
     collapsed_sandbox_authorization_details: HashSet<acp::ToolCallId>,
     collapsed_sandbox_network_details: HashSet<acp::ToolCallId>,
     /// Sandbox escalation prompts whose "surprising Unicode" warning the user
@@ -1139,6 +1140,7 @@ impl ThreadView {
             last_token_limit_telemetry: None,
             thread_feedback: Default::default(),
             expanded_tool_call_raw_inputs: HashSet::default(),
+            collapsed_comet_tool_groups: HashSet::default(),
             collapsed_sandbox_authorization_details: HashSet::default(),
             collapsed_sandbox_network_details: HashSet::default(),
             acknowledged_confusable_warnings: HashSet::default(),
@@ -6794,10 +6796,17 @@ fn sandbox_network_rows(network: &SandboxNetPolicy) -> Vec<SandboxRow> {
 impl ThreadView {
     fn render_entries(&mut self, cx: &mut Context<Self>) -> List {
         let max_content_width = AgentSettings::get_global(cx).max_content_width;
+        let comet_mode = omega_zero_base::is_comet_mode();
         let centered_container = move |content: AnyElement| {
             h_flex().w_full().justify_center().child(
                 div()
-                    .when_some(max_content_width, |this, max_w| this.max_w(max_w))
+                    .map(|this| {
+                        if comet_mode {
+                            this.max_w(px(736.0))
+                        } else {
+                            this.when_some(max_content_width, |this, max_w| this.max_w(max_w))
+                        }
+                    })
                     .w_full()
                     .child(content),
             )
@@ -6876,7 +6885,26 @@ impl ThreadView {
                     self.agent_id.clone()
                 };
 
-                v_flex()
+                if omega_zero_base::is_comet_mode() && !editing {
+                    v_flex()
+                        .id(("comet-user-message", entry_ix))
+                        .w_full()
+                        .pt(px(7.0))
+                        .pb(px(7.0))
+                        .items_end()
+                        .child(
+                            div()
+                                .max_w(relative(0.8))
+                                .px(px(16.0))
+                                .py(px(10.0))
+                                .rounded(px(16.0))
+                                .bg(cx.theme().colors().elevated_surface_background)
+                                .text_size(px(14.0))
+                                .child(editor.into_any_element()),
+                        )
+                        .into_any()
+                } else {
+                    v_flex()
                     .id(("user_message", entry_ix))
                     .map(|this| {
                         if is_first_indented {
@@ -7025,6 +7053,7 @@ impl ThreadView {
                             }),
                     )
                     .into_any()
+                }
             }
             AgentThreadEntry::AssistantMessage(AssistantMessage {
                 chunks,
@@ -7083,8 +7112,13 @@ impl ThreadView {
                     Empty.into_any()
                 } else {
                     v_flex()
-                        .px_5()
-                        .py_1p5()
+                        .map(|this| {
+                            if omega_zero_base::is_comet_mode() {
+                                this.px_0().py(px(7.0))
+                            } else {
+                                this.px_5().py_1p5()
+                            }
+                        })
                         .when(is_last, |this| this.pb_4())
                         .w_full()
                         .text_ui(cx)
@@ -7112,6 +7146,24 @@ impl ThreadView {
                     if !has_visible_content {
                         return Empty.into_any();
                     }
+                }
+
+                if omega_zero_base::is_comet_mode() && Self::comet_tool_call_is_groupable(tool_call)
+                {
+                    let entries = self.thread.read(cx).entries();
+                    let follows_groupable_tool =
+                        entry_ix.checked_sub(1).is_some_and(|previous_ix| {
+                            matches!(
+                                entries.get(previous_ix),
+                                Some(AgentThreadEntry::ToolCall(previous))
+                                    if Self::comet_tool_call_is_groupable(previous)
+                            )
+                        });
+                    if follows_groupable_tool {
+                        return Empty.into_any();
+                    }
+
+                    return self.render_comet_tool_group(entry_ix, window, cx);
                 }
 
                 let tool_call = self.render_any_tool_call(
@@ -9014,6 +9066,290 @@ impl ThreadView {
                 self.thread.read(cx).session_id() == &pending_session_id
                     && tool_call_id == &pending_tool_call_id
             })
+    }
+
+    fn comet_tool_call_is_groupable(tool_call: &ToolCall) -> bool {
+        !tool_call.is_subagent()
+            && !matches!(
+                tool_call.status,
+                ToolCallStatus::WaitingForConfirmation { .. }
+            )
+    }
+
+    fn comet_tool_kind_label(kind: acp::ToolKind) -> &'static str {
+        match kind {
+            acp::ToolKind::Read => "Read",
+            acp::ToolKind::Edit => "Edit",
+            acp::ToolKind::Delete => "Delete",
+            acp::ToolKind::Move => "Move",
+            acp::ToolKind::Search => "Search",
+            acp::ToolKind::Execute => "Run",
+            acp::ToolKind::Think => "Think",
+            acp::ToolKind::Fetch => "Fetch",
+            acp::ToolKind::SwitchMode => "Switch",
+            acp::ToolKind::Other | _ => "Tool",
+        }
+    }
+
+    fn comet_tool_kind_icon(kind: acp::ToolKind) -> IconName {
+        match kind {
+            acp::ToolKind::Read | acp::ToolKind::Search => IconName::ToolSearch,
+            acp::ToolKind::Edit => IconName::ToolPencil,
+            acp::ToolKind::Delete => IconName::ToolDeleteFile,
+            acp::ToolKind::Move | acp::ToolKind::SwitchMode => IconName::ArrowRightLeft,
+            acp::ToolKind::Execute => IconName::ToolTerminal,
+            acp::ToolKind::Think => IconName::ToolThink,
+            acp::ToolKind::Fetch => IconName::ToolWeb,
+            acp::ToolKind::Other | _ => IconName::ToolHammer,
+        }
+    }
+
+    fn comet_tool_group_summary(tool_calls: &[&ToolCall]) -> String {
+        let count = |kind| {
+            tool_calls
+                .iter()
+                .filter(|tool_call| tool_call.kind == kind)
+                .count()
+        };
+        let commands = count(acp::ToolKind::Execute);
+        let edits = count(acp::ToolKind::Edit);
+        let reads = count(acp::ToolKind::Read);
+        let searches = count(acp::ToolKind::Search);
+        let failures = tool_calls
+            .iter()
+            .filter(|tool_call| {
+                matches!(
+                    tool_call.status,
+                    ToolCallStatus::Failed | ToolCallStatus::Rejected | ToolCallStatus::Canceled
+                )
+            })
+            .count();
+        let mut clauses = Vec::new();
+
+        if commands > 0 {
+            clauses.push(format!(
+                "Ran {commands} {}",
+                if commands == 1 { "command" } else { "commands" }
+            ));
+        }
+        if edits > 0 {
+            clauses.push(format!(
+                "edited {edits} {}",
+                if edits == 1 { "file" } else { "files" }
+            ));
+        }
+        if reads > 0 {
+            clauses.push(format!(
+                "read {reads} {}",
+                if reads == 1 { "file" } else { "files" }
+            ));
+        }
+        if searches > 0 {
+            clauses.push(format!(
+                "searched {searches} {}",
+                if searches == 1 { "time" } else { "times" }
+            ));
+        }
+
+        let described = commands + edits + reads + searches;
+        let other = tool_calls.len().saturating_sub(described);
+        if other > 0 {
+            clauses.push(format!(
+                "used {other} {}",
+                if other == 1 { "tool" } else { "tools" }
+            ));
+        }
+        if failures > 0 {
+            clauses.push(format!("{failures} failed"));
+        }
+
+        let mut summary = clauses.join(" · ");
+        if let Some(first) = summary.get_mut(0..1) {
+            first.make_ascii_uppercase();
+        }
+        summary
+    }
+
+    fn render_comet_tool_group(
+        &self,
+        first_entry_ix: usize,
+        window: &Window,
+        cx: &Context<Self>,
+    ) -> AnyElement {
+        let thread = self.thread.read(cx);
+        let tool_calls = thread
+            .entries()
+            .iter()
+            .enumerate()
+            .skip(first_entry_ix)
+            .map_while(|(entry_ix, entry)| match entry {
+                AgentThreadEntry::ToolCall(tool_call)
+                    if Self::comet_tool_call_is_groupable(tool_call) =>
+                {
+                    Some((entry_ix, tool_call))
+                }
+                _ => None,
+            })
+            .collect::<Vec<_>>();
+        let Some((_, first_tool_call)) = tool_calls.first() else {
+            return Empty.into_any_element();
+        };
+        let first_tool_call_id = first_tool_call.id.clone();
+        let collapsed = self
+            .collapsed_comet_tool_groups
+            .contains(&first_tool_call_id);
+        let summary_calls = tool_calls
+            .iter()
+            .map(|(_, tool_call)| *tool_call)
+            .collect::<Vec<_>>();
+        let summary = Self::comet_tool_group_summary(&summary_calls);
+        let session_id = thread.session_id();
+        let focus_handle = self.focus_handle(cx);
+        let border = cx.theme().colors().text.opacity(0.07);
+        let wash = cx.theme().colors().text.opacity(0.03);
+        let icon_wash = cx.theme().colors().text.opacity(0.08);
+
+        v_flex()
+            .w_full()
+            .py(px(4.0))
+            .child(
+                h_flex()
+                    .id(("comet-tool-group-header", first_entry_ix))
+                    .h(px(26.0))
+                    .px(px(4.0))
+                    .gap(px(8.0))
+                    .cursor_pointer()
+                    .text_color(cx.theme().colors().text_muted)
+                    .hover(|style| style.text_color(cx.theme().colors().text))
+                    .child(
+                        h_flex()
+                            .size(px(18.0))
+                            .flex_none()
+                            .justify_center()
+                            .rounded(px(5.0))
+                            .bg(cx.theme().colors().text.opacity(0.06))
+                            .child(
+                                Icon::new(if collapsed {
+                                    IconName::ChevronRight
+                                } else {
+                                    IconName::ChevronDown
+                                })
+                                .size(IconSize::XSmall)
+                                .color(Color::Muted),
+                            ),
+                    )
+                    .child(
+                        Label::new(summary)
+                            .size(LabelSize::Custom(rems_from_px(12.0)))
+                            .color(Color::Muted)
+                            .buffer_font(cx),
+                    )
+                    .on_click(cx.listener(move |this, _, _, cx| {
+                        if !this.collapsed_comet_tool_groups.remove(&first_tool_call_id) {
+                            this.collapsed_comet_tool_groups
+                                .insert(first_tool_call_id.clone());
+                        }
+                        cx.notify();
+                    })),
+            )
+            .when(!collapsed, |group| {
+                group.child(v_flex().pt(px(2.0)).children(tool_calls.into_iter().map(
+                    |(entry_ix, tool_call)| {
+                        let failed = matches!(
+                            tool_call.status,
+                            ToolCallStatus::Failed
+                                | ToolCallStatus::Rejected
+                                | ToolCallStatus::Canceled
+                        );
+                        let expanded = self
+                            .entry_view_state
+                            .read(cx)
+                            .is_tool_call_expanded(&tool_call.id);
+                        let tool_call_id = tool_call.id.clone();
+                        let detail = tool_call.label.read(cx).source().trim().to_string();
+                        let label = Self::comet_tool_kind_label(tool_call.kind);
+                        let icon = Self::comet_tool_kind_icon(tool_call.kind);
+                        let chip = h_flex()
+                            .id(("comet-tool-chip", entry_ix))
+                            .h(px(38.0))
+                            .w_full()
+                            .flex_none()
+                            .cursor_pointer()
+                            .child(
+                                div().ml(px(12.0)).h_full().w(px(1.0)).flex_none().bg(cx
+                                    .theme()
+                                    .colors()
+                                    .text
+                                    .opacity(0.08)),
+                            )
+                            .child(
+                                h_flex()
+                                    .ml(px(12.0))
+                                    .h(px(30.0))
+                                    .min_w_0()
+                                    .flex_1()
+                                    .gap(px(8.0))
+                                    .overflow_hidden()
+                                    .rounded(px(9.0))
+                                    .border_1()
+                                    .border_color(border)
+                                    .bg(wash)
+                                    .px(px(8.0))
+                                    .hover(|style| style.bg(cx.theme().colors().element_hover))
+                                    .child(
+                                        h_flex()
+                                            .size(px(18.0))
+                                            .flex_none()
+                                            .justify_center()
+                                            .rounded(px(5.0))
+                                            .bg(icon_wash)
+                                            .child(
+                                                Icon::new(icon)
+                                                    .size(IconSize::XSmall)
+                                                    .color(Color::Muted),
+                                            ),
+                                    )
+                                    .child(
+                                        Label::new(label)
+                                            .size(LabelSize::Custom(rems_from_px(12.0)))
+                                            .color(if failed { Color::Error } else { Color::Muted })
+                                            .buffer_font(cx),
+                                    )
+                                    .child(
+                                        Label::new(detail)
+                                            .size(LabelSize::Custom(rems_from_px(12.0)))
+                                            .color(if failed {
+                                                Color::Error
+                                            } else {
+                                                Color::Default
+                                            })
+                                            .buffer_font(cx)
+                                            .truncate(),
+                                    ),
+                            )
+                            .on_click(cx.listener(move |this, _, window, cx| {
+                                this.entry_view_state.update(cx, |state, _cx| {
+                                    state.toggle_tool_call_expansion(&tool_call_id);
+                                });
+                                this.refresh_thread_search(window, cx);
+                                cx.notify();
+                            }));
+
+                        v_flex().w_full().child(chip).when(expanded, |this| {
+                            this.child(self.render_any_tool_call(
+                                session_id,
+                                entry_ix,
+                                tool_call,
+                                &focus_handle,
+                                ToolCallLayout::Standalone,
+                                window,
+                                cx,
+                            ))
+                        })
+                    },
+                )))
+            })
+            .into_any_element()
     }
 
     fn render_any_tool_call(
