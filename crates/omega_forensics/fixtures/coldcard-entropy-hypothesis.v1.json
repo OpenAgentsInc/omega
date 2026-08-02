@@ -1,0 +1,114 @@
+{
+  "schema": "openagents.omega.entropy-file-output.v1",
+  "runRef": "run.entropy.coldcard.fixture",
+  "filePath": "mpconfigboard.h",
+  "observations": [],
+  "hypotheses": [
+    {
+      "hypothesisRef": "hypothesis.coldcard.entropy.six_link",
+      "title": "Disabled hardware RNG may resolve to a deterministic fallback",
+      "analyzedFile": "mpconfigboard.h",
+      "symbols": [
+        "MICROPY_HW_ENABLE_RNG",
+        "rng_get",
+        "ngu.random.bytes"
+      ],
+      "suspectedMechanism": "A defined-as-zero board guard crosses into a definedness test and may select MicroPython's Yasmarang provider for secret entropy consumers.",
+      "secretConsumers": [
+        "wallet seed creation through ngu.random.bytes"
+      ],
+      "causalLinks": [
+        {
+          "sequence": 1,
+          "claim": "Wallet seed creation consumes ngu.random.bytes as secret entropy.",
+          "sourceRefs": [
+            {
+              "sourceRef": "source.coldcard.shared.seed.wallet_entropy",
+              "path": "shared/seed.py",
+              "symbol": "make_new_wallet",
+              "startLine": 1,
+              "endLine": 2000,
+              "commit": "bcc2c382a324690a2fcf972c0bac3b79bf923f7b"
+            }
+          ]
+        },
+        {
+          "sequence": 2,
+          "claim": "The Coldcard board defines MICROPY_HW_ENABLE_RNG with value zero.",
+          "sourceRefs": [
+            {
+              "sourceRef": "source.coldcard.board.rng_guard",
+              "path": "mpconfigboard.h",
+              "symbol": "MICROPY_HW_ENABLE_RNG",
+              "startLine": 1,
+              "endLine": 2000,
+              "commit": "bcc2c382a324690a2fcf972c0bac3b79bf923f7b"
+            }
+          ]
+        },
+        {
+          "sequence": 3,
+          "claim": "libNgU tests macro definedness rather than its value and calls global rng_get.",
+          "sourceRefs": [
+            {
+              "sourceRef": "source.coldcard.libngu.random.provider",
+              "path": "external/libngu/ngu/random.c",
+              "symbol": "CHIP_TRNG_32",
+              "startLine": 1,
+              "endLine": 2000,
+              "commit": "bcc2c382a324690a2fcf972c0bac3b79bf923f7b"
+            }
+          ]
+        },
+        {
+          "sequence": 4,
+          "claim": "The vulnerable board source does not export the rng_get provider required by libNgU.",
+          "sourceRefs": [
+            {
+              "sourceRef": "source.coldcard.board.rng_provider_absent",
+              "path": "stm32/COLDCARD/rng.c",
+              "symbol": "rng_get",
+              "startLine": 1,
+              "endLine": 2000,
+              "commit": "bcc2c382a324690a2fcf972c0bac3b79bf923f7b"
+            }
+          ]
+        },
+        {
+          "sequence": 5,
+          "claim": "MicroPython tests the macro value and compiles the Yasmarang rng_get fallback when it is zero.",
+          "sourceRefs": [
+            {
+              "sourceRef": "source.coldcard.micropython.yasmarang",
+              "path": "external/micropython/ports/stm32/rng.c",
+              "symbol": "rng_get",
+              "startLine": 1,
+              "endLine": 2000,
+              "commit": "bcc2c382a324690a2fcf972c0bac3b79bf923f7b"
+            }
+          ]
+        },
+        {
+          "sequence": 6,
+          "claim": "That deterministic fallback can reach the wallet-seed sink at source tier, while final linked-artifact selection remains unproven.",
+          "sourceRefs": [
+            {
+              "sourceRef": "source.coldcard.shared.seed.sink",
+              "path": "shared/seed.py",
+              "symbol": "ngu.random.bytes",
+              "startLine": 1,
+              "endLine": 2000,
+              "commit": "bcc2c382a324690a2fcf972c0bac3b79bf923f7b"
+            }
+          ]
+        }
+      ],
+      "missingEvidence": [
+        "The final linked artifact and shipped provider selection are not available at source tier."
+      ],
+      "nextCheck": "Inspect the exact linker map and final firmware artifact for the pinned build.",
+      "confidenceBoundary": "Source-observed causal hypothesis only; no artifact or exploitability claim."
+    }
+  ],
+  "limitations": []
+}

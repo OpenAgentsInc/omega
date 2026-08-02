@@ -4,6 +4,10 @@ use std::collections::{BTreeMap, BTreeSet};
 use thiserror::Error;
 use url::Url;
 
+mod entropy_repository;
+
+pub use entropy_repository::*;
+
 pub const PREFLIGHT_SCHEMA_V1: &str = "openagents.omega.forensics-preflight.v1";
 pub const LAUNCH_INTENT_SCHEMA_V1: &str = "openagents.omega.forensics-launch-intent.v1";
 pub const RUN_PROJECTION_SCHEMA_V1: &str = "openagents.omega.forensics-run.v1";
@@ -3138,6 +3142,8 @@ pub enum ForensicsError {
     InvalidMatrix(String),
     #[error("the Coldcard evidence workspace is invalid: {0}")]
     InvalidColdcardEvidence(String),
+    #[error("the entropy repository run is invalid: {0}")]
+    InvalidEntropyRun(String),
 }
 
 fn validate_ref(label: &str, value: &str) -> Result<(), ForensicsError> {

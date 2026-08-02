@@ -1,9 +1,11 @@
 use gpui::{App, Context, EventEmitter, FocusHandle, Focusable, Render, SharedString, Window};
 use omega_forensics::{
-    ColdcardBenchmarkArm, ColdcardEvidenceWorkspaceProjection, CoverageStatus, DependencyPolicy,
-    ExplicitOperatorAction, FORENSIC_FINDING_SCHEMA_V1, FORENSIC_HYPOTHESIS_SCHEMA_V1,
-    ForensicBudgetState, ForensicEvidenceTier, ForensicExactness, ForensicLifecycleState,
-    ForensicPromptIr, ForensicPromptWorkspace, ForensicReviewDecisionKind, ForensicReviewOutcome,
+    ColdcardBenchmarkArm, ColdcardEvidenceWorkspaceProjection, CoverageStatus,
+    DEFAULT_ENTROPY_ANALYSIS_PROMPT, DependencyPolicy, EntropyFileAnalysisOutput, EntropyFileTask,
+    EntropyLimitation, EntropyRunPhase, EntropyRunProjection, ExplicitOperatorAction,
+    FORENSIC_FINDING_SCHEMA_V1, FORENSIC_HYPOTHESIS_SCHEMA_V1, ForensicBudgetState,
+    ForensicEvidenceTier, ForensicExactness, ForensicLifecycleState, ForensicPromptIr,
+    ForensicPromptWorkspace, ForensicReviewDecisionKind, ForensicReviewOutcome,
     ForensicSourceCitation, ForensicStatistic, ForensicWorkerObservation, ForensicWorkerPlacement,
     ForensicsFailureProjection, ForensicsLaunchIntent, ForensicsMatrixProjection,
     ForensicsPreflightProjection, ForensicsReviewProjection, ForensicsRunPhase,
@@ -39,6 +41,7 @@ pub struct ForensicsWorkbenchSnapshot {
     pub prompt_workspace: ForensicPromptWorkspace,
     pub matrix: Option<ForensicsMatrixProjection>,
     pub coldcard_evidence: Option<ColdcardEvidenceWorkspaceProjection>,
+    pub entropy_run: Option<EntropyRunProjection>,
     pub source_resolutions: std::collections::BTreeMap<String, ForensicSourceResolution>,
     pub status: SharedString,
 }
@@ -52,6 +55,10 @@ pub enum ForensicSourceResolution {
 
 #[derive(Clone, Debug)]
 pub enum ForensicsWorkbenchCommand {
+    StartEntropy {
+        prompt: String,
+    },
+    CancelEntropy,
     Launch {
         run_ref: String,
         intent: ForensicsLaunchIntent,
@@ -75,6 +82,7 @@ pub struct ForensicsWorkbenchSurface {
     prompt_workspace: ForensicPromptWorkspace,
     matrix: Option<ForensicsMatrixProjection>,
     coldcard_evidence: Option<ColdcardEvidenceWorkspaceProjection>,
+    entropy_run: Option<EntropyRunProjection>,
     source_resolutions: std::collections::BTreeMap<String, ForensicSourceResolution>,
     status: SharedString,
 }
@@ -104,6 +112,7 @@ impl ForensicsWorkbenchSurface {
             .expect("the built-in forensic prompt workspace must remain valid"),
             matrix: None,
             coldcard_evidence: None,
+            entropy_run: None,
             source_resolutions: std::collections::BTreeMap::new(),
             status: "Awaiting OpenAgents managed profile".into(),
         }
@@ -111,6 +120,93 @@ impl ForensicsWorkbenchSurface {
 
     pub fn binding(&self) -> &RepositoryBinding {
         &self.binding
+    }
+
+    pub fn request_entropy_run(&mut self, cx: &mut Context<Self>) {
+        self.entropy_run = None;
+        self.status = "Preparing an entropy file manifest…".into();
+        cx.emit(ForensicsWorkbenchCommand::StartEntropy {
+            prompt: DEFAULT_ENTROPY_ANALYSIS_PROMPT.into(),
+        });
+        cx.notify();
+    }
+
+    pub fn install_entropy_run(&mut self, run: EntropyRunProjection, cx: &mut Context<Self>) {
+        let counts = run.counts();
+        self.status = format!(
+            "Entropy run ready · {} queued · {} skipped",
+            counts.queued, counts.skipped
+        )
+        .into();
+        self.entropy_run = Some(run);
+        cx.notify();
+    }
+
+    pub fn start_next_entropy_file(
+        &mut self,
+        observed_at: String,
+        cx: &mut Context<Self>,
+    ) -> anyhow::Result<Option<EntropyFileTask>> {
+        let run = self
+            .entropy_run
+            .as_mut()
+            .ok_or_else(|| anyhow::anyhow!("the entropy repository run is unavailable"))?;
+        let task = run.start_next_file(observed_at)?;
+        if let Some(task) = &task {
+            self.status = format!("Reading {}", task.file_path).into();
+        } else {
+            self.status = entropy_run_status(run).into();
+        }
+        cx.notify();
+        Ok(task)
+    }
+
+    pub fn apply_entropy_output(
+        &mut self,
+        output: EntropyFileAnalysisOutput,
+        observed_at: String,
+        cx: &mut Context<Self>,
+    ) -> anyhow::Result<()> {
+        let run = self
+            .entropy_run
+            .as_mut()
+            .ok_or_else(|| anyhow::anyhow!("the entropy repository run is unavailable"))?;
+        run.apply_output(output, observed_at)?;
+        self.status = entropy_run_status(run).into();
+        cx.notify();
+        Ok(())
+    }
+
+    pub fn fail_entropy_file(
+        &mut self,
+        limitation: EntropyLimitation,
+        observed_at: String,
+        cx: &mut Context<Self>,
+    ) -> anyhow::Result<()> {
+        let run = self
+            .entropy_run
+            .as_mut()
+            .ok_or_else(|| anyhow::anyhow!("the entropy repository run is unavailable"))?;
+        run.fail_reading_file(limitation, observed_at)?;
+        self.status = entropy_run_status(run).into();
+        cx.notify();
+        Ok(())
+    }
+
+    pub fn cancel_entropy_run(&mut self, cx: &mut Context<Self>) -> anyhow::Result<()> {
+        let run = self
+            .entropy_run
+            .as_mut()
+            .ok_or_else(|| anyhow::anyhow!("the entropy repository run is unavailable"))?;
+        run.cancel(chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Millis, true))?;
+        self.status = entropy_run_status(run).into();
+        cx.notify();
+        Ok(())
+    }
+
+    pub fn set_entropy_error(&mut self, error: impl Into<SharedString>, cx: &mut Context<Self>) {
+        self.status = error.into();
+        cx.notify();
     }
 
     pub fn set_managed_preflight(
@@ -439,6 +535,7 @@ impl ForensicsWorkbenchSurface {
             prompt_workspace: self.prompt_workspace.clone(),
             matrix: self.matrix.clone(),
             coldcard_evidence: self.coldcard_evidence.clone(),
+            entropy_run: self.entropy_run.clone(),
             source_resolutions: self.source_resolutions.clone(),
             status: self.status.clone(),
         }
@@ -584,6 +681,10 @@ impl Render for ForensicsWorkbenchSurface {
         let prompt_candidates = prompt_workspace.candidates().cloned().collect::<Vec<_>>();
         let matrix = self.matrix.clone();
         let coldcard_evidence = self.coldcard_evidence.clone();
+        let entropy_run = self.entropy_run.clone();
+        let entropy_running = entropy_run.as_ref().is_some_and(|run| {
+            matches!(run.phase, EntropyRunPhase::Ready | EntropyRunPhase::Running)
+        });
 
         v_flex()
             .id("omega.forensics.workbench")
@@ -602,6 +703,62 @@ impl Render for ForensicsWorkbenchSurface {
                     .child(Icon::new(IconName::Crosshair).size(IconSize::Small))
                     .child(Label::new("Forensics").size(LabelSize::Small)),
             )
+            .child(
+                v_flex()
+                    .gap_1()
+                    .child(
+                        Label::new("Entropy repository run")
+                            .size(LabelSize::XSmall)
+                            .color(Color::Muted),
+                    )
+                    .child(
+                        Label::new(
+                            "Read-only file traversal using the configured model. Source and tool limitations remain visible.",
+                        )
+                        .size(LabelSize::XSmall)
+                        .color(Color::Muted),
+                    )
+                    .when_some(entropy_run, |this, run| {
+                        let counts = run.counts();
+                        this.child(Self::render_fact(
+                            "Progress",
+                            format!(
+                                "{} queued · {} reading · {} analyzed · {} candidates",
+                                counts.queued, counts.reading, counts.analyzed, counts.candidate
+                            ),
+                        ))
+                        .child(Self::render_fact(
+                            "Limitations",
+                            format!("{} skipped · {} failed", counts.skipped, counts.failed),
+                        ))
+                    })
+                    .child(
+                        h_flex()
+                            .gap_1()
+                            .child(
+                                Button::new("omega.forensics.entropy.start", "Run entropy scan")
+                                    .size(ButtonSize::Compact)
+                                    .disabled(entropy_running)
+                                    .on_click(cx.listener(|this, _, _, cx| {
+                                        this.request_entropy_run(cx)
+                                    })),
+                            )
+                            .when(entropy_running, |this| {
+                                this.child(
+                                    Button::new(
+                                        "omega.forensics.entropy.cancel",
+                                        "Cancel entropy scan",
+                                    )
+                                    .size(ButtonSize::Compact)
+                                    .style(ButtonStyle::Subtle)
+                                    .on_click(cx.listener(|_, _, _, cx| {
+                                        cx.emit(ForensicsWorkbenchCommand::CancelEntropy);
+                                    })),
+                                )
+                            }),
+                    ),
+            )
+            .child(div().h_px().bg(cx.theme().colors().border))
             .child(
                 v_flex()
                     .gap_1()
@@ -1709,6 +1866,28 @@ fn run_phase_label(phase: ForensicsRunPhase) -> &'static str {
     }
 }
 
+fn entropy_run_status(run: &EntropyRunProjection) -> String {
+    let counts = run.counts();
+    match run.phase {
+        EntropyRunPhase::Ready | EntropyRunPhase::Running => format!(
+            "Entropy analysis · {} queued · {} analyzed · {} candidates · {} failed",
+            counts.queued, counts.analyzed, counts.candidate, counts.failed
+        ),
+        EntropyRunPhase::CancelRequested | EntropyRunPhase::Cancelled => format!(
+            "Entropy analysis cancelled · {} files stopped",
+            counts.cancelled
+        ),
+        EntropyRunPhase::Completed => format!(
+            "Entropy analysis complete · {} analyzed · {} candidates",
+            counts.analyzed, counts.candidate
+        ),
+        EntropyRunPhase::CompletedWithLimitations => format!(
+            "Entropy analysis complete with limitations · {} candidates · {} skipped · {} failed",
+            counts.candidate, counts.skipped, counts.failed
+        ),
+    }
+}
+
 fn evidence_tier_color(tier: ForensicEvidenceTier) -> Color {
     match tier {
         ForensicEvidenceTier::Hypothesis => Color::Warning,
@@ -2383,6 +2562,63 @@ mod tests {
                 snapshot.status.as_ref(),
                 "Coldcard evidence ready · 6 evidenced rungs · private boundary"
             );
+        });
+    }
+
+    #[gpui::test]
+    fn entropy_run_exposes_ordered_progress_and_cancellation(cx: &mut gpui::TestAppContext) {
+        let root = tempfile::tempdir().expect("temporary repository");
+        std::fs::write(root.path().join("a.c"), "int rng_get(void);\n").expect("first source");
+        std::fs::write(root.path().join("b.py"), "seed = random(32)\n").expect("second source");
+        let repository = omega_forensics::EntropyRepositoryBinding {
+            repository_ref: "repository.omega.fixture".into(),
+            display_name: "Omega fixture".into(),
+            revision: "0123456789abcdef0123456789abcdef01234567".into(),
+        };
+        let manifest = omega_forensics::EntropyManifest::build(
+            root.path(),
+            "manifest.omega.entropy.fixture".into(),
+            repository.clone(),
+            Vec::new(),
+            1_024,
+        )
+        .expect("valid entropy manifest");
+        let run = omega_forensics::EntropyRunProjection::new(
+            omega_forensics::EntropyRunBinding {
+                run_ref: "run.omega.entropy.fixture".into(),
+                repository,
+                manifest_ref: manifest.manifest_ref.clone(),
+                manifest_digest: manifest.canonical_digest.clone(),
+                prompt_digest: omega_forensics::entropy_prompt_digest(
+                    omega_forensics::DEFAULT_ENTROPY_ANALYSIS_PROMPT,
+                )
+                .expect("valid prompt"),
+                model_route_ref: "model.omega.fixture".into(),
+                tool_surface_refs: vec!["tool.omega.project.read".into()],
+                started_at: "2026-08-02T18:20:00Z".into(),
+            },
+            manifest,
+        )
+        .expect("valid entropy run");
+
+        cx.update(|cx| {
+            let binding = RepositoryBinding::new("repo", "worktree").expect("valid binding");
+            let surface = cx.new(|cx| ForensicsWorkbenchSurface::new(&candidate(binding), cx));
+            surface.update(cx, |surface, cx| surface.install_entropy_run(run, cx));
+            let first = surface
+                .update(cx, |surface, cx| {
+                    surface.start_next_entropy_file("2026-08-02T18:20:01Z".into(), cx)
+                })
+                .expect("first file should start")
+                .expect("first file task");
+            assert_eq!(first.file_path, "a.c");
+            surface
+                .update(cx, |surface, cx| surface.cancel_entropy_run(cx))
+                .expect("cancellation should be explicit");
+            let snapshot = surface.read(cx).snapshot();
+            let entropy = snapshot.entropy_run.expect("entropy state");
+            assert_eq!(entropy.phase, omega_forensics::EntropyRunPhase::Cancelled);
+            assert_eq!(entropy.counts().cancelled, 2);
         });
     }
 }
