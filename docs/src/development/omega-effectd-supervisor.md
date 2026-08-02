@@ -20,6 +20,7 @@ GPUI is not run authority.
 | Version | `0.1.0` |
 | Pack SHA-256 | `4cc1cb2e5d71ff8af6f730248871ee779488a991f21a848880e885331ef31831` |
 | Protocol | `openagents.omega.effectd.v1` |
+| All Work profile | generated `omega-effectd.v2` Work Index and snapshot reads |
 | Omega crate | `crates/omega_effectd` |
 | Runtime release | `omega-effectd-v0.1.0-rc.8` |
 | macOS arm64 archive SHA-256 | `01d11597b054d009296d0381b6cd6ed3d31c83b93e75a58845f2ae47bf33226a` |

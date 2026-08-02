@@ -24,6 +24,12 @@ use util::ResultExt as _;
 use util::process::Child;
 use util::redact::redact_command;
 
+use crate::all_work::generated::{
+    ContractValidate, ProtocolCapability as AllWorkProtocolCapability,
+    ProtocolInitializeRequest as AllWorkProtocolInitializeRequest,
+    ProtocolVersion as AllWorkProtocolVersion, WorkIndexReadRequest, WorkIndexReadResult,
+    WorkSnapshotReadRequest, WorkSnapshotReadResult,
+};
 use crate::protocol::{
     HealthResult, HostMethod, HostRequestFrame, HostResponseError, HostResponseErrorCode,
     HostResponseFrame, InitializeResult, PROTOCOL_SCHEMA, ProtocolErrorCode, ResponseFrame,
@@ -126,10 +132,23 @@ impl OmegaEffectdSupervisor {
         }
         self.spawn_child().await?;
         let generation = self.generation();
+        let all_work = AllWorkProtocolInitializeRequest {
+            supported_versions: vec![
+                AllWorkProtocolVersion::OmegaEffectdV2,
+                AllWorkProtocolVersion::OmegaEffectdV1,
+            ],
+            requested_capabilities: vec![
+                AllWorkProtocolCapability::WorkIndexRead,
+                AllWorkProtocolCapability::WorkSnapshotRead,
+            ],
+        };
+        all_work
+            .validate()
+            .context("validate All Work negotiation")?;
         let result = self
             .request(
                 "initialize",
-                Some(json!({ "generation": generation })),
+                Some(json!({ "generation": generation, "allWork": all_work })),
                 generation,
             )
             .await?;
@@ -146,6 +165,50 @@ impl OmegaEffectdSupervisor {
     pub async fn health(&mut self) -> Result<HealthResult, SupervisorError> {
         let result = self.request("health", None, self.generation()).await?;
         Ok(serde_json::from_value(result).context("decode health result")?)
+    }
+
+    pub async fn read_work_index(
+        &mut self,
+        params: WorkIndexReadRequest,
+    ) -> Result<WorkIndexReadResult, SupervisorError> {
+        params
+            .validate()
+            .map_err(|error| SupervisorError::Anyhow(error.into()))?;
+        let result = self
+            .request(
+                "work.index.read",
+                Some(serde_json::to_value(params).context("encode Work Index request")?),
+                self.generation(),
+            )
+            .await?;
+        let result: WorkIndexReadResult =
+            serde_json::from_value(result).context("decode Work Index result")?;
+        result
+            .validate()
+            .map_err(|error| SupervisorError::Anyhow(error.into()))?;
+        Ok(result)
+    }
+
+    pub async fn read_work_snapshot(
+        &mut self,
+        params: WorkSnapshotReadRequest,
+    ) -> Result<WorkSnapshotReadResult, SupervisorError> {
+        params
+            .validate()
+            .map_err(|error| SupervisorError::Anyhow(error.into()))?;
+        let result = self
+            .request(
+                "work.snapshot.read",
+                Some(serde_json::to_value(params).context("encode Work snapshot request")?),
+                self.generation(),
+            )
+            .await?;
+        let result: WorkSnapshotReadResult =
+            serde_json::from_value(result).context("decode Work snapshot result")?;
+        result
+            .validate()
+            .map_err(|error| SupervisorError::Anyhow(error.into()))?;
+        Ok(result)
     }
 
     pub async fn list_runs(&mut self) -> Result<Vec<RunSnapshot>, SupervisorError> {

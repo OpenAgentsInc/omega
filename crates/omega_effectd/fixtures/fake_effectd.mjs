@@ -28,6 +28,42 @@ mkdirSync(path.join(dataRoot, "agent-computer"), { recursive: true, mode: 0o700 
 let generation = 0
 let running = false
 let pendingHostHealth = null
+let allWorkVersion = "omega-effectd.v1"
+
+const allWorkSummary = {
+  contractVersion: "openagents.all_work_boundary.v1",
+  workRef: "work:fixture:1",
+  title: "Fixture Work",
+  domain: "general",
+  workClass: "run",
+  state: "active",
+  priority: "normal",
+  ownerRef: "principal:omega:owner",
+  assignee: null,
+  sourceAuthority: {
+    kind: "effect_service",
+    sourceRef: "run:fixture:1",
+    adapterVersion: "omega-effectd-all-work-v1",
+    writable: false,
+  },
+  revision: 1,
+  updatedAt: "2026-08-02T12:00:00Z",
+  freshness: {
+    state: "fresh",
+    observedAt: "2026-08-02T12:00:01Z",
+    sourceUpdatedAt: "2026-08-02T12:00:00Z",
+  },
+  completeness: {
+    state: "complete",
+    cursor: "cursor:fixture:1",
+    gapRefs: [],
+  },
+  redaction: {
+    privacyClass: "owner_only",
+    redactedFieldCount: 2,
+    policyRef: "policy:omega:full-auto-work-summary-v1",
+  },
+}
 
 const respond = (id, gen, ok, result, error) => {
   process.stdout.write(
@@ -350,6 +386,9 @@ for await (const line of rl) {
   }
   if (request.method === "initialize") {
     generation = request.params?.generation ?? 1
+    allWorkVersion = request.params?.allWork?.supportedVersions?.includes("omega-effectd.v2")
+      ? "omega-effectd.v2"
+      : "omega-effectd.v1"
     running = true
     respond(request.id, generation, true, {
       schema,
@@ -385,7 +424,19 @@ for await (const line of rl) {
         "sarah_room_snapshot",
         "sarah_send_message",
         "sarah_interrupt_turn",
+        ...(allWorkVersion === "omega-effectd.v2"
+          ? ["work.index.read", "work.snapshot.read"]
+          : []),
       ],
+      allWork: {
+        selectedVersion: allWorkVersion,
+        contractRef: "openagents.all_work_boundary.v1",
+        contractDigest: "f40c1d09b12103f0247a6354e020ed7322415c8b228e45a8fd3f8d7ccd3294f8",
+        capabilities:
+          allWorkVersion === "omega-effectd.v2"
+            ? ["work.index.read", "work.snapshot.read"]
+            : [],
+      },
       dataRoot,
       activeRunLimit: 8,
     })
@@ -395,6 +446,49 @@ for await (const line of rl) {
     respond(request.id, generation, false, undefined, {
       code: "stale_generation",
       message: `Expected generation ${generation}, got ${request.generation}.`,
+    })
+    continue
+  }
+  if (request.method === "work.index.read" || request.method === "work.snapshot.read") {
+    if (allWorkVersion !== "omega-effectd.v2") {
+      respond(request.id, generation, false, undefined, {
+        code: "incompatible_version",
+        message: `${request.method} requires omega-effectd.v2.`,
+      })
+      continue
+    }
+    if (request.method === "work.index.read") {
+      respond(request.id, generation, true, {
+        items: [allWorkSummary],
+        nextCursor: null,
+        completeness: { state: "complete", cursor: null, gapRefs: [] },
+        generatedAt: "2026-08-02T12:00:01Z",
+      })
+      continue
+    }
+    if (request.params?.workRef !== allWorkSummary.workRef) {
+      respond(request.id, generation, false, undefined, {
+        code: "not_found",
+        message: "No Work snapshot exists for that Work reference.",
+      })
+      continue
+    }
+    respond(request.id, generation, true, {
+      snapshot: {
+        summary: allWorkSummary,
+        relations: [],
+        threadRefs: ["thread:fixture:1"],
+        sessionRefs: [],
+        agentSessionRefs: [],
+        agentActivityRefs: [],
+        runRefs: ["run:fixture:1"],
+        intentRefs: [],
+        eventRefs: [],
+        receiptRefs: [],
+        evidenceRefs: [],
+        verificationRefs: [],
+        ownerDispositionRefs: [],
+      },
     })
     continue
   }

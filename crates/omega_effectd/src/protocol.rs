@@ -3,6 +3,8 @@
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
+use crate::all_work::generated::ProtocolInitializeResult as AllWorkProtocolInitializeResult;
+
 pub const PROTOCOL_SCHEMA: &str = "openagents.omega.effectd.v1";
 pub const PROTOCOL_VERSION: u32 = 1;
 pub const SERVICE_VERSION: &str = "0.1.0";
@@ -20,6 +22,11 @@ pub enum ProtocolErrorCode {
     HostUnavailable,
     HostTimeout,
     FrameTooLarge,
+    IncompatibleVersion,
+    NotFound,
+    Unavailable,
+    StaleCursor,
+    Gap,
     Internal,
 }
 
@@ -179,6 +186,8 @@ pub struct InitializeResult {
     pub capabilities: Vec<String>,
     pub data_root: String,
     pub active_run_limit: u32,
+    #[serde(default)]
+    pub all_work: Option<AllWorkProtocolInitializeResult>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

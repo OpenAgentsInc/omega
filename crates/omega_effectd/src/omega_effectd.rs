@@ -3,6 +3,7 @@
 //! Authority: OpenAgentsInc/omega#21 (`OMEGA-FA-02`).
 //! Durable run truth stays in omega-effectd on disk. GPUI is not run authority.
 
+mod all_work;
 mod forensics_cloud;
 mod issue31_nostr;
 mod issue31_provider_handoff;
@@ -33,6 +34,7 @@ pub use openagents_binding::{
     init_openagents_binding, openagents_binding, try_openagents_binding,
 };
 
+pub use all_work::generated as all_work_contract;
 pub use forensics_cloud::*;
 pub use issue31_nostr::*;
 pub use issue31_provider_handoff::*;
@@ -828,6 +830,104 @@ mod tests {
                 .expect_err("oversized host response");
             assert!(error.to_string().contains("host response frame exceeds"));
             assert!(supervisor.health().await.is_err(), "child must be stopped");
+        });
+    }
+
+    #[test]
+    fn typed_all_work_reads_cross_the_supervised_process_boundary() {
+        smol::block_on(async {
+            let root = tempdir().expect("tempdir");
+            let mut supervisor = OmegaEffectdSupervisor::new(OmegaEffectdSupervisorOptions {
+                data_root: root.path().to_path_buf(),
+                command: fixture_command(&fixture_path()),
+                initial_generation: 1,
+                request_timeout: Duration::from_secs(5),
+            });
+
+            let initialized = supervisor.start().await.expect("start");
+            assert_eq!(
+                initialized
+                    .all_work
+                    .as_ref()
+                    .map(|result| &result.selected_version),
+                Some(&all_work_contract::ProtocolVersion::OmegaEffectdV2)
+            );
+            let index = supervisor
+                .read_work_index(all_work_contract::WorkIndexReadRequest {
+                    cursor: None,
+                    limit: None,
+                    filter: None,
+                })
+                .await
+                .expect("typed Work Index read");
+            assert_eq!(index.items.len(), 1);
+            assert_eq!(
+                index.items.first().expect("one Work item").work_ref.0,
+                "work:fixture:1"
+            );
+
+            let snapshot = supervisor
+                .read_work_snapshot(all_work_contract::WorkSnapshotReadRequest {
+                    work_ref: all_work_contract::WorkRef::try_from("work:fixture:1".to_string())
+                        .expect("valid Work ref"),
+                })
+                .await
+                .expect("typed Work snapshot read");
+            assert_eq!(
+                snapshot.snapshot.run_refs.first().expect("one Run ref").0,
+                "run:fixture:1"
+            );
+            supervisor.stop().await.expect("stop");
+        });
+    }
+
+    #[test]
+    #[ignore = "requires the pinned OpenAgents source checkout"]
+    fn typed_all_work_index_crosses_the_openagents_process_boundary() {
+        smol::block_on(async {
+            let source_root = std::env::var_os("OPENAGENTS_ALL_WORK_SOURCE_ROOT")
+                .map(PathBuf::from)
+                .expect("OPENAGENTS_ALL_WORK_SOURCE_ROOT must name the pinned checkout");
+            let entry = source_root.join("packages/omega-effectd/src/bin/omega-effectd.ts");
+            assert!(entry.is_file(), "OpenAgents omega-effectd entry must exist");
+            let pnpm = std::env::var_os("PNPM")
+                .map(PathBuf::from)
+                .unwrap_or_else(|| PathBuf::from("pnpm"));
+            let root = tempdir().expect("tempdir");
+            let mut supervisor = OmegaEffectdSupervisor::new(OmegaEffectdSupervisorOptions {
+                data_root: root.path().to_path_buf(),
+                command: OmegaEffectdCommand {
+                    program: pnpm,
+                    args: vec![
+                        "--dir".to_string(),
+                        source_root.display().to_string(),
+                        "exec".to_string(),
+                        "tsx".to_string(),
+                        entry.display().to_string(),
+                    ],
+                },
+                initial_generation: 1,
+                request_timeout: Duration::from_secs(15),
+            });
+
+            let initialized = supervisor.start().await.expect("start OpenAgents process");
+            assert_eq!(
+                initialized
+                    .all_work
+                    .as_ref()
+                    .map(|result| &result.selected_version),
+                Some(&all_work_contract::ProtocolVersion::OmegaEffectdV2)
+            );
+            let index = supervisor
+                .read_work_index(all_work_contract::WorkIndexReadRequest {
+                    cursor: None,
+                    limit: None,
+                    filter: None,
+                })
+                .await
+                .expect("typed Work Index read from OpenAgents process");
+            assert!(index.items.is_empty());
+            supervisor.stop().await.expect("stop OpenAgents process");
         });
     }
 

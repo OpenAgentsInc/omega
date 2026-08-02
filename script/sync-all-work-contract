@@ -1,0 +1,75 @@
+#!/usr/bin/env python3
+import argparse
+import hashlib
+import json
+import shutil
+import subprocess
+from pathlib import Path
+
+
+SOURCE_COMMIT = "1ea08b1429cbd888875fef195f9b94bef666e70e"
+SOURCE_PACKAGE = Path("packages/all-work-contract")
+
+
+def sha256(data: bytes) -> str:
+    return hashlib.sha256(data).hexdigest()
+
+
+def git(source_root: Path, *arguments: str) -> str:
+    return subprocess.check_output(
+        ["git", "-C", str(source_root), *arguments], text=True
+    ).strip()
+
+
+def main() -> None:
+    parser = argparse.ArgumentParser()
+    parser.add_argument("source_root", type=Path)
+    arguments = parser.parse_args()
+    source_root = arguments.source_root.resolve()
+    repository_root = Path(__file__).resolve().parents[1]
+    source = source_root / SOURCE_PACKAGE
+    destination = repository_root / "crates/omega_effectd/all-work-contract"
+
+    actual_commit = git(source_root, "rev-parse", "HEAD")
+    if actual_commit != SOURCE_COMMIT:
+        raise SystemExit(
+            f"OpenAgents source is {actual_commit}; expected immutable commit {SOURCE_COMMIT}"
+        )
+    if git(source_root, "status", "--porcelain", "--", str(SOURCE_PACKAGE)):
+        raise SystemExit("OpenAgents All Work source has uncommitted changes")
+
+    compatibility_path = source / "generated/compatibility.json"
+    compatibility = json.loads(compatibility_path.read_text())
+    rust_path = source / "generated/rust/all_work_v1.rs"
+    rust_bytes = rust_path.read_bytes()
+    expected_rust_digest = compatibility["artifacts"]["rustSha256"]
+    if sha256(rust_bytes) != expected_rust_digest:
+        raise SystemExit("OpenAgents Rust artifact does not match its compatibility manifest")
+
+    if destination.exists():
+        shutil.rmtree(destination)
+    (destination / "generated/rust").mkdir(parents=True)
+    (destination / "fixtures").mkdir(parents=True)
+    shutil.copy2(rust_path, destination / "generated/rust/all_work_v1.rs")
+    shutil.copy2(compatibility_path, destination / "generated/compatibility.json")
+    shutil.copy2(source / "generated/fixture-index.json", destination / "generated/fixture-index.json")
+    shutil.copytree(source / "fixtures", destination / "fixtures", dirs_exist_ok=True)
+
+    receipt = {
+        "schema": "openagents.omega.all_work_contract_consumer.v1",
+        "sourceRepository": "https://github.com/OpenAgentsInc/openagents",
+        "sourceCommit": SOURCE_COMMIT,
+        "contractRef": compatibility["contractRef"],
+        "definitionSha256": compatibility["definitionSha256"],
+        "rustSha256": expected_rust_digest,
+        "jsonSchemaSha256": compatibility["artifacts"]["jsonSchemaSha256"],
+        "fixtureIndexSha256": compatibility["artifacts"]["fixtureIndexSha256"],
+        "consumption": "vendored-digest-bound-generated-artifact",
+    }
+    (destination / "SOURCE.json").write_text(
+        json.dumps(receipt, indent=2) + "\n", encoding="utf-8"
+    )
+
+
+if __name__ == "__main__":
+    main()

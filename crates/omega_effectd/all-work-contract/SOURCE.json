@@ -1,0 +1,11 @@
+{
+  "schema": "openagents.omega.all_work_contract_consumer.v1",
+  "sourceRepository": "https://github.com/OpenAgentsInc/openagents",
+  "sourceCommit": "1ea08b1429cbd888875fef195f9b94bef666e70e",
+  "contractRef": "openagents.all_work_boundary.v1",
+  "definitionSha256": "f40c1d09b12103f0247a6354e020ed7322415c8b228e45a8fd3f8d7ccd3294f8",
+  "rustSha256": "298aa826cb7bdf182742251d53c9ab6a436ba8e386fd292a22701a7dec40cefb",
+  "jsonSchemaSha256": "55f77d0f03fb3180bcd23558b034fb5c5d4d1dfad9973f80a4a2347b386c60b4",
+  "fixtureIndexSha256": "1d192e907c687ebb392a9dd3d41ebf546c06e7dd473c085758571eaf1ece225f",
+  "consumption": "vendored-digest-bound-generated-artifact"
+}
