@@ -27465,4 +27465,58 @@ mod tests {
             );
         }
     }
+
+    /// OMEGA-DELTA-0224. Comet's settings navigation is presentation around
+    /// Omega's focused settings pages, never a second settings authority.
+    #[test]
+    fn comet_settings_sidebar_routes_to_omega_settings() {
+        let settings = without_comments(&read_repository_file(
+            "crates/settings_ui/src/settings_ui.rs",
+        ));
+        let navigation = body_of(&settings, "render_omega_nav");
+        for required in [
+            "COMET_SETTINGS_SIDEBAR_WIDTH",
+            "omega-comet-settings-sidebar",
+            "\"API Keys\" => IconName::Lock",
+            "\"Voice\" => IconName::Mic",
+            "navigate_to_sub_page(\"llm_providers\"",
+            "omega-comet-settings-back",
+            "original_window.activate_window()",
+            "window.remove_window()",
+        ] {
+            assert!(
+                navigation.contains(required),
+                "OMEGA-DELTA-0224: the Comet settings sidebar lost `{required}`"
+            );
+        }
+
+        assert!(
+            settings.contains("self.kind == SettingsWindowKind::Omega")
+                && settings.contains("self.render_omega_nav(window, cx)")
+                && settings.contains("self.render_nav(window, cx)"),
+            "OMEGA-DELTA-0224: focused Omega Settings and Legacy Settings no longer select their own navigation"
+        );
+
+        let page_data =
+            without_comments(&read_repository_file("crates/settings_ui/src/page_data.rs"));
+        let focused = body_of(&page_data, "omega_settings_data");
+        for required in ["title: \"API Keys\"", "omega_voice_page()"] {
+            assert!(
+                focused.contains(required),
+                "OMEGA-DELTA-0224: the Comet sidebar no longer derives from Omega's focused setting `{required}`"
+            );
+        }
+
+        let panel = without_comments(&read_repository_file("crates/agent_ui/src/agent_panel.rs"));
+        let shell = body_of(&panel, "render_comet_shell");
+        for required in [
+            "comet-open-settings",
+            "omega_actions::OpenSettings.boxed_clone()",
+        ] {
+            assert!(
+                shell.contains(required),
+                "OMEGA-DELTA-0224: the Comet shell lost its working Settings entry `{required}`"
+            );
+        }
+    }
 }

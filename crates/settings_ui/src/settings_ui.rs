@@ -3534,6 +3534,136 @@ impl SettingsWindow {
             )
     }
 
+    fn render_omega_nav(
+        &self,
+        _window: &mut Window,
+        cx: &mut Context<SettingsWindow>,
+    ) -> AnyElement {
+        const COMET_SETTINGS_SIDEBAR_WIDTH: f32 = 256.;
+
+        let colors = cx.theme().colors();
+        let selected_background = colors.element_selected;
+        let hover_background = colors.ghost_element_hover;
+        let text = colors.text;
+        let text_muted = colors.text_muted;
+        let text_placeholder = colors.text_placeholder;
+        let root_entries = self
+            .navbar_entries
+            .iter()
+            .enumerate()
+            .filter(|(_, entry)| entry.is_root)
+            .map(|(entry_index, entry)| {
+                let title = entry.title;
+                let selected = entry.page_index == self.current_page_index();
+                let icon = match title {
+                    "API Keys" => IconName::Lock,
+                    "Voice" => IconName::Mic,
+                    _ => IconName::Settings,
+                };
+                h_flex()
+                    .id(("omega-settings-nav-entry", entry_index))
+                    .debug_selector(move || format!("omega.settings.nav.{title}"))
+                    .w_full()
+                    .gap_2()
+                    .px_2()
+                    .py_1p5()
+                    .rounded(px(8.))
+                    .text_size(px(13.))
+                    .text_color(if selected { text } else { text_muted })
+                    .font_weight(if selected {
+                        gpui::FontWeight::MEDIUM
+                    } else {
+                        gpui::FontWeight::NORMAL
+                    })
+                    .cursor_pointer()
+                    .track_focus(&entry.focus_handle)
+                    .tab_index(0isize)
+                    .role(Role::Button)
+                    .aria_label(title)
+                    .when(selected, |row| row.bg(selected_background))
+                    .when(!selected, |row| {
+                        row.hover(move |style| style.bg(hover_background).text_color(text))
+                    })
+                    .on_click(cx.listener(move |this, _, window, cx| {
+                        this.open_and_scroll_to_navbar_entry(entry_index, None, true, window, cx);
+                        if title == "API Keys" {
+                            this.navigate_to_sub_page("llm_providers", window, cx);
+                        }
+                    }))
+                    .child(Icon::new(icon).size(IconSize::Small).color(Color::Muted))
+                    .child(title)
+            })
+            .collect::<Vec<_>>();
+
+        v_flex()
+            .id("omega-comet-settings-sidebar")
+            .debug_selector(|| "omega.comet.settings-sidebar".into())
+            .key_context("NavigationMenu")
+            .w(px(COMET_SETTINGS_SIDEBAR_WIDTH))
+            .h_full()
+            .flex_none()
+            .bg(colors.surface_background)
+            .border_r_1()
+            .border_color(colors.border_variant)
+            .when(cfg!(target_os = "macos"), |sidebar| sidebar.pt_10())
+            .child(
+                div()
+                    .px_4()
+                    .pt_3()
+                    .pb_1()
+                    .text_size(px(11.))
+                    .font_weight(gpui::FontWeight::MEDIUM)
+                    .text_color(text_placeholder)
+                    .child("Settings"),
+            )
+            .child(
+                v_flex()
+                    .id("omega-comet-settings-navigation")
+                    .role(Role::Navigation)
+                    .aria_label("Settings")
+                    .flex_1()
+                    .min_h_0()
+                    .gap_0p5()
+                    .px_2()
+                    .children(root_entries),
+            )
+            .child(
+                div().px_2().pb_3().child(
+                    h_flex()
+                        .id("omega-comet-settings-back")
+                        .w_full()
+                        .gap_1p5()
+                        .px_2()
+                        .py_1p5()
+                        .rounded(px(8.))
+                        .text_size(px(13.))
+                        .text_color(text_muted)
+                        .cursor_pointer()
+                        .tab_index(0isize)
+                        .role(Role::Button)
+                        .aria_label("Back")
+                        .hover(move |style| style.bg(hover_background).text_color(text))
+                        .on_click(cx.listener(|this, _, window, cx| {
+                            if let Some(original_window) = this.original_window {
+                                original_window
+                                    .update(cx, |_, original_window, _| {
+                                        original_window.activate_window();
+                                    })
+                                    .log_err();
+                            }
+                            window.remove_window();
+                        }))
+                        .child(
+                            Icon::new(IconName::ArrowLeft)
+                                .size(IconSize::Small)
+                                .color(Color::Muted),
+                        )
+                        .child("Back"),
+                ),
+            )
+            .into_any_element()
+    }
+
     fn open_and_scroll_to_navbar_entry(
         &mut self,
         navbar_entry_index: usize,
@@ -4688,6 +4818,11 @@ impl SettingsWindow {
 impl Render for SettingsWindow {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let ui_font = theme_settings::setup_ui_font(window, cx);
+        let navigation = if self.kind == SettingsWindowKind::Omega {
+            self.render_omega_nav(window, cx)
+        } else {
+            self.render_nav(window, cx).into_any_element()
+        };
 
         client_side_decorations(
             v_flex()
@@ -4772,7 +4907,7 @@ impl Render for SettingsWindow {
                         .when(!cfg!(target_os = "macos"), |this| {
                             this.border_t_1().border_color(cx.theme().colors().border)
                         })
-                        .child(self.render_nav(window, cx))
+                        .child(navigation)
                         .child(self.render_page(window, cx)),
                 ),
             window,

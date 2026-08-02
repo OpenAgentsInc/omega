@@ -14715,9 +14715,17 @@ impl AgentPanel {
             )
             .child(
                 h_flex()
+                    .id("comet-open-settings")
                     .h(px(42.))
                     .px(px(8.))
                     .gap(px(8.))
+                    .rounded(px(8.))
+                    .cursor_pointer()
+                    .aria_label("Open Settings")
+                    .hover(move |style| style.bg(hover_background))
+                    .on_click(|_, window, cx| {
+                        window.dispatch_action(omega_actions::OpenSettings.boxed_clone(), cx);
+                    })
                     .child(
                         div()
                             .size(px(24.))
@@ -14730,12 +14738,17 @@ impl AgentPanel {
                             .child("O"),
                     )
                     .child(
-                        v_flex().child("Omega").child(
+                        v_flex().flex_1().child("Omega").child(
                             div()
                                 .text_size(px(10.))
                                 .text_color(text_placeholder)
                                 .child("Comet mode"),
                         ),
+                    )
+                    .child(
+                        Icon::new(IconName::Settings)
+                            .size(IconSize::Small)
+                            .color(Color::Muted),
                     ),
             );
 
