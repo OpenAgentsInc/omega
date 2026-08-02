@@ -14423,6 +14423,7 @@ impl ThreadView {
             self.workspace.clone(),
             current_label,
             conversation_is_bound,
+            self.message_editor.focus_handle(cx),
             self.composer_model_picker(model_picker_enabled, cx),
             cx,
         )

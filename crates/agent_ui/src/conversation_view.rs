@@ -4372,6 +4372,7 @@ impl ConversationView {
             self.workspace.clone(),
             self.composer_executor_label(cx),
             conversation_is_bound,
+            editor.focus_handle(cx),
             model_picker,
             cx,
         );
