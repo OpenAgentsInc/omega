@@ -15,6 +15,11 @@ exact terms are already loaded and admitted, loads them and opens audio when
 they are not, and when voice is refused it draws one sentence beside the button
 with a link to Settings. The admission page is where a person goes to read the
 detail, not where a click while writing puts them.
+
+In Comet mode, the new/loading composer renders that same shared microphone
+control before a conversation session exists. It uses the existing Sarah
+admission, start, mute, and end actions; Comet does not own a separate voice
+transport or authority path.
 Before **Start voice** is enabled, the service-backed projection
 must disclose `admissionCohortRef`, the effective rate in msat per million
 tokens, credit hold, remaining credit, maximum duration, transcript policy,

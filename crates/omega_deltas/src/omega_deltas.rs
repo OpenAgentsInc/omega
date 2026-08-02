@@ -26635,6 +26635,14 @@ mod tests {
              was out of reach.",
             repository_path("crates/agent_ui/src/composer_voice.rs").display()
         );
+        assert!(
+            pre_session.contains("omega_zero_base::is_comet_mode()")
+                && pre_session.contains("crate::composer_voice::render_composer_voice_controls("),
+            "OMEGA-DELTA-0204: `render_loading_composer` in {} no longer mounts \
+             the shared Sarah voice control in Comet mode. The visible \
+             microphone would then disappear before the first session exists.",
+            repository_path(CONVERSATION_VIEW_PATH).display()
+        );
 
         let tier = read_repository_file(OMEGA_MODEL_TIER_PATH);
         assert!(

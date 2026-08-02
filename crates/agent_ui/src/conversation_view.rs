@@ -4388,6 +4388,12 @@ impl ConversationView {
             .when(!compact, |this| this.flex_wrap())
             .gap_1()
             .children(executor_menu)
+            .when(omega_zero_base::is_comet_mode(), |this| {
+                this.child(crate::composer_voice::render_composer_voice_controls(
+                    self.workspace.entity_id(),
+                    cx,
+                ))
+            })
             .child(
                 div()
                     .id("add-context-connecting")
