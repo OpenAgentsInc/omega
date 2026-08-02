@@ -1033,7 +1033,7 @@ fn update_command_palette_filter(cx: &mut App) {
                 }
                 EditPredictionProvider::Copilot => {
                     filter.show_namespace("edit_prediction");
-                    filter.show_namespace("copilot");
+                    filter.hide_namespace("copilot");
                     filter.show_action_types(edit_prediction_actions.iter());
                 }
                 EditPredictionProvider::Zed
@@ -1169,6 +1169,7 @@ mod tests {
             default_height: px(600.),
             max_content_width: Some(px(850.)),
             default_model: None,
+            openai_api_fallback: true,
             subagent_model: None,
             inline_assistant_model: None,
             inline_assistant_use_streaming_tools: false,

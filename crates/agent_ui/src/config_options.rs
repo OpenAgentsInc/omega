@@ -30,6 +30,28 @@ use crate::{
 
 const PICKER_THRESHOLD: usize = 5;
 
+#[derive(Clone)]
+pub(crate) struct ComposerConfigModel {
+    pub id: SharedString,
+    pub name: SharedString,
+    pub description: Option<SharedString>,
+    pub selected: bool,
+}
+
+#[derive(Clone)]
+pub(crate) struct ComposerConfigTraitChoice {
+    pub id: SharedString,
+    pub name: SharedString,
+    pub selected: bool,
+}
+
+#[derive(Clone)]
+pub(crate) struct ComposerConfigTrait {
+    pub id: SharedString,
+    pub name: SharedString,
+    pub choices: Vec<ComposerConfigTraitChoice>,
+}
+
 pub struct ConfigOptionsView {
     config_options: Rc<dyn AgentSessionConfigOptions>,
     selectors: Vec<Entity<ConfigOptionSelector>>,
@@ -128,6 +150,147 @@ impl ConfigOptionsView {
         .detach();
 
         true
+    }
+
+    pub(crate) fn composer_models(&self) -> Vec<ComposerConfigModel> {
+        let Some(option) = self
+            .config_options
+            .config_options()
+            .into_iter()
+            .find(|option| {
+                option.category.as_ref() == Some(&acp::SessionConfigOptionCategory::Model)
+                    || option.id.0.as_ref().eq_ignore_ascii_case("model")
+                    || option.name.eq_ignore_ascii_case("model")
+            })
+        else {
+            return Vec::new();
+        };
+        let acp::SessionConfigKind::Select(select) = &option.kind else {
+            return Vec::new();
+        };
+        extract_options(&self.config_options, &option.id)
+            .into_iter()
+            .map(|model| ComposerConfigModel {
+                id: model.value.0.clone().into(),
+                name: model.name.into(),
+                description: model.description.map(Into::into),
+                selected: model.value == select.current_value,
+            })
+            .collect()
+    }
+
+    pub(crate) fn select_composer_model(&mut self, model_id: &str, cx: &mut Context<Self>) {
+        let Some(option) = self
+            .config_options
+            .config_options()
+            .into_iter()
+            .find(|option| {
+                option.category.as_ref() == Some(&acp::SessionConfigOptionCategory::Model)
+                    || option.id.0.as_ref().eq_ignore_ascii_case("model")
+                    || option.name.eq_ignore_ascii_case("model")
+            })
+        else {
+            return;
+        };
+        let Some(model) = extract_options(&self.config_options, &option.id)
+            .into_iter()
+            .find(|model| model.value.0.as_ref() == model_id)
+        else {
+            return;
+        };
+        self.agent_server.set_default_config_option(
+            option.id.0.as_ref(),
+            Some(AgentConfigOptionValue::ValueId(model.value.0.to_string())),
+            self.fs.clone(),
+            cx,
+        );
+        self.config_options
+            .set_config_option(
+                option.id,
+                acp::SessionConfigOptionValue::value_id(model.value),
+                cx,
+            )
+            .detach_and_log_err(cx);
+    }
+
+    pub(crate) fn composer_traits(&self) -> Vec<ComposerConfigTrait> {
+        self.config_options
+            .config_options()
+            .into_iter()
+            .filter(|option| {
+                matches!(
+                    option.category.as_ref(),
+                    Some(acp::SessionConfigOptionCategory::ThoughtLevel)
+                        | Some(acp::SessionConfigOptionCategory::ModelConfig)
+                )
+            })
+            .filter_map(|option| {
+                let choices = match &option.kind {
+                    acp::SessionConfigKind::Select(select) => {
+                        extract_options(&self.config_options, &option.id)
+                            .into_iter()
+                            .map(|choice| ComposerConfigTraitChoice {
+                                selected: choice.value == select.current_value,
+                                id: choice.value.0.into(),
+                                name: choice.name.into(),
+                            })
+                            .collect()
+                    }
+                    acp::SessionConfigKind::Boolean(boolean) => vec![
+                        ComposerConfigTraitChoice {
+                            id: "false".into(),
+                            name: "Off".into(),
+                            selected: !boolean.current_value,
+                        },
+                        ComposerConfigTraitChoice {
+                            id: "true".into(),
+                            name: "On".into(),
+                            selected: boolean.current_value,
+                        },
+                    ],
+                    _ => return None,
+                };
+                Some(ComposerConfigTrait {
+                    id: option.id.0.into(),
+                    name: option.name.into(),
+                    choices,
+                })
+            })
+            .collect()
+    }
+
+    pub(crate) fn select_composer_trait(
+        &mut self,
+        config_id: &str,
+        choice_id: &str,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(option) = self
+            .config_options
+            .config_options()
+            .into_iter()
+            .find(|option| option.id.0.as_ref() == config_id)
+        else {
+            return;
+        };
+        let value = match &option.kind {
+            acp::SessionConfigKind::Select(_) => {
+                acp::SessionConfigOptionValue::value_id(choice_id.to_string())
+            }
+            acp::SessionConfigKind::Boolean(_) => {
+                acp::SessionConfigOptionValue::boolean(choice_id == "true")
+            }
+            _ => return,
+        };
+        self.agent_server.set_default_config_option(
+            option.id.0.as_ref(),
+            setting_value_for_config_option_value(&value),
+            self.fs.clone(),
+            cx,
+        );
+        self.config_options
+            .set_config_option(option.id, value, cx)
+            .detach_and_log_err(cx);
     }
 
     fn first_config_option_id_matching(

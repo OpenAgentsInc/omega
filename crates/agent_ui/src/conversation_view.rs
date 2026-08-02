@@ -1648,14 +1648,14 @@ impl ConversationView {
             crate::omega_executor_selector::selected(),
         );
         let loading_placeholder = routed_executor
-            .map(|executor| placeholder_text(executor.name(), false))
+            .map(|executor| placeholder_text(executor.name()))
             .unwrap_or_else(|| {
                 let name = self
                     .agent_server_store
                     .read(cx)
                     .agent_display_name(&self.agent.agent_id())
                     .unwrap_or_else(|| self.agent.agent_id().0.to_string().into());
-                placeholder_text(name.as_ref(), false)
+                placeholder_text(name.as_ref())
             });
 
         let editor = cx.new(|cx| {
@@ -1886,9 +1886,12 @@ impl ConversationView {
                             cx,
                         );
                     });
-                    let was_focused = this.focus_handle.contains_focused(window, cx);
+                    let loading_composer_was_focused = this
+                        .loading_composer
+                        .as_ref()
+                        .is_some_and(|editor| editor.focus_handle(cx).contains_focused(window, cx));
                     this.hand_loading_draft_over(&current, window, cx);
-                    if was_focused {
+                    if loading_composer_was_focused {
                         current
                             .read(cx)
                             .message_editor
@@ -2494,10 +2497,13 @@ impl ConversationView {
                             );
                         });
 
-                        let was_focused = this.focus_handle.contains_focused(window, cx);
+                        let loading_composer_was_focused =
+                            this.loading_composer.as_ref().is_some_and(|editor| {
+                                editor.focus_handle(cx).contains_focused(window, cx)
+                            });
                         this.hand_loading_draft_over(&current, window, cx);
 
-                        if was_focused {
+                        if loading_composer_was_focused {
                             current
                                 .read(cx)
                                 .message_editor
@@ -3291,9 +3297,6 @@ impl ConversationView {
                             native_available_skills(&native_connection, &session_id, cx)
                         })
                         .unwrap_or_default();
-                    let has_slash_completions =
-                        !available_commands.is_empty() || !available_skills.is_empty();
-
                     let agent_display_name = self
                         .agent_server_store
                         .read(cx)
@@ -3325,7 +3328,6 @@ impl ConversationView {
                         executor_name
                             .as_deref()
                             .unwrap_or(agent_display_name.as_ref()),
-                        has_slash_completions,
                     );
 
                     thread_view.update(cx, |thread_view, cx| {
@@ -4372,7 +4374,9 @@ impl ConversationView {
             self.workspace.clone(),
             self.composer_executor_label(cx),
             conversation_is_bound,
+            editor.focus_handle(cx),
             model_picker,
+            window,
             cx,
         );
 
@@ -4610,13 +4614,25 @@ impl ConversationView {
         use crate::omega_model_tier::selected;
         use crate::omega_routed_model::face_for_next_turn;
 
-        let fs = self.project.read(cx).fs().clone();
-        crate::omega_composer_executor_menu::ComposerModelPicker {
-            face: face_for_next_turn(None, selected(), cx),
-            enabled: true,
-            on_select: Rc::new(move |tier, _window, cx| {
-                crate::omega_model_tier::select_before_session(tier, fs.clone(), cx);
-            }),
+        if matches!(self.agent_key(), Agent::NativeAgent) {
+            let fs = self.project.read(cx).fs().clone();
+            crate::omega_composer_executor_menu::ComposerModelPicker::omega(
+                face_for_next_turn(None, selected(), cx),
+                true,
+                Rc::new(move |tier, _window, cx| {
+                    crate::omega_model_tier::select_before_session(tier, fs.clone(), cx);
+                }),
+            )
+        } else {
+            crate::omega_composer_executor_menu::ComposerModelPicker {
+                label: "Loading models…".into(),
+                current_model: None,
+                models: Vec::new(),
+                traits: Vec::new(),
+                enabled: false,
+                empty_message: "This agent's models appear when its session is ready.".into(),
+                on_select: Rc::new(|_, _, _| {}),
+            }
         }
     }
 
@@ -5426,20 +5442,13 @@ fn native_available_skills(
         .collect()
 }
 
-fn placeholder_text(agent_name: &str, has_commands: bool) -> String {
-    if agent_name == agent::OMEGA_AGENT_ID.as_ref() {
-        format!(
-            "Message the {}, @ to include context, / for commands",
-            agent_name
-        )
-    } else if has_commands {
-        format!(
-            "Message {} — @ to include context, / for commands",
-            agent_name
-        )
+fn placeholder_text(agent_name: &str) -> String {
+    let agent_name = if agent_name == agent::OMEGA_AGENT_ID.as_ref() {
+        "Omega"
     } else {
-        format!("Message {} — @ to include context", agent_name)
-    }
+        agent_name
+    };
+    format!("Message {agent_name}")
 }
 
 impl Focusable for ConversationView {
@@ -7272,10 +7281,7 @@ pub(crate) mod tests {
             assert_eq!(available_commands[0].description.as_str(), "Get help");
         });
 
-        assert_eq!(
-            placeholder,
-            Some("Message Test — @ to include context, / for commands".to_string())
-        );
+        assert_eq!(placeholder, Some("Message Test".to_string()));
 
         message_editor.update_in(cx, |editor, window, cx| {
             editor.set_text("/help", window, cx);
@@ -8766,6 +8772,29 @@ pub(crate) mod tests {
                 "Direct Agent readiness must retain its physical-session proof"
             );
         });
+    }
+
+    #[gpui::test]
+    async fn connected_composer_accepts_pointer_input_after_loading(cx: &mut TestAppContext) {
+        init_test(cx);
+
+        let (conversation_view, cx) = setup_conversation_view_still_connecting(
+            StubAgentServer::new(StubAgentConnection::new()),
+            cx,
+        )
+        .await;
+        add_to_workspace(conversation_view.clone(), cx);
+        cx.run_until_parked();
+
+        cx.simulate_click_selector("omega.workbench.composer-input")
+            .expect("the connected composer must be clickable");
+        cx.simulate_keystrokes("pointerinput");
+
+        assert_eq!(
+            message_editor(&conversation_view, cx).read_with(cx, |editor, cx| editor.text(cx)),
+            "pointerinput",
+            "the loaded composer must receive mouse focus and typed text"
+        );
     }
 
     /// `OMEGA-DELTA-0170`, the failure half. A message sent while connecting

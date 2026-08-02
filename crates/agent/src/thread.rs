@@ -48,8 +48,8 @@ use language_model::{
     LanguageModelId, LanguageModelImage, LanguageModelProviderId, LanguageModelRegistry,
     LanguageModelRequest, LanguageModelRequestMessage, LanguageModelRequestTool,
     LanguageModelToolResult, LanguageModelToolResultContent, LanguageModelToolSchemaFormat,
-    LanguageModelToolUse, LanguageModelToolUseId, MessageContent, Role, SelectedModel, Speed,
-    StopReason, TokenUsage, ZED_CLOUD_PROVIDER_ID,
+    LanguageModelToolUse, LanguageModelToolUseId, MessageContent, OPEN_AI_PROVIDER_ID, Role,
+    SelectedModel, Speed, StopReason, TokenUsage, ZED_CLOUD_PROVIDER_ID,
 };
 use omega_front_door::ExecutorDisclosure;
 use project::{Project, trusted_worktrees::TrustedWorktrees};
@@ -3597,7 +3597,7 @@ impl Thread {
         cx: &mut AsyncApp,
     ) -> Result<Option<Arc<dyn LanguageModel>>> {
         let fallback = this.update(cx, |_, cx| {
-            Self::next_turn_fallback_model(failed_model, attempted, cx)
+            Self::next_turn_fallback_model(failed_model, failure, attempted, cx)
         })?;
         let Some(fallback) = fallback else {
             log::warn!(
@@ -3647,6 +3647,7 @@ impl Thread {
     /// Google provider and no personal Google key was configured.
     fn next_turn_fallback_model(
         failed_model: &Arc<dyn LanguageModel>,
+        failure: &anyhow::Error,
         attempted: &mut Vec<(String, String)>,
         cx: &App,
     ) -> Option<Arc<dyn LanguageModel>> {
@@ -3668,6 +3669,25 @@ impl Thread {
         // a panic in the error path.
         let registry = LanguageModelRegistry::try_global(cx)?;
         let registry = registry.read(cx);
+        if failed_model.provider_id().0.as_ref() == "openai-subscribed"
+            && AgentSettings::get_global(cx).openai_api_fallback
+            && Self::codex_failure_allows_openai_api_fallback(failure)
+            && let Some(provider) = registry.provider(&OPEN_AI_PROVIDER_ID)
+            && provider.is_authenticated(cx)
+        {
+            let model = provider
+                .provided_models(cx)
+                .into_iter()
+                .find(|model| model.id() == failed_model.id())
+                .or_else(|| provider.default_model(cx));
+            if let Some(model) = model {
+                let key = (model.provider_id().0.to_string(), model.id().0.to_string());
+                if !attempted.contains(&key) {
+                    attempted.push(key);
+                    return Some(model);
+                }
+            }
+        }
         for (provider_id, model_id) in TURN_PROVIDER_FALLBACK_CHAIN {
             let key = ((*provider_id).to_string(), (*model_id).to_string());
             if attempted.contains(&key) {
@@ -3695,6 +3715,9 @@ impl Thread {
             }
         }
         for provider in registry.providers() {
+            if provider.id() == OPEN_AI_PROVIDER_ID {
+                continue;
+            }
             if !provider.is_authenticated(cx) {
                 continue;
             }
@@ -3709,6 +3732,57 @@ impl Thread {
             return Some(model);
         }
         None
+    }
+
+    fn codex_failure_allows_openai_api_fallback(failure: &anyhow::Error) -> bool {
+        use LanguageModelCompletionError::*;
+
+        let Some(failure) = failure.downcast_ref::<LanguageModelCompletionError>() else {
+            return false;
+        };
+        match failure {
+            NoApiKey { .. }
+            | RateLimitExceeded { .. }
+            | HostedUsageLimitExceeded { .. }
+            | ServerOverloaded { .. }
+            | ApiInternalServerError { .. }
+            | AuthenticationError { .. }
+            | PermissionError { .. }
+            | ApiEndpointNotFound { .. }
+            | ApiReadResponseError { .. }
+            | HttpSend { .. }
+            | DeserializeResponse { .. }
+            | StreamEndedUnexpectedly { .. }
+            | PaymentRequired
+            | Other(_) => true,
+            UpstreamProviderError { status, .. } => {
+                status.is_server_error()
+                    || matches!(
+                        *status,
+                        http_client::StatusCode::UNAUTHORIZED
+                            | http_client::StatusCode::PAYMENT_REQUIRED
+                            | http_client::StatusCode::FORBIDDEN
+                            | http_client::StatusCode::TOO_MANY_REQUESTS
+                            | http_client::StatusCode::SERVICE_UNAVAILABLE
+                    )
+            }
+            HttpResponseError { status_code, .. } => {
+                status_code.is_server_error()
+                    || matches!(
+                        *status_code,
+                        http_client::StatusCode::UNAUTHORIZED
+                            | http_client::StatusCode::PAYMENT_REQUIRED
+                            | http_client::StatusCode::FORBIDDEN
+                            | http_client::StatusCode::TOO_MANY_REQUESTS
+                            | http_client::StatusCode::SERVICE_UNAVAILABLE
+                    )
+            }
+            PromptTooLarge { .. }
+            | DataRetentionConsentRequired { .. }
+            | BadRequestFormat { .. }
+            | SerializeRequest { .. }
+            | BuildRequestBody { .. } => false,
+        }
     }
 
     /// `turn_model_override` is the `OMEGA-DELTA-0201` rung the turn has fallen
@@ -9467,6 +9541,125 @@ mod tests {
             );
         });
         (luna, flash, kimi)
+    }
+
+    fn register_codex_and_openai_api_models(
+        cx: &mut App,
+    ) -> (Arc<FakeLanguageModel>, Arc<FakeLanguageModel>) {
+        use language_model::LanguageModelProviderName;
+        use language_model::fake_provider::FakeLanguageModelProvider;
+
+        let codex = Arc::new(FakeLanguageModel::with_id_and_thinking(
+            "openai-subscribed",
+            "gpt-5.6-luna",
+            "GPT-5.6 Luna",
+            false,
+        ));
+        let openai = Arc::new(FakeLanguageModel::with_id_and_thinking(
+            "openai",
+            "gpt-5.6-luna",
+            "GPT-5.6 Luna",
+            false,
+        ));
+        LanguageModelRegistry::global(cx).update(cx, |registry, cx| {
+            for (provider_id, provider_name, model) in [
+                (
+                    "openai-subscribed",
+                    "ChatGPT Subscription",
+                    codex.clone() as Arc<dyn LanguageModel>,
+                ),
+                ("openai", "OpenAI", openai.clone() as Arc<dyn LanguageModel>),
+            ] {
+                registry.register_provider(
+                    Arc::new(
+                        FakeLanguageModelProvider::new(
+                            LanguageModelProviderId::from(provider_id.to_string()),
+                            LanguageModelProviderName::from(provider_name.to_string()),
+                        )
+                        .with_models(vec![model]),
+                    ),
+                    cx,
+                );
+            }
+        });
+        (codex, openai)
+    }
+
+    #[gpui::test]
+    async fn test_codex_usage_limit_prefers_configured_openai_api_fallback(
+        cx: &mut TestAppContext,
+    ) {
+        let (thread, _event_stream) = setup_thread_for_test(cx).await;
+        let (codex, openai) = cx.update(register_codex_and_openai_api_models);
+        cx.update(|cx| {
+            let mut settings = AgentSettings::get_global(cx).clone();
+            settings.openai_api_fallback = true;
+            AgentSettings::override_global(settings, cx);
+            thread.update(cx, |thread, cx| thread.set_model(codex.clone(), cx));
+        });
+
+        send_one_turn(&thread, cx);
+        let request = codex
+            .pending_completions()
+            .pop()
+            .expect("the turn starts on the ChatGPT/Codex subscription");
+        codex.send_completion_stream_error(
+            &request,
+            LanguageModelCompletionError::HostedUsageLimitExceeded {
+                message: "Codex usage is exhausted".into(),
+            },
+        );
+        codex.end_completion_stream(&request);
+        cx.run_until_parked();
+
+        assert_eq!(
+            openai.completion_count(),
+            1,
+            "the configured OpenAI API key should take over the same turn"
+        );
+    }
+
+    #[gpui::test]
+    async fn test_openai_api_fallback_respects_setting_and_failure_kind(cx: &mut TestAppContext) {
+        let (_thread, _event_stream) = setup_thread_for_test(cx).await;
+        let (codex, _openai) = cx.update(register_codex_and_openai_api_models);
+        let codex: Arc<dyn LanguageModel> = codex;
+
+        cx.update(|cx| {
+            let mut settings = AgentSettings::get_global(cx).clone();
+            settings.openai_api_fallback = false;
+            AgentSettings::override_global(settings, cx);
+        });
+        let exhausted = anyhow!(LanguageModelCompletionError::HostedUsageLimitExceeded {
+            message: "Codex usage is exhausted".into(),
+        });
+        let disabled = cx
+            .update(|cx| Thread::next_turn_fallback_model(&codex, &exhausted, &mut Vec::new(), cx));
+        assert_ne!(
+            disabled.map(|model| model.provider_id()),
+            Some(OPEN_AI_PROVIDER_ID),
+            "the API key must not be billed when fallback is disabled"
+        );
+
+        cx.update(|cx| {
+            let mut settings = AgentSettings::get_global(cx).clone();
+            settings.openai_api_fallback = true;
+            AgentSettings::override_global(settings, cx);
+        });
+        let invalid_request = anyhow!(LanguageModelCompletionError::BadRequestFormat {
+            provider: language_model::LanguageModelProviderName::from(
+                "ChatGPT Subscription".to_string(),
+            ),
+            message: "invalid tool schema".into(),
+        });
+        let invalid_request_fallback = cx.update(|cx| {
+            Thread::next_turn_fallback_model(&codex, &invalid_request, &mut Vec::new(), cx)
+        });
+        assert_ne!(
+            invalid_request_fallback.map(|model| model.provider_id()),
+            Some(OPEN_AI_PROVIDER_ID),
+            "an invalid request must not be retried through a separately billed API"
+        );
     }
 
     fn send_one_turn(thread: &Entity<Thread>, cx: &mut TestAppContext) {

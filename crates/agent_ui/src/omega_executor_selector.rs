@@ -138,7 +138,7 @@ impl SelectableExecutor {
             Self::Omega => "Omega",
             Self::Exo => "Exo",
             Self::Codex => "Codex",
-            Self::Claude => "Claude",
+            Self::Claude => "Claude Code",
             Self::Grok => "Grok",
         }
     }
@@ -146,10 +146,7 @@ impl SelectableExecutor {
     /// The name used in the public executor menu.
     #[must_use]
     pub const fn selector_name(self) -> &'static str {
-        match self {
-            Self::Claude => "Claude Code",
-            _ => self.name(),
-        }
+        self.name()
     }
 
     /// The stable token this choice is logged under.
@@ -893,7 +890,7 @@ mod tests {
             vec![SelectableExecutor::Omega, SelectableExecutor::Exo],
             "Exo joins the public selector only for an opted-in launch"
         );
-        assert_eq!(SelectableExecutor::Claude.selector_name(), "Claude Code");
+        assert_eq!(SelectableExecutor::Claude.selector_name(), "Claude");
     }
 
     #[test]

@@ -217,6 +217,7 @@ pub struct AgentSettings {
     pub default_height: Pixels,
     pub max_content_width: Option<Pixels>,
     pub default_model: Option<LanguageModelSelection>,
+    pub openai_api_fallback: bool,
     pub subagent_model: Option<LanguageModelSelection>,
     pub inline_assistant_model: Option<LanguageModelSelection>,
     pub inline_assistant_use_streaming_tools: bool,
@@ -766,6 +767,7 @@ impl Settings for AgentSettings {
             },
             flexible: agent.flexible.unwrap(),
             default_model: Some(agent.default_model.unwrap()),
+            openai_api_fallback: agent.openai_api_fallback.unwrap(),
             subagent_model: agent.subagent_model,
             inline_assistant_model: agent.inline_assistant_model,
             inline_assistant_use_streaming_tools: agent

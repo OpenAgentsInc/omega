@@ -539,10 +539,6 @@
         "class": "omega_contrast",
         "reason": "Omega-authored comment naming the upstream default and the feed it points at (OMEGA-DELTA-0026)."
       },
-      "// Which edit prediction provider to use. Upstream Zed ships \"zed\", which": {
-        "class": "omega_contrast",
-        "reason": "Omega-authored comment naming the upstream default provider (OMEGA-DELTA-0026)."
-      },
       "// Empty in Omega. Upstream Zed installs the \"html\" extension from Zed's": {
         "class": "omega_contrast",
         "reason": "Omega-authored comment naming the upstream default and the registry it installs from (OMEGA-DELTA-0026)."

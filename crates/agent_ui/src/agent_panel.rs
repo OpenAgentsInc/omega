@@ -235,6 +235,83 @@ fn comet_tab_shortcut_hint(index: usize, color: Hsla) -> AnyElement {
         .into_any_element()
 }
 
+fn comet_executor_icon(
+    executor: Option<crate::omega_executor_selector::SelectableExecutor>,
+) -> IconName {
+    use crate::omega_executor_selector::SelectableExecutor;
+
+    match executor {
+        Some(SelectableExecutor::Codex) => IconName::AiOpenAi,
+        Some(SelectableExecutor::Claude) => IconName::AiClaude,
+        Some(SelectableExecutor::Grok) => IconName::AiXAi,
+        Some(SelectableExecutor::Omega | SelectableExecutor::Exo) | None => IconName::OmegaAgent,
+    }
+}
+
+fn comet_thread_icon(row: &omega_threads_sidebar::ThreadRow) -> IconName {
+    comet_executor_icon(omega_threads_sidebar::recorded_executor(&row.agent_id))
+}
+
+fn stable_comet_session_rows(
+    mut rows: Vec<omega_threads_sidebar::ThreadRow>,
+    active_thread_id: Option<ThreadId>,
+    oldest_first: bool,
+) -> Vec<omega_threads_sidebar::ThreadRow> {
+    let active_position = active_thread_id.and_then(|active_thread_id| {
+        rows.iter()
+            .position(|row| row.thread_id == active_thread_id)
+    });
+    let visible_count = if active_position.is_some() {
+        COMET_TAB_SHORTCUT_LABELS.len()
+    } else {
+        COMET_TAB_SHORTCUT_LABELS.len().saturating_sub(1)
+    };
+
+    if rows.len() > visible_count {
+        if let Some(active_position) = active_position
+            && active_position >= visible_count
+        {
+            let active_row = rows.remove(active_position);
+            rows.truncate(visible_count.saturating_sub(1));
+            rows.push(active_row);
+        } else {
+            rows.truncate(visible_count);
+        }
+    }
+
+    rows.sort_by(|left, right| {
+        let ordering = left.created_at.cmp(&right.created_at).then_with(|| {
+            left.thread_id
+                .to_key_string()
+                .cmp(&right.thread_id.to_key_string())
+        });
+        if oldest_first {
+            ordering
+        } else {
+            ordering.reverse()
+        }
+    });
+    rows
+}
+
+fn reconcile_new_comet_session_rows(
+    rows: Vec<omega_threads_sidebar::ThreadRow>,
+    active_thread_id: Option<ThreadId>,
+    known_tabs: &mut HashSet<ThreadId>,
+    closed_tabs: &mut HashSet<ThreadId>,
+) {
+    for row in rows {
+        if known_tabs.insert(row.thread_id) && Some(row.thread_id) != active_thread_id {
+            closed_tabs.insert(row.thread_id);
+        }
+    }
+
+    if let Some(active_thread_id) = active_thread_id {
+        known_tabs.insert(active_thread_id);
+        closed_tabs.remove(&active_thread_id);
+    }
+}
+
 fn forensics_timestamp() -> String {
     Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Millis, true)
 }
@@ -2882,7 +2959,8 @@ pub struct AgentPanel {
     terminals: HashMap<TerminalId, AgentTerminal>,
     pending_terminal_spawn: Option<TerminalId>,
     new_thread_menu_handle: PopoverMenuHandle<ContextMenu>,
-    composer_executor_menu_handle: PopoverMenuHandle<ContextMenu>,
+    composer_executor_menu_handle:
+        PopoverMenuHandle<crate::omega_composer_executor_menu::CometComposerModelMenu>,
     agent_panel_menu_handle: PopoverMenuHandle<ContextMenu>,
     thread_repository_menu_handle: PopoverMenuHandle<ContextMenu>,
     thread_worktree_menu_handle: PopoverMenuHandle<ContextMenu>,
@@ -2984,6 +3062,7 @@ pub struct AgentPanel {
     workbench_shell_enabled: bool,
     comet_titlebar_dragging: bool,
     comet_sidebar_tween: Option<CometSidebarTween>,
+    comet_known_session_tabs: HashSet<ThreadId>,
     comet_closed_session_tabs: HashSet<ThreadId>,
     comet_navigation_history: CometNavigationHistory,
     /// Thread keys whose durable disk selection was already adopted (or
@@ -3607,6 +3686,7 @@ impl AgentPanel {
             workbench_shell_enabled: omega_zero_base::is_active(),
             comet_titlebar_dragging: false,
             comet_sidebar_tween: None,
+            comet_known_session_tabs: HashSet::default(),
             comet_closed_session_tabs: HashSet::default(),
             comet_navigation_history: CometNavigationHistory::default(),
             workbench_selection_restore_attempted: HashSet::default(),
@@ -4334,8 +4414,16 @@ impl AgentPanel {
     const NAMED_DIRECT_AGENT_IDS: &'static [&'static str] = &[
         agent_servers::CODEX_ID,
         agent_servers::CLAUDE_AGENT_ID,
-        "grok-build",
+        agent_servers::GROK_ID,
     ];
+
+    fn agent_is_hidden_from_composer(agent_id: &AgentId, label: &str) -> bool {
+        agent_id.as_ref().to_ascii_lowercase().contains("copilot")
+            || label.to_ascii_lowercase().contains("copilot")
+            || agent_id.as_ref() == agent_servers::CURSOR_ID
+            || label.eq_ignore_ascii_case("cursor")
+            || agent_id.as_ref() == "grok-build"
+    }
 
     /// Readiness of a direct-agent draft prepared for `agent_id`, read from
     /// the draft's own preparation state.
@@ -4532,14 +4620,9 @@ impl AgentPanel {
 
         for id in Self::NAMED_DIRECT_AGENT_IDS {
             let agent_id = AgentId::new(*id);
-            let label = agent_server_store
-                .agent_display_name(&agent_id)
-                .unwrap_or_else(|| {
-                    SharedString::from(
-                        crate::omega_composer_executor_menu::named_direct_agent_label(id)
-                            .unwrap_or(id),
-                    )
-                });
+            let label = SharedString::from(
+                crate::omega_composer_executor_menu::named_direct_agent_label(id).unwrap_or(id),
+            );
             rows.extend(direct_row(&agent_id, label));
         }
 
@@ -4550,7 +4633,7 @@ impl AgentPanel {
                     .iter()
                     .any(|named| agent_id.as_ref() == *named)
             })
-            .map(|agent_id| {
+            .filter_map(|agent_id| {
                 let display_name = agent_server_store
                     .agent_display_name(agent_id)
                     .or_else(|| {
@@ -4560,7 +4643,8 @@ impl AgentPanel {
                             .map(|agent| agent.name().clone())
                     })
                     .unwrap_or_else(|| agent_id.0.clone());
-                (agent_id.clone(), display_name)
+                (!Self::agent_is_hidden_from_composer(agent_id, &display_name))
+                    .then(|| (agent_id.clone(), display_name))
             })
             .collect();
         other_installed.sort_unstable_by_key(|(_, name)| name.to_lowercase());
@@ -4586,6 +4670,12 @@ impl AgentPanel {
         .into_iter()
         .flatten()
         {
+            let display_name = agent_server_store
+                .agent_display_name(&uncovered)
+                .unwrap_or_else(|| uncovered.0.clone());
+            if Self::agent_is_hidden_from_composer(&uncovered, &display_name) {
+                continue;
+            }
             let covered = rows.iter().any(|row| {
                 matches!(
                     &row.target,
@@ -4594,9 +4684,6 @@ impl AgentPanel {
                 )
             });
             if !covered {
-                let display_name = agent_server_store
-                    .agent_display_name(&uncovered)
-                    .unwrap_or_else(|| uncovered.0.clone());
                 rows.extend(direct_row(&uncovered, display_name));
             }
         }
@@ -6114,7 +6201,7 @@ impl AgentPanel {
         }));
     }
 
-    /// The rows the threads sidebar draws, newest first.
+    /// The rows the threads sidebar draws, newest-created first.
     ///
     /// Recomputed per render from the metadata store rather than cached. The
     /// store is already in memory and the list is bounded, so a cache would buy
@@ -6123,10 +6210,8 @@ impl AgentPanel {
         let Some(store) = ThreadMetadataStore::try_global(cx) else {
             return Vec::new();
         };
-        let registered: Vec<AgentId> = self
-            .project
-            .read(cx)
-            .agent_server_store()
+        let agent_server_store = self.project.read(cx).agent_server_store().clone();
+        let registered: Vec<AgentId> = agent_server_store
             .read(cx)
             .external_agents()
             .cloned()
@@ -6172,7 +6257,15 @@ impl AgentPanel {
         // and closing it would take away the list the person is picking from.
         let metadata = ThreadMetadataStore::try_global(cx)
             .and_then(|store| store.read(cx).entry(row.thread_id).cloned());
-        let Some(agent) = metadata.and_then(|metadata| metadata.restorable_agent().ok()) else {
+        let Some(metadata) = metadata else {
+            self.threads_sidebar_refusal = Some(
+                "This thread predates verified Direct Agent ownership, so Omega cannot safely choose an executor for its session."
+                    .into(),
+            );
+            cx.notify();
+            return;
+        };
+        let Some(agent) = metadata.restorable_agent().ok() else {
             self.threads_sidebar_refusal = Some(
                 "This thread predates verified Direct Agent ownership, so Omega cannot safely choose an executor for its session."
                     .into(),
@@ -7811,7 +7904,9 @@ impl AgentPanel {
     /// serves the loading composer and the zero-base bar alike. The
     /// `agent::ToggleComposerExecutorMenu` action toggles it, which is what
     /// makes the dropdown keyboard-reachable (`OMEGA-DELTA-0184`, omega#165).
-    pub(crate) fn composer_executor_menu_handle(&self) -> PopoverMenuHandle<ContextMenu> {
+    pub(crate) fn composer_executor_menu_handle(
+        &self,
+    ) -> PopoverMenuHandle<crate::omega_composer_executor_menu::CometComposerModelMenu> {
         self.composer_executor_menu_handle.clone()
     }
 
@@ -15629,14 +15724,29 @@ impl AgentPanel {
         cx.notify();
     }
 
-    fn comet_historical_tab_rows(&self, cx: &App) -> Vec<omega_threads_sidebar::ThreadRow> {
+    fn comet_session_tab_rows(&self, cx: &App) -> Vec<omega_threads_sidebar::ThreadRow> {
         let active_thread_id = self.active_thread_id(cx);
-        self.threads_sidebar_rows(cx)
+        let rows = self
+            .threads_sidebar_rows(cx)
             .into_iter()
-            .filter(|row| Some(row.thread_id) != active_thread_id)
             .filter(|row| !self.comet_closed_session_tabs.contains(&row.thread_id))
-            .take(COMET_TAB_SHORTCUT_LABELS.len() - 1)
-            .collect()
+            .collect::<Vec<_>>();
+        stable_comet_session_rows(rows, active_thread_id, true)
+    }
+
+    fn reconcile_comet_session_tabs(&mut self, cx: &App) {
+        let active_thread_id = self.active_thread_id(cx);
+        reconcile_new_comet_session_rows(
+            self.threads_sidebar_rows(cx),
+            active_thread_id,
+            &mut self.comet_known_session_tabs,
+            &mut self.comet_closed_session_tabs,
+        );
+    }
+
+    fn comet_sidebar_session_rows(&self, cx: &App) -> Vec<omega_threads_sidebar::ThreadRow> {
+        let active_thread_id = self.active_thread_id(cx);
+        stable_comet_session_rows(self.threads_sidebar_rows(cx), active_thread_id, false)
     }
 
     fn activate_comet_session_tab(
@@ -15645,10 +15755,12 @@ impl AgentPanel {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        if index == 0 || index >= COMET_TAB_SHORTCUT_LABELS.len() {
+        if index >= COMET_TAB_SHORTCUT_LABELS.len() {
             return;
         }
-        if let Some(row) = self.comet_historical_tab_rows(cx).get(index - 1).cloned() {
+        if let Some(row) = self.comet_session_tab_rows(cx).get(index).cloned()
+            && Some(row.thread_id) != self.active_thread_id(cx)
+        {
             self.open_thread_from_threads_sidebar(&row, window, cx);
         }
     }
@@ -15748,6 +15860,7 @@ impl AgentPanel {
             self.comet_sidebar_tween = None;
         }
         let active_thread_id = self.active_thread_id(cx);
+        self.reconcile_comet_session_tabs(cx);
         if let Some(active_thread_id) = active_thread_id {
             self.comet_navigation_history.push(active_thread_id);
         }
@@ -15756,15 +15869,66 @@ impl AgentPanel {
             .map(|view| view.read(cx).title(cx))
             .unwrap_or_else(|| "New session".into());
         let active_sidebar_title = active_title.clone();
-        let historical_rows = self
-            .threads_sidebar_rows(cx)
-            .into_iter()
-            .filter(|row| Some(row.thread_id) != active_thread_id)
-            .take(9)
-            .collect::<Vec<_>>();
-        let historical_tabs = self.comet_historical_tab_rows(cx);
+        let active_executor = self
+            .active_conversation_view()
+            .and_then(|view| view.read(cx).active_thread().cloned())
+            .and_then(|thread| {
+                let disclosure = thread.read(cx).executor_disclosure(cx);
+                crate::omega_executor_selector::SelectableExecutor::of(
+                    disclosure.class,
+                    disclosure.agent_id.as_ref(),
+                )
+            })
+            .or_else(crate::omega_executor_selector::selected);
+        let active_icon = comet_executor_icon(active_executor);
+        let session_tab_rows = self.comet_session_tab_rows(cx);
+        let active_tab_is_persisted = active_thread_id.is_some_and(|active_thread_id| {
+            session_tab_rows
+                .iter()
+                .any(|row| row.thread_id == active_thread_id)
+        });
+        let session_tabs = session_tab_rows.iter().enumerate().map(|(index, row)| {
+            let row = row.clone();
+            let title = row.title.clone();
+            let icon = comet_thread_icon(&row);
+            let is_active = Some(row.thread_id) == active_thread_id;
+            div()
+                .id(("comet-session-tab", index))
+                .when(is_active, |tab| {
+                    tab.debug_selector(|| "omega.comet.session-tab.active".into())
+                        .bg(selected_background)
+                        .border_1()
+                        .border_color(colors.border_selected)
+                        .text_color(text)
+                })
+                .when(!is_active, |tab| {
+                    tab.text_color(text_muted)
+                        .cursor_pointer()
+                        .hover(move |style| style.bg(hover_background))
+                        .on_click(cx.listener(move |this, _, window, cx| {
+                            cx.stop_propagation();
+                            this.open_thread_from_threads_sidebar(&row, window, cx);
+                        }))
+                })
+                .w(px(TAB_WIDTH))
+                .h(px(28.))
+                .flex_none()
+                .flex()
+                .items_center()
+                .gap(px(6.))
+                .px(px(8.))
+                .rounded(px(8.))
+                .text_size(px(12.))
+                .occlude()
+                .child(Icon::new(icon).size(IconSize::Small).color(Color::Muted))
+                .child(div().min_w_0().flex_1().truncate().child(title))
+                .when(tab_shortcuts_visible, |tab| {
+                    tab.child(comet_tab_shortcut_hint(index, text_placeholder))
+                })
+        });
 
-        let active_tab = div()
+        let draft_tab_index = session_tab_rows.len();
+        let active_draft_tab = div()
             .id("comet-active-session-tab")
             .debug_selector(|| "omega.comet.session-tab.active".into())
             .w(px(TAB_WIDTH))
@@ -15783,82 +15947,14 @@ impl AgentPanel {
             .text_color(text)
             .occlude()
             .child(
-                Icon::new(IconName::OmegaAgent)
+                Icon::new(active_icon)
                     .size(IconSize::Small)
                     .color(Color::Muted),
             )
             .child(div().min_w_0().flex_1().truncate().child(active_title))
             .when(tab_shortcuts_visible, |tab| {
-                tab.child(comet_tab_shortcut_hint(0, text_placeholder))
+                tab.child(comet_tab_shortcut_hint(draft_tab_index, text_placeholder))
             });
-
-        let active_sidebar_row = h_flex()
-            .id("comet-sidebar-active-session")
-            .debug_selector(|| "omega.comet.sidebar-session.active".into())
-            .w_full()
-            .px(px(8.))
-            .py(px(7.))
-            .gap(px(8.))
-            .rounded(px(8.))
-            .bg(selected_background)
-            .border_1()
-            .border_color(colors.border_selected)
-            .cursor_pointer()
-            .on_click(cx.listener(|this, _, window, cx| {
-                if this
-                    .workbench_shell
-                    .projection()
-                    .visible_projection()
-                    .is_some_and(|visible| visible.dock_open)
-                {
-                    this.collapse_work_surface_dock(window, cx);
-                }
-            }))
-            .child(
-                Icon::new(IconName::OmegaAgent)
-                    .size(IconSize::Small)
-                    .color(Color::Muted),
-            )
-            .child(
-                div()
-                    .min_w_0()
-                    .flex_1()
-                    .truncate()
-                    .child(active_sidebar_title),
-            )
-            .child(div().size(px(6.)).rounded_full().bg(text_accent));
-
-        let history_tabs = historical_tabs.iter().enumerate().map(|(index, row)| {
-            let row = row.clone();
-            let title = row.title.clone();
-            div()
-                .id(("comet-session-tab", index))
-                .w(px(TAB_WIDTH))
-                .h(px(28.))
-                .flex_none()
-                .flex()
-                .items_center()
-                .gap(px(6.))
-                .px(px(8.))
-                .rounded(px(8.))
-                .text_size(px(12.))
-                .text_color(text_muted)
-                .cursor_pointer()
-                .occlude()
-                .hover(move |style| style.bg(hover_background))
-                .on_click(cx.listener(move |this, _, window, cx| {
-                    this.open_thread_from_threads_sidebar(&row, window, cx);
-                }))
-                .child(
-                    Icon::new(IconName::OmegaAgent)
-                        .size(IconSize::Small)
-                        .color(Color::Muted),
-                )
-                .child(div().min_w_0().flex_1().truncate().child(title))
-                .when(tab_shortcuts_visible, |tab| {
-                    tab.child(comet_tab_shortcut_hint(index + 1, text_placeholder))
-                })
-        });
 
         let toggle = self.render_comet_control(
             "comet-toggle-sidebar",
@@ -15983,43 +16079,90 @@ impl AgentPanel {
                     .pt(px(2.))
                     .gap(px(4.))
                     .overflow_hidden()
-                    .child(active_tab)
-                    .children(history_tabs)
+                    .children(session_tabs)
+                    .when(!active_tab_is_persisted, |tabs| {
+                        tabs.child(active_draft_tab)
+                    })
                     .child(new_session),
             );
 
-        let sidebar_rows = historical_rows.into_iter().enumerate().map(|(index, row)| {
-            let title = row.title.clone();
-            let age = row.age.clone();
-            div()
-                .id(("comet-sidebar-session", index))
-                .w_full()
-                .px(px(8.))
-                .py(px(7.))
-                .rounded(px(8.))
-                .cursor_pointer()
-                .hover(move |style| style.bg(hover_background))
-                .on_click(cx.listener(move |this, _, window, cx| {
-                    this.open_thread_from_threads_sidebar(&row, window, cx);
-                }))
-                .child(
-                    h_flex()
-                        .w_full()
-                        .gap(px(8.))
-                        .child(
-                            Icon::new(IconName::OmegaAgent)
-                                .size(IconSize::Small)
-                                .color(Color::Muted),
-                        )
-                        .child(div().min_w_0().flex_1().truncate().child(title))
-                        .child(
-                            div()
-                                .text_size(px(10.))
-                                .text_color(text_placeholder)
-                                .child(age),
-                        ),
-                )
+        let sidebar_session_rows = self.comet_sidebar_session_rows(cx);
+        let active_sidebar_row_is_persisted = active_thread_id.is_some_and(|active_thread_id| {
+            sidebar_session_rows
+                .iter()
+                .any(|row| row.thread_id == active_thread_id)
         });
+        let sidebar_rows = sidebar_session_rows
+            .into_iter()
+            .enumerate()
+            .map(|(index, row)| {
+                let title = row.title.clone();
+                let age = row.age.clone();
+                let icon = comet_thread_icon(&row);
+                let is_active = Some(row.thread_id) == active_thread_id;
+                div()
+                    .id(("comet-sidebar-session", index))
+                    .when(is_active, |row| {
+                        row.debug_selector(|| "omega.comet.sidebar-session.active".into())
+                            .bg(selected_background)
+                            .border_1()
+                            .border_color(colors.border_selected)
+                    })
+                    .when(!is_active, |item| {
+                        item.cursor_pointer()
+                            .hover(move |style| style.bg(hover_background))
+                            .on_click(cx.listener(move |this, _, window, cx| {
+                                this.open_thread_from_threads_sidebar(&row, window, cx);
+                            }))
+                    })
+                    .w_full()
+                    .px(px(8.))
+                    .py(px(7.))
+                    .rounded(px(8.))
+                    .child(
+                        h_flex()
+                            .w_full()
+                            .gap(px(8.))
+                            .child(Icon::new(icon).size(IconSize::Small).color(Color::Muted))
+                            .child(div().min_w_0().flex_1().truncate().child(title))
+                            .when(is_active, |row| {
+                                row.child(div().size(px(6.)).rounded_full().bg(text_accent))
+                            })
+                            .when(!is_active, |row| {
+                                row.child(
+                                    div()
+                                        .text_size(px(10.))
+                                        .text_color(text_placeholder)
+                                        .child(age),
+                                )
+                            }),
+                    )
+            });
+
+        let active_draft_sidebar_row = h_flex()
+            .id("comet-sidebar-active-session")
+            .debug_selector(|| "omega.comet.sidebar-session.active".into())
+            .w_full()
+            .px(px(8.))
+            .py(px(7.))
+            .gap(px(8.))
+            .rounded(px(8.))
+            .bg(selected_background)
+            .border_1()
+            .border_color(colors.border_selected)
+            .child(
+                Icon::new(active_icon)
+                    .size(IconSize::Small)
+                    .color(Color::Muted),
+            )
+            .child(
+                div()
+                    .min_w_0()
+                    .flex_1()
+                    .truncate()
+                    .child(active_sidebar_title),
+            )
+            .child(div().size(px(6.)).rounded_full().bg(text_accent));
 
         let project_rows = self
             .workbench_shell
@@ -16194,7 +16337,9 @@ impl AgentPanel {
                     .min_h_0()
                     .overflow_y_scroll()
                     .gap(px(2.))
-                    .child(active_sidebar_row)
+                    .when(!active_sidebar_row_is_persisted, |rows| {
+                        rows.child(active_draft_sidebar_row)
+                    })
                     .children(sidebar_rows),
             )
             .child(
@@ -16219,16 +16364,9 @@ impl AgentPanel {
                             .flex()
                             .items_center()
                             .justify_center()
-                            .child("O"),
+                            .child("A"),
                     )
-                    .child(
-                        v_flex().flex_1().child("Omega").child(
-                            div()
-                                .text_size(px(10.))
-                                .text_color(text_placeholder)
-                                .child("Comet mode"),
-                        ),
-                    )
+                    .child(v_flex().flex_1().child("Anonymous"))
                     .child(
                         Icon::new(IconName::Settings)
                             .size(IconSize::Small)
@@ -16860,6 +16998,24 @@ impl Render for AgentPanel {
 mod comet_sidebar_motion_tests {
     use super::*;
 
+    fn comet_row(
+        title: &'static str,
+        created_at: DateTime<Utc>,
+    ) -> omega_threads_sidebar::ThreadRow {
+        omega_threads_sidebar::ThreadRow {
+            thread_id: ThreadId::new(),
+            agent_id: AgentId::new(title),
+            created_at,
+            title: title.into(),
+            age: "now".into(),
+            executor: None,
+            folder_paths: PathList::default(),
+            unavailable_note: None,
+            refusal: None,
+            lifecycle: crate::omega_agent_supervision::SupervisedThreadLifecycle::Completed,
+        }
+    }
+
     #[test]
     fn comet_sidebar_tween_matches_resize_timing_and_reduced_motion() {
         let started = Instant::now();
@@ -16903,6 +17059,64 @@ mod comet_sidebar_motion_tests {
             COMET_TAB_SHORTCUT_LABELS,
             ["1", "2", "3", "4", "5", "6", "7", "8", "9", "0"]
         );
+    }
+
+    #[test]
+    fn comet_session_order_does_not_follow_the_active_thread() {
+        let now = Utc::now();
+        let oldest = comet_row("oldest", now - chrono::Duration::minutes(2));
+        let middle = comet_row("middle", now - chrono::Duration::minutes(1));
+        let newest = comet_row("newest", now);
+        let rows = vec![newest.clone(), middle.clone(), oldest.clone()];
+
+        for active_thread_id in [oldest.thread_id, middle.thread_id, newest.thread_id] {
+            let tabs = stable_comet_session_rows(rows.clone(), Some(active_thread_id), true);
+            assert_eq!(
+                tabs.iter()
+                    .map(|row| row.title.as_ref())
+                    .collect::<Vec<_>>(),
+                ["oldest", "middle", "newest"]
+            );
+
+            let sidebar = stable_comet_session_rows(rows.clone(), Some(active_thread_id), false);
+            assert_eq!(
+                sidebar
+                    .iter()
+                    .map(|row| row.title.as_ref())
+                    .collect::<Vec<_>>(),
+                ["newest", "middle", "oldest"]
+            );
+        }
+    }
+
+    #[test]
+    fn comet_startup_opens_only_the_active_session_tab() {
+        let now = Utc::now();
+        let active = comet_row("active", now);
+        let recent = comet_row("recent", now - chrono::Duration::minutes(1));
+        let older = comet_row("older", now - chrono::Duration::minutes(2));
+        let mut known_tabs = HashSet::default();
+        let mut closed_tabs = HashSet::default();
+
+        reconcile_new_comet_session_rows(
+            vec![active.clone(), recent.clone(), older.clone()],
+            Some(active.thread_id),
+            &mut known_tabs,
+            &mut closed_tabs,
+        );
+
+        assert!(!closed_tabs.contains(&active.thread_id));
+        assert!(closed_tabs.contains(&recent.thread_id));
+        assert!(closed_tabs.contains(&older.thread_id));
+
+        closed_tabs.remove(&recent.thread_id);
+        reconcile_new_comet_session_rows(
+            vec![active, recent.clone(), older],
+            Some(recent.thread_id),
+            &mut known_tabs,
+            &mut closed_tabs,
+        );
+        assert!(!closed_tabs.contains(&recent.thread_id));
     }
 }
 
@@ -20633,6 +20847,62 @@ mod tests {
         })
     }
 
+    #[test]
+    fn composer_catalog_hides_retired_agents_and_keeps_canonical_names() {
+        assert!(AgentPanel::agent_is_hidden_from_composer(
+            &AgentId::new("github-copilot"),
+            "GitHub Copilot",
+        ));
+        assert!(AgentPanel::agent_is_hidden_from_composer(
+            &AgentId::new("grok-build"),
+            "Grok Build",
+        ));
+        assert!(AgentPanel::agent_is_hidden_from_composer(
+            &AgentId::new(agent_servers::CURSOR_ID),
+            "Cursor",
+        ));
+        assert_eq!(
+            AgentPanel::NAMED_DIRECT_AGENT_IDS,
+            [
+                agent_servers::CODEX_ID,
+                agent_servers::CLAUDE_AGENT_ID,
+                agent_servers::GROK_ID,
+            ]
+        );
+        assert_eq!(
+            crate::omega_composer_executor_menu::named_direct_agent_label(
+                agent_servers::CLAUDE_AGENT_ID,
+            ),
+            Some("Claude"),
+        );
+        assert_eq!(
+            crate::omega_composer_executor_menu::named_direct_agent_label(agent_servers::GROK_ID),
+            Some("Grok"),
+        );
+    }
+
+    #[test]
+    fn comet_session_icons_follow_the_recorded_executor() {
+        use crate::omega_executor_selector::SelectableExecutor;
+
+        assert_eq!(
+            comet_executor_icon(Some(SelectableExecutor::Omega)),
+            IconName::OmegaAgent
+        );
+        assert_eq!(
+            comet_executor_icon(Some(SelectableExecutor::Codex)),
+            IconName::AiOpenAi
+        );
+        assert_eq!(
+            comet_executor_icon(Some(SelectableExecutor::Claude)),
+            IconName::AiClaude
+        );
+        assert_eq!(
+            comet_executor_icon(Some(SelectableExecutor::Grok)),
+            IconName::AiXAi
+        );
+    }
+
     #[gpui::test]
     async fn composer_front_door_claims_prepared_omega_and_offers_the_dropdown(
         cx: &mut TestAppContext,
@@ -20655,10 +20925,9 @@ mod tests {
                 Some(ConversationTarget::OmegaAgent),
                 "Omega is the first row and the default executor"
             );
-            assert_eq!(
-                rows.last().map(|row| row.label.clone()),
-                Some(SharedString::from("Sarah (voice)")),
-                "Sarah stays visible at the end of the dropdown"
+            assert!(
+                rows.iter()
+                    .all(|row| row.target != ConversationTarget::Sarah)
             );
             // The named direct agents are permanent rows, in the issue's
             // order, and honest about not being installed here.
@@ -20668,7 +20937,7 @@ mod tests {
                 .take(3)
                 .map(|row| row.label.to_string())
                 .collect();
-            assert_eq!(named, ["Codex", "Claude Code", "Grok Build"]);
+            assert_eq!(named, ["Codex", "Claude", "Grok"]);
             for row in rows.iter().skip(1).take(3) {
                 assert!(
                     !row.is_selectable(),

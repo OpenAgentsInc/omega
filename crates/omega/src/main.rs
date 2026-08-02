@@ -226,6 +226,10 @@ fn main() {
     }
 
     let mut args = Args::parse();
+    if option_env!("OMEGA_COMET_BUILD").is_some() {
+        args.comet = true;
+        log::info!("Omega embedded Comet build is active");
+    }
 
     // `zed --askpass` Makes zed operate in nc/netcat mode for use with askpass
     #[cfg(not(target_os = "windows"))]
@@ -738,21 +742,6 @@ fn main() {
             cx.background_executor().clone(),
         );
         command_palette::init(cx);
-        let copilot_chat_configuration = copilot_chat::CopilotChatConfiguration {
-            enterprise_uri: language::language_settings::all_language_settings(None, cx)
-                .edit_predictions
-                .copilot
-                .enterprise_uri
-                .clone(),
-        };
-        copilot_chat::init(
-            app_state.fs.clone(),
-            app_state.client.http_client(),
-            copilot_chat_configuration,
-            cx,
-        );
-
-        copilot_ui::init(&app_state, cx);
         language_model::init(cx);
         RefreshLlmTokenListener::register(
             app_state.client.clone(),

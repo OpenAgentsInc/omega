@@ -2030,7 +2030,11 @@ impl Focusable for MessageEditor {
 impl Render for MessageEditor {
     fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         div()
+            .debug_selector(|| "omega.workbench.composer-input".into())
             .key_context("MessageEditor")
+            .on_any_mouse_down(cx.listener(|this, _: &gpui::MouseDownEvent, window, cx| {
+                this.editor.focus_handle(cx).focus(window, cx);
+            }))
             .on_action(cx.listener(Self::chat))
             .on_action(cx.listener(Self::send_immediately))
             .on_action(cx.listener(Self::chat_with_follow))
@@ -2039,6 +2043,8 @@ impl Render for MessageEditor {
             .capture_action(cx.listener(Self::cut))
             .on_action(cx.listener(Self::paste_raw))
             .capture_action(cx.listener(Self::paste))
+            .h_full()
+            .min_h_0()
             .flex_1()
             .child(EditorElement::new(&self.editor, composer_editor_style(cx)))
     }

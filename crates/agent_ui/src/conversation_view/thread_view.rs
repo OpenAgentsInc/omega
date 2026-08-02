@@ -898,7 +898,6 @@ impl ThreadView {
         let session_id = thread.read(cx).session_id().clone();
         let parent_session_id = thread.read(cx).parent_session_id().cloned();
 
-        let has_slash_completions = session_capabilities.read().has_slash_completions();
         // omega#112. Name the executor here too, not only when commands update.
         //
         // The update path fixed earlier fires on `AvailableCommandsUpdated`,
@@ -918,10 +917,7 @@ impl ThreadView {
                 disclosure.agent_id.as_ref(),
             )
             .map(|executor| executor.name().to_owned());
-            placeholder_text(
-                executor.as_deref().unwrap_or(agent_display_name.as_ref()),
-                has_slash_completions,
-            )
+            placeholder_text(executor.as_deref().unwrap_or(agent_display_name.as_ref()))
         };
 
         let mut should_auto_submit = false;
@@ -5019,7 +5015,7 @@ impl ThreadView {
 
     pub(crate) fn render_message_editor(
         &mut self,
-        _window: &mut Window,
+        window: &mut Window,
         cx: &mut Context<Self>,
     ) -> AnyElement {
         if self.is_subagent() {
@@ -5042,7 +5038,7 @@ impl ThreadView {
             cx.theme().window_background_appearance() == gpui::WindowBackgroundAppearance::Opaque;
 
         let controls = if omega_zero_base::is_active() {
-            self.render_zero_base_executor_bar(compact, cx)
+            self.render_zero_base_executor_bar(compact, window, cx)
         } else {
             h_flex()
                 .w_full()
@@ -6932,21 +6928,24 @@ impl ThreadView {
                 };
 
                 if omega_zero_base::is_comet_mode() && !editing {
-                    v_flex()
+                    h_flex()
                         .id(("comet-user-message", entry_ix))
                         .w_full()
                         .pt(px(7.0))
                         .pb(px(7.0))
-                        .items_end()
+                        .justify_end()
                         .child(
                             div()
+                                .flex_none()
                                 .max_w(relative(0.8))
                                 .px(px(16.0))
                                 .py(px(10.0))
                                 .rounded(px(16.0))
                                 .bg(cx.theme().colors().elevated_surface_background)
                                 .text_size(px(14.0))
-                                .child(editor.into_any_element()),
+                                .child(SharedString::from(
+                                    message.content.to_markdown(cx).to_string(),
+                                )),
                         )
                         .into_any()
                 } else {
@@ -11919,8 +11918,9 @@ impl ThreadView {
                         h_flex()
                             .id(format!("subagent-title-{}", entry_ix))
                             .px_1()
+                            .flex_1()
                             .min_w_0()
-                            .size_full()
+                            .h_full()
                             .gap_2()
                             .justify_between()
                             .rounded_sm()
@@ -11928,7 +11928,7 @@ impl ThreadView {
                             .child(
                                 h_flex()
                                     .min_w_0()
-                                    .w_full()
+                                    .flex_1()
                                     .gap_1p5()
                                     .child(icon)
                                     .child(
@@ -11940,13 +11940,15 @@ impl ThreadView {
                                         this.child(
                                             div()
                                                 .id(("subagent-executor", entry_ix))
-                                                .flex_none()
+                                                .min_w_0()
+                                                .overflow_hidden()
                                                 .child(
                                                     Label::new(executor)
                                                         .size(LabelSize::Custom(
                                                             self.tool_name_font_size(),
                                                         ))
-                                                        .color(Color::Muted),
+                                                        .color(Color::Muted)
+                                                        .truncate(),
                                                 ),
                                         )
                                     })
@@ -12034,10 +12036,12 @@ impl ThreadView {
                         is_running && subagent_session_id.is_some() && !is_expanded,
                         |buttons| {
                             buttons.child(
-                                Icon::new(IconName::TodoProgress)
-                                    .size(IconSize::Small)
-                                    .color(Color::Accent)
-                                    .with_rotate_animation(2),
+                                div().flex_none().child(
+                                    Icon::new(IconName::TodoProgress)
+                                        .size(IconSize::Small)
+                                        .color(Color::Accent)
+                                        .with_rotate_animation(2),
+                                ),
                             )
                         },
                     )
@@ -12045,27 +12049,29 @@ impl ThreadView {
                         is_running && subagent_session_id.is_some() && is_expanded,
                         |buttons| {
                             buttons.child(
-                                IconButton::new(
-                                    format!("stop-subagent-{}", entry_ix),
-                                    IconName::Stop,
-                                )
-                                .icon_size(IconSize::Small)
-                                .icon_color(Color::Error)
-                                .tooltip(Tooltip::text("Stop Subagent"))
-                                .when_some(
-                                    thread_view
-                                        .as_ref()
-                                        .map(|view| view.read(cx).thread.clone()),
-                                    |this, thread| {
-                                        this.on_click(cx.listener(
-                                            move |_this, _event, _window, cx| {
-                                                telemetry::event!("Subagent Stopped");
-                                                thread.update(cx, |thread, cx| {
-                                                    thread.cancel(cx).detach();
-                                                });
-                                            },
-                                        ))
-                                    },
+                                div().flex_none().child(
+                                    IconButton::new(
+                                        format!("stop-subagent-{}", entry_ix),
+                                        IconName::Stop,
+                                    )
+                                    .icon_size(IconSize::Small)
+                                    .icon_color(Color::Error)
+                                    .tooltip(Tooltip::text("Stop Subagent"))
+                                    .when_some(
+                                        thread_view
+                                            .as_ref()
+                                            .map(|view| view.read(cx).thread.clone()),
+                                        |this, thread| {
+                                            this.on_click(cx.listener(
+                                                move |_this, _event, _window, cx| {
+                                                    telemetry::event!("Subagent Stopped");
+                                                    thread.update(cx, |thread, cx| {
+                                                        thread.cancel(cx).detach();
+                                                    });
+                                                },
+                                            ))
+                                        },
+                                    ),
                                 ),
                             )
                         },
@@ -12196,8 +12202,6 @@ impl ThreadView {
         window: &Window,
         cx: &Context<Self>,
     ) -> impl IntoElement {
-        const MAX_PREVIEW_ENTRIES: usize = 8;
-
         let subagent_view = thread_view.read(cx);
         let session_id = subagent_view.thread.read(cx).session_id().clone();
 
@@ -12222,7 +12226,7 @@ impl ThreadView {
 
         let entries = subagent_view.thread.read(cx).entries();
         let total_entries = entries.len();
-        let mut entry_range = if let Some(info) = tool_call.subagent_session_info.as_ref() {
+        let entry_range = if let Some(info) = tool_call.subagent_session_info.as_ref() {
             info.message_start_index
                 ..info
                     .message_end_index
@@ -12231,10 +12235,6 @@ impl ThreadView {
         } else {
             0..total_entries
         };
-        entry_range.start = entry_range
-            .end
-            .saturating_sub(MAX_PREVIEW_ENTRIES)
-            .max(entry_range.start);
         let start_ix = entry_range.start;
 
         let scroll_handle = self
@@ -14290,6 +14290,7 @@ impl ThreadView {
     fn render_zero_base_executor_bar(
         &mut self,
         compact: bool,
+        window: &mut Window,
         cx: &mut Context<Self>,
     ) -> AnyElement {
         let exo = self.exo_connection(cx);
@@ -14365,7 +14366,7 @@ impl ThreadView {
                     // omega#165: on a bound conversation it starts a new
                     // thread on the picked executor; it never retargets this
                     // transcript.
-                    .children(self.render_composer_executor_menu(!turn_running, cx))
+                    .children(self.render_composer_executor_menu(!turn_running, window, cx))
                     // omega#99. The inspector's contents are the conversation's
                     // — identity, runtime, capabilities and the authority
                     // receipt for the turn a person just watched — so in zero
@@ -14408,6 +14409,7 @@ impl ThreadView {
     fn render_composer_executor_menu(
         &self,
         model_picker_enabled: bool,
+        window: &mut Window,
         cx: &mut Context<Self>,
     ) -> Option<AnyElement> {
         let conversation_is_bound = !self.thread.read(cx).is_draft_thread();
@@ -14423,7 +14425,9 @@ impl ThreadView {
             self.workspace.clone(),
             current_label,
             conversation_is_bound,
+            self.message_editor.focus_handle(cx),
             self.composer_model_picker(model_picker_enabled, cx),
+            window,
             cx,
         )
     }
@@ -14444,29 +14448,183 @@ impl ThreadView {
         use acp_thread::AgentModelId;
         use std::rc::Rc;
 
-        let routed = RoutedModel::from_disclosure(&self.executor_disclosure(cx));
-        // `OMEGA-DELTA-0207`. When nothing has routed yet, the model the next
-        // turn will start on — not the standing static, which is `Luna` at
-        // every launch and disagreed with the send.
-        let face = face_for_next_turn(routed.as_ref(), selected(), cx);
-        let model_selector = self.model_selector.clone();
-
-        crate::omega_composer_executor_menu::ComposerModelPicker {
-            face,
-            enabled,
-            on_select: Rc::new(move |tier, _window, cx| {
-                select(tier);
-                if let Some(entity) = model_selector.as_ref() {
-                    let agent = entity.read(cx).agent_selector();
-                    let model_id = AgentModelId::new(tier.agent_model_id());
-                    agent.select_model(model_id, cx).detach_and_log_err(cx);
-                } else {
-                    log::warn!(
-                        "omega_model_tier: chose {} but this thread has no model selector",
-                        tier.name()
-                    );
+        if self.agent_id.as_ref() == agent::OMEGA_AGENT_ID.as_ref() {
+            let routed = RoutedModel::from_disclosure(&self.executor_disclosure(cx));
+            let face = face_for_next_turn(routed.as_ref(), selected(), cx);
+            let model_selector = self.model_selector.clone();
+            let mut picker = crate::omega_composer_executor_menu::ComposerModelPicker::omega(
+                face,
+                enabled,
+                Rc::new(move |tier, _window, cx| {
+                    select(tier);
+                    if let Some(entity) = model_selector.as_ref() {
+                        let agent = entity.read(cx).agent_selector();
+                        let model_id = AgentModelId::new(tier.agent_model_id());
+                        agent.select_model(model_id, cx).detach_and_log_err(cx);
+                    } else {
+                        log::warn!(
+                            "omega_model_tier: chose {} but this thread has no model selector",
+                            tier.name()
+                        );
+                    }
+                }),
+            );
+            if let Some(thread) = self.as_native_thread(cx) {
+                let (supports_disabling, thinking_enabled, selected_effort, effort_levels) = {
+                    let thread = thread.read(cx);
+                    let Some(model) = thread.model() else {
+                        return picker;
+                    };
+                    (
+                        model.supports_disabling_thinking(),
+                        thread.thinking_enabled(),
+                        thread.thinking_effort().cloned(),
+                        model.supported_effort_levels(),
+                    )
+                };
+                if !effort_levels.is_empty() {
+                    let mut options = Vec::new();
+                    if supports_disabling {
+                        options.push(crate::omega_composer_executor_menu::ComposerTraitOption {
+                            id: "__off".into(),
+                            label: "Off".into(),
+                            selected: !thinking_enabled,
+                        });
+                    }
+                    options.extend(effort_levels.into_iter().map(|level| {
+                        let selected = thinking_enabled
+                            && selected_effort.as_deref() == Some(level.value.as_ref());
+                        crate::omega_composer_executor_menu::ComposerTraitOption {
+                            id: level.value,
+                            label: level.name,
+                            selected,
+                        }
+                    }));
+                    picker
+                        .traits
+                        .push(crate::omega_composer_executor_menu::ComposerTraitGroup {
+                            id: "reasoning".into(),
+                            label: "Reasoning".into(),
+                            options,
+                            on_select: Rc::new(move |effort, _window, cx| {
+                                thread.update(cx, |thread, cx| {
+                                    if effort.as_ref() == "__off" {
+                                        thread.set_thinking_enabled(false, cx);
+                                    } else {
+                                        thread.set_thinking_enabled(true, cx);
+                                        thread.set_thinking_effort(Some(effort.to_string()), cx);
+                                    }
+                                });
+                            }),
+                        });
                 }
-            }),
+            }
+            picker
+        } else if let Some(config_options) = self.config_options_view.clone() {
+            let models = config_options.read(cx).composer_models();
+            let traits = config_options
+                .read(cx)
+                .composer_traits()
+                .into_iter()
+                .map(|group| {
+                    let config_options = config_options.clone();
+                    let config_id = group.id.clone();
+                    crate::omega_composer_executor_menu::ComposerTraitGroup {
+                        id: group.id,
+                        label: group.name,
+                        options: group
+                            .choices
+                            .into_iter()
+                            .map(|choice| {
+                                crate::omega_composer_executor_menu::ComposerTraitOption {
+                                    id: choice.id,
+                                    label: choice.name,
+                                    selected: choice.selected,
+                                }
+                            })
+                            .collect(),
+                        on_select: Rc::new(move |choice_id, _window, cx| {
+                            config_options.update(cx, |config_options, cx| {
+                                config_options.select_composer_trait(
+                                    config_id.as_ref(),
+                                    choice_id.as_ref(),
+                                    cx,
+                                );
+                            });
+                        }),
+                    }
+                })
+                .collect();
+            let current_model = models.iter().find(|model| model.selected).cloned();
+            let options = models
+                .into_iter()
+                .map(
+                    |model| crate::omega_composer_executor_menu::ComposerModelOption {
+                        id: AgentModelId::new(model.id),
+                        name: model.name,
+                        description: model.description,
+                        disabled: false,
+                    },
+                )
+                .collect::<Vec<_>>();
+            crate::omega_composer_executor_menu::ComposerModelPicker {
+                label: current_model
+                    .as_ref()
+                    .map(|model| model.name.clone())
+                    .unwrap_or_else(|| self.agent_display_name.clone()),
+                current_model: current_model.map(|model| AgentModelId::new(model.id)),
+                enabled: enabled && !options.is_empty(),
+                models: options,
+                traits,
+                empty_message: "Choose one of this agent's models.".into(),
+                on_select: Rc::new(move |model_id, _window, cx| {
+                    config_options.update(cx, |config_options, cx| {
+                        config_options.select_composer_model(model_id.as_str(), cx);
+                    });
+                }),
+            }
+        } else if let Some(model_selector) = self.model_selector.clone() {
+            let selector = model_selector.read(cx);
+            let active_model = selector.active_model(cx).cloned();
+            let models = selector
+                .available_models(cx)
+                .into_iter()
+                .map(
+                    |model| crate::omega_composer_executor_menu::ComposerModelOption {
+                        id: model.id,
+                        name: model.name,
+                        description: model.description,
+                        disabled: model.disabled.is_some(),
+                    },
+                )
+                .collect();
+            let agent_selector = selector.agent_selector();
+            crate::omega_composer_executor_menu::ComposerModelPicker {
+                label: active_model
+                    .as_ref()
+                    .map(|model| model.name.clone())
+                    .unwrap_or_else(|| "Select a model".into()),
+                current_model: active_model.map(|model| model.id),
+                models,
+                traits: Vec::new(),
+                enabled,
+                empty_message: "Choose one of this agent's models.".into(),
+                on_select: Rc::new(move |model_id, _window, cx| {
+                    agent_selector
+                        .select_model(model_id, cx)
+                        .detach_and_log_err(cx);
+                }),
+            }
+        } else {
+            crate::omega_composer_executor_menu::ComposerModelPicker {
+                label: self.agent_display_name.clone(),
+                current_model: None,
+                models: Vec::new(),
+                traits: Vec::new(),
+                enabled: false,
+                empty_message: "This agent manages models in its own settings.".into(),
+                on_select: Rc::new(|_, _, _| {}),
+            }
         }
     }
 

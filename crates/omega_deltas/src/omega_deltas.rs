@@ -6322,8 +6322,11 @@ mod tests {
              only surface left that names the executor.",
             path.display()
         );
+        // The Comet model picker needs the live window to mount its popover.
+        // Keep the attribution assertion aligned with that admitted UI seam:
+        // adding the window parameter must not make the bar optional.
         assert!(
-            source.contains("self.render_zero_base_executor_bar(compact, cx)"),
+            source.contains("self.render_zero_base_executor_bar(compact, window, cx)"),
             "OMEGA-DELTA-0021: {} must draw zero base's composer bar. Defining \
              it without rendering it leaves a zero-base turn unattributed, \
              which is omega#77's falsifier.",
@@ -17212,9 +17215,9 @@ mod tests {
             });
         for (token, why) in [
             (
-                "right.updated_at.cmp(&left.updated_at)",
-                "newest first is the order the owner asked for — \"historical \
-                 chats\" with the recent ones out of reach is the same as none",
+                "right_created_at.cmp(&left_created_at)",
+                "creation order is immutable, so opening or updating a chat \
+                 cannot move the row while the person is navigating",
             ),
             (
                 "short_age(",
@@ -24286,7 +24289,7 @@ mod tests {
         let thread_view = read_repository_file(ZERO_BASE_THREAD_VIEW_PATH);
         let bar = body_of(&thread_view, "render_zero_base_executor_bar");
         assert!(
-            bar.contains("self.render_composer_executor_menu(!turn_running, cx)"),
+            bar.contains("self.render_composer_executor_menu(!turn_running, window, cx)"),
             "OMEGA-DELTA-0184: the zero-base composer bar no longer offers \
              the executor dropdown beside the tier selector."
         );
@@ -27664,11 +27667,13 @@ mod tests {
             "window.modifiers()",
             "modifiers.platform",
             "modifiers.control",
-            "take(COMET_TAB_SHORTCUT_LABELS.len() - 1)",
+            "fn comet_session_tab_rows",
+            "left.created_at.cmp(&right.created_at)",
             "activate_comet_session_tab(action.0, window, cx)",
             "on_modifiers_changed",
-            "comet_tab_shortcut_hint(0, text_placeholder)",
-            "comet_tab_shortcut_hint(index + 1, text_placeholder)",
+            "comet_tab_shortcut_hint(index, text_placeholder)",
+            "active_tab_is_persisted",
+            "active_sidebar_row_is_persisted",
         ] {
             assert!(
                 panel.contains(required),
@@ -27689,5 +27694,44 @@ mod tests {
                 );
             }
         }
+    }
+
+    /// OMEGA-DELTA-0229. The Comet composer uses its dedicated harness/model
+    /// picker geometry instead of collapsing model selection into a generic
+    /// context menu.
+    #[test]
+    fn comet_composer_uses_the_comet_model_picker() {
+        let menu = without_comments(&read_repository_file(
+            "crates/agent_ui/src/omega_composer_executor_menu.rs",
+        ));
+        for required in [
+            "struct CometComposerModelMenu",
+            "Label::new(model_label)",
+            "w(px(460.))",
+            "h(px(420.))",
+            "w(px(148.))",
+            "Label::new(\"Agents\")",
+            "Label::new(\"Models\")",
+            "ModelTier::ALL",
+            "tier.model_name()",
+            "tier.description()",
+            "IconName::Check",
+            "on_action(cx.listener(Self::select_next))",
+            "on_action(cx.listener(Self::select_previous))",
+            "on_action(cx.listener(Self::confirm))",
+            "on_action(cx.listener(Self::cancel))",
+            "IconName::Return",
+            "Add More Agents…",
+        ] {
+            assert!(
+                menu.contains(required),
+                "OMEGA-DELTA-0229: Comet model picker lost `{required}`"
+            );
+        }
+        assert!(
+            !menu.contains("Label::new(current_label)"),
+            "OMEGA-DELTA-0229: the composer trigger regressed to an executor label instead of \
+             Comet's brand-mark plus model face"
+        );
     }
 }
