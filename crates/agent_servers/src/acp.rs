@@ -459,13 +459,15 @@ impl AcpConnectionDefaults {
     }
 
     fn refresh_from_settings(&self, agent_id: &AgentId, cx: &App) {
+        let forced_mode =
+            crate::full_access_mode_for_agent(agent_id.as_ref()).map(acp::SessionModeId::new);
         let Some(settings_store) = cx.try_global::<SettingsStore>() else {
-            self.set(None, HashMap::default());
+            self.set(forced_mode, HashMap::default());
             return;
         };
         let settings = settings_store.get::<AllAgentServersSettings>(None);
         let Some(agent_settings) = settings.get(agent_id.as_ref()) else {
-            self.set(None, HashMap::default());
+            self.set(forced_mode, HashMap::default());
             return;
         };
 
@@ -480,7 +482,7 @@ impl AcpConnectionDefaults {
             } => default_config_options.clone(),
         };
         self.set(
-            agent_settings.default_mode().map(acp::SessionModeId::new),
+            forced_mode.or_else(|| agent_settings.default_mode().map(acp::SessionModeId::new)),
             default_config_options,
         );
     }
@@ -1357,6 +1359,7 @@ impl AcpConnection {
                     let (modes, config_options) =
                         config_state(response.modes, response.config_options);
 
+                    this.apply_default_mode(&session_id, modes.as_ref(), cx);
                     if let Some(config_opts) = config_options.as_ref() {
                         this.apply_default_config_options(&session_id, config_opts, cx);
                     }
@@ -1399,6 +1402,64 @@ impl AcpConnection {
 
         cx.foreground_executor()
             .spawn(async move { shared_task.await.map_err(|err| anyhow!(err)) })
+    }
+
+    fn apply_default_mode(
+        &self,
+        session_id: &acp::SessionId,
+        modes: Option<&Rc<RefCell<acp::SessionModeState>>>,
+        cx: &mut AsyncApp,
+    ) {
+        let Some(default_mode) = self.defaults.mode() else {
+            return;
+        };
+        let Some(modes) = modes else {
+            return;
+        };
+
+        let mut modes_ref = modes.borrow_mut();
+        let has_mode = modes_ref
+            .available_modes
+            .iter()
+            .any(|mode| mode.id == default_mode);
+        if !has_mode {
+            let available_modes = modes_ref
+                .available_modes
+                .iter()
+                .map(|mode| format!("- `{}`: {}", mode.id, mode.name))
+                .collect::<Vec<_>>()
+                .join("\n");
+            log::warn!(
+                "`{default_mode}` is not a valid {} mode. Available options:\n{available_modes}",
+                self.id
+            );
+            return;
+        }
+        if modes_ref.current_mode_id == default_mode {
+            return;
+        }
+
+        let initial_mode_id = modes_ref.current_mode_id.clone();
+        modes_ref.current_mode_id = default_mode.clone();
+        drop(modes_ref);
+
+        cx.spawn({
+            let session_id = session_id.clone();
+            let modes = modes.clone();
+            let connection = self.connection.clone();
+            async move |_| {
+                let result = connection
+                    .send_request(acp::SetSessionModeRequest::new(session_id, default_mode))
+                    .block_task()
+                    .await
+                    .log_err();
+
+                if result.is_none() {
+                    modes.borrow_mut().current_mode_id = initial_mode_id;
+                }
+            }
+        })
+        .detach();
     }
 
     fn apply_default_config_options(
@@ -1799,7 +1860,6 @@ impl AgentConnection for AcpConnection {
         cx: &mut App,
     ) -> Task<Result<Entity<AcpThread>>> {
         let directories = self.session_directories(work_dirs.clone(), &project, cx);
-        let name = self.id.0.clone();
         let mcp_servers = mcp_servers_for_project(&project, cx);
 
         cx.spawn(async move |cx| {
@@ -1808,60 +1868,12 @@ impl AgentConnection for AcpConnection {
                 .connection
                 .send_request(directories.into_new_session_request(mcp_servers))
                 .block_task()
-            .await
-            .map_err(map_acp_error)?;
+                .await
+                .map_err(map_acp_error)?;
 
             let (modes, config_options) = config_state(response.modes, response.config_options);
 
-            let default_mode = self.defaults.mode();
-            if let Some(default_mode) = default_mode {
-                if let Some(modes) = modes.as_ref() {
-                    let mut modes_ref = modes.borrow_mut();
-                    let has_mode = modes_ref
-                        .available_modes
-                        .iter()
-                        .any(|mode| mode.id == default_mode);
-
-                    if has_mode {
-                        let initial_mode_id = modes_ref.current_mode_id.clone();
-
-                        cx.spawn({
-                            let default_mode = default_mode.clone();
-                            let session_id = response.session_id.clone();
-                            let modes = modes.clone();
-                            let conn = self.connection.clone();
-                            async move |_| {
-                                let result = conn
-                                    .send_request(acp::SetSessionModeRequest::new(
-                                        session_id,
-                                        default_mode,
-                                    ))
-                                    .block_task()
-                                .await
-                                .log_err();
-
-                                if result.is_none() {
-                                    modes.borrow_mut().current_mode_id = initial_mode_id;
-                                }
-                            }
-                        })
-                        .detach();
-
-                        modes_ref.current_mode_id = default_mode;
-                    } else {
-                        let available_modes = modes_ref
-                            .available_modes
-                            .iter()
-                            .map(|mode| format!("- `{}`: {}", mode.id, mode.name))
-                            .collect::<Vec<_>>()
-                            .join("\n");
-
-                        log::warn!(
-                            "`{default_mode}` is not valid {name} mode. Available options:\n{available_modes}",
-                        );
-                    }
-                }
-            }
+            self.apply_default_mode(&response.session_id, modes.as_ref(), cx);
 
             if let Some(config_opts) = config_options.as_ref() {
                 self.apply_default_config_options(&response.session_id, config_opts, cx);
@@ -1878,9 +1890,7 @@ impl AgentConnection for AcpConnection {
                     action_log,
                     response.session_id.clone(),
                     // ACP doesn't currently support per-session prompt capabilities or changing capabilities dynamically.
-                    watch::Receiver::constant(
-                        self.agent_capabilities.prompt_capabilities.clone(),
-                    ),
+                    watch::Receiver::constant(self.agent_capabilities.prompt_capabilities.clone()),
                     cx,
                 )
             });

@@ -127,6 +127,13 @@ Omega intentionally differs from upstream Zed. Its global tool-permission
 default is `allow`, not `confirm`, because unattended Full Auto work cannot
 make progress while waiting at a prompt.
 
+Owner-directed Codex and Claude ACP sessions also run in their respective
+full-access modes. Omega reapplies that mode when it creates or restores a
+session. Changing another agent-server preference, such as the default model,
+does not remove the full-access mode. As a result, these coding agents can read
+and write outside the selected project, use the network, and run commands
+without an approval prompt.
+
 This does not mean every possible command is safe:
 
 - hardcoded terminal rules still reject a small set of catastrophic commands

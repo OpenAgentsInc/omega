@@ -114,10 +114,13 @@ impl AgentServer for CustomAgentServer {
     // in settings is discarded before the first session is opened, and
     // `new_session` sends no `session/set_mode` at all. Returning it here
     // therefore did nothing — and if the clobber were ever fixed it would apply
-    // bypass to the owner's own panel thread, which is wider than the delegation
-    // this policy is about. The mode is applied where it can be awaited and
-    // checked instead: `create_external_acp_subagent`.
+    // bypass to the owner's own panel thread. Omega now intentionally applies
+    // that wider policy for the owner's coding-agent sessions as well.
     fn default_mode(&self, cx: &App) -> Option<acp::SessionModeId> {
+        if let Some(mode) = full_access_mode_for_agent(self.agent_id().as_ref()) {
+            return Some(acp::SessionModeId::new(mode));
+        }
+
         let settings = cx.read_global(|settings: &SettingsStore, _| {
             settings
                 .get::<AllAgentServersSettings>(None)
@@ -378,6 +381,21 @@ fn prepend_launch_args_for_agent(agent_id: &str, unattended: bool, args: &mut Ve
     *args = launch_args;
 }
 
+/// The no-confirmation mode required for owner-directed coding-agent sessions.
+///
+/// This is deliberately stronger than a default setting: user settings merge
+/// agent-server entries as whole objects, so adding a model preference can
+/// otherwise erase the packaged mode and silently restore approval prompts.
+/// Returning the mode here keeps both newly created and restored sessions on
+/// the owner's requested full-access policy.
+pub fn full_access_mode_for_agent(agent_id: &str) -> Option<&'static str> {
+    match agent_id {
+        CODEX_ID => Some("agent-full-access"),
+        CLAUDE_AGENT_ID => Some("bypassPermissions"),
+        _ => None,
+    }
+}
+
 /// The session mode a delegated coding agent has to be in to run unattended.
 ///
 /// OMEGA-DELTA-0161. A delegated sub-agent's permission prompt has nobody to
@@ -389,11 +407,7 @@ fn prepend_launch_args_for_agent(agent_id: &str, unattended: bool, args: &mut Ve
 /// This is the only place the mapping lives. It is the caller's job to apply it
 /// and to prove it took effect — see `create_external_acp_subagent`.
 pub fn unattended_mode_for_agent(agent_id: &str) -> Option<&'static str> {
-    match agent_id {
-        CODEX_ID => Some("agent-full-access"),
-        CLAUDE_AGENT_ID => Some("bypassPermissions"),
-        _ => None,
-    }
+    full_access_mode_for_agent(agent_id)
 }
 
 fn api_key_for_gemini_cli(cx: &mut App) -> Task<Result<String>> {
@@ -464,6 +478,47 @@ mod tests {
         );
         assert_eq!(unattended_mode_for_agent(GEMINI_ID), None);
         assert_eq!(unattended_mode_for_agent(GROK_ID), None);
+    }
+
+    #[gpui::test]
+    fn owner_coding_sessions_ignore_narrower_merged_defaults(cx: &mut TestAppContext) {
+        init_test(cx);
+        cx.update(|cx| {
+            AllAgentServersSettings::override_global(
+                AllAgentServersSettings(HashMap::from_iter([
+                    (
+                        CODEX_ID.to_string(),
+                        settings::CustomAgentServerSettings::Registry {
+                            default_mode: None,
+                            env: HashMap::default(),
+                            default_config_options: HashMap::default(),
+                            favorite_config_option_values: HashMap::default(),
+                        }
+                        .into(),
+                    ),
+                    (
+                        CLAUDE_AGENT_ID.to_string(),
+                        settings::CustomAgentServerSettings::Registry {
+                            default_mode: Some("default".to_string()),
+                            env: HashMap::default(),
+                            default_config_options: HashMap::default(),
+                            favorite_config_option_values: HashMap::default(),
+                        }
+                        .into(),
+                    ),
+                ])),
+                cx,
+            );
+
+            assert_eq!(
+                CustomAgentServer::new(AgentId::new(CODEX_ID)).default_mode(cx),
+                Some(acp::SessionModeId::new("agent-full-access"))
+            );
+            assert_eq!(
+                CustomAgentServer::new(AgentId::new(CLAUDE_AGENT_ID)).default_mode(cx),
+                Some(acp::SessionModeId::new("bypassPermissions"))
+            );
+        });
     }
 
     #[test]

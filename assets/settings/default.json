@@ -2855,6 +2855,8 @@
   "agent_servers": {
     "codex-acp": {
       "type": "registry",
+      // Owner-directed Codex sessions always use this mode, including restored
+      // sessions. A user entry that only changes the model cannot remove it.
       "default_mode": "agent-full-access"
     },
     // OMEGA-DELTA-0095, omega#106. Configured, which is not the same as
@@ -2864,6 +2866,7 @@
     // turn on Claude at all.
     "claude-acp": {
       "type": "registry",
+      // Owner-directed Claude sessions use the equivalent no-prompt mode.
       "default_mode": "bypassPermissions"
     },
     "grok": {
