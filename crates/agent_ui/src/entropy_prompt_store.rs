@@ -32,6 +32,8 @@ pub struct EntropyForensicsRestoreState {
     pub bench_view: Option<String>,
     #[serde(default)]
     pub lifecycle_selection: Option<String>,
+    #[serde(default)]
+    pub evidence_selection: Option<String>,
 }
 
 impl Default for EntropyForensicsRestoreState {
@@ -46,6 +48,7 @@ impl Default for EntropyForensicsRestoreState {
             coldcard_case_rung: None,
             bench_view: None,
             lifecycle_selection: None,
+            evidence_selection: None,
         }
     }
 }
@@ -106,6 +109,14 @@ impl EntropyForensicsRestoreState {
             })
         {
             anyhow::bail!("forensics restore contains an unknown lifecycle selection");
+        }
+        if self.evidence_selection.as_deref().is_some_and(|selection| {
+            !matches!(
+                selection,
+                "findings" | "hypotheses" | "limitations" | "disputes" | "reconciliation"
+            )
+        }) {
+            anyhow::bail!("forensics restore contains an unknown evidence selection");
         }
         if let Some(parent_prompt_ref) = &self.parent_prompt_ref
             && !self
@@ -208,6 +219,7 @@ mod tests {
             coldcard_case_rung: Some("entity".into()),
             bench_view: Some("lifecycle".into()),
             lifecycle_selection: Some("cleanup".into()),
+            evidence_selection: Some("disputes".into()),
         };
         state.validate().expect("valid restore state");
         let encoded = serde_json::to_string(&state).expect("encode restore state");

@@ -91,7 +91,7 @@ pub enum ForensicsBenchView {
 }
 
 impl ForensicsBenchView {
-    const AVAILABLE: [Self; 3] = [Self::Entropy, Self::Case, Self::Lifecycle];
+    const AVAILABLE: [Self; 4] = [Self::Entropy, Self::Case, Self::Lifecycle, Self::Evidence];
 
     fn label(self) -> &'static str {
         match self {
@@ -123,6 +123,56 @@ impl ForensicsBenchView {
             Some("models") => Self::Models,
             Some("publication") => Self::Publication,
             _ => Self::Entropy,
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum EvidenceSelection {
+    #[default]
+    Findings,
+    Hypotheses,
+    Limitations,
+    Disputes,
+    Reconciliation,
+}
+
+impl EvidenceSelection {
+    const ALL: [Self; 5] = [
+        Self::Findings,
+        Self::Hypotheses,
+        Self::Limitations,
+        Self::Disputes,
+        Self::Reconciliation,
+    ];
+
+    fn label(self) -> &'static str {
+        match self {
+            Self::Findings => "Findings",
+            Self::Hypotheses => "Hypotheses",
+            Self::Limitations => "Limitations",
+            Self::Disputes => "Disputes",
+            Self::Reconciliation => "Reconciliation",
+        }
+    }
+
+    fn persisted(self) -> &'static str {
+        match self {
+            Self::Findings => "findings",
+            Self::Hypotheses => "hypotheses",
+            Self::Limitations => "limitations",
+            Self::Disputes => "disputes",
+            Self::Reconciliation => "reconciliation",
+        }
+    }
+
+    fn from_persisted(value: Option<&str>) -> Self {
+        match value {
+            Some("hypotheses") => Self::Hypotheses,
+            Some("limitations") => Self::Limitations,
+            Some("disputes") => Self::Disputes,
+            Some("reconciliation") => Self::Reconciliation,
+            _ => Self::Findings,
         }
     }
 }
@@ -305,6 +355,7 @@ pub struct ForensicsWorkbenchSnapshot {
     pub binding: RepositoryBinding,
     pub bench_view: ForensicsBenchView,
     pub lifecycle_selection: LifecycleSelection,
+    pub evidence_selection: EvidenceSelection,
     pub selected_arm: ColdcardBenchmarkArm,
     pub readiness: Option<PreflightReadiness>,
     pub prepared_intent: Option<ForensicsLaunchIntent>,
@@ -368,6 +419,7 @@ pub struct ForensicsWorkbenchSurface {
     repository: ForensicsRepositoryContext,
     bench_view: ForensicsBenchView,
     lifecycle_selection: LifecycleSelection,
+    evidence_selection: EvidenceSelection,
     selected_arm: ColdcardBenchmarkArm,
     preflight: Option<ForensicsPreflightProjection>,
     prepared_intent: Option<ForensicsLaunchIntent>,
@@ -426,6 +478,7 @@ impl ForensicsWorkbenchSurface {
             },
             bench_view: ForensicsBenchView::Entropy,
             lifecycle_selection: LifecycleSelection::Summary,
+            evidence_selection: EvidenceSelection::Findings,
             selected_arm: ColdcardBenchmarkArm::Vulnerable,
             preflight: None,
             prepared_intent: None,
@@ -479,6 +532,8 @@ impl ForensicsWorkbenchSurface {
         this.bench_view = ForensicsBenchView::from_persisted(restored.bench_view.as_deref());
         this.lifecycle_selection =
             LifecycleSelection::from_persisted(restored.lifecycle_selection.as_deref());
+        this.evidence_selection =
+            EvidenceSelection::from_persisted(restored.evidence_selection.as_deref());
         let mut campaigns = restored.campaigns;
         if let Some(mut active_campaign) = campaigns.pop() {
             if matches!(
@@ -808,6 +863,7 @@ impl ForensicsWorkbenchSurface {
                 .map(str::to_string),
             bench_view: Some(self.bench_view.persisted().into()),
             lifecycle_selection: Some(self.lifecycle_selection.persisted().into()),
+            evidence_selection: Some(self.evidence_selection.persisted().into()),
         }
     }
 
@@ -1221,6 +1277,16 @@ impl ForensicsWorkbenchSurface {
         cx.notify();
     }
 
+    pub fn select_evidence_section(
+        &mut self,
+        selection: EvidenceSelection,
+        cx: &mut Context<Self>,
+    ) {
+        self.evidence_selection = selection;
+        self.persist_entropy_state(cx);
+        cx.notify();
+    }
+
     pub fn open_source(&mut self, citation: ForensicSourceCitation, cx: &mut Context<Self>) {
         let repository_root = self
             .selected_entropy_project
@@ -1295,6 +1361,7 @@ impl ForensicsWorkbenchSurface {
             binding: self.binding.clone(),
             bench_view: self.bench_view,
             lifecycle_selection: self.lifecycle_selection,
+            evidence_selection: self.evidence_selection,
             selected_arm: self.selected_arm,
             readiness: self
                 .preflight
@@ -1802,6 +1869,392 @@ impl ForensicsWorkbenchSurface {
                         Label::new(presentation.scene.label())
                             .size(LabelSize::XSmall)
                             .color(presentation.scene.color()),
+                    ),
+            )
+            .child(h_flex().w_full().items_stretch().child(list).child(detail))
+            .into_any_element()
+    }
+
+    fn evidence_section_count(&self, section: EvidenceSelection) -> usize {
+        let Some(workspace) = self.coldcard_evidence.as_ref() else {
+            return 0;
+        };
+        match section {
+            EvidenceSelection::Findings => self.review.as_ref().map_or_else(
+                || {
+                    workspace
+                        .ladder
+                        .iter()
+                        .filter(|rung| rung.state != ColdcardRungState::Missing)
+                        .count()
+                },
+                |review| review.findings.len(),
+            ),
+            EvidenceSelection::Hypotheses => self.review.as_ref().map_or_else(
+                || {
+                    workspace
+                        .ladder
+                        .iter()
+                        .filter(|rung| rung.state == ColdcardRungState::Provisional)
+                        .count()
+                },
+                |review| review.hypotheses.len(),
+            ),
+            EvidenceSelection::Limitations => {
+                workspace
+                    .ladder
+                    .iter()
+                    .filter(|rung| rung.state == ColdcardRungState::Missing)
+                    .count()
+                    + usize::from(!workspace.scan.reportable)
+            }
+            EvidenceSelection::Disputes => {
+                workspace.corrections.len()
+                    + workspace
+                        .graph_health
+                        .iter()
+                        .filter(|subject| !subject.complete)
+                        .count()
+            }
+            EvidenceSelection::Reconciliation => workspace.reconciliation.len(),
+        }
+    }
+
+    fn render_evidence_workspace(&self, cx: &mut Context<Self>) -> AnyElement {
+        let selected = self.evidence_selection;
+        let state_label = match &self.coldcard_case_reader_state {
+            ColdcardCaseReaderState::Loading => "Loading",
+            ColdcardCaseReaderState::Empty => "Empty",
+            ColdcardCaseReaderState::Invalid(_) => "Invalid",
+            ColdcardCaseReaderState::Stale(_) => "Stale",
+            ColdcardCaseReaderState::Complete => "Complete",
+        };
+        let state_color = match &self.coldcard_case_reader_state {
+            ColdcardCaseReaderState::Invalid(_) => Color::Error,
+            ColdcardCaseReaderState::Stale(_) => Color::Warning,
+            ColdcardCaseReaderState::Complete => Color::Success,
+            ColdcardCaseReaderState::Loading | ColdcardCaseReaderState::Empty => Color::Muted,
+        };
+
+        let list =
+            v_flex()
+                .id("omega.forensics.evidence.list")
+                .w(px(260.))
+                .flex_shrink_0()
+                .gap_1()
+                .p_2()
+                .border_r_1()
+                .border_color(cx.theme().colors().border_variant)
+                .role(gpui::Role::List)
+                .aria_label("Forensic evidence queue")
+                .children(EvidenceSelection::ALL.into_iter().enumerate().map(
+                    |(index, section)| {
+                        let is_selected = selected == section;
+                        div()
+                            .id(("omega.forensics.evidence.section", index))
+                            .px_3()
+                            .py_2()
+                            .rounded(px(6.))
+                            .cursor_pointer()
+                            .tab_index(0)
+                            .role(gpui::Role::ListItem)
+                            .aria_label(format!(
+                                "{} evidence section, {} items",
+                                section.label(),
+                                self.evidence_section_count(section)
+                            ))
+                            .aria_selected(is_selected)
+                            .when(is_selected, |row| {
+                                row.bg(cx.theme().colors().element_selected)
+                            })
+                            .hover(|row| row.bg(cx.theme().colors().element_hover))
+                            .child(
+                                h_flex()
+                                    .w_full()
+                                    .justify_between()
+                                    .child(Label::new(section.label()).size(LabelSize::Small))
+                                    .child(
+                                        Label::new(
+                                            self.evidence_section_count(section).to_string(),
+                                        )
+                                        .size(LabelSize::XSmall)
+                                        .color(Color::Muted),
+                                    ),
+                            )
+                            .on_click(cx.listener(move |this, _, _, cx| {
+                                this.select_evidence_section(section, cx)
+                            }))
+                            .on_key_down(cx.listener(
+                                move |this, event: &gpui::KeyDownEvent, _, cx| {
+                                    if matches!(event.keystroke.key.as_str(), "enter" | "space") {
+                                        this.select_evidence_section(section, cx);
+                                        cx.stop_propagation();
+                                    }
+                                },
+                            ))
+                    },
+                ));
+
+        let mut detail = v_flex()
+            .id("omega.forensics.evidence.detail")
+            .min_w_0()
+            .flex_1()
+            .gap_3()
+            .p_4()
+            .role(gpui::Role::Group)
+            .aria_label(format!("{} evidence detail", selected.label()))
+            .child(
+                h_flex()
+                    .w_full()
+                    .justify_between()
+                    .gap_3()
+                    .child(Label::new(selected.label()).size(LabelSize::Large))
+                    .child(
+                        Label::new(state_label)
+                            .size(LabelSize::XSmall)
+                            .color(state_color),
+                    ),
+            );
+
+        let Some(workspace) = self.coldcard_evidence.as_ref() else {
+            let message = match &self.coldcard_case_reader_state {
+                ColdcardCaseReaderState::Loading => "Loading the validated evidence projection…",
+                ColdcardCaseReaderState::Empty => "No evidence projection is available.",
+                ColdcardCaseReaderState::Invalid(error) | ColdcardCaseReaderState::Stale(error) => {
+                    error.as_ref()
+                }
+                ColdcardCaseReaderState::Complete => "The evidence projection is unavailable.",
+            };
+            detail = detail.child(
+                Label::new(message)
+                    .size(LabelSize::Small)
+                    .color(state_color),
+            );
+            return v_flex()
+                .id("omega.forensics.evidence.workspace")
+                .w_full()
+                .rounded(px(10.))
+                .border_1()
+                .border_color(cx.theme().colors().border_variant)
+                .bg(cx.theme().colors().surface_background)
+                .role(gpui::Role::Region)
+                .aria_label("Evidence queue and claim inspector")
+                .child(h_flex().w_full().items_stretch().child(list).child(detail))
+                .into_any_element();
+        };
+
+        detail = match selected {
+            EvidenceSelection::Findings => {
+                let source_buttons = self
+                    .review
+                    .iter()
+                    .flat_map(|review| &review.findings)
+                    .flat_map(|finding| &finding.source_refs)
+                    .cloned()
+                    .enumerate()
+                    .map(|(index, citation)| {
+                        let label = format!("{}:{}", citation.path, citation.start_line);
+                        Button::new(("omega.forensics.evidence.source", index), label)
+                            .size(ButtonSize::Compact)
+                            .style(ButtonStyle::Subtle)
+                            .on_click(cx.listener(move |this, _, _, cx| {
+                                this.open_source(citation.clone(), cx)
+                            }))
+                    });
+                detail
+                    .child(Self::render_fact("Claim authority", &workspace.workspace_ref))
+                    .child(Self::render_fact(
+                        "Evidence ladder",
+                        format!(
+                            "{} evidenced · {} missing",
+                            workspace
+                                .ladder
+                                .iter()
+                                .filter(|rung| rung.state != ColdcardRungState::Missing)
+                                .count(),
+                            workspace
+                                .ladder
+                                .iter()
+                                .filter(|rung| rung.state == ColdcardRungState::Missing)
+                                .count()
+                        ),
+                    ))
+                    .children(workspace.ladder.iter().filter(|rung| {
+                        rung.state != ColdcardRungState::Missing
+                    }).map(|rung| {
+                        Self::render_fact(
+                            rung.rung.label(),
+                            format!(
+                                "{} · {}",
+                                coldcard_rung_state_label(rung.state),
+                                rung.evidence_refs.join(" · ")
+                            ),
+                        )
+                    }))
+                    .child(Label::new("Generator trace").size(LabelSize::Small))
+                    .children(workspace.trace.iter().map(|step| {
+                        Self::render_fact(
+                            format!("{}. {}", step.sequence, step.label),
+                            format!(
+                                "{} · {} · {}",
+                                step.evidence_ref, step.rule_ref, step.verifier_state
+                            ),
+                        )
+                    }))
+                    .when_some(self.review.as_ref(), |detail, review| {
+                        detail.children(review.findings.iter().map(|finding| {
+                            Self::render_fact(
+                                format!("Finding · {}", finding.title),
+                                format!(
+                                    "{} · {} · {}",
+                                    finding.claim_state,
+                                    finding.evidence_tier.label(),
+                                    finding.claim_ref
+                                ),
+                            )
+                        }))
+                    })
+                    .child(h_flex().gap_2().flex_wrap().children(source_buttons))
+            }
+            EvidenceSelection::Hypotheses => detail
+                .children(self.review.iter().flat_map(|review| &review.hypotheses).map(
+                    |hypothesis| {
+                        v_flex()
+                            .gap_1()
+                            .child(Self::render_fact(
+                                &hypothesis.hypothesis_ref,
+                                &hypothesis.state,
+                            ))
+                            .child(
+                                Label::new(hypothesis.suspected_mechanism.clone())
+                                    .size(LabelSize::Small),
+                            )
+                            .child(Self::render_fact(
+                                "Supporting evidence",
+                                hypothesis.supporting_refs.join(" · "),
+                            ))
+                            .child(Self::render_fact(
+                                "Missing evidence",
+                                hypothesis.missing_evidence.join(" · "),
+                            ))
+                            .child(Self::render_fact("Next mechanical check", &hypothesis.next_check))
+                    },
+                ))
+                .children(workspace.ladder.iter().filter(|rung| {
+                    rung.state == ColdcardRungState::Provisional
+                }).map(|rung| {
+                    Self::render_fact(
+                        format!("Provisional · {}", rung.rung.label()),
+                        format!(
+                            "{} · next: independent verification",
+                            rung.assumptions.join(" · ")
+                        ),
+                    )
+                })),
+            EvidenceSelection::Limitations => detail
+                .child(Self::render_fact(
+                    "Privacy boundary",
+                    if workspace.scan.reportable {
+                        "Reportable"
+                    } else {
+                        "Private · non-reportable"
+                    },
+                ))
+                .child(Self::render_fact(
+                    "Historical scan",
+                    format!(
+                        "{} ranges · {}",
+                        workspace.scan.ranges.len(),
+                        workspace.scan.restart_state
+                    ),
+                ))
+                .children(workspace.ladder.iter().filter(|rung| {
+                    rung.state == ColdcardRungState::Missing
+                }).map(|rung| {
+                    Self::render_fact(
+                        format!("Missing rung · {}", rung.rung.label()),
+                        format!(
+                            "{} · {}",
+                            rung.assumptions.join(" · "),
+                            rung.non_implications.join(" · ")
+                        ),
+                    )
+                }))
+                .child(Self::render_fact(
+                    "Next mechanical check",
+                    "Establish the next missing rung with independent evidence; do not infer across it",
+                )),
+            EvidenceSelection::Disputes => detail
+                .child(Label::new("Corrections are append-only; prior claims remain inspectable.")
+                    .size(LabelSize::Small)
+                    .color(Color::Muted))
+                .children(workspace.corrections.iter().map(|correction| {
+                    Self::render_fact(
+                        format!("Correction {} · {}", correction.sequence, correction.claim_ref),
+                        format!(
+                            "{} → {} · {} · evidence {}",
+                            correction.prior_value,
+                            correction.corrected_value,
+                            correction.reason_ref,
+                            correction.appended_evidence_refs.join(" · ")
+                        ),
+                    )
+                }))
+                .children(workspace.graph_health.iter().filter(|subject| !subject.complete).map(
+                    |subject| {
+                        Self::render_fact(
+                            format!("Disputed provenance · {}", subject.subject_ref),
+                            subject.missing_provenance_refs.join(" · "),
+                        )
+                    },
+                )),
+            EvidenceSelection::Reconciliation => detail
+                .child(Self::render_fact(
+                    "Graph health",
+                    format!(
+                        "{} complete · {} incomplete",
+                        workspace.graph_health.iter().filter(|item| item.complete).count(),
+                        workspace.graph_health.iter().filter(|item| !item.complete).count()
+                    ),
+                ))
+                .children(workspace.reconciliation.iter().map(|item| {
+                    Self::render_fact(
+                        &item.metric_ref,
+                        format!(
+                            "{:?} · derived {} · published {} · refs {}",
+                            item.status,
+                            item.derived_value.as_deref().unwrap_or("Unavailable"),
+                            item.published_value.as_deref().unwrap_or("Unavailable"),
+                            item.source_refs.join(" · ")
+                        ),
+                    )
+                })),
+        };
+
+        v_flex()
+            .id("omega.forensics.evidence.workspace")
+            .debug_selector(|| "omega.forensics.evidence.workspace".into())
+            .w_full()
+            .rounded(px(10.))
+            .border_1()
+            .border_color(cx.theme().colors().border_variant)
+            .bg(cx.theme().colors().surface_background)
+            .role(gpui::Role::Region)
+            .aria_label("Evidence queue and claim inspector")
+            .child(
+                h_flex()
+                    .w_full()
+                    .justify_between()
+                    .gap_3()
+                    .px_4()
+                    .py_3()
+                    .border_b_1()
+                    .border_color(cx.theme().colors().border_variant)
+                    .child(Label::new("Coldcard evidence queue").size(LabelSize::Small))
+                    .child(
+                        Label::new("Private · read only")
+                            .size(LabelSize::XSmall)
+                            .color(Color::Warning),
                     ),
             )
             .child(h_flex().w_full().items_stretch().child(list).child(detail))
@@ -2412,6 +2865,24 @@ impl Render for ForensicsWorkbenchSurface {
                 .child(header)
                 .child(navigation)
                 .child(lifecycle)
+                .into_any_element();
+        }
+
+        if self.bench_view == ForensicsBenchView::Evidence {
+            let evidence = self.render_evidence_workspace(cx);
+            return v_flex()
+                .id("omega.forensics.workbench")
+                .track_focus(&self.focus_handle)
+                .tab_index(0)
+                .role(gpui::Role::Group)
+                .aria_label("Forensics evidence workspace")
+                .size_full()
+                .overflow_y_scroll()
+                .p_6()
+                .gap_4()
+                .child(header)
+                .child(navigation)
+                .child(evidence)
                 .into_any_element();
         }
 
@@ -4613,6 +5084,82 @@ mod tests {
             assert_eq!(after.run, before.run);
             assert_eq!(after.review, before.review);
             assert!(!LIVE_FORENSIC_CONTROLS_ACCEPTED);
+        });
+    }
+
+    #[gpui::test]
+    fn evidence_queue_keeps_claim_classes_and_private_boundaries_visible(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        cx.update(|cx| {
+            let binding = RepositoryBinding::new("repo", "worktree").expect("valid binding");
+            let surface = cx.new(|cx| ForensicsWorkbenchSurface::new(&candidate(binding), cx));
+            let surface = surface.read(cx);
+            let workspace = surface
+                .coldcard_evidence
+                .as_ref()
+                .expect("bundled evidence workspace");
+
+            assert_eq!(
+                surface.evidence_section_count(EvidenceSelection::Findings),
+                6
+            );
+            assert_eq!(
+                surface.evidence_section_count(EvidenceSelection::Hypotheses),
+                2
+            );
+            assert_eq!(
+                surface.evidence_section_count(EvidenceSelection::Limitations),
+                4
+            );
+            assert_eq!(
+                surface.evidence_section_count(EvidenceSelection::Disputes),
+                2
+            );
+            assert_eq!(
+                surface.evidence_section_count(EvidenceSelection::Reconciliation),
+                2
+            );
+            assert!(!workspace.scan.reportable);
+            assert!(workspace.reconciliation.iter().any(|item| {
+                item.status == omega_forensics::ColdcardReconciliationStatus::Unavailable
+                    && item.derived_value.is_none()
+                    && item.published_value.is_none()
+            }));
+            assert!(
+                workspace
+                    .ladder
+                    .iter()
+                    .filter(|rung| rung.state == ColdcardRungState::Missing)
+                    .all(|rung| !rung.non_implications.is_empty())
+            );
+        });
+    }
+
+    #[gpui::test]
+    fn evidence_selection_is_presentation_only(cx: &mut gpui::TestAppContext) {
+        cx.update(|cx| {
+            let binding = RepositoryBinding::new("repo", "worktree").expect("valid binding");
+            let surface = cx.new(|cx| ForensicsWorkbenchSurface::new(&candidate(binding), cx));
+            let before = surface.read(cx).snapshot();
+            surface.update(cx, |surface, cx| {
+                surface.select_bench_view(ForensicsBenchView::Evidence, cx);
+                surface.select_evidence_section(EvidenceSelection::Disputes, cx);
+            });
+            let after = surface.read(cx).snapshot();
+            assert_eq!(after.bench_view, ForensicsBenchView::Evidence);
+            assert_eq!(after.evidence_selection, EvidenceSelection::Disputes);
+            assert_eq!(after.coldcard_evidence, before.coldcard_evidence);
+            assert_eq!(after.review, before.review);
+            assert_eq!(after.run, before.run);
+            assert_eq!(
+                surface
+                    .read(cx)
+                    .entropy_restore_state()
+                    .evidence_selection
+                    .as_deref(),
+                Some("disputes")
+            );
         });
     }
 

@@ -56,6 +56,29 @@ source-delivery acceptance gates tracked by OpenAgents issues #9289 and #9290.
 The UI cannot acknowledge those gates or convert a ready preflight into launch
 authority.
 
+## Evidence queue and claim inspector
+
+The **Evidence** bench view is a bounded list/detail workspace. Its queue keeps
+five claim classes separate: findings, hypotheses, limitations, disputes, and
+reconciliation. Selecting a row changes presentation state only. The validated
+Coldcard workspace and forensic review projections remain the authorities.
+
+The inspector exposes the evidence ladder, generator trace, historical scan,
+graph health, append-only corrections, exact evidence and rule references,
+missing rungs, non-implications, and the next mechanical check. An unavailable
+value stays unavailable. A missing rung is not inferred from evidence on either
+side of it. The bundled scan is marked private and non-reportable.
+
+Source locations are interactive only when a typed `ForensicSourceCitation`
+exists in the review projection. The button emits the existing `OpenSource`
+command. The evidence UI does not resolve or open arbitrary strings as paths.
+
+Deterministic evidence scenes reuse the validated case projection states:
+loading, empty, invalid, stale, and complete. Keyboard users can focus every
+bench and queue row and activate it with Enter or Space. Selected rows publish
+their selected accessibility state and the list/detail regions have explicit
+labels.
+
 ## Evidence ladder
 
 The ladder always contains nine ordered rungs: source flaw, artifact reality,
@@ -109,5 +132,6 @@ Run the contract and GPUI coverage with:
 cargo test -p omega_forensics coldcard_workspace
 cargo test -p agent_ui forensics_workbench::tests::coldcard --lib
 cargo test -p agent_ui forensics_workbench::tests::lifecycle --lib
+cargo test -p agent_ui forensics_workbench::tests::evidence --lib
 ./script/clippy -p omega_forensics -p agent_ui
 ```
