@@ -22,6 +22,11 @@ Run the development binary with:
 cargo run --profile release-fast
 ```
 
+Build the installable development bundle with the same profile by running
+`script/bundle-mac -f`. The `-f` path is intended for installed-product
+acceptance; it does not make the ad-hoc development signature a release or
+notarization claim.
+
 The resulting application executable is named `omega`. Internal crate names,
 `ZED_*` build variables, project `.zed` folders, remote-server folders, and
 legacy `zed://` parsing remain compatibility surfaces. Omega does not register

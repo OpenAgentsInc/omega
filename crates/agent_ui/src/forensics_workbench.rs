@@ -901,13 +901,7 @@ impl ForensicsWorkbenchSurface {
         this.entropy_prompt_snapshots = restored.prompt_snapshots;
         this.coldcard_case_selection =
             ColdcardCaseSelection::from_persisted_rung(restored.coldcard_case_rung.as_deref());
-        let restored_bench_view =
-            ForensicsBenchView::from_persisted(restored.bench_view.as_deref());
-        this.bench_view = if this.bench_view_available(restored_bench_view) {
-            restored_bench_view
-        } else {
-            ForensicsBenchView::Entropy
-        };
+        this.restore_bench_view(restored.bench_view.as_deref());
         this.lifecycle_selection =
             LifecycleSelection::from_persisted(restored.lifecycle_selection.as_deref());
         this.evidence_selection =
@@ -1671,6 +1665,15 @@ impl ForensicsWorkbenchSurface {
         self.bench_view = view;
         self.persist_entropy_state(cx);
         cx.notify();
+    }
+
+    fn restore_bench_view(&mut self, persisted: Option<&str>) {
+        let restored = ForensicsBenchView::from_persisted(persisted);
+        self.bench_view = if self.bench_view_available(restored) {
+            restored
+        } else {
+            ForensicsBenchView::Entropy
+        };
     }
 
     fn bench_view_available(&self, view: ForensicsBenchView) -> bool {
@@ -3197,9 +3200,16 @@ impl ForensicsWorkbenchSurface {
                     .gap_2()
                     .when(self.fixture_views_enabled, |header| {
                         header.child(
-                            Label::new("DEV MOCKS")
-                                .size(LabelSize::XSmall)
-                                .color(Color::Warning),
+                            div()
+                                .id("omega.forensics.dev-mocks")
+                                .debug_selector(|| "omega.forensics.dev-mocks".into())
+                                .role(gpui::Role::Status)
+                                .aria_label("Development mock data")
+                                .child(
+                                    Label::new("DEV MOCKS")
+                                        .size(LabelSize::XSmall)
+                                        .color(Color::Warning),
+                                ),
                         )
                     })
                     .child(
@@ -5748,19 +5758,95 @@ mod tests {
 
     #[test]
     fn fixture_views_require_test_support_or_explicit_debug_mock_gate() {
-        assert!(forensics_fixture_views_enabled_for(true, false, None));
-        assert!(forensics_fixture_views_enabled_for(false, true, Some("1")));
-        assert!(!forensics_fixture_views_enabled_for(
-            false,
-            false,
-            Some("1")
-        ));
-        assert!(!forensics_fixture_views_enabled_for(
-            false,
-            true,
-            Some("true")
-        ));
-        assert!(!forensics_fixture_views_enabled_for(false, true, None));
+        for (test_support, debug, value, expected) in [
+            (true, false, None, true),
+            (true, false, Some("0"), true),
+            (false, true, Some("1"), true),
+            (false, true, Some("0"), false),
+            (false, true, Some("true"), false),
+            (false, true, None, false),
+            (false, false, Some("1"), false),
+            (false, false, None, false),
+        ] {
+            assert_eq!(
+                forensics_fixture_views_enabled_for(test_support, debug, value),
+                expected,
+                "unexpected gate for test_support={test_support}, debug={debug}, value={value:?}"
+            );
+        }
+    }
+
+    #[gpui::test]
+    fn production_and_mock_navigation_expose_exact_accessible_destinations(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        crate::test_support::init_test(cx);
+        let binding = RepositoryBinding::new("repo", "worktree").expect("valid binding");
+        let candidate = candidate(binding);
+        let (surface, cx) = cx.add_window_view(|window, cx| {
+            ForensicsWorkbenchSurface::new_with_window(&candidate, window, cx)
+        });
+        cx.set_debug_accessibility_active(true);
+
+        surface.update(cx, |surface, cx| {
+            surface.fixture_views_enabled = false;
+            surface.coldcard_evidence = None;
+            surface.review = None;
+            surface.matrix = None;
+            surface.restore_bench_view(Some("publication"));
+            cx.notify();
+        });
+        cx.run_until_parked();
+        let production_tree = cx
+            .debug_render_snapshot()
+            .accessibility_tree_json()
+            .expect("production accessibility tree")
+            .to_string();
+        for label in ["Entropy forensics view", "Lifecycle forensics view"] {
+            assert!(production_tree.contains(label), "missing {label}");
+        }
+        for label in [
+            "Case forensics view",
+            "Evidence forensics view",
+            "Models forensics view",
+            "Publication forensics view",
+            "Development mock data",
+        ] {
+            assert!(
+                !production_tree.contains(label),
+                "production exposed {label}"
+            );
+        }
+        assert_eq!(
+            surface.read_with(cx, |surface, _| surface.bench_view),
+            ForensicsBenchView::Entropy,
+            "a persisted fixture-only route must normalize to Entropy"
+        );
+
+        surface.update(cx, |surface, cx| {
+            surface.fixture_views_enabled = true;
+            surface.coldcard_evidence = Some(
+                bundled_coldcard_evidence_workspace().expect("valid bundled fixture workspace"),
+            );
+            cx.notify();
+        });
+        cx.run_until_parked();
+        let mock_tree = cx
+            .debug_render_snapshot()
+            .accessibility_tree_json()
+            .expect("mock accessibility tree")
+            .to_string();
+        for label in [
+            "Entropy forensics view",
+            "Case forensics view",
+            "Lifecycle forensics view",
+            "Evidence forensics view",
+            "Models forensics view",
+            "Publication forensics view",
+            "Development mock data",
+        ] {
+            assert!(mock_tree.contains(label), "mock mode missing {label}");
+        }
     }
 
     #[gpui::test]

@@ -2,9 +2,11 @@
 
 Omega issue [#197](https://github.com/OpenAgentsInc/omega/issues/197) added the
 typed Coldcard evidence projection. Omega issue
-[#203](https://github.com/OpenAgentsInc/omega/issues/203) makes the bundled,
-synthetic projection available in the production Forensics workbench as a
-read-only case reader. The reader consumes a validated projection; it does not
+[#203](https://github.com/OpenAgentsInc/omega/issues/203) added the bundled,
+synthetic read-only case scene. Omega issue
+[#209](https://github.com/OpenAgentsInc/omega/issues/209) restricts that scene
+to explicit development/mock and test-support builds. The reader consumes a
+validated projection; it does not
 recompute evidence from prose or grant a renderer access to worker
 credentials, private keys, or source artifacts.
 
@@ -19,10 +21,19 @@ thread history.
 Users can open Forensics from the project sidebar or from **View → Workbench →
 Forensics**. Both paths select the same native work surface.
 
-The workbench navigation separates the entropy dashboard, Coldcard case, and
-preflight lifecycle. The selected view and lifecycle row are presentation
-state. Omega restores them for the same repository binding without copying a
-preflight, run, review, or evidence projection into UI-owned state.
+Production navigation always contains the functional entropy dashboard and
+preflight lifecycle. Case appears only with a validated evidence projection,
+Evidence only with a review projection, and Models only with a matrix
+projection. The deterministic Case, Evidence, Models, and Publication scenes
+appear together only when a debug operator sets `OMEGA_UI_MOCKS=1` or the build
+enables test support. Those builds show `DEV MOCKS` and expose a Development
+mock data accessibility status. Candidate and release builds ignore the
+environment value.
+
+The selected view and lifecycle row are presentation state. Omega restores
+them for the same repository binding without copying a preflight, run, review,
+or evidence projection into UI-owned state. A persisted fixture-only selection
+normalizes to Entropy when its source-backed view is unavailable.
 
 The overview identifies the Coldcard target, public clone URL, pinned
 vulnerable commit, synthetic fixture state, private/non-reportable boundary,
@@ -92,7 +103,7 @@ evaluator digests plus common findings. Agreement is not truth, and a majority
 vote cannot promote a forensic claim. The projection's hard gates and promotion
 state remain authoritative.
 
-Before an observed matrix exists, Omega displays a validated synthetic
+In explicit development/mock mode, Omega can display a validated synthetic
 Coldcard matrix with an explicit **Synthetic fixture** badge. It contains an
 eligible hit, a right-censored miss, and an ineligible clean control so that the
 important scenes stay inspectable without implying a live run. Model-run
@@ -100,7 +111,7 @@ selection is restored presentation state only.
 
 ## Publication gate
 
-The **Publication** bench view is a read-only authority reader. It keeps
+The development/mock **Publication** bench view is a read-only authority reader. It keeps
 redaction, independent review, disclosure scope, maintainer decision, and
 publication authority as five separate gates. Each row shows the exact state,
 available evidence ref, unmet blocker, and next admitted action. Operator
@@ -111,7 +122,8 @@ blocked. The deterministic reader preserves private-blocked, denied,
 awaiting-review, rejected, stale, and eligible-but-not-authorized scenes. The
 eligible scene still cannot publish: publication authority must arrive as an
 external typed receipt. Omega provides no approve, authorize, or publish
-control in this workspace.
+control in this workspace. Production does not render this destination until a
+real publication projection and route are admitted.
 
 Scene selection is restored presentation state only. The validated
 `ForensicPublicationGateProjection` remains the authority, and its validation
