@@ -39,7 +39,7 @@ pub struct QuickActionBar {
     show: bool,
     toggle_selections_handle: PopoverMenuHandle<ContextMenu>,
     toggle_settings_handle: PopoverMenuHandle<ContextMenu>,
-    _workspace: WeakEntity<Workspace>,
+    workspace: WeakEntity<Workspace>,
 }
 
 impl QuickActionBar {
@@ -70,7 +70,7 @@ impl QuickActionBar {
             show: true,
             toggle_selections_handle: Default::default(),
             toggle_settings_handle: Default::default(),
-            _workspace: workspace.weak_handle(),
+            workspace: workspace.weak_handle(),
         };
         this.apply_settings(cx);
         cx.observe_global::<SettingsStore>(|this, cx| this.apply_settings(cx))

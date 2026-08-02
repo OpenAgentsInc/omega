@@ -232,7 +232,6 @@ image.workspace = true
 pkg-config = "0.3.22"
 
 [dev-dependencies]
-remote_server.workspace = true
 remote_connection = { workspace = true, features = ["test-support"] }
 editor = { workspace = true, features = ["test-support"] }
 fs = { workspace = true, features = ["test-support"] }
