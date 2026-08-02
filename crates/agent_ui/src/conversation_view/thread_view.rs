@@ -898,7 +898,6 @@ impl ThreadView {
         let session_id = thread.read(cx).session_id().clone();
         let parent_session_id = thread.read(cx).parent_session_id().cloned();
 
-        let has_slash_completions = session_capabilities.read().has_slash_completions();
         // omega#112. Name the executor here too, not only when commands update.
         //
         // The update path fixed earlier fires on `AvailableCommandsUpdated`,
@@ -918,10 +917,7 @@ impl ThreadView {
                 disclosure.agent_id.as_ref(),
             )
             .map(|executor| executor.name().to_owned());
-            placeholder_text(
-                executor.as_deref().unwrap_or(agent_display_name.as_ref()),
-                has_slash_completions,
-            )
+            placeholder_text(executor.as_deref().unwrap_or(agent_display_name.as_ref()))
         };
 
         let mut should_auto_submit = false;
@@ -11919,8 +11915,9 @@ impl ThreadView {
                         h_flex()
                             .id(format!("subagent-title-{}", entry_ix))
                             .px_1()
+                            .flex_1()
                             .min_w_0()
-                            .size_full()
+                            .h_full()
                             .gap_2()
                             .justify_between()
                             .rounded_sm()
@@ -11928,7 +11925,7 @@ impl ThreadView {
                             .child(
                                 h_flex()
                                     .min_w_0()
-                                    .w_full()
+                                    .flex_1()
                                     .gap_1p5()
                                     .child(icon)
                                     .child(
@@ -11940,13 +11937,15 @@ impl ThreadView {
                                         this.child(
                                             div()
                                                 .id(("subagent-executor", entry_ix))
-                                                .flex_none()
+                                                .min_w_0()
+                                                .overflow_hidden()
                                                 .child(
                                                     Label::new(executor)
                                                         .size(LabelSize::Custom(
                                                             self.tool_name_font_size(),
                                                         ))
-                                                        .color(Color::Muted),
+                                                        .color(Color::Muted)
+                                                        .truncate(),
                                                 ),
                                         )
                                     })
@@ -12034,10 +12033,12 @@ impl ThreadView {
                         is_running && subagent_session_id.is_some() && !is_expanded,
                         |buttons| {
                             buttons.child(
-                                Icon::new(IconName::TodoProgress)
-                                    .size(IconSize::Small)
-                                    .color(Color::Accent)
-                                    .with_rotate_animation(2),
+                                div().flex_none().child(
+                                    Icon::new(IconName::TodoProgress)
+                                        .size(IconSize::Small)
+                                        .color(Color::Accent)
+                                        .with_rotate_animation(2),
+                                ),
                             )
                         },
                     )
@@ -12045,27 +12046,29 @@ impl ThreadView {
                         is_running && subagent_session_id.is_some() && is_expanded,
                         |buttons| {
                             buttons.child(
-                                IconButton::new(
-                                    format!("stop-subagent-{}", entry_ix),
-                                    IconName::Stop,
-                                )
-                                .icon_size(IconSize::Small)
-                                .icon_color(Color::Error)
-                                .tooltip(Tooltip::text("Stop Subagent"))
-                                .when_some(
-                                    thread_view
-                                        .as_ref()
-                                        .map(|view| view.read(cx).thread.clone()),
-                                    |this, thread| {
-                                        this.on_click(cx.listener(
-                                            move |_this, _event, _window, cx| {
-                                                telemetry::event!("Subagent Stopped");
-                                                thread.update(cx, |thread, cx| {
-                                                    thread.cancel(cx).detach();
-                                                });
-                                            },
-                                        ))
-                                    },
+                                div().flex_none().child(
+                                    IconButton::new(
+                                        format!("stop-subagent-{}", entry_ix),
+                                        IconName::Stop,
+                                    )
+                                    .icon_size(IconSize::Small)
+                                    .icon_color(Color::Error)
+                                    .tooltip(Tooltip::text("Stop Subagent"))
+                                    .when_some(
+                                        thread_view
+                                            .as_ref()
+                                            .map(|view| view.read(cx).thread.clone()),
+                                        |this, thread| {
+                                            this.on_click(cx.listener(
+                                                move |_this, _event, _window, cx| {
+                                                    telemetry::event!("Subagent Stopped");
+                                                    thread.update(cx, |thread, cx| {
+                                                        thread.cancel(cx).detach();
+                                                    });
+                                                },
+                                            ))
+                                        },
+                                    ),
                                 ),
                             )
                         },
@@ -12196,8 +12199,6 @@ impl ThreadView {
         window: &Window,
         cx: &Context<Self>,
     ) -> impl IntoElement {
-        const MAX_PREVIEW_ENTRIES: usize = 8;
-
         let subagent_view = thread_view.read(cx);
         let session_id = subagent_view.thread.read(cx).session_id().clone();
 
@@ -12222,7 +12223,7 @@ impl ThreadView {
 
         let entries = subagent_view.thread.read(cx).entries();
         let total_entries = entries.len();
-        let mut entry_range = if let Some(info) = tool_call.subagent_session_info.as_ref() {
+        let entry_range = if let Some(info) = tool_call.subagent_session_info.as_ref() {
             info.message_start_index
                 ..info
                     .message_end_index
@@ -12231,10 +12232,6 @@ impl ThreadView {
         } else {
             0..total_entries
         };
-        entry_range.start = entry_range
-            .end
-            .saturating_sub(MAX_PREVIEW_ENTRIES)
-            .max(entry_range.start);
         let start_ix = entry_range.start;
 
         let scroll_handle = self
