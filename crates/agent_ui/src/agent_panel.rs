@@ -14715,6 +14715,7 @@ impl AgentPanel {
                 .occlude()
                 .hover(move |style| style.bg(hover_background))
                 .on_click(cx.listener(move |this, _, window, cx| {
+                    cx.stop_propagation();
                     this.open_thread_from_threads_sidebar(&row, window, cx);
                 }))
                 .child(

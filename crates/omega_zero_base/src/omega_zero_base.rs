@@ -732,6 +732,45 @@ mod tests {
         }
     }
 
+    #[test]
+    fn comet_session_tab_keymaps_win_over_workspace_pane_bindings() {
+        const COMET_CONTEXT: &str = "\"context\": \"AgentPanel && CometMode\"";
+
+        for (platform, keymap, first_shortcut) in [
+            (
+                "linux",
+                include_str!("../../../assets/keymaps/default-linux.json"),
+                "\"ctrl-1\": [\"agent::ActivateCometSessionTab\", 0]",
+            ),
+            (
+                "macos",
+                include_str!("../../../assets/keymaps/default-macos.json"),
+                "\"cmd-1\": [\"agent::ActivateCometSessionTab\", 0]",
+            ),
+            (
+                "windows",
+                include_str!("../../../assets/keymaps/default-windows.json"),
+                "\"ctrl-1\": [\"agent::ActivateCometSessionTab\", 0]",
+            ),
+        ] {
+            let comet_offset = keymap
+                .rfind(COMET_CONTEXT)
+                .unwrap_or_else(|| panic!("{platform} keymap must contain the Comet context"));
+            let pane_offset = keymap.rfind("workspace::ActivatePane").unwrap_or_else(|| {
+                panic!("{platform} keymap must contain workspace pane bindings")
+            });
+
+            assert!(
+                comet_offset > pane_offset,
+                "{platform} must place Comet tab bindings after workspace pane bindings so the scoped action wins"
+            );
+            assert!(
+                keymap[comet_offset..].contains(first_shortcut),
+                "{platform} Comet context must bind its first positional tab shortcut"
+            );
+        }
+    }
+
     /// `OMEGA-DELTA-0052`, amended by omega#161. The sentence names the action
     /// and offers nothing: no control in the window, and no flag — the editor
     /// the old sentence pointed at no longer exists.
