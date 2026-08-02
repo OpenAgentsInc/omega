@@ -35,10 +35,11 @@
 
 use std::{collections::HashMap, rc::Rc};
 
-use gpui::{AnyElement, App, EntityId, Global, WeakEntity, Window};
-use omega_front_door::ModeReadiness;
-use ui::{ButtonLike, ContextMenu, ContextMenuEntry, PopoverMenu, PopoverMenuHandle, prelude::*};
-use util::ResultExt as _;
+use gpui::{
+    AnyElement, App, DismissEvent, EntityId, EventEmitter, FocusHandle, Focusable, Global, Render,
+    WeakEntity, Window,
+};
+use ui::{ButtonLike, PopoverMenu, PopoverMenuHandle, prelude::*};
 use workspace::Workspace;
 
 use crate::agent_panel::{AgentPanel, ComposerExecutorRow};
@@ -60,7 +61,13 @@ pub struct ComposerModelPicker {
 /// immutably.
 #[derive(Default)]
 struct GlobalComposerExecutorMenuHandles(
-    HashMap<EntityId, (PopoverMenuHandle<ContextMenu>, WeakEntity<AgentPanel>)>,
+    HashMap<
+        EntityId,
+        (
+            PopoverMenuHandle<CometComposerModelMenu>,
+            WeakEntity<AgentPanel>,
+        ),
+    >,
 );
 
 impl Global for GlobalComposerExecutorMenuHandles {}
@@ -70,9 +77,9 @@ impl Global for GlobalComposerExecutorMenuHandles {}
 ///
 /// Called from `AgentPanel::new`. Re-registering replaces the entry, which is
 /// what a rebuilt panel wants.
-pub fn register_menu_handle(
+pub(crate) fn register_menu_handle(
     workspace_id: EntityId,
-    handle: PopoverMenuHandle<ContextMenu>,
+    handle: PopoverMenuHandle<CometComposerModelMenu>,
     panel: WeakEntity<AgentPanel>,
     cx: &mut App,
 ) {
@@ -84,7 +91,10 @@ pub fn register_menu_handle(
 fn menu_handle(
     workspace_id: EntityId,
     cx: &App,
-) -> Option<(PopoverMenuHandle<ContextMenu>, WeakEntity<AgentPanel>)> {
+) -> Option<(
+    PopoverMenuHandle<CometComposerModelMenu>,
+    WeakEntity<AgentPanel>,
+)> {
     cx.try_global::<GlobalComposerExecutorMenuHandles>()
         .and_then(|handles| handles.0.get(&workspace_id).cloned())
 }
@@ -132,8 +142,12 @@ pub fn render_composer_executor_menu(
 ) -> Option<AnyElement> {
     let (handle, panel) = menu_handle(workspace.entity_id(), cx)?;
 
-    let trigger_label = current_label.clone();
-    let model_label = model_picker.face.label.clone();
+    let current_model = model_picker.face.tier;
+    let model_label = current_model
+        .map(ModelTier::model_name)
+        .map(SharedString::from)
+        .unwrap_or_else(|| model_picker.face.label.clone());
+    let trigger_icon = executor_icon(&current_label);
     let trigger = ButtonLike::new("omega-composer-executor-trigger")
         .style(ButtonStyle::Transparent)
         .size(ButtonSize::None)
@@ -141,7 +155,7 @@ pub fn render_composer_executor_menu(
         .aria_label("Choose agent and model")
         .aria_value(SharedString::from(format!(
             "{} {}",
-            trigger_label, model_label
+            current_label, model_label
         )))
         .child(
             h_flex()
@@ -156,26 +170,20 @@ pub fn render_composer_executor_menu(
                 .font_weight(gpui::FontWeight::MEDIUM)
                 .text_color(cx.theme().colors().text.opacity(0.9))
                 .child(
-                    Icon::new(IconName::OmegaAgent)
+                    Icon::new(trigger_icon)
                         .size(IconSize::Small)
                         .color(Color::Accent),
                 )
-                .child(Label::new(current_label).size(LabelSize::XSmall).truncate())
-                .child(
-                    Label::new(model_picker.face.label.clone())
-                        .size(LabelSize::XSmall)
-                        .color(Color::Muted),
-                ),
+                .child(Label::new(model_label).size(LabelSize::XSmall).truncate()),
         );
 
-    let current_model = model_picker.face.tier;
     let model_picker_enabled = model_picker.enabled;
     let on_model_select = model_picker.on_select;
 
     Some(
         PopoverMenu::new("omega-composer-executor")
             // Keyboard-reachable: `agent::ToggleComposerExecutorMenu` opens
-            // this handle, and the context menu itself is arrow-key driven.
+            // this handle, and the selector itself is arrow-key driven.
             //
             // No trigger tooltip. The owner's law (omega#160, 2026-07-30,
             // `OMEGA-DELTA-0189`): a dropdown labeled with the executor name
@@ -193,123 +201,422 @@ pub fn render_composer_executor_menu(
                 // leased workspace either.
                 let panel = panel.upgrade()?;
                 let rows = panel.read(cx).composer_executor_rows(cx);
-                Some(build_menu(
-                    panel,
-                    rows,
-                    conversation_is_bound,
-                    current_model,
-                    model_picker_enabled,
-                    on_model_select.clone(),
-                    window,
-                    cx,
-                ))
+                Some(cx.new(|cx| {
+                    CometComposerModelMenu::new(
+                        panel,
+                        rows,
+                        conversation_is_bound,
+                        current_model,
+                        model_picker_enabled,
+                        on_model_select.clone(),
+                        window,
+                        cx,
+                    )
+                }))
             })
             .into_any_element(),
     )
 }
 
-fn build_menu(
+fn executor_icon(label: &str) -> IconName {
+    match label {
+        "Codex" => IconName::AiOpenAi,
+        "Claude Code" => IconName::AiClaude,
+        "Grok Build" => IconName::AiXAi,
+        _ => IconName::OmegaAgent,
+    }
+}
+
+pub(crate) struct CometComposerModelMenu {
     panel: gpui::Entity<AgentPanel>,
     rows: Vec<ComposerExecutorRow>,
     conversation_is_bound: bool,
     current_model: Option<ModelTier>,
     model_picker_enabled: bool,
     on_model_select: Rc<dyn Fn(ModelTier, &mut Window, &mut App)>,
-    window: &mut Window,
-    cx: &mut App,
-) -> gpui::Entity<ContextMenu> {
-    ContextMenu::build(window, cx, move |mut menu, _window, _cx| {
-        menu = menu.header(if conversation_is_bound {
+    focus_handle: FocusHandle,
+    selected_index: usize,
+}
+
+impl CometComposerModelMenu {
+    fn new(
+        panel: gpui::Entity<AgentPanel>,
+        rows: Vec<ComposerExecutorRow>,
+        conversation_is_bound: bool,
+        current_model: Option<ModelTier>,
+        model_picker_enabled: bool,
+        on_model_select: Rc<dyn Fn(ModelTier, &mut Window, &mut App)>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> Self {
+        let focus_handle = cx.focus_handle();
+        cx.on_blur(&focus_handle, window, |_, _, cx| cx.emit(DismissEvent))
+            .detach();
+        let selected_index = rows.iter().position(|row| row.is_current).unwrap_or(0);
+        Self {
+            panel,
+            rows,
+            conversation_is_bound,
+            current_model,
+            model_picker_enabled,
+            on_model_select,
+            focus_handle,
+            selected_index,
+        }
+    }
+
+    fn item_count(&self) -> usize {
+        self.rows.len() + ModelTier::ALL.len() + 1
+    }
+
+    fn item_is_selectable(&self, index: usize) -> bool {
+        if let Some(row) = self.rows.get(index) {
+            return row.is_selectable();
+        }
+        let model_index = index.saturating_sub(self.rows.len());
+        model_index < ModelTier::ALL.len() && self.model_picker_enabled
+            || model_index == ModelTier::ALL.len()
+    }
+
+    fn move_selection(&mut self, delta: isize, cx: &mut Context<Self>) {
+        let count = self.item_count();
+        if count == 0 {
+            return;
+        }
+        for _ in 0..count {
+            self.selected_index = if delta < 0 {
+                self.selected_index.checked_sub(1).unwrap_or(count - 1)
+            } else {
+                (self.selected_index + 1) % count
+            };
+            if self.item_is_selectable(self.selected_index) {
+                cx.notify();
+                return;
+            }
+        }
+    }
+
+    fn select_next(&mut self, _: &menu::SelectNext, _: &mut Window, cx: &mut Context<Self>) {
+        self.move_selection(1, cx);
+    }
+
+    fn select_previous(
+        &mut self,
+        _: &menu::SelectPrevious,
+        _: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.move_selection(-1, cx);
+    }
+
+    fn confirm(&mut self, _: &menu::Confirm, window: &mut Window, cx: &mut Context<Self>) {
+        if self.selected_index < self.rows.len() {
+            self.choose_agent(self.selected_index, window, cx);
+            return;
+        }
+        let model_index = self.selected_index - self.rows.len();
+        if let Some(tier) = ModelTier::ALL.get(model_index).copied() {
+            self.choose_model(tier, window, cx);
+            return;
+        }
+        window.dispatch_action(Box::new(omega_actions::AcpRegistry), cx);
+        cx.emit(DismissEvent);
+    }
+
+    fn cancel(&mut self, _: &menu::Cancel, _: &mut Window, cx: &mut Context<Self>) {
+        cx.emit(DismissEvent);
+    }
+
+    fn choose_agent(&mut self, index: usize, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(row) = self.rows.get(index).cloned() else {
+            return;
+        };
+        if !row.is_selectable() {
+            return;
+        }
+        if row.is_current {
+            cx.emit(DismissEvent);
+            return;
+        }
+        self.panel.update(cx, |panel, cx| {
+            panel.compose_on_executor(row.target, window, cx);
+        });
+        cx.emit(DismissEvent);
+    }
+
+    fn choose_model(&mut self, tier: ModelTier, window: &mut Window, cx: &mut Context<Self>) {
+        if !self.model_picker_enabled {
+            return;
+        }
+        if self.current_model == Some(tier) {
+            cx.emit(DismissEvent);
+            return;
+        }
+        (self.on_model_select)(tier, window, cx);
+        self.current_model = Some(tier);
+        cx.emit(DismissEvent);
+    }
+}
+
+impl Focusable for CometComposerModelMenu {
+    fn focus_handle(&self, _cx: &App) -> FocusHandle {
+        self.focus_handle.clone()
+    }
+}
+
+impl EventEmitter<DismissEvent> for CometComposerModelMenu {}
+
+impl Render for CometComposerModelMenu {
+    fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        let colors = cx.theme().colors();
+        let divider = colors.border_variant.opacity(0.45);
+        let selected = colors.element_selected.opacity(0.72);
+        let header = if self.conversation_is_bound {
             BOUND_MENU_HEADER
         } else {
             UNBOUND_MENU_HEADER
-        });
+        };
 
-        for row in rows {
-            let selectable = row.is_selectable();
-            let is_current = row.is_current;
-            if selectable {
-                let panel = panel.downgrade();
-                let target = row.target.clone();
-                let readiness_note = match &row.readiness {
-                    // "Ready" as a badge would restate the checkmark; the
-                    // states a person acts on are the non-ready ones.
-                    ModeReadiness::Ready { .. } => None,
-                    readiness => readiness.reason().map(str::to_owned),
-                };
-                let mut entry = ContextMenuEntry::new(row.label.clone())
-                    .toggleable(IconPosition::End, is_current)
-                    .handler(move |window, cx| {
-                        // Re-picking what already owns the conversation would
-                        // rebuild a draft for no change.
-                        if is_current {
-                            return;
-                        }
-                        panel
-                            .update(cx, |panel, cx| {
-                                panel.compose_on_executor(target.clone(), window, cx);
-                            })
-                            .log_err();
-                    });
-                if let Some(note) = readiness_note {
-                    let note = SharedString::from(note);
-                    entry = entry.documentation_aside(ui::DocumentationSide::Left, move |_| {
-                        Label::new(note.clone()).into_any_element()
-                    });
-                }
-                menu.push_item(entry);
-            } else {
-                // The reason lives in the label, not in a documentation
-                // aside: a disabled entry's aside is never shown (the same
-                // component fact `OMEGA-DELTA-0123` recorded), and a reason
-                // that cannot be reached is not a reason.
-                let reason = row
-                    .readiness
-                    .reason()
-                    .map_or_else(|| row.readiness.label().to_owned(), str::to_owned);
-                menu.push_item(
-                    ContextMenuEntry::new(SharedString::from(format!("{} — {reason}", row.label)))
-                        .disabled(true),
-                );
-            }
-        }
-
-        menu = menu.separator();
-        for tier in ModelTier::ALL {
-            let tier = *tier;
-            let is_current = current_model == Some(tier);
-            let description = SharedString::from(tier.description());
-            let on_model_select = on_model_select.clone();
-            let entry = ContextMenuEntry::new(SharedString::from(tier.name()))
-                .toggleable(IconPosition::End, is_current)
-                .documentation_aside(ui::DocumentationSide::Left, move |_| {
-                    Label::new(description.clone()).into_any_element()
-                })
-                .disabled(!model_picker_enabled)
-                .handler(move |window, cx| {
-                    if !is_current {
-                        on_model_select(tier, window, cx);
-                    }
+        let agents = self
+            .rows
+            .clone()
+            .into_iter()
+            .enumerate()
+            .map(|(index, row)| {
+                let selectable = row.is_selectable();
+                let is_current = row.is_current;
+                let reason = (!selectable).then(|| {
+                    row.readiness
+                        .reason()
+                        .map_or_else(|| row.readiness.label().to_owned(), str::to_owned)
                 });
-            menu.push_item(entry);
-        }
+                let icon = executor_icon(&row.label);
+                let is_focused = self.selected_index == index;
+                h_flex()
+                    .id(("comet-agent-row", index))
+                    .h(px(30.))
+                    .min_w_0()
+                    .gap_2()
+                    .px_2()
+                    .rounded(px(8.))
+                    .text_size(px(12.))
+                    .font_weight(gpui::FontWeight::MEDIUM)
+                    .text_color(if is_current {
+                        colors.text
+                    } else {
+                        colors.text_muted
+                    })
+                    .when(is_current || is_focused, |this| this.bg(selected))
+                    .when(!selectable, |this| this.opacity(0.35))
+                    .when(selectable, |this| {
+                        this.cursor_pointer()
+                            .hover(|style| style.bg(colors.element_hover))
+                            .on_click(cx.listener(move |this, _, window, cx| {
+                                this.choose_agent(index, window, cx);
+                            }))
+                    })
+                    .child(Icon::new(icon).size(IconSize::Small).color(if is_current {
+                        Color::Accent
+                    } else {
+                        Color::Muted
+                    }))
+                    .child(
+                        v_flex()
+                            .min_w_0()
+                            .child(Label::new(row.label).size(LabelSize::XSmall).truncate())
+                            .when_some(reason, |this, reason| {
+                                this.child(
+                                    Label::new(reason)
+                                        .size(LabelSize::XSmall)
+                                        .color(Color::Muted)
+                                        .truncate(),
+                                )
+                            }),
+                    )
+            });
 
-        // The install path for everything the disabled rows name.
-        menu = menu.separator();
-        menu.push_item(
-            ContextMenuEntry::new("Add More Agents…")
-                // omega#170. This entry doubles as the deployed popup's
-                // position probe, because "the menu opened" and "the menu
-                // opened at its trigger" once diverged: the pre-first-send
-                // composer deployed this menu at the window's bottom-left.
-                .debug_selector("omega.composer.executor-menu.popup")
-                .handler(move |window, cx| {
-                    window.dispatch_action(Box::new(omega_actions::AcpRegistry), cx);
-                }),
-        );
+        let models = ModelTier::ALL
+            .iter()
+            .copied()
+            .enumerate()
+            .map(|(index, tier)| {
+                let is_current = self.current_model == Some(tier);
+                let is_focused = self.selected_index == self.rows.len() + index;
+                v_flex()
+                    .id(("comet-model-row", index))
+                    .min_h(px(48.))
+                    .justify_center()
+                    .gap_0p5()
+                    .px_2()
+                    .rounded(px(8.))
+                    .when(is_current || is_focused, |this| this.bg(selected))
+                    .when(!self.model_picker_enabled, |this| this.opacity(0.35))
+                    .when(self.model_picker_enabled, |this| {
+                        this.cursor_pointer()
+                            .hover(|style| style.bg(colors.element_hover))
+                            .on_click(cx.listener(move |this, _, window, cx| {
+                                this.choose_model(tier, window, cx);
+                            }))
+                    })
+                    .child(
+                        h_flex()
+                            .w_full()
+                            .justify_between()
+                            .child(Label::new(tier.model_name()).size(LabelSize::Small))
+                            .when(is_current, |this| {
+                                this.child(
+                                    Icon::new(IconName::Check)
+                                        .size(IconSize::XSmall)
+                                        .color(Color::Accent),
+                                )
+                            }),
+                    )
+                    .child(
+                        Label::new(tier.description())
+                            .size(LabelSize::XSmall)
+                            .color(Color::Muted)
+                            .truncate(),
+                    )
+            });
 
-        menu.key_context("OmegaComposerExecutorMenu")
-    })
+        v_flex()
+            .id("omega-composer-model-menu")
+            .debug_selector(|| "omega.composer.executor-menu.popup".into())
+            .track_focus(&self.focus_handle)
+            .key_context("OmegaComposerExecutorMenu")
+            .on_action(cx.listener(Self::select_next))
+            .on_action(cx.listener(Self::select_previous))
+            .on_action(cx.listener(Self::confirm))
+            .on_action(cx.listener(Self::cancel))
+            .occlude()
+            .w(px(460.))
+            .h(px(420.))
+            .overflow_hidden()
+            .rounded(px(12.))
+            .border_1()
+            .border_color(colors.border)
+            .bg(colors.elevated_surface_background)
+            .shadow_lg()
+            .aria_label(header)
+            .child(
+                h_flex()
+                    .flex_1()
+                    .min_h_0()
+                    .items_stretch()
+                    .child(
+                        v_flex()
+                            .w(px(148.))
+                            .flex_none()
+                            .gap_0p5()
+                            .p_1()
+                            .border_r_1()
+                            .border_color(divider)
+                            .child(
+                                Label::new("Agents")
+                                    .size(LabelSize::XSmall)
+                                    .color(Color::Muted),
+                            )
+                            .child(
+                                v_flex()
+                                    .id("comet-agent-scroll")
+                                    .flex_1()
+                                    .min_h_0()
+                                    .overflow_y_scroll()
+                                    .children(agents),
+                            )
+                            .child(
+                                h_flex()
+                                    .id("comet-model-add-agents")
+                                    .mt_auto()
+                                    .h(px(30.))
+                                    .px_2()
+                                    .rounded(px(8.))
+                                    .text_size(px(12.))
+                                    .text_color(colors.text_muted)
+                                    .cursor_pointer()
+                                    .hover(|style| style.bg(colors.element_hover))
+                                    .when(
+                                        self.selected_index
+                                            == self.rows.len() + ModelTier::ALL.len(),
+                                        |this| this.bg(selected),
+                                    )
+                                    .on_click(|_, window, cx| {
+                                        window.dispatch_action(
+                                            Box::new(omega_actions::AcpRegistry),
+                                            cx,
+                                        );
+                                    })
+                                    .child("Add More Agents…"),
+                            ),
+                    )
+                    .child(
+                        v_flex()
+                            .flex_1()
+                            .min_w_0()
+                            .min_h_0()
+                            .child(
+                                v_flex()
+                                    .flex_1()
+                                    .min_h_0()
+                                    .gap_0p5()
+                                    .p_1()
+                                    .child(
+                                        Label::new("Models")
+                                            .size(LabelSize::XSmall)
+                                            .color(Color::Muted),
+                                    )
+                                    .children(models),
+                            )
+                            .child(
+                                v_flex()
+                                    .max_h(px(190.))
+                                    .flex_none()
+                                    .gap_1()
+                                    .border_t_1()
+                                    .border_color(divider)
+                                    .p_2()
+                                    .child(
+                                        Label::new("Selection")
+                                            .size(LabelSize::XSmall)
+                                            .color(Color::Muted),
+                                    )
+                                    .child(
+                                        Label::new(
+                                            self.current_model
+                                                .map(ModelTier::description)
+                                                .unwrap_or("Choose a model for the next turn."),
+                                        )
+                                        .size(LabelSize::Small),
+                                    ),
+                            ),
+                    ),
+            )
+            .child(
+                h_flex()
+                    .h(px(38.))
+                    .flex_none()
+                    .gap_3()
+                    .px_3()
+                    .border_t_1()
+                    .border_color(divider)
+                    .bg(colors.surface_background.opacity(0.72))
+                    .text_size(px(11.))
+                    .text_color(colors.text_muted)
+                    .child(
+                        h_flex()
+                            .gap_1()
+                            .child(Icon::new(IconName::ArrowUp).size(IconSize::XSmall))
+                            .child(Icon::new(IconName::ArrowDown).size(IconSize::XSmall))
+                            .child("Navigate"),
+                    )
+                    .child(
+                        h_flex()
+                            .gap_1()
+                            .child(Icon::new(IconName::Return).size(IconSize::XSmall))
+                            .child("Select"),
+                    ),
+            )
+    }
 }
 
 #[cfg(test)]
