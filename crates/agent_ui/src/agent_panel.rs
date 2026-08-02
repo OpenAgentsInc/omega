@@ -232,6 +232,48 @@ fn comet_tab_shortcut_hint(index: usize, color: Hsla) -> AnyElement {
         .into_any_element()
 }
 
+fn stable_comet_session_rows(
+    mut rows: Vec<omega_threads_sidebar::ThreadRow>,
+    active_thread_id: Option<ThreadId>,
+    oldest_first: bool,
+) -> Vec<omega_threads_sidebar::ThreadRow> {
+    let active_position = active_thread_id.and_then(|active_thread_id| {
+        rows.iter()
+            .position(|row| row.thread_id == active_thread_id)
+    });
+    let visible_count = if active_position.is_some() {
+        COMET_TAB_SHORTCUT_LABELS.len()
+    } else {
+        COMET_TAB_SHORTCUT_LABELS.len().saturating_sub(1)
+    };
+
+    if rows.len() > visible_count {
+        if let Some(active_position) = active_position
+            && active_position >= visible_count
+        {
+            let active_row = rows.remove(active_position);
+            rows.truncate(visible_count.saturating_sub(1));
+            rows.push(active_row);
+        } else {
+            rows.truncate(visible_count);
+        }
+    }
+
+    rows.sort_by(|left, right| {
+        let ordering = left.created_at.cmp(&right.created_at).then_with(|| {
+            left.thread_id
+                .to_key_string()
+                .cmp(&right.thread_id.to_key_string())
+        });
+        if oldest_first {
+            ordering
+        } else {
+            ordering.reverse()
+        }
+    });
+    rows
+}
+
 fn forensics_timestamp() -> String {
     Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Millis, true)
 }
@@ -5437,7 +5479,7 @@ impl AgentPanel {
         }));
     }
 
-    /// The rows the threads sidebar draws, newest first.
+    /// The rows the threads sidebar draws, newest-created first.
     ///
     /// Recomputed per render from the metadata store rather than cached. The
     /// store is already in memory and the list is bounded, so a cache would buy
@@ -14523,14 +14565,19 @@ impl AgentPanel {
         cx.notify();
     }
 
-    fn comet_historical_tab_rows(&self, cx: &App) -> Vec<omega_threads_sidebar::ThreadRow> {
+    fn comet_session_tab_rows(&self, cx: &App) -> Vec<omega_threads_sidebar::ThreadRow> {
         let active_thread_id = self.active_thread_id(cx);
-        self.threads_sidebar_rows(cx)
+        let rows = self
+            .threads_sidebar_rows(cx)
             .into_iter()
-            .filter(|row| Some(row.thread_id) != active_thread_id)
             .filter(|row| !self.comet_closed_session_tabs.contains(&row.thread_id))
-            .take(COMET_TAB_SHORTCUT_LABELS.len() - 1)
-            .collect()
+            .collect::<Vec<_>>();
+        stable_comet_session_rows(rows, active_thread_id, true)
+    }
+
+    fn comet_sidebar_session_rows(&self, cx: &App) -> Vec<omega_threads_sidebar::ThreadRow> {
+        let active_thread_id = self.active_thread_id(cx);
+        stable_comet_session_rows(self.threads_sidebar_rows(cx), active_thread_id, false)
     }
 
     fn activate_comet_session_tab(
@@ -14539,10 +14586,12 @@ impl AgentPanel {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        if index == 0 || index >= COMET_TAB_SHORTCUT_LABELS.len() {
+        if index >= COMET_TAB_SHORTCUT_LABELS.len() {
             return;
         }
-        if let Some(row) = self.comet_historical_tab_rows(cx).get(index - 1).cloned() {
+        if let Some(row) = self.comet_session_tab_rows(cx).get(index).cloned()
+            && Some(row.thread_id) != self.active_thread_id(cx)
+        {
             self.open_thread_from_threads_sidebar(&row, window, cx);
         }
     }
@@ -14635,15 +14684,57 @@ impl AgentPanel {
             .map(|view| view.read(cx).title(cx))
             .unwrap_or_else(|| "New session".into());
         let active_sidebar_title = active_title.clone();
-        let historical_rows = self
-            .threads_sidebar_rows(cx)
-            .into_iter()
-            .filter(|row| Some(row.thread_id) != active_thread_id)
-            .take(9)
-            .collect::<Vec<_>>();
-        let historical_tabs = self.comet_historical_tab_rows(cx);
+        let session_tab_rows = self.comet_session_tab_rows(cx);
+        let active_tab_is_persisted = active_thread_id.is_some_and(|active_thread_id| {
+            session_tab_rows
+                .iter()
+                .any(|row| row.thread_id == active_thread_id)
+        });
+        let session_tabs = session_tab_rows.iter().enumerate().map(|(index, row)| {
+            let row = row.clone();
+            let title = row.title.clone();
+            let is_active = Some(row.thread_id) == active_thread_id;
+            div()
+                .id(("comet-session-tab", index))
+                .when(is_active, |tab| {
+                    tab.debug_selector(|| "omega.comet.session-tab.active".into())
+                        .bg(selected_background)
+                        .border_1()
+                        .border_color(colors.border_selected)
+                        .text_color(text)
+                })
+                .when(!is_active, |tab| {
+                    tab.text_color(text_muted)
+                        .cursor_pointer()
+                        .hover(move |style| style.bg(hover_background))
+                        .on_click(cx.listener(move |this, _, window, cx| {
+                            cx.stop_propagation();
+                            this.open_thread_from_threads_sidebar(&row, window, cx);
+                        }))
+                })
+                .w(px(TAB_WIDTH))
+                .h(px(28.))
+                .flex_none()
+                .flex()
+                .items_center()
+                .gap(px(6.))
+                .px(px(8.))
+                .rounded(px(8.))
+                .text_size(px(12.))
+                .occlude()
+                .child(
+                    Icon::new(IconName::OmegaAgent)
+                        .size(IconSize::Small)
+                        .color(Color::Muted),
+                )
+                .child(div().min_w_0().flex_1().truncate().child(title))
+                .when(tab_shortcuts_visible, |tab| {
+                    tab.child(comet_tab_shortcut_hint(index, text_placeholder))
+                })
+        });
 
-        let active_tab = div()
+        let draft_tab_index = session_tab_rows.len();
+        let active_draft_tab = div()
             .id("comet-active-session-tab")
             .debug_selector(|| "omega.comet.session-tab.active".into())
             .w(px(TAB_WIDTH))
@@ -14668,66 +14759,8 @@ impl AgentPanel {
             )
             .child(div().min_w_0().flex_1().truncate().child(active_title))
             .when(tab_shortcuts_visible, |tab| {
-                tab.child(comet_tab_shortcut_hint(0, text_placeholder))
+                tab.child(comet_tab_shortcut_hint(draft_tab_index, text_placeholder))
             });
-
-        let active_sidebar_row = h_flex()
-            .id("comet-sidebar-active-session")
-            .debug_selector(|| "omega.comet.sidebar-session.active".into())
-            .w_full()
-            .px(px(8.))
-            .py(px(7.))
-            .gap(px(8.))
-            .rounded(px(8.))
-            .bg(selected_background)
-            .border_1()
-            .border_color(colors.border_selected)
-            .child(
-                Icon::new(IconName::OmegaAgent)
-                    .size(IconSize::Small)
-                    .color(Color::Muted),
-            )
-            .child(
-                div()
-                    .min_w_0()
-                    .flex_1()
-                    .truncate()
-                    .child(active_sidebar_title),
-            )
-            .child(div().size(px(6.)).rounded_full().bg(text_accent));
-
-        let history_tabs = historical_tabs.iter().enumerate().map(|(index, row)| {
-            let row = row.clone();
-            let title = row.title.clone();
-            div()
-                .id(("comet-session-tab", index))
-                .w(px(TAB_WIDTH))
-                .h(px(28.))
-                .flex_none()
-                .flex()
-                .items_center()
-                .gap(px(6.))
-                .px(px(8.))
-                .rounded(px(8.))
-                .text_size(px(12.))
-                .text_color(text_muted)
-                .cursor_pointer()
-                .occlude()
-                .hover(move |style| style.bg(hover_background))
-                .on_click(cx.listener(move |this, _, window, cx| {
-                    cx.stop_propagation();
-                    this.open_thread_from_threads_sidebar(&row, window, cx);
-                }))
-                .child(
-                    Icon::new(IconName::OmegaAgent)
-                        .size(IconSize::Small)
-                        .color(Color::Muted),
-                )
-                .child(div().min_w_0().flex_1().truncate().child(title))
-                .when(tab_shortcuts_visible, |tab| {
-                    tab.child(comet_tab_shortcut_hint(index + 1, text_placeholder))
-                })
-        });
 
         let toggle = self.render_comet_control(
             "comet-toggle-sidebar",
@@ -14852,43 +14885,93 @@ impl AgentPanel {
                     .pt(px(2.))
                     .gap(px(4.))
                     .overflow_hidden()
-                    .child(active_tab)
-                    .children(history_tabs)
+                    .children(session_tabs)
+                    .when(!active_tab_is_persisted, |tabs| {
+                        tabs.child(active_draft_tab)
+                    })
                     .child(new_session),
             );
 
-        let sidebar_rows = historical_rows.into_iter().enumerate().map(|(index, row)| {
-            let title = row.title.clone();
-            let age = row.age.clone();
-            div()
-                .id(("comet-sidebar-session", index))
-                .w_full()
-                .px(px(8.))
-                .py(px(7.))
-                .rounded(px(8.))
-                .cursor_pointer()
-                .hover(move |style| style.bg(hover_background))
-                .on_click(cx.listener(move |this, _, window, cx| {
-                    this.open_thread_from_threads_sidebar(&row, window, cx);
-                }))
-                .child(
-                    h_flex()
-                        .w_full()
-                        .gap(px(8.))
-                        .child(
-                            Icon::new(IconName::OmegaAgent)
-                                .size(IconSize::Small)
-                                .color(Color::Muted),
-                        )
-                        .child(div().min_w_0().flex_1().truncate().child(title))
-                        .child(
-                            div()
-                                .text_size(px(10.))
-                                .text_color(text_placeholder)
-                                .child(age),
-                        ),
-                )
+        let sidebar_session_rows = self.comet_sidebar_session_rows(cx);
+        let active_sidebar_row_is_persisted = active_thread_id.is_some_and(|active_thread_id| {
+            sidebar_session_rows
+                .iter()
+                .any(|row| row.thread_id == active_thread_id)
         });
+        let sidebar_rows = sidebar_session_rows
+            .into_iter()
+            .enumerate()
+            .map(|(index, row)| {
+                let title = row.title.clone();
+                let age = row.age.clone();
+                let is_active = Some(row.thread_id) == active_thread_id;
+                div()
+                    .id(("comet-sidebar-session", index))
+                    .when(is_active, |row| {
+                        row.debug_selector(|| "omega.comet.sidebar-session.active".into())
+                            .bg(selected_background)
+                            .border_1()
+                            .border_color(colors.border_selected)
+                    })
+                    .when(!is_active, |item| {
+                        item.cursor_pointer()
+                            .hover(move |style| style.bg(hover_background))
+                            .on_click(cx.listener(move |this, _, window, cx| {
+                                this.open_thread_from_threads_sidebar(&row, window, cx);
+                            }))
+                    })
+                    .w_full()
+                    .px(px(8.))
+                    .py(px(7.))
+                    .rounded(px(8.))
+                    .child(
+                        h_flex()
+                            .w_full()
+                            .gap(px(8.))
+                            .child(
+                                Icon::new(IconName::OmegaAgent)
+                                    .size(IconSize::Small)
+                                    .color(Color::Muted),
+                            )
+                            .child(div().min_w_0().flex_1().truncate().child(title))
+                            .when(is_active, |row| {
+                                row.child(div().size(px(6.)).rounded_full().bg(text_accent))
+                            })
+                            .when(!is_active, |row| {
+                                row.child(
+                                    div()
+                                        .text_size(px(10.))
+                                        .text_color(text_placeholder)
+                                        .child(age),
+                                )
+                            }),
+                    )
+            });
+
+        let active_draft_sidebar_row = h_flex()
+            .id("comet-sidebar-active-session")
+            .debug_selector(|| "omega.comet.sidebar-session.active".into())
+            .w_full()
+            .px(px(8.))
+            .py(px(7.))
+            .gap(px(8.))
+            .rounded(px(8.))
+            .bg(selected_background)
+            .border_1()
+            .border_color(colors.border_selected)
+            .child(
+                Icon::new(IconName::OmegaAgent)
+                    .size(IconSize::Small)
+                    .color(Color::Muted),
+            )
+            .child(
+                div()
+                    .min_w_0()
+                    .flex_1()
+                    .truncate()
+                    .child(active_sidebar_title),
+            )
+            .child(div().size(px(6.)).rounded_full().bg(text_accent));
 
         let project_rows = self
             .workbench_shell
@@ -15033,7 +15116,9 @@ impl AgentPanel {
                     .min_h_0()
                     .overflow_y_scroll()
                     .gap(px(2.))
-                    .child(active_sidebar_row)
+                    .when(!active_sidebar_row_is_persisted, |rows| {
+                        rows.child(active_draft_sidebar_row)
+                    })
                     .children(sidebar_rows),
             )
             .child(
@@ -15699,6 +15784,24 @@ impl Render for AgentPanel {
 mod comet_sidebar_motion_tests {
     use super::*;
 
+    fn comet_row(
+        title: &'static str,
+        created_at: DateTime<Utc>,
+    ) -> omega_threads_sidebar::ThreadRow {
+        omega_threads_sidebar::ThreadRow {
+            thread_id: ThreadId::new(),
+            agent_id: AgentId::new(title),
+            created_at,
+            title: title.into(),
+            age: "now".into(),
+            executor: None,
+            folder_paths: PathList::default(),
+            unavailable_note: None,
+            refusal: None,
+            lifecycle: crate::omega_agent_supervision::SupervisedThreadLifecycle::Completed,
+        }
+    }
+
     #[test]
     fn comet_sidebar_tween_matches_resize_timing_and_reduced_motion() {
         let started = Instant::now();
@@ -15742,6 +15845,34 @@ mod comet_sidebar_motion_tests {
             COMET_TAB_SHORTCUT_LABELS,
             ["1", "2", "3", "4", "5", "6", "7", "8", "9", "0"]
         );
+    }
+
+    #[test]
+    fn comet_session_order_does_not_follow_the_active_thread() {
+        let now = Utc::now();
+        let oldest = comet_row("oldest", now - chrono::Duration::minutes(2));
+        let middle = comet_row("middle", now - chrono::Duration::minutes(1));
+        let newest = comet_row("newest", now);
+        let rows = vec![newest.clone(), middle.clone(), oldest.clone()];
+
+        for active_thread_id in [oldest.thread_id, middle.thread_id, newest.thread_id] {
+            let tabs = stable_comet_session_rows(rows.clone(), Some(active_thread_id), true);
+            assert_eq!(
+                tabs.iter()
+                    .map(|row| row.title.as_ref())
+                    .collect::<Vec<_>>(),
+                ["oldest", "middle", "newest"]
+            );
+
+            let sidebar = stable_comet_session_rows(rows.clone(), Some(active_thread_id), false);
+            assert_eq!(
+                sidebar
+                    .iter()
+                    .map(|row| row.title.as_ref())
+                    .collect::<Vec<_>>(),
+                ["newest", "middle", "oldest"]
+            );
+        }
     }
 }
 
