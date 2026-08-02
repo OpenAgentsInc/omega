@@ -12,10 +12,12 @@ check. **Reset prompt** restores that default. **Use prior prompt** copies the
 latest run's text into a new editable draft with explicit parent-prompt and
 source-run lineage.
 
-Omega requires a clean Git worktree, an
-exact 40-character revision, and a configured inline-assistant model. It then
-uses the existing project path and model configuration. It does not create a
-checkout, shell, credential path, or publication destination.
+For a single-repository run, Omega requires a clean Git worktree, an exact
+40-character revision, and a configured inline-assistant model. It then uses
+the existing project path and model configuration. That path does not create a
+checkout, shell, credential path, or publication destination. The
+multi-project campaign uses the separate isolated-checkout behavior described
+below.
 
 ## Frozen run input {#frozen-run-input}
 
@@ -69,6 +71,49 @@ exact usage, the UI says that usage is unavailable. It does not show zero.
 After a rerun, the same surface compares prompt A with prompt B and counts
 gained, lost, changed, and unchanged file candidates. Cancellation preserves
 completed rows and changes queued or reading rows to cancelled.
+
+## Fifteen-product campaign {#fifteen-product-campaign}
+
+Choose **Run 15-project campaign** to apply one frozen entropy prompt to the
+versioned wallet-source catalog. The catalog keeps these product rows in this
+order: Coldcard MK4/Q1, Trezor Model One/Model T, SeedSigner, Sparrow, Trezor
+Safe 3/5/7, BitBox02, Opendime, Bitkey, BlueWallet, Phoenix, Blockstream Jade,
+Ledger, SpecterDIY, Electrum for Android, and Samourai Wallet. Each eligible
+row binds a public repository to an exact commit. A row also records its
+license or access status and recursive dependency policy.
+
+The campaign freezes one catalog digest, prompt snapshot and digest, model
+route and parameters, read-only tool surface, and file-selection policy. It
+materializes one isolated temporary checkout at a time, verifies the exact
+commit, initializes recursive submodules, and gives that checkout its own
+manifest and run. The next repository does not start until the current one is
+terminal. **Pause after repository** stops at that boundary. **Resume** starts
+the next queued repository. **Cancel campaign** retains completed and partial
+rows and cancels the active local entropy run.
+
+All 15 rows remain visible while the campaign runs. A row shows source state,
+progress, files analyzed, candidate count, limitations, elapsed time, usage
+exactness, and the frozen prompt digest. Select a row to use the existing file
+traversal and candidate detail. Source citations resolve inside that product's
+pinned temporary checkout and recheck its Git revision before opening the
+file. The dashboard uses status colors for execution state only; it does not
+assign red, yellow, or green product-security grades.
+
+The built-in catalog marks the Ledger row `input_incomplete` because the
+public SDK is not complete product source. The contract also supports
+`source_unavailable` catalog rows. Neither state can become a clean analysis.
+Repository materialization failure, incomplete dependencies, provider failure,
+invalid model output, and cancellation remain separate limitations.
+
+Up to four recent campaign projections are stored with the prompt workspace.
+If Omega restarts during a campaign, it restores the partial results as a
+cancelled campaign instead of silently resuming with new process state.
+
+After prompt B completes, select the same product to compare it with the most
+recent prompt A campaign. The comparison preserves both campaign IDs, prompt
+digests, source revisions, and project run IDs, then reports gained, lost,
+changed, and unchanged candidate references. It does not aggregate candidates
+into a cross-product security score.
 
 ## File states and typed output {#file-states-and-typed-output}
 

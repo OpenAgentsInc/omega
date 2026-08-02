@@ -2,7 +2,8 @@ use anyhow::{Context as _, Result};
 use db::kvp::KeyValueStore;
 use gpui::{App, AppContext as _, Task};
 use omega_forensics::{
-    DEFAULT_ENTROPY_ANALYSIS_PROMPT, EntropyPromptSnapshot, EntropyRunProjection,
+    DEFAULT_ENTROPY_ANALYSIS_PROMPT, EntropyCampaignProjection, EntropyPromptSnapshot,
+    EntropyRunProjection,
 };
 use omega_workbench_state::RepositoryBinding;
 use serde::{Deserialize, Serialize};
@@ -13,6 +14,7 @@ use crate::account_scope::AccountScope;
 const NAMESPACE: &str = "omega_entropy_forensics_v1";
 const MAX_PROMPT_SNAPSHOTS: usize = 64;
 const MAX_RESTORED_RUNS: usize = 16;
+const MAX_RESTORED_CAMPAIGNS: usize = 4;
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
@@ -22,6 +24,8 @@ pub struct EntropyForensicsRestoreState {
     pub source_run_ref: Option<String>,
     pub prompt_snapshots: Vec<EntropyPromptSnapshot>,
     pub runs: Vec<EntropyRunProjection>,
+    #[serde(default)]
+    pub campaigns: Vec<EntropyCampaignProjection>,
 }
 
 impl Default for EntropyForensicsRestoreState {
@@ -32,6 +36,7 @@ impl Default for EntropyForensicsRestoreState {
             source_run_ref: None,
             prompt_snapshots: Vec::new(),
             runs: Vec::new(),
+            campaigns: Vec::new(),
         }
     }
 }
@@ -45,11 +50,17 @@ impl EntropyForensicsRestoreState {
         if self.runs.len() > MAX_RESTORED_RUNS {
             anyhow::bail!("entropy prompt restore exceeds the run bound");
         }
+        if self.campaigns.len() > MAX_RESTORED_CAMPAIGNS {
+            anyhow::bail!("entropy prompt restore exceeds the campaign bound");
+        }
         for snapshot in &self.prompt_snapshots {
             snapshot.validate()?;
         }
         for run in &self.runs {
             run.validate()?;
+        }
+        for campaign in &self.campaigns {
+            campaign.validate()?;
         }
         if let Some(parent_prompt_ref) = &self.parent_prompt_ref
             && !self
@@ -77,6 +88,10 @@ impl EntropyForensicsRestoreState {
         }
         if self.runs.len() > MAX_RESTORED_RUNS {
             self.runs.drain(..self.runs.len() - MAX_RESTORED_RUNS);
+        }
+        if self.campaigns.len() > MAX_RESTORED_CAMPAIGNS {
+            self.campaigns
+                .drain(..self.campaigns.len() - MAX_RESTORED_CAMPAIGNS);
         }
         self
     }
@@ -144,6 +159,7 @@ mod tests {
             source_run_ref: None,
             prompt_snapshots: vec![parent],
             runs: Vec::new(),
+            campaigns: Vec::new(),
         };
         state.validate().expect("valid restore state");
         let encoded = serde_json::to_string(&state).expect("encode restore state");

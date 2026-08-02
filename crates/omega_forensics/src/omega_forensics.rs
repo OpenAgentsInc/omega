@@ -4,8 +4,10 @@ use std::collections::{BTreeMap, BTreeSet};
 use thiserror::Error;
 use url::Url;
 
+mod entropy_campaign;
 mod entropy_repository;
 
+pub use entropy_campaign::*;
 pub use entropy_repository::*;
 
 pub const PREFLIGHT_SCHEMA_V1: &str = "openagents.omega.forensics-preflight.v1";

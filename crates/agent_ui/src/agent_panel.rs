@@ -247,6 +247,420 @@ fn entropy_model_route_ref(provider: &str, model: &str) -> String {
     format!("model-route.sha256.{:x}", digest.finalize())
 }
 
+async fn materialize_entropy_campaign_project(
+    campaign_ref: &str,
+    project: &omega_forensics::EntropyProjectRecord,
+) -> Result<PathBuf> {
+    let repository_url = project
+        .repository_url
+        .as_deref()
+        .context("the catalog row has no repository URL")?;
+    let revision = project
+        .pinned_revision
+        .as_deref()
+        .context("the catalog row has no pinned revision")?;
+    let root = crate::forensics_workbench::entropy_campaign_checkout_root(
+        campaign_ref,
+        &project.product_ref,
+    );
+    smol::fs::create_dir_all(&root).await?;
+    let commands = [
+        vec!["init".to_string(), "--quiet".to_string()],
+        vec![
+            "remote".to_string(),
+            "add".to_string(),
+            "origin".to_string(),
+            repository_url.to_string(),
+        ],
+        vec![
+            "-c".to_string(),
+            "protocol.file.allow=never".to_string(),
+            "-c".to_string(),
+            "protocol.ext.allow=never".to_string(),
+            "fetch".to_string(),
+            "--depth=1".to_string(),
+            "--no-tags".to_string(),
+            "origin".to_string(),
+            revision.to_string(),
+        ],
+        vec![
+            "checkout".to_string(),
+            "--quiet".to_string(),
+            "--detach".to_string(),
+            "FETCH_HEAD".to_string(),
+        ],
+        vec![
+            "-c".to_string(),
+            "protocol.file.allow=never".to_string(),
+            "-c".to_string(),
+            "protocol.ext.allow=never".to_string(),
+            "submodule".to_string(),
+            "update".to_string(),
+            "--init".to_string(),
+            "--recursive".to_string(),
+            "--depth=1".to_string(),
+        ],
+    ];
+    for args in commands {
+        let output = smol::process::Command::new("git")
+            .arg("-C")
+            .arg(&root)
+            .args(args)
+            .output()
+            .await?;
+        anyhow::ensure!(
+            output.status.success(),
+            "git source materialization failed: {}",
+            String::from_utf8_lossy(&output.stderr).trim()
+        );
+    }
+    let output = smol::process::Command::new("git")
+        .arg("-C")
+        .arg(&root)
+        .args(["rev-parse", "HEAD"])
+        .output()
+        .await?;
+    anyhow::ensure!(
+        output.status.success(),
+        "cannot verify campaign source revision"
+    );
+    anyhow::ensure!(
+        String::from_utf8_lossy(&output.stdout).trim() == revision,
+        "materialized campaign source does not match the catalog revision"
+    );
+    Ok(root)
+}
+
+fn spawn_entropy_campaign(
+    surface: Entity<crate::forensics_workbench::ForensicsWorkbenchSurface>,
+    configured_model: language_model::ConfiguredModel,
+    cx: &mut Context<AgentPanel>,
+) {
+    let model = configured_model.model;
+    let model_route_ref = entropy_model_route_ref(
+        &configured_model.provider.id().to_string(),
+        model.id().0.as_ref(),
+    );
+    let surface = surface.downgrade();
+    cx.spawn(async move |_, cx| {
+        loop {
+            let project = surface.update(cx, |surface, cx| {
+                surface.start_next_entropy_campaign_project(cx)
+            })??;
+            let Some(project) = project else {
+                break;
+            };
+            let started = Instant::now();
+            let campaign = surface.read_with(cx, |surface, _| {
+                surface
+                    .snapshot()
+                    .entropy_campaign
+                    .context("the entropy campaign is unavailable")
+            })??;
+            let campaign_ref = campaign.binding.campaign_ref.clone();
+            let root = match materialize_entropy_campaign_project(&campaign_ref, &project).await {
+                Ok(root) => root,
+                Err(error) => {
+                    surface.update(cx, |surface, cx| {
+                        surface.fail_entropy_campaign_source(
+                            &project.product_ref,
+                            error.to_string(),
+                            Some(started.elapsed().as_millis() as u64),
+                            cx,
+                        )
+                    })??;
+                    continue;
+                }
+            };
+            surface.update(cx, |surface, cx| {
+                surface.install_entropy_campaign_root(project.product_ref.clone(), root.clone(), cx)
+            })?;
+            let repository = omega_forensics::EntropyRepositoryBinding {
+                repository_ref: project
+                    .repository_ref
+                    .clone()
+                    .context("the catalog row has no repository ref")?,
+                display_name: project.product_name.clone(),
+                revision: project
+                    .pinned_revision
+                    .clone()
+                    .context("the catalog row has no pinned revision")?,
+            };
+            let manifest_ref = format!("manifest.omega.entropy.{}", uuid::Uuid::new_v4().simple());
+            let manifest_root = root.clone();
+            let manifest_repository = repository.clone();
+            let manifest = cx
+                .background_spawn(async move {
+                    let dependencies = inspect_entropy_dependencies(&manifest_root).await;
+                    omega_forensics::EntropyManifest::build(
+                        &manifest_root,
+                        manifest_ref,
+                        manifest_repository,
+                        dependencies,
+                        512 * 1_024,
+                    )
+                })
+                .await;
+            let manifest = match manifest {
+                Ok(manifest) => manifest,
+                Err(error) => {
+                    surface.update(cx, |surface, cx| {
+                        surface.fail_entropy_campaign_source(
+                            &project.product_ref,
+                            format!("entropy manifest failed: {error}"),
+                            Some(started.elapsed().as_millis() as u64),
+                            cx,
+                        )
+                    })??;
+                    continue;
+                }
+            };
+            let run_ref = format!("run.omega.entropy.{}", uuid::Uuid::new_v4().simple());
+            let binding = omega_forensics::EntropyRunBinding {
+                run_ref,
+                repository,
+                manifest_ref: manifest.manifest_ref.clone(),
+                manifest_digest: manifest.canonical_digest.clone(),
+                prompt_snapshot: campaign.binding.prompt_snapshot.clone(),
+                prompt_digest: campaign.binding.prompt_digest.clone(),
+                model_route_ref: model_route_ref.clone(),
+                model_parameters: campaign.binding.model_parameters.clone(),
+                tool_surface_refs: campaign.binding.tool_surface_refs.clone(),
+                started_at: forensics_timestamp(),
+            };
+            let run = match omega_forensics::EntropyRunProjection::new(binding, manifest) {
+                Ok(run) => run,
+                Err(error) => {
+                    surface.update(cx, |surface, cx| {
+                        surface.fail_entropy_campaign_source(
+                            &project.product_ref,
+                            format!("entropy run binding failed: {error}"),
+                            Some(started.elapsed().as_millis() as u64),
+                            cx,
+                        )
+                    })??;
+                    continue;
+                }
+            };
+            let source_manifest = run.manifest.clone();
+            surface.update(cx, |surface, cx| {
+                surface.install_entropy_run(run.clone(), cx);
+                surface.sync_entropy_campaign_project(
+                    &project.product_ref,
+                    run,
+                    Some(started.elapsed().as_millis() as u64),
+                    cx,
+                )
+            })??;
+
+            loop {
+                let task = surface.update(cx, |surface, cx| {
+                    surface.start_next_entropy_file(forensics_timestamp(), cx)
+                })??;
+                let Some(task) = task else {
+                    break;
+                };
+                let source_root = root.clone();
+                let source_task = task.clone();
+                let source = cx
+                    .background_spawn(
+                        async move { entropy_source_text(&source_root, &source_task) },
+                    )
+                    .await;
+                let source = match source {
+                    Ok(source) => source,
+                    Err(error) => {
+                        surface.update(cx, |surface, cx| {
+                            surface.fail_entropy_file(
+                                entropy_limitation(
+                                    omega_forensics::EntropyLimitationClass::SourceUnavailable,
+                                    "limitation.entropy.source_unavailable",
+                                    error,
+                                    task.file_path.clone(),
+                                ),
+                                forensics_timestamp(),
+                                cx,
+                            )
+                        })??;
+                        sync_active_campaign_run(&surface, &project.product_ref, started, cx)?;
+                        continue;
+                    }
+                };
+                let request = match entropy_file_request(
+                    &campaign.binding.prompt_snapshot.text,
+                    &task,
+                    project
+                        .pinned_revision
+                        .as_deref()
+                        .context("the catalog row has no revision")?,
+                    &source,
+                ) {
+                    Ok(request) => request,
+                    Err(error) => {
+                        surface.update(cx, |surface, cx| {
+                            surface.fail_entropy_file(
+                                entropy_limitation(
+                                    omega_forensics::EntropyLimitationClass::RequestSchemaFailure,
+                                    "limitation.entropy.request_schema_failure",
+                                    error,
+                                    task.file_path.clone(),
+                                ),
+                                forensics_timestamp(),
+                                cx,
+                            )
+                        })??;
+                        sync_active_campaign_run(&surface, &project.product_ref, started, cx)?;
+                        continue;
+                    }
+                };
+                let response = model.stream_completion_text(request, cx).await;
+                let mut response = match response {
+                    Ok(response) => response.stream,
+                    Err(error) => {
+                        surface.update(cx, |surface, cx| {
+                            surface.fail_entropy_file(
+                                entropy_limitation(
+                                    omega_forensics::EntropyLimitationClass::ModelFailure,
+                                    "limitation.entropy.model_failure",
+                                    error,
+                                    task.file_path.clone(),
+                                ),
+                                forensics_timestamp(),
+                                cx,
+                            )
+                        })??;
+                        sync_active_campaign_run(&surface, &project.product_ref, started, cx)?;
+                        continue;
+                    }
+                };
+                let mut output_text = String::new();
+                let mut stream_error = None;
+                while let Some(chunk) = response.next().await {
+                    match chunk {
+                        Ok(chunk) => output_text.push_str(&chunk),
+                        Err(error) => {
+                            stream_error = Some(error);
+                            break;
+                        }
+                    }
+                }
+                if let Some(error) = stream_error {
+                    surface.update(cx, |surface, cx| {
+                        surface.fail_entropy_file(
+                            entropy_limitation(
+                                omega_forensics::EntropyLimitationClass::ModelFailure,
+                                "limitation.entropy.model_failure",
+                                error,
+                                task.file_path.clone(),
+                            ),
+                            forensics_timestamp(),
+                            cx,
+                        )
+                    })??;
+                    sync_active_campaign_run(&surface, &project.product_ref, started, cx)?;
+                    continue;
+                }
+                let output = match omega_forensics::parse_entropy_file_output(&output_text) {
+                    Ok(output) => output,
+                    Err(error) => {
+                        surface.update(cx, |surface, cx| {
+                            surface.fail_entropy_file(
+                                entropy_limitation(
+                                    omega_forensics::EntropyLimitationClass::InvalidOutput,
+                                    "limitation.entropy.invalid_output",
+                                    error,
+                                    task.file_path.clone(),
+                                ),
+                                forensics_timestamp(),
+                                cx,
+                            )
+                        })??;
+                        sync_active_campaign_run(&surface, &project.product_ref, started, cx)?;
+                        continue;
+                    }
+                };
+                let verification_root = root.clone();
+                let verification_revision = project
+                    .pinned_revision
+                    .clone()
+                    .context("the catalog row has no revision")?;
+                let verification_manifest = source_manifest.clone();
+                let verification_output = output.clone();
+                if let Err(error) = cx
+                    .background_spawn(async move {
+                        verify_entropy_output_sources(
+                            &verification_root,
+                            &verification_revision,
+                            &verification_manifest,
+                            &verification_output,
+                        )
+                    })
+                    .await
+                {
+                    surface.update(cx, |surface, cx| {
+                        surface.fail_entropy_file(
+                            entropy_limitation(
+                                omega_forensics::EntropyLimitationClass::InvalidOutput,
+                                "limitation.entropy.invalid_source_ref",
+                                error,
+                                task.file_path.clone(),
+                            ),
+                            forensics_timestamp(),
+                            cx,
+                        )
+                    })??;
+                    sync_active_campaign_run(&surface, &project.product_ref, started, cx)?;
+                    continue;
+                }
+                surface.update(cx, |surface, cx| {
+                    surface.apply_entropy_output(output, forensics_timestamp(), cx)
+                })??;
+                sync_active_campaign_run(&surface, &project.product_ref, started, cx)?;
+            }
+            sync_active_campaign_run(&surface, &project.product_ref, started, cx)?;
+        }
+        anyhow::Ok(())
+    })
+    .detach_and_log_err(cx);
+}
+
+fn sync_active_campaign_run(
+    surface: &WeakEntity<crate::forensics_workbench::ForensicsWorkbenchSurface>,
+    product_ref: &str,
+    started: Instant,
+    cx: &mut gpui::AsyncApp,
+) -> Result<()> {
+    let run = surface.read_with(cx, |surface, _| {
+        let snapshot = surface.snapshot();
+        let Some(campaign) = snapshot.entropy_campaign else {
+            return Ok(None);
+        };
+        let project_is_running = campaign.projects.iter().any(|project| {
+            project.product.product_ref == product_ref
+                && project.phase == omega_forensics::EntropyCampaignProjectPhase::Running
+        });
+        if !project_is_running {
+            return Ok(None);
+        }
+        snapshot
+            .entropy_run
+            .map(Some)
+            .context("the active entropy run is unavailable")
+    })??;
+    let Some(run) = run else {
+        return Ok(());
+    };
+    surface.update(cx, |surface, cx| {
+        surface.sync_entropy_campaign_project(
+            product_ref,
+            run,
+            Some(started.elapsed().as_millis() as u64),
+            cx,
+        )
+    })??;
+    Ok(())
+}
+
 async fn inspect_entropy_dependencies(
     root: &Path,
 ) -> Vec<omega_forensics::EntropyDependencyBinding> {
@@ -12694,6 +13108,79 @@ impl AgentPanel {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
+        if let crate::forensics_workbench::ForensicsWorkbenchCommand::StartEntropyCampaign {
+            prompt_snapshot,
+            catalog,
+        } = command.clone()
+        {
+            let configured_model = LanguageModelRegistry::read_global(cx).inline_assistant_model();
+            let Some(configured_model) = configured_model else {
+                surface.update(cx, |surface, cx| {
+                    surface.set_entropy_error(
+                        "Configure an inline assistant model before starting the campaign",
+                        cx,
+                    )
+                });
+                return;
+            };
+            let model_route_ref = entropy_model_route_ref(
+                &configured_model.provider.id().to_string(),
+                configured_model.model.id().0.as_ref(),
+            );
+            let binding = omega_forensics::EntropyCampaignBinding {
+                campaign_ref: format!("campaign.omega.entropy.{}", uuid::Uuid::new_v4().simple()),
+                catalog_ref: catalog.catalog_ref.clone(),
+                catalog_digest: catalog.canonical_digest.clone(),
+                prompt_digest: prompt_snapshot.canonical_digest.clone(),
+                prompt_snapshot,
+                model_route_ref,
+                model_parameters: omega_forensics::EntropyModelParameters {
+                    temperature_millis: 0,
+                    thinking_allowed: true,
+                    reasoning_effort_ref: None,
+                },
+                tool_surface_refs: vec!["tool.omega.project.read".into()],
+                file_selection_policy_ref: omega_forensics::ENTROPY_FILE_SELECTION_POLICY_REF_V1
+                    .into(),
+                started_at: forensics_timestamp(),
+            };
+            let campaign = omega_forensics::EntropyCampaignProjection::new(binding, catalog)
+                .and_then(|mut campaign| {
+                    campaign.start()?;
+                    Ok(campaign)
+                });
+            match campaign {
+                Ok(campaign) => {
+                    surface.update(cx, |surface, cx| {
+                        surface.install_entropy_campaign(campaign, cx)
+                    });
+                    spawn_entropy_campaign(surface, configured_model, cx);
+                }
+                Err(error) => surface.update(cx, |surface, cx| {
+                    surface
+                        .set_entropy_error(format!("Entropy campaign binding failed · {error}"), cx)
+                }),
+            }
+            return;
+        }
+        if matches!(
+            &command,
+            crate::forensics_workbench::ForensicsWorkbenchCommand::ContinueEntropyCampaign
+        ) {
+            let Some(configured_model) =
+                LanguageModelRegistry::read_global(cx).inline_assistant_model()
+            else {
+                surface.update(cx, |surface, cx| {
+                    surface.set_entropy_error(
+                        "Configure an inline assistant model before resuming the campaign",
+                        cx,
+                    )
+                });
+                return;
+            };
+            spawn_entropy_campaign(surface, configured_model, cx);
+            return;
+        }
         if matches!(
             &command,
             crate::forensics_workbench::ForensicsWorkbenchCommand::CancelEntropy
@@ -13010,9 +13497,16 @@ impl AgentPanel {
             .detach_and_log_err(cx);
             return;
         }
-        if let crate::forensics_workbench::ForensicsWorkbenchCommand::OpenSource(citation) = command
+        if let crate::forensics_workbench::ForensicsWorkbenchCommand::OpenSource {
+            citation,
+            repository_root,
+        } = command
         {
-            self.open_forensics_source(surface, citation, window, cx);
+            if let Some(repository_root) = repository_root {
+                self.open_forensics_source_at_root(surface, repository_root, citation, window, cx);
+            } else {
+                self.open_forensics_source(surface, citation, window, cx);
+            }
             return;
         }
         let session = omega_effectd::openagents_session_if_initialized(cx);
@@ -13297,9 +13791,13 @@ impl AgentPanel {
                         }
                     }
                 }
-                crate::forensics_workbench::ForensicsWorkbenchCommand::OpenSource(_) => {}
+                crate::forensics_workbench::ForensicsWorkbenchCommand::OpenSource { .. } => {}
                 crate::forensics_workbench::ForensicsWorkbenchCommand::StartEntropy { .. }
-                | crate::forensics_workbench::ForensicsWorkbenchCommand::CancelEntropy => {}
+                | crate::forensics_workbench::ForensicsWorkbenchCommand::CancelEntropy
+                | crate::forensics_workbench::ForensicsWorkbenchCommand::StartEntropyCampaign {
+                    ..
+                }
+                | crate::forensics_workbench::ForensicsWorkbenchCommand::ContinueEntropyCampaign => {}
             }
             Ok::<(), anyhow::Error>(())
         })
@@ -13338,11 +13836,23 @@ impl AgentPanel {
             return;
         }
         let repository_root = candidate.worktree_abs_path.clone();
+        self.open_forensics_source_at_root(surface, repository_root, citation, window, cx);
+    }
+
+    fn open_forensics_source_at_root(
+        &mut self,
+        surface: Entity<crate::forensics_workbench::ForensicsWorkbenchSurface>,
+        repository_root: PathBuf,
+        citation: omega_forensics::ForensicSourceCitation,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
         let source_path = repository_root.join(&citation.path);
+        let expected_commit = citation.commit.clone();
         let source_ref = citation.source_ref.clone();
         let start_line = citation.start_line;
         let end_line = citation.end_line;
-        let symbol = citation.symbol.clone();
+        let symbol = citation.symbol;
         let workspace = self.workspace.clone();
         let fs = workspace.read_with(cx, |workspace, cx| {
             workspace.project().read(cx).fs().clone()
@@ -13370,6 +13880,20 @@ impl AgentPanel {
                     anyhow::ensure!(
                         fs.is_file(&canonical_source).await,
                         "the cited file is absent"
+                    );
+                    let head = smol::process::Command::new("git")
+                        .arg("-C")
+                        .arg(&canonical_root)
+                        .args(["rev-parse", "HEAD"])
+                        .output()
+                        .await?;
+                    anyhow::ensure!(
+                        head.status.success(),
+                        "cannot verify the pinned Git revision"
+                    );
+                    anyhow::ensure!(
+                        String::from_utf8_lossy(&head.stdout).trim() == expected_commit,
+                        "the local worktree is not at the cited pinned commit"
                     );
                     if let Some(symbol) = symbol {
                         let source = fs.load(&canonical_source).await?;

@@ -403,7 +403,7 @@ pub struct EntropyModelParameters {
 }
 
 impl EntropyModelParameters {
-    fn validate(&self) -> Result<(), ForensicsError> {
+    pub fn validate(&self) -> Result<(), ForensicsError> {
         if self.temperature_millis > 2_000 {
             return Err(ForensicsError::InvalidEntropyRun(
                 "model temperature must stay between 0 and 2.0".into(),

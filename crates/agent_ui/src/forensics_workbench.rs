@@ -5,9 +5,10 @@ use gpui::{
 };
 use omega_forensics::{
     ColdcardBenchmarkArm, ColdcardEvidenceWorkspaceProjection, CoverageStatus,
-    DEFAULT_ENTROPY_ANALYSIS_PROMPT, DependencyPolicy, EntropyFileAnalysisOutput, EntropyFileState,
-    EntropyFileTask, EntropyLimitation, EntropyPromptSnapshot, EntropyRunPhase,
-    EntropyRunProjection, ExplicitOperatorAction, FORENSIC_FINDING_SCHEMA_V1,
+    DEFAULT_ENTROPY_ANALYSIS_PROMPT, DependencyPolicy, EntropyCampaignComparison,
+    EntropyCampaignPhase, EntropyCampaignProjection, EntropyFileAnalysisOutput, EntropyFileState,
+    EntropyFileTask, EntropyLimitation, EntropyProjectCatalog, EntropyPromptSnapshot,
+    EntropyRunPhase, EntropyRunProjection, ExplicitOperatorAction, FORENSIC_FINDING_SCHEMA_V1,
     FORENSIC_HYPOTHESIS_SCHEMA_V1, ForensicBudgetState, ForensicEvidenceTier, ForensicExactness,
     ForensicLifecycleState, ForensicPromptIr, ForensicPromptWorkspace, ForensicReviewDecisionKind,
     ForensicReviewOutcome, ForensicSourceCitation, ForensicStatistic, ForensicWorkerObservation,
@@ -17,6 +18,7 @@ use omega_forensics::{
     PromptCompatibilityProfile, SourceState,
 };
 use omega_workbench_state::RepositoryBinding;
+use sha2::{Digest, Sha256};
 use ui::{
     Button, ButtonSize, ButtonStyle, Color, Icon, IconName, IconSize, Label, LabelSize, prelude::*,
     v_flex,
@@ -26,6 +28,19 @@ use crate::thread_identity::ThreadIdentityCandidate;
 
 const PREPARE_ACTION_REF: &str = "operator-action-ref://omega/forensics/prepare-run";
 const MAX_VISIBLE_ENTROPY_FILES: usize = 500;
+
+pub(crate) fn entropy_campaign_checkout_root(
+    campaign_ref: &str,
+    product_ref: &str,
+) -> std::path::PathBuf {
+    let mut digest = Sha256::new();
+    digest.update(campaign_ref.as_bytes());
+    digest.update([0]);
+    digest.update(product_ref.as_bytes());
+    std::env::temp_dir()
+        .join("omega-entropy-campaigns")
+        .join(format!("{:x}", digest.finalize()))
+}
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub enum EntropyFileFilter {
@@ -93,6 +108,9 @@ pub struct ForensicsWorkbenchSnapshot {
     pub entropy_prompt_snapshots: Vec<EntropyPromptSnapshot>,
     pub entropy_file_filter: EntropyFileFilter,
     pub selected_entropy_file: Option<String>,
+    pub entropy_campaign: Option<EntropyCampaignProjection>,
+    pub entropy_campaign_history: Vec<EntropyCampaignProjection>,
+    pub selected_entropy_project: Option<String>,
     pub source_resolutions: std::collections::BTreeMap<String, ForensicSourceResolution>,
     pub status: SharedString,
 }
@@ -110,6 +128,11 @@ pub enum ForensicsWorkbenchCommand {
         prompt_snapshot: EntropyPromptSnapshot,
     },
     CancelEntropy,
+    StartEntropyCampaign {
+        prompt_snapshot: EntropyPromptSnapshot,
+        catalog: EntropyProjectCatalog,
+    },
+    ContinueEntropyCampaign,
     Launch {
         run_ref: String,
         intent: ForensicsLaunchIntent,
@@ -118,7 +141,10 @@ pub enum ForensicsWorkbenchCommand {
     Refresh,
     Cancel,
     Cleanup,
-    OpenSource(ForensicSourceCitation),
+    OpenSource {
+        citation: ForensicSourceCitation,
+        repository_root: Option<std::path::PathBuf>,
+    },
 }
 
 pub struct ForensicsWorkbenchSurface {
@@ -142,6 +168,11 @@ pub struct ForensicsWorkbenchSurface {
     entropy_prompt_snapshots: Vec<EntropyPromptSnapshot>,
     entropy_file_filter: EntropyFileFilter,
     selected_entropy_file: Option<String>,
+    entropy_catalog: EntropyProjectCatalog,
+    entropy_campaign: Option<EntropyCampaignProjection>,
+    entropy_campaign_history: Vec<EntropyCampaignProjection>,
+    selected_entropy_project: Option<String>,
+    entropy_campaign_roots: std::collections::BTreeMap<String, std::path::PathBuf>,
     _entropy_prompt_subscription: Option<Subscription>,
     source_resolutions: std::collections::BTreeMap<String, ForensicSourceResolution>,
     status: SharedString,
@@ -149,6 +180,12 @@ pub struct ForensicsWorkbenchSurface {
 
 impl ForensicsWorkbenchSurface {
     pub fn new(candidate: &ThreadIdentityCandidate, cx: &mut Context<Self>) -> Self {
+        let entropy_catalog = EntropyProjectCatalog::wallet_entropy_v1()
+            .expect("the built-in 15-project entropy catalog must remain valid");
+        let selected_entropy_project = entropy_catalog
+            .projects
+            .first()
+            .map(|project| project.product_ref.clone());
         Self {
             focus_handle: cx.focus_handle(),
             binding: candidate.binding.clone(),
@@ -181,6 +218,11 @@ impl ForensicsWorkbenchSurface {
             entropy_prompt_snapshots: Vec::new(),
             entropy_file_filter: EntropyFileFilter::All,
             selected_entropy_file: None,
+            entropy_catalog,
+            entropy_campaign: None,
+            entropy_campaign_history: Vec::new(),
+            selected_entropy_project,
+            entropy_campaign_roots: std::collections::BTreeMap::new(),
             _entropy_prompt_subscription: None,
             source_resolutions: std::collections::BTreeMap::new(),
             status: "Awaiting OpenAgents managed profile".into(),
@@ -199,6 +241,32 @@ impl ForensicsWorkbenchSurface {
         this.entropy_parent_prompt_ref = restored.parent_prompt_ref;
         this.entropy_source_run_ref = restored.source_run_ref;
         this.entropy_prompt_snapshots = restored.prompt_snapshots;
+        let mut campaigns = restored.campaigns;
+        if let Some(mut active_campaign) = campaigns.pop() {
+            if matches!(
+                active_campaign.phase,
+                EntropyCampaignPhase::Ready
+                    | EntropyCampaignPhase::Running
+                    | EntropyCampaignPhase::Paused
+            ) {
+                let _ = active_campaign.cancel(
+                    chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Millis, true),
+                );
+            }
+            for project in &active_campaign.projects {
+                if project.run.is_some() {
+                    this.entropy_campaign_roots.insert(
+                        project.product.product_ref.clone(),
+                        entropy_campaign_checkout_root(
+                            &active_campaign.binding.campaign_ref,
+                            &project.product.product_ref,
+                        ),
+                    );
+                }
+            }
+            this.entropy_campaign = Some(active_campaign);
+        }
+        this.entropy_campaign_history = campaigns;
         this.selected_entropy_file = restored
             .runs
             .last()
@@ -247,6 +315,17 @@ impl ForensicsWorkbenchSurface {
     }
 
     pub fn request_entropy_run(&mut self, cx: &mut Context<Self>) -> anyhow::Result<()> {
+        anyhow::ensure!(
+            !self.entropy_campaign.as_ref().is_some_and(|campaign| {
+                matches!(
+                    campaign.phase,
+                    EntropyCampaignPhase::Ready
+                        | EntropyCampaignPhase::Running
+                        | EntropyCampaignPhase::Paused
+                )
+            }),
+            "finish or cancel the active entropy campaign before starting a repository run"
+        );
         let snapshot = EntropyPromptSnapshot::new(
             format!("prompt.omega.entropy.{}", uuid::Uuid::new_v4().simple()),
             self.entropy_parent_prompt_ref.clone(),
@@ -254,6 +333,9 @@ impl ForensicsWorkbenchSurface {
             self.entropy_prompt_draft.clone(),
             chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Millis, true),
         )?;
+        if let Some(campaign) = self.entropy_campaign.take() {
+            self.entropy_campaign_history.push(campaign);
+        }
         self.entropy_prompt_snapshots.push(snapshot.clone());
         if let Some(previous) = self.entropy_run.take() {
             self.entropy_run_history.push(previous);
@@ -265,6 +347,188 @@ impl ForensicsWorkbenchSurface {
         self.persist_entropy_state(cx);
         cx.notify();
         Ok(())
+    }
+
+    pub fn request_entropy_campaign(&mut self, cx: &mut Context<Self>) -> anyhow::Result<()> {
+        anyhow::ensure!(
+            !self.entropy_run.as_ref().is_some_and(|run| {
+                matches!(
+                    run.phase,
+                    EntropyRunPhase::Ready
+                        | EntropyRunPhase::Running
+                        | EntropyRunPhase::CancelRequested
+                )
+            }),
+            "finish or cancel the active repository run before starting a campaign"
+        );
+        let snapshot = EntropyPromptSnapshot::new(
+            format!("prompt.omega.entropy.{}", uuid::Uuid::new_v4().simple()),
+            self.entropy_parent_prompt_ref.clone(),
+            self.entropy_source_run_ref.clone(),
+            self.entropy_prompt_draft.clone(),
+            chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Millis, true),
+        )?;
+        self.entropy_prompt_snapshots.push(snapshot.clone());
+        self.status = "Preparing the 15-project entropy campaign…".into();
+        cx.emit(ForensicsWorkbenchCommand::StartEntropyCampaign {
+            prompt_snapshot: snapshot,
+            catalog: self.entropy_catalog.clone(),
+        });
+        self.persist_entropy_state(cx);
+        cx.notify();
+        Ok(())
+    }
+
+    pub fn install_entropy_campaign(
+        &mut self,
+        campaign: EntropyCampaignProjection,
+        cx: &mut Context<Self>,
+    ) {
+        if let Some(previous) = self.entropy_campaign.replace(campaign) {
+            self.entropy_campaign_history.push(previous);
+        }
+        self.status = "15-project entropy campaign started".into();
+        self.persist_entropy_state(cx);
+        cx.notify();
+    }
+
+    pub fn start_next_entropy_campaign_project(
+        &mut self,
+        cx: &mut Context<Self>,
+    ) -> anyhow::Result<Option<omega_forensics::EntropyProjectRecord>> {
+        let campaign = self
+            .entropy_campaign
+            .as_mut()
+            .ok_or_else(|| anyhow::anyhow!("the entropy campaign is unavailable"))?;
+        let next = campaign.start_next_project()?;
+        if let Some(project) = &next {
+            self.selected_entropy_project = Some(project.product_ref.clone());
+            self.selected_entropy_file = None;
+            self.status = format!(
+                "Materializing {} at its pinned revision…",
+                project.product_name
+            )
+            .into();
+        }
+        self.persist_entropy_state(cx);
+        cx.notify();
+        Ok(next)
+    }
+
+    pub fn install_entropy_campaign_root(
+        &mut self,
+        product_ref: String,
+        root: std::path::PathBuf,
+        cx: &mut Context<Self>,
+    ) {
+        self.entropy_campaign_roots.insert(product_ref, root);
+        cx.notify();
+    }
+
+    pub fn sync_entropy_campaign_project(
+        &mut self,
+        product_ref: &str,
+        run: EntropyRunProjection,
+        elapsed_milliseconds: Option<u64>,
+        cx: &mut Context<Self>,
+    ) -> anyhow::Result<()> {
+        let campaign = self
+            .entropy_campaign
+            .as_mut()
+            .ok_or_else(|| anyhow::anyhow!("the entropy campaign is unavailable"))?;
+        campaign.update_project_run(
+            product_ref,
+            run,
+            elapsed_milliseconds,
+            omega_forensics::EntropyCampaignUsage::unavailable(),
+        )?;
+        self.persist_entropy_state(cx);
+        cx.notify();
+        Ok(())
+    }
+
+    pub fn fail_entropy_campaign_project(
+        &mut self,
+        product_ref: &str,
+        message: String,
+        elapsed_milliseconds: Option<u64>,
+        cx: &mut Context<Self>,
+    ) -> anyhow::Result<()> {
+        let campaign = self
+            .entropy_campaign
+            .as_mut()
+            .ok_or_else(|| anyhow::anyhow!("the entropy campaign is unavailable"))?;
+        campaign.record_provider_failure(product_ref, message, elapsed_milliseconds)?;
+        self.persist_entropy_state(cx);
+        cx.notify();
+        Ok(())
+    }
+
+    pub fn fail_entropy_campaign_source(
+        &mut self,
+        product_ref: &str,
+        message: String,
+        elapsed_milliseconds: Option<u64>,
+        cx: &mut Context<Self>,
+    ) -> anyhow::Result<()> {
+        let campaign = self
+            .entropy_campaign
+            .as_mut()
+            .ok_or_else(|| anyhow::anyhow!("the entropy campaign is unavailable"))?;
+        campaign.record_source_failure(product_ref, message, elapsed_milliseconds)?;
+        self.persist_entropy_state(cx);
+        cx.notify();
+        Ok(())
+    }
+
+    pub fn pause_entropy_campaign(&mut self, cx: &mut Context<Self>) -> anyhow::Result<()> {
+        self.entropy_campaign
+            .as_mut()
+            .ok_or_else(|| anyhow::anyhow!("the entropy campaign is unavailable"))?
+            .pause()?;
+        self.status = "Entropy campaign paused after the active repository".into();
+        self.persist_entropy_state(cx);
+        cx.notify();
+        Ok(())
+    }
+
+    pub fn resume_entropy_campaign(&mut self, cx: &mut Context<Self>) -> anyhow::Result<()> {
+        self.entropy_campaign
+            .as_mut()
+            .ok_or_else(|| anyhow::anyhow!("the entropy campaign is unavailable"))?
+            .resume()?;
+        self.status = "Entropy campaign resumed".into();
+        cx.emit(ForensicsWorkbenchCommand::ContinueEntropyCampaign);
+        self.persist_entropy_state(cx);
+        cx.notify();
+        Ok(())
+    }
+
+    pub fn cancel_entropy_campaign(&mut self, cx: &mut Context<Self>) -> anyhow::Result<()> {
+        if self.entropy_run.as_ref().is_some_and(|run| {
+            matches!(
+                run.phase,
+                EntropyRunPhase::Ready
+                    | EntropyRunPhase::Running
+                    | EntropyRunPhase::CancelRequested
+            )
+        }) {
+            self.cancel_entropy_run(cx)?;
+        }
+        self.entropy_campaign
+            .as_mut()
+            .ok_or_else(|| anyhow::anyhow!("the entropy campaign is unavailable"))?
+            .cancel(chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Millis, true))?;
+        self.status = "Entropy campaign cancelled; partial results retained".into();
+        self.persist_entropy_state(cx);
+        cx.notify();
+        Ok(())
+    }
+
+    pub fn select_entropy_project(&mut self, product_ref: String, cx: &mut Context<Self>) {
+        self.selected_entropy_project = Some(product_ref);
+        self.selected_entropy_file = None;
+        cx.notify();
     }
 
     pub fn install_entropy_run(&mut self, run: EntropyRunProjection, cx: &mut Context<Self>) {
@@ -293,6 +557,13 @@ impl ForensicsWorkbenchSurface {
             source_run_ref: self.entropy_source_run_ref.clone(),
             prompt_snapshots: self.entropy_prompt_snapshots.clone(),
             runs,
+            campaigns: {
+                let mut campaigns = self.entropy_campaign_history.clone();
+                if let Some(campaign) = self.entropy_campaign.clone() {
+                    campaigns.push(campaign);
+                }
+                campaigns
+            },
         }
     }
 
@@ -681,6 +952,11 @@ impl ForensicsWorkbenchSurface {
     }
 
     pub fn open_source(&mut self, citation: ForensicSourceCitation, cx: &mut Context<Self>) {
+        let repository_root = self
+            .selected_entropy_project
+            .as_ref()
+            .and_then(|product_ref| self.entropy_campaign_roots.get(product_ref))
+            .cloned();
         self.source_resolutions.insert(
             citation.source_ref.clone(),
             ForensicSourceResolution::Opening,
@@ -690,7 +966,10 @@ impl ForensicsWorkbenchSurface {
             citation.path, citation.start_line
         )
         .into();
-        cx.emit(ForensicsWorkbenchCommand::OpenSource(citation));
+        cx.emit(ForensicsWorkbenchCommand::OpenSource {
+            citation,
+            repository_root,
+        });
         cx.notify();
     }
 
@@ -763,6 +1042,9 @@ impl ForensicsWorkbenchSurface {
             entropy_prompt_snapshots: self.entropy_prompt_snapshots.clone(),
             entropy_file_filter: self.entropy_file_filter,
             selected_entropy_file: self.selected_entropy_file.clone(),
+            entropy_campaign: self.entropy_campaign.clone(),
+            entropy_campaign_history: self.entropy_campaign_history.clone(),
+            selected_entropy_project: self.selected_entropy_project.clone(),
             source_resolutions: self.source_resolutions.clone(),
             status: self.status.clone(),
         }
@@ -909,13 +1191,31 @@ impl Render for ForensicsWorkbenchSurface {
         let matrix = self.matrix.clone();
         let coldcard_evidence = self.coldcard_evidence.clone();
         let entropy_run = self.entropy_run.clone();
-        let entropy_run_workbench = entropy_run.clone();
+        let entropy_catalog = self.entropy_catalog.clone();
+        let entropy_campaign = self.entropy_campaign.clone();
+        let selected_entropy_project = self.selected_entropy_project.clone();
+        let selected_campaign_project = entropy_campaign.as_ref().and_then(|campaign| {
+            selected_entropy_project
+                .as_deref()
+                .and_then(|product_ref| campaign.project(product_ref))
+        });
+        let entropy_run_workbench = if entropy_campaign.is_some() {
+            selected_campaign_project.and_then(|project| project.run.clone())
+        } else {
+            entropy_run.clone()
+        };
+        let entropy_campaign_comparison = self
+            .entropy_campaign_history
+            .last()
+            .zip(entropy_campaign.as_ref())
+            .and_then(|(prior, current)| EntropyCampaignComparison::between(prior, current).ok());
         let entropy_filter = self.entropy_file_filter;
         let selected_entropy_file = self.selected_entropy_file.clone();
         let entropy_comparison = self
             .entropy_run_history
             .last()
             .zip(entropy_run.as_ref())
+            .filter(|(prior, current)| prior.binding.repository == current.binding.repository)
             .map(|(prior, current)| compare_entropy_runs(prior, current));
         let entropy_prompt_editor = self.entropy_prompt_editor.clone();
         let entropy_prompt_draft = self.entropy_prompt_draft.clone();
@@ -923,7 +1223,20 @@ impl Render for ForensicsWorkbenchSurface {
         let entropy_source_run_ref = self.entropy_source_run_ref.clone();
         let next_prompt_digest = omega_forensics::entropy_prompt_digest(&entropy_prompt_draft).ok();
         let entropy_running = entropy_run.as_ref().is_some_and(|run| {
-            matches!(run.phase, EntropyRunPhase::Ready | EntropyRunPhase::Running)
+            matches!(
+                run.phase,
+                EntropyRunPhase::Ready
+                    | EntropyRunPhase::Running
+                    | EntropyRunPhase::CancelRequested
+            )
+        });
+        let entropy_campaign_active = entropy_campaign.as_ref().is_some_and(|campaign| {
+            matches!(
+                campaign.phase,
+                EntropyCampaignPhase::Ready
+                    | EntropyCampaignPhase::Running
+                    | EntropyCampaignPhase::Paused
+            )
         });
 
         v_flex()
@@ -1027,12 +1340,32 @@ impl Render for ForensicsWorkbenchSurface {
                             .child(
                                 Button::new("omega.forensics.entropy.start", "Run entropy scan")
                                     .size(ButtonSize::Compact)
-                                    .disabled(entropy_running || self.entropy_prompt_draft.trim().is_empty())
+                                    .disabled(entropy_running || entropy_campaign_active || self.entropy_prompt_draft.trim().is_empty())
                                     .on_click(cx.listener(|this, _, _, cx| {
                                         if let Err(error) = this.request_entropy_run(cx) {
                                             this.set_entropy_error(format!("Entropy prompt is invalid · {error}"), cx);
                                         }
                                     })),
+                            )
+                            .child(
+                                Button::new(
+                                    "omega.forensics.entropy.campaign.start",
+                                    "Run 15-project campaign",
+                                )
+                                .size(ButtonSize::Compact)
+                                .disabled(
+                                    entropy_campaign_active
+                                        || entropy_running
+                                        || self.entropy_prompt_draft.trim().is_empty(),
+                                )
+                                .on_click(cx.listener(|this, _, _, cx| {
+                                    if let Err(error) = this.request_entropy_campaign(cx) {
+                                        this.set_entropy_error(
+                                            format!("Entropy campaign prompt is invalid · {error}"),
+                                            cx,
+                                        );
+                                    }
+                                })),
                             )
                             .when(entropy_running, |this| {
                                 this.child(
@@ -1047,6 +1380,331 @@ impl Render for ForensicsWorkbenchSurface {
                                     })),
                                 )
                             }),
+                    ),
+            )
+            .child(div().h_px().bg(cx.theme().colors().border))
+            .child(
+                v_flex()
+                    .id("omega.forensics.entropy.campaign")
+                    .debug_selector(|| "omega.forensics.entropy.campaign".into())
+                    .gap_1()
+                    .child(
+                        h_flex()
+                            .justify_between()
+                            .child(
+                                Label::new("15-project entropy campaign").size(LabelSize::Small),
+                            )
+                            .child(
+                                Label::new(
+                                    entropy_campaign
+                                        .as_ref()
+                                        .map_or("Not started", |campaign| {
+                                            entropy_campaign_phase_label(campaign.phase)
+                                        }),
+                                )
+                                .size(LabelSize::XSmall)
+                                .color(entropy_campaign.as_ref().map_or(Color::Muted, |campaign| {
+                                    entropy_campaign_phase_color(campaign.phase)
+                                })),
+                            ),
+                    )
+                    .child(
+                        Label::new(
+                            "One frozen prompt and source policy across exact repository pins. A missing or partial source remains a limitation, never a clean result.",
+                        )
+                        .size(LabelSize::XSmall)
+                        .color(Color::Muted),
+                    )
+                    .child(Self::render_fact(
+                        "Catalog",
+                        format!(
+                            "{} · {} products",
+                            entropy_catalog.catalog_ref,
+                            entropy_catalog.projects.len()
+                        ),
+                    ))
+                    .child(Self::render_fact(
+                        "Catalog digest",
+                        entropy_catalog.canonical_digest.clone(),
+                    ))
+                    .when_some(entropy_campaign.clone(), |this, campaign| {
+                        this.child(Self::render_fact(
+                            "Frozen prompt digest",
+                            campaign.binding.prompt_digest,
+                        ))
+                        .child(Self::render_fact("Model route", campaign.binding.model_route_ref))
+                        .child(Self::render_fact(
+                            "File selection",
+                            campaign.binding.file_selection_policy_ref,
+                        ))
+                    })
+                    .when_some(entropy_campaign.clone(), |this, campaign| {
+                        this.child(
+                            h_flex()
+                                .flex_wrap()
+                                .gap_1()
+                                .when(campaign.phase == EntropyCampaignPhase::Running, |this| {
+                                    this.child(
+                                        Button::new(
+                                            "omega.forensics.entropy.campaign.pause",
+                                            "Pause after this repo",
+                                        )
+                                        .size(ButtonSize::Compact)
+                                        .style(ButtonStyle::Subtle)
+                                        .on_click(cx.listener(|this, _, _, cx| {
+                                            if let Err(error) = this.pause_entropy_campaign(cx) {
+                                                this.set_entropy_error(
+                                                    format!("Campaign pause failed · {error}"),
+                                                    cx,
+                                                );
+                                            }
+                                        })),
+                                    )
+                                })
+                                .when(campaign.phase == EntropyCampaignPhase::Paused, |this| {
+                                    this.child(
+                                        Button::new(
+                                            "omega.forensics.entropy.campaign.resume",
+                                            "Resume campaign",
+                                        )
+                                        .size(ButtonSize::Compact)
+                                        .on_click(cx.listener(|this, _, _, cx| {
+                                            if let Err(error) = this.resume_entropy_campaign(cx) {
+                                                this.set_entropy_error(
+                                                    format!("Campaign resume failed · {error}"),
+                                                    cx,
+                                                );
+                                            }
+                                        })),
+                                    )
+                                })
+                                .when(
+                                    matches!(
+                                        campaign.phase,
+                                        EntropyCampaignPhase::Ready
+                                            | EntropyCampaignPhase::Running
+                                            | EntropyCampaignPhase::Paused
+                                    ),
+                                    |this| {
+                                        this.child(
+                                            Button::new(
+                                                "omega.forensics.entropy.campaign.cancel",
+                                                "Cancel campaign",
+                                            )
+                                            .size(ButtonSize::Compact)
+                                            .style(ButtonStyle::Subtle)
+                                            .on_click(cx.listener(|this, _, _, cx| {
+                                                if let Err(error) =
+                                                    this.cancel_entropy_campaign(cx)
+                                                {
+                                                    this.set_entropy_error(
+                                                        format!(
+                                                            "Campaign cancellation failed · {error}"
+                                                        ),
+                                                        cx,
+                                                    );
+                                                }
+                                            })),
+                                        )
+                                    },
+                                ),
+                        )
+                    })
+                    .child(
+                        v_flex()
+                            .id("omega.forensics.entropy.campaign.projects")
+                            .max_h(px(360.))
+                            .overflow_y_scroll()
+                            .border_1()
+                            .border_color(cx.theme().colors().border)
+                            .children(entropy_catalog.projects.iter().enumerate().map(
+                                |(index, product)| {
+                                    let product_ref = product.product_ref.clone();
+                                    let selected = selected_entropy_project.as_deref()
+                                        == Some(product_ref.as_str());
+                                    let campaign_row = entropy_campaign
+                                        .as_ref()
+                                        .and_then(|campaign| campaign.project(&product_ref));
+                                    let status = campaign_row.map_or_else(
+                                        || product.source_availability.label(),
+                                        |row| row.phase.label(),
+                                    );
+                                    let progress = campaign_row.map_or_else(
+                                        || "Not run".to_string(),
+                                        |row| {
+                                            format!(
+                                                "{} files · {} candidates",
+                                                row.files_analyzed(),
+                                                row.candidate_count()
+                                            )
+                                        },
+                                    );
+                                    h_flex()
+                                        .id(("omega-entropy-project", index))
+                                        .debug_selector({
+                                            let product_ref = product_ref.clone();
+                                            move || format!(
+                                                "omega.forensics.entropy.project.{product_ref}"
+                                            )
+                                        })
+                                        .w_full()
+                                        .px_2()
+                                        .py_1()
+                                        .gap_2()
+                                        .cursor_pointer()
+                                        .when(selected, |row| {
+                                            row.bg(cx.theme().colors().element_selected)
+                                        })
+                                        .hover(|style| {
+                                            style.bg(cx.theme().colors().ghost_element_hover)
+                                        })
+                                        .on_click(cx.listener(move |this, _, _, cx| {
+                                            this.select_entropy_project(product_ref.clone(), cx)
+                                        }))
+                                        .child(
+                                            div()
+                                                .min_w_0()
+                                                .flex_1()
+                                                .truncate()
+                                                .child(product.product_name.clone()),
+                                        )
+                                        .child(
+                                            Label::new(progress)
+                                                .size(LabelSize::XSmall)
+                                                .color(Color::Muted),
+                                        )
+                                        .child(
+                                            Label::new(status)
+                                                .size(LabelSize::XSmall)
+                                                .color(campaign_row.map_or(Color::Muted, |row| {
+                                                    entropy_campaign_project_color(row.phase)
+                                                })),
+                                        )
+                                },
+                            )),
+                    )
+                    .when_some(
+                        selected_entropy_project.as_deref().and_then(|product_ref| {
+                            entropy_catalog
+                                .projects
+                                .iter()
+                                .find(|product| product.product_ref == product_ref)
+                                .cloned()
+                        }),
+                        |this, product| {
+                            let campaign_row = entropy_campaign
+                                .as_ref()
+                                .and_then(|campaign| campaign.project(&product.product_ref));
+                            let comparison_row = entropy_campaign_comparison
+                                .as_ref()
+                                .and_then(|comparison| {
+                                    comparison.projects.iter().find(|row| {
+                                        row.product_ref == product.product_ref
+                                    })
+                                });
+                            this.child(
+                                v_flex()
+                                    .gap_1()
+                                    .p_2()
+                                    .border_1()
+                                    .border_color(cx.theme().colors().border)
+                                    .child(
+                                        Label::new(product.product_name.clone())
+                                            .size(LabelSize::Small),
+                                    )
+                                    .child(Self::render_fact(
+                                        "Source",
+                                        product.source_availability.label(),
+                                    ))
+                                    .child(Self::render_fact(
+                                        "Repository",
+                                        product
+                                            .repository_url
+                                            .clone()
+                                            .unwrap_or_else(|| "Unavailable".into()),
+                                    ))
+                                    .child(Self::render_fact(
+                                        "Revision",
+                                        product
+                                            .pinned_revision
+                                            .clone()
+                                            .unwrap_or_else(|| "Unavailable".into()),
+                                    ))
+                                    .child(Self::render_fact(
+                                        "License / access",
+                                        product.license_or_access_status,
+                                    ))
+                                    .child(Self::render_fact(
+                                        "Dependencies",
+                                        product.dependency_policy_ref,
+                                    ))
+                                    .child(Self::render_fact(
+                                        "Limitations",
+                                        campaign_row.map_or_else(
+                                            || {
+                                                if product.limitation_refs.is_empty() {
+                                                    "None declared".into()
+                                                } else {
+                                                    product.limitation_refs.join(" · ")
+                                                }
+                                            },
+                                            |row| {
+                                                if row.limitation_refs.is_empty() {
+                                                    "None declared".into()
+                                                } else {
+                                                    row.limitation_refs.join(" · ")
+                                                }
+                                            },
+                                        ),
+                                    ))
+                                    .when_some(campaign_row, |this, row| {
+                                        this.child(Self::render_fact(
+                                            "Progress",
+                                            format!(
+                                                "{} files · {} candidates · {}",
+                                                row.files_analyzed(),
+                                                row.candidate_count(),
+                                                row.phase.label()
+                                            ),
+                                        ))
+                                        .child(Self::render_fact(
+                                            "Elapsed",
+                                            row.elapsed_milliseconds.map_or_else(
+                                                || "Unavailable".into(),
+                                                |elapsed| format!("{elapsed} ms"),
+                                            ),
+                                        ))
+                                        .child(Self::render_fact(
+                                            "Usage",
+                                            row.usage.total_tokens.map_or_else(
+                                                || "Unavailable · not inferred".into(),
+                                                |tokens| format!("{tokens} exact tokens"),
+                                            ),
+                                        ))
+                                    })
+                                    .when_some(comparison_row, |this, row| {
+                                        this.child(Self::render_fact(
+                                            "Prompt A → B",
+                                            format!(
+                                                "{} gained · {} lost · {} changed · {} unchanged",
+                                                row.gained, row.lost, row.changed, row.unchanged
+                                            ),
+                                        ))
+                                        .child(Self::render_fact(
+                                            "Exact run identities",
+                                            format!(
+                                                "{} → {}",
+                                                row.run_a_ref
+                                                    .clone()
+                                                    .unwrap_or_else(|| "Unavailable".into()),
+                                                row.run_b_ref
+                                                    .clone()
+                                                    .unwrap_or_else(|| "Unavailable".into())
+                                            ),
+                                        ))
+                                    }),
+                            )
+                        },
                     ),
             )
             .when_some(entropy_run_workbench, |this, run| {
@@ -2372,6 +3030,44 @@ fn entropy_run_phase_label(phase: EntropyRunPhase) -> &'static str {
     }
 }
 
+fn entropy_campaign_phase_label(phase: EntropyCampaignPhase) -> &'static str {
+    match phase {
+        EntropyCampaignPhase::Ready => "Ready",
+        EntropyCampaignPhase::Running => "Running",
+        EntropyCampaignPhase::Paused => "Paused",
+        EntropyCampaignPhase::Completed => "Completed",
+        EntropyCampaignPhase::CompletedWithLimitations => "Completed with limitations",
+        EntropyCampaignPhase::Cancelled => "Cancelled",
+    }
+}
+
+fn entropy_campaign_phase_color(phase: EntropyCampaignPhase) -> Color {
+    match phase {
+        EntropyCampaignPhase::Running => Color::Accent,
+        EntropyCampaignPhase::Paused
+        | EntropyCampaignPhase::CompletedWithLimitations
+        | EntropyCampaignPhase::Cancelled => Color::Warning,
+        EntropyCampaignPhase::Ready | EntropyCampaignPhase::Completed => Color::Muted,
+    }
+}
+
+fn entropy_campaign_project_color(phase: omega_forensics::EntropyCampaignProjectPhase) -> Color {
+    use omega_forensics::EntropyCampaignProjectPhase;
+    match phase {
+        EntropyCampaignProjectPhase::Running => Color::Accent,
+        EntropyCampaignProjectPhase::ProviderFailed | EntropyCampaignProjectPhase::SourceFailed => {
+            Color::Error
+        }
+        EntropyCampaignProjectPhase::CompletedWithLimitations
+        | EntropyCampaignProjectPhase::SourceUnavailable
+        | EntropyCampaignProjectPhase::InputIncomplete
+        | EntropyCampaignProjectPhase::Cancelled => Color::Warning,
+        EntropyCampaignProjectPhase::Queued | EntropyCampaignProjectPhase::Completed => {
+            Color::Muted
+        }
+    }
+}
+
 fn entropy_file_state_label(state: EntropyFileState) -> &'static str {
     match state {
         EntropyFileState::Queued => "Queued",
@@ -2824,6 +3520,63 @@ mod tests {
                 assert_eq!(surface.read(cx).snapshot().selected_arm, arm);
                 assert_eq!(surface.read(cx).snapshot().readiness, None);
             }
+        });
+    }
+
+    #[gpui::test]
+    fn entropy_campaign_keeps_all_fifteen_rows_and_selected_project_state(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        cx.update(|cx| {
+            let binding = RepositoryBinding::new("repo", "worktree").expect("valid binding");
+            let surface = cx.new(|cx| ForensicsWorkbenchSurface::new(&candidate(binding), cx));
+            let catalog = EntropyProjectCatalog::wallet_entropy_v1().expect("wallet catalog");
+            let prompt = EntropyPromptSnapshot::new(
+                "prompt.entropy.campaign.fixture".into(),
+                None,
+                None,
+                "Inspect entropy only.".into(),
+                "2026-08-02T08:15:00Z".into(),
+            )
+            .expect("prompt");
+            let campaign_binding = omega_forensics::EntropyCampaignBinding {
+                campaign_ref: "campaign.entropy.fixture".into(),
+                catalog_ref: catalog.catalog_ref.clone(),
+                catalog_digest: catalog.canonical_digest.clone(),
+                prompt_digest: prompt.canonical_digest.clone(),
+                prompt_snapshot: prompt,
+                model_route_ref: "model-route.fixture.kimi".into(),
+                model_parameters: omega_forensics::EntropyModelParameters {
+                    temperature_millis: 0,
+                    thinking_allowed: true,
+                    reasoning_effort_ref: None,
+                },
+                tool_surface_refs: vec!["tool.omega.project.read".into()],
+                file_selection_policy_ref: omega_forensics::ENTROPY_FILE_SELECTION_POLICY_REF_V1
+                    .into(),
+                started_at: "2026-08-02T08:15:00Z".into(),
+            };
+            let mut campaign = EntropyCampaignProjection::new(campaign_binding, catalog)
+                .expect("campaign projection");
+            campaign.start().expect("start campaign");
+            surface.update(cx, |surface, cx| {
+                surface.install_entropy_campaign(campaign, cx);
+                surface.select_entropy_project("product.samourai-wallet".into(), cx);
+            });
+            let snapshot = surface.read(cx).snapshot();
+            assert_eq!(
+                snapshot
+                    .entropy_campaign
+                    .as_ref()
+                    .expect("campaign")
+                    .projects
+                    .len(),
+                15
+            );
+            assert_eq!(
+                snapshot.selected_entropy_project.as_deref(),
+                Some("product.samourai-wallet")
+            );
         });
     }
 
