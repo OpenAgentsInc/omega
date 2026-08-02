@@ -2157,7 +2157,7 @@ impl ConversationView {
                 (
                     Some(thread.session_id().clone()),
                     thread.work_dirs().cloned(),
-                    thread.title(),
+                    thread.title_or_first_user_message(cx),
                 )
             })
             .unwrap_or_else(|| {
@@ -2870,7 +2870,7 @@ impl ConversationView {
         match &self.server_state {
             ServerState::Connected(view) => view
                 .active_view()
-                .and_then(|v| v.read(cx).thread.read(cx).title())
+                .and_then(|v| v.read(cx).thread.read(cx).title_or_first_user_message(cx))
                 .unwrap_or_else(|| DEFAULT_THREAD_TITLE.into()),
             ServerState::Loading { .. } => self
                 .loading_status
@@ -3006,7 +3006,7 @@ impl ConversationView {
                 crate::omega_agent_supervision::ThreadSupervisionSnapshot {
                     thread_key: session_id.0.to_string(),
                     title: thread
-                        .title()
+                        .title_or_first_user_message(cx)
                         .unwrap_or_else(|| DEFAULT_THREAD_TITLE.into()),
                     executor: {
                         // `OMEGA-DELTA-0208`. The chrome line: this snapshot is
@@ -3256,7 +3256,8 @@ impl ConversationView {
                         .entry(self.thread_id)
                         .and_then(|m| m.title_override.clone())
                 });
-                let title = override_title.or_else(|| thread.read(cx).title());
+                let title =
+                    override_title.or_else(|| thread.read(cx).title_or_first_user_message(cx));
                 if let Some(title) = title
                     && let Some(active_thread) = self.thread_view(&session_id)
                 {
@@ -5035,7 +5036,7 @@ impl ConversationView {
         let root_thread = root_thread.read(cx).thread.read(cx);
         let root_thread_id = self.thread_id;
         let root_work_dirs = root_thread.work_dirs().cloned();
-        let root_title = root_thread.title();
+        let root_title = root_thread.title_or_first_user_message(cx);
 
         let title = root_title
             .clone()

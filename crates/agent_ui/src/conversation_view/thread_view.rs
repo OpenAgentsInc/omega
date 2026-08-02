@@ -1021,7 +1021,7 @@ impl ThreadView {
             let initial_title = if parent_session_id.is_none() {
                 metadata.as_ref().and_then(|m| m.title())
             } else {
-                thread.read(cx).title()
+                thread.read(cx).title_or_first_user_message(cx)
             }
             .unwrap_or_else(|| DEFAULT_THREAD_TITLE.into());
             let editor = cx.new(|cx| {
@@ -1916,7 +1916,7 @@ impl ThreadView {
         let snapshot = ThreadSupervisionSnapshot {
             thread_key: thread.session_id().0.to_string(),
             title: thread
-                .title()
+                .title_or_first_user_message(cx)
                 .unwrap_or_else(|| DEFAULT_THREAD_TITLE.into()),
             executor: {
                 // `OMEGA-DELTA-0208`. The chrome line, not the record's line.
@@ -1968,7 +1968,10 @@ impl ThreadView {
                 if can_retarget && crate::omega_thread_worktree::can_isolate(&project, cx) =>
             {
                 let name_hint = crate::omega_thread_worktree::worktree_name_for_thread(
-                    self.thread.read(cx).title().as_deref(),
+                    self.thread
+                        .read(cx)
+                        .title_or_first_user_message(cx)
+                        .as_deref(),
                 );
                 Some(crate::omega_thread_worktree::provision(
                     project, name_hint, cx,
@@ -8100,7 +8103,7 @@ impl ThreadView {
     ) -> Task<Result<()>> {
         let thread = self.thread.read(cx);
         let thread_title = thread
-            .title()
+            .title_or_first_user_message(cx)
             .unwrap_or_else(|| DEFAULT_THREAD_TITLE.into())
             .to_string();
         let markdown = thread.to_markdown(cx);
@@ -11828,7 +11831,7 @@ impl ThreadView {
 
         let thread_title = thread
             .as_ref()
-            .and_then(|t| t.read(cx).title())
+            .and_then(|t| t.read(cx).title_or_first_user_message(cx))
             .filter(|t| !t.is_empty());
         let tool_call_label = tool_call.label.read(cx).source().to_string();
         let has_tool_call_label = !tool_call_label.is_empty();

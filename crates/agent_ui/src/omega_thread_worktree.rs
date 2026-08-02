@@ -113,13 +113,16 @@ pub fn can_isolate(project: &Entity<Project>, cx: &App) -> bool {
 /// A directory name for a thread's isolated worktree.
 ///
 /// A real thread title becomes a slug so `../worktrees/` stays readable.
-/// `None` — a thread still called "New Agent Thread", or a title with nothing
+/// `None` — a thread still using a default placeholder, or a title with nothing
 /// sluggable in it — hands the choice to `generate_worktree_name`, which picks
 /// an adjective-noun pair that no existing worktree uses. Omega never asks a
 /// person to name a worktree it decided to create.
 pub fn worktree_name_for_thread(title: Option<&str>) -> Option<String> {
     let title = title?.trim();
-    if title.is_empty() || title == crate::DEFAULT_THREAD_TITLE {
+    if title.is_empty()
+        || title == crate::DEFAULT_THREAD_TITLE
+        || title == crate::LEGACY_DEFAULT_THREAD_TITLE
+    {
         return None;
     }
 

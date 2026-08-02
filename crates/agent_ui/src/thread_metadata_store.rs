@@ -29,7 +29,7 @@ use util::ResultExt as _;
 use workspace::{PathList, SerializedWorkspaceLocation, WorkspaceDb};
 
 use crate::{
-    DEFAULT_THREAD_TITLE,
+    DEFAULT_THREAD_TITLE, LEGACY_DEFAULT_THREAD_TITLE,
     omega_agent_supervision::{SupervisedThreadLifecycle, lifecycle_for_thread},
 };
 
@@ -150,6 +150,7 @@ fn migrate_thread_metadata(cx: &mut App) -> Task<anyhow::Result<()>> {
                         conversation_owner_version: ConversationOwnerVersion::V1,
                         title: if entry.title.is_empty()
                             || entry.title.as_ref() == DEFAULT_THREAD_TITLE
+                            || entry.title.as_ref() == LEGACY_DEFAULT_THREAD_TITLE
                         {
                             None
                         } else {
@@ -1465,7 +1466,7 @@ impl ThreadMetadataStore {
         } else {
             Some(thread_ref.session_id().clone())
         };
-        let title = thread_ref.title();
+        let title = thread_ref.title_or_first_user_message(cx);
         let title_override = existing_thread.and_then(|t| t.title_override.clone());
 
         let updated_at = Utc::now();
@@ -2006,7 +2007,10 @@ impl Column for ThreadMetadata {
                         anyhow::bail!("unsupported conversation owner version {version}")
                     }
                 },
-                title: if title.is_empty() || title == DEFAULT_THREAD_TITLE {
+                title: if title.is_empty()
+                    || title == DEFAULT_THREAD_TITLE
+                    || title == LEGACY_DEFAULT_THREAD_TITLE
+                {
                     None
                 } else {
                     Some(title.into())

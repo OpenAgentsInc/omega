@@ -2524,6 +2524,22 @@ impl AcpThread {
             .or_else(|| self.provisional_title.clone())
     }
 
+    /// Returns the provider title, or the first user message when a restored
+    /// transcript has no provider-supplied summary.
+    pub fn title_or_first_user_message(&self, cx: &App) -> Option<SharedString> {
+        self.title().or_else(|| {
+            self.entries.iter().find_map(|entry| {
+                let AgentThreadEntry::UserMessage(message) = entry else {
+                    return None;
+                };
+                let text = message.content.to_markdown(cx);
+                let first_line = text.lines().find(|line| !line.trim().is_empty())?.trim();
+                (!first_line.is_empty())
+                    .then(|| SharedString::from(util::truncate_and_trailoff(first_line, 200)))
+            })
+        })
+    }
+
     pub fn has_provisional_title(&self) -> bool {
         self.provisional_title.is_some()
     }
@@ -11441,6 +11457,49 @@ mod tests {
             &[SharedString::from("Helping with Rust question")],
             "real title should propagate to the connection"
         );
+    }
+
+    #[gpui::test]
+    async fn test_missing_title_falls_back_to_first_user_message(cx: &mut TestAppContext) {
+        init_test(cx);
+
+        let fs = FakeFs::new(cx.executor());
+        let project = Project::test(fs, [], cx).await;
+        let connection = Rc::new(FakeAgentConnection::new());
+        let thread = cx
+            .update(|cx| {
+                connection.new_session(project, PathList::new(&[Path::new(path!("/test"))]), cx)
+            })
+            .await
+            .unwrap();
+
+        thread.read_with(cx, |thread, cx| {
+            assert_eq!(thread.title_or_first_user_message(cx), None);
+        });
+
+        thread.update(cx, |thread, cx| {
+            thread.push_user_content_block(
+                None,
+                "\n  Find the entropy bug\nIgnore this line".into(),
+                cx,
+            );
+        });
+        thread.read_with(cx, |thread, cx| {
+            assert_eq!(
+                thread.title_or_first_user_message(cx).as_deref(),
+                Some("Find the entropy bug")
+            );
+        });
+
+        thread.update(cx, |thread, cx| {
+            thread.set_provisional_title("Entropy audit".into(), cx);
+        });
+        thread.read_with(cx, |thread, cx| {
+            assert_eq!(
+                thread.title_or_first_user_message(cx).as_deref(),
+                Some("Entropy audit")
+            );
+        });
     }
 
     #[gpui::test]

@@ -3153,7 +3153,7 @@ impl AgentPanel {
                 .map(|thread| {
                     let thread = thread.read(cx);
 
-                    let title = thread.title();
+                    let title = thread.title_or_first_user_message(cx);
                     let work_dirs = thread.work_dirs().cloned();
                     SerializedActiveThread {
                         session_id: (!is_draft_active).then(|| thread.session_id().0.to_string()),
@@ -8589,7 +8589,7 @@ impl AgentPanel {
             return;
         }
 
-        // The thread is still called "New Agent Thread" here — its title comes
+        // The thread still uses the default placeholder here — its title comes
         // from the first message — so this hint is almost always `None` and the
         // adjective-noun generator names the worktree. Nobody is asked.
         let title = conversation_view.read(cx).title(cx);

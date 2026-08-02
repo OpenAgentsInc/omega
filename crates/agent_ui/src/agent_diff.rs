@@ -1353,7 +1353,7 @@ impl Item for AgentDiffPane {
     }
 
     fn tab_tooltip_content(&self, cx: &App) -> Option<TabTooltipContent> {
-        let title = self.thread.read(cx).title();
+        let title = self.thread.read(cx).title_or_first_user_message(cx);
 
         Some(TabTooltipContent::Custom(Box::new(Tooltip::element({
             let title = title.map(|title| title.to_string());
@@ -1493,7 +1493,7 @@ impl Item for AgentDiffPane {
     }
 
     fn tab_content_text(&self, _detail: usize, cx: &App) -> SharedString {
-        match self.thread.read(cx).title() {
+        match self.thread.read(cx).title_or_first_user_message(cx) {
             Some(title) => format!("Review: {}", truncate_and_trailoff(&title, 20)).into(),
             None => "Review".into(),
         }

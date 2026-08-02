@@ -1260,7 +1260,7 @@ fn device_mirror_thread(
             let root_thread = conversation.read(cx).root_thread(cx)?;
             let root_thread = root_thread.read(cx);
             let title = root_thread
-                .title()
+                .title_or_first_user_message(cx)
                 .map_or_else(|| thread.operation_ref.clone(), |title| title.to_string());
             let state = device_thread_state(root_thread.status(), thread);
             let thread_ref = thread.thread_id.to_key_string();
@@ -1345,7 +1345,7 @@ fn device_loaded_thread(
     );
     omega_effectd::MirrorThread {
         thread_ref: thread_ref.clone(),
-        title: thread.title().map_or_else(
+        title: thread.title_or_first_user_message(cx).map_or_else(
             || "Omega thread".to_string(),
             |title| device_public_label(&title, "Omega thread"),
         ),

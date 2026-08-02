@@ -1340,7 +1340,7 @@ impl<T: PromptCompletionProviderDelegate> PromptCompletionProvider<T> {
 
         if let Some(agent_panel) = workspace.panel::<AgentPanel>(cx)
             && let Some(thread) = agent_panel.read(cx).active_agent_thread(cx)
-            && let Some(title) = thread.read(cx).title()
+            && let Some(title) = thread.read(cx).title_or_first_user_message(cx)
         {
             mentions.insert(MentionUri::Thread {
                 id: thread.read(cx).session_id().clone(),
