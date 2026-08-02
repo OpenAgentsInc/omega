@@ -27608,4 +27608,39 @@ mod tests {
             );
         }
     }
+
+    /// OMEGA-DELTA-0227. Comet mode collapses its fixed-width sidebar with
+    /// Comet's manually driven 200ms ease-out clip while the tone and tabs ride
+    /// the same width clock.
+    #[test]
+    fn comet_sidebar_uses_the_exact_resize_tween() {
+        let panel = without_comments(&read_repository_file("crates/agent_ui/src/agent_panel.rs"));
+        for required in [
+            "COMET_SIDEBAR_RESIZE_DURATION: Duration = Duration::from_millis(200)",
+            "let x = coefficients(0., 0.58)",
+            "let y = coefficients(0., 1.)",
+            "window.request_animation_frame()",
+            "tween.value(Instant::now(), cx.reduce_motion())",
+            ".overflow_hidden()",
+            ".w(px(sidebar_width))",
+            ".child(sidebar)",
+            "let tabs_left = (sidebar_width + 16.).max(158.)",
+        ] {
+            assert!(
+                panel.contains(required),
+                "OMEGA-DELTA-0227: Comet sidebar motion lost `{required}`"
+            );
+        }
+
+        let toggle = body_of(&panel, "toggle_threads_sidebar");
+        for required in [
+            "omega_zero_base::is_comet_mode()",
+            "CometSidebarTween::new(comet_from, comet_to)",
+        ] {
+            assert!(
+                toggle.contains(required),
+                "OMEGA-DELTA-0227: Comet sidebar toggle lost `{required}`"
+            );
+        }
+    }
 }

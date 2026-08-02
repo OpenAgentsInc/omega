@@ -7,7 +7,7 @@ use std::{
         Arc,
         atomic::{AtomicBool, Ordering},
     },
-    time::Duration,
+    time::{Duration, Instant},
 };
 
 use acp_thread::{AcpThread, AcpThreadEvent, MentionUri, ThreadStatus, line_range_suffix};
@@ -133,6 +133,81 @@ const LAST_USED_AGENT_KEY: &str = "agent_panel__last_used_external_agent";
 const LAST_CREATED_ENTRY_KIND_KEY: &str = "agent_panel__last_created_entry_kind";
 const TERMINAL_AGENT_TELEMETRY_ID: &str = "terminal";
 const TERMINAL_INIT_COMMAND_STARTUP_TIMEOUT: Duration = Duration::from_secs(5);
+const COMET_SIDEBAR_WIDTH: f32 = 256.;
+const COMET_SIDEBAR_RESIZE_DURATION: Duration = Duration::from_millis(200);
+
+#[derive(Clone, Copy, Debug)]
+struct CometSidebarTween {
+    from: f32,
+    to: f32,
+    started: Instant,
+}
+
+impl CometSidebarTween {
+    fn new(from: f32, to: f32) -> Self {
+        Self {
+            from,
+            to,
+            started: Instant::now(),
+        }
+    }
+
+    fn value(self, now: Instant, reduce_motion: bool) -> (f32, bool) {
+        if reduce_motion {
+            return (self.to, false);
+        }
+        let raw = now.saturating_duration_since(self.started).as_secs_f32()
+            / COMET_SIDEBAR_RESIZE_DURATION.as_secs_f32();
+        if raw >= 1. {
+            return (self.to, false);
+        }
+        let progress = comet_sidebar_ease_out(raw);
+        (self.from + (self.to - self.from) * progress, true)
+    }
+}
+
+fn comet_sidebar_ease_out(progress: f32) -> f32 {
+    fn coefficients(first: f32, second: f32) -> (f32, f32, f32) {
+        let c = 3. * first;
+        let b = 3. * (second - first) - c;
+        (1. - c - b, b, c)
+    }
+
+    fn sample((a, b, c): (f32, f32, f32), time: f32) -> f32 {
+        ((a * time + b) * time + c) * time
+    }
+
+    let progress = progress.clamp(0., 1.);
+    if progress == 0. || progress == 1. {
+        return progress;
+    }
+
+    let x = coefficients(0., 0.58);
+    let y = coefficients(0., 1.);
+    let mut time = progress;
+    for _ in 0..8 {
+        let error = sample(x, time) - progress;
+        if error.abs() < 1e-6 {
+            return sample(y, time).clamp(0., 1.);
+        }
+        let derivative = (3. * x.0 * time + 2. * x.1) * time + x.2;
+        if derivative.abs() < 1e-6 {
+            break;
+        }
+        time -= error / derivative;
+    }
+
+    let (mut low, mut high) = (0., 1.);
+    for _ in 0..32 {
+        let midpoint = (low + high) / 2.;
+        if sample(x, midpoint) < progress {
+            low = midpoint;
+        } else {
+            high = midpoint;
+        }
+    }
+    sample(y, (low + high) / 2.).clamp(0., 1.)
+}
 
 fn forensics_timestamp() -> String {
     Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Millis, true)
@@ -2207,6 +2282,7 @@ pub struct AgentPanel {
     workbench_shell: workbench_shell::WorkbenchShell,
     workbench_shell_enabled: bool,
     comet_titlebar_dragging: bool,
+    comet_sidebar_tween: Option<CometSidebarTween>,
     comet_closed_session_tabs: HashSet<ThreadId>,
     comet_navigation_history: CometNavigationHistory,
     /// Thread keys whose durable disk selection was already adopted (or
@@ -2829,6 +2905,7 @@ impl AgentPanel {
             workbench_shell,
             workbench_shell_enabled: omega_zero_base::is_active(),
             comet_titlebar_dragging: false,
+            comet_sidebar_tween: None,
             comet_closed_session_tabs: HashSet::default(),
             comet_navigation_history: CometNavigationHistory::default(),
             workbench_selection_restore_attempted: HashSet::default(),
@@ -5252,7 +5329,20 @@ impl AgentPanel {
     /// sidebar whose first section is those threads rather than opening an
     /// overlay that was only threads.
     pub fn toggle_threads_sidebar(&mut self, cx: &mut Context<Self>) {
+        let comet_from = self
+            .sidebar
+            .open
+            .then_some(COMET_SIDEBAR_WIDTH)
+            .unwrap_or_default();
         self.sidebar.open = !self.sidebar.open;
+        if omega_zero_base::is_comet_mode() {
+            let comet_to = self
+                .sidebar
+                .open
+                .then_some(COMET_SIDEBAR_WIDTH)
+                .unwrap_or_default();
+            self.comet_sidebar_tween = Some(CometSidebarTween::new(comet_from, comet_to));
+        }
         // A refusal belongs to the click that produced it. Carrying it across
         // a collapse and an expand would show a sentence about a thread the
         // person is no longer looking at.
@@ -14451,11 +14541,10 @@ impl AgentPanel {
     fn render_comet_shell(
         &mut self,
         content: impl IntoElement,
-        _window: &mut Window,
+        window: &mut Window,
         cx: &mut Context<Self>,
     ) -> AnyElement {
         const TITLEBAR_HEIGHT: f32 = 38.;
-        const SIDEBAR_WIDTH: f32 = 256.;
         const TAB_WIDTH: f32 = 140.;
 
         let colors = cx.theme().colors();
@@ -14472,6 +14561,20 @@ impl AgentPanel {
         let icon_muted = colors.icon_muted;
 
         let sidebar_open = self.sidebar.open;
+        let sidebar_target = if sidebar_open {
+            COMET_SIDEBAR_WIDTH
+        } else {
+            0.
+        };
+        let (sidebar_width, sidebar_animating) = self
+            .comet_sidebar_tween
+            .map(|tween| tween.value(Instant::now(), cx.reduce_motion()))
+            .unwrap_or((sidebar_target, false));
+        if sidebar_animating {
+            window.request_animation_frame();
+        } else {
+            self.comet_sidebar_tween = None;
+        }
         let active_thread_id = self.active_thread_id(cx);
         if let Some(active_thread_id) = active_thread_id {
             self.comet_navigation_history.push(active_thread_id);
@@ -14633,11 +14736,7 @@ impl AgentPanel {
             },
         );
 
-        let tabs_left = if sidebar_open {
-            SIDEBAR_WIDTH + 16.
-        } else {
-            158.
-        };
+        let tabs_left = (sidebar_width + 16.).max(158.);
         let titlebar = div()
             .id("comet-titlebar")
             .debug_selector(|| "omega.comet.titlebar".into())
@@ -14813,7 +14912,7 @@ impl AgentPanel {
         let sidebar = div()
             .id("comet-sidebar")
             .debug_selector(|| "omega.comet.sidebar".into())
-            .w(px(SIDEBAR_WIDTH))
+            .w(px(COMET_SIDEBAR_WIDTH))
             .h_full()
             .flex_none()
             .flex()
@@ -14922,6 +15021,13 @@ impl AgentPanel {
                     ),
             );
 
+        let sidebar = div()
+            .h_full()
+            .flex_none()
+            .overflow_hidden()
+            .w(px(sidebar_width))
+            .child(sidebar);
+
         let card = div()
             .id("comet-main-card")
             .debug_selector(|| "omega.comet.main-card".into())
@@ -14951,7 +15057,7 @@ impl AgentPanel {
                     .top_0()
                     .bottom_0()
                     .left_0()
-                    .w(px(if sidebar_open { SIDEBAR_WIDTH } else { 0. }))
+                    .w(px(sidebar_width))
                     .bg(sidebar_background)
                     .border_r_1()
                     .border_color(border),
@@ -14963,7 +15069,7 @@ impl AgentPanel {
                     .flex_1()
                     .min_h_0()
                     .items_stretch()
-                    .when(sidebar_open, |body| body.child(sidebar))
+                    .child(sidebar)
                     .child(
                         div()
                             .flex_1()
@@ -15519,6 +15625,48 @@ impl Render for AgentPanel {
             }
             _ => content,
         }
+    }
+}
+
+#[cfg(test)]
+mod comet_sidebar_motion_tests {
+    use super::*;
+
+    #[test]
+    fn comet_sidebar_tween_matches_resize_timing_and_reduced_motion() {
+        let started = Instant::now();
+        let tween = CometSidebarTween {
+            from: COMET_SIDEBAR_WIDTH,
+            to: 0.,
+            started,
+        };
+
+        let (start, active) = tween.value(started, false);
+        assert_eq!(start, COMET_SIDEBAR_WIDTH);
+        assert!(active);
+
+        let (middle, active) = tween.value(started + Duration::from_millis(100), false);
+        assert!((0.0..COMET_SIDEBAR_WIDTH / 2.).contains(&middle));
+        assert!(active);
+
+        assert_eq!(
+            tween.value(started + COMET_SIDEBAR_RESIZE_DURATION, false),
+            (0., false)
+        );
+        assert_eq!(tween.value(started, true), (0., false));
+    }
+
+    #[test]
+    fn comet_sidebar_ease_out_is_bounded_and_monotonic() {
+        let mut previous = 0.;
+        for step in 0..=1_000 {
+            let value = comet_sidebar_ease_out(step as f32 / 1_000.);
+            assert!((0.0..=1.).contains(&value));
+            assert!(value >= previous);
+            previous = value;
+        }
+        assert_eq!(comet_sidebar_ease_out(0.), 0.);
+        assert_eq!(comet_sidebar_ease_out(1.), 1.);
     }
 }
 
