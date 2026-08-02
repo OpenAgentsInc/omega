@@ -4610,13 +4610,24 @@ impl ConversationView {
         use crate::omega_model_tier::selected;
         use crate::omega_routed_model::face_for_next_turn;
 
-        let fs = self.project.read(cx).fs().clone();
-        crate::omega_composer_executor_menu::ComposerModelPicker {
-            face: face_for_next_turn(None, selected(), cx),
-            enabled: true,
-            on_select: Rc::new(move |tier, _window, cx| {
-                crate::omega_model_tier::select_before_session(tier, fs.clone(), cx);
-            }),
+        if matches!(self.agent_key(), Agent::NativeAgent) {
+            let fs = self.project.read(cx).fs().clone();
+            crate::omega_composer_executor_menu::ComposerModelPicker::omega(
+                face_for_next_turn(None, selected(), cx),
+                true,
+                Rc::new(move |tier, _window, cx| {
+                    crate::omega_model_tier::select_before_session(tier, fs.clone(), cx);
+                }),
+            )
+        } else {
+            crate::omega_composer_executor_menu::ComposerModelPicker {
+                label: "Loading models…".into(),
+                current_model: None,
+                models: Vec::new(),
+                enabled: false,
+                empty_message: "This agent's models appear when its session is ready.".into(),
+                on_select: Rc::new(|_, _, _| {}),
+            }
         }
     }
 

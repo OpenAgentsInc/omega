@@ -45,10 +45,59 @@ use workspace::Workspace;
 use crate::agent_panel::{AgentPanel, ComposerExecutorRow};
 use crate::omega_model_tier::{ModelTier, RoutedFace};
 
+#[derive(Clone)]
+pub struct ComposerModelOption {
+    pub id: acp_thread::AgentModelId,
+    pub name: SharedString,
+    pub description: Option<SharedString>,
+    pub disabled: bool,
+}
+
 pub struct ComposerModelPicker {
-    pub face: RoutedFace,
+    pub label: SharedString,
+    pub current_model: Option<acp_thread::AgentModelId>,
+    pub models: Vec<ComposerModelOption>,
     pub enabled: bool,
-    pub on_select: Rc<dyn Fn(ModelTier, &mut Window, &mut App)>,
+    pub empty_message: SharedString,
+    pub on_select: Rc<dyn Fn(acp_thread::AgentModelId, &mut Window, &mut App)>,
+}
+
+impl ComposerModelPicker {
+    pub fn omega(
+        face: RoutedFace,
+        enabled: bool,
+        on_select: Rc<dyn Fn(ModelTier, &mut Window, &mut App)>,
+    ) -> Self {
+        let current_model = face
+            .tier
+            .map(|tier| acp_thread::AgentModelId::new(tier.agent_model_id()));
+        let models = ModelTier::ALL
+            .iter()
+            .copied()
+            .map(|tier| ComposerModelOption {
+                id: acp_thread::AgentModelId::new(tier.agent_model_id()),
+                name: tier.model_name().into(),
+                description: Some(tier.description().into()),
+                disabled: false,
+            })
+            .collect();
+        Self {
+            label: face.label,
+            current_model,
+            models,
+            enabled,
+            empty_message: "Choose a model for the next turn.".into(),
+            on_select: Rc::new(move |model_id, window, cx| {
+                if let Some(tier) = ModelTier::ALL
+                    .iter()
+                    .copied()
+                    .find(|tier| tier.agent_model_id() == model_id.as_str())
+                {
+                    on_select(tier, window, cx);
+                }
+            }),
+        }
+    }
 }
 
 /// The popover handles behind every composer executor dropdown, one per
@@ -113,8 +162,8 @@ pub const BOUND_MENU_HEADER: &str = "Start a new conversation on";
 pub fn named_direct_agent_label(agent_id: &str) -> Option<&'static str> {
     match agent_id {
         agent_servers::CODEX_ID => Some("Codex"),
-        agent_servers::CLAUDE_AGENT_ID => Some("Claude Code"),
-        "grok-build" => Some("Grok Build"),
+        agent_servers::CLAUDE_AGENT_ID => Some("Claude"),
+        agent_servers::GROK_ID => Some("Grok"),
         _ => None,
     }
 }
@@ -142,11 +191,7 @@ pub fn render_composer_executor_menu(
 ) -> Option<AnyElement> {
     let (handle, panel) = menu_handle(workspace.entity_id(), cx)?;
 
-    let current_model = model_picker.face.tier;
-    let model_label = current_model
-        .map(ModelTier::model_name)
-        .map(SharedString::from)
-        .unwrap_or_else(|| model_picker.face.label.clone());
+    let model_label = model_picker.label.clone();
     let trigger_icon = executor_icon(&current_label);
     let trigger = ButtonLike::new("omega-composer-executor-trigger")
         .style(ButtonStyle::Transparent)
@@ -177,9 +222,6 @@ pub fn render_composer_executor_menu(
                 .child(Label::new(model_label).size(LabelSize::XSmall).truncate()),
         );
 
-    let model_picker_enabled = model_picker.enabled;
-    let on_model_select = model_picker.on_select;
-
     Some(
         PopoverMenu::new("omega-composer-executor")
             // Keyboard-reachable: `agent::ToggleComposerExecutorMenu` opens
@@ -206,9 +248,11 @@ pub fn render_composer_executor_menu(
                         panel,
                         rows,
                         conversation_is_bound,
-                        current_model,
-                        model_picker_enabled,
-                        on_model_select.clone(),
+                        model_picker.current_model.clone(),
+                        model_picker.models.clone(),
+                        model_picker.enabled,
+                        model_picker.empty_message.clone(),
+                        model_picker.on_select.clone(),
                         window,
                         cx,
                     )
@@ -221,8 +265,8 @@ pub fn render_composer_executor_menu(
 fn executor_icon(label: &str) -> IconName {
     match label {
         "Codex" => IconName::AiOpenAi,
-        "Claude Code" => IconName::AiClaude,
-        "Grok Build" => IconName::AiXAi,
+        "Claude" => IconName::AiClaude,
+        "Grok" => IconName::AiXAi,
         _ => IconName::OmegaAgent,
     }
 }
@@ -231,9 +275,11 @@ pub(crate) struct CometComposerModelMenu {
     panel: gpui::Entity<AgentPanel>,
     rows: Vec<ComposerExecutorRow>,
     conversation_is_bound: bool,
-    current_model: Option<ModelTier>,
+    current_model: Option<acp_thread::AgentModelId>,
+    models: Vec<ComposerModelOption>,
     model_picker_enabled: bool,
-    on_model_select: Rc<dyn Fn(ModelTier, &mut Window, &mut App)>,
+    empty_message: SharedString,
+    on_model_select: Rc<dyn Fn(acp_thread::AgentModelId, &mut Window, &mut App)>,
     focus_handle: FocusHandle,
     selected_index: usize,
 }
@@ -243,9 +289,11 @@ impl CometComposerModelMenu {
         panel: gpui::Entity<AgentPanel>,
         rows: Vec<ComposerExecutorRow>,
         conversation_is_bound: bool,
-        current_model: Option<ModelTier>,
+        current_model: Option<acp_thread::AgentModelId>,
+        models: Vec<ComposerModelOption>,
         model_picker_enabled: bool,
-        on_model_select: Rc<dyn Fn(ModelTier, &mut Window, &mut App)>,
+        empty_message: SharedString,
+        on_model_select: Rc<dyn Fn(acp_thread::AgentModelId, &mut Window, &mut App)>,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> Self {
@@ -258,7 +306,9 @@ impl CometComposerModelMenu {
             rows,
             conversation_is_bound,
             current_model,
+            models,
             model_picker_enabled,
+            empty_message,
             on_model_select,
             focus_handle,
             selected_index,
@@ -266,7 +316,7 @@ impl CometComposerModelMenu {
     }
 
     fn item_count(&self) -> usize {
-        self.rows.len() + ModelTier::ALL.len() + 1
+        self.rows.len() + self.models.len() + 1
     }
 
     fn item_is_selectable(&self, index: usize) -> bool {
@@ -274,8 +324,10 @@ impl CometComposerModelMenu {
             return row.is_selectable();
         }
         let model_index = index.saturating_sub(self.rows.len());
-        model_index < ModelTier::ALL.len() && self.model_picker_enabled
-            || model_index == ModelTier::ALL.len()
+        self.models
+            .get(model_index)
+            .is_some_and(|model| self.model_picker_enabled && !model.disabled)
+            || model_index == self.models.len()
     }
 
     fn move_selection(&mut self, delta: isize, cx: &mut Context<Self>) {
@@ -315,8 +367,8 @@ impl CometComposerModelMenu {
             return;
         }
         let model_index = self.selected_index - self.rows.len();
-        if let Some(tier) = ModelTier::ALL.get(model_index).copied() {
-            self.choose_model(tier, window, cx);
+        if let Some(model) = self.models.get(model_index).cloned() {
+            self.choose_model(model, window, cx);
             return;
         }
         window.dispatch_action(Box::new(omega_actions::AcpRegistry), cx);
@@ -344,16 +396,21 @@ impl CometComposerModelMenu {
         cx.emit(DismissEvent);
     }
 
-    fn choose_model(&mut self, tier: ModelTier, window: &mut Window, cx: &mut Context<Self>) {
-        if !self.model_picker_enabled {
+    fn choose_model(
+        &mut self,
+        model: ComposerModelOption,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if !self.model_picker_enabled || model.disabled {
             return;
         }
-        if self.current_model == Some(tier) {
+        if self.current_model.as_ref() == Some(&model.id) {
             cx.emit(DismissEvent);
             return;
         }
-        (self.on_model_select)(tier, window, cx);
-        self.current_model = Some(tier);
+        (self.on_model_select)(model.id.clone(), window, cx);
+        self.current_model = Some(model.id);
         cx.emit(DismissEvent);
     }
 }
@@ -435,13 +492,16 @@ impl Render for CometComposerModelMenu {
                     )
             });
 
-        let models = ModelTier::ALL
-            .iter()
-            .copied()
+        let models = self
+            .models
+            .clone()
+            .into_iter()
             .enumerate()
-            .map(|(index, tier)| {
-                let is_current = self.current_model == Some(tier);
+            .map(|(index, model)| {
+                let is_current = self.current_model.as_ref() == Some(&model.id);
                 let is_focused = self.selected_index == self.rows.len() + index;
+                let selectable = self.model_picker_enabled && !model.disabled;
+                let click_model = model.clone();
                 v_flex()
                     .id(("comet-model-row", index))
                     .min_h(px(48.))
@@ -450,19 +510,19 @@ impl Render for CometComposerModelMenu {
                     .px_2()
                     .rounded(px(8.))
                     .when(is_current || is_focused, |this| this.bg(selected))
-                    .when(!self.model_picker_enabled, |this| this.opacity(0.35))
-                    .when(self.model_picker_enabled, |this| {
+                    .when(!selectable, |this| this.opacity(0.35))
+                    .when(selectable, |this| {
                         this.cursor_pointer()
                             .hover(|style| style.bg(colors.element_hover))
                             .on_click(cx.listener(move |this, _, window, cx| {
-                                this.choose_model(tier, window, cx);
+                                this.choose_model(click_model.clone(), window, cx);
                             }))
                     })
                     .child(
                         h_flex()
                             .w_full()
                             .justify_between()
-                            .child(Label::new(tier.model_name()).size(LabelSize::Small))
+                            .child(Label::new(model.name.clone()).size(LabelSize::Small))
                             .when(is_current, |this| {
                                 this.child(
                                     Icon::new(IconName::Check)
@@ -471,12 +531,14 @@ impl Render for CometComposerModelMenu {
                                 )
                             }),
                     )
-                    .child(
-                        Label::new(tier.description())
-                            .size(LabelSize::XSmall)
-                            .color(Color::Muted)
-                            .truncate(),
-                    )
+                    .when_some(model.description, |this, description| {
+                        this.child(
+                            Label::new(description)
+                                .size(LabelSize::XSmall)
+                                .color(Color::Muted)
+                                .truncate(),
+                        )
+                    })
             });
 
         v_flex()
@@ -536,8 +598,7 @@ impl Render for CometComposerModelMenu {
                                     .cursor_pointer()
                                     .hover(|style| style.bg(colors.element_hover))
                                     .when(
-                                        self.selected_index
-                                            == self.rows.len() + ModelTier::ALL.len(),
+                                        self.selected_index == self.rows.len() + self.models.len(),
                                         |this| this.bg(selected),
                                     )
                                     .on_click(|_, window, cx| {
@@ -581,12 +642,8 @@ impl Render for CometComposerModelMenu {
                                             .color(Color::Muted),
                                     )
                                     .child(
-                                        Label::new(
-                                            self.current_model
-                                                .map(ModelTier::description)
-                                                .unwrap_or("Choose a model for the next turn."),
-                                        )
-                                        .size(LabelSize::Small),
+                                        Label::new(self.empty_message.clone())
+                                            .size(LabelSize::Small),
                                     ),
                             ),
                     ),

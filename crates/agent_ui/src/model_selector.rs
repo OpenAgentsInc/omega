@@ -129,6 +129,14 @@ impl ModelPickerDelegate {
         self.selected_model.as_ref()
     }
 
+    pub fn available_models(&self) -> Vec<AgentModelInfo> {
+        match self.models.as_ref() {
+            Some(AgentModelList::Flat(models)) => models.clone(),
+            Some(AgentModelList::Grouped(groups)) => groups.values().flatten().cloned().collect(),
+            None => Vec::new(),
+        }
+    }
+
     pub fn favorites_count(&self) -> usize {
         self.favorites.len()
     }

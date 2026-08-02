@@ -3699,8 +3699,14 @@ impl AgentPanel {
     const NAMED_DIRECT_AGENT_IDS: &'static [&'static str] = &[
         agent_servers::CODEX_ID,
         agent_servers::CLAUDE_AGENT_ID,
-        "grok-build",
+        agent_servers::GROK_ID,
     ];
+
+    fn agent_is_hidden_from_composer(agent_id: &AgentId, label: &str) -> bool {
+        agent_id.as_ref().to_ascii_lowercase().contains("copilot")
+            || label.to_ascii_lowercase().contains("copilot")
+            || agent_id.as_ref() == "grok-build"
+    }
 
     /// Readiness of a direct-agent draft prepared for `agent_id`, read from
     /// the draft's own preparation state.
@@ -3897,14 +3903,9 @@ impl AgentPanel {
 
         for id in Self::NAMED_DIRECT_AGENT_IDS {
             let agent_id = AgentId::new(*id);
-            let label = agent_server_store
-                .agent_display_name(&agent_id)
-                .unwrap_or_else(|| {
-                    SharedString::from(
-                        crate::omega_composer_executor_menu::named_direct_agent_label(id)
-                            .unwrap_or(id),
-                    )
-                });
+            let label = SharedString::from(
+                crate::omega_composer_executor_menu::named_direct_agent_label(id).unwrap_or(id),
+            );
             rows.extend(direct_row(&agent_id, label));
         }
 
@@ -3915,7 +3916,7 @@ impl AgentPanel {
                     .iter()
                     .any(|named| agent_id.as_ref() == *named)
             })
-            .map(|agent_id| {
+            .filter_map(|agent_id| {
                 let display_name = agent_server_store
                     .agent_display_name(agent_id)
                     .or_else(|| {
@@ -3925,7 +3926,8 @@ impl AgentPanel {
                             .map(|agent| agent.name().clone())
                     })
                     .unwrap_or_else(|| agent_id.0.clone());
-                (agent_id.clone(), display_name)
+                (!Self::agent_is_hidden_from_composer(agent_id, &display_name))
+                    .then(|| (agent_id.clone(), display_name))
             })
             .collect();
         other_installed.sort_unstable_by_key(|(_, name)| name.to_lowercase());
@@ -3951,6 +3953,12 @@ impl AgentPanel {
         .into_iter()
         .flatten()
         {
+            let display_name = agent_server_store
+                .agent_display_name(&uncovered)
+                .unwrap_or_else(|| uncovered.0.clone());
+            if Self::agent_is_hidden_from_composer(&uncovered, &display_name) {
+                continue;
+            }
             let covered = rows.iter().any(|row| {
                 matches!(
                     &row.target,
@@ -3959,22 +3967,9 @@ impl AgentPanel {
                 )
             });
             if !covered {
-                let display_name = agent_server_store
-                    .agent_display_name(&uncovered)
-                    .unwrap_or_else(|| uncovered.0.clone());
                 rows.extend(direct_row(&uncovered, display_name));
             }
         }
-
-        rows.push(ComposerExecutorRow {
-            target: ConversationTarget::Sarah,
-            label: "Sarah (voice)".into(),
-            readiness: ModeReadiness::SetupRequired {
-                reason: "Review Sarah's exact admission terms before microphone access".into(),
-                action: ModeSetupAction::RevealPreparedConversation,
-            },
-            is_current: self.showing_sarah_admission,
-        });
 
         rows
     }
@@ -19603,6 +19598,36 @@ mod tests {
         })
     }
 
+    #[test]
+    fn composer_catalog_hides_retired_agents_and_keeps_canonical_names() {
+        assert!(AgentPanel::agent_is_hidden_from_composer(
+            &AgentId::new("github-copilot"),
+            "GitHub Copilot",
+        ));
+        assert!(AgentPanel::agent_is_hidden_from_composer(
+            &AgentId::new("grok-build"),
+            "Grok Build",
+        ));
+        assert_eq!(
+            AgentPanel::NAMED_DIRECT_AGENT_IDS,
+            [
+                agent_servers::CODEX_ID,
+                agent_servers::CLAUDE_AGENT_ID,
+                agent_servers::GROK_ID,
+            ]
+        );
+        assert_eq!(
+            crate::omega_composer_executor_menu::named_direct_agent_label(
+                agent_servers::CLAUDE_AGENT_ID,
+            ),
+            Some("Claude"),
+        );
+        assert_eq!(
+            crate::omega_composer_executor_menu::named_direct_agent_label(agent_servers::GROK_ID),
+            Some("Grok"),
+        );
+    }
+
     #[gpui::test]
     async fn composer_front_door_claims_prepared_omega_and_offers_the_dropdown(
         cx: &mut TestAppContext,
@@ -19625,10 +19650,9 @@ mod tests {
                 Some(ConversationTarget::OmegaAgent),
                 "Omega is the first row and the default executor"
             );
-            assert_eq!(
-                rows.last().map(|row| row.label.clone()),
-                Some(SharedString::from("Sarah (voice)")),
-                "Sarah stays visible at the end of the dropdown"
+            assert!(
+                rows.iter()
+                    .all(|row| row.target != ConversationTarget::Sarah)
             );
             // The named direct agents are permanent rows, in the issue's
             // order, and honest about not being installed here.
@@ -19638,7 +19662,7 @@ mod tests {
                 .take(3)
                 .map(|row| row.label.to_string())
                 .collect();
-            assert_eq!(named, ["Codex", "Claude Code", "Grok Build"]);
+            assert_eq!(named, ["Codex", "Claude", "Grok"]);
             for row in rows.iter().skip(1).take(3) {
                 assert!(
                     !row.is_selectable(),
