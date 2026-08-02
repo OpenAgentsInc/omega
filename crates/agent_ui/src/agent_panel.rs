@@ -235,6 +235,10 @@ fn comet_tab_shortcut_hint(index: usize, color: Hsla) -> AnyElement {
         .into_any_element()
 }
 
+fn comet_sidebar_row_padding(selected: bool) -> (f32, f32) {
+    if selected { (7., 6.) } else { (8., 7.) }
+}
+
 fn comet_executor_icon(
     executor: Option<crate::omega_executor_selector::SelectableExecutor>,
 ) -> IconName {
@@ -16100,6 +16104,7 @@ impl AgentPanel {
                 let age = row.age.clone();
                 let icon = comet_thread_icon(&row);
                 let is_active = Some(row.thread_id) == active_thread_id;
+                let (padding_x, padding_y) = comet_sidebar_row_padding(is_active);
                 div()
                     .id(("comet-sidebar-session", index))
                     .when(is_active, |row| {
@@ -16116,8 +16121,8 @@ impl AgentPanel {
                             }))
                     })
                     .w_full()
-                    .px(px(8.))
-                    .py(px(7.))
+                    .px(px(padding_x))
+                    .py(px(padding_y))
                     .rounded(px(8.))
                     .child(
                         h_flex()
@@ -16139,12 +16144,13 @@ impl AgentPanel {
                     )
             });
 
+        let (active_sidebar_padding_x, active_sidebar_padding_y) = comet_sidebar_row_padding(true);
         let active_draft_sidebar_row = h_flex()
             .id("comet-sidebar-active-session")
             .debug_selector(|| "omega.comet.sidebar-session.active".into())
             .w_full()
-            .px(px(8.))
-            .py(px(7.))
+            .px(px(active_sidebar_padding_x))
+            .py(px(active_sidebar_padding_y))
             .gap(px(8.))
             .rounded(px(8.))
             .bg(selected_background)
@@ -16193,12 +16199,13 @@ impl AgentPanel {
                         let accessible_label = candidate.accessible_label();
                         let project_name = candidate.project_name.clone();
                         let branch = candidate.branch.label();
+                        let (padding_x, padding_y) = comet_sidebar_row_padding(selected);
                         h_flex()
                             .id(("comet-project", index))
                             .debug_selector(move || debug_selector)
                             .w_full()
-                            .px(px(8.))
-                            .py(px(7.))
+                            .px(px(padding_x))
+                            .py(px(padding_y))
                             .gap(px(8.))
                             .rounded(px(8.))
                             .cursor_pointer()
@@ -16236,6 +16243,8 @@ impl AgentPanel {
             })
             .unwrap_or_default();
         let has_projects = !project_rows.is_empty();
+        let (forensics_padding_x, forensics_padding_y) =
+            comet_sidebar_row_padding(comet_forensics_selected);
 
         let sidebar = div()
             .id("comet-sidebar")
@@ -16294,8 +16303,8 @@ impl AgentPanel {
                     .debug_selector(|| "omega.comet.sidebar.forensics".into())
                     .w_full()
                     .mt(px(10.))
-                    .px(px(8.))
-                    .py(px(7.))
+                    .px(px(forensics_padding_x))
+                    .py(px(forensics_padding_y))
                     .gap(px(8.))
                     .rounded(px(8.))
                     .cursor_pointer()
@@ -17059,6 +17068,16 @@ mod comet_sidebar_motion_tests {
             COMET_TAB_SHORTCUT_LABELS,
             ["1", "2", "3", "4", "5", "6", "7", "8", "9", "0"]
         );
+    }
+
+    #[test]
+    fn comet_sidebar_selection_border_consumes_padding_without_changing_row_size() {
+        let (resting_x, resting_y) = comet_sidebar_row_padding(false);
+        let (selected_x, selected_y) = comet_sidebar_row_padding(true);
+        let selected_border = 1.;
+
+        assert_eq!(resting_x * 2., selected_x * 2. + selected_border * 2.);
+        assert_eq!(resting_y * 2., selected_y * 2. + selected_border * 2.);
     }
 
     #[test]
