@@ -2204,7 +2204,8 @@ pub struct AgentPanel {
     terminals: HashMap<TerminalId, AgentTerminal>,
     pending_terminal_spawn: Option<TerminalId>,
     new_thread_menu_handle: PopoverMenuHandle<ContextMenu>,
-    composer_executor_menu_handle: PopoverMenuHandle<ContextMenu>,
+    composer_executor_menu_handle:
+        PopoverMenuHandle<crate::omega_composer_executor_menu::CometComposerModelMenu>,
     agent_panel_menu_handle: PopoverMenuHandle<ContextMenu>,
     thread_repository_menu_handle: PopoverMenuHandle<ContextMenu>,
     thread_worktree_menu_handle: PopoverMenuHandle<ContextMenu>,
@@ -7133,7 +7134,9 @@ impl AgentPanel {
     /// serves the loading composer and the zero-base bar alike. The
     /// `agent::ToggleComposerExecutorMenu` action toggles it, which is what
     /// makes the dropdown keyboard-reachable (`OMEGA-DELTA-0184`, omega#165).
-    pub(crate) fn composer_executor_menu_handle(&self) -> PopoverMenuHandle<ContextMenu> {
+    pub(crate) fn composer_executor_menu_handle(
+        &self,
+    ) -> PopoverMenuHandle<crate::omega_composer_executor_menu::CometComposerModelMenu> {
         self.composer_executor_menu_handle.clone()
     }
 

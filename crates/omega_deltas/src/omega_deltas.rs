@@ -27690,4 +27690,43 @@ mod tests {
             }
         }
     }
+
+    /// OMEGA-DELTA-0229. The Comet composer uses its dedicated harness/model
+    /// picker geometry instead of collapsing model selection into a generic
+    /// context menu.
+    #[test]
+    fn comet_composer_uses_the_comet_model_picker() {
+        let menu = without_comments(&read_repository_file(
+            "crates/agent_ui/src/omega_composer_executor_menu.rs",
+        ));
+        for required in [
+            "struct CometComposerModelMenu",
+            "Label::new(model_label)",
+            "w(px(460.))",
+            "h(px(420.))",
+            "w(px(148.))",
+            "Label::new(\"Agents\")",
+            "Label::new(\"Models\")",
+            "ModelTier::ALL",
+            "tier.model_name()",
+            "tier.description()",
+            "IconName::Check",
+            "on_action(cx.listener(Self::select_next))",
+            "on_action(cx.listener(Self::select_previous))",
+            "on_action(cx.listener(Self::confirm))",
+            "on_action(cx.listener(Self::cancel))",
+            "IconName::Return",
+            "Add More Agents…",
+        ] {
+            assert!(
+                menu.contains(required),
+                "OMEGA-DELTA-0229: Comet model picker lost `{required}`"
+            );
+        }
+        assert!(
+            !menu.contains("Label::new(current_label)"),
+            "OMEGA-DELTA-0229: the composer trigger regressed to an executor label instead of \
+             Comet's brand-mark plus model face"
+        );
+    }
 }
