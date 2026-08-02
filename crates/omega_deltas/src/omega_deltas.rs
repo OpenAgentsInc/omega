@@ -27546,6 +27546,7 @@ mod tests {
             "comet-nav-forward",
             "navigate_comet_forward",
             "comet_history_thread_available",
+            "comet_navigation_history.push(active_thread_id)",
         ] {
             assert!(
                 shell.contains(required),

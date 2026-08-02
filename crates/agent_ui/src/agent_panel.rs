@@ -14473,6 +14473,9 @@ impl AgentPanel {
 
         let sidebar_open = self.sidebar.open;
         let active_thread_id = self.active_thread_id(cx);
+        if let Some(active_thread_id) = active_thread_id {
+            self.comet_navigation_history.push(active_thread_id);
+        }
         let active_title = self
             .active_conversation_view()
             .map(|view| view.read(cx).title(cx))
