@@ -106,7 +106,9 @@ use notifications::status_toast::StatusToast;
 use omega_front_door::{
     ConversationTarget, DirectAgentId, ModeReadiness, ModeSetupAction, PreparationReceipt,
 };
-use project::{Project, ProjectPath, Worktree, WorktreeId, git_store::RepositoryId};
+use project::{
+    Project, ProjectGroupKey, ProjectPath, Worktree, WorktreeId, git_store::RepositoryId,
+};
 use project_panel::ProjectPanel;
 use settings::TerminalDockPosition;
 use settings::{NotifyWhenAgentWaiting, Settings, update_settings_file};
@@ -296,6 +298,29 @@ fn stable_comet_session_rows(
         }
     });
     rows
+}
+
+fn comet_project_workspaces(
+    multi_workspace: &MultiWorkspace,
+    cx: &App,
+) -> Vec<(Entity<Workspace>, ProjectGroupKey, SharedString)> {
+    let path_detail_map = std::collections::HashMap::new();
+    multi_workspace
+        .project_group_keys()
+        .into_iter()
+        .filter(|key| !key.path_list().is_empty())
+        .filter_map(|key| {
+            let target = multi_workspace
+                .last_active_workspace_for_group(&key, cx)
+                .or_else(|| {
+                    multi_workspace
+                        .workspaces_for_project_group(&key, cx)
+                        .and_then(|workspaces| workspaces.into_iter().next())
+                })?;
+            let name = key.display_name(&path_detail_map);
+            Some((target, key, name))
+        })
+        .collect()
 }
 
 fn reconcile_new_comet_session_rows(
@@ -6247,6 +6272,9 @@ impl AgentPanel {
         let Some(store) = ThreadMetadataStore::try_global(cx) else {
             return Vec::new();
         };
+        let project_key = self.project.read(cx).project_group_key(cx);
+        let project_paths = project_key.path_list().clone();
+        let project_host = project_key.host();
         let agent_server_store = self.project.read(cx).agent_server_store().clone();
         let registered: Vec<AgentId> = agent_server_store
             .read(cx)
@@ -6254,7 +6282,10 @@ impl AgentPanel {
             .cloned()
             .collect();
         omega_threads_sidebar::rows(
-            store.read(cx).entries(),
+            store.read(cx).entries().filter(|thread| {
+                thread.main_worktree_paths() == &project_paths
+                    && thread.matches_remote_connection(project_host.as_ref())
+            }),
             Utc::now(),
             &omega_executor_selector::unavailable_here(),
             &registered,
@@ -16310,78 +16341,82 @@ impl AgentPanel {
             )
             .child(div().size(px(6.)).rounded_full().bg(text_accent));
 
-        let project_rows = self
+        let active_project_key = self.project.read(cx).project_group_key(cx);
+        let active_branch = self
             .workbench_shell
             .identity()
-            .cloned()
-            .zip(self.workbench_shell.projection().visible_projection())
-            .filter(|(identity, visible)| visible.binding.as_ref() == identity.binding())
-            .map(|(identity, visible)| {
-                let selected_worktree_id = identity
-                    .selected
-                    .as_ref()
-                    .map(|selected| selected.binding.worktree_id.clone());
-                let mut seen_worktrees = HashSet::default();
-                identity
-                    .candidates
+            .and_then(|identity| identity.selected.as_ref())
+            .map(|selected| selected.branch.label());
+        let source_workspace = self.workspace.clone();
+        let project_rows = window
+            .root::<MultiWorkspace>()
+            .flatten()
+            .map(|multi_workspace| {
+                let project_rows = multi_workspace.read(cx);
+                comet_project_workspaces(&project_rows, cx)
                     .into_iter()
-                    .filter(|candidate| {
-                        seen_worktrees.insert(candidate.binding.worktree_id.clone())
-                    })
-                    .enumerate()
-                    .map(|(index, candidate)| {
-                        let binding = candidate.binding.clone();
-                        let debug_selector = format!("omega.comet.project.{}", binding.worktree_id);
-                        let selected = selected_worktree_id.as_ref() == Some(&binding.worktree_id);
-                        let source_thread_id = visible.thread_id.clone();
-                        let source_binding = visible.binding.clone();
-                        let source_generation = visible.generation;
-                        let accessible_label = candidate.accessible_label();
-                        let project_name = candidate.project_name.clone();
-                        let branch = candidate.branch.label();
-                        let (padding_x, padding_y) = comet_sidebar_row_padding(selected);
-                        h_flex()
-                            .id(("comet-project", index))
-                            .debug_selector(move || debug_selector)
-                            .w_full()
-                            .px(px(padding_x))
-                            .py(px(padding_y))
-                            .gap(px(8.))
-                            .rounded(px(8.))
-                            .cursor_pointer()
-                            .aria_label(accessible_label)
-                            .when(selected, |row| {
-                                row.bg(selected_background)
-                                    .border_1()
-                                    .border_color(colors.border_selected)
-                            })
-                            .when(!selected, |row| {
-                                row.hover(move |style| style.bg(hover_background))
-                            })
-                            .on_click(cx.listener(move |this, _, _, cx| {
-                                this.select_thread_identity(
-                                    &source_thread_id,
-                                    source_binding.as_ref(),
-                                    source_generation,
-                                    binding.clone(),
-                                    cx,
-                                );
-                            }))
-                            .child(Icon::new(IconName::Folder).size(IconSize::Small))
-                            .child(div().min_w_0().flex_1().truncate().child(project_name))
-                            .child(
-                                div()
-                                    .max_w(px(72.))
-                                    .truncate()
-                                    .text_size(px(10.))
-                                    .text_color(text_placeholder)
-                                    .child(branch),
-                            )
-                            .into_any_element()
+                    .map(|(target, key, name)| {
+                        let selected = key == active_project_key;
+                        (target, selected, name)
                     })
                     .collect::<Vec<_>>()
             })
-            .unwrap_or_default();
+            .unwrap_or_default()
+            .into_iter()
+            .enumerate()
+            .map(|(index, (target, selected, project_name))| {
+                let multi_workspace = window.root::<MultiWorkspace>().flatten();
+                let debug_selector = format!("omega.comet.project.{index}");
+                let accessible_label = format!("Open project {project_name}");
+                let branch = selected.then(|| active_branch.clone()).flatten();
+                let source_workspace = source_workspace.clone();
+                let (padding_x, padding_y) = comet_sidebar_row_padding(selected);
+                h_flex()
+                    .id(("comet-project", index))
+                    .debug_selector(move || debug_selector)
+                    .w_full()
+                    .px(px(padding_x))
+                    .py(px(padding_y))
+                    .gap(px(8.))
+                    .rounded(px(8.))
+                    .cursor_pointer()
+                    .aria_label(accessible_label)
+                    .when(selected, |row| {
+                        row.bg(selected_background)
+                            .border_1()
+                            .border_color(colors.border_selected)
+                    })
+                    .when(!selected, |row| {
+                        row.hover(move |style| style.bg(hover_background))
+                    })
+                    .on_click(move |_, window, cx| {
+                        let Some(multi_workspace) = multi_workspace.as_ref() else {
+                            return;
+                        };
+                        multi_workspace.update(cx, |multi_workspace, cx| {
+                            multi_workspace.activate(
+                                target.clone(),
+                                Some(source_workspace.clone()),
+                                window,
+                                cx,
+                            );
+                        });
+                    })
+                    .child(Icon::new(IconName::Folder).size(IconSize::Small))
+                    .child(div().min_w_0().flex_1().truncate().child(project_name))
+                    .when_some(branch, |row, branch| {
+                        row.child(
+                            div()
+                                .max_w(px(72.))
+                                .truncate()
+                                .text_size(px(10.))
+                                .text_color(text_placeholder)
+                                .child(branch),
+                        )
+                    })
+                    .into_any_element()
+            })
+            .collect::<Vec<_>>();
         let has_projects = !project_rows.is_empty();
         let (forensics_padding_x, forensics_padding_y) =
             comet_sidebar_row_padding(comet_forensics_selected);
@@ -18093,6 +18128,81 @@ mod tests {
         assert!(!history.can_back(|route| route == CometRoute::Thread(current)));
         assert_eq!(history.back(), Some(CometRoute::Thread(unavailable)));
         assert_eq!(history.back(), Some(CometRoute::Thread(first)));
+    }
+
+    #[gpui::test]
+    async fn comet_project_list_keeps_each_opened_project(cx: &mut TestAppContext) {
+        init_test(cx);
+        let fs = FakeFs::new(cx.executor());
+        fs.insert_tree("/project-a", json!({ "file.txt": "" }))
+            .await;
+        fs.insert_tree("/project-b", json!({ "file.txt": "" }))
+            .await;
+        let project_a = Project::test(fs.clone(), [Path::new("/project-a")], cx).await;
+        let project_b = Project::test(fs, [Path::new("/project-b")], cx).await;
+        let multi_workspace =
+            cx.add_window(|window, cx| MultiWorkspace::test_new(project_a, window, cx));
+        multi_workspace
+            .update(cx, |multi_workspace, window, cx| {
+                multi_workspace.test_add_workspace(project_b, window, cx);
+            })
+            .expect("second project should open in the current window");
+
+        let mut names = multi_workspace
+            .read_with(cx, |multi_workspace, cx| {
+                comet_project_workspaces(multi_workspace, cx)
+                    .into_iter()
+                    .map(|(_, _, name)| name.to_string())
+                    .collect::<Vec<_>>()
+            })
+            .expect("project rows should be readable");
+        names.sort();
+        assert_eq!(names, ["project-a", "project-b"]);
+    }
+
+    #[gpui::test]
+    async fn comet_sessions_are_scoped_to_the_selected_project(cx: &mut TestAppContext) {
+        use crate::thread_metadata_store::{ConversationOwnerVersion, ThreadMetadata};
+
+        let (panel, mut cx) = setup_panel(cx).await;
+        let now = Utc::now();
+        let metadata = |title: &'static str, path: &'static str| ThreadMetadata {
+            thread_id: ThreadId::new(),
+            session_id: Some(acp::SessionId::new(title)),
+            agent_id: agent::OMEGA_AGENT_ID.clone(),
+            conversation_owner_version: ConversationOwnerVersion::V1,
+            title: Some(title.into()),
+            title_override: None,
+            updated_at: now,
+            created_at: Some(now),
+            interacted_at: None,
+            worktree_paths: WorktreePaths::from_folder_paths(&PathList::new(&[PathBuf::from(
+                path,
+            )])),
+            remote_connection: None,
+            archived: false,
+            lifecycle: crate::omega_agent_supervision::SupervisedThreadLifecycle::Completed,
+        };
+        cx.update(|_, cx| {
+            ThreadMetadataStore::global(cx).update(cx, |store, cx| {
+                store.save_all(
+                    vec![
+                        metadata("Current project", "/project"),
+                        metadata("Different project", "/other"),
+                    ],
+                    cx,
+                );
+            });
+        });
+
+        let titles = panel.read_with(&cx, |panel, cx| {
+            panel
+                .comet_sidebar_session_rows(cx)
+                .into_iter()
+                .map(|row| row.title.to_string())
+                .collect::<Vec<_>>()
+        });
+        assert_eq!(titles, ["Current project"]);
     }
 
     /// The settings-footer version is short and channel-honest: stable shows
