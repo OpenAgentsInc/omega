@@ -27519,4 +27519,38 @@ mod tests {
             );
         }
     }
+
+    /// OMEGA-DELTA-0225. Comet titlebar history is real browser-style session
+    /// navigation, not permanently disabled decorative controls.
+    #[test]
+    fn comet_titlebar_back_and_forward_walk_session_history() {
+        let panel = without_comments(&read_repository_file("crates/agent_ui/src/agent_panel.rs"));
+        let history = outside_the_tests(&panel);
+        for required in [
+            "self.entries.truncate(self.index + 1)",
+            "fn can_back",
+            "fn can_forward",
+            "fn back",
+            "fn forward",
+        ] {
+            assert!(
+                history.contains(required),
+                "OMEGA-DELTA-0225: Comet navigation lost browser-history behavior `{required}`"
+            );
+        }
+
+        let shell = body_of(&panel, "render_comet_shell");
+        for required in [
+            "comet-nav-back",
+            "navigate_comet_back",
+            "comet-nav-forward",
+            "navigate_comet_forward",
+            "comet_history_thread_available",
+        ] {
+            assert!(
+                shell.contains(required),
+                "OMEGA-DELTA-0225: Comet titlebar control lost `{required}`"
+            );
+        }
+    }
 }

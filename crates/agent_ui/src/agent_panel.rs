@@ -1415,6 +1415,60 @@ enum BaseView {
     },
 }
 
+#[derive(Debug, Default)]
+struct CometNavigationHistory {
+    entries: Vec<ThreadId>,
+    index: usize,
+}
+
+impl CometNavigationHistory {
+    fn push(&mut self, thread_id: ThreadId) {
+        if self.entries.get(self.index) == Some(&thread_id) {
+            return;
+        }
+        if self.entries.is_empty() {
+            self.entries.push(thread_id);
+            self.index = 0;
+            return;
+        }
+        self.entries.truncate(self.index + 1);
+        self.entries.push(thread_id);
+        self.index += 1;
+    }
+
+    fn can_back(&self, mut is_available: impl FnMut(ThreadId) -> bool) -> bool {
+        self.entries
+            .get(..self.index)
+            .is_some_and(|entries| entries.iter().rev().copied().any(&mut is_available))
+    }
+
+    fn can_forward(&self, mut is_available: impl FnMut(ThreadId) -> bool) -> bool {
+        self.entries
+            .get(self.index.saturating_add(1)..)
+            .is_some_and(|entries| entries.iter().copied().any(&mut is_available))
+    }
+
+    fn back(&mut self) -> Option<ThreadId> {
+        if self.index == 0 {
+            return None;
+        }
+        self.index -= 1;
+        self.entries.get(self.index).copied()
+    }
+
+    fn forward(&mut self) -> Option<ThreadId> {
+        if self.index.saturating_add(1) >= self.entries.len() {
+            return None;
+        }
+        self.index += 1;
+        self.entries.get(self.index).copied()
+    }
+
+    fn restore_index(&mut self, index: usize) {
+        self.index = index.min(self.entries.len().saturating_sub(1));
+    }
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum ToolbarMode {
     Terminal,
@@ -2154,6 +2208,7 @@ pub struct AgentPanel {
     workbench_shell_enabled: bool,
     comet_titlebar_dragging: bool,
     comet_closed_session_tabs: HashSet<ThreadId>,
+    comet_navigation_history: CometNavigationHistory,
     /// Thread keys whose durable disk selection was already adopted (or
     /// reset), so a render-driven sync does not re-read disk per frame.
     workbench_selection_restore_attempted: HashSet<String>,
@@ -2775,6 +2830,7 @@ impl AgentPanel {
             workbench_shell_enabled: omega_zero_base::is_active(),
             comet_titlebar_dragging: false,
             comet_closed_session_tabs: HashSet::default(),
+            comet_navigation_history: CometNavigationHistory::default(),
             workbench_selection_restore_attempted: HashSet::default(),
             workbench_sync_failure_log: DistinctFailureLog::default(),
             workbench_files_panel,
@@ -7751,8 +7807,22 @@ impl AgentPanel {
         }
         self.public_channels.clear_selection();
 
+        let comet_thread_id = if omega_zero_base::is_comet_mode() {
+            match &new_view {
+                BaseView::AgentThread { conversation_view } => {
+                    Some(conversation_view.read(cx).thread_id)
+                }
+                BaseView::Uninitialized | BaseView::Terminal { .. } => None,
+            }
+        } else {
+            None
+        };
         let old_view = std::mem::replace(&mut self.base_view, new_view);
         self.retain_running_thread(old_view, cx);
+
+        if let Some(thread_id) = comet_thread_id {
+            self.comet_navigation_history.push(thread_id);
+        }
 
         if let BaseView::AgentThread { conversation_view } = &self.base_view {
             let conversation_view = conversation_view.read(cx);
@@ -14234,6 +14304,89 @@ impl AgentPanel {
 }
 
 impl AgentPanel {
+    fn comet_history_thread_available(&self, thread_id: ThreadId, cx: &App) -> bool {
+        self.active_thread_id(cx) == Some(thread_id)
+            || self
+                .draft_thread
+                .as_ref()
+                .is_some_and(|draft| draft.read(cx).thread_id == thread_id)
+            || self.retained_threads.contains_key(&thread_id)
+            || ThreadMetadataStore::try_global(cx).is_some_and(|store| {
+                store
+                    .read(cx)
+                    .entry(thread_id)
+                    .is_some_and(|metadata| metadata.restorable_agent().is_ok())
+            })
+    }
+
+    fn open_comet_history_thread(
+        &mut self,
+        thread_id: ThreadId,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> bool {
+        if !self.comet_history_thread_available(thread_id, cx) {
+            return false;
+        }
+        if self.active_thread_id(cx) == Some(thread_id) {
+            return true;
+        }
+        self.comet_closed_session_tabs.remove(&thread_id);
+        if self
+            .draft_thread
+            .as_ref()
+            .is_some_and(|draft| draft.read(cx).thread_id == thread_id)
+            || self.retained_threads.contains_key(&thread_id)
+        {
+            self.activate_retained_thread(thread_id, true, window, cx);
+            return self.active_thread_id(cx) == Some(thread_id);
+        }
+
+        let metadata = ThreadMetadataStore::try_global(cx)
+            .and_then(|store| store.read(cx).entry(thread_id).cloned());
+        let Some(metadata) = metadata else {
+            return false;
+        };
+        let Ok(agent) = metadata.restorable_agent() else {
+            return false;
+        };
+        self.load_agent_thread(
+            agent,
+            thread_id,
+            Some(metadata.folder_paths().clone()),
+            metadata.title(),
+            true,
+            AgentThreadSource::AgentPanel,
+            window,
+            cx,
+        );
+        self.active_thread_id(cx) == Some(thread_id)
+    }
+
+    fn navigate_comet_back(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let starting_index = self.comet_navigation_history.index;
+        while let Some(thread_id) = self.comet_navigation_history.back() {
+            if self.open_comet_history_thread(thread_id, window, cx) {
+                cx.notify();
+                return;
+            }
+        }
+        self.comet_navigation_history.restore_index(starting_index);
+        cx.notify();
+    }
+
+    fn navigate_comet_forward(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let starting_index = self.comet_navigation_history.index;
+        while let Some(thread_id) = self.comet_navigation_history.forward() {
+            if self.open_comet_history_thread(thread_id, window, cx) {
+                cx.notify();
+                return;
+            }
+        }
+        self.comet_navigation_history.restore_index(starting_index);
+        cx.notify();
+    }
+
     fn close_active_comet_session_tab(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let active_thread_id = self.active_thread_id(cx);
         let fallback = self.threads_sidebar_rows(cx).into_iter().find(|row| {
@@ -14257,6 +14410,7 @@ impl AgentPanel {
     fn render_comet_control(
         &self,
         id: &'static str,
+        label: &'static str,
         icon: IconName,
         disabled: bool,
         text_color: Hsla,
@@ -14265,6 +14419,10 @@ impl AgentPanel {
     ) -> AnyElement {
         div()
             .id(id)
+            .role(gpui::Role::Button)
+            .aria_label(label)
+            .aria_disabled(disabled)
+            .tooltip(Tooltip::text(label))
             .size(px(24.))
             .flex_none()
             .flex()
@@ -14413,6 +14571,7 @@ impl AgentPanel {
 
         let toggle = self.render_comet_control(
             "comet-toggle-sidebar",
+            "Toggle sidebar",
             if sidebar_open {
                 IconName::ThreadsSidebarLeftOpen
             } else {
@@ -14425,22 +14584,29 @@ impl AgentPanel {
         );
         let back = self.render_comet_control(
             "comet-nav-back",
+            "Back",
             IconName::ArrowLeft,
-            true,
+            !self
+                .comet_navigation_history
+                .can_back(|thread_id| self.comet_history_thread_available(thread_id, cx)),
             icon_muted,
             hover_background,
-            |_, _, _| {},
+            cx.listener(|this, _, window, cx| this.navigate_comet_back(window, cx)),
         );
         let forward = self.render_comet_control(
             "comet-nav-forward",
+            "Forward",
             IconName::ArrowRight,
-            true,
+            !self
+                .comet_navigation_history
+                .can_forward(|thread_id| self.comet_history_thread_available(thread_id, cx)),
             icon_muted,
             hover_background,
-            |_, _, _| {},
+            cx.listener(|this, _, window, cx| this.navigate_comet_forward(window, cx)),
         );
         let new_session = self.render_comet_control(
             "comet-new-session",
+            "New session",
             IconName::Plus,
             false,
             icon_muted,
@@ -14449,6 +14615,7 @@ impl AgentPanel {
         );
         let open_project = self.render_comet_control(
             "comet-open-project",
+            "Open project",
             IconName::Plus,
             false,
             icon_muted,
@@ -16117,6 +16284,48 @@ mod tests {
     use std::path::{Path, PathBuf};
     use std::sync::Arc;
     use std::time::Instant;
+
+    #[test]
+    fn comet_navigation_history_walks_and_branches_like_a_browser() {
+        let first = ThreadId::new();
+        let second = ThreadId::new();
+        let third = ThreadId::new();
+        let branch = ThreadId::new();
+        let mut history = CometNavigationHistory::default();
+
+        history.push(first);
+        history.push(second);
+        history.push(third);
+        assert!(history.can_back(|_| true));
+        assert!(!history.can_forward(|_| true));
+        assert_eq!(history.back(), Some(second));
+        assert_eq!(history.back(), Some(first));
+        assert_eq!(history.back(), None);
+        assert!(history.can_forward(|_| true));
+        assert_eq!(history.forward(), Some(second));
+
+        history.push(branch);
+        assert_eq!(history.back(), Some(second));
+        assert_eq!(history.forward(), Some(branch));
+        assert_eq!(history.forward(), None);
+    }
+
+    #[test]
+    fn comet_navigation_history_ignores_unavailable_targets() {
+        let first = ThreadId::new();
+        let unavailable = ThreadId::new();
+        let current = ThreadId::new();
+        let mut history = CometNavigationHistory::default();
+
+        history.push(first);
+        history.push(unavailable);
+        history.push(current);
+
+        assert!(history.can_back(|thread_id| thread_id == first));
+        assert!(!history.can_back(|thread_id| thread_id == current));
+        assert_eq!(history.back(), Some(unavailable));
+        assert_eq!(history.back(), Some(first));
+    }
 
     /// The settings-footer version is short and channel-honest: stable shows
     /// only the version, a stamped build shows `v0.2.0 b28`, and an unstamped
