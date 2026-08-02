@@ -90,7 +90,7 @@ echo "Compiling zed binaries"
 # OMEGA-DELTA-0203. `scv` is a first-party agent Omega offers to delegate to,
 # so it is built and packaged with the application rather than expected on a
 # shell PATH that a packaged application does not have.
-cargo build ${build_flag} --package zed --package cli --package scv --target $target_triple
+cargo build ${build_flag} --package omega --package cli --package scv --target $target_triple
 # Build remote_server in separate invocation to prevent feature unification from other crates
 # from influencing dynamic libraries required by it.
 cargo build ${build_flag} --package remote_server --target $target_triple
