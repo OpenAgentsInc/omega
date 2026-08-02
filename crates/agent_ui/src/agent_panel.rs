@@ -437,6 +437,59 @@ async fn materialize_entropy_campaign_project(
     Ok(root)
 }
 
+async fn materialize_entropy_repository_checkout(
+    repository_root: &Path,
+    revision: &str,
+) -> Result<crate::forensics_workbench::EntropyRepositorySource> {
+    let guard = tempfile::Builder::new()
+        .prefix("omega-entropy-repository-")
+        .tempdir()
+        .context("cannot create the entropy source snapshot")?;
+    let checkout_root = guard.path().join("source");
+    let clone = smol::process::Command::new("git")
+        .args([
+            "clone",
+            "--quiet",
+            "--no-checkout",
+            "--no-hardlinks",
+            "--local",
+        ])
+        .arg(repository_root)
+        .arg(&checkout_root)
+        .output()
+        .await
+        .context("cannot clone the selected repository")?;
+    anyhow::ensure!(
+        clone.status.success(),
+        "cannot snapshot the selected repository: {}",
+        String::from_utf8_lossy(&clone.stderr).trim()
+    );
+    let checkout = smol::process::Command::new("git")
+        .arg("-C")
+        .arg(&checkout_root)
+        .args(["checkout", "--quiet", "--detach", revision])
+        .output()
+        .await
+        .context("cannot check out the pinned entropy revision")?;
+    anyhow::ensure!(
+        checkout.status.success(),
+        "cannot check out the pinned entropy revision: {}",
+        String::from_utf8_lossy(&checkout.stderr).trim()
+    );
+    let observed = smol::process::Command::new("git")
+        .arg("-C")
+        .arg(&checkout_root)
+        .args(["rev-parse", "HEAD"])
+        .output()
+        .await
+        .context("cannot verify the entropy source snapshot")?;
+    anyhow::ensure!(
+        observed.status.success() && String::from_utf8_lossy(&observed.stdout).trim() == revision,
+        "the entropy source snapshot does not match the selected revision"
+    );
+    Ok(crate::forensics_workbench::EntropyRepositorySource::snapshot(checkout_root, guard))
+}
+
 fn spawn_entropy_campaign(
     surface: Entity<crate::forensics_workbench::ForensicsWorkbenchSurface>,
     configured_model: language_model::ConfiguredModel,
@@ -13361,6 +13414,7 @@ impl AgentPanel {
             prompt_snapshot,
         } = command.clone()
         {
+            log::info!("Forensics entropy scan requested");
             if let Err(error) = prompt_snapshot.validate() {
                 surface.update(cx, |surface, cx| {
                     surface.set_entropy_error(
@@ -13385,13 +13439,6 @@ impl AgentPanel {
                 });
                 return;
             };
-            if candidate.git.dirty_files > 0 {
-                surface.update(cx, |surface, cx| {
-                    surface
-                        .set_entropy_error("Entropy analysis requires a clean pinned worktree", cx)
-                });
-                return;
-            }
             let Some(revision) = candidate.head_commit.clone() else {
                 surface.update(cx, |surface, cx| {
                     surface.set_entropy_error(
@@ -13413,6 +13460,7 @@ impl AgentPanel {
                 return;
             };
             let repository_root = candidate.worktree_abs_path;
+            let repository_is_dirty = candidate.git.dirty_files > 0;
             let model = configured_model.model;
             let model_route_ref = entropy_model_route_ref(
                 &configured_model.provider.id().to_string(),
@@ -13434,13 +13482,38 @@ impl AgentPanel {
             let manifest_ref = format!("manifest.omega.entropy.{}", uuid::Uuid::new_v4().simple());
             let surface = surface.downgrade();
             cx.spawn(async move |_, cx| {
-                let manifest_root = repository_root.clone();
+                let repository_source = if repository_is_dirty {
+                    surface.update(cx, |surface, cx| {
+                        surface.set_entropy_status("Preparing a clean snapshot of HEAD…", cx)
+                    })?;
+                    match materialize_entropy_repository_checkout(&repository_root, &revision).await {
+                        Ok(checkout) => checkout,
+                        Err(error) => {
+                            surface.update(cx, |surface, cx| {
+                                surface.set_entropy_error(
+                                    format!("Entropy source snapshot failed · {error}"),
+                                    cx,
+                                )
+                            })?;
+                            return anyhow::Ok(());
+                        }
+                    }
+                } else {
+                    crate::forensics_workbench::EntropyRepositorySource::selected(
+                        repository_root.clone(),
+                    )
+                };
+                let manifest_root = repository_source.root().to_path_buf();
+                surface.update(cx, |surface, cx| {
+                    surface.set_entropy_repository_source(repository_source, cx)
+                })?;
+                let manifest_build_root = manifest_root.clone();
                 let manifest_repository = repository.clone();
                 let manifest = cx
                     .background_spawn(async move {
-                        let dependencies = inspect_entropy_dependencies(&manifest_root).await;
+                        let dependencies = inspect_entropy_dependencies(&manifest_build_root).await;
                         omega_forensics::EntropyManifest::build(
-                            &manifest_root,
+                            &manifest_build_root,
                             manifest_ref,
                             manifest_repository,
                             dependencies,
@@ -13497,7 +13570,7 @@ impl AgentPanel {
                     let Some(task) = task else {
                         break;
                     };
-                    let source_root = repository_root.clone();
+                    let source_root = manifest_root.clone();
                     let source_task = task.clone();
                     let source = cx
                         .background_spawn(
@@ -13603,7 +13676,7 @@ impl AgentPanel {
                             continue;
                         }
                     };
-                    let verification_root = repository_root.clone();
+                    let verification_root = manifest_root.clone();
                     let verification_revision = revision.clone();
                     let verification_manifest = source_manifest.clone();
                     let verification_output = output.clone();
@@ -18153,6 +18226,74 @@ mod tests {
     use std::path::{Path, PathBuf};
     use std::sync::Arc;
     use std::time::Instant;
+
+    #[test]
+    fn dirty_entropy_repository_uses_a_clean_pinned_snapshot() {
+        let repository = tempfile::tempdir().expect("temporary Git repository");
+        let source_path = repository.path().join("entropy.rs");
+        std::fs::write(&source_path, "const SOURCE: &str = \"committed\";\n")
+            .expect("write committed source");
+        let git = |arguments: &[&str]| {
+            let output = std::process::Command::new("git")
+                .arg("-C")
+                .arg(repository.path())
+                .args(arguments)
+                .output()
+                .expect("run Git command");
+            assert!(
+                output.status.success(),
+                "Git command failed: {}",
+                String::from_utf8_lossy(&output.stderr)
+            );
+            output
+        };
+        git(&["init", "--quiet"]);
+        git(&["add", "entropy.rs"]);
+        git(&[
+            "-c",
+            "user.name=Omega Test",
+            "-c",
+            "user.email=omega@example.invalid",
+            "commit",
+            "--quiet",
+            "-m",
+            "fixture",
+        ]);
+        let revision = String::from_utf8(git(&["rev-parse", "HEAD"]).stdout)
+            .expect("UTF-8 revision")
+            .trim()
+            .to_string();
+        std::fs::write(&source_path, "const SOURCE: &str = \"dirty\";\n")
+            .expect("write dirty source");
+
+        let checkout = smol::block_on(materialize_entropy_repository_checkout(
+            repository.path(),
+            &revision,
+        ))
+        .expect("materialize pinned source");
+        let checkout_root = checkout.root().to_path_buf();
+        assert_eq!(
+            std::fs::read_to_string(checkout_root.join("entropy.rs"))
+                .expect("read snapshot source"),
+            "const SOURCE: &str = \"committed\";\n"
+        );
+        assert_eq!(
+            String::from_utf8(
+                std::process::Command::new("git")
+                    .arg("-C")
+                    .arg(&checkout_root)
+                    .args(["rev-parse", "HEAD"])
+                    .output()
+                    .expect("read snapshot revision")
+                    .stdout
+            )
+            .expect("UTF-8 snapshot revision")
+            .trim(),
+            revision
+        );
+        drop(checkout);
+        assert!(!checkout_root.exists());
+    }
 
     #[test]
     fn comet_navigation_history_walks_and_branches_like_a_browser() {

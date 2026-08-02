@@ -12,10 +12,12 @@ check. **Reset prompt** restores that default. **Use prior prompt** copies the
 latest run's text into a new editable draft with explicit parent-prompt and
 source-run lineage.
 
-For a single-repository run, Omega requires a clean Git worktree, an exact
-40-character revision, and a configured inline-assistant model. It then uses
-the existing project path and model configuration. That path does not create a
-checkout, shell, credential path, or publication destination. The
+For a single-repository run, Omega requires an exact 40-character revision and
+a configured or available default model. For a clean worktree, it reads the
+existing project path. If the selected worktree has changes, Omega creates a
+temporary local clone and scans the exact selected HEAD instead of silently
+including uncommitted source. The temporary clone is deleted with the
+Forensics surface. Neither path creates a publication destination. The
 multi-project campaign uses the separate isolated-checkout behavior described
 below.
 

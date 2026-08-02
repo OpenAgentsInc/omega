@@ -620,6 +620,28 @@ pub(crate) fn entropy_campaign_checkout_root(
         .join(format!("{:x}", digest.finalize()))
 }
 
+pub(crate) struct EntropyRepositorySource {
+    root: std::path::PathBuf,
+    _guard: Option<std::sync::Arc<tempfile::TempDir>>,
+}
+
+impl EntropyRepositorySource {
+    pub(crate) fn selected(root: std::path::PathBuf) -> Self {
+        Self { root, _guard: None }
+    }
+
+    pub(crate) fn snapshot(root: std::path::PathBuf, guard: tempfile::TempDir) -> Self {
+        Self {
+            root,
+            _guard: Some(std::sync::Arc::new(guard)),
+        }
+    }
+
+    pub(crate) fn root(&self) -> &std::path::Path {
+        &self.root
+    }
+}
+
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub enum EntropyFileFilter {
     #[default]
@@ -765,6 +787,7 @@ pub struct ForensicsWorkbenchSurface {
     entropy_campaign_history: Vec<EntropyCampaignProjection>,
     selected_entropy_project: Option<String>,
     entropy_campaign_roots: std::collections::BTreeMap<String, std::path::PathBuf>,
+    entropy_repository_source: Option<EntropyRepositorySource>,
     _entropy_prompt_subscription: Option<Subscription>,
     source_resolutions: std::collections::BTreeMap<String, ForensicSourceResolution>,
     status: SharedString,
@@ -832,6 +855,7 @@ impl ForensicsWorkbenchSurface {
             entropy_campaign_history: Vec::new(),
             selected_entropy_project,
             entropy_campaign_roots: std::collections::BTreeMap::new(),
+            entropy_repository_source: None,
             _entropy_prompt_subscription: None,
             source_resolutions: std::collections::BTreeMap::new(),
             status: "Awaiting OpenAgents managed profile".into(),
@@ -955,6 +979,7 @@ impl ForensicsWorkbenchSurface {
         if let Some(campaign) = self.entropy_campaign.take() {
             self.entropy_campaign_history.push(campaign);
         }
+        self.entropy_campaign_roots.clear();
         self.entropy_prompt_snapshots.push(snapshot.clone());
         if let Some(previous) = self.entropy_run.take() {
             self.entropy_run_history.push(previous);
@@ -988,6 +1013,7 @@ impl ForensicsWorkbenchSurface {
             chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Millis, true),
         )?;
         self.entropy_prompt_snapshots.push(snapshot.clone());
+        self.entropy_repository_source = None;
         self.status = "Preparing the 15-project entropy campaign…".into();
         cx.emit(ForensicsWorkbenchCommand::StartEntropyCampaign {
             prompt_snapshot: snapshot,
@@ -1318,6 +1344,24 @@ impl ForensicsWorkbenchSurface {
         cx.notify();
     }
 
+    pub(crate) fn set_entropy_status(
+        &mut self,
+        status: impl Into<SharedString>,
+        cx: &mut Context<Self>,
+    ) {
+        self.status = status.into();
+        cx.notify();
+    }
+
+    pub(crate) fn set_entropy_repository_source(
+        &mut self,
+        source: EntropyRepositorySource,
+        cx: &mut Context<Self>,
+    ) {
+        self.entropy_repository_source = Some(source);
+        cx.notify();
+    }
+
     pub fn select_entropy_filter(&mut self, filter: EntropyFileFilter, cx: &mut Context<Self>) {
         self.entropy_file_filter = filter;
         cx.notify();
@@ -1629,10 +1673,15 @@ impl ForensicsWorkbenchSurface {
 
     pub fn open_source(&mut self, citation: ForensicSourceCitation, cx: &mut Context<Self>) {
         let repository_root = self
-            .selected_entropy_project
+            .entropy_repository_source
             .as_ref()
-            .and_then(|product_ref| self.entropy_campaign_roots.get(product_ref))
-            .cloned();
+            .map(|source| source.root().to_path_buf())
+            .or_else(|| {
+                self.selected_entropy_project
+                    .as_ref()
+                    .and_then(|product_ref| self.entropy_campaign_roots.get(product_ref))
+                    .cloned()
+            });
         self.source_resolutions.insert(
             citation.source_ref.clone(),
             ForensicSourceResolution::Opening,
@@ -3866,6 +3915,7 @@ impl Render for ForensicsWorkbenchSurface {
                             .child(
                                 Button::new("omega.forensics.entropy.start", "Run entropy scan")
                                     .size(ButtonSize::Compact)
+                                    .debug_selector(|| "omega.forensics.entropy.start".into())
                                     .disabled(entropy_running || entropy_campaign_active || self.entropy_prompt_draft.trim().is_empty())
                                     .on_click(cx.listener(|this, _, _, cx| {
                                         if let Err(error) = this.request_entropy_run(cx) {
@@ -5634,6 +5684,38 @@ mod tests {
         WORKER_PLACEMENT_SCHEMA_V1, WorkerPlacementState,
     };
     use std::path::PathBuf;
+
+    #[gpui::test]
+    fn entropy_run_button_emits_start_command(cx: &mut gpui::TestAppContext) {
+        crate::test_support::init_test(cx);
+        let binding = RepositoryBinding::new("repo", "worktree").expect("valid binding");
+        let candidate = candidate(binding);
+        let (surface, cx) = cx.add_window_view(|window, cx| {
+            ForensicsWorkbenchSurface::new_with_window(&candidate, window, cx)
+        });
+        let started = std::rc::Rc::new(std::cell::Cell::new(false));
+        let _subscription = surface.update(cx, |_, cx| {
+            let started = started.clone();
+            cx.subscribe(&cx.entity(), move |_, _, event, _| {
+                if matches!(event, ForensicsWorkbenchCommand::StartEntropy { .. }) {
+                    started.set(true);
+                }
+            })
+        });
+
+        cx.simulate_click_selector("omega.forensics.entropy.start")
+            .expect("Run entropy scan must accept pointer input");
+        cx.run_until_parked();
+
+        assert!(
+            started.get(),
+            "Run entropy scan must dispatch a start command"
+        );
+        assert_eq!(
+            surface.read_with(cx, |surface, _| surface.snapshot().status),
+            "Preparing an entropy file manifest…"
+        );
+    }
 
     fn candidate(binding: RepositoryBinding) -> ThreadIdentityCandidate {
         ThreadIdentityCandidate {
