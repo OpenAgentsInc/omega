@@ -383,6 +383,8 @@ Execution and result\n\
 - Ground every claim in exact file and line references from the verified snapshot.\n\
 - Separate observations, hypotheses, limitations, and the next falsifiable checks.\n\
 - Do not claim a linked artifact contains a source path without artifact evidence.\n\
+- Present the final result as readable Markdown, not as a raw JSON object. Preserve every field requested by the analysis prompt under clear Summary, Findings, Hypotheses, Limitations, and Next checks sections.\n\
+- Begin the final response with `Entropy scan complete` or `Entropy scan complete with limitations`, as applicable.\n\
 - Finish with a concise entropy-risk summary and explicitly state any incomplete source or evidence.",
         repository = candidate.repository_name,
         path = candidate.worktree_abs_path.display(),
@@ -18319,6 +18321,8 @@ mod tests {
         assert!(prompt.contains("create a temporary clean detached worktree or local clone"));
         assert!(prompt.contains("do not ask the user to pin or prepare a worktree"));
         assert!(prompt.contains("Trace every entropy source and secret consumer."));
+        assert!(prompt.contains("Present the final result as readable Markdown"));
+        assert!(prompt.contains("Entropy scan complete with limitations"));
     }
 
     #[test]

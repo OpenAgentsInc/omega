@@ -828,6 +828,11 @@ pub struct ThreadView {
     pub should_be_following: bool,
     pub editing_message: Option<usize>,
     pub message_queue: MessageQueue,
+    /// Initial content can only auto-submit after the durable queue is bound
+    /// to this thread. Sending from the constructor races the caller's
+    /// immediate `rehydrate_durable_queue` and can turn a busy first turn into
+    /// a non-durable queued send.
+    pub(super) pending_initial_auto_submit: bool,
     pub turn_fields: TurnFields,
     message_generation_info: HashMap<usize, MessageGenerationInfo>,
     pub discarded_partial_edits: HashSet<acp::ToolCallId>,
@@ -1376,6 +1381,7 @@ impl ThreadView {
             should_be_following: false,
             editing_message: None,
             message_queue: MessageQueue::default(),
+            pending_initial_auto_submit: should_auto_submit,
             turn_fields: TurnFields::default(),
             message_generation_info: HashMap::default(),
             discarded_partial_edits: HashSet::default(),
@@ -1447,9 +1453,6 @@ impl ThreadView {
                 });
             });
 
-        if should_auto_submit {
-            this.send(window, cx);
-        }
         this
     }
 
@@ -2919,6 +2922,9 @@ impl ThreadView {
             self.message_queue.restore(entry);
         }
         self.sync_queue_flag_to_native_thread(cx);
+        if std::mem::take(&mut self.pending_initial_auto_submit) {
+            self.send(window, cx);
+        }
         cx.notify();
     }
 

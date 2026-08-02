@@ -8567,6 +8567,42 @@ pub(crate) mod tests {
         })
     }
 
+    #[gpui::test]
+    async fn initial_auto_submit_waits_for_the_durable_queue_binding(cx: &mut TestAppContext) {
+        init_test(cx);
+        let connection = StubAgentConnection::new();
+        let initial_content = AgentInitialContent::ContentBlock {
+            blocks: vec![acp::ContentBlock::Text(acp::TextContent::new(
+                "Run the entropy scan now",
+            ))],
+            auto_submit: true,
+        };
+        let (conversation_view, cx) = setup_conversation_view_with_initial_content(
+            StubAgentServer::new(connection),
+            initial_content,
+            cx,
+        )
+        .await;
+
+        let thread_view = active_thread(&conversation_view, cx);
+        thread_view.read_with(cx, |view, _cx| {
+            assert!(
+                view.thread_error.is_none(),
+                "auto-submit must not race durable queue configuration: {:?}",
+                view.thread_error
+            );
+            assert!(
+                !view.pending_initial_auto_submit,
+                "the initial send must be consumed after queue binding"
+            );
+            assert!(view.message_queue.is_empty());
+        });
+        assert_eq!(
+            user_message_markdown(&thread_view, cx),
+            vec!["## User\n\nRun the entropy scan now\n\n".to_string()]
+        );
+    }
+
     /// `OMEGA-DELTA-0170`, the core promise. Enter while the executor is
     /// still connecting accepts the message; when the connection lands, every
     /// pending message dispatches automatically, in order, exactly once, with

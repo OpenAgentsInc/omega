@@ -8,7 +8,10 @@ source-write authority.
 Edit the visible **Entropy prompt**, then choose **Run entropy scan** in
 Forensics. Omega immediately opens a normal task, submits the frozen prompt,
 and shows the agent's progress, tool calls, stop control, and result in the
-standard transcript. The built-in prompt asks for source-grounded entropy
+standard transcript. A terminal response begins with an explicit completion
+state and presents the typed result as readable Summary, Findings, Hypotheses,
+Limitations, and Next checks sections instead of an unformatted JSON blob. The
+built-in prompt asks for source-grounded entropy
 mechanisms, secret consumers, causal links, missing evidence, and the next
 falsifiable check. **Reset prompt** restores that default. **Use prior prompt**
 copies the latest run's text into a new editable draft with explicit
