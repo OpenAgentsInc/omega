@@ -16342,22 +16342,91 @@ impl AgentPanel {
             .child(div().size(px(6.)).rounded_full().bg(text_accent));
 
         let active_project_key = self.project.read(cx).project_group_key(cx);
-        let active_branch = self
+        let active_project_rows = self
             .workbench_shell
             .identity()
-            .and_then(|identity| identity.selected.as_ref())
-            .map(|selected| selected.branch.label());
+            .cloned()
+            .zip(self.workbench_shell.projection().visible_projection())
+            .filter(|(identity, visible)| visible.binding.as_ref() == identity.binding())
+            .map(|(identity, visible)| {
+                let selected_worktree_id = identity
+                    .selected
+                    .as_ref()
+                    .map(|selected| selected.binding.worktree_id.clone());
+                let mut seen_worktrees = HashSet::default();
+                identity
+                    .candidates
+                    .into_iter()
+                    .filter(|candidate| {
+                        seen_worktrees.insert(candidate.binding.worktree_id.clone())
+                    })
+                    .enumerate()
+                    .map(|(index, candidate)| {
+                        let binding = candidate.binding.clone();
+                        let debug_selector = format!("omega.comet.project.{}", binding.worktree_id);
+                        let selected = selected_worktree_id.as_ref() == Some(&binding.worktree_id);
+                        let source_thread_id = visible.thread_id.clone();
+                        let source_binding = visible.binding.clone();
+                        let source_generation = visible.generation;
+                        let accessible_label = candidate.accessible_label();
+                        let project_name = candidate.project_name.clone();
+                        let branch = candidate.branch.label();
+                        let (padding_x, padding_y) = comet_sidebar_row_padding(selected);
+                        h_flex()
+                            .id(("comet-project", index))
+                            .debug_selector(move || debug_selector)
+                            .w_full()
+                            .px(px(padding_x))
+                            .py(px(padding_y))
+                            .gap(px(8.))
+                            .rounded(px(8.))
+                            .cursor_pointer()
+                            .aria_label(accessible_label)
+                            .when(selected, |row| {
+                                row.bg(selected_background)
+                                    .border_1()
+                                    .border_color(colors.border_selected)
+                            })
+                            .when(!selected, |row| {
+                                row.hover(move |style| style.bg(hover_background))
+                            })
+                            .on_click(cx.listener(move |this, _, _, cx| {
+                                this.select_thread_identity(
+                                    &source_thread_id,
+                                    source_binding.as_ref(),
+                                    source_generation,
+                                    binding.clone(),
+                                    cx,
+                                );
+                            }))
+                            .child(Icon::new(IconName::Folder).size(IconSize::Small))
+                            .child(div().min_w_0().flex_1().truncate().child(project_name))
+                            .child(
+                                div()
+                                    .max_w(px(72.))
+                                    .truncate()
+                                    .text_size(px(10.))
+                                    .text_color(text_placeholder)
+                                    .child(branch),
+                            )
+                            .into_any_element()
+                    })
+                    .collect::<Vec<_>>()
+            })
+            .unwrap_or_default();
+        let active_project_has_candidates = !active_project_rows.is_empty();
         let source_workspace = self.workspace.clone();
-        let project_rows = window
+        let retained_project_rows = window
             .root::<MultiWorkspace>()
             .flatten()
             .map(|multi_workspace| {
                 let project_rows = multi_workspace.read(cx);
                 comet_project_workspaces(&project_rows, cx)
                     .into_iter()
-                    .map(|(target, key, name)| {
+                    .filter_map(|(target, key, name)| {
                         let selected = key == active_project_key;
-                        (target, selected, name)
+                        (!selected || !active_project_has_candidates)
+                            .then_some((target, selected, name))
                     })
                     .collect::<Vec<_>>()
             })
@@ -16368,7 +16437,6 @@ impl AgentPanel {
                 let multi_workspace = window.root::<MultiWorkspace>().flatten();
                 let debug_selector = format!("omega.comet.project.{index}");
                 let accessible_label = format!("Open project {project_name}");
-                let branch = selected.then(|| active_branch.clone()).flatten();
                 let source_workspace = source_workspace.clone();
                 let (padding_x, padding_y) = comet_sidebar_row_padding(selected);
                 h_flex()
@@ -16404,18 +16472,12 @@ impl AgentPanel {
                     })
                     .child(Icon::new(IconName::Folder).size(IconSize::Small))
                     .child(div().min_w_0().flex_1().truncate().child(project_name))
-                    .when_some(branch, |row, branch| {
-                        row.child(
-                            div()
-                                .max_w(px(72.))
-                                .truncate()
-                                .text_size(px(10.))
-                                .text_color(text_placeholder)
-                                .child(branch),
-                        )
-                    })
                     .into_any_element()
             })
+            .collect::<Vec<_>>();
+        let project_rows = active_project_rows
+            .into_iter()
+            .chain(retained_project_rows)
             .collect::<Vec<_>>();
         let has_projects = !project_rows.is_empty();
         let (forensics_padding_x, forensics_padding_y) =
