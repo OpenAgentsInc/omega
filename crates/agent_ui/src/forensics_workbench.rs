@@ -11,11 +11,13 @@ use omega_forensics::{
     EntropyProjectCatalog, EntropyPromptSnapshot, EntropyRunPhase, EntropyRunProjection,
     ExplicitOperatorAction, FORENSIC_FINDING_SCHEMA_V1, FORENSIC_HYPOTHESIS_SCHEMA_V1,
     ForensicBudgetState, ForensicEvidenceTier, ForensicExactness, ForensicLifecycleState,
-    ForensicPromptIr, ForensicPromptWorkspace, ForensicReviewDecisionKind, ForensicReviewOutcome,
-    ForensicSourceCitation, ForensicStatistic, ForensicWorkerObservation, ForensicWorkerPlacement,
-    ForensicsFailureProjection, ForensicsLaunchIntent, ForensicsMatrixProjection,
-    ForensicsPreflightProjection, ForensicsReviewProjection, ForensicsRunPhase,
-    ForensicsRunProjection, PreflightReadiness, PromptChangeKind, PromptCompatibilityProfile,
+    ForensicPromptIr, ForensicPromptWorkspace, ForensicPublicationGate,
+    ForensicPublicationGateKind, ForensicPublicationGateProjection, ForensicPublicationGateState,
+    ForensicReviewDecisionKind, ForensicReviewOutcome, ForensicSourceCitation, ForensicStatistic,
+    ForensicWorkerObservation, ForensicWorkerPlacement, ForensicsFailureProjection,
+    ForensicsLaunchIntent, ForensicsMatrixProjection, ForensicsPreflightProjection,
+    ForensicsReviewProjection, ForensicsRunPhase, ForensicsRunProjection,
+    PUBLICATION_GATE_SCHEMA_V1, PreflightReadiness, PromptChangeKind, PromptCompatibilityProfile,
     RepositoryTargetProjection, SourceState,
 };
 use omega_workbench_state::RepositoryBinding;
@@ -91,12 +93,13 @@ pub enum ForensicsBenchView {
 }
 
 impl ForensicsBenchView {
-    const AVAILABLE: [Self; 5] = [
+    const AVAILABLE: [Self; 6] = [
         Self::Entropy,
         Self::Case,
         Self::Lifecycle,
         Self::Evidence,
         Self::Models,
+        Self::Publication,
     ];
 
     fn label(self) -> &'static str {
@@ -129,6 +132,61 @@ impl ForensicsBenchView {
             Some("models") => Self::Models,
             Some("publication") => Self::Publication,
             _ => Self::Entropy,
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum PublicationScene {
+    #[default]
+    PrivateBlocked,
+    Denied,
+    AwaitingReview,
+    Rejected,
+    Stale,
+    EligibleNotAuthorized,
+}
+
+impl PublicationScene {
+    const ALL: [Self; 6] = [
+        Self::PrivateBlocked,
+        Self::Denied,
+        Self::AwaitingReview,
+        Self::Rejected,
+        Self::Stale,
+        Self::EligibleNotAuthorized,
+    ];
+
+    fn label(self) -> &'static str {
+        match self {
+            Self::PrivateBlocked => "Private · blocked",
+            Self::Denied => "Denied",
+            Self::AwaitingReview => "Awaiting review",
+            Self::Rejected => "Rejected",
+            Self::Stale => "Stale",
+            Self::EligibleNotAuthorized => "Eligible · not authorized",
+        }
+    }
+
+    fn persisted(self) -> &'static str {
+        match self {
+            Self::PrivateBlocked => "private_blocked",
+            Self::Denied => "denied",
+            Self::AwaitingReview => "awaiting_review",
+            Self::Rejected => "rejected",
+            Self::Stale => "stale",
+            Self::EligibleNotAuthorized => "eligible_not_authorized",
+        }
+    }
+
+    fn from_persisted(value: Option<&str>) -> Self {
+        match value {
+            Some("denied") => Self::Denied,
+            Some("awaiting_review") => Self::AwaitingReview,
+            Some("rejected") => Self::Rejected,
+            Some("stale") => Self::Stale,
+            Some("eligible_not_authorized") => Self::EligibleNotAuthorized,
+            _ => Self::PrivateBlocked,
         }
     }
 }
@@ -466,6 +524,89 @@ fn bundled_coldcard_model_matrix() -> anyhow::Result<ForensicsMatrixProjection> 
     .map_err(Into::into)
 }
 
+fn bundled_publication_gate(
+    scene: PublicationScene,
+) -> anyhow::Result<ForensicPublicationGateProjection> {
+    let state_for = |kind| match (scene, kind) {
+        (PublicationScene::Denied, ForensicPublicationGateKind::Redaction) => {
+            ForensicPublicationGateState::Denied
+        }
+        (PublicationScene::AwaitingReview, ForensicPublicationGateKind::IndependentReview) => {
+            ForensicPublicationGateState::AwaitingReview
+        }
+        (PublicationScene::Rejected, ForensicPublicationGateKind::MaintainerDecision) => {
+            ForensicPublicationGateState::Rejected
+        }
+        (PublicationScene::Stale, ForensicPublicationGateKind::DisclosureScope) => {
+            ForensicPublicationGateState::Stale
+        }
+        (
+            PublicationScene::EligibleNotAuthorized,
+            ForensicPublicationGateKind::PublicationAuthority,
+        ) => ForensicPublicationGateState::EligibleNotAuthorized,
+        (PublicationScene::EligibleNotAuthorized, _) => ForensicPublicationGateState::Satisfied,
+        _ => ForensicPublicationGateState::Blocked,
+    };
+    let gate = |kind, suffix: &str, blocker: &str, next_action: &str, evidence: Option<&str>| {
+        ForensicPublicationGate {
+            gate_ref: format!("gate.publication.{suffix}"),
+            kind,
+            state: state_for(kind),
+            evidence_ref: evidence.map(str::to_string),
+            blocker: blocker.into(),
+            next_action: next_action.into(),
+        }
+    };
+    let projection = ForensicPublicationGateProjection {
+        schema: PUBLICATION_GATE_SCHEMA_V1.into(),
+        case_ref: "case.coldcard.synthetic".into(),
+        private: true,
+        synthetic: true,
+        operator_ready: scene == PublicationScene::EligibleNotAuthorized,
+        maintainer_approved: scene == PublicationScene::EligibleNotAuthorized,
+        publication_authorized: false,
+        gates: vec![
+            gate(
+                ForensicPublicationGateKind::Redaction,
+                "redaction",
+                "Private identifiers and source excerpts require a redaction receipt",
+                "Produce a bounded redaction receipt without changing the evidence record",
+                None,
+            ),
+            gate(
+                ForensicPublicationGateKind::IndependentReview,
+                "independent-review",
+                "No accepted independent-review decision is attached",
+                "Request review from an admitted independent reviewer",
+                Some("evidence.review.synthetic"),
+            ),
+            gate(
+                ForensicPublicationGateKind::DisclosureScope,
+                "disclosure-scope",
+                "The public disclosure scope is absent or stale",
+                "Record the exact claims, limitations, and evidence refs proposed for disclosure",
+                Some("evidence.scope.synthetic"),
+            ),
+            gate(
+                ForensicPublicationGateKind::MaintainerDecision,
+                "maintainer-decision",
+                "A maintainer has not admitted this disclosure",
+                "Request a maintainer decision after evidence and review gates are satisfied",
+                None,
+            ),
+            gate(
+                ForensicPublicationGateKind::PublicationAuthority,
+                "publication-authority",
+                "No publication authority receipt exists",
+                "Obtain publication authority outside this read-only UI",
+                None,
+            ),
+        ],
+    };
+    projection.validate()?;
+    Ok(projection)
+}
+
 pub(crate) fn entropy_campaign_checkout_root(
     campaign_ref: &str,
     product_ref: &str,
@@ -533,6 +674,7 @@ pub struct ForensicsWorkbenchSnapshot {
     pub lifecycle_selection: LifecycleSelection,
     pub evidence_selection: EvidenceSelection,
     pub selected_model_run_ref: Option<String>,
+    pub publication_scene: PublicationScene,
     pub selected_arm: ColdcardBenchmarkArm,
     pub readiness: Option<PreflightReadiness>,
     pub prepared_intent: Option<ForensicsLaunchIntent>,
@@ -598,6 +740,7 @@ pub struct ForensicsWorkbenchSurface {
     lifecycle_selection: LifecycleSelection,
     evidence_selection: EvidenceSelection,
     selected_model_run_ref: Option<String>,
+    publication_scene: PublicationScene,
     selected_arm: ColdcardBenchmarkArm,
     preflight: Option<ForensicsPreflightProjection>,
     prepared_intent: Option<ForensicsLaunchIntent>,
@@ -658,6 +801,7 @@ impl ForensicsWorkbenchSurface {
             lifecycle_selection: LifecycleSelection::Summary,
             evidence_selection: EvidenceSelection::Findings,
             selected_model_run_ref: None,
+            publication_scene: PublicationScene::PrivateBlocked,
             selected_arm: ColdcardBenchmarkArm::Vulnerable,
             preflight: None,
             prepared_intent: None,
@@ -714,6 +858,8 @@ impl ForensicsWorkbenchSurface {
         this.evidence_selection =
             EvidenceSelection::from_persisted(restored.evidence_selection.as_deref());
         this.selected_model_run_ref = restored.model_run_ref;
+        this.publication_scene =
+            PublicationScene::from_persisted(restored.publication_scene.as_deref());
         let mut campaigns = restored.campaigns;
         if let Some(mut active_campaign) = campaigns.pop() {
             if matches!(
@@ -1045,6 +1191,7 @@ impl ForensicsWorkbenchSurface {
             lifecycle_selection: Some(self.lifecycle_selection.persisted().into()),
             evidence_selection: Some(self.evidence_selection.persisted().into()),
             model_run_ref: self.selected_model_run_ref.clone(),
+            publication_scene: Some(self.publication_scene.persisted().into()),
         }
     }
 
@@ -1474,6 +1621,12 @@ impl ForensicsWorkbenchSurface {
         cx.notify();
     }
 
+    pub fn select_publication_scene(&mut self, scene: PublicationScene, cx: &mut Context<Self>) {
+        self.publication_scene = scene;
+        self.persist_entropy_state(cx);
+        cx.notify();
+    }
+
     pub fn open_source(&mut self, citation: ForensicSourceCitation, cx: &mut Context<Self>) {
         let repository_root = self
             .selected_entropy_project
@@ -1550,6 +1703,7 @@ impl ForensicsWorkbenchSurface {
             lifecycle_selection: self.lifecycle_selection,
             evidence_selection: self.evidence_selection,
             selected_model_run_ref: self.selected_model_run_ref.clone(),
+            publication_scene: self.publication_scene,
             selected_arm: self.selected_arm,
             readiness: self
                 .preflight
@@ -2723,6 +2877,199 @@ impl ForensicsWorkbenchSurface {
             .into_any_element()
     }
 
+    fn render_publication_gate_workspace(&self, cx: &mut Context<Self>) -> AnyElement {
+        let projection = bundled_publication_gate(self.publication_scene).ok();
+        let scenes = v_flex()
+            .id("omega.forensics.publication.scenes")
+            .w(px(260.))
+            .flex_shrink_0()
+            .gap_1()
+            .p_2()
+            .border_r_1()
+            .border_color(cx.theme().colors().border_variant)
+            .role(gpui::Role::List)
+            .aria_label("Publication gate scenes")
+            .children(
+                PublicationScene::ALL
+                    .into_iter()
+                    .enumerate()
+                    .map(|(index, scene)| {
+                        let selected = self.publication_scene == scene;
+                        div()
+                            .id(("omega.forensics.publication.scene", index))
+                            .px_3()
+                            .py_2()
+                            .rounded(px(6.))
+                            .cursor_pointer()
+                            .tab_index(0)
+                            .role(gpui::Role::ListItem)
+                            .aria_label(format!("{} publication scene", scene.label()))
+                            .aria_selected(selected)
+                            .when(selected, |row| row.bg(cx.theme().colors().element_selected))
+                            .hover(|row| row.bg(cx.theme().colors().element_hover))
+                            .child(Label::new(scene.label()).size(LabelSize::Small))
+                            .on_click(cx.listener(move |this, _, _, cx| {
+                                this.select_publication_scene(scene, cx)
+                            }))
+                            .on_key_down(cx.listener(
+                                move |this, event: &gpui::KeyDownEvent, _, cx| {
+                                    if matches!(event.keystroke.key.as_str(), "enter" | "space") {
+                                        this.select_publication_scene(scene, cx);
+                                        cx.stop_propagation();
+                                    }
+                                },
+                            ))
+                    }),
+            );
+
+        let mut detail = v_flex()
+            .id("omega.forensics.publication.detail")
+            .min_w_0()
+            .flex_1()
+            .gap_3()
+            .p_4()
+            .role(gpui::Role::Group)
+            .aria_label("Selected publication gate detail")
+            .child(
+                h_flex()
+                    .w_full()
+                    .justify_between()
+                    .gap_3()
+                    .child(Label::new("Publication readiness").size(LabelSize::Large))
+                    .child(
+                        Label::new("PRIVATE · PUBLICATION BLOCKED")
+                            .size(LabelSize::XSmall)
+                            .color(Color::Error),
+                    ),
+            )
+            .child(
+                Label::new(
+                    "This reader reports authority receipts. It cannot approve, authorize, or publish a case.",
+                )
+                .size(LabelSize::XSmall)
+                .color(Color::Muted),
+            );
+        if let Some(projection) = projection {
+            detail = detail
+                .child(
+                    h_flex()
+                        .w_full()
+                        .gap_4()
+                        .child(Self::render_fact(
+                            "Operator readiness",
+                            if projection.operator_ready {
+                                "Ready"
+                            } else {
+                                "Blocked"
+                            },
+                        ))
+                        .child(Self::render_fact(
+                            "Maintainer decision",
+                            if projection.maintainer_approved {
+                                "Approved"
+                            } else {
+                                "Not approved"
+                            },
+                        ))
+                        .child(Self::render_fact(
+                            "Publication authority",
+                            if projection.publication_authorized {
+                                "Authorized"
+                            } else {
+                                "Not authorized"
+                            },
+                        )),
+                )
+                .children(projection.gates.iter().enumerate().map(|(index, gate)| {
+                    v_flex()
+                        .id(("omega.forensics.publication.gate", index))
+                        .w_full()
+                        .gap_1()
+                        .px_3()
+                        .py_2()
+                        .rounded(px(6.))
+                        .border_1()
+                        .border_color(cx.theme().colors().border_variant)
+                        .role(gpui::Role::Group)
+                        .aria_label(format!(
+                            "{} gate, {}",
+                            publication_gate_kind_label(gate.kind),
+                            publication_gate_state_label(gate.state)
+                        ))
+                        .child(
+                            h_flex()
+                                .w_full()
+                                .justify_between()
+                                .gap_3()
+                                .child(
+                                    Label::new(publication_gate_kind_label(gate.kind))
+                                        .size(LabelSize::Small),
+                                )
+                                .child(
+                                    Label::new(publication_gate_state_label(gate.state))
+                                        .size(LabelSize::XSmall)
+                                        .color(publication_gate_state_color(gate.state)),
+                                ),
+                        )
+                        .child(Label::new(gate.blocker.clone()).size(LabelSize::XSmall))
+                        .child(
+                            Label::new(format!(
+                                "Evidence · {}",
+                                gate.evidence_ref.as_deref().unwrap_or("missing")
+                            ))
+                            .size(LabelSize::XSmall)
+                            .color(Color::Muted),
+                        )
+                        .child(
+                            Label::new(format!("Next · {}", gate.next_action))
+                                .size(LabelSize::XSmall)
+                                .color(Color::Muted),
+                        )
+                }));
+        } else {
+            detail = detail.child(
+                Label::new("The publication gate projection is invalid or unavailable.")
+                    .size(LabelSize::Small)
+                    .color(Color::Error),
+            );
+        }
+
+        v_flex()
+            .id("omega.forensics.publication.workspace")
+            .debug_selector(|| "omega.forensics.publication.workspace".into())
+            .w_full()
+            .rounded(px(10.))
+            .border_1()
+            .border_color(cx.theme().colors().border_variant)
+            .bg(cx.theme().colors().surface_background)
+            .role(gpui::Role::Region)
+            .aria_label("Forensic publication gate")
+            .child(
+                h_flex()
+                    .w_full()
+                    .justify_between()
+                    .gap_3()
+                    .px_4()
+                    .py_3()
+                    .border_b_1()
+                    .border_color(cx.theme().colors().border_variant)
+                    .child(Label::new("Publication gate").size(LabelSize::Small))
+                    .child(
+                        Label::new("Synthetic case · read only")
+                            .size(LabelSize::XSmall)
+                            .color(Color::Warning),
+                    ),
+            )
+            .child(
+                h_flex()
+                    .w_full()
+                    .items_stretch()
+                    .child(scenes)
+                    .child(detail),
+            )
+            .into_any_element()
+    }
+
     fn render_workbench_header(
         &self,
         repository_name: SharedString,
@@ -3363,6 +3710,24 @@ impl Render for ForensicsWorkbenchSurface {
                 .child(header)
                 .child(navigation)
                 .child(models)
+                .into_any_element();
+        }
+
+        if self.bench_view == ForensicsBenchView::Publication {
+            let publication = self.render_publication_gate_workspace(cx);
+            return v_flex()
+                .id("omega.forensics.workbench")
+                .track_focus(&self.focus_handle)
+                .tab_index(0)
+                .role(gpui::Role::Group)
+                .aria_label("Forensics publication gate workspace")
+                .size_full()
+                .overflow_y_scroll()
+                .p_6()
+                .gap_4()
+                .child(header)
+                .child(navigation)
+                .child(publication)
                 .into_any_element();
         }
 
@@ -5172,6 +5537,40 @@ fn statistic_label(statistic: &ForensicStatistic) -> String {
     }
 }
 
+fn publication_gate_kind_label(kind: ForensicPublicationGateKind) -> &'static str {
+    match kind {
+        ForensicPublicationGateKind::Redaction => "Redaction",
+        ForensicPublicationGateKind::IndependentReview => "Independent review",
+        ForensicPublicationGateKind::DisclosureScope => "Disclosure scope",
+        ForensicPublicationGateKind::MaintainerDecision => "Maintainer decision",
+        ForensicPublicationGateKind::PublicationAuthority => "Publication authority",
+    }
+}
+
+fn publication_gate_state_label(state: ForensicPublicationGateState) -> &'static str {
+    match state {
+        ForensicPublicationGateState::Satisfied => "Satisfied",
+        ForensicPublicationGateState::Blocked => "Blocked",
+        ForensicPublicationGateState::Denied => "Denied",
+        ForensicPublicationGateState::AwaitingReview => "Awaiting review",
+        ForensicPublicationGateState::Rejected => "Rejected",
+        ForensicPublicationGateState::Stale => "Stale",
+        ForensicPublicationGateState::EligibleNotAuthorized => "Eligible · not authorized",
+    }
+}
+
+fn publication_gate_state_color(state: ForensicPublicationGateState) -> Color {
+    match state {
+        ForensicPublicationGateState::Satisfied => Color::Success,
+        ForensicPublicationGateState::AwaitingReview => Color::Muted,
+        ForensicPublicationGateState::Stale
+        | ForensicPublicationGateState::EligibleNotAuthorized => Color::Warning,
+        ForensicPublicationGateState::Blocked
+        | ForensicPublicationGateState::Denied
+        | ForensicPublicationGateState::Rejected => Color::Error,
+    }
+}
+
 fn aggregate_truth_label(value: Option<u64>, exactness: ForensicExactness, unit: &str) -> String {
     match (value, exactness) {
         (None, ForensicExactness::Unavailable) => "unavailable".into(),
@@ -6051,6 +6450,50 @@ mod tests {
                     .model_run_ref
                     .as_deref(),
                 Some("run.matrix.general-reviewer")
+            );
+        });
+    }
+
+    #[test]
+    fn bundled_publication_scenes_are_private_blocked_and_separate_authorities() {
+        for scene in PublicationScene::ALL {
+            let projection = bundled_publication_gate(scene).expect("valid publication fixture");
+            assert!(projection.private);
+            assert!(projection.synthetic);
+            assert!(!projection.publication_authorized);
+            assert_eq!(projection.gates.len(), 5);
+            assert!(
+                projection
+                    .gates
+                    .iter()
+                    .any(|gate| gate.kind == ForensicPublicationGateKind::PublicationAuthority)
+            );
+        }
+    }
+
+    #[gpui::test]
+    fn publication_scene_selection_is_presentation_only(cx: &mut gpui::TestAppContext) {
+        cx.update(|cx| {
+            let binding = RepositoryBinding::new("repo", "worktree").expect("valid binding");
+            let surface = cx.new(|cx| ForensicsWorkbenchSurface::new(&candidate(binding), cx));
+            let before = surface.read(cx).snapshot();
+            surface.update(cx, |surface, cx| {
+                surface.select_bench_view(ForensicsBenchView::Publication, cx);
+                surface.select_publication_scene(PublicationScene::Stale, cx);
+            });
+            let after = surface.read(cx).snapshot();
+            assert_eq!(after.bench_view, ForensicsBenchView::Publication);
+            assert_eq!(after.publication_scene, PublicationScene::Stale);
+            assert_eq!(after.matrix, before.matrix);
+            assert_eq!(after.review, before.review);
+            assert_eq!(after.run, before.run);
+            assert_eq!(
+                surface
+                    .read(cx)
+                    .entropy_restore_state()
+                    .publication_scene
+                    .as_deref(),
+                Some("stale")
             );
         });
     }

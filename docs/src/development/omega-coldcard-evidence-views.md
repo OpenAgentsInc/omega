@@ -98,6 +98,26 @@ eligible hit, a right-censored miss, and an ineligible clean control so that the
 important scenes stay inspectable without implying a live run. Model-run
 selection is restored presentation state only.
 
+## Publication gate
+
+The **Publication** bench view is a read-only authority reader. It keeps
+redaction, independent review, disclosure scope, maintainer decision, and
+publication authority as five separate gates. Each row shows the exact state,
+available evidence ref, unmet blocker, and next admitted action. Operator
+readiness never substitutes for maintainer approval or publication authority.
+
+Synthetic, incomplete, private, and unavailable cases remain private and
+blocked. The deterministic reader preserves private-blocked, denied,
+awaiting-review, rejected, stale, and eligible-but-not-authorized scenes. The
+eligible scene still cannot publish: publication authority must arrive as an
+external typed receipt. Omega provides no approve, authorize, or publish
+control in this workspace.
+
+Scene selection is restored presentation state only. The validated
+`ForensicPublicationGateProjection` remains the authority, and its validation
+rejects synthetic publication, public state without authority, or authorization
+without all five satisfied gates.
+
 ## Evidence ladder
 
 The ladder always contains nine ordered rungs: source flaw, artifact reality,
@@ -153,5 +173,7 @@ cargo test -p agent_ui forensics_workbench::tests::coldcard --lib
 cargo test -p agent_ui forensics_workbench::tests::lifecycle --lib
 cargo test -p agent_ui forensics_workbench::tests::evidence --lib
 cargo test -p agent_ui forensics_workbench::tests::model --lib
+cargo test -p omega_forensics publication_gate --lib
+cargo test -p agent_ui forensics_workbench::tests::publication --lib
 ./script/clippy -p omega_forensics -p agent_ui
 ```

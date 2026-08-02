@@ -17,6 +17,7 @@ pub const WORKER_PLACEMENT_SCHEMA_V1: &str = "openagents.forensic_worker_placeme
 pub const WORKER_OBSERVATION_SCHEMA_V1: &str = "openagents.forensic_worker_observation.v1";
 pub const REVIEW_PROJECTION_SCHEMA_V1: &str = "openagents.omega.forensics-review.v1";
 pub const MATRIX_PROJECTION_SCHEMA_V1: &str = "openagents.omega.forensics-matrix.v1";
+pub const PUBLICATION_GATE_SCHEMA_V1: &str = "openagents.omega.forensics-publication-gate.v1";
 pub const COLDCARD_EVIDENCE_WORKSPACE_SCHEMA_V1: &str =
     "openagents.omega.coldcard-evidence-workspace.v1";
 pub const FORENSIC_PROMPT_ARTIFACT_SCHEMA_V1: &str = "openagents.forensic_prompt_artifact.v1";
@@ -1510,6 +1511,95 @@ pub enum ForensicReviewDecisionKind {
     Accept,
     Correct,
     Reject,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ForensicPublicationGateKind {
+    Redaction,
+    IndependentReview,
+    DisclosureScope,
+    MaintainerDecision,
+    PublicationAuthority,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ForensicPublicationGateState {
+    Satisfied,
+    Blocked,
+    Denied,
+    AwaitingReview,
+    Rejected,
+    Stale,
+    EligibleNotAuthorized,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct ForensicPublicationGate {
+    pub gate_ref: String,
+    pub kind: ForensicPublicationGateKind,
+    pub state: ForensicPublicationGateState,
+    pub evidence_ref: Option<String>,
+    pub blocker: String,
+    pub next_action: String,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct ForensicPublicationGateProjection {
+    pub schema: String,
+    pub case_ref: String,
+    pub private: bool,
+    pub synthetic: bool,
+    pub operator_ready: bool,
+    pub maintainer_approved: bool,
+    pub publication_authorized: bool,
+    pub gates: Vec<ForensicPublicationGate>,
+}
+
+impl ForensicPublicationGateProjection {
+    pub fn validate(&self) -> Result<(), ForensicsError> {
+        if self.schema != PUBLICATION_GATE_SCHEMA_V1 {
+            return Err(ForensicsError::InvalidSchema);
+        }
+        validate_ref("publication case", &self.case_ref)?;
+        if self.gates.len() != 5 {
+            return Err(ForensicsError::InvalidPublicationGate(
+                "all five publication gates must be present".into(),
+            ));
+        }
+        let mut kinds = BTreeSet::new();
+        for gate in &self.gates {
+            validate_ref("publication gate", &gate.gate_ref)?;
+            if let Some(evidence_ref) = &gate.evidence_ref {
+                validate_ref("publication evidence", evidence_ref)?;
+            }
+            if gate.blocker.trim().is_empty()
+                || gate.next_action.trim().is_empty()
+                || !kinds.insert(gate.kind)
+            {
+                return Err(ForensicsError::InvalidPublicationGate(
+                    "publication gates require unique kinds, blockers, and next actions".into(),
+                ));
+            }
+        }
+        let all_satisfied = self
+            .gates
+            .iter()
+            .all(|gate| gate.state == ForensicPublicationGateState::Satisfied);
+        if self.synthetic && (!self.private || self.publication_authorized)
+            || self.publication_authorized
+                && (!all_satisfied || !self.maintainer_approved || !self.operator_ready)
+            || !self.private && !self.publication_authorized
+        {
+            return Err(ForensicsError::InvalidPublicationGate(
+                "privacy, synthetic evidence, and publication authority disagree".into(),
+            ));
+        }
+        Ok(())
+    }
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -3146,6 +3236,8 @@ pub enum ForensicsError {
     IncompatiblePrompt,
     #[error("the forensic run matrix is invalid: {0}")]
     InvalidMatrix(String),
+    #[error("the forensic publication gate is invalid: {0}")]
+    InvalidPublicationGate(String),
     #[error("the Coldcard evidence workspace is invalid: {0}")]
     InvalidColdcardEvidence(String),
     #[error("the entropy repository run is invalid: {0}")]
@@ -4137,6 +4229,44 @@ mod tests {
         assert!(matches!(
             mnemonic.validate(),
             Err(ForensicsError::InvalidColdcardEvidence(_))
+        ));
+    }
+
+    #[test]
+    fn publication_gate_requires_all_authorities_and_fails_closed_for_synthetic_cases() {
+        let kinds = [
+            ForensicPublicationGateKind::Redaction,
+            ForensicPublicationGateKind::IndependentReview,
+            ForensicPublicationGateKind::DisclosureScope,
+            ForensicPublicationGateKind::MaintainerDecision,
+            ForensicPublicationGateKind::PublicationAuthority,
+        ];
+        let mut projection = ForensicPublicationGateProjection {
+            schema: PUBLICATION_GATE_SCHEMA_V1.into(),
+            case_ref: "case.coldcard.synthetic".into(),
+            private: true,
+            synthetic: true,
+            operator_ready: false,
+            maintainer_approved: false,
+            publication_authorized: false,
+            gates: kinds
+                .into_iter()
+                .enumerate()
+                .map(|(index, kind)| ForensicPublicationGate {
+                    gate_ref: format!("gate.publication.{index}"),
+                    kind,
+                    state: ForensicPublicationGateState::Blocked,
+                    evidence_ref: None,
+                    blocker: "Missing authority receipt".into(),
+                    next_action: "Obtain the exact external receipt".into(),
+                })
+                .collect(),
+        };
+        projection.validate().expect("private blocked projection");
+        projection.publication_authorized = true;
+        assert!(matches!(
+            projection.validate(),
+            Err(ForensicsError::InvalidPublicationGate(_))
         ));
     }
 }
