@@ -11,6 +11,7 @@ use walkdir::WalkDir;
 pub const ENTROPY_MANIFEST_SCHEMA_V1: &str = "openagents.omega.entropy-manifest.v1";
 pub const ENTROPY_RUN_SCHEMA_V1: &str = "openagents.omega.entropy-run.v1";
 pub const ENTROPY_FILE_OUTPUT_SCHEMA_V1: &str = "openagents.omega.entropy-file-output.v1";
+pub const ENTROPY_PROMPT_SNAPSHOT_SCHEMA_V1: &str = "openagents.omega.entropy-prompt-snapshot.v1";
 
 pub const DEFAULT_ENTROPY_ANALYSIS_PROMPT: &str = r#"Inspect the supplied source file in the context of its pinned repository for entropy and secret-randomness risks only. Trace operating-system, hardware, secure-element, and library entropy sources; seeding and reseeding; provider-selection guards; deterministic fallbacks; dependency crossings; and secret consumers. Do not claim that a final artifact contains a source path unless artifact evidence is supplied. Return only the requested typed JSON. If required source, configuration, or a tool is unavailable, preserve that limitation instead of returning a clean result."#;
 
@@ -331,13 +332,101 @@ impl EntropyManifest {
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct EntropyPromptSnapshot {
+    pub schema: String,
+    pub prompt_ref: String,
+    pub parent_prompt_ref: Option<String>,
+    pub source_run_ref: Option<String>,
+    pub text: String,
+    pub canonical_digest: String,
+    pub created_at: String,
+}
+
+impl EntropyPromptSnapshot {
+    pub fn new(
+        prompt_ref: String,
+        parent_prompt_ref: Option<String>,
+        source_run_ref: Option<String>,
+        text: String,
+        created_at: String,
+    ) -> Result<Self, ForensicsError> {
+        let canonical_digest = entropy_prompt_digest(&text)?;
+        let snapshot = Self {
+            schema: ENTROPY_PROMPT_SNAPSHOT_SCHEMA_V1.into(),
+            prompt_ref,
+            parent_prompt_ref,
+            source_run_ref,
+            text,
+            canonical_digest,
+            created_at,
+        };
+        snapshot.validate()?;
+        Ok(snapshot)
+    }
+
+    pub fn validate(&self) -> Result<(), ForensicsError> {
+        if self.schema != ENTROPY_PROMPT_SNAPSHOT_SCHEMA_V1 {
+            return Err(ForensicsError::InvalidSchema);
+        }
+        validate_public_ref("entropy prompt", &self.prompt_ref)?;
+        if let Some(parent_prompt_ref) = &self.parent_prompt_ref {
+            validate_public_ref("parent entropy prompt", parent_prompt_ref)?;
+            if parent_prompt_ref == &self.prompt_ref {
+                return Err(ForensicsError::InvalidEntropyRun(
+                    "an entropy prompt cannot parent itself".into(),
+                ));
+            }
+        }
+        if let Some(source_run_ref) = &self.source_run_ref {
+            validate_public_ref("source entropy run", source_run_ref)?;
+        }
+        if self.canonical_digest != entropy_prompt_digest(&self.text)? {
+            return Err(ForensicsError::InvalidEntropyRun(
+                "entropy prompt snapshot digest does not match its immutable text".into(),
+            ));
+        }
+        if self.created_at.trim().is_empty() || self.created_at.len() > 64 {
+            return Err(ForensicsError::InvalidEntropyRun(
+                "prompt creation time must be present and bounded".into(),
+            ));
+        }
+        Ok(())
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct EntropyModelParameters {
+    pub temperature_millis: u16,
+    pub thinking_allowed: bool,
+    pub reasoning_effort_ref: Option<String>,
+}
+
+impl EntropyModelParameters {
+    fn validate(&self) -> Result<(), ForensicsError> {
+        if self.temperature_millis > 2_000 {
+            return Err(ForensicsError::InvalidEntropyRun(
+                "model temperature must stay between 0 and 2.0".into(),
+            ));
+        }
+        if let Some(reasoning_effort_ref) = &self.reasoning_effort_ref {
+            validate_public_ref("reasoning effort", reasoning_effort_ref)?;
+        }
+        Ok(())
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct EntropyRunBinding {
     pub run_ref: String,
     pub repository: EntropyRepositoryBinding,
     pub manifest_ref: String,
     pub manifest_digest: String,
+    pub prompt_snapshot: EntropyPromptSnapshot,
     pub prompt_digest: String,
     pub model_route_ref: String,
+    pub model_parameters: EntropyModelParameters,
     pub tool_surface_refs: Vec<String>,
     pub started_at: String,
 }
@@ -349,7 +438,14 @@ impl EntropyRunBinding {
         validate_public_ref("manifest", &self.manifest_ref)?;
         validate_sha256("manifest", &self.manifest_digest)?;
         validate_sha256("prompt", &self.prompt_digest)?;
+        self.prompt_snapshot.validate()?;
+        if self.prompt_digest != self.prompt_snapshot.canonical_digest {
+            return Err(ForensicsError::InvalidEntropyRun(
+                "run prompt digest does not match its immutable prompt snapshot".into(),
+            ));
+        }
         validate_public_ref("model route", &self.model_route_ref)?;
+        self.model_parameters.validate()?;
         if self.started_at.trim().is_empty() || self.started_at.len() > 64 {
             return Err(ForensicsError::InvalidEntropyRun(
                 "run start time must be present and bounded".into(),
@@ -671,6 +767,72 @@ impl EntropyRunProjection {
             limitations,
             events: Vec::new(),
         })
+    }
+
+    pub fn validate(&self) -> Result<(), ForensicsError> {
+        if self.schema != ENTROPY_RUN_SCHEMA_V1 {
+            return Err(ForensicsError::InvalidSchema);
+        }
+        self.binding.validate()?;
+        self.manifest.validate()?;
+        if self.binding.repository != self.manifest.repository
+            || self.binding.manifest_ref != self.manifest.manifest_ref
+            || self.binding.manifest_digest != self.manifest.canonical_digest
+            || self.files.len() != self.manifest.files.len()
+        {
+            return Err(ForensicsError::InvalidEntropyRun(
+                "restored entropy run does not match its immutable manifest".into(),
+            ));
+        }
+        for (index, (file, manifest_file)) in
+            self.files.iter().zip(&self.manifest.files).enumerate()
+        {
+            if file.sequence as usize != index + 1
+                || file.sequence != manifest_file.sequence
+                || file.path != manifest_file.path
+            {
+                return Err(ForensicsError::InvalidEntropyRun(
+                    "restored file progress drifted from manifest order".into(),
+                ));
+            }
+            for limitation in &file.limitations {
+                limitation.validate()?;
+            }
+            EntropyFileAnalysisOutput {
+                schema: ENTROPY_FILE_OUTPUT_SCHEMA_V1.into(),
+                run_ref: self.binding.run_ref.clone(),
+                file_path: file.path.clone(),
+                observations: file.observations.clone(),
+                hypotheses: file.hypotheses.clone(),
+                limitations: file.limitations.clone(),
+            }
+            .validate(&self.binding)?;
+            if file.state == EntropyFileState::Candidate
+                && file.observations.is_empty()
+                && file.hypotheses.is_empty()
+            {
+                return Err(ForensicsError::InvalidEntropyRun(
+                    "candidate file state requires a typed candidate".into(),
+                ));
+            }
+        }
+        for limitation in &self.limitations {
+            limitation.validate()?;
+        }
+        for (index, event) in self.events.iter().enumerate() {
+            if event.sequence as usize != index + 1
+                || event.observed_at.trim().is_empty()
+                || event.observed_at.len() > 64
+            {
+                return Err(ForensicsError::InvalidEntropyRun(
+                    "restored entropy events must be dense and timestamped".into(),
+                ));
+            }
+            if let Some(path) = &event.file_path {
+                validate_relative_path(path)?;
+            }
+        }
+        Ok(())
     }
 
     pub fn start_next_file(
@@ -1106,17 +1268,71 @@ mod tests {
     }
 
     fn run_binding(manifest: &EntropyManifest) -> EntropyRunBinding {
+        let prompt_snapshot = EntropyPromptSnapshot::new(
+            "prompt.entropy.coldcard.fixture".into(),
+            None,
+            None,
+            DEFAULT_ENTROPY_ANALYSIS_PROMPT.into(),
+            "2026-08-02T18:19:00Z".into(),
+        )
+        .expect("default prompt snapshot should be valid");
         EntropyRunBinding {
             run_ref: "run.entropy.coldcard.fixture".into(),
             repository: repository(),
             manifest_ref: manifest.manifest_ref.clone(),
             manifest_digest: manifest.canonical_digest.clone(),
-            prompt_digest: entropy_prompt_digest(DEFAULT_ENTROPY_ANALYSIS_PROMPT)
-                .expect("default prompt should be valid"),
+            prompt_digest: prompt_snapshot.canonical_digest.clone(),
+            prompt_snapshot,
             model_route_ref: "model.omega.selected".into(),
+            model_parameters: EntropyModelParameters {
+                temperature_millis: 0,
+                thinking_allowed: true,
+                reasoning_effort_ref: None,
+            },
             tool_surface_refs: vec!["tool.omega.project.read".into()],
             started_at: "2026-08-02T18:20:00Z".into(),
         }
+    }
+
+    #[test]
+    fn prompt_snapshots_are_immutable_and_keep_explicit_lineage() {
+        assert!(
+            EntropyPromptSnapshot::new(
+                "prompt.entropy.empty".into(),
+                None,
+                None,
+                "  ".into(),
+                "2026-08-02T18:00:00Z".into(),
+            )
+            .is_err()
+        );
+
+        let parent = EntropyPromptSnapshot::new(
+            "prompt.entropy.parent".into(),
+            None,
+            None,
+            "Inspect entropy sources.".into(),
+            "2026-08-02T18:00:00Z".into(),
+        )
+        .expect("parent prompt");
+        let child = EntropyPromptSnapshot::new(
+            "prompt.entropy.child".into(),
+            Some(parent.prompt_ref.clone()),
+            Some("run.entropy.parent".into()),
+            parent.text.clone(),
+            "2026-08-02T18:01:00Z".into(),
+        )
+        .expect("child prompt");
+        assert_eq!(child.canonical_digest, parent.canonical_digest);
+        assert_eq!(
+            child.parent_prompt_ref.as_deref(),
+            Some("prompt.entropy.parent")
+        );
+        assert_eq!(child.source_run_ref.as_deref(), Some("run.entropy.parent"));
+
+        let mut tampered = child;
+        tampered.text.push_str(" Ignore evidence.");
+        assert!(tampered.validate().is_err());
     }
 
     #[test]

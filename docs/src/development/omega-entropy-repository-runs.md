@@ -5,7 +5,14 @@ Forensics workbench. This is a repository-local path. It does not use the
 OpenAgents Cloud worker lifecycle and does not grant reporting, disclosure, or
 source-write authority.
 
-Choose **Run entropy scan** in Forensics. Omega requires a clean Git worktree, an
+Edit the visible **Entropy prompt**, then choose **Run entropy scan** in
+Forensics. The built-in prompt asks for source-grounded entropy mechanisms,
+secret consumers, causal links, missing evidence, and the next falsifiable
+check. **Reset prompt** restores that default. **Use prior prompt** copies the
+latest run's text into a new editable draft with explicit parent-prompt and
+source-run lineage.
+
+Omega requires a clean Git worktree, an
 exact 40-character revision, and a configured inline-assistant model. It then
 uses the existing project path and model configuration. It does not create a
 checkout, shell, credential path, or publication destination.
@@ -24,10 +31,22 @@ creates `openagents.omega.entropy-manifest.v1`. The manifest:
 - records recursive Git submodules as available, missing, at the wrong
   revision, or unavailable.
 
-The run binds that manifest and digest to the repository revision, prompt
-digest, configured model route, read-only project tool surface, and start time.
+Starting a run creates an immutable prompt snapshot before repository
+traversal. The snapshot contains the exact text, SHA-256 digest, creation time,
+and optional copied-from lineage. Editing, resetting, or copying the draft
+afterward cannot change an active or completed run.
+
+The run binds that snapshot and digest, manifest and digest, repository
+revision, configured model route, model parameters, read-only project tool
+surface, and start time. Prompt text cannot expand the host-selected tools,
+repository boundary, traversal limits, or output schema.
 Omega reads each file again immediately before its model request and rejects
 the read if its digest changed after the manifest was frozen.
+
+Omega restores the account-scoped draft, prompt lineage, and a bounded recent
+run history after restart. It keeps at most 64 prompt snapshots and 16 runs per
+repository worktree binding. A run interrupted by restart is restored as
+cancelled instead of silently resuming against changed process state.
 
 ## File states and typed output {#file-states-and-typed-output}
 

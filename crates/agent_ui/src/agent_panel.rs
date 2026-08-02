@@ -12673,8 +12673,11 @@ impl AgentPanel {
                 "Forensics requires an exact Git repository binding"
             ));
         }
-        let surface =
-            cx.new(|cx| crate::forensics_workbench::ForensicsWorkbenchSurface::new(&candidate, cx));
+        let surface = cx.new(|cx| {
+            crate::forensics_workbench::ForensicsWorkbenchSurface::new_with_window(
+                &candidate, window, cx,
+            )
+        });
         self._forensics_workbench_subscriptions
             .push(
                 cx.subscribe_in(&surface, window, |this, surface, command, window, cx| {
@@ -12702,9 +12705,20 @@ impl AgentPanel {
             }
             return;
         }
-        if let crate::forensics_workbench::ForensicsWorkbenchCommand::StartEntropy { prompt } =
-            command.clone()
+        if let crate::forensics_workbench::ForensicsWorkbenchCommand::StartEntropy {
+            prompt_snapshot,
+        } = command.clone()
         {
+            if let Err(error) = prompt_snapshot.validate() {
+                surface.update(cx, |surface, cx| {
+                    surface.set_entropy_error(
+                        format!("Entropy prompt snapshot is invalid · {error}"),
+                        cx,
+                    )
+                });
+                return;
+            }
+            let prompt = prompt_snapshot.text.clone();
             let candidate = self
                 .workbench_shell
                 .identity()
@@ -12792,25 +12806,20 @@ impl AgentPanel {
                         return anyhow::Ok(());
                     }
                 };
-                let prompt_digest = match omega_forensics::entropy_prompt_digest(&prompt) {
-                    Ok(digest) => digest,
-                    Err(error) => {
-                        surface.update(cx, |surface, cx| {
-                            surface.set_entropy_error(
-                                format!("Entropy prompt is invalid · {error}"),
-                                cx,
-                            )
-                        })?;
-                        return anyhow::Ok(());
-                    }
-                };
+                let prompt_digest = prompt_snapshot.canonical_digest.clone();
                 let binding = omega_forensics::EntropyRunBinding {
                     run_ref: run_ref.clone(),
                     repository,
                     manifest_ref: manifest.manifest_ref.clone(),
                     manifest_digest: manifest.canonical_digest.clone(),
+                    prompt_snapshot,
                     prompt_digest,
                     model_route_ref,
+                    model_parameters: omega_forensics::EntropyModelParameters {
+                        temperature_millis: 0,
+                        thinking_allowed: true,
+                        reasoning_effort_ref: None,
+                    },
                     tool_surface_refs: vec!["tool.omega.project.read".into()],
                     started_at: forensics_timestamp(),
                 };
