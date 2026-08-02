@@ -17212,9 +17212,9 @@ mod tests {
             });
         for (token, why) in [
             (
-                "right.updated_at.cmp(&left.updated_at)",
-                "newest first is the order the owner asked for — \"historical \
-                 chats\" with the recent ones out of reach is the same as none",
+                "right_created_at.cmp(&left_created_at)",
+                "creation order is immutable, so opening or updating a chat \
+                 cannot move the row while the person is navigating",
             ),
             (
                 "short_age(",
@@ -27664,11 +27664,13 @@ mod tests {
             "window.modifiers()",
             "modifiers.platform",
             "modifiers.control",
-            "take(COMET_TAB_SHORTCUT_LABELS.len() - 1)",
+            "fn comet_session_tab_rows",
+            "left.created_at.cmp(&right.created_at)",
             "activate_comet_session_tab(action.0, window, cx)",
             "on_modifiers_changed",
-            "comet_tab_shortcut_hint(0, text_placeholder)",
-            "comet_tab_shortcut_hint(index + 1, text_placeholder)",
+            "comet_tab_shortcut_hint(index, text_placeholder)",
+            "active_tab_is_persisted",
+            "active_sidebar_row_is_persisted",
         ] {
             assert!(
                 panel.contains(required),

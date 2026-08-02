@@ -1,4 +1,4 @@
-//! Zero base's threads sidebar: the past conversations, newest first.
+//! Zero base's threads sidebar: the past conversations, newest-created first.
 //!
 //! `OMEGA-DELTA-0118`, omega#114. The owner pressed "Toggle Threads Sidebar" in
 //! a zero-base build and nothing happened: *"this 'Toggle Threads Sidebar' does
@@ -53,6 +53,7 @@ pub const MAX_ROWS: usize = 200;
 pub struct ThreadRow {
     pub thread_id: ThreadId,
     pub agent_id: AgentId,
+    pub created_at: DateTime<Utc>,
     /// The title, or the default when a thread never got one.
     pub title: SharedString,
     /// A compact age — `3s`, `4m`, `2h`, `5d`.
@@ -96,7 +97,7 @@ impl ThreadRow {
     }
 }
 
-/// The rows, newest first.
+/// The rows, newest-created first.
 ///
 /// `entries` is the whole store; the ordering, the exclusions and the bound are
 /// applied here so there is one answer to "what does the sidebar list" rather
@@ -127,15 +128,13 @@ pub fn rows<'a>(
         .filter(|thread| !thread.is_draft())
         .collect();
 
-    // Newest first. `updated_at` is what every other thread surface orders by,
-    // and it is the field the age beside the title renders, so the order and
-    // the number a person reads cannot disagree.
-    //
-    // The thread id breaks ties. Two threads written in the same second would
-    // otherwise swap places between renders, and a list that reorders itself
-    // while somebody is reading it is worse than one that is slightly wrong.
+    // Creation time is immutable, so reading or resuming a conversation cannot
+    // move it while somebody is navigating the list. Legacy rows without a
+    // recorded creation time fall back to their first available timestamp.
     listed.sort_by(|left, right| {
-        right.updated_at.cmp(&left.updated_at).then_with(|| {
+        let left_created_at = left.created_at.unwrap_or(left.updated_at);
+        let right_created_at = right.created_at.unwrap_or(right.updated_at);
+        right_created_at.cmp(&left_created_at).then_with(|| {
             left.thread_id
                 .to_key_string()
                 .cmp(&right.thread_id.to_key_string())
@@ -146,6 +145,7 @@ pub fn rows<'a>(
         .into_iter()
         .take(MAX_ROWS)
         .map(|thread| {
+            let created_at = thread.created_at.unwrap_or(thread.updated_at);
             let executor = recorded_executor(&thread.agent_id);
             let unreopenable = match thread.conversation_owner() {
                 // Legacy owner ambiguity stays internal (omega#152 versioned
@@ -167,8 +167,9 @@ pub fn rows<'a>(
             ThreadRow {
                 thread_id: thread.thread_id,
                 agent_id: thread.agent_id.clone(),
+                created_at,
                 title: thread.display_title(),
-                age: short_age(thread.updated_at, now).into(),
+                age: short_age(created_at, now).into(),
                 executor: executor
                     .filter(|executor| *executor != SelectableExecutor::Omega)
                     .map(|executor| SharedString::new_static(executor.name())),
@@ -349,7 +350,7 @@ mod tests {
             title: Some(title.into()),
             title_override: None,
             updated_at,
-            created_at: None,
+            created_at: Some(updated_at),
             interacted_at: None,
             worktree_paths: Default::default(),
             remote_connection: None,
@@ -365,7 +366,7 @@ mod tests {
     }
 
     #[test]
-    fn rows_are_newest_first_and_carry_an_age() {
+    fn rows_are_newest_created_first_and_carry_an_age() {
         let now = at(10);
         let entries = [
             thread("older", omega(), at(0), true),
@@ -376,6 +377,21 @@ mod tests {
         assert_eq!(rows.len(), 2);
         assert_eq!(rows[0].title.as_ref(), "newer");
         assert_eq!(rows[0].age.as_ref(), "1m");
+        assert_eq!(rows[1].title.as_ref(), "older");
+        assert_eq!(rows[1].age.as_ref(), "10m");
+    }
+
+    #[test]
+    fn rows_stay_in_creation_order_when_a_thread_is_updated() {
+        let now = at(10);
+        let mut older = thread("older", omega(), at(9), true);
+        older.created_at = Some(at(0));
+        let newer = thread("newer", omega(), at(5), true);
+
+        let rows = rows([older, newer].iter(), now, ALL_READY, &[]);
+
+        assert_eq!(rows[0].title.as_ref(), "newer");
+        assert_eq!(rows[0].age.as_ref(), "5m");
         assert_eq!(rows[1].title.as_ref(), "older");
         assert_eq!(rows[1].age.as_ref(), "10m");
     }
