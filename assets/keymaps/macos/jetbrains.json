@@ -149,7 +149,7 @@
     "context": "ProjectPanel",
     "bindings": {
       "enter": "project_panel::Open",
-      "cmd-shift-f": "project_panel::NewSearchInDirectory",
+      "cmd-shift-f": "omega_workbench::SelectForensics",
       "cmd-backspace": ["project_panel::Trash", { "skip_prompt": false }],
       "backspace": ["project_panel::Trash", { "skip_prompt": false }],
       "delete": ["project_panel::Trash", { "skip_prompt": false }],

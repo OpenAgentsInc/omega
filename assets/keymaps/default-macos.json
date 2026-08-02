@@ -521,7 +521,7 @@
       "escape": "project_search::ToggleFocus",
       "cmd-shift-j": "project_search::ToggleFilters",
       "cmd-shift-enter": "project_search::ToggleAllSearchResults",
-      "cmd-shift-f": "search::FocusSearch",
+      "cmd-shift-f": "omega_workbench::SelectForensics",
       "cmd-shift-h": "search::ToggleReplace",
       "alt-cmd-g": "search::ToggleRegex",
       "alt-cmd-x": "search::ToggleRegex",
@@ -702,7 +702,7 @@
       "ctrl-0": "pane::ActivateLastItem",
       "ctrl--": "pane::GoBack",
       "ctrl-_": "pane::GoForward",
-      "cmd-shift-f": "pane::DeploySearch"
+      "cmd-shift-f": "omega_workbench::SelectForensics"
     }
   },
   {
@@ -749,7 +749,7 @@
       "ctrl-alt-)": "workspace::ResetOpenDocksSize",
       "ctrl-alt-_": ["workspace::DecreaseOpenDocksSize", { "px": 0 }],
       "ctrl-alt-+": ["workspace::IncreaseOpenDocksSize", { "px": 0 }],
-      "cmd-shift-f": "pane::DeploySearch",
+      "cmd-shift-f": "omega_workbench::SelectForensics",
       "cmd-shift-h": ["pane::DeploySearch", { "replace_enabled": true }],
       "cmd-shift-t": "pane::ReopenClosedItem",
       "cmd-k cmd-p": "workspace::ReopenLastPicker",

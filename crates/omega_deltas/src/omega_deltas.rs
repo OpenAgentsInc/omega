@@ -22486,6 +22486,7 @@ mod tests {
                     ("cmd-v", "editor::Paste"),
                     ("cmd-a", "editor::SelectAll"),
                     ("cmd-f", "agent::ToggleSearch"),
+                    ("cmd-shift-f", "omega_workbench::SelectForensics"),
                     ("cmd-=", "omega::IncreaseBufferFontSize"),
                     ("cmd--", "omega::DecreaseBufferFontSize"),
                     ("cmd-0", "omega::ResetBufferFontSize"),
@@ -22597,6 +22598,41 @@ mod tests {
                     "OMEGA-DELTA-0176: {keymap_path} resolves `{keystroke}` to refused `{action}`"
                 );
             }
+        }
+    }
+
+    /// The macOS Forensics shortcut wins in every bundled focus context and
+    /// in the optional JetBrains keymap instead of falling back to search.
+    #[test]
+    fn macos_forensics_shortcut_is_consistent_across_bundled_keymaps() {
+        for keymap_path in [
+            "assets/keymaps/default-macos.json",
+            "assets/keymaps/macos/jetbrains.json",
+        ] {
+            let parsed: serde_json::Value =
+                serde_json::from_str(&strip_jsonc(&read_repository_file(keymap_path)))
+                    .unwrap_or_else(|error| panic!("{keymap_path}: {error}"));
+            let sections = parsed
+                .as_array()
+                .unwrap_or_else(|| panic!("{keymap_path} is not an array"));
+            let actions = sections
+                .iter()
+                .filter_map(|section| section.get("bindings"))
+                .filter_map(serde_json::Value::as_object)
+                .filter_map(|bindings| bindings.get("cmd-shift-f"))
+                .filter_map(serde_json::Value::as_str)
+                .collect::<Vec<_>>();
+
+            assert!(
+                !actions.is_empty(),
+                "{keymap_path} does not bind cmd-shift-f"
+            );
+            assert!(
+                actions
+                    .iter()
+                    .all(|action| *action == "omega_workbench::SelectForensics"),
+                "{keymap_path} retains a conflicting cmd-shift-f binding: {actions:?}"
+            );
         }
     }
 
