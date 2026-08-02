@@ -307,8 +307,8 @@ pub struct ComposerVoiceNotice {
 ///
 /// `OMEGA-DELTA-0211`. One sentence, no cohort reference, no refusal token, no
 /// credit number, and no second sentence — the owner law the control-crawl copy
-/// lint enforces. Everything the detailed admission surface says still exists;
-/// Settings is where a person who wants it goes.
+/// lint enforces. The detailed admission surface remains available through
+/// Sarah's explicit conversation and menu entry points.
 pub const COMPOSER_VOICE_NOTICE_COPY: &str = "Sarah voice is not available.";
 
 #[derive(Default)]
@@ -462,12 +462,11 @@ pub fn remove_sarah_voice_admission(workspace_id: EntityId, cx: &mut App) {
 /// `OMEGA-DELTA-0211`. The control never navigates. When admission is already
 /// current it opens audio; when it is not, `StartVoiceFromComposer` loads the
 /// terms and opens audio without drawing a page; and when voice is refused it
-/// draws one sentence beside the button with a way to Settings. The detailed
-/// admission surface still exists and is still reached from Settings, the `+`
-/// menu, and the Thread menu — never from the microphone the person clicked
-/// while writing.
+/// draws one dismissible sentence beside the button. The detailed admission
+/// surface still exists and is reached from Sarah's chooser, the `+` menu, and
+/// the Thread menu — never from the microphone the person clicked while
+/// writing.
 pub fn render_composer_voice_controls(workspace_id: EntityId, cx: &mut App) -> AnyElement {
-    use omega_actions::OpenSettings;
     use omega_actions::workroom::{EndVoice, StartVoice, StartVoiceFromComposer, ToggleVoiceMute};
 
     let status = composer_voice_status(workspace_id, cx).read(cx).clone();
@@ -515,17 +514,6 @@ pub fn render_composer_voice_controls(workspace_id: EntityId, cx: &mut App) -> A
                             Label::new(COMPOSER_VOICE_NOTICE_COPY)
                                 .size(LabelSize::Small)
                                 .color(Color::Default),
-                        )
-                        .child(
-                            Button::new("agent-composer-voice-notice-settings", "Settings")
-                                .debug_selector(|| "agent.composer.voice-notice.settings".into())
-                                .style(ButtonStyle::Subtle)
-                                .label_size(LabelSize::Small)
-                                .aria_label("Open Settings")
-                                .on_click(move |_, window, cx| {
-                                    dismiss_composer_voice_notice(workspace_id, cx);
-                                    window.dispatch_action(OpenSettings.boxed_clone(), cx);
-                                }),
                         )
                         .child(
                             IconButton::new("agent-composer-voice-notice-dismiss", IconName::Close)

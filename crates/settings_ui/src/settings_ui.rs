@@ -3576,7 +3576,6 @@ impl SettingsWindow {
                 let selected = entry.page_index == self.current_page_index();
                 let icon = match title {
                     "API Keys" => IconName::Lock,
-                    "Voice" => IconName::Mic,
                     _ => IconName::Settings,
                 };
                 h_flex()

@@ -23018,9 +23018,7 @@ mod tests {
             "StartVoice.boxed_clone()",
             "StartVoiceFromComposer.boxed_clone()",
             "show_composer_voice_notice(workspace_id, cx)",
-            "OpenSettings.boxed_clone()",
             "agent.composer.voice-notice",
-            "agent.composer.voice-notice.settings",
             "agent.composer.voice-notice.dismiss",
             "COMPOSER_VOICE_NOTICE_COPY",
         ] {
@@ -23032,7 +23030,8 @@ mod tests {
 
         // Owner law 2, mechanised for exactly this string: the notice is one
         // short sentence. No cohort reference, no refusal token, no credit
-        // arithmetic — that detail did not disappear, it moved to Settings.
+        // arithmetic — that detail stays in Sarah's explicit admission entry
+        // points.
         let copy = string_constant(&composer_voice, "COMPOSER_VOICE_NOTICE_COPY")
             .expect("OMEGA-DELTA-0211: the composer voice notice lost its copy constant");
         // The same rule the control-crawl copy lint applies, inlined so this
@@ -23064,29 +23063,24 @@ mod tests {
                 !copy.contains(forbidden),
                 "OMEGA-DELTA-0211: the composer voice notice says `{forbidden}`. \
                  That is the exposition the owner asked never to be navigated \
-                 into; Settings is where it lives."
+                 into; Sarah's explicit admission surface is where it lives."
             );
         }
 
-        // The Settings link is a real door, and the detail is behind it.
+        // The crash-prone Settings bridge is gone. Sarah's explicit chooser,
+        // `+` menu, and Thread menu remain the admission entry points.
         let page_data = read_repository_file("crates/settings_ui/src/page_data.rs");
-        for required in [
+        for removed in [
             "fn omega_voice_page()",
-            "title: \"Voice\"",
+            "button_text: \"Open Sarah voice\"",
             "agent::OpenSarahAdmission",
-            "omega_voice_page()",
         ] {
             assert!(
-                page_data.contains(required),
-                "OMEGA-DELTA-0211: focused Settings lost `{required}`. The \
-                 composer's popup sends people here; a row that is not there \
-                 makes the link a lie."
+                !page_data.contains(removed),
+                "OMEGA-DELTA-0211: focused Settings restored the removed \
+                 Sarah bridge `{removed}`"
             );
         }
-        assert!(
-            omega_zero_base::admits_action("omega::OpenSettings"),
-            "OMEGA-DELTA-0211: the composer's Settings link is refused in zero base"
-        );
         assert!(
             omega_zero_base::admits_action("workroom::StartVoiceFromComposer"),
             "OMEGA-DELTA-0211: the composer's own start action is refused in zero base"
@@ -27526,7 +27520,6 @@ mod tests {
             "COMET_SETTINGS_SIDEBAR_WIDTH",
             "omega-comet-settings-sidebar",
             "\"API Keys\" => IconName::Lock",
-            "\"Voice\" => IconName::Mic",
             "navigate_to_sub_page(\"llm_providers\"",
             "omega-comet-settings-back",
             "if this.embedded",
@@ -27550,12 +27543,12 @@ mod tests {
         let page_data =
             without_comments(&read_repository_file("crates/settings_ui/src/page_data.rs"));
         let focused = body_of(&page_data, "omega_settings_data");
-        for required in ["title: \"API Keys\"", "omega_voice_page()"] {
-            assert!(
-                focused.contains(required),
-                "OMEGA-DELTA-0224: the Comet sidebar no longer derives from Omega's focused setting `{required}`"
-            );
-        }
+        assert!(
+            focused.contains("title: \"API Keys\"")
+                && !focused.contains("omega_voice_page()")
+                && !navigation.contains("\"Voice\" => IconName::Mic"),
+            "OMEGA-DELTA-0224: focused Settings must keep API Keys and omit the removed Sarah voice bridge"
+        );
 
         let panel = without_comments(&read_repository_file("crates/agent_ui/src/agent_panel.rs"));
         let shell = body_of(&panel, "render_comet_shell");

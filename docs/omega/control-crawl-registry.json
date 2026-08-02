@@ -53,8 +53,8 @@
       "kind": "popover",
       "status": "complete",
       "crate": "agent_ui",
-      "description": "The composer microphone's one-line voice notice: copy, Settings link, and dismiss. Drawn in place instead of navigating to the admission page (OMEGA-DELTA-0211).",
-      "coverage": "the_composer_microphone_never_navigates_to_the_admission_page in agent_ui asserts the notice is drawn, the admission surface is not, the conversation stays drawn, and the Settings control dispatches omega::OpenSettings; omega_deltas asserts the render body cannot reach OpenSarahAdmission and that the copy carries no cohort, refusal, or credit exposition"
+      "description": "The composer microphone's one-line voice notice: copy and dismiss. Drawn in place instead of navigating to the admission page (OMEGA-DELTA-0211).",
+      "coverage": "the_composer_microphone_never_navigates_to_the_admission_page in agent_ui asserts the notice is drawn, the admission surface is not, the conversation stays drawn, and the notice dismisses locally; omega_deltas asserts the render body cannot reach OpenSarahAdmission or the removed Settings bridge and that the copy carries no cohort, refusal, or credit exposition"
     },
     {
       "id": "omega-tester-channel",

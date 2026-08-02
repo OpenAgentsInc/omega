@@ -22063,12 +22063,11 @@ mod tests {
             "OMEGA-DELTA-0211: the click has to leave something a person can \
              see, or it is a silent no-op"
         );
-        assert_eq!(
+        assert!(
             after
                 .occurrences("agent.composer.voice-notice.settings")
-                .len(),
-            1,
-            "the notice's only offer is the way to Settings"
+                .is_empty(),
+            "the removed Settings bridge must not return"
         );
         assert_eq!(
             after.occurrences("omega.workbench.composer").len(),
@@ -22082,25 +22081,21 @@ mod tests {
             "the microphone is still where it was"
         );
 
-        // The Settings control is a door, not a decoration: it dispatches the
-        // shipped action, and the notice comes back down.
-        let settings_bounds = cx
-            .debug_bounds("agent.composer.voice-notice.settings")
-            .expect("the notice draws its Settings control");
-        cx.simulate_click(settings_bounds.center(), Modifiers::default());
+        // The refusal stays local and dismissible. Admission remains available
+        // from Sarah's explicit chooser and menu entries.
+        let dismiss_bounds = cx
+            .debug_bounds("agent.composer.voice-notice.dismiss")
+            .expect("the notice draws its dismiss control");
+        cx.simulate_click(dismiss_bounds.center(), Modifiers::default());
         cx.run_until_parked();
         cx.update(|_window, cx| {
             assert!(
                 !crate::composer_voice::composer_voice_notice(workspace_id, cx)
                     .read(cx)
                     .showing,
-                "OMEGA-DELTA-0211: choosing Settings must take the notice down"
+                "OMEGA-DELTA-0211: dismissing the notice must take it down"
             );
         });
-        assert!(
-            omega_zero_base::admits_action("omega::OpenSettings"),
-            "OMEGA-DELTA-0211: the notice's Settings action is refused in zero base"
-        );
     }
 
     #[gpui::test]

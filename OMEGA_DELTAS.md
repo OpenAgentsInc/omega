@@ -9441,12 +9441,13 @@ is recorded in omega#190.
 
 **The composer voice control never navigates.** It opens audio when the exact
 admission terms are already loaded and admitted, loads them and opens audio
-when they are not, and when voice is refused it draws one short sentence
-anchored to the button that was clicked, with a link to Settings. The detailed
-admission surface — cohort reference, refusal reason, rate, credit hold,
-remaining credit, duration, transcript policy, bounded capabilities — is not
-deleted and not weakened. It is reached from Settings, the `+` menu, and the
-Thread menu, by a person who went looking for it.
+when they are not, and when voice is refused it draws one short dismissible
+sentence anchored to the button that was clicked. The detailed admission
+surface — cohort reference, refusal reason, rate, credit hold, remaining
+credit, duration, transcript policy, bounded capabilities — is not deleted and
+not weakened. It is reached from Sarah's chooser, the `+` menu, and the Thread
+menu, by a person who went looking for it. Focused Settings does not proxy the
+admission action across windows.
 
 **Why.** The microphone sat in the composer, beside Send, on the surface where
 a person writes. `OMEGA-DELTA-0180` wired every non-active phase of it —

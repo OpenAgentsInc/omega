@@ -201,8 +201,9 @@ external-agent view, with its native controls.
 Choosing **Sarah**, **Thread > Sarah voice…**, or **Sarah voice…** in the
 toolbar `+` menu opens the same admission surface inside Agent Panel. The
 composer microphone stays in the conversation: when terms are ready it starts
-voice, otherwise it loads them and shows a short refusal beside the control
-with a link to the detailed Voice settings. Opening admission does not request
+voice, otherwise it loads them and shows a short dismissible refusal beside the
+control. Detailed admission remains available from Sarah's chooser and menu
+entries. Opening admission does not request
 microphone access or a one-use voice ticket. A Ready surface first shows the
 service-returned admission cohort, effective
 rate, credit hold, remaining credit or explicit non-metered owner entitlement,

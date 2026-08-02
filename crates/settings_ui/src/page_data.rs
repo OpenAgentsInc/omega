@@ -85,9 +85,9 @@ pub(crate) fn settings_data(cx: &App) -> Vec<SettingsPage> {
 /// The focused Omega settings surface.
 ///
 /// The inherited editor remains available as Legacy Settings. This surface
-/// carries the categories Omega owns: provider credentials, and — since
-/// `OMEGA-DELTA-0211` — the Sarah voice admission detail the composer stopped
-/// navigating to.
+/// carries the provider credentials Omega owns. Sarah voice admission belongs
+/// to Agent Panel and is reached through Sarah's explicit conversation/menu
+/// entry points, not through a cross-window Settings bridge.
 pub(crate) fn omega_settings_data(cx: &App) -> Vec<SettingsPage> {
     let provider_items = ai_page(cx).items.into_vec().into_iter().filter(|item| {
         matches!(
@@ -99,54 +99,10 @@ pub(crate) fn omega_settings_data(cx: &App) -> Vec<SettingsPage> {
 
     let mut items = vec![SettingsPageItem::SectionHeader("Providers")];
     items.extend(provider_items);
-    vec![
-        SettingsPage {
-            title: "API Keys",
-            items: items.into_boxed_slice(),
-        },
-        omega_voice_page(),
-    ]
-}
-
-/// `OMEGA-DELTA-0211`. Where the Sarah voice admission detail lives now.
-///
-/// The composer microphone used to take the whole panel over with cohort
-/// references, refusal tokens, and credit arithmetic. None of that detail was
-/// deleted — it moved behind a person's own decision to go looking for it, and
-/// this row is the door. It dispatches the same `agent::OpenSarahAdmission`
-/// the `+` menu and the Thread menu dispatch, by name, so Settings does not
-/// have to depend on the Agent Panel to reach it.
-fn omega_voice_page() -> SettingsPage {
-    SettingsPage {
-        title: "Voice",
-        items: Box::new([
-            SettingsPageItem::SectionHeader("Sarah voice"),
-            SettingsPageItem::ActionLink(ActionLink {
-                title: "Sarah voice admission".into(),
-                description: Some(
-                    "Cohort, price, credit hold, duration, transcript policy, and the bounded command set."
-                        .into(),
-                ),
-                button_text: "Open Sarah voice".into(),
-                on_click: Arc::new(|settings_window, window, cx| {
-                    let Some(original_window) = settings_window.original_window else {
-                        return;
-                    };
-                    let Ok(action) = cx.build_action("agent::OpenSarahAdmission", None) else {
-                        return;
-                    };
-                    original_window
-                        .update(cx, |_workspace, original_window, cx| {
-                            original_window.dispatch_action(action, cx);
-                            original_window.activate_window();
-                        })
-                        .ok();
-                    window.remove_window();
-                }),
-                files: USER,
-            }),
-        ]),
-    }
+    vec![SettingsPage {
+        title: "API Keys",
+        items: items.into_boxed_slice(),
+    }]
 }
 
 fn developer_page(cx: &App) -> SettingsPage {

@@ -8,13 +8,13 @@ collaboration mute or deafen state. An admitted `livekit_room_v1` session joins
 one owner-private LiveKit room for media only; the prior `custom_wss_v1` PCM
 transport remains an explicit rollback path.
 
-Opening Sarah from the new-conversation row, Thread menu, toolbar `+` menu, or
-the **Voice** page in Settings only opens admission. The composer microphone
-control never opens admission and never navigates: it opens audio when the
-exact terms are already loaded and admitted, loads them and opens audio when
-they are not, and when voice is refused it draws one sentence beside the button
-with a link to Settings. The admission page is where a person goes to read the
-detail, not where a click while writing puts them.
+Opening Sarah from the new-conversation row, Thread menu, or toolbar `+` menu
+only opens admission. The composer microphone
+control never opens admission and never navigates: it opens audio when the exact terms are already loaded and
+admitted, loads them and opens audio when they are not, and when voice is
+refused it draws one dismissible sentence beside the button. The admission
+page is where a person goes to read the detail, not where a click while writing
+puts them. Focused Settings does not proxy Sarah admission across windows.
 
 In Comet mode, the new/loading composer renders that same shared microphone
 control before a conversation session exists. It uses the existing Sarah
