@@ -32,6 +32,7 @@ use crate::entry_view_state::{
     tool_output_ceiling_label,
 };
 use crate::message_editor::SharedSessionCapabilities;
+use crate::omega_executor_disclosure::ThreadExecutorDisclosure as _;
 use crate::ui::{
     SandboxGroup, SandboxRow, SandboxSection, SandboxStatusTooltip, TerminalSandboxWarning,
     TerminalToolHeader,
@@ -42,7 +43,7 @@ use db::kvp::KeyValueStore;
 use full_auto_ui::{ThreadRunLink, ThreadRunRecords, project_thread_run_link};
 use gpui::Stateful;
 use gpui::TaskExt;
-use gpui::{List, PromptLevel};
+use gpui::{DismissEvent, List, PromptLevel};
 use heapless::Vec as ArrayVec;
 use language_model::{
     FastModeConfirmation, LanguageModel, LanguageModelEffortLevel, LanguageModelId,
@@ -71,6 +72,202 @@ const DATA_RETENTION_LEARN_MORE_URL: &str = "https://support.claude.com/en/artic
 struct ThreadFeedbackState {
     feedback: Option<ThreadFeedback>,
     comments_editor: Option<Entity<Editor>>,
+}
+
+#[derive(Clone, Debug, PartialEq)]
+struct MessageCost {
+    amount: f64,
+    currency: SharedString,
+}
+
+#[derive(Clone)]
+struct MessageGenerationInfo {
+    executor: ExecutorDisclosure,
+    input_tokens: Option<u64>,
+    output_tokens: Option<u64>,
+    total_tokens: Option<u64>,
+    cost: Option<MessageCost>,
+    duration: Option<Duration>,
+    recorded_for_message: bool,
+}
+
+impl MessageGenerationInfo {
+    fn unavailable(executor: ExecutorDisclosure) -> Self {
+        Self {
+            executor: ExecutorDisclosure {
+                class: executor.class,
+                agent_id: executor.agent_id,
+                provider: None,
+                model: None,
+                run_ref: None,
+                route: None,
+            },
+            input_tokens: None,
+            output_tokens: None,
+            total_tokens: None,
+            cost: None,
+            duration: None,
+            recorded_for_message: false,
+        }
+    }
+}
+
+fn message_token_usage(
+    starting: Option<&acp_thread::TokenUsage>,
+    ending: Option<acp_thread::TokenUsage>,
+) -> (Option<u64>, Option<u64>, Option<u64>) {
+    let Some(usage) = ending.filter(|usage| Some(usage) != starting) else {
+        return (None, None, None);
+    };
+    let split_available = usage.input_tokens > 0 || usage.output_tokens > 0;
+    (
+        split_available.then_some(usage.input_tokens),
+        split_available.then_some(usage.output_tokens),
+        (usage.used_tokens > 0).then_some(usage.used_tokens),
+    )
+}
+
+fn message_cost(
+    starting: Option<&MessageCost>,
+    ending: Option<MessageCost>,
+) -> Option<MessageCost> {
+    match (starting, ending) {
+        (Some(start), Some(end)) if start.currency == end.currency && end.amount > start.amount => {
+            Some(MessageCost {
+                amount: end.amount - start.amount,
+                currency: end.currency,
+            })
+        }
+        (None, Some(end)) if end.amount > 0.0 => Some(end),
+        _ => None,
+    }
+}
+
+struct MessageInfoPopover {
+    focus_handle: FocusHandle,
+    info: MessageGenerationInfo,
+}
+
+impl MessageInfoPopover {
+    fn new(info: MessageGenerationInfo, cx: &mut Context<Self>) -> Self {
+        Self {
+            focus_handle: cx.focus_handle(),
+            info,
+        }
+    }
+
+    fn row(label: &'static str, value: impl Into<SharedString>) -> AnyElement {
+        h_flex()
+            .w_full()
+            .min_w_0()
+            .justify_between()
+            .gap_4()
+            .child(
+                Label::new(label)
+                    .size(LabelSize::XSmall)
+                    .color(Color::Muted),
+            )
+            .child(Label::new(value.into()).size(LabelSize::XSmall).truncate())
+            .into_any_element()
+    }
+
+    fn optional_count(value: Option<u64>) -> SharedString {
+        value
+            .map(crate::humanize_token_count)
+            .unwrap_or_else(|| "Unavailable".to_owned())
+            .into()
+    }
+
+    fn cost_label(cost: Option<&MessageCost>) -> SharedString {
+        let Some(cost) = cost else {
+            return "Unavailable".into();
+        };
+        let precision = if cost.amount > 0.0 && cost.amount < 0.01 {
+            4
+        } else {
+            2
+        };
+        format!(
+            "{:.precision$} {}",
+            cost.amount,
+            cost.currency,
+            precision = precision
+        )
+        .into()
+    }
+}
+
+impl Focusable for MessageInfoPopover {
+    fn focus_handle(&self, _cx: &App) -> FocusHandle {
+        self.focus_handle.clone()
+    }
+}
+
+impl EventEmitter<DismissEvent> for MessageInfoPopover {}
+
+impl Render for MessageInfoPopover {
+    fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        let info = self.info.clone();
+        let provider = info
+            .executor
+            .provider
+            .clone()
+            .unwrap_or_else(|| "Not disclosed".to_owned());
+        let model = info
+            .executor
+            .model
+            .clone()
+            .unwrap_or_else(|| "Not disclosed".to_owned());
+        let duration = info
+            .duration
+            .map(duration_alt_display)
+            .unwrap_or_else(|| "Unavailable".to_owned());
+
+        Popover::new().child(
+            v_flex()
+                .id("assistant-message-info-popover")
+                .key_context("AssistantMessageInfo")
+                .track_focus(&self.focus_handle)
+                .w(px(340.))
+                .max_w_full()
+                .gap_2()
+                .px_3()
+                .py_2()
+                .on_action(cx.listener(|_, _: &menu::Cancel, _, cx| {
+                    cx.emit(DismissEvent);
+                }))
+                .child(
+                    Label::new("Message info")
+                        .size(LabelSize::Small)
+                        .color(Color::Default),
+                )
+                .child(Self::row("Agent", info.executor.agent_id))
+                .child(Self::row("Provider", provider))
+                .child(Self::row("Model", model))
+                .child(div().h_px().w_full().bg(cx.theme().colors().border_variant))
+                .child(Self::row(
+                    "Input tokens",
+                    Self::optional_count(info.input_tokens),
+                ))
+                .child(Self::row(
+                    "Output tokens",
+                    Self::optional_count(info.output_tokens),
+                ))
+                .child(Self::row(
+                    "Total tokens",
+                    Self::optional_count(info.total_tokens),
+                ))
+                .child(Self::row("Cost", Self::cost_label(info.cost.as_ref())))
+                .child(Self::row("Duration", duration))
+                .when(!info.recorded_for_message, |this| {
+                    this.child(
+                        Label::new("Detailed usage was not recorded for this message.")
+                            .size(LabelSize::XSmall)
+                            .color(Color::Muted),
+                    )
+                }),
+        )
+    }
 }
 
 /// `OMEGA-DELTA-0214`. There is exactly one outcome. Admission used to be a
@@ -632,6 +829,7 @@ pub struct ThreadView {
     pub editing_message: Option<usize>,
     pub message_queue: MessageQueue,
     pub turn_fields: TurnFields,
+    message_generation_info: HashMap<usize, MessageGenerationInfo>,
     pub discarded_partial_edits: HashSet<acp::ToolCallId>,
     pub is_loading_contents: bool,
     repository_mutation_pending: bool,
@@ -738,6 +936,8 @@ pub struct TurnFields {
     pub turn_generation: usize,
     pub turn_started_at: Option<Instant>,
     pub turn_tokens: Option<u64>,
+    starting_token_usage: Option<acp_thread::TokenUsage>,
+    starting_cost: Option<MessageCost>,
 }
 
 /// How a tool call is rendered relative to its surroundings.
@@ -1177,6 +1377,7 @@ impl ThreadView {
             editing_message: None,
             message_queue: MessageQueue::default(),
             turn_fields: TurnFields::default(),
+            message_generation_info: HashMap::default(),
             discarded_partial_edits: HashSet::default(),
             is_loading_contents: false,
             repository_mutation_pending: false,
@@ -1561,6 +1762,11 @@ impl ThreadView {
         self.turn_fields.last_turn_duration = None;
         self.turn_fields.last_turn_tokens = None;
         self.turn_fields.turn_tokens = Some(0);
+        self.turn_fields.starting_token_usage = self.thread.read(cx).token_usage().cloned();
+        self.turn_fields.starting_cost = self.thread.read(cx).cost().map(|cost| MessageCost {
+            amount: cost.amount,
+            currency: cost.currency.clone(),
+        });
         self.turn_fields._turn_timer_task = Some(cx.spawn(async move |this, cx| {
             loop {
                 cx.background_executor().timer(Duration::from_secs(1)).await;
@@ -1572,7 +1778,7 @@ impl ThreadView {
         generation
     }
 
-    pub fn stop_turn(&mut self, generation: usize, _cx: &mut Context<Self>) {
+    pub fn stop_turn(&mut self, generation: usize, cx: &mut Context<Self>) {
         if self.turn_fields.turn_generation != generation {
             return;
         }
@@ -1583,6 +1789,39 @@ impl ThreadView {
             .map(|started| started.elapsed());
         self.turn_fields.last_turn_tokens = self.turn_fields.turn_tokens.take();
         self.turn_fields._turn_timer_task = None;
+
+        let ending_usage = self.thread.read(cx).token_usage().cloned();
+        let (input_tokens, output_tokens, total_tokens) =
+            message_token_usage(self.turn_fields.starting_token_usage.as_ref(), ending_usage);
+        let ending_cost = self.thread.read(cx).cost().map(|cost| MessageCost {
+            amount: cost.amount,
+            currency: cost.currency.clone(),
+        });
+        let cost = message_cost(self.turn_fields.starting_cost.as_ref(), ending_cost);
+        let duration = self.turn_fields.last_turn_duration;
+        let executor = self.thread.read(cx).omega_executor_disclosure(cx);
+        if let Some(entry_ix) = self
+            .thread
+            .read(cx)
+            .entries()
+            .iter()
+            .rposition(|entry| matches!(entry, AgentThreadEntry::AssistantMessage(_)))
+        {
+            self.message_generation_info.insert(
+                entry_ix,
+                MessageGenerationInfo {
+                    executor,
+                    input_tokens,
+                    output_tokens,
+                    total_tokens,
+                    cost,
+                    duration,
+                    recorded_for_message: true,
+                },
+            );
+        }
+        self.turn_fields.starting_token_usage = None;
+        self.turn_fields.starting_cost = None;
     }
 
     pub fn update_turn_tokens(&mut self, cx: &App) {
@@ -7629,6 +7868,31 @@ impl ThreadView {
                 }))
         });
 
+        let message_info_button = copy_response_index.map(|_| {
+            let info = self
+                .message_generation_info
+                .get(&entry_ix)
+                .cloned()
+                .unwrap_or_else(|| {
+                    MessageGenerationInfo::unavailable(
+                        self.thread.read(cx).omega_executor_disclosure(cx),
+                    )
+                });
+            PopoverMenu::new(("assistant-message-info", entry_ix))
+                .trigger_with_tooltip(
+                    IconButton::new(("assistant-message-info-button", entry_ix), IconName::Info)
+                        .icon_size(IconSize::Small)
+                        .icon_color(Color::Muted),
+                    |window, cx| Tooltip::text("Message info")(window, cx),
+                )
+                .anchor(gpui::Anchor::BottomRight)
+                .attach(gpui::Anchor::TopRight)
+                .menu(move |_window, cx| {
+                    let info = info.clone();
+                    Some(cx.new(|cx| MessageInfoPopover::new(info, cx)))
+                })
+        });
+
         let scroll_to_recent_user_prompt = IconButton::new(
             ("scroll_to_recent_user_prompt", entry_ix),
             IconName::UserArrowUp,
@@ -7768,6 +8032,7 @@ impl ThreadView {
                 },
             )
             .when_some(feedback_buttons, |this, buttons| this.child(buttons))
+            .when_some(message_info_button, |this, button| this.child(button))
             .when_some(copy_response_button, |this, button| this.child(button))
             .child(scroll_to_recent_user_prompt)
             .when_some(scroll_to_top, |this, button| this.child(button))
@@ -15565,11 +15830,70 @@ fn strip_leading_command(text: &str, command_name: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use omega_front_door::ExecutorClass;
     use project::{FakeFs, Project};
     use serde_json::json;
     use std::path::Path;
     use util::path;
     use workspace::MultiWorkspace;
+
+    #[test]
+    fn message_info_uses_only_usage_recorded_for_that_turn() {
+        let starting = acp_thread::TokenUsage {
+            used_tokens: 40,
+            input_tokens: 30,
+            output_tokens: 10,
+            ..Default::default()
+        };
+        assert_eq!(
+            message_token_usage(Some(&starting), Some(starting.clone())),
+            (None, None, None)
+        );
+
+        let ending = acp_thread::TokenUsage {
+            used_tokens: 90,
+            input_tokens: 70,
+            output_tokens: 20,
+            ..Default::default()
+        };
+        assert_eq!(
+            message_token_usage(Some(&starting), Some(ending)),
+            (Some(70), Some(20), Some(90))
+        );
+    }
+
+    #[test]
+    fn message_info_does_not_fabricate_legacy_model_or_cost() {
+        let legacy = MessageGenerationInfo::unavailable(ExecutorDisclosure {
+            class: ExecutorClass::NativeLoop,
+            agent_id: "Omega".to_owned(),
+            provider: Some("provider-at-view-time".to_owned()),
+            model: Some("model-at-view-time".to_owned()),
+            run_ref: None,
+            route: None,
+        });
+        assert_eq!(legacy.executor.agent_id, "Omega");
+        assert_eq!(legacy.executor.provider, None);
+        assert_eq!(legacy.executor.model, None);
+        assert_eq!(legacy.cost, None);
+        assert!(!legacy.recorded_for_message);
+
+        let starting = MessageCost {
+            amount: 0.25,
+            currency: "USD".into(),
+        };
+        assert_eq!(message_cost(Some(&starting), Some(starting.clone())), None);
+        let delta = message_cost(
+            Some(&starting),
+            Some(MessageCost {
+                amount: 0.40,
+                currency: "USD".into(),
+            }),
+        )
+        .expect("an increased cumulative cost has a per-message delta");
+        assert!((delta.amount - 0.15).abs() < f64::EPSILON);
+        assert_eq!(delta.currency.as_ref(), "USD");
+    }
 
     fn native_command(name: &str) -> acp::AvailableCommand {
         acp::AvailableCommand::new(name, "").meta(acp_thread::meta_with_command_category(

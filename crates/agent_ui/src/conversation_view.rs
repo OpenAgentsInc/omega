@@ -64,7 +64,7 @@ use theme_settings::{AgentBufferFontSize, AgentUiFontSize};
 use ui::{
     ButtonSize, Callout, CircularProgress, CommonAnimationExt, ContextMenu, ContextMenuEntry,
     CopyButton, DecoratedIcon, DiffStat, Disclosure, Divider, DividerColor, IconDecoration,
-    IconDecorationKind, KeyBinding, PopoverMenu, PopoverMenuHandle, TintColor, Tooltip,
+    IconDecorationKind, KeyBinding, Popover, PopoverMenu, PopoverMenuHandle, TintColor, Tooltip,
     WithScrollbar, prelude::*, right_click_menu,
 };
 use util::{
