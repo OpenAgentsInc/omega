@@ -274,6 +274,24 @@ fn stable_comet_session_rows(
     rows
 }
 
+fn reconcile_new_comet_session_rows(
+    rows: Vec<omega_threads_sidebar::ThreadRow>,
+    active_thread_id: Option<ThreadId>,
+    known_tabs: &mut HashSet<ThreadId>,
+    closed_tabs: &mut HashSet<ThreadId>,
+) {
+    for row in rows {
+        if known_tabs.insert(row.thread_id) && Some(row.thread_id) != active_thread_id {
+            closed_tabs.insert(row.thread_id);
+        }
+    }
+
+    if let Some(active_thread_id) = active_thread_id {
+        known_tabs.insert(active_thread_id);
+        closed_tabs.remove(&active_thread_id);
+    }
+}
+
 fn forensics_timestamp() -> String {
     Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Millis, true)
 }
@@ -2349,6 +2367,7 @@ pub struct AgentPanel {
     workbench_shell_enabled: bool,
     comet_titlebar_dragging: bool,
     comet_sidebar_tween: Option<CometSidebarTween>,
+    comet_known_session_tabs: HashSet<ThreadId>,
     comet_closed_session_tabs: HashSet<ThreadId>,
     comet_navigation_history: CometNavigationHistory,
     /// Thread keys whose durable disk selection was already adopted (or
@@ -2972,6 +2991,7 @@ impl AgentPanel {
             workbench_shell_enabled: omega_zero_base::is_active(),
             comet_titlebar_dragging: false,
             comet_sidebar_tween: None,
+            comet_known_session_tabs: HashSet::default(),
             comet_closed_session_tabs: HashSet::default(),
             comet_navigation_history: CometNavigationHistory::default(),
             workbench_selection_restore_attempted: HashSet::default(),
@@ -14570,6 +14590,16 @@ impl AgentPanel {
         stable_comet_session_rows(rows, active_thread_id, true)
     }
 
+    fn reconcile_comet_session_tabs(&mut self, cx: &App) {
+        let active_thread_id = self.active_thread_id(cx);
+        reconcile_new_comet_session_rows(
+            self.threads_sidebar_rows(cx),
+            active_thread_id,
+            &mut self.comet_known_session_tabs,
+            &mut self.comet_closed_session_tabs,
+        );
+    }
+
     fn comet_sidebar_session_rows(&self, cx: &App) -> Vec<omega_threads_sidebar::ThreadRow> {
         let active_thread_id = self.active_thread_id(cx);
         stable_comet_session_rows(self.threads_sidebar_rows(cx), active_thread_id, false)
@@ -14671,6 +14701,7 @@ impl AgentPanel {
             self.comet_sidebar_tween = None;
         }
         let active_thread_id = self.active_thread_id(cx);
+        self.reconcile_comet_session_tabs(cx);
         if let Some(active_thread_id) = active_thread_id {
             self.comet_navigation_history.push(active_thread_id);
         }
@@ -15868,6 +15899,36 @@ mod comet_sidebar_motion_tests {
                 ["newest", "middle", "oldest"]
             );
         }
+    }
+
+    #[test]
+    fn comet_startup_opens_only_the_active_session_tab() {
+        let now = Utc::now();
+        let active = comet_row("active", now);
+        let recent = comet_row("recent", now - chrono::Duration::minutes(1));
+        let older = comet_row("older", now - chrono::Duration::minutes(2));
+        let mut known_tabs = HashSet::default();
+        let mut closed_tabs = HashSet::default();
+
+        reconcile_new_comet_session_rows(
+            vec![active.clone(), recent.clone(), older.clone()],
+            Some(active.thread_id),
+            &mut known_tabs,
+            &mut closed_tabs,
+        );
+
+        assert!(!closed_tabs.contains(&active.thread_id));
+        assert!(closed_tabs.contains(&recent.thread_id));
+        assert!(closed_tabs.contains(&older.thread_id));
+
+        closed_tabs.remove(&recent.thread_id);
+        reconcile_new_comet_session_rows(
+            vec![active, recent.clone(), older],
+            Some(recent.thread_id),
+            &mut known_tabs,
+            &mut closed_tabs,
+        );
+        assert!(!closed_tabs.contains(&recent.thread_id));
     }
 }
 
