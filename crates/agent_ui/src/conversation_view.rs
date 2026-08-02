@@ -1886,9 +1886,12 @@ impl ConversationView {
                             cx,
                         );
                     });
-                    let was_focused = this.focus_handle.contains_focused(window, cx);
+                    let loading_composer_was_focused = this
+                        .loading_composer
+                        .as_ref()
+                        .is_some_and(|editor| editor.focus_handle(cx).contains_focused(window, cx));
                     this.hand_loading_draft_over(&current, window, cx);
-                    if was_focused {
+                    if loading_composer_was_focused {
                         current
                             .read(cx)
                             .message_editor
@@ -2494,10 +2497,13 @@ impl ConversationView {
                             );
                         });
 
-                        let was_focused = this.focus_handle.contains_focused(window, cx);
+                        let loading_composer_was_focused =
+                            this.loading_composer.as_ref().is_some_and(|editor| {
+                                editor.focus_handle(cx).contains_focused(window, cx)
+                            });
                         this.hand_loading_draft_over(&current, window, cx);
 
-                        if was_focused {
+                        if loading_composer_was_focused {
                             current
                                 .read(cx)
                                 .message_editor
@@ -4374,6 +4380,7 @@ impl ConversationView {
             conversation_is_bound,
             editor.focus_handle(cx),
             model_picker,
+            window,
             cx,
         );
 
@@ -8778,6 +8785,29 @@ pub(crate) mod tests {
                 "Direct Agent readiness must retain its physical-session proof"
             );
         });
+    }
+
+    #[gpui::test]
+    async fn connected_composer_accepts_pointer_input_after_loading(cx: &mut TestAppContext) {
+        init_test(cx);
+
+        let (conversation_view, cx) = setup_conversation_view_still_connecting(
+            StubAgentServer::new(StubAgentConnection::new()),
+            cx,
+        )
+        .await;
+        add_to_workspace(conversation_view.clone(), cx);
+        cx.run_until_parked();
+
+        cx.simulate_click_selector("omega.workbench.composer-input")
+            .expect("the connected composer must be clickable");
+        cx.simulate_keystrokes("pointerinput");
+
+        assert_eq!(
+            message_editor(&conversation_view, cx).read_with(cx, |editor, cx| editor.text(cx)),
+            "pointerinput",
+            "the loaded composer must receive mouse focus and typed text"
+        );
     }
 
     /// `OMEGA-DELTA-0170`, the failure half. A message sent while connecting

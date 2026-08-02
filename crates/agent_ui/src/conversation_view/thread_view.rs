@@ -5019,7 +5019,7 @@ impl ThreadView {
 
     pub(crate) fn render_message_editor(
         &mut self,
-        _window: &mut Window,
+        window: &mut Window,
         cx: &mut Context<Self>,
     ) -> AnyElement {
         if self.is_subagent() {
@@ -5042,7 +5042,7 @@ impl ThreadView {
             cx.theme().window_background_appearance() == gpui::WindowBackgroundAppearance::Opaque;
 
         let controls = if omega_zero_base::is_active() {
-            self.render_zero_base_executor_bar(compact, cx)
+            self.render_zero_base_executor_bar(compact, window, cx)
         } else {
             h_flex()
                 .w_full()
@@ -14290,6 +14290,7 @@ impl ThreadView {
     fn render_zero_base_executor_bar(
         &mut self,
         compact: bool,
+        window: &mut Window,
         cx: &mut Context<Self>,
     ) -> AnyElement {
         let exo = self.exo_connection(cx);
@@ -14365,7 +14366,7 @@ impl ThreadView {
                     // omega#165: on a bound conversation it starts a new
                     // thread on the picked executor; it never retargets this
                     // transcript.
-                    .children(self.render_composer_executor_menu(!turn_running, cx))
+                    .children(self.render_composer_executor_menu(!turn_running, window, cx))
                     // omega#99. The inspector's contents are the conversation's
                     // — identity, runtime, capabilities and the authority
                     // receipt for the turn a person just watched — so in zero
@@ -14408,6 +14409,7 @@ impl ThreadView {
     fn render_composer_executor_menu(
         &self,
         model_picker_enabled: bool,
+        window: &mut Window,
         cx: &mut Context<Self>,
     ) -> Option<AnyElement> {
         let conversation_is_bound = !self.thread.read(cx).is_draft_thread();
@@ -14425,6 +14427,7 @@ impl ThreadView {
             conversation_is_bound,
             self.message_editor.focus_handle(cx),
             self.composer_model_picker(model_picker_enabled, cx),
+            window,
             cx,
         )
     }

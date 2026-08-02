@@ -53,6 +53,7 @@ pub struct ComposerModelOption {
     pub disabled: bool,
 }
 
+#[derive(Clone)]
 pub struct ComposerModelPicker {
     pub label: SharedString,
     pub current_model: Option<acp_thread::AgentModelId>,
@@ -109,15 +110,17 @@ impl ComposerModelPicker {
 /// here at construction instead, and the render path reads this global
 /// immutably.
 #[derive(Default)]
-struct GlobalComposerExecutorMenuHandles(
-    HashMap<
+struct GlobalComposerExecutorMenuHandles {
+    handles: HashMap<
         EntityId,
         (
             PopoverMenuHandle<CometComposerModelMenu>,
             WeakEntity<AgentPanel>,
         ),
     >,
-);
+    keep_open: HashMap<EntityId, bool>,
+    reopen_scheduled: HashMap<EntityId, bool>,
+}
 
 impl Global for GlobalComposerExecutorMenuHandles {}
 
@@ -133,7 +136,7 @@ pub(crate) fn register_menu_handle(
     cx: &mut App,
 ) {
     cx.default_global::<GlobalComposerExecutorMenuHandles>()
-        .0
+        .handles
         .insert(workspace_id, (handle, panel));
 }
 
@@ -145,7 +148,20 @@ fn menu_handle(
     WeakEntity<AgentPanel>,
 )> {
     cx.try_global::<GlobalComposerExecutorMenuHandles>()
-        .and_then(|handles| handles.0.get(&workspace_id).cloned())
+        .and_then(|handles| handles.handles.get(&workspace_id).cloned())
+}
+
+fn keep_menu_open(workspace_id: EntityId, keep_open: bool, cx: &mut App) {
+    cx.default_global::<GlobalComposerExecutorMenuHandles>()
+        .keep_open
+        .insert(workspace_id, keep_open);
+}
+
+fn menu_should_stay_open(workspace_id: EntityId, cx: &App) -> bool {
+    cx.try_global::<GlobalComposerExecutorMenuHandles>()
+        .and_then(|handles| handles.keep_open.get(&workspace_id))
+        .copied()
+        .unwrap_or(false)
 }
 
 /// The menu header over an unbound conversation: choosing re-homes this
@@ -188,9 +204,49 @@ pub fn render_composer_executor_menu(
     conversation_is_bound: bool,
     composer_focus_handle: FocusHandle,
     model_picker: ComposerModelPicker,
-    cx: &App,
+    window: &mut Window,
+    cx: &mut App,
 ) -> Option<AnyElement> {
-    let (handle, panel) = menu_handle(workspace.entity_id(), cx)?;
+    let workspace_id = workspace.entity_id();
+    let (handle, panel) = menu_handle(workspace_id, cx)?;
+
+    if let Some(menu) = handle.deployed_menu() {
+        let current_label = current_label.clone();
+        let composer_focus_handle = composer_focus_handle.clone();
+        let model_picker = model_picker.clone();
+        menu.update(cx, |menu, cx| {
+            menu.sync_active_composer(
+                current_label,
+                conversation_is_bound,
+                composer_focus_handle,
+                model_picker,
+                cx,
+            );
+        });
+    } else if menu_should_stay_open(workspace_id, cx) {
+        let should_schedule = {
+            let handles = cx.default_global::<GlobalComposerExecutorMenuHandles>();
+            !handles
+                .reopen_scheduled
+                .get(&workspace_id)
+                .copied()
+                .unwrap_or(false)
+        };
+        if should_schedule {
+            cx.default_global::<GlobalComposerExecutorMenuHandles>()
+                .reopen_scheduled
+                .insert(workspace_id, true);
+            let handle = handle.clone();
+            window.on_next_frame(move |window, cx| {
+                cx.default_global::<GlobalComposerExecutorMenuHandles>()
+                    .reopen_scheduled
+                    .insert(workspace_id, false);
+                if menu_should_stay_open(workspace_id, cx) {
+                    handle.show(window, cx);
+                }
+            });
+        }
+    }
 
     let model_label = model_picker.label.clone();
     let trigger_icon = executor_icon(&current_label);
@@ -232,6 +288,9 @@ pub fn render_composer_executor_menu(
             // `OMEGA-DELTA-0189`): a dropdown labeled with the executor name
             // needs no essay about internal mechanics.
             .with_handle(handle)
+            .on_open(Rc::new(move |_, cx| {
+                keep_menu_open(workspace_id, true, cx);
+            }))
             .trigger(trigger)
             .anchor(gpui::Anchor::BottomRight)
             .menu(move |window, cx| {
@@ -247,6 +306,7 @@ pub fn render_composer_executor_menu(
                 Some(cx.new(|cx| {
                     CometComposerModelMenu::new(
                         panel,
+                        workspace_id,
                         rows,
                         conversation_is_bound,
                         composer_focus_handle.clone(),
@@ -275,6 +335,7 @@ fn executor_icon(label: &str) -> IconName {
 
 pub(crate) struct CometComposerModelMenu {
     panel: gpui::Entity<AgentPanel>,
+    workspace_id: EntityId,
     rows: Vec<ComposerExecutorRow>,
     conversation_is_bound: bool,
     composer_focus_handle: FocusHandle,
@@ -285,11 +346,13 @@ pub(crate) struct CometComposerModelMenu {
     on_model_select: Rc<dyn Fn(acp_thread::AgentModelId, &mut Window, &mut App)>,
     focus_handle: FocusHandle,
     selected_index: usize,
+    preserve_open_on_blur: bool,
 }
 
 impl CometComposerModelMenu {
     fn new(
         panel: gpui::Entity<AgentPanel>,
+        workspace_id: EntityId,
         rows: Vec<ComposerExecutorRow>,
         conversation_is_bound: bool,
         composer_focus_handle: FocusHandle,
@@ -302,11 +365,19 @@ impl CometComposerModelMenu {
         cx: &mut Context<Self>,
     ) -> Self {
         let focus_handle = cx.focus_handle();
-        cx.on_blur(&focus_handle, window, |_, _, cx| cx.emit(DismissEvent))
-            .detach();
+        cx.on_blur(&focus_handle, window, |this, _, cx| {
+            if this.preserve_open_on_blur {
+                this.preserve_open_on_blur = false;
+            } else {
+                keep_menu_open(this.workspace_id, false, cx);
+            }
+            cx.emit(DismissEvent);
+        })
+        .detach();
         let selected_index = rows.iter().position(|row| row.is_current).unwrap_or(0);
         Self {
             panel,
+            workspace_id,
             rows,
             conversation_is_bound,
             composer_focus_handle,
@@ -317,7 +388,32 @@ impl CometComposerModelMenu {
             on_model_select,
             focus_handle,
             selected_index,
+            preserve_open_on_blur: false,
         }
+    }
+
+    fn sync_active_composer(
+        &mut self,
+        current_label: SharedString,
+        conversation_is_bound: bool,
+        composer_focus_handle: FocusHandle,
+        model_picker: ComposerModelPicker,
+        cx: &mut Context<Self>,
+    ) {
+        self.conversation_is_bound = conversation_is_bound;
+        self.composer_focus_handle = composer_focus_handle;
+        self.current_model = model_picker.current_model;
+        self.models = model_picker.models;
+        self.model_picker_enabled = model_picker.enabled;
+        self.empty_message = model_picker.empty_message;
+        self.on_model_select = model_picker.on_select;
+        for row in &mut self.rows {
+            row.is_current = row.label == current_label;
+        }
+        if let Some(index) = self.rows.iter().position(|row| row.is_current) {
+            self.selected_index = index;
+        }
+        cx.notify();
     }
 
     fn item_count(&self) -> usize {
@@ -392,9 +488,21 @@ impl CometComposerModelMenu {
             return;
         }
         if row.is_current {
-            self.dismiss_to_composer(window, cx);
             return;
         }
+        keep_menu_open(self.workspace_id, true, cx);
+        self.preserve_open_on_blur = true;
+        for row in &mut self.rows {
+            row.is_current = false;
+        }
+        if let Some(row) = self.rows.get_mut(index) {
+            row.is_current = true;
+        }
+        self.selected_index = index;
+        self.current_model = None;
+        self.models.clear();
+        self.model_picker_enabled = false;
+        self.empty_message = "Loading models…".into();
         self.panel.update(cx, |panel, cx| {
             panel.compose_on_executor(row.target, window, cx);
         });
@@ -420,6 +528,7 @@ impl CometComposerModelMenu {
     }
 
     fn dismiss_to_composer(&self, window: &mut Window, cx: &mut Context<Self>) {
+        keep_menu_open(self.workspace_id, false, cx);
         self.composer_focus_handle.focus(window, cx);
         cx.emit(DismissEvent);
     }
@@ -629,18 +738,24 @@ impl Render for CometComposerModelMenu {
                                 v_flex()
                                     .flex_1()
                                     .min_h_0()
-                                    .gap_0p5()
                                     .p_1()
                                     .child(
                                         Label::new("Models")
                                             .size(LabelSize::XSmall)
                                             .color(Color::Muted),
                                     )
-                                    .children(models),
+                                    .child(
+                                        v_flex()
+                                            .id("comet-model-scroll")
+                                            .flex_1()
+                                            .min_h_0()
+                                            .gap_0p5()
+                                            .overflow_y_scroll()
+                                            .children(models),
+                                    ),
                             )
                             .child(
                                 v_flex()
-                                    .max_h(px(190.))
                                     .flex_none()
                                     .gap_1()
                                     .border_t_1()
