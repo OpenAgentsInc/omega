@@ -282,23 +282,6 @@
     }
   },
   {
-    "context": "AgentPanel && CometMode",
-    "use_key_equivalents": true,
-    "bindings": {
-      "cmd-1": ["agent::ActivateCometSessionTab", 0],
-      "cmd-2": ["agent::ActivateCometSessionTab", 1],
-      "cmd-3": ["agent::ActivateCometSessionTab", 2],
-      "cmd-4": ["agent::ActivateCometSessionTab", 3],
-      "cmd-5": ["agent::ActivateCometSessionTab", 4],
-      "cmd-6": ["agent::ActivateCometSessionTab", 5],
-      "cmd-7": ["agent::ActivateCometSessionTab", 6],
-      "cmd-8": ["agent::ActivateCometSessionTab", 7],
-      "cmd-9": ["agent::ActivateCometSessionTab", 8],
-      "cmd-0": ["agent::ActivateCometSessionTab", 9],
-      "cmd-w": "omega_workbench::CloseActiveSessionTab"
-    }
-  },
-  {
     "context": "WorkbenchRail",
     "use_key_equivalents": true,
     "bindings": {
@@ -1446,6 +1429,23 @@
       "cmd-k r": "community_sarah::RemoveSarah",
       "cmd-k t": "community_sarah::TalkToSarah",
       "cmd-k x": "community_sarah::ModeratorStop"
+    }
+  },
+  {
+    "context": "AgentPanel && CometMode",
+    "use_key_equivalents": true,
+    "bindings": {
+      "cmd-1": ["agent::ActivateCometSessionTab", 0],
+      "cmd-2": ["agent::ActivateCometSessionTab", 1],
+      "cmd-3": ["agent::ActivateCometSessionTab", 2],
+      "cmd-4": ["agent::ActivateCometSessionTab", 3],
+      "cmd-5": ["agent::ActivateCometSessionTab", 4],
+      "cmd-6": ["agent::ActivateCometSessionTab", 5],
+      "cmd-7": ["agent::ActivateCometSessionTab", 6],
+      "cmd-8": ["agent::ActivateCometSessionTab", 7],
+      "cmd-9": ["agent::ActivateCometSessionTab", 8],
+      "cmd-0": ["agent::ActivateCometSessionTab", 9],
+      "cmd-w": "omega_workbench::CloseActiveSessionTab"
     }
   }
 ]
