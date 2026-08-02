@@ -186,6 +186,7 @@ pub fn render_composer_executor_menu(
     workspace: WeakEntity<Workspace>,
     current_label: SharedString,
     conversation_is_bound: bool,
+    composer_focus_handle: FocusHandle,
     model_picker: ComposerModelPicker,
     cx: &App,
 ) -> Option<AnyElement> {
@@ -248,6 +249,7 @@ pub fn render_composer_executor_menu(
                         panel,
                         rows,
                         conversation_is_bound,
+                        composer_focus_handle.clone(),
                         model_picker.current_model.clone(),
                         model_picker.models.clone(),
                         model_picker.enabled,
@@ -275,6 +277,7 @@ pub(crate) struct CometComposerModelMenu {
     panel: gpui::Entity<AgentPanel>,
     rows: Vec<ComposerExecutorRow>,
     conversation_is_bound: bool,
+    composer_focus_handle: FocusHandle,
     current_model: Option<acp_thread::AgentModelId>,
     models: Vec<ComposerModelOption>,
     model_picker_enabled: bool,
@@ -289,6 +292,7 @@ impl CometComposerModelMenu {
         panel: gpui::Entity<AgentPanel>,
         rows: Vec<ComposerExecutorRow>,
         conversation_is_bound: bool,
+        composer_focus_handle: FocusHandle,
         current_model: Option<acp_thread::AgentModelId>,
         models: Vec<ComposerModelOption>,
         model_picker_enabled: bool,
@@ -305,6 +309,7 @@ impl CometComposerModelMenu {
             panel,
             rows,
             conversation_is_bound,
+            composer_focus_handle,
             current_model,
             models,
             model_picker_enabled,
@@ -375,8 +380,8 @@ impl CometComposerModelMenu {
         cx.emit(DismissEvent);
     }
 
-    fn cancel(&mut self, _: &menu::Cancel, _: &mut Window, cx: &mut Context<Self>) {
-        cx.emit(DismissEvent);
+    fn cancel(&mut self, _: &menu::Cancel, window: &mut Window, cx: &mut Context<Self>) {
+        self.dismiss_to_composer(window, cx);
     }
 
     fn choose_agent(&mut self, index: usize, window: &mut Window, cx: &mut Context<Self>) {
@@ -387,7 +392,7 @@ impl CometComposerModelMenu {
             return;
         }
         if row.is_current {
-            cx.emit(DismissEvent);
+            self.dismiss_to_composer(window, cx);
             return;
         }
         self.panel.update(cx, |panel, cx| {
@@ -406,11 +411,16 @@ impl CometComposerModelMenu {
             return;
         }
         if self.current_model.as_ref() == Some(&model.id) {
-            cx.emit(DismissEvent);
+            self.dismiss_to_composer(window, cx);
             return;
         }
         (self.on_model_select)(model.id.clone(), window, cx);
         self.current_model = Some(model.id);
+        self.dismiss_to_composer(window, cx);
+    }
+
+    fn dismiss_to_composer(&self, window: &mut Window, cx: &mut Context<Self>) {
+        self.composer_focus_handle.focus(window, cx);
         cx.emit(DismissEvent);
     }
 }
