@@ -41,6 +41,10 @@ impl ModelSelectorPopover {
         self.selector.read(cx).delegate.active_model()
     }
 
+    pub fn available_models(&self, cx: &App) -> Vec<AgentModelInfo> {
+        self.selector.read(cx).delegate.available_models()
+    }
+
     /// The underlying ACP model selector (for Flash/Pro tier application).
     pub fn agent_selector(&self) -> Rc<dyn AgentModelSelector> {
         self.agent_selector.clone()

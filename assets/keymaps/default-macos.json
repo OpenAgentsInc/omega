@@ -1447,5 +1447,12 @@
       "cmd-0": ["agent::ActivateCometSessionTab", 9],
       "cmd-w": "omega_workbench::CloseActiveSessionTab"
     }
+  },
+  {
+    "context": "OmegaComposerExecutorMenu",
+    "use_key_equivalents": true,
+    "bindings": {
+      "cmd-w": "omega_workbench::CloseActiveSessionTab"
+    }
   }
 ]

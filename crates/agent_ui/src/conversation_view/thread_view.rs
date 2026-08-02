@@ -14444,29 +14444,96 @@ impl ThreadView {
         use acp_thread::AgentModelId;
         use std::rc::Rc;
 
-        let routed = RoutedModel::from_disclosure(&self.executor_disclosure(cx));
-        // `OMEGA-DELTA-0207`. When nothing has routed yet, the model the next
-        // turn will start on — not the standing static, which is `Luna` at
-        // every launch and disagreed with the send.
-        let face = face_for_next_turn(routed.as_ref(), selected(), cx);
-        let model_selector = self.model_selector.clone();
-
-        crate::omega_composer_executor_menu::ComposerModelPicker {
-            face,
-            enabled,
-            on_select: Rc::new(move |tier, _window, cx| {
-                select(tier);
-                if let Some(entity) = model_selector.as_ref() {
-                    let agent = entity.read(cx).agent_selector();
-                    let model_id = AgentModelId::new(tier.agent_model_id());
-                    agent.select_model(model_id, cx).detach_and_log_err(cx);
-                } else {
-                    log::warn!(
-                        "omega_model_tier: chose {} but this thread has no model selector",
-                        tier.name()
-                    );
-                }
-            }),
+        if self.agent_id.as_ref() == agent::OMEGA_AGENT_ID.as_ref() {
+            let routed = RoutedModel::from_disclosure(&self.executor_disclosure(cx));
+            let face = face_for_next_turn(routed.as_ref(), selected(), cx);
+            let model_selector = self.model_selector.clone();
+            crate::omega_composer_executor_menu::ComposerModelPicker::omega(
+                face,
+                enabled,
+                Rc::new(move |tier, _window, cx| {
+                    select(tier);
+                    if let Some(entity) = model_selector.as_ref() {
+                        let agent = entity.read(cx).agent_selector();
+                        let model_id = AgentModelId::new(tier.agent_model_id());
+                        agent.select_model(model_id, cx).detach_and_log_err(cx);
+                    } else {
+                        log::warn!(
+                            "omega_model_tier: chose {} but this thread has no model selector",
+                            tier.name()
+                        );
+                    }
+                }),
+            )
+        } else if let Some(config_options) = self.config_options_view.clone() {
+            let models = config_options.read(cx).composer_models();
+            let current_model = models.iter().find(|model| model.selected).cloned();
+            let options = models
+                .into_iter()
+                .map(
+                    |model| crate::omega_composer_executor_menu::ComposerModelOption {
+                        id: AgentModelId::new(model.id),
+                        name: model.name,
+                        description: model.description,
+                        disabled: false,
+                    },
+                )
+                .collect::<Vec<_>>();
+            crate::omega_composer_executor_menu::ComposerModelPicker {
+                label: current_model
+                    .as_ref()
+                    .map(|model| model.name.clone())
+                    .unwrap_or_else(|| self.agent_display_name.clone()),
+                current_model: current_model.map(|model| AgentModelId::new(model.id)),
+                enabled: enabled && !options.is_empty(),
+                models: options,
+                empty_message: "Choose one of this agent's models.".into(),
+                on_select: Rc::new(move |model_id, _window, cx| {
+                    config_options.update(cx, |config_options, cx| {
+                        config_options.select_composer_model(model_id.as_str(), cx);
+                    });
+                }),
+            }
+        } else if let Some(model_selector) = self.model_selector.clone() {
+            let selector = model_selector.read(cx);
+            let active_model = selector.active_model(cx).cloned();
+            let models = selector
+                .available_models(cx)
+                .into_iter()
+                .map(
+                    |model| crate::omega_composer_executor_menu::ComposerModelOption {
+                        id: model.id,
+                        name: model.name,
+                        description: model.description,
+                        disabled: model.disabled.is_some(),
+                    },
+                )
+                .collect();
+            let agent_selector = selector.agent_selector();
+            crate::omega_composer_executor_menu::ComposerModelPicker {
+                label: active_model
+                    .as_ref()
+                    .map(|model| model.name.clone())
+                    .unwrap_or_else(|| "Select a model".into()),
+                current_model: active_model.map(|model| model.id),
+                models,
+                enabled,
+                empty_message: "Choose one of this agent's models.".into(),
+                on_select: Rc::new(move |model_id, _window, cx| {
+                    agent_selector
+                        .select_model(model_id, cx)
+                        .detach_and_log_err(cx);
+                }),
+            }
+        } else {
+            crate::omega_composer_executor_menu::ComposerModelPicker {
+                label: self.agent_display_name.clone(),
+                current_model: None,
+                models: Vec::new(),
+                enabled: false,
+                empty_message: "This agent manages models in its own settings.".into(),
+                on_select: Rc::new(|_, _, _| {}),
+            }
         }
     }
 

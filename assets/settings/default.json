@@ -1829,9 +1829,7 @@
   //      "load_direnv": "disabled"
   "load_direnv": "direct",
   "edit_predictions": {
-    // Which edit prediction provider to use. Upstream Zed ships "zed", which
-    // is its hosted edit-prediction service. Omega has none, and its retained
-    // provider is GitHub Copilot, configured per user. See OMEGA-DELTA-0026.
+    // Which edit prediction provider to use. Omega defaults to none.
     "provider": "none",
     // A list of globs representing files that edit predictions should be disabled for.
     // There's a sensible default list of globs already included.
