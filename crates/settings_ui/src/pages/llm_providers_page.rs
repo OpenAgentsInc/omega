@@ -1,20 +1,23 @@
 use std::{collections::HashSet, sync::Arc};
 
+use agent_settings::AgentSettings;
 use editor::Editor;
-use gpui::{AnyView, Entity, Focusable as _, ScrollHandle, prelude::*};
+use gpui::{AnyView, Entity, Focusable as _, ReadGlobal as _, ScrollHandle, prelude::*};
 use language_model::{
     ApiKeyConfiguration, CreateProviderSettingsView, IconOrSvg, InlineDescription,
-    LanguageModelProvider, LanguageModelProviderId, LanguageModelRegistry, ProviderSettingsView,
+    LanguageModelProvider, LanguageModelProviderId, LanguageModelRegistry, OPEN_AI_PROVIDER_ID,
+    ProviderSettingsView,
 };
 
 use settings::{
     AnthropicCompatibleAvailableModel, AnthropicCompatibleModelCapabilities,
     AnthropicCompatibleSettingsContent, OpenAiCompatibleAvailableModel,
     OpenAiCompatibleModelCapabilities, OpenAiCompatibleSettingsContent, OpenAiReasoningEffort,
+    Settings as _, SettingsStore,
 };
 use ui::{
     ButtonLink, Checkbox, ConfiguredApiCard, ContextMenu, Divider, DividerColor, DropdownMenu,
-    DropdownStyle, IconPosition, PopoverMenu, ToggleState, prelude::*,
+    DropdownStyle, IconPosition, PopoverMenu, SwitchField, ToggleState, prelude::*,
 };
 use util::ResultExt as _;
 
@@ -224,15 +227,16 @@ fn render_api_key_providers_item(
     provider: &Arc<dyn LanguageModelProvider>,
     provider_name: SharedString,
     config: ApiKeyConfiguration,
-    _cx: &mut Context<SettingsWindow>,
+    cx: &mut Context<SettingsWindow>,
 ) -> AnyElement {
     let provider_id = provider.id();
+    let is_openai = provider_id == OPEN_AI_PROVIDER_ID;
     let has_key = config.has_key;
     let is_from_env_var = config.is_from_env_var;
     let env_var_name = config.env_var_name;
     let api_key_url = config.api_key_url;
 
-    if has_key {
+    let api_key_control = if has_key {
         let configured_label = if is_from_env_var {
             "API Key Set in Environment Variable"
         } else {
@@ -240,7 +244,7 @@ fn render_api_key_providers_item(
         };
         let button_id = format!("reset-api-key-{}", provider_id.0);
 
-        let card = ConfiguredApiCard::new(button_id, configured_label)
+        ConfiguredApiCard::new(button_id, configured_label)
             .button_label("Reset Key")
             .button_tab_index(0)
             .disabled(is_from_env_var)
@@ -255,80 +259,100 @@ fn render_api_key_providers_item(
                     provider.set_api_key(None, cx).detach_and_log_err(cx);
                 }
             })
-            .into_any_element();
+            .into_any_element()
+    } else {
+        let input_id = format!("{}-api-key-input", provider_id.0);
+        let aria_label = format!("{provider_name} API Key");
 
-        return v_flex().gap_2().child(card).into_any_element();
-    }
-
-    let input_id = format!("{}-api-key-input", provider_id.0);
-    let aria_label = format!("{provider_name} API Key");
-
-    v_flex()
-        .gap_2()
-        .child(
-            h_flex()
-                .pt_2p5()
-                .w_full()
-                .min_w_0()
-                .gap_4()
-                .justify_between()
-                .child(
-                    v_flex()
-                        .w_full()
-                        .min_w_0()
-                        .max_w_1_2()
-                        .gap_0p5()
-                        .child(Label::new("API Key"))
-                        .child(
-                            h_flex()
-                                .w_full()
-                                .min_w_0()
-                                .flex_wrap()
-                                .gap_0p5()
-                                .child(
-                                    Label::new("Visit the")
-                                        .size(LabelSize::Small)
-                                        .color(Color::Muted),
-                                )
-                                .child(
-                                    ButtonLink::new(
-                                        format!("{provider_name} dashboard"),
-                                        api_key_url,
-                                    )
+        h_flex()
+            .pt_2p5()
+            .w_full()
+            .min_w_0()
+            .gap_4()
+            .justify_between()
+            .child(
+                v_flex()
+                    .w_full()
+                    .min_w_0()
+                    .max_w_1_2()
+                    .gap_0p5()
+                    .child(Label::new("API Key"))
+                    .child(
+                        h_flex()
+                            .w_full()
+                            .min_w_0()
+                            .flex_wrap()
+                            .gap_0p5()
+                            .child(
+                                Label::new("Visit the")
+                                    .size(LabelSize::Small)
+                                    .color(Color::Muted),
+                            )
+                            .child(
+                                ButtonLink::new(format!("{provider_name} dashboard"), api_key_url)
                                     .no_icon(true)
                                     .label_size(LabelSize::Small)
                                     .label_color(Color::Muted),
-                                )
-                                .child(
-                                    Label::new("to generate an API key.")
-                                        .size(LabelSize::Small)
-                                        .color(Color::Muted),
-                                ),
-                        )
-                        .child(
-                            Label::new(format!(
-                                "Or set the {env_var_name} env var and restart Omega for it to take effect."
-                            ))
-                            .size(LabelSize::XSmall)
-                            .color(Color::Muted),
-                        ),
-                )
-                .child(
-                    SettingsInputField::new(input_id)
-                        .tab_index(0)
-                        .with_placeholder("xxxxxxxxxxxxxxxxxxxx")
-                        .aria_label(aria_label)
-                        .on_confirm({
-                            let provider = provider.clone();
-                            move |api_key, _window, cx| {
-                                if let Some(key) = api_key.filter(|key| !key.is_empty()) {
-                                    provider.set_api_key(Some(key), cx).detach_and_log_err(cx);
-                                }
+                            )
+                            .child(
+                                Label::new("to generate an API key.")
+                                    .size(LabelSize::Small)
+                                    .color(Color::Muted),
+                            ),
+                    )
+                    .child(
+                        Label::new(format!(
+                            "Or set the {env_var_name} env var and restart Omega for it to take effect."
+                        ))
+                        .size(LabelSize::XSmall)
+                        .color(Color::Muted),
+                    ),
+            )
+            .child(
+                SettingsInputField::new(input_id)
+                    .tab_index(0)
+                    .with_placeholder("xxxxxxxxxxxxxxxxxxxx")
+                    .aria_label(aria_label)
+                    .on_confirm({
+                        let provider = provider.clone();
+                        move |api_key, _window, cx| {
+                            if let Some(key) = api_key.filter(|key| !key.is_empty()) {
+                                provider.set_api_key(Some(key), cx).detach_and_log_err(cx);
                             }
-                        }),
-                ),
-        )
+                        }
+                    }),
+            )
+            .into_any_element()
+    };
+
+    v_flex()
+        .gap_4()
+        .child(api_key_control)
+        .when(is_openai, |this| {
+            let fallback_enabled = AgentSettings::get_global(cx).openai_api_fallback;
+            this.child(Divider::horizontal()).child(
+                SwitchField::new(
+                    "openai-api-fallback",
+                    Some("Use OpenAI API as a Codex fallback"),
+                    Some(
+                        "When ChatGPT/Codex is signed out, unavailable, rate-limited, or out of usage, retry the same turn with this API key. OpenAI API usage is billed separately."
+                            .into(),
+                    ),
+                    fallback_enabled,
+                    move |state, _window, cx| {
+                        set_openai_api_fallback(*state == ToggleState::Selected, cx);
+                    },
+                )
+                .tab_index(0),
+            )
+        })
         .into_any_element()
+}
+
+fn set_openai_api_fallback(enabled: bool, cx: &mut App) {
+    SettingsStore::global(cx).update_settings_file(<dyn fs::Fs>::global(cx), move |settings, _| {
+        settings.agent.get_or_insert_default().openai_api_fallback = Some(enabled);
+    });
 }
 
 fn render_inline_body(
