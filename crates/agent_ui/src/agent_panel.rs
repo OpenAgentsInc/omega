@@ -15169,16 +15169,9 @@ impl AgentPanel {
                             .flex()
                             .items_center()
                             .justify_center()
-                            .child("O"),
+                            .child("A"),
                     )
-                    .child(
-                        v_flex().flex_1().child("Omega").child(
-                            div()
-                                .text_size(px(10.))
-                                .text_color(text_placeholder)
-                                .child("Comet mode"),
-                        ),
-                    )
+                    .child(v_flex().flex_1().child("Anonymous"))
                     .child(
                         Icon::new(IconName::Settings)
                             .size(IconSize::Small)

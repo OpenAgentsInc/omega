@@ -1648,14 +1648,14 @@ impl ConversationView {
             crate::omega_executor_selector::selected(),
         );
         let loading_placeholder = routed_executor
-            .map(|executor| placeholder_text(executor.name(), false))
+            .map(|executor| placeholder_text(executor.name()))
             .unwrap_or_else(|| {
                 let name = self
                     .agent_server_store
                     .read(cx)
                     .agent_display_name(&self.agent.agent_id())
                     .unwrap_or_else(|| self.agent.agent_id().0.to_string().into());
-                placeholder_text(name.as_ref(), false)
+                placeholder_text(name.as_ref())
             });
 
         let editor = cx.new(|cx| {
@@ -3297,9 +3297,6 @@ impl ConversationView {
                             native_available_skills(&native_connection, &session_id, cx)
                         })
                         .unwrap_or_default();
-                    let has_slash_completions =
-                        !available_commands.is_empty() || !available_skills.is_empty();
-
                     let agent_display_name = self
                         .agent_server_store
                         .read(cx)
@@ -3331,7 +3328,6 @@ impl ConversationView {
                         executor_name
                             .as_deref()
                             .unwrap_or(agent_display_name.as_ref()),
-                        has_slash_completions,
                     );
 
                     thread_view.update(cx, |thread_view, cx| {
@@ -5446,20 +5442,13 @@ fn native_available_skills(
         .collect()
 }
 
-fn placeholder_text(agent_name: &str, has_commands: bool) -> String {
-    if agent_name == agent::OMEGA_AGENT_ID.as_ref() {
-        format!(
-            "Message the {}, @ to include context, / for commands",
-            agent_name
-        )
-    } else if has_commands {
-        format!(
-            "Message {} — @ to include context, / for commands",
-            agent_name
-        )
+fn placeholder_text(agent_name: &str) -> String {
+    let agent_name = if agent_name == agent::OMEGA_AGENT_ID.as_ref() {
+        "Omega"
     } else {
-        format!("Message {} — @ to include context", agent_name)
-    }
+        agent_name
+    };
+    format!("Message {agent_name}")
 }
 
 impl Focusable for ConversationView {
@@ -7292,10 +7281,7 @@ pub(crate) mod tests {
             assert_eq!(available_commands[0].description.as_str(), "Get help");
         });
 
-        assert_eq!(
-            placeholder,
-            Some("Message Test — @ to include context, / for commands".to_string())
-        );
+        assert_eq!(placeholder, Some("Message Test".to_string()));
 
         message_editor.update_in(cx, |editor, window, cx| {
             editor.set_text("/help", window, cx);

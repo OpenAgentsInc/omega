@@ -140,12 +140,18 @@ impl RoutedModel {
 ///
 /// Everything else about the line is unchanged, because the shape stays in
 /// [`ExecutorDisclosure::label_with_model`]: the run reference and the fallback
-/// clause are still said, and a model nobody disclosed is still *said* to be
-/// undisclosed rather than quietly dropped.
+/// clause are still said. When an ACP executor supplies a model but no provider,
+/// the human-facing line uses the model name by itself; the record retains the
+/// exact provider-disclosure state for receipts and machine readers.
 #[must_use]
 pub fn chrome_line(disclosure: &ExecutorDisclosure) -> String {
     let model = RoutedModel::from_disclosure(disclosure).map_or_else(
-        || disclosure.model_phrase(),
+        || {
+            disclosure
+                .model
+                .clone()
+                .unwrap_or_else(|| "model not disclosed".to_owned())
+        },
         |routed| routed.human_name().to_string(),
     );
     disclosure.label_with_model(&model)
@@ -324,10 +330,9 @@ mod tests {
     /// The fold changed which word names the model and nothing else.
     ///
     /// `OMEGA-DELTA-0208`. A run reference is still said, a fallback is still
-    /// said, and a model nobody disclosed is still *said* to be undisclosed
-    /// rather than quietly dropped — which is the whole reason
-    /// `ExecutorDisclosure::label_with_model` owns the shape of the line and
-    /// this module only chooses the model phrase.
+    /// said, and a genuinely unknown model is still said to be undisclosed. A
+    /// known model with an undisclosed provider is named without exposing the
+    /// record-layer placeholder in application chrome.
     #[test]
     fn folding_the_line_kept_every_other_part_of_it() {
         let delegated = ExecutorDisclosure {
@@ -369,6 +374,17 @@ mod tests {
             "with nothing to name humanly the chrome line is the record's own, \
              so ignorance is still stated rather than dropped"
         );
+
+        let model_only = ExecutorDisclosure {
+            class: ExecutorClass::ExternalAcp,
+            agent_id: "codex-acp".to_owned(),
+            provider: None,
+            model: Some("GPT-5.6-Sol".to_owned()),
+            run_ref: None,
+            route: None,
+        };
+        assert_eq!(chrome_line(&model_only), "codex-acp · GPT-5.6-Sol");
+        assert!(!chrome_line(&model_only).contains("provider not disclosed"));
     }
 
     /// The three surfaces are one function of one record, so they cannot
