@@ -157,7 +157,13 @@ Use OpenAI API access when you have an OpenAI API key or API billing. ChatGPT Pl
 3. Open Agent Settings with {#action agent::OpenSettings} and go to the OpenAI section.
 4. Enter your OpenAI API key.
 
-Zed also reads `OPENAI_API_KEY` from the local Zed process environment.
+Omega enables **Use OpenAI API as a Codex fallback** by default. When your
+ChatGPT/Codex subscription is signed out, unavailable, rate-limited, or out of
+usage, Omega retries that turn through the configured OpenAI API key. OpenAI
+API usage is billed separately. Turn this option off beneath the OpenAI key if
+you do not want automatic API fallback.
+
+Omega also reads `OPENAI_API_KEY` from the local Omega process environment.
 
 #### Custom OpenAI Models {#openai-custom-models}
 
