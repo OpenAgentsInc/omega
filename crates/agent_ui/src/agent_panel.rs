@@ -353,6 +353,45 @@ fn entropy_model_route_ref(provider: &str, model: &str) -> String {
     format!("model-route.sha256.{:x}", digest.finalize())
 }
 
+fn entropy_agent_task_prompt(
+    candidate: &crate::thread_identity::ThreadIdentityCandidate,
+    prompt_snapshot: &omega_forensics::EntropyPromptSnapshot,
+) -> String {
+    let worktree_state = if candidate.git.dirty_files > 0 {
+        format!("dirty ({} changed files)", candidate.git.dirty_files)
+    } else {
+        "clean".to_string()
+    };
+    format!(
+        "Run a read-only entropy forensics scan of the selected repository now.\n\n\
+Target\n\
+- Repository: {repository}\n\
+- Selected path: {path}\n\
+- Exact HEAD: {revision}\n\
+- Worktree: {worktree_state}\n\
+- Frozen prompt digest: {prompt_digest}\n\n\
+Source handling\n\
+- Verify the repository and exact HEAD before analysis.\n\
+- If the selected worktree is dirty, create a temporary clean detached worktree or local clone at the exact HEAD, analyze only that snapshot, and remove it when the scan finishes. Do not include uncommitted files.\n\
+- If it is clean, analyze the selected repository in place after verifying HEAD.\n\
+- Do not modify repository source. Handle snapshot creation and cleanup yourself; do not ask the user to pin or prepare a worktree.\n\n\
+Analysis prompt\n\
+{analysis_prompt}\n\n\
+Execution and result\n\
+- Start immediately and keep all tool activity and progress visible in this task.\n\
+- Traverse the repository, following relevant definitions and consumers across files and dependencies.\n\
+- Ground every claim in exact file and line references from the verified snapshot.\n\
+- Separate observations, hypotheses, limitations, and the next falsifiable checks.\n\
+- Do not claim a linked artifact contains a source path without artifact evidence.\n\
+- Finish with a concise entropy-risk summary and explicitly state any incomplete source or evidence.",
+        repository = candidate.repository_name,
+        path = candidate.worktree_abs_path.display(),
+        revision = candidate.head_commit.as_deref().unwrap_or("unavailable"),
+        prompt_digest = prompt_snapshot.canonical_digest,
+        analysis_prompt = prompt_snapshot.text,
+    )
+}
+
 async fn materialize_entropy_campaign_project(
     campaign_ref: &str,
     project: &omega_forensics::EntropyProjectRecord,
@@ -13448,6 +13487,22 @@ impl AgentPanel {
                 });
                 return;
             };
+            let task_prompt = entropy_agent_task_prompt(&candidate, &prompt_snapshot);
+            if self
+                .create_omega_thread_with_message(task_prompt, true, window, cx)
+                .is_some()
+            {
+                log::info!(
+                    "Forensics entropy scan opened as a visible Omega task for {} at {}",
+                    candidate.repository_name,
+                    revision
+                );
+                return;
+            }
+
+            // A selected repository normally guarantees an open project. Keep
+            // the existing local runner as a defensive fallback for bindings
+            // restored before their project finishes opening.
             let Some(configured_model) =
                 LanguageModelRegistry::read_global(cx).inline_assistant_model()
             else {
@@ -18226,6 +18281,45 @@ mod tests {
     use std::path::{Path, PathBuf};
     use std::sync::Arc;
     use std::time::Instant;
+
+    #[test]
+    fn entropy_task_prompt_makes_snapshot_handling_an_agent_responsibility() {
+        let candidate = crate::thread_identity::ThreadIdentityCandidate {
+            binding: omega_workbench_state::RepositoryBinding::new("repo", "worktree")
+                .expect("valid binding"),
+            git_repository_id: Some(1),
+            project_name: "Omega".into(),
+            repository_name: "omega".into(),
+            worktree_name: "omega".into(),
+            worktree_abs_path: PathBuf::from("/work/omega"),
+            worktree_path: "/work/omega".into(),
+            remote_url: Some("https://github.com/OpenAgentsInc/omega.git".into()),
+            head_commit: Some("0123456789abcdef0123456789abcdef01234567".into()),
+            branch: crate::thread_identity::BranchIdentity::Branch("main".into()),
+            git: crate::thread_identity::GitIdentitySummary {
+                dirty_files: 3,
+                ..Default::default()
+            },
+            source_revision: 1,
+        };
+        let snapshot = omega_forensics::EntropyPromptSnapshot::new(
+            "prompt.omega.entropy.test".to_string(),
+            None,
+            None,
+            "Trace every entropy source and secret consumer.".to_string(),
+            "2026-08-02T20:30:00.000Z".to_string(),
+        )
+        .expect("valid prompt snapshot");
+
+        let prompt = entropy_agent_task_prompt(&candidate, &snapshot);
+
+        assert!(prompt.contains("Run a read-only entropy forensics scan"));
+        assert!(prompt.contains("dirty (3 changed files)"));
+        assert!(prompt.contains("0123456789abcdef0123456789abcdef01234567"));
+        assert!(prompt.contains("create a temporary clean detached worktree or local clone"));
+        assert!(prompt.contains("do not ask the user to pin or prepare a worktree"));
+        assert!(prompt.contains("Trace every entropy source and secret consumer."));
+    }
 
     #[test]
     fn dirty_entropy_repository_uses_a_clean_pinned_snapshot() {

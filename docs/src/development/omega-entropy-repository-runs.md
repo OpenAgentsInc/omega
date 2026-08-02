@@ -6,18 +6,21 @@ OpenAgents Cloud worker lifecycle and does not grant reporting, disclosure, or
 source-write authority.
 
 Edit the visible **Entropy prompt**, then choose **Run entropy scan** in
-Forensics. The built-in prompt asks for source-grounded entropy mechanisms,
-secret consumers, causal links, missing evidence, and the next falsifiable
-check. **Reset prompt** restores that default. **Use prior prompt** copies the
-latest run's text into a new editable draft with explicit parent-prompt and
-source-run lineage.
+Forensics. Omega immediately opens a normal task, submits the frozen prompt,
+and shows the agent's progress, tool calls, stop control, and result in the
+standard transcript. The built-in prompt asks for source-grounded entropy
+mechanisms, secret consumers, causal links, missing evidence, and the next
+falsifiable check. **Reset prompt** restores that default. **Use prior prompt**
+copies the latest run's text into a new editable draft with explicit
+parent-prompt and source-run lineage.
 
-For a single-repository run, Omega requires an exact 40-character revision and
-a configured or available default model. For a clean worktree, it reads the
-existing project path. If the selected worktree has changes, Omega creates a
-temporary local clone and scans the exact selected HEAD instead of silently
-including uncommitted source. The temporary clone is deleted with the
-Forensics surface. Neither path creates a publication destination. The
+For a single-repository run, Omega binds the task to the selected repository
+and exact 40-character revision. For a clean worktree, the task verifies HEAD
+and reads the existing project path. If the selected worktree has changes, the
+task creates a temporary clean detached worktree or local clone, scans the
+exact selected HEAD instead of silently including uncommitted source, and
+removes the temporary checkout when it finishes. The user does not pin or
+prepare a worktree. Neither path creates a publication destination. The
 multi-project campaign uses the separate isolated-checkout behavior described
 below.
 
