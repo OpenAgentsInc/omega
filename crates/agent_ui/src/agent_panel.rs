@@ -15192,6 +15192,21 @@ impl AgentPanel {
         let text_accent = colors.text_accent;
         let icon_muted = colors.icon_muted;
         let tab_shortcuts_visible = comet_tab_shortcuts_visible(window);
+        let comet_forensics_selected = self
+            .workbench_shell
+            .projection()
+            .visible_projection()
+            .is_some_and(|visible| {
+                visible.dock_open
+                    && visible.effective_surface
+                        == Some(omega_workbench_state::WorkSurface::Forensics)
+            });
+        let comet_forensics_host = comet_forensics_selected
+            .then(|| self.workbench_shell.visible_host().cloned())
+            .flatten();
+        let main_content = comet_forensics_host
+            .map(|host| host.into_any_element())
+            .unwrap_or_else(|| content.into_any_element());
 
         let sidebar_open = self.sidebar.open;
         let sidebar_target = if sidebar_open {
@@ -15264,6 +15279,17 @@ impl AgentPanel {
             .bg(selected_background)
             .border_1()
             .border_color(colors.border_selected)
+            .cursor_pointer()
+            .on_click(cx.listener(|this, _, window, cx| {
+                if this
+                    .workbench_shell
+                    .projection()
+                    .visible_projection()
+                    .is_some_and(|visible| visible.dock_open)
+                {
+                    this.collapse_work_surface_dock(window, cx);
+                }
+            }))
             .child(
                 Icon::new(IconName::OmegaAgent)
                     .size(IconSize::Small)
@@ -15596,6 +15622,36 @@ impl AgentPanel {
                 )
             })
             .child(
+                h_flex()
+                    .id("comet-open-forensics")
+                    .debug_selector(|| "omega.comet.sidebar.forensics".into())
+                    .w_full()
+                    .mt(px(10.))
+                    .px(px(8.))
+                    .py(px(7.))
+                    .gap(px(8.))
+                    .rounded(px(8.))
+                    .cursor_pointer()
+                    .aria_label("Open Forensics")
+                    .when(comet_forensics_selected, |row| {
+                        row.bg(selected_background)
+                            .border_1()
+                            .border_color(colors.border_selected)
+                    })
+                    .when(!comet_forensics_selected, |row| {
+                        row.hover(move |style| style.bg(hover_background))
+                    })
+                    .on_click(cx.listener(|this, _, window, cx| {
+                        this.select_work_surface(
+                            omega_workbench_state::WorkSurface::Forensics,
+                            window,
+                            cx,
+                        );
+                    }))
+                    .child(Icon::new(IconName::Crosshair).size(IconSize::Small))
+                    .child("Forensics"),
+            )
+            .child(
                 div()
                     .mt(px(12.))
                     .h(px(28.))
@@ -15674,7 +15730,7 @@ impl AgentPanel {
             .border_1()
             .border_color(border)
             .bg(card_background)
-            .child(content);
+            .child(main_content);
 
         div()
             .id("comet-frost-shell")

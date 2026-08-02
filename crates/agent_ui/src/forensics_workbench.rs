@@ -5,16 +5,16 @@ use gpui::{
 };
 use omega_forensics::{
     ColdcardBenchmarkArm, ColdcardEvidenceWorkspaceProjection, CoverageStatus,
-    DEFAULT_ENTROPY_ANALYSIS_PROMPT, DependencyPolicy, EntropyFileAnalysisOutput, EntropyFileTask,
-    EntropyLimitation, EntropyPromptSnapshot, EntropyRunPhase, EntropyRunProjection,
-    ExplicitOperatorAction, FORENSIC_FINDING_SCHEMA_V1, FORENSIC_HYPOTHESIS_SCHEMA_V1,
-    ForensicBudgetState, ForensicEvidenceTier, ForensicExactness, ForensicLifecycleState,
-    ForensicPromptIr, ForensicPromptWorkspace, ForensicReviewDecisionKind, ForensicReviewOutcome,
-    ForensicSourceCitation, ForensicStatistic, ForensicWorkerObservation, ForensicWorkerPlacement,
-    ForensicsFailureProjection, ForensicsLaunchIntent, ForensicsMatrixProjection,
-    ForensicsPreflightProjection, ForensicsReviewProjection, ForensicsRunPhase,
-    ForensicsRunProjection, PreflightReadiness, PromptChangeKind, PromptCompatibilityProfile,
-    SourceState,
+    DEFAULT_ENTROPY_ANALYSIS_PROMPT, DependencyPolicy, EntropyFileAnalysisOutput, EntropyFileState,
+    EntropyFileTask, EntropyLimitation, EntropyPromptSnapshot, EntropyRunPhase,
+    EntropyRunProjection, ExplicitOperatorAction, FORENSIC_FINDING_SCHEMA_V1,
+    FORENSIC_HYPOTHESIS_SCHEMA_V1, ForensicBudgetState, ForensicEvidenceTier, ForensicExactness,
+    ForensicLifecycleState, ForensicPromptIr, ForensicPromptWorkspace, ForensicReviewDecisionKind,
+    ForensicReviewOutcome, ForensicSourceCitation, ForensicStatistic, ForensicWorkerObservation,
+    ForensicWorkerPlacement, ForensicsFailureProjection, ForensicsLaunchIntent,
+    ForensicsMatrixProjection, ForensicsPreflightProjection, ForensicsReviewProjection,
+    ForensicsRunPhase, ForensicsRunProjection, PreflightReadiness, PromptChangeKind,
+    PromptCompatibilityProfile, SourceState,
 };
 use omega_workbench_state::RepositoryBinding;
 use ui::{
@@ -25,6 +25,46 @@ use ui::{
 use crate::thread_identity::ThreadIdentityCandidate;
 
 const PREPARE_ACTION_REF: &str = "operator-action-ref://omega/forensics/prepare-run";
+const MAX_VISIBLE_ENTROPY_FILES: usize = 500;
+
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum EntropyFileFilter {
+    #[default]
+    All,
+    Candidates,
+    Failures,
+    Incomplete,
+}
+
+impl EntropyFileFilter {
+    const ALL: [Self; 4] = [
+        Self::All,
+        Self::Candidates,
+        Self::Failures,
+        Self::Incomplete,
+    ];
+
+    fn label(self) -> &'static str {
+        match self {
+            Self::All => "All files",
+            Self::Candidates => "Candidates",
+            Self::Failures => "Failures",
+            Self::Incomplete => "Incomplete",
+        }
+    }
+
+    fn includes(self, state: EntropyFileState) -> bool {
+        match self {
+            Self::All => true,
+            Self::Candidates => state == EntropyFileState::Candidate,
+            Self::Failures => matches!(state, EntropyFileState::Failed | EntropyFileState::Skipped),
+            Self::Incomplete => matches!(
+                state,
+                EntropyFileState::Queued | EntropyFileState::Reading | EntropyFileState::Cancelled
+            ),
+        }
+    }
+}
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct ForensicsRepositoryContext {
@@ -51,6 +91,8 @@ pub struct ForensicsWorkbenchSnapshot {
     pub entropy_parent_prompt_ref: Option<String>,
     pub entropy_source_run_ref: Option<String>,
     pub entropy_prompt_snapshots: Vec<EntropyPromptSnapshot>,
+    pub entropy_file_filter: EntropyFileFilter,
+    pub selected_entropy_file: Option<String>,
     pub source_resolutions: std::collections::BTreeMap<String, ForensicSourceResolution>,
     pub status: SharedString,
 }
@@ -98,6 +140,8 @@ pub struct ForensicsWorkbenchSurface {
     entropy_parent_prompt_ref: Option<String>,
     entropy_source_run_ref: Option<String>,
     entropy_prompt_snapshots: Vec<EntropyPromptSnapshot>,
+    entropy_file_filter: EntropyFileFilter,
+    selected_entropy_file: Option<String>,
     _entropy_prompt_subscription: Option<Subscription>,
     source_resolutions: std::collections::BTreeMap<String, ForensicSourceResolution>,
     status: SharedString,
@@ -135,6 +179,8 @@ impl ForensicsWorkbenchSurface {
             entropy_parent_prompt_ref: None,
             entropy_source_run_ref: None,
             entropy_prompt_snapshots: Vec::new(),
+            entropy_file_filter: EntropyFileFilter::All,
+            selected_entropy_file: None,
             _entropy_prompt_subscription: None,
             source_resolutions: std::collections::BTreeMap::new(),
             status: "Awaiting OpenAgents managed profile".into(),
@@ -153,6 +199,15 @@ impl ForensicsWorkbenchSurface {
         this.entropy_parent_prompt_ref = restored.parent_prompt_ref;
         this.entropy_source_run_ref = restored.source_run_ref;
         this.entropy_prompt_snapshots = restored.prompt_snapshots;
+        this.selected_entropy_file = restored
+            .runs
+            .last()
+            .and_then(|run| {
+                run.files
+                    .iter()
+                    .find(|file| file.state == EntropyFileState::Candidate)
+            })
+            .map(|file| file.path.clone());
         let mut runs = restored.runs;
         if let Some(mut active) = runs.pop() {
             if matches!(
@@ -222,6 +277,7 @@ impl ForensicsWorkbenchSurface {
         if let Some(previous) = self.entropy_run.replace(run) {
             self.entropy_run_history.push(previous);
         }
+        self.selected_entropy_file = None;
         self.persist_entropy_state(cx);
         cx.notify();
     }
@@ -360,6 +416,16 @@ impl ForensicsWorkbenchSurface {
 
     pub fn set_entropy_error(&mut self, error: impl Into<SharedString>, cx: &mut Context<Self>) {
         self.status = error.into();
+        cx.notify();
+    }
+
+    pub fn select_entropy_filter(&mut self, filter: EntropyFileFilter, cx: &mut Context<Self>) {
+        self.entropy_file_filter = filter;
+        cx.notify();
+    }
+
+    pub fn select_entropy_file(&mut self, path: String, cx: &mut Context<Self>) {
+        self.selected_entropy_file = Some(path);
         cx.notify();
     }
 
@@ -695,6 +761,8 @@ impl ForensicsWorkbenchSurface {
             entropy_parent_prompt_ref: self.entropy_parent_prompt_ref.clone(),
             entropy_source_run_ref: self.entropy_source_run_ref.clone(),
             entropy_prompt_snapshots: self.entropy_prompt_snapshots.clone(),
+            entropy_file_filter: self.entropy_file_filter,
+            selected_entropy_file: self.selected_entropy_file.clone(),
             source_resolutions: self.source_resolutions.clone(),
             status: self.status.clone(),
         }
@@ -841,6 +909,14 @@ impl Render for ForensicsWorkbenchSurface {
         let matrix = self.matrix.clone();
         let coldcard_evidence = self.coldcard_evidence.clone();
         let entropy_run = self.entropy_run.clone();
+        let entropy_run_workbench = entropy_run.clone();
+        let entropy_filter = self.entropy_file_filter;
+        let selected_entropy_file = self.selected_entropy_file.clone();
+        let entropy_comparison = self
+            .entropy_run_history
+            .last()
+            .zip(entropy_run.as_ref())
+            .map(|(prior, current)| compare_entropy_runs(prior, current));
         let entropy_prompt_editor = self.entropy_prompt_editor.clone();
         let entropy_prompt_draft = self.entropy_prompt_draft.clone();
         let entropy_parent_prompt_ref = self.entropy_parent_prompt_ref.clone();
@@ -973,6 +1049,188 @@ impl Render for ForensicsWorkbenchSurface {
                             }),
                     ),
             )
+            .when_some(entropy_run_workbench, |this, run| {
+                let counts = run.counts();
+                let completed = counts.analyzed + counts.candidate + counts.skipped + counts.failed + counts.cancelled;
+                let elapsed = entropy_elapsed_label(&run);
+                let visible_files = run
+                    .files
+                    .iter()
+                    .filter(|file| entropy_filter.includes(file.state))
+                    .take(MAX_VISIBLE_ENTROPY_FILES)
+                    .cloned()
+                    .collect::<Vec<_>>();
+                let selected = selected_entropy_file
+                    .as_deref()
+                    .and_then(|path| run.files.iter().find(|file| file.path == path))
+                    .or_else(|| run.files.iter().find(|file| file.state == EntropyFileState::Candidate))
+                    .or_else(|| run.files.first())
+                    .cloned();
+                let has_selected = selected.is_some();
+
+                this.child(div().h_px().bg(cx.theme().colors().border))
+                    .child(
+                        v_flex()
+                            .gap_1()
+                            .child(Label::new("Live entropy traversal").size(LabelSize::Small))
+                            .child(Self::render_fact("Run state", entropy_run_phase_label(run.phase)))
+                            .child(Self::render_fact(
+                                "Summary",
+                                format!(
+                                    "{completed}/{} files · {} candidates · {} limitations",
+                                    run.files.len(),
+                                    counts.candidate,
+                                    run.limitations.len()
+                                ),
+                            ))
+                            .child(Self::render_fact("Elapsed", elapsed))
+                            .child(Self::render_fact(
+                                "Usage exactness",
+                                "Unavailable · selected model route did not report exact usage",
+                            ))
+                            .when_some(entropy_comparison, |this, comparison| {
+                                this.child(Self::render_fact(
+                                    "Prompt A → B",
+                                    format!(
+                                        "{} gained · {} lost · {} changed · {} unchanged",
+                                        comparison.gained,
+                                        comparison.lost,
+                                        comparison.changed,
+                                        comparison.unchanged
+                                    ),
+                                ))
+                            })
+                            .child(
+                                h_flex().flex_wrap().gap_1().children(
+                                    EntropyFileFilter::ALL.into_iter().enumerate().map(|(index, filter)| {
+                                        Button::new(("omega.forensics.entropy.filter", index), filter.label())
+                                            .size(ButtonSize::Compact)
+                                            .style(if filter == entropy_filter {
+                                                ButtonStyle::Tinted(ui::TintColor::Accent)
+                                            } else {
+                                                ButtonStyle::Subtle
+                                            })
+                                            .on_click(cx.listener(move |this, _, _, cx| {
+                                                this.select_entropy_filter(filter, cx)
+                                            }))
+                                    }),
+                                ),
+                            )
+                            .child(
+                                h_flex()
+                                    .items_start()
+                                    .gap_2()
+                                    .child(
+                                        v_flex()
+                                            .id("omega.forensics.entropy.files")
+                                            .debug_selector(|| "omega.forensics.entropy.files".into())
+                                            .w_1_2()
+                                            .max_h(px(420.))
+                                            .overflow_y_scroll()
+                                            .border_1()
+                                            .border_color(cx.theme().colors().border)
+                                            .when(visible_files.is_empty(), |this| {
+                                                this.child(
+                                                    div().p_2().child(
+                                                        Label::new("No files match this filter")
+                                                            .size(LabelSize::XSmall)
+                                                            .color(Color::Muted),
+                                                    ),
+                                                )
+                                            })
+                                            .children(visible_files.into_iter().enumerate().map(|(index, file)| {
+                                                let path = file.path.clone();
+                                                let is_selected = selected_entropy_file.as_deref() == Some(path.as_str());
+                                                h_flex()
+                                                    .id(("omega-entropy-file", index))
+                                                    .debug_selector({
+                                                        let path = path.clone();
+                                                        move || format!("omega.forensics.entropy.file.{path}")
+                                                    })
+                                                    .w_full()
+                                                    .px_2()
+                                                    .py_1()
+                                                    .gap_2()
+                                                    .cursor_pointer()
+                                                    .when(is_selected, |row| row.bg(cx.theme().colors().element_selected))
+                                                    .hover(|style| style.bg(cx.theme().colors().ghost_element_hover))
+                                                    .on_click(cx.listener(move |this, _, _, cx| {
+                                                        this.select_entropy_file(path.clone(), cx)
+                                                    }))
+                                                    .child(
+                                                        Label::new(entropy_file_state_label(file.state))
+                                                            .size(LabelSize::XSmall)
+                                                            .color(entropy_file_state_color(file.state)),
+                                                    )
+                                                    .child(div().min_w_0().flex_1().truncate().child(file.path))
+                                            })),
+                                    )
+                                    .child(
+                                        v_flex()
+                                            .id("omega.forensics.entropy.detail")
+                                            .debug_selector(|| "omega.forensics.entropy.detail".into())
+                                            .w_1_2()
+                                            .min_h_32()
+                                            .max_h(px(420.))
+                                            .overflow_y_scroll()
+                                            .border_1()
+                                            .border_color(cx.theme().colors().border)
+                                            .p_2()
+                                            .gap_1()
+                                            .when_some(selected, |this, file| {
+                                                this.child(Label::new(file.path.clone()).size(LabelSize::Small))
+                                                    .child(Self::render_fact("State", entropy_file_state_label(file.state)))
+                                                    .children(file.observations.into_iter().enumerate().map(|(index, observation)| {
+                                                        let citations = observation.source_refs.clone();
+                                                        v_flex()
+                                                            .id(("omega-entropy-observation", index))
+                                                            .gap_1()
+                                                            .child(Label::new(observation.title).size(LabelSize::XSmall))
+                                                            .child(Self::render_fact("Mechanism", observation.suspected_mechanism))
+                                                            .child(Self::render_fact("Confidence boundary", observation.confidence_boundary))
+                                                            .children(citations.into_iter().enumerate().map(|(source_index, citation)| {
+                                                                let label = format!("{}:{} · {}", citation.path, citation.start_line, citation.symbol.clone().unwrap_or_else(|| "source".into()));
+                                                                Button::new(("omega-entropy-observation-source", index * 100 + source_index), label)
+                                                                    .size(ButtonSize::Compact)
+                                                                    .style(ButtonStyle::Subtle)
+                                                                    .on_click(cx.listener(move |this, _, _, cx| this.open_source(citation.clone(), cx)))
+                                                            }))
+                                                    }))
+                                                    .children(file.hypotheses.into_iter().enumerate().map(|(index, hypothesis)| {
+                                                        let citations = hypothesis
+                                                            .causal_links
+                                                            .iter()
+                                                            .flat_map(|link| link.source_refs.iter().cloned())
+                                                            .collect::<Vec<_>>();
+                                                        v_flex()
+                                                            .id(("omega-entropy-hypothesis", index))
+                                                            .gap_1()
+                                                            .child(Label::new(hypothesis.title).size(LabelSize::XSmall))
+                                                            .child(Self::render_fact("Mechanism", hypothesis.suspected_mechanism))
+                                                            .child(Self::render_fact("Missing evidence", hypothesis.missing_evidence.join(" · ")))
+                                                            .child(Self::render_fact("Next check", hypothesis.next_check))
+                                                            .child(Self::render_fact("Confidence boundary", hypothesis.confidence_boundary))
+                                                            .children(citations.into_iter().enumerate().map(|(source_index, citation)| {
+                                                                let label = format!("{}:{} · {}", citation.path, citation.start_line, citation.symbol.clone().unwrap_or_else(|| "source".into()));
+                                                                Button::new(("omega-entropy-hypothesis-source", index * 100 + source_index), label)
+                                                                    .size(ButtonSize::Compact)
+                                                                    .style(ButtonStyle::Subtle)
+                                                                    .on_click(cx.listener(move |this, _, _, cx| this.open_source(citation.clone(), cx)))
+                                                            }))
+                                                    }))
+                                                    .children(file.limitations.into_iter().map(|limitation| {
+                                                        Label::new(format!("Limitation · {}", limitation.message))
+                                                            .size(LabelSize::XSmall)
+                                                            .color(Color::Warning)
+                                                    }))
+                                            })
+                                            .when(!has_selected, |this| {
+                                                this.child(Label::new("Select a file to inspect its result").size(LabelSize::XSmall).color(Color::Muted))
+                                            }),
+                                    ),
+                            ),
+                    )
+            })
             .child(div().h_px().bg(cx.theme().colors().border))
             .child(
                 v_flex()
@@ -2103,6 +2361,99 @@ fn entropy_run_status(run: &EntropyRunProjection) -> String {
     }
 }
 
+fn entropy_run_phase_label(phase: EntropyRunPhase) -> &'static str {
+    match phase {
+        EntropyRunPhase::Ready => "Ready",
+        EntropyRunPhase::Running => "Running",
+        EntropyRunPhase::CancelRequested => "Cancellation requested",
+        EntropyRunPhase::Completed => "Completed",
+        EntropyRunPhase::CompletedWithLimitations => "Completed with limitations",
+        EntropyRunPhase::Cancelled => "Cancelled",
+    }
+}
+
+fn entropy_file_state_label(state: EntropyFileState) -> &'static str {
+    match state {
+        EntropyFileState::Queued => "Queued",
+        EntropyFileState::Reading => "Reading",
+        EntropyFileState::Analyzed => "Analyzed",
+        EntropyFileState::Candidate => "Candidate",
+        EntropyFileState::Skipped => "Skipped",
+        EntropyFileState::Failed => "Failed",
+        EntropyFileState::Cancelled => "Cancelled",
+    }
+}
+
+fn entropy_file_state_color(state: EntropyFileState) -> Color {
+    match state {
+        EntropyFileState::Candidate => Color::Accent,
+        EntropyFileState::Failed => Color::Error,
+        EntropyFileState::Skipped | EntropyFileState::Cancelled => Color::Warning,
+        EntropyFileState::Reading => Color::Success,
+        EntropyFileState::Queued | EntropyFileState::Analyzed => Color::Muted,
+    }
+}
+
+fn entropy_elapsed_label(run: &EntropyRunProjection) -> String {
+    let started = chrono::DateTime::parse_from_rfc3339(&run.binding.started_at).ok();
+    let ended = run
+        .events
+        .last()
+        .and_then(|event| chrono::DateTime::parse_from_rfc3339(&event.observed_at).ok());
+    match started.zip(ended) {
+        Some((started, ended)) => {
+            let seconds = (ended - started).num_seconds().max(0);
+            format!("{seconds}s")
+        }
+        None => "Pending first file event".into(),
+    }
+}
+
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+struct EntropyRunComparison {
+    gained: usize,
+    lost: usize,
+    changed: usize,
+    unchanged: usize,
+}
+
+fn compare_entropy_runs(
+    prior: &EntropyRunProjection,
+    current: &EntropyRunProjection,
+) -> EntropyRunComparison {
+    use std::collections::{BTreeMap, BTreeSet};
+
+    fn candidates(run: &EntropyRunProjection) -> BTreeMap<&str, String> {
+        run.files
+            .iter()
+            .filter(|file| file.state == EntropyFileState::Candidate)
+            .map(|file| {
+                let signature = format!("{:?}|{:?}", file.observations, file.hypotheses);
+                (file.path.as_str(), signature)
+            })
+            .collect()
+    }
+
+    let prior = candidates(prior);
+    let current = candidates(current);
+    let paths = prior
+        .keys()
+        .chain(current.keys())
+        .copied()
+        .collect::<BTreeSet<_>>();
+    let mut comparison = EntropyRunComparison::default();
+    for path in paths {
+        match (prior.get(path), current.get(path)) {
+            (None, Some(_)) => comparison.gained += 1,
+            (Some(_), None) => comparison.lost += 1,
+            (Some(left), Some(right)) if left == right => comparison.unchanged += 1,
+            (Some(_), Some(_)) => comparison.changed += 1,
+            (None, None) => {}
+        }
+    }
+    comparison
+}
+
 fn evidence_tier_color(tier: ForensicEvidenceTier) -> Color {
     match tier {
         ForensicEvidenceTier::Hypothesis => Color::Warning,
@@ -2828,11 +3179,32 @@ mod tests {
             manifest,
         )
         .expect("valid entropy run");
+        let mut prior = run.clone();
+        let mut current = run.clone();
+        prior.files[0].state = EntropyFileState::Candidate;
+        current.files[0].state = EntropyFileState::Candidate;
+        current.files[1].state = EntropyFileState::Candidate;
+        assert_eq!(
+            compare_entropy_runs(&prior, &current),
+            EntropyRunComparison {
+                gained: 1,
+                lost: 0,
+                changed: 0,
+                unchanged: 1,
+            }
+        );
 
         cx.update(|cx| {
             let binding = RepositoryBinding::new("repo", "worktree").expect("valid binding");
             let surface = cx.new(|cx| ForensicsWorkbenchSurface::new(&candidate(binding), cx));
             surface.update(cx, |surface, cx| surface.install_entropy_run(run, cx));
+            surface.update(cx, |surface, cx| {
+                surface.select_entropy_filter(EntropyFileFilter::Incomplete, cx);
+                surface.select_entropy_file("b.py".into(), cx);
+            });
+            let dashboard = surface.read(cx).snapshot();
+            assert_eq!(dashboard.entropy_file_filter, EntropyFileFilter::Incomplete);
+            assert_eq!(dashboard.selected_entropy_file.as_deref(), Some("b.py"));
             surface.update(cx, |surface, cx| {
                 surface.entropy_prompt_draft = "A changed prompt for the next run.".into();
                 cx.notify();

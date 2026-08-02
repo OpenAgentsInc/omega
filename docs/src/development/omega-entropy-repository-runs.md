@@ -48,6 +48,28 @@ run history after restart. It keeps at most 64 prompt snapshots and 16 runs per
 repository worktree binding. A run interrupted by restart is restored as
 cancelled instead of silently resuming against changed process state.
 
+## Comet Forensics workbench {#comet-forensics-workbench}
+
+In Comet mode, choose **Forensics** in the left sidebar. The Forensics surface
+uses the existing main workbench region; it does not add another navigation
+rail. Choose the active session row or choose **Forensics** again to return to
+the transcript.
+
+The live entropy traversal keeps manifest order while file states change. It
+shows at most 500 rows at once so large repositories cannot create unbounded UI
+work. Filters select all files, candidates, failures, or incomplete work. A
+selected row opens a detail pane with observations, hypotheses, exact source
+links, mechanisms, confidence boundaries, missing evidence, and the next
+check. Exact source links open the pinned file and line through the existing
+Forensics source resolver.
+
+The summary keeps completed-file, candidate, limitation, elapsed-time, and
+usage-exactness facts separate. If the configured model route does not report
+exact usage, the UI says that usage is unavailable. It does not show zero.
+After a rerun, the same surface compares prompt A with prompt B and counts
+gained, lost, changed, and unchanged file candidates. Cancellation preserves
+completed rows and changes queued or reading rows to cancelled.
+
 ## File states and typed output {#file-states-and-typed-output}
 
 The local runner processes one eligible file at a time in manifest order. Files
