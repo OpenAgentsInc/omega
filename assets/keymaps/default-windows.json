@@ -243,6 +243,16 @@
   {
     "context": "AgentPanel && CometMode",
     "bindings": {
+      "ctrl-1": ["agent::ActivateCometSessionTab", 0],
+      "ctrl-2": ["agent::ActivateCometSessionTab", 1],
+      "ctrl-3": ["agent::ActivateCometSessionTab", 2],
+      "ctrl-4": ["agent::ActivateCometSessionTab", 3],
+      "ctrl-5": ["agent::ActivateCometSessionTab", 4],
+      "ctrl-6": ["agent::ActivateCometSessionTab", 5],
+      "ctrl-7": ["agent::ActivateCometSessionTab", 6],
+      "ctrl-8": ["agent::ActivateCometSessionTab", 7],
+      "ctrl-9": ["agent::ActivateCometSessionTab", 8],
+      "ctrl-0": ["agent::ActivateCometSessionTab", 9],
       "ctrl-w": "omega_workbench::CloseActiveSessionTab"
     }
   },

@@ -27643,4 +27643,43 @@ mod tests {
             );
         }
     }
+
+    /// OMEGA-DELTA-0228. The first ten Comet session tabs have positional
+    /// keyboard shortcuts, and their numbers appear only while the shortcut
+    /// modifier is held.
+    #[test]
+    fn comet_session_tabs_have_visible_positional_shortcuts() {
+        let panel = without_comments(&read_repository_file("crates/agent_ui/src/agent_panel.rs"));
+        for required in [
+            "COMET_TAB_SHORTCUT_LABELS: [&str; 10]",
+            "fn comet_tab_shortcuts_visible",
+            "window.modifiers()",
+            "modifiers.platform",
+            "modifiers.control",
+            "take(COMET_TAB_SHORTCUT_LABELS.len() - 1)",
+            "activate_comet_session_tab(action.0, window, cx)",
+            "on_modifiers_changed",
+            "comet_tab_shortcut_hint(0, text_placeholder)",
+            "comet_tab_shortcut_hint(index + 1, text_placeholder)",
+        ] {
+            assert!(
+                panel.contains(required),
+                "OMEGA-DELTA-0228: Comet tab shortcuts lost `{required}`"
+            );
+        }
+
+        for keymap in [
+            "assets/keymaps/default-macos.json",
+            "assets/keymaps/default-linux.json",
+            "assets/keymaps/default-windows.json",
+        ] {
+            let keymap = read_repository_file(keymap);
+            for index in 0..10 {
+                assert!(
+                    keymap.contains(&format!("[\"agent::ActivateCometSessionTab\", {index}]")),
+                    "OMEGA-DELTA-0228: platform keymap lost tab index {index}"
+                );
+            }
+        }
+    }
 }

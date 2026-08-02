@@ -49,8 +49,8 @@ use crate::thread_metadata_store::{
     ThreadId, ThreadMetadataStore, ThreadMetadataStoreEvent, WorktreePaths,
 };
 use crate::{
-    Agent, AgentInitialContent, AgentThreadSource, ExternalSourcePrompt, NewExternalAgentThread,
-    NewNativeAgentThreadFromSummary,
+    ActivateCometSessionTab, Agent, AgentInitialContent, AgentThreadSource, ExternalSourcePrompt,
+    NewExternalAgentThread, NewNativeAgentThreadFromSummary,
 };
 use crate::{
     AgentDiffPane, ConversationView, CopyThreadToClipboard, Follow, LoadThreadFromClipboard,
@@ -135,6 +135,7 @@ const TERMINAL_AGENT_TELEMETRY_ID: &str = "terminal";
 const TERMINAL_INIT_COMMAND_STARTUP_TIMEOUT: Duration = Duration::from_secs(5);
 const COMET_SIDEBAR_WIDTH: f32 = 256.;
 const COMET_SIDEBAR_RESIZE_DURATION: Duration = Duration::from_millis(200);
+const COMET_TAB_SHORTCUT_LABELS: [&str; 10] = ["1", "2", "3", "4", "5", "6", "7", "8", "9", "0"];
 
 #[derive(Clone, Copy, Debug)]
 struct CometSidebarTween {
@@ -207,6 +208,28 @@ fn comet_sidebar_ease_out(progress: f32) -> f32 {
         }
     }
     sample(y, (low + high) / 2.).clamp(0., 1.)
+}
+
+fn comet_tab_shortcuts_visible(window: &Window) -> bool {
+    let modifiers = window.modifiers();
+    if cfg!(target_os = "macos") {
+        modifiers.platform
+    } else {
+        modifiers.control
+    }
+}
+
+fn comet_tab_shortcut_hint(index: usize, color: Hsla) -> AnyElement {
+    let label = COMET_TAB_SHORTCUT_LABELS
+        .get(index)
+        .copied()
+        .unwrap_or_default();
+    div()
+        .flex_none()
+        .text_size(px(10.))
+        .text_color(color)
+        .child(label)
+        .into_any_element()
 }
 
 fn forensics_timestamp() -> String {
@@ -14497,6 +14520,30 @@ impl AgentPanel {
         cx.notify();
     }
 
+    fn comet_historical_tab_rows(&self, cx: &App) -> Vec<omega_threads_sidebar::ThreadRow> {
+        let active_thread_id = self.active_thread_id(cx);
+        self.threads_sidebar_rows(cx)
+            .into_iter()
+            .filter(|row| Some(row.thread_id) != active_thread_id)
+            .filter(|row| !self.comet_closed_session_tabs.contains(&row.thread_id))
+            .take(COMET_TAB_SHORTCUT_LABELS.len() - 1)
+            .collect()
+    }
+
+    fn activate_comet_session_tab(
+        &mut self,
+        index: usize,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if index == 0 || index >= COMET_TAB_SHORTCUT_LABELS.len() {
+            return;
+        }
+        if let Some(row) = self.comet_historical_tab_rows(cx).get(index - 1).cloned() {
+            self.open_thread_from_threads_sidebar(&row, window, cx);
+        }
+    }
+
     fn render_comet_control(
         &self,
         id: &'static str,
@@ -14559,6 +14606,7 @@ impl AgentPanel {
         let text_placeholder = colors.text_placeholder;
         let text_accent = colors.text_accent;
         let icon_muted = colors.icon_muted;
+        let tab_shortcuts_visible = comet_tab_shortcuts_visible(window);
 
         let sidebar_open = self.sidebar.open;
         let sidebar_target = if sidebar_open {
@@ -14588,13 +14636,9 @@ impl AgentPanel {
             .threads_sidebar_rows(cx)
             .into_iter()
             .filter(|row| Some(row.thread_id) != active_thread_id)
-            .take(8)
+            .take(9)
             .collect::<Vec<_>>();
-        let historical_tabs = historical_rows
-            .iter()
-            .filter(|row| !self.comet_closed_session_tabs.contains(&row.thread_id))
-            .cloned()
-            .collect::<Vec<_>>();
+        let historical_tabs = self.comet_historical_tab_rows(cx);
 
         let active_tab = div()
             .id("comet-active-session-tab")
@@ -14619,7 +14663,10 @@ impl AgentPanel {
                     .size(IconSize::Small)
                     .color(Color::Muted),
             )
-            .child(div().min_w_0().flex_1().truncate().child(active_title));
+            .child(div().min_w_0().flex_1().truncate().child(active_title))
+            .when(tab_shortcuts_visible, |tab| {
+                tab.child(comet_tab_shortcut_hint(0, text_placeholder))
+            });
 
         let active_sidebar_row = h_flex()
             .id("comet-sidebar-active-session")
@@ -14673,6 +14720,9 @@ impl AgentPanel {
                         .color(Color::Muted),
                 )
                 .child(div().min_w_0().flex_1().truncate().child(title))
+                .when(tab_shortcuts_visible, |tab| {
+                    tab.child(comet_tab_shortcut_hint(index + 1, text_placeholder))
+                })
         });
 
         let toggle = self.render_comet_control(
@@ -15131,6 +15181,16 @@ impl Render for AgentPanel {
                     }
                 },
             ))
+            .on_action(
+                cx.listener(|this, action: &ActivateCometSessionTab, window, cx| {
+                    if omega_zero_base::is_comet_mode() {
+                        cx.stop_propagation();
+                        this.activate_comet_session_tab(action.0, window, cx);
+                    } else {
+                        cx.propagate();
+                    }
+                }),
+            )
             .on_action(cx.listener(|this, _: &NewTerminalThread, window, cx| {
                 cx.stop_propagation();
                 this.new_terminal(None, AgentThreadSource::AgentPanel, window, cx);
@@ -15195,6 +15255,9 @@ impl Render for AgentPanel {
                     cx.stop_propagation();
                 }
             }))
+            .when(comet_mode, |parent| {
+                parent.on_modifiers_changed(cx.listener(|_, _, _, cx| cx.notify()))
+            })
             .when(!comet_mode, |parent| {
                 parent
                     .child(self.render_toolbar(window, cx))
@@ -15667,6 +15730,14 @@ mod comet_sidebar_motion_tests {
         }
         assert_eq!(comet_sidebar_ease_out(0.), 0.);
         assert_eq!(comet_sidebar_ease_out(1.), 1.);
+    }
+
+    #[test]
+    fn comet_tab_shortcuts_assign_zero_to_the_tenth_tab() {
+        assert_eq!(
+            COMET_TAB_SHORTCUT_LABELS,
+            ["1", "2", "3", "4", "5", "6", "7", "8", "9", "0"]
+        );
     }
 }
 
