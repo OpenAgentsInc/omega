@@ -5445,10 +5445,8 @@ impl AgentPanel {
         let Some(store) = ThreadMetadataStore::try_global(cx) else {
             return Vec::new();
         };
-        let registered: Vec<AgentId> = self
-            .project
-            .read(cx)
-            .agent_server_store()
+        let agent_server_store = self.project.read(cx).agent_server_store().clone();
+        let registered: Vec<AgentId> = agent_server_store
             .read(cx)
             .external_agents()
             .cloned()
@@ -5494,7 +5492,15 @@ impl AgentPanel {
         // and closing it would take away the list the person is picking from.
         let metadata = ThreadMetadataStore::try_global(cx)
             .and_then(|store| store.read(cx).entry(row.thread_id).cloned());
-        let Some(agent) = metadata.and_then(|metadata| metadata.restorable_agent().ok()) else {
+        let Some(metadata) = metadata else {
+            self.threads_sidebar_refusal = Some(
+                "This thread predates verified Direct Agent ownership, so Omega cannot safely choose an executor for its session."
+                    .into(),
+            );
+            cx.notify();
+            return;
+        };
+        let Some(agent) = metadata.restorable_agent().ok() else {
             self.threads_sidebar_refusal = Some(
                 "This thread predates verified Direct Agent ownership, so Omega cannot safely choose an executor for its session."
                     .into(),
