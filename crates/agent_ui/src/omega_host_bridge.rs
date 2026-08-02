@@ -1821,20 +1821,31 @@ fn refresh_device_generation(
 }
 
 fn sarah_host_error(error: omega_effectd::SarahConversationError) -> HostResponseError {
-    let code = match error.protocol_code() {
-        omega_effectd::ProtocolErrorCode::StaleGeneration => HostResponseErrorCode::StaleGeneration,
-        omega_effectd::ProtocolErrorCode::InvalidRequest => HostResponseErrorCode::InvalidRequest,
-        omega_effectd::ProtocolErrorCode::UnknownMethod => HostResponseErrorCode::Unsupported,
-        omega_effectd::ProtocolErrorCode::HostUnavailable => HostResponseErrorCode::Unavailable,
-        omega_effectd::ProtocolErrorCode::HostTimeout => HostResponseErrorCode::Unavailable,
-        omega_effectd::ProtocolErrorCode::NotRunning
-        | omega_effectd::ProtocolErrorCode::RunNotFound => HostResponseErrorCode::Unavailable,
-        omega_effectd::ProtocolErrorCode::FrameTooLarge => HostResponseErrorCode::InvalidRequest,
-        omega_effectd::ProtocolErrorCode::Internal => HostResponseErrorCode::Internal,
-    };
+    let code = host_response_error_code(error.protocol_code());
     HostResponseError {
         code,
         message: error.to_string(),
+    }
+}
+
+fn host_response_error_code(code: omega_effectd::ProtocolErrorCode) -> HostResponseErrorCode {
+    match code {
+        omega_effectd::ProtocolErrorCode::StaleGeneration
+        | omega_effectd::ProtocolErrorCode::StaleCursor => HostResponseErrorCode::StaleGeneration,
+        omega_effectd::ProtocolErrorCode::InvalidRequest
+        | omega_effectd::ProtocolErrorCode::FrameTooLarge => HostResponseErrorCode::InvalidRequest,
+        omega_effectd::ProtocolErrorCode::UnknownMethod
+        | omega_effectd::ProtocolErrorCode::IncompatibleVersion => {
+            HostResponseErrorCode::Unsupported
+        }
+        omega_effectd::ProtocolErrorCode::NotRunning
+        | omega_effectd::ProtocolErrorCode::RunNotFound
+        | omega_effectd::ProtocolErrorCode::HostUnavailable
+        | omega_effectd::ProtocolErrorCode::HostTimeout
+        | omega_effectd::ProtocolErrorCode::NotFound
+        | omega_effectd::ProtocolErrorCode::Unavailable
+        | omega_effectd::ProtocolErrorCode::Gap => HostResponseErrorCode::Unavailable,
+        omega_effectd::ProtocolErrorCode::Internal => HostResponseErrorCode::Internal,
     }
 }
 
@@ -3032,6 +3043,68 @@ mod tests {
         assert!(decode_params::<ResolveWorkspaceParams>(json!({ "extra": true })).is_err());
         assert!(decode_params::<ResolveSyncSessionParams>(json!({})).is_ok());
         assert!(decode_params::<ResolveSyncSessionParams>(json!({ "token": "no" })).is_err());
+    }
+
+    #[test]
+    fn maps_every_effectd_protocol_error_to_the_host_contract() {
+        use omega_effectd::ProtocolErrorCode;
+
+        let cases = [
+            (
+                ProtocolErrorCode::StaleGeneration,
+                HostResponseErrorCode::StaleGeneration,
+            ),
+            (
+                ProtocolErrorCode::StaleCursor,
+                HostResponseErrorCode::StaleGeneration,
+            ),
+            (
+                ProtocolErrorCode::InvalidRequest,
+                HostResponseErrorCode::InvalidRequest,
+            ),
+            (
+                ProtocolErrorCode::FrameTooLarge,
+                HostResponseErrorCode::InvalidRequest,
+            ),
+            (
+                ProtocolErrorCode::UnknownMethod,
+                HostResponseErrorCode::Unsupported,
+            ),
+            (
+                ProtocolErrorCode::IncompatibleVersion,
+                HostResponseErrorCode::Unsupported,
+            ),
+            (
+                ProtocolErrorCode::NotRunning,
+                HostResponseErrorCode::Unavailable,
+            ),
+            (
+                ProtocolErrorCode::RunNotFound,
+                HostResponseErrorCode::Unavailable,
+            ),
+            (
+                ProtocolErrorCode::HostUnavailable,
+                HostResponseErrorCode::Unavailable,
+            ),
+            (
+                ProtocolErrorCode::HostTimeout,
+                HostResponseErrorCode::Unavailable,
+            ),
+            (
+                ProtocolErrorCode::NotFound,
+                HostResponseErrorCode::Unavailable,
+            ),
+            (
+                ProtocolErrorCode::Unavailable,
+                HostResponseErrorCode::Unavailable,
+            ),
+            (ProtocolErrorCode::Gap, HostResponseErrorCode::Unavailable),
+            (ProtocolErrorCode::Internal, HostResponseErrorCode::Internal),
+        ];
+
+        for (protocol, expected) in cases {
+            assert_eq!(host_response_error_code(protocol), expected);
+        }
     }
 
     #[test]
