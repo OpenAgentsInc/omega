@@ -4,6 +4,9 @@ pub mod parser;
 mod path_range;
 mod selection;
 mod streaming;
+mod streaming_veil;
+
+pub use streaming_veil::StreamingMarkdownVeil;
 
 use base64::Engine as _;
 use futures::FutureExt as _;
@@ -23,14 +26,14 @@ use theme_settings::ThemeSettings;
 use util::maybe;
 
 use std::borrow::Cow;
-use std::cell::Cell;
+use std::cell::{Cell, RefCell};
 use std::collections::BTreeMap;
 use std::mem;
 use std::ops::Range;
 use std::path::Path;
 use std::rc::Rc;
 use std::sync::Arc;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use collections::{HashMap, HashSet};
 use gpui::{
@@ -1364,6 +1367,7 @@ pub struct MarkdownElement {
     image_resolver: Option<Box<dyn Fn(&str) -> Option<ImageSource>>>,
     show_root_block_markers: bool,
     autoscroll: AutoscrollBehavior,
+    streaming_veil: Option<Rc<RefCell<StreamingMarkdownVeil>>>,
 }
 
 impl MarkdownElement {
@@ -1384,7 +1388,13 @@ impl MarkdownElement {
             image_resolver: None,
             show_root_block_markers: false,
             autoscroll: AutoscrollBehavior::Propagate,
+            streaming_veil: None,
         }
+    }
+
+    pub fn streaming_veil(mut self, veil: Rc<RefCell<StreamingMarkdownVeil>>) -> Self {
+        self.streaming_veil = Some(veil);
+        self
     }
 
     #[cfg(any(test, feature = "test-support"))]
@@ -2233,10 +2243,14 @@ impl Element for MarkdownElement {
         window: &mut Window,
         cx: &mut App,
     ) -> (gpui::LayoutId, Self::RequestLayoutState) {
+        let reduce_motion = cx.reduce_motion();
         let mut builder = MarkdownElementBuilder::new(
             &self.style.container_style,
             self.style.base_text_style.clone(),
             self.style.syntax.clone(),
+            (!reduce_motion)
+                .then(|| self.streaming_veil.clone())
+                .flatten(),
         );
         let (parsed_markdown, images, active_root_block, render_mermaid_diagrams, mermaid_state) = {
             let markdown = self.markdown.read(cx);
@@ -2929,6 +2943,13 @@ impl Element for MarkdownElement {
                 .update(cx, |markdown, _| markdown.clear_code_block_scroll_handles());
         }
         let mut rendered_markdown = builder.build();
+        if !reduce_motion && let Some(veil) = &self.streaming_veil {
+            let mut veil = veil.borrow_mut();
+            veil.finish_seeding();
+            if veil.is_fading() {
+                window.request_animation_frame();
+            }
+        }
         let child_layout_id = rendered_markdown.element.request_layout(window, cx);
         let layout_id = window.request_layout(gpui::Style::default(), [child_layout_id], cx);
         (layout_id, rendered_markdown)
@@ -3288,6 +3309,9 @@ struct MarkdownElementBuilder {
     list_stack: Vec<ListStackEntry>,
     table: TableState,
     syntax_theme: Arc<SyntaxTheme>,
+    streaming_veil: Option<Rc<RefCell<StreamingMarkdownVeil>>>,
+    streaming_element_index: usize,
+    now: Instant,
 }
 
 struct DivStackEntry {
@@ -3326,6 +3350,7 @@ impl MarkdownElementBuilder {
         container_style: &StyleRefinement,
         base_text_style: TextStyle,
         syntax_theme: Arc<SyntaxTheme>,
+        streaming_veil: Option<Rc<RefCell<StreamingMarkdownVeil>>>,
     ) -> Self {
         Self {
             div_stack: vec![{
@@ -3348,6 +3373,9 @@ impl MarkdownElementBuilder {
             list_stack: Vec::new(),
             table: TableState::default(),
             syntax_theme,
+            streaming_veil,
+            streaming_element_index: 0,
+            now: Instant::now(),
         }
     }
 
@@ -3684,7 +3712,16 @@ impl MarkdownElementBuilder {
             return;
         }
 
-        let text = StyledText::new(line.text).with_runs(line.runs);
+        let runs = if let Some(veil) = &self.streaming_veil {
+            let spans =
+                veil.borrow_mut()
+                    .advance(self.streaming_element_index, &line.text, self.now);
+            streaming_veil::apply_veil(line.runs, &spans)
+        } else {
+            line.runs
+        };
+        self.streaming_element_index += 1;
+        let text = StyledText::new(line.text).with_runs(runs);
         self.rendered_lines.push(RenderedLine {
             layout: text.layout().clone(),
             source_mappings: line.source_mappings,

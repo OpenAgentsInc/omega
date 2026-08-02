@@ -27554,4 +27554,58 @@ mod tests {
             );
         }
     }
+
+    /// OMEGA-DELTA-0226. Live assistant text in Comet mode uses Comet's
+    /// cadence-adaptive paint veil, while settled and reduced-motion text stays
+    /// immediately readable.
+    #[test]
+    fn comet_streaming_text_uses_the_exact_paint_only_veil() {
+        let veil = without_comments(&read_repository_file(
+            "crates/markdown/src/streaming_veil.rs",
+        ));
+        for required in [
+            "VEIL_EMA_SEED_MS: f32 = 160.0",
+            "VEIL_MIN_FADE_MS: f32 = 120.0",
+            "VEIL_MAX_FADE_MS: f32 = 400.0",
+            "VEIL_CURVE_POW: f32 = 1.6",
+            "ema_ms * 0.7 + gap_ms.min(VEIL_GAP_CLAMP_MS) * 0.3",
+            "1.0 + 0.3 * active_chunks.saturating_sub(2) as f32",
+            "piece.color = piece.color.opacity(opacity)",
+        ] {
+            assert!(
+                veil.contains(required),
+                "OMEGA-DELTA-0226: the Comet streaming veil lost `{required}`"
+            );
+        }
+
+        let markdown = without_comments(&read_repository_file("crates/markdown/src/markdown.rs"));
+        let layout = body_of(&markdown, "request_layout");
+        for required in [
+            "cx.reduce_motion()",
+            "veil.finish_seeding()",
+            "veil.is_fading()",
+            "window.request_animation_frame()",
+        ] {
+            assert!(
+                layout.contains(required),
+                "OMEGA-DELTA-0226: MarkdownElement lost veil lifecycle `{required}`"
+            );
+        }
+
+        let thread_view = without_comments(&read_repository_file(
+            "crates/agent_ui/src/conversation_view/thread_view.rs",
+        ));
+        let entry = body_of(&thread_view, "render_entry");
+        for required in [
+            "omega_zero_base::is_comet_mode()",
+            "ThreadStatus::Generating",
+            ".streaming_veil(veil)",
+            ".remove(&markdown_id)",
+        ] {
+            assert!(
+                entry.contains(required),
+                "OMEGA-DELTA-0226: Comet transcript lost streaming boundary `{required}`"
+            );
+        }
+    }
 }

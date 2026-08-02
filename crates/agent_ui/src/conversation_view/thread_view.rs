@@ -8,7 +8,7 @@ use crate::{
     thread_metadata_store::{ThreadId, ThreadMetadataStore},
 };
 use agent_client_protocol::schema::v1 as acp;
-use std::cell::RefCell;
+use std::{cell::RefCell, rc::Rc};
 
 use acp_thread::{
     Elicitation, ElicitationEntryId, ElicitationStatus, PlanEntry, SandboxAuthorizationDetails,
@@ -615,6 +615,8 @@ pub struct ThreadView {
     pub session_capabilities: SharedSessionCapabilities,
     pub expanded_tool_call_raw_inputs: HashSet<acp::ToolCallId>,
     collapsed_comet_tool_groups: HashSet<acp::ToolCallId>,
+    comet_streaming_markdown_veils:
+        RefCell<HashMap<gpui::EntityId, Rc<RefCell<markdown::StreamingMarkdownVeil>>>>,
     collapsed_sandbox_authorization_details: HashSet<acp::ToolCallId>,
     collapsed_sandbox_network_details: HashSet<acp::ToolCallId>,
     /// Sandbox escalation prompts whose "surprising Unicode" warning the user
@@ -975,6 +977,31 @@ impl ThreadView {
             && project.upgrade().is_some_and(|p| p.read(cx).is_local())
             && agent_id.as_ref() == "Codex";
 
+        let comet_streaming_markdown_veils = if omega_zero_base::is_comet_mode() {
+            thread
+                .read(cx)
+                .entries()
+                .iter()
+                .filter_map(|entry| match entry {
+                    AgentThreadEntry::AssistantMessage(message) => Some(&message.chunks),
+                    _ => None,
+                })
+                .flatten()
+                .filter_map(|chunk| match chunk {
+                    AssistantMessageChunk::Message { block, .. } => block.markdown(),
+                    AssistantMessageChunk::Thought { .. } => None,
+                })
+                .map(|markdown| {
+                    (
+                        markdown.entity_id(),
+                        Rc::new(RefCell::new(markdown::StreamingMarkdownVeil::seeded())),
+                    )
+                })
+                .collect()
+        } else {
+            HashMap::default()
+        };
+
         if let Some(project) = project.upgrade() {
             subscriptions.push(cx.subscribe(&project, {
                 let resolver = code_span_resolver.clone();
@@ -1141,6 +1168,7 @@ impl ThreadView {
             thread_feedback: Default::default(),
             expanded_tool_call_raw_inputs: HashSet::default(),
             collapsed_comet_tool_groups: HashSet::default(),
+            comet_streaming_markdown_veils: RefCell::new(comet_streaming_markdown_veils),
             collapsed_sandbox_authorization_details: HashSet::default(),
             collapsed_sandbox_network_details: HashSet::default(),
             acknowledged_confusable_warnings: HashSet::default(),
@@ -7080,6 +7108,9 @@ impl ThreadView {
             }) => {
                 let mut is_blank = true;
                 let is_last = entry_ix + 1 == total_entries;
+                let comet_streaming_assistant = omega_zero_base::is_comet_mode()
+                    && is_last
+                    && matches!(self.thread.read(cx).status(), ThreadStatus::Generating);
 
                 let style = MarkdownStyle::themed(MarkdownFont::Agent, window, cx);
                 let message_body = v_flex()
@@ -7095,10 +7126,29 @@ impl ThreadView {
                                         return None;
                                     }
 
-                                    Some(
-                                        self.render_markdown(md.clone(), style.clone(), cx)
-                                            .into_any_element(),
-                                    )
+                                    let markdown_id = md.entity_id();
+                                    let mut rendered =
+                                        self.render_markdown(md.clone(), style.clone(), cx);
+                                    if comet_streaming_assistant {
+                                        let veil = self
+                                            .comet_streaming_markdown_veils
+                                            .borrow_mut()
+                                            .entry(markdown_id)
+                                            .or_insert_with(|| {
+                                                Rc::new(RefCell::new(if cx.reduce_motion() {
+                                                    markdown::StreamingMarkdownVeil::seeded()
+                                                } else {
+                                                    markdown::StreamingMarkdownVeil::default()
+                                                }))
+                                            })
+                                            .clone();
+                                        rendered = rendered.streaming_veil(veil);
+                                    } else {
+                                        self.comet_streaming_markdown_veils
+                                            .borrow_mut()
+                                            .remove(&markdown_id);
+                                    }
+                                    Some(rendered.into_any_element())
                                 })
                             }
                             AssistantMessageChunk::Thought { block, .. } => {
