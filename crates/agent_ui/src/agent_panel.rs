@@ -232,6 +232,23 @@ fn comet_tab_shortcut_hint(index: usize, color: Hsla) -> AnyElement {
         .into_any_element()
 }
 
+fn comet_executor_icon(
+    executor: Option<crate::omega_executor_selector::SelectableExecutor>,
+) -> IconName {
+    use crate::omega_executor_selector::SelectableExecutor;
+
+    match executor {
+        Some(SelectableExecutor::Codex) => IconName::AiOpenAi,
+        Some(SelectableExecutor::Claude) => IconName::AiClaude,
+        Some(SelectableExecutor::Grok) => IconName::AiXAi,
+        Some(SelectableExecutor::Omega | SelectableExecutor::Exo) | None => IconName::OmegaAgent,
+    }
+}
+
+fn comet_thread_icon(row: &omega_threads_sidebar::ThreadRow) -> IconName {
+    comet_executor_icon(omega_threads_sidebar::recorded_executor(&row.agent_id))
+}
+
 fn stable_comet_session_rows(
     mut rows: Vec<omega_threads_sidebar::ThreadRow>,
     active_thread_id: Option<ThreadId>,
@@ -3725,6 +3742,8 @@ impl AgentPanel {
     fn agent_is_hidden_from_composer(agent_id: &AgentId, label: &str) -> bool {
         agent_id.as_ref().to_ascii_lowercase().contains("copilot")
             || label.to_ascii_lowercase().contains("copilot")
+            || agent_id.as_ref() == agent_servers::CURSOR_ID
+            || label.eq_ignore_ascii_case("cursor")
             || agent_id.as_ref() == "grok-build"
     }
 
@@ -14710,6 +14729,18 @@ impl AgentPanel {
             .map(|view| view.read(cx).title(cx))
             .unwrap_or_else(|| "New session".into());
         let active_sidebar_title = active_title.clone();
+        let active_executor = self
+            .active_conversation_view()
+            .and_then(|view| view.read(cx).active_thread().cloned())
+            .and_then(|thread| {
+                let disclosure = thread.read(cx).executor_disclosure(cx);
+                crate::omega_executor_selector::SelectableExecutor::of(
+                    disclosure.class,
+                    disclosure.agent_id.as_ref(),
+                )
+            })
+            .or_else(crate::omega_executor_selector::selected);
+        let active_icon = comet_executor_icon(active_executor);
         let session_tab_rows = self.comet_session_tab_rows(cx);
         let active_tab_is_persisted = active_thread_id.is_some_and(|active_thread_id| {
             session_tab_rows
@@ -14719,6 +14750,7 @@ impl AgentPanel {
         let session_tabs = session_tab_rows.iter().enumerate().map(|(index, row)| {
             let row = row.clone();
             let title = row.title.clone();
+            let icon = comet_thread_icon(&row);
             let is_active = Some(row.thread_id) == active_thread_id;
             div()
                 .id(("comet-session-tab", index))
@@ -14748,11 +14780,7 @@ impl AgentPanel {
                 .rounded(px(8.))
                 .text_size(px(12.))
                 .occlude()
-                .child(
-                    Icon::new(IconName::OmegaAgent)
-                        .size(IconSize::Small)
-                        .color(Color::Muted),
-                )
+                .child(Icon::new(icon).size(IconSize::Small).color(Color::Muted))
                 .child(div().min_w_0().flex_1().truncate().child(title))
                 .when(tab_shortcuts_visible, |tab| {
                     tab.child(comet_tab_shortcut_hint(index, text_placeholder))
@@ -14779,7 +14807,7 @@ impl AgentPanel {
             .text_color(text)
             .occlude()
             .child(
-                Icon::new(IconName::OmegaAgent)
+                Icon::new(active_icon)
                     .size(IconSize::Small)
                     .color(Color::Muted),
             )
@@ -14930,6 +14958,7 @@ impl AgentPanel {
             .map(|(index, row)| {
                 let title = row.title.clone();
                 let age = row.age.clone();
+                let icon = comet_thread_icon(&row);
                 let is_active = Some(row.thread_id) == active_thread_id;
                 div()
                     .id(("comet-sidebar-session", index))
@@ -14954,11 +14983,7 @@ impl AgentPanel {
                         h_flex()
                             .w_full()
                             .gap(px(8.))
-                            .child(
-                                Icon::new(IconName::OmegaAgent)
-                                    .size(IconSize::Small)
-                                    .color(Color::Muted),
-                            )
+                            .child(Icon::new(icon).size(IconSize::Small).color(Color::Muted))
                             .child(div().min_w_0().flex_1().truncate().child(title))
                             .when(is_active, |row| {
                                 row.child(div().size(px(6.)).rounded_full().bg(text_accent))
@@ -14986,7 +15011,7 @@ impl AgentPanel {
             .border_1()
             .border_color(colors.border_selected)
             .child(
-                Icon::new(IconName::OmegaAgent)
+                Icon::new(active_icon)
                     .size(IconSize::Small)
                     .color(Color::Muted),
             )
@@ -19662,6 +19687,10 @@ mod tests {
             &AgentId::new("grok-build"),
             "Grok Build",
         ));
+        assert!(AgentPanel::agent_is_hidden_from_composer(
+            &AgentId::new(agent_servers::CURSOR_ID),
+            "Cursor",
+        ));
         assert_eq!(
             AgentPanel::NAMED_DIRECT_AGENT_IDS,
             [
@@ -19679,6 +19708,28 @@ mod tests {
         assert_eq!(
             crate::omega_composer_executor_menu::named_direct_agent_label(agent_servers::GROK_ID),
             Some("Grok"),
+        );
+    }
+
+    #[test]
+    fn comet_session_icons_follow_the_recorded_executor() {
+        use crate::omega_executor_selector::SelectableExecutor;
+
+        assert_eq!(
+            comet_executor_icon(Some(SelectableExecutor::Omega)),
+            IconName::OmegaAgent
+        );
+        assert_eq!(
+            comet_executor_icon(Some(SelectableExecutor::Codex)),
+            IconName::AiOpenAi
+        );
+        assert_eq!(
+            comet_executor_icon(Some(SelectableExecutor::Claude)),
+            IconName::AiClaude
+        );
+        assert_eq!(
+            comet_executor_icon(Some(SelectableExecutor::Grok)),
+            IconName::AiXAi
         );
     }
 

@@ -226,6 +226,10 @@ fn main() {
     }
 
     let mut args = Args::parse();
+    if option_env!("OMEGA_COMET_BUILD").is_some() {
+        args.comet = true;
+        log::info!("Omega embedded Comet build is active");
+    }
 
     // `zed --askpass` Makes zed operate in nc/netcat mode for use with askpass
     #[cfg(not(target_os = "windows"))]
