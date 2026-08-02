@@ -26,6 +26,8 @@ pub struct EntropyForensicsRestoreState {
     pub runs: Vec<EntropyRunProjection>,
     #[serde(default)]
     pub campaigns: Vec<EntropyCampaignProjection>,
+    #[serde(default)]
+    pub coldcard_case_rung: Option<String>,
 }
 
 impl Default for EntropyForensicsRestoreState {
@@ -37,6 +39,7 @@ impl Default for EntropyForensicsRestoreState {
             prompt_snapshots: Vec::new(),
             runs: Vec::new(),
             campaigns: Vec::new(),
+            coldcard_case_rung: None,
         }
     }
 }
@@ -61,6 +64,22 @@ impl EntropyForensicsRestoreState {
         }
         for campaign in &self.campaigns {
             campaign.validate()?;
+        }
+        if self.coldcard_case_rung.as_deref().is_some_and(|rung| {
+            !matches!(
+                rung,
+                "source"
+                    | "artifact"
+                    | "generator"
+                    | "exploitability"
+                    | "owned_fixture"
+                    | "fingerprint"
+                    | "entity"
+                    | "unauthorized_movement"
+                    | "identity"
+            )
+        }) {
+            anyhow::bail!("Coldcard case restore contains an unknown evidence rung");
         }
         if let Some(parent_prompt_ref) = &self.parent_prompt_ref
             && !self
@@ -160,6 +179,7 @@ mod tests {
             prompt_snapshots: vec![parent],
             runs: Vec::new(),
             campaigns: Vec::new(),
+            coldcard_case_rung: Some("entity".into()),
         };
         state.validate().expect("valid restore state");
         let encoded = serde_json::to_string(&state).expect("encode restore state");

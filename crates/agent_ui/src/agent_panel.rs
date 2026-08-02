@@ -16535,34 +16535,37 @@ impl AgentPanel {
                 )
             })
             .child(
-                h_flex()
-                    .id("comet-open-forensics")
-                    .debug_selector(|| "omega.comet.sidebar.forensics".into())
-                    .w_full()
-                    .mt(px(10.))
-                    .px(px(forensics_padding_x))
-                    .py(px(forensics_padding_y))
-                    .gap(px(8.))
-                    .rounded(px(8.))
-                    .cursor_pointer()
-                    .aria_label("Open Forensics")
-                    .when(comet_forensics_selected, |row| {
-                        row.bg(selected_background)
-                            .border_1()
-                            .border_color(colors.border_selected)
-                    })
-                    .when(!comet_forensics_selected, |row| {
-                        row.hover(move |style| style.bg(hover_background))
-                    })
-                    .on_click(cx.listener(|this, _, window, cx| {
-                        this.select_work_surface(
-                            omega_workbench_state::WorkSurface::Forensics,
-                            window,
-                            cx,
-                        );
-                    }))
-                    .child(Icon::new(IconName::Crosshair).size(IconSize::Small))
-                    .child("Forensics"),
+                div().h(px(40.)).flex_none().pt(px(10.)).child(
+                    h_flex()
+                        .id("comet-open-forensics")
+                        .debug_selector(|| "omega.comet.sidebar.forensics".into())
+                        .w_full()
+                        .h(px(30.))
+                        .px(px(forensics_padding_x))
+                        .py(px(forensics_padding_y))
+                        .gap(px(8.))
+                        .rounded(px(8.))
+                        .cursor_pointer()
+                        .role(gpui::Role::Button)
+                        .aria_label("Open Forensics")
+                        .when(comet_forensics_selected, |row| {
+                            row.bg(selected_background)
+                                .border_1()
+                                .border_color(colors.border_selected)
+                        })
+                        .when(!comet_forensics_selected, |row| {
+                            row.hover(move |style| style.bg(hover_background))
+                        })
+                        .on_click(cx.listener(|this, _, window, cx| {
+                            this.select_work_surface(
+                                omega_workbench_state::WorkSurface::Forensics,
+                                window,
+                                cx,
+                            );
+                        }))
+                        .child(Icon::new(IconName::Crosshair).size(IconSize::Small))
+                        .child("Forensics"),
+                ),
             )
             .child(
                 div()

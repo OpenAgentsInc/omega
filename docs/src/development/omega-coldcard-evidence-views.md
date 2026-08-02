@@ -1,10 +1,35 @@
-# Omega Coldcard evidence views
+# Omega Coldcard case reader
 
-Omega issue [#197](https://github.com/OpenAgentsInc/omega/issues/197) extends
-the native Forensics workbench with a linked, private view of the full Coldcard
-reproduction chain. It consumes a validated projection; it does not recompute
-evidence from prose or grant a renderer access to worker credentials, private
-keys, or source artifacts.
+Omega issue [#197](https://github.com/OpenAgentsInc/omega/issues/197) added the
+typed Coldcard evidence projection. Omega issue
+[#203](https://github.com/OpenAgentsInc/omega/issues/203) makes the bundled,
+synthetic projection available in the production Forensics workbench as a
+read-only case reader. The reader consumes a validated projection; it does not
+recompute evidence from prose or grant a renderer access to worker
+credentials, private keys, or source artifacts.
+
+## Comet reader
+
+The reader is one bounded list/detail workspace. Its left list contains a case
+overview and all nine ordered proof rungs. Its right detail pane shows the
+selected overview or rung. This replaces the former vertical pile of evidence
+cards while preserving the surrounding Comet sidebar, tabs, composer, and
+thread history.
+
+Users can open Forensics from the project sidebar or from **View → Workbench →
+Forensics**. Both paths select the same native work surface.
+
+The overview identifies the Coldcard target, public clone URL, pinned
+vulnerable commit, synthetic fixture state, private/non-reportable boundary,
+highest supported rung, evidence completeness, and provenance health. It also
+labels the live-run control as unavailable. The fixture is a reader input, not
+a live receipt.
+
+Every list row is reachable by Tab and activatable with Enter or Space. The
+list, rows, selected state, status/error scenes, detail group, and read-only
+boundary have explicit accessibility roles and labels. Reader selection is
+presentation state only. Selecting a row does not prepare or launch a run,
+promote a claim, publish a result, or create another authority store.
 
 ## Evidence ladder
 
@@ -57,5 +82,6 @@ Run the contract and GPUI coverage with:
 
 ```sh
 cargo test -p omega_forensics coldcard_workspace
-cargo test -p agent_ui forensics_workbench::tests::coldcard_views_keep_missing_rungs_private_ids_and_original_corrections
+cargo test -p agent_ui forensics_workbench::tests::coldcard --lib
+./script/clippy -p omega_forensics -p agent_ui
 ```

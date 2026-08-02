@@ -4,18 +4,19 @@ use gpui::{
     TaskExt, Window,
 };
 use omega_forensics::{
-    ColdcardBenchmarkArm, ColdcardEvidenceWorkspaceProjection, CoverageStatus,
-    DEFAULT_ENTROPY_ANALYSIS_PROMPT, DependencyPolicy, EntropyCampaignComparison,
-    EntropyCampaignPhase, EntropyCampaignProjection, EntropyFileAnalysisOutput, EntropyFileState,
-    EntropyFileTask, EntropyLimitation, EntropyProjectCatalog, EntropyPromptSnapshot,
-    EntropyRunPhase, EntropyRunProjection, ExplicitOperatorAction, FORENSIC_FINDING_SCHEMA_V1,
-    FORENSIC_HYPOTHESIS_SCHEMA_V1, ForensicBudgetState, ForensicEvidenceTier, ForensicExactness,
-    ForensicLifecycleState, ForensicPromptIr, ForensicPromptWorkspace, ForensicReviewDecisionKind,
-    ForensicReviewOutcome, ForensicSourceCitation, ForensicStatistic, ForensicWorkerObservation,
-    ForensicWorkerPlacement, ForensicsFailureProjection, ForensicsLaunchIntent,
-    ForensicsMatrixProjection, ForensicsPreflightProjection, ForensicsReviewProjection,
-    ForensicsRunPhase, ForensicsRunProjection, PreflightReadiness, PromptChangeKind,
-    PromptCompatibilityProfile, SourceState,
+    ColdcardBenchmarkArm, ColdcardClaimRung, ColdcardEvidenceWorkspaceProjection,
+    ColdcardRungState, CoverageStatus, DEFAULT_ENTROPY_ANALYSIS_PROMPT, DependencyPolicy,
+    EntropyCampaignComparison, EntropyCampaignPhase, EntropyCampaignProjection,
+    EntropyFileAnalysisOutput, EntropyFileState, EntropyFileTask, EntropyLimitation,
+    EntropyProjectCatalog, EntropyPromptSnapshot, EntropyRunPhase, EntropyRunProjection,
+    ExplicitOperatorAction, FORENSIC_FINDING_SCHEMA_V1, FORENSIC_HYPOTHESIS_SCHEMA_V1,
+    ForensicBudgetState, ForensicEvidenceTier, ForensicExactness, ForensicLifecycleState,
+    ForensicPromptIr, ForensicPromptWorkspace, ForensicReviewDecisionKind, ForensicReviewOutcome,
+    ForensicSourceCitation, ForensicStatistic, ForensicWorkerObservation, ForensicWorkerPlacement,
+    ForensicsFailureProjection, ForensicsLaunchIntent, ForensicsMatrixProjection,
+    ForensicsPreflightProjection, ForensicsReviewProjection, ForensicsRunPhase,
+    ForensicsRunProjection, PreflightReadiness, PromptChangeKind, PromptCompatibilityProfile,
+    RepositoryTargetProjection, SourceState,
 };
 use omega_workbench_state::RepositoryBinding;
 use sha2::{Digest, Sha256};
@@ -28,6 +29,62 @@ use crate::thread_identity::ThreadIdentityCandidate;
 
 const PREPARE_ACTION_REF: &str = "operator-action-ref://omega/forensics/prepare-run";
 const MAX_VISIBLE_ENTROPY_FILES: usize = 500;
+
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum ColdcardCaseSelection {
+    #[default]
+    Overview,
+    Rung(ColdcardClaimRung),
+}
+
+impl ColdcardCaseSelection {
+    fn persisted_rung(self) -> Option<&'static str> {
+        match self {
+            Self::Overview => None,
+            Self::Rung(ColdcardClaimRung::Source) => Some("source"),
+            Self::Rung(ColdcardClaimRung::Artifact) => Some("artifact"),
+            Self::Rung(ColdcardClaimRung::Generator) => Some("generator"),
+            Self::Rung(ColdcardClaimRung::Exploitability) => Some("exploitability"),
+            Self::Rung(ColdcardClaimRung::OwnedFixture) => Some("owned_fixture"),
+            Self::Rung(ColdcardClaimRung::Fingerprint) => Some("fingerprint"),
+            Self::Rung(ColdcardClaimRung::Entity) => Some("entity"),
+            Self::Rung(ColdcardClaimRung::UnauthorizedMovement) => Some("unauthorized_movement"),
+            Self::Rung(ColdcardClaimRung::Identity) => Some("identity"),
+        }
+    }
+
+    fn from_persisted_rung(rung: Option<&str>) -> Self {
+        match rung {
+            Some("source") => Self::Rung(ColdcardClaimRung::Source),
+            Some("artifact") => Self::Rung(ColdcardClaimRung::Artifact),
+            Some("generator") => Self::Rung(ColdcardClaimRung::Generator),
+            Some("exploitability") => Self::Rung(ColdcardClaimRung::Exploitability),
+            Some("owned_fixture") => Self::Rung(ColdcardClaimRung::OwnedFixture),
+            Some("fingerprint") => Self::Rung(ColdcardClaimRung::Fingerprint),
+            Some("entity") => Self::Rung(ColdcardClaimRung::Entity),
+            Some("unauthorized_movement") => Self::Rung(ColdcardClaimRung::UnauthorizedMovement),
+            Some("identity") => Self::Rung(ColdcardClaimRung::Identity),
+            _ => Self::Overview,
+        }
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum ColdcardCaseReaderState {
+    Loading,
+    Empty,
+    Invalid(SharedString),
+    Stale(SharedString),
+    Complete,
+}
+
+fn bundled_coldcard_evidence_workspace() -> anyhow::Result<ColdcardEvidenceWorkspaceProjection> {
+    let workspace: ColdcardEvidenceWorkspaceProjection = serde_json::from_str(include_str!(
+        "../../omega_forensics/fixtures/coldcard-evidence-workspace.v1.json"
+    ))?;
+    workspace.validate()?;
+    Ok(workspace)
+}
 
 pub(crate) fn entropy_campaign_checkout_root(
     campaign_ref: &str,
@@ -100,6 +157,8 @@ pub struct ForensicsWorkbenchSnapshot {
     pub prompt_workspace: ForensicPromptWorkspace,
     pub matrix: Option<ForensicsMatrixProjection>,
     pub coldcard_evidence: Option<ColdcardEvidenceWorkspaceProjection>,
+    pub coldcard_case_selection: ColdcardCaseSelection,
+    pub coldcard_case_reader_state: ColdcardCaseReaderState,
     pub entropy_run: Option<EntropyRunProjection>,
     pub entropy_run_history: Vec<EntropyRunProjection>,
     pub entropy_prompt_draft: String,
@@ -159,6 +218,8 @@ pub struct ForensicsWorkbenchSurface {
     prompt_workspace: ForensicPromptWorkspace,
     matrix: Option<ForensicsMatrixProjection>,
     coldcard_evidence: Option<ColdcardEvidenceWorkspaceProjection>,
+    coldcard_case_selection: ColdcardCaseSelection,
+    coldcard_case_reader_state: ColdcardCaseReaderState,
     entropy_run: Option<EntropyRunProjection>,
     entropy_run_history: Vec<EntropyRunProjection>,
     entropy_prompt_editor: Option<Entity<Editor>>,
@@ -186,6 +247,16 @@ impl ForensicsWorkbenchSurface {
             .projects
             .first()
             .map(|project| project.product_ref.clone());
+        let (coldcard_evidence, coldcard_case_reader_state) =
+            match bundled_coldcard_evidence_workspace() {
+                Ok(workspace) => (Some(workspace), ColdcardCaseReaderState::Complete),
+                Err(error) => (
+                    None,
+                    ColdcardCaseReaderState::Invalid(
+                        format!("Bundled Coldcard case is invalid: {error}").into(),
+                    ),
+                ),
+            };
         Self {
             focus_handle: cx.focus_handle(),
             binding: candidate.binding.clone(),
@@ -208,7 +279,9 @@ impl ForensicsWorkbenchSurface {
             )
             .expect("the built-in forensic prompt workspace must remain valid"),
             matrix: None,
-            coldcard_evidence: None,
+            coldcard_evidence,
+            coldcard_case_selection: ColdcardCaseSelection::Overview,
+            coldcard_case_reader_state,
             entropy_run: None,
             entropy_run_history: Vec::new(),
             entropy_prompt_editor: None,
@@ -241,6 +314,8 @@ impl ForensicsWorkbenchSurface {
         this.entropy_parent_prompt_ref = restored.parent_prompt_ref;
         this.entropy_source_run_ref = restored.source_run_ref;
         this.entropy_prompt_snapshots = restored.prompt_snapshots;
+        this.coldcard_case_selection =
+            ColdcardCaseSelection::from_persisted_rung(restored.coldcard_case_rung.as_deref());
         let mut campaigns = restored.campaigns;
         if let Some(mut active_campaign) = campaigns.pop() {
             if matches!(
@@ -564,6 +639,10 @@ impl ForensicsWorkbenchSurface {
                 }
                 campaigns
             },
+            coldcard_case_rung: self
+                .coldcard_case_selection
+                .persisted_rung()
+                .map(str::to_string),
         }
     }
 
@@ -719,7 +798,6 @@ impl ForensicsWorkbenchSurface {
         self.prepared_intent = None;
         self.run = None;
         self.review = None;
-        self.coldcard_evidence = None;
         self.source_resolutions.clear();
         self.status = readiness_label(projection.readiness()).into();
         self.preflight = Some(projection);
@@ -732,7 +810,6 @@ impl ForensicsWorkbenchSurface {
         self.prepared_intent = None;
         self.run = None;
         self.review = None;
-        self.coldcard_evidence = None;
         self.source_resolutions.clear();
         if let Some(preflight) = self.preflight.as_mut() {
             preflight.set_benchmark_arm(arm);
@@ -947,8 +1024,20 @@ impl ForensicsWorkbenchSurface {
         )
         .into();
         self.coldcard_evidence = Some(projection);
+        self.coldcard_case_reader_state = ColdcardCaseReaderState::Complete;
+        self.coldcard_case_selection = ColdcardCaseSelection::Overview;
         cx.notify();
         Ok(())
+    }
+
+    pub fn select_coldcard_case(
+        &mut self,
+        selection: ColdcardCaseSelection,
+        cx: &mut Context<Self>,
+    ) {
+        self.coldcard_case_selection = selection;
+        self.persist_entropy_state(cx);
+        cx.notify();
     }
 
     pub fn open_source(&mut self, citation: ForensicSourceCitation, cx: &mut Context<Self>) {
@@ -1034,6 +1123,8 @@ impl ForensicsWorkbenchSurface {
             prompt_workspace: self.prompt_workspace.clone(),
             matrix: self.matrix.clone(),
             coldcard_evidence: self.coldcard_evidence.clone(),
+            coldcard_case_selection: self.coldcard_case_selection,
+            coldcard_case_reader_state: self.coldcard_case_reader_state.clone(),
             entropy_run: self.entropy_run.clone(),
             entropy_run_history: self.entropy_run_history.clone(),
             entropy_prompt_draft: self.entropy_prompt_draft.clone(),
@@ -1110,6 +1201,375 @@ impl ForensicsWorkbenchSurface {
                     .color(Color::Muted),
             )
             .child(Label::new(value).size(LabelSize::XSmall).line_clamp(1))
+    }
+
+    fn render_coldcard_case_reader(&self, cx: &mut Context<Self>) -> AnyElement {
+        let state_content = match &self.coldcard_case_reader_state {
+            ColdcardCaseReaderState::Loading => Some((
+                gpui::Role::Status,
+                "Loading the bundled Coldcard case…".to_string(),
+                Color::Muted,
+            )),
+            ColdcardCaseReaderState::Empty => Some((
+                gpui::Role::Status,
+                "No Coldcard case projection is available.".to_string(),
+                Color::Muted,
+            )),
+            ColdcardCaseReaderState::Invalid(error) => {
+                Some((gpui::Role::Alert, error.to_string(), Color::Error))
+            }
+            ColdcardCaseReaderState::Stale(reason) => Some((
+                gpui::Role::Status,
+                format!("Coldcard case is stale: {reason}"),
+                Color::Warning,
+            )),
+            ColdcardCaseReaderState::Complete => None,
+        };
+
+        let shell = v_flex()
+            .id("omega.forensics.coldcard.case-reader")
+            .debug_selector(|| "omega.forensics.coldcard.case-reader".into())
+            .w_full()
+            .rounded(px(10.))
+            .border_1()
+            .border_color(cx.theme().colors().border_variant)
+            .bg(cx.theme().colors().surface_background)
+            .role(gpui::Role::Region)
+            .aria_label("Read-only Coldcard case reader")
+            .child(
+                h_flex()
+                    .w_full()
+                    .justify_between()
+                    .gap_4()
+                    .px_4()
+                    .py_3()
+                    .border_b_1()
+                    .border_color(cx.theme().colors().border_variant)
+                    .child(
+                        v_flex()
+                            .gap_1()
+                            .child(
+                                h_flex()
+                                    .gap_2()
+                                    .child(
+                                        Icon::new(IconName::Lock)
+                                            .size(IconSize::Small)
+                                            .color(Color::Muted),
+                                    )
+                                    .child(Label::new("Coldcard case").size(LabelSize::Small)),
+                            )
+                            .child(
+                                Label::new("Synthetic evidence fixture · read-only")
+                                    .size(LabelSize::XSmall)
+                                    .color(Color::Muted),
+                            ),
+                    )
+                    .child(
+                        h_flex()
+                            .gap_2()
+                            .child(
+                                Label::new("PRIVATE · NON-REPORTABLE")
+                                    .size(LabelSize::XSmall)
+                                    .color(Color::Warning),
+                            )
+                            .child(
+                                Button::new(
+                                    "omega.forensics.coldcard.live",
+                                    "Live run unavailable",
+                                )
+                                .size(ButtonSize::Compact)
+                                .style(ButtonStyle::Subtle)
+                                .disabled(true),
+                            ),
+                    ),
+            );
+
+        if let Some((role, message, color)) = state_content {
+            return shell
+                .child(
+                    div()
+                        .id("omega.forensics.coldcard.case.state")
+                        .role(role)
+                        .aria_label(message.clone())
+                        .p_4()
+                        .child(Label::new(message).size(LabelSize::Small).color(color)),
+                )
+                .into_any_element();
+        }
+
+        let Some(workspace) = self.coldcard_evidence.as_ref() else {
+            return shell
+                .child(
+                    div()
+                        .id("omega.forensics.coldcard.case.missing")
+                        .role(gpui::Role::Alert)
+                        .aria_label("The validated Coldcard case projection is missing")
+                        .p_4()
+                        .child(
+                            Label::new("The validated Coldcard case projection is missing.")
+                                .size(LabelSize::Small)
+                                .color(Color::Error),
+                        ),
+                )
+                .into_any_element();
+        };
+
+        let target = RepositoryTargetProjection::coldcard(ColdcardBenchmarkArm::Vulnerable);
+        let evidenced = workspace
+            .ladder
+            .iter()
+            .filter(|rung| rung.state != ColdcardRungState::Missing)
+            .count();
+        let missing = workspace.ladder.len().saturating_sub(evidenced);
+        let incomplete_provenance = workspace
+            .graph_health
+            .iter()
+            .filter(|health| !health.complete)
+            .count();
+
+        let overview_selected = self.coldcard_case_selection == ColdcardCaseSelection::Overview;
+        let overview_row = div()
+            .id("omega.forensics.coldcard.case.overview")
+            .debug_selector(|| "omega.forensics.coldcard.case.overview".into())
+            .w_full()
+            .px_3()
+            .py_2()
+            .rounded(px(6.))
+            .cursor_pointer()
+            .role(gpui::Role::ListItem)
+            .tab_index(0)
+            .aria_label(format!(
+                "Case overview, {evidenced} of {} evidence rungs complete",
+                workspace.ladder.len()
+            ))
+            .aria_selected(overview_selected)
+            .when(overview_selected, |row| {
+                row.bg(cx.theme().colors().element_selected)
+            })
+            .hover(|row| row.bg(cx.theme().colors().element_hover))
+            .child(
+                h_flex()
+                    .w_full()
+                    .justify_between()
+                    .gap_2()
+                    .child(Label::new("Case overview").size(LabelSize::Small))
+                    .child(
+                        Label::new(format!("{evidenced}/{}", workspace.ladder.len()))
+                            .size(LabelSize::XSmall)
+                            .color(Color::Muted),
+                    ),
+            )
+            .on_click(cx.listener(|this, _, _, cx| {
+                this.select_coldcard_case(ColdcardCaseSelection::Overview, cx);
+            }))
+            .on_key_down(cx.listener(|this, event: &gpui::KeyDownEvent, _, cx| {
+                if matches!(event.keystroke.key.as_str(), "enter" | "space") {
+                    this.select_coldcard_case(ColdcardCaseSelection::Overview, cx);
+                    cx.stop_propagation();
+                }
+            }));
+
+        let ladder = v_flex()
+            .id("omega.forensics.coldcard.case.ladder")
+            .w(px(288.))
+            .flex_shrink_0()
+            .gap_1()
+            .p_2()
+            .border_r_1()
+            .border_color(cx.theme().colors().border_variant)
+            .role(gpui::Role::List)
+            .aria_label("Coldcard evidence ladder")
+            .child(overview_row)
+            .children(workspace.ladder.iter().enumerate().map(|(index, rung)| {
+                let rung_id = rung.rung;
+                let selected = self.coldcard_case_selection == ColdcardCaseSelection::Rung(rung_id);
+                let state_label = coldcard_rung_state_label(rung.state);
+                div()
+                    .id(("omega.forensics.coldcard.case.rung", index))
+                    .debug_selector(move || {
+                        format!("omega.forensics.coldcard.case.rung.{}", index + 1)
+                    })
+                    .w_full()
+                    .px_3()
+                    .py_2()
+                    .rounded(px(6.))
+                    .cursor_pointer()
+                    .role(gpui::Role::ListItem)
+                    .tab_index(0)
+                    .aria_label(format!(
+                        "Evidence rung {} of 9, {}, {state_label}",
+                        index + 1,
+                        rung.rung.label()
+                    ))
+                    .aria_selected(selected)
+                    .when(selected, |row| row.bg(cx.theme().colors().element_selected))
+                    .hover(|row| row.bg(cx.theme().colors().element_hover))
+                    .child(
+                        h_flex()
+                            .w_full()
+                            .gap_2()
+                            .child(
+                                Icon::new(if rung.state == ColdcardRungState::Missing {
+                                    IconName::Dash
+                                } else {
+                                    IconName::Check
+                                })
+                                .size(IconSize::XSmall)
+                                .color(coldcard_rung_state_color(rung.state)),
+                            )
+                            .child(
+                                div()
+                                    .min_w_0()
+                                    .flex_1()
+                                    .child(Label::new(rung.rung.label()).size(LabelSize::Small)),
+                            )
+                            .child(
+                                Label::new(format!("{:02}", index + 1))
+                                    .size(LabelSize::XSmall)
+                                    .color(Color::Muted),
+                            ),
+                    )
+                    .on_click(cx.listener(move |this, _, _, cx| {
+                        this.select_coldcard_case(ColdcardCaseSelection::Rung(rung_id), cx);
+                    }))
+                    .on_key_down(cx.listener(move |this, event: &gpui::KeyDownEvent, _, cx| {
+                        if matches!(event.keystroke.key.as_str(), "enter" | "space") {
+                            this.select_coldcard_case(ColdcardCaseSelection::Rung(rung_id), cx);
+                            cx.stop_propagation();
+                        }
+                    }))
+            }));
+
+        let detail = match self.coldcard_case_selection {
+            ColdcardCaseSelection::Overview => v_flex()
+                .gap_3()
+                .child(
+                    v_flex()
+                        .gap_1()
+                        .child(Label::new("Case overview").size(LabelSize::Large))
+                        .child(
+                            Label::new(
+                                "A validated, public-safe fixture for inspecting the evidence boundary. It does not launch a worker or assert a live result.",
+                            )
+                            .size(LabelSize::Small)
+                            .color(Color::Muted),
+                        ),
+                )
+                .child(Self::render_fact("Target", target.display_name))
+                .child(Self::render_fact("Repository", target.clone_url))
+                .child(Self::render_fact("Pinned commit", target.commit))
+                .child(Self::render_fact("Source", "Bundled synthetic fixture"))
+                .child(Self::render_fact("Privacy", "Private · non-reportable"))
+                .child(Self::render_fact(
+                    "Highest supported rung",
+                    "Program fingerprint · provisional",
+                ))
+                .child(Self::render_fact(
+                    "Completeness",
+                    format!("{evidenced} evidenced · {missing} missing"),
+                ))
+                .child(Self::render_fact(
+                    "Provenance",
+                    if incomplete_provenance == 0 {
+                        "Complete".to_string()
+                    } else {
+                        format!("{incomplete_provenance} incomplete projection")
+                    },
+                ))
+                .child(Self::render_fact("Workspace", workspace.workspace_ref.clone()))
+                .child(Self::render_fact("Fixture run", workspace.run_ref.clone()))
+                .into_any_element(),
+            ColdcardCaseSelection::Rung(rung_id) => {
+                let rung = workspace.ladder.iter().find(|rung| rung.rung == rung_id);
+                match rung {
+                    Some(rung) => v_flex()
+                        .gap_3()
+                        .child(
+                            h_flex()
+                                .w_full()
+                                .justify_between()
+                                .gap_3()
+                                .child(
+                                    v_flex()
+                                        .gap_1()
+                                        .child(Label::new(rung.rung.label()).size(LabelSize::Large))
+                                        .child(
+                                            Label::new(rung.verifier_state.clone())
+                                                .size(LabelSize::Small)
+                                                .color(Color::Muted),
+                                        ),
+                                )
+                                .child(
+                                    Label::new(coldcard_rung_state_label(rung.state))
+                                        .size(LabelSize::XSmall)
+                                        .color(coldcard_rung_state_color(rung.state)),
+                                ),
+                        )
+                        .child(Self::render_fact("Time to rung", rung.time_to_rung.display_value()))
+                        .child(Self::render_fact(
+                            "Tokens to rung",
+                            rung.tokens_to_rung.display_value(),
+                        ))
+                        .child(Self::render_fact(
+                            "Evidence",
+                            if rung.evidence_refs.is_empty() {
+                                "Missing — not inferred downstream".to_string()
+                            } else {
+                                rung.evidence_refs.join(" · ")
+                            },
+                        ))
+                        .child(Self::render_fact("Assumptions", rung.assumptions.join(" · ")))
+                        .child(Self::render_fact(
+                            "Does not imply",
+                            rung.non_implications.join(" · "),
+                        ))
+                        .when(rung.state == ColdcardRungState::Missing, |this| {
+                            this.child(
+                                div()
+                                    .id("omega.forensics.coldcard.case.missing-rung")
+                                    .role(gpui::Role::Status)
+                                    .aria_label("This missing rung blocks downstream attribution")
+                                    .p_3()
+                                    .rounded(px(8.))
+                                    .bg(cx.theme().colors().element_background)
+                                    .child(
+                                        Label::new(
+                                            "Missing evidence remains missing. This reader never promotes a downstream inference into this rung.",
+                                        )
+                                        .size(LabelSize::Small)
+                                        .color(Color::Warning),
+                                    ),
+                            )
+                        })
+                        .into_any_element(),
+                    None => div()
+                        .id("omega.forensics.coldcard.case.unavailable-rung")
+                        .role(gpui::Role::Alert)
+                        .aria_label("Selected evidence rung is unavailable")
+                        .child(
+                            Label::new("Selected evidence rung is unavailable.")
+                                .size(LabelSize::Small)
+                                .color(Color::Error),
+                        )
+                        .into_any_element(),
+                }
+            }
+        };
+
+        shell
+            .child(
+                h_flex().w_full().items_stretch().child(ladder).child(
+                    div()
+                        .id("omega.forensics.coldcard.case.detail")
+                        .min_w_0()
+                        .flex_1()
+                        .p_4()
+                        .role(gpui::Role::Group)
+                        .aria_label("Selected Coldcard case detail")
+                        .child(detail),
+                ),
+            )
+            .into_any_element()
     }
 }
 
@@ -1189,7 +1649,6 @@ impl Render for ForensicsWorkbenchSurface {
         let prompt_changes = prompt_workspace.semantic_diff().unwrap_or_default();
         let prompt_candidates = prompt_workspace.candidates().cloned().collect::<Vec<_>>();
         let matrix = self.matrix.clone();
-        let coldcard_evidence = self.coldcard_evidence.clone();
         let entropy_run = self.entropy_run.clone();
         let entropy_catalog = self.entropy_catalog.clone();
         let entropy_campaign = self.entropy_campaign.clone();
@@ -1249,6 +1708,7 @@ impl Render for ForensicsWorkbenchSurface {
         } else {
             Color::Muted
         };
+        let coldcard_case_reader = self.render_coldcard_case_reader(cx);
 
         v_flex()
             .id("omega.forensics.workbench")
@@ -1316,6 +1776,7 @@ impl Render for ForensicsWorkbenchSurface {
                             .color(status_color),
                     ),
             )
+            .child(coldcard_case_reader)
             .child(
                 v_flex()
                     .gap_2()
@@ -2121,235 +2582,6 @@ impl Render for ForensicsWorkbenchSurface {
                         },
                     )),
             )
-            .when_some(coldcard_evidence, |this, workspace| {
-                this.child(div().h_px().bg(cx.theme().colors().border))
-                    .child(
-                        v_flex()
-                            .gap_2()
-                            .child(
-                                h_flex()
-                                    .justify_between()
-                                    .child(
-                                        Label::new("Coldcard reproduction chain")
-                                            .size(LabelSize::Small),
-                                    )
-                                    .child(
-                                        Label::new("PRIVATE RUN · NON-REPORTABLE")
-                                            .size(LabelSize::XSmall)
-                                            .color(Color::Warning),
-                                    ),
-                            )
-                            .child(
-                                Label::new("Evidence ladder")
-                                    .size(LabelSize::XSmall)
-                                    .color(Color::Muted),
-                            )
-                            .children(workspace.ladder.into_iter().map(|rung| {
-                                v_flex()
-                                    .gap_1()
-                                    .p_2()
-                                    .border_1()
-                                    .border_color(cx.theme().colors().border)
-                                    .rounded_md()
-                                    .child(
-                                        h_flex()
-                                            .justify_between()
-                                            .child(
-                                                Label::new(rung.rung.label())
-                                                    .size(LabelSize::Small),
-                                            )
-                                            .child(
-                                                Label::new(coldcard_rung_state_label(rung.state))
-                                                    .size(LabelSize::XSmall)
-                                                    .color(coldcard_rung_state_color(rung.state)),
-                                            ),
-                                    )
-                                    .child(Self::render_fact(
-                                        "Time",
-                                        rung.time_to_rung.display_value(),
-                                    ))
-                                    .child(Self::render_fact(
-                                        "Tokens",
-                                        rung.tokens_to_rung.display_value(),
-                                    ))
-                                    .child(Self::render_fact("Verifier", rung.verifier_state))
-                                    .child(Self::render_fact(
-                                        "Evidence",
-                                        if rung.evidence_refs.is_empty() {
-                                            "Missing — not inferred downstream".to_string()
-                                        } else {
-                                            rung.evidence_refs.join(" · ")
-                                        },
-                                    ))
-                                    .child(Self::render_fact(
-                                        "Assumptions",
-                                        rung.assumptions.join(" · "),
-                                    ))
-                                    .child(Self::render_fact(
-                                        "Does not imply",
-                                        rung.non_implications.join(" · "),
-                                    ))
-                            }))
-                            .child(
-                                Label::new("Source → artifact → generator trace")
-                                    .size(LabelSize::XSmall)
-                                    .color(Color::Muted),
-                            )
-                            .children(workspace.trace.into_iter().map(|step| {
-                                Self::render_fact(
-                                    format!("{:02} · {}", step.sequence, step.label),
-                                    format!("{} · {}", step.verifier_state, step.evidence_ref),
-                                )
-                            }))
-                            .child(
-                                Label::new("Entropy assumptions and sensitivity")
-                                    .size(LabelSize::XSmall)
-                                    .color(Color::Muted),
-                            )
-                            .children(workspace.assumption_diffs.into_iter().map(|assumption| {
-                                Self::render_fact(
-                                    assumption.kind.label(),
-                                    format!(
-                                        "{} → {} · {}–{} bits",
-                                        assumption.baseline,
-                                        assumption.selected,
-                                        assumption.lower_bound_bits,
-                                        assumption.upper_bound_bits
-                                    ),
-                                )
-                            }))
-                            .child(
-                                Label::new("Historical-chain scan")
-                                    .size(LabelSize::XSmall)
-                                    .color(Color::Muted),
-                            )
-                            .child(Self::render_fact(
-                                "Boundary",
-                                workspace.scan.boundary_ref.clone(),
-                            ))
-                            .child(Self::render_fact(
-                                "Restart",
-                                workspace.scan.restart_state.clone(),
-                            ))
-                            .child(Self::render_fact(
-                                "Throughput",
-                                aggregate_truth_label(
-                                    workspace.scan.transactions_per_second,
-                                    workspace.scan.throughput_exactness,
-                                    "tx/s",
-                                ),
-                            ))
-                            .child(Self::render_fact(
-                                "Controls",
-                                format!(
-                                    "positive {} · negative {}",
-                                    control_state_label(workspace.scan.positive_control),
-                                    control_state_label(workspace.scan.negative_control)
-                                ),
-                            ))
-                            .children(workspace.scan.ranges.into_iter().map(|range| {
-                                Self::render_fact(
-                                    format!("Range {}–{}", range.start_height, range.end_height),
-                                    match (range.completed_height, range.checkpoint_ref) {
-                                        (Some(height), Some(checkpoint)) => {
-                                            format!("checkpoint {height} · {checkpoint}")
-                                        }
-                                        _ => "Not started".into(),
-                                    },
-                                )
-                            }))
-                            .children(workspace.scan.candidate_funnel.into_iter().map(|stage| {
-                                Self::render_fact(
-                                    stage.label,
-                                    format!("{} · {}", stage.count, stage.source_receipt_ref),
-                                )
-                            }))
-                            .children(workspace.scan.base_rates.into_iter().map(|rate| {
-                                Self::render_fact(
-                                    "False matches / million",
-                                    format!("{} · {}", rate.matches_per_million, rate.stratum_ref),
-                                )
-                            }))
-                            .when(!workspace.scan.missing_data_refs.is_empty(), |this| {
-                                this.child(
-                                    Label::new(format!(
-                                        "Missing-data failure · {}",
-                                        workspace.scan.missing_data_refs.join(" · ")
-                                    ))
-                                    .size(LabelSize::XSmall)
-                                    .color(Color::Error),
-                                )
-                            })
-                            .child(Self::render_fact(
-                                "Private transactions",
-                                format!(
-                                    "{} retained inside run",
-                                    workspace.scan.public_transaction_refs.len()
-                                ),
-                            ))
-                            .child(Self::render_fact(
-                                "Candidate clusters",
-                                format!(
-                                    "{} non-reportable",
-                                    workspace.scan.candidate_cluster_refs.len()
-                                ),
-                            ))
-                            .child(
-                                Label::new("Provenance graph health")
-                                    .size(LabelSize::XSmall)
-                                    .color(Color::Muted),
-                            )
-                            .children(workspace.graph_health.into_iter().map(|health| {
-                                Self::render_fact(
-                                    health.subject_ref,
-                                    if health.complete {
-                                        "Complete provenance".into()
-                                    } else {
-                                        format!(
-                                            "Missing · {}",
-                                            health.missing_provenance_refs.join(" · ")
-                                        )
-                                    },
-                                )
-                            }))
-                            .child(
-                                Label::new("Reconciliation ledger")
-                                    .size(LabelSize::XSmall)
-                                    .color(Color::Muted),
-                            )
-                            .children(workspace.reconciliation.into_iter().map(|item| {
-                                Self::render_fact(
-                                    item.metric_ref,
-                                    format!(
-                                        "{} · derived {} · published {}",
-                                        reconciliation_status_label(item.status),
-                                        item.derived_value.unwrap_or_else(|| "unavailable".into()),
-                                        item.published_value
-                                            .unwrap_or_else(|| "unavailable".into())
-                                    ),
-                                )
-                            }))
-                            .child(
-                                Label::new("Append-only correction history")
-                                    .size(LabelSize::XSmall)
-                                    .color(Color::Muted),
-                            )
-                            .children(workspace.corrections.into_iter().map(|correction| {
-                                Self::render_fact(
-                                    format!(
-                                        "#{:02} · {}",
-                                        correction.sequence, correction.claim_ref
-                                    ),
-                                    format!(
-                                        "{} → {} · {} affected",
-                                        correction.prior_value,
-                                        correction.corrected_value,
-                                        correction.affected_projection_refs.len()
-                                    ),
-                                )
-                            })),
-                    )
-            })
             .when_some(matrix, |this, matrix| {
                 this.child(div().h_px().bg(cx.theme().colors().border))
                     .child(
@@ -3262,24 +3494,6 @@ fn coldcard_rung_state_color(state: omega_forensics::ColdcardRungState) -> Color
     }
 }
 
-fn control_state_label(state: omega_forensics::ForensicControlState) -> &'static str {
-    match state {
-        omega_forensics::ForensicControlState::Passed => "passed",
-        omega_forensics::ForensicControlState::Failed => "failed",
-        omega_forensics::ForensicControlState::Missing => "missing",
-    }
-}
-
-fn reconciliation_status_label(
-    status: omega_forensics::ColdcardReconciliationStatus,
-) -> &'static str {
-    match status {
-        omega_forensics::ColdcardReconciliationStatus::Match => "MATCH",
-        omega_forensics::ColdcardReconciliationStatus::Drift => "DRIFT",
-        omega_forensics::ColdcardReconciliationStatus::Unavailable => "UNAVAILABLE",
-    }
-}
-
 fn lifecycle_marker(state: ForensicLifecycleState) -> &'static str {
     match state {
         ForensicLifecycleState::Pending => "○",
@@ -3964,6 +4178,88 @@ mod tests {
                 snapshot.status.as_ref(),
                 "Coldcard evidence ready · 6 evidenced rungs · private boundary"
             );
+        });
+    }
+
+    #[gpui::test]
+    fn coldcard_case_reader_loads_the_validated_fixture_without_live_authority(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        cx.update(|cx| {
+            let binding = RepositoryBinding::new("repo", "worktree").expect("valid binding");
+            let surface = cx.new(|cx| ForensicsWorkbenchSurface::new(&candidate(binding), cx));
+
+            let initial = surface.read(cx).snapshot();
+            assert_eq!(
+                initial.coldcard_case_reader_state,
+                ColdcardCaseReaderState::Complete
+            );
+            assert_eq!(
+                initial.coldcard_case_selection,
+                ColdcardCaseSelection::Overview
+            );
+            let fixture = initial
+                .coldcard_evidence
+                .as_ref()
+                .expect("bundled validated Coldcard case");
+            assert_eq!(fixture.ladder.len(), ColdcardClaimRung::ALL.len());
+            assert_eq!(
+                fixture
+                    .ladder
+                    .iter()
+                    .filter(|rung| rung.state == ColdcardRungState::Missing)
+                    .count(),
+                3
+            );
+            assert!(!fixture.scan.reportable);
+            assert!(initial.prepared_intent.is_none());
+            assert!(initial.run.is_none());
+            assert!(initial.review.is_none());
+
+            surface.update(cx, |surface, cx| {
+                surface.select_coldcard_case(
+                    ColdcardCaseSelection::Rung(ColdcardClaimRung::Entity),
+                    cx,
+                );
+            });
+            let selected = surface.read(cx).snapshot();
+            assert_eq!(
+                selected.coldcard_case_selection,
+                ColdcardCaseSelection::Rung(ColdcardClaimRung::Entity)
+            );
+            assert_eq!(selected.coldcard_evidence, initial.coldcard_evidence);
+            assert!(selected.prepared_intent.is_none());
+            assert!(selected.run.is_none());
+            assert!(selected.review.is_none());
+        });
+    }
+
+    #[gpui::test]
+    fn coldcard_case_reader_preserves_deterministic_non_authoritative_scenes(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        cx.update(|cx| {
+            let binding = RepositoryBinding::new("repo", "worktree").expect("valid binding");
+            let surface = cx.new(|cx| ForensicsWorkbenchSurface::new(&candidate(binding), cx));
+            let scenes = [
+                ColdcardCaseReaderState::Loading,
+                ColdcardCaseReaderState::Empty,
+                ColdcardCaseReaderState::Invalid("fixture validation failed".into()),
+                ColdcardCaseReaderState::Stale("fixture revision changed".into()),
+                ColdcardCaseReaderState::Complete,
+            ];
+
+            for scene in scenes {
+                surface.update(cx, |surface, cx| {
+                    surface.coldcard_case_reader_state = scene.clone();
+                    cx.notify();
+                });
+                let snapshot = surface.read(cx).snapshot();
+                assert_eq!(snapshot.coldcard_case_reader_state, scene);
+                assert!(snapshot.prepared_intent.is_none());
+                assert!(snapshot.run.is_none());
+                assert!(snapshot.review.is_none());
+            }
         });
     }
 
