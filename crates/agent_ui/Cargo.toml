@@ -139,6 +139,7 @@ rope.workspace = true
 sandbox.workspace = true
 schemars.workspace = true
 search.workspace = true
+settings_ui.workspace = true
 serde.workspace = true
 sha2.workspace = true
 smol.workspace = true

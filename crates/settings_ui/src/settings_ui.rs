@@ -467,6 +467,10 @@ pub fn init(cx: &mut App) {
                 );
             })
             .register_action(|_, _: &OpenSettings, window, cx| {
+                if omega_zero_base::is_comet_mode() {
+                    window.dispatch_action(omega_actions::OpenEmbeddedSettings.boxed_clone(), cx);
+                    return;
+                }
                 let window_handle = window.window_handle().downcast::<MultiWorkspace>();
                 open_omega_settings_editor(window_handle, cx);
             })
@@ -988,6 +992,7 @@ fn active_language_mut() -> Option<std::sync::RwLockWriteGuard<'static, Option<S
 
 pub struct SettingsWindow {
     kind: SettingsWindowKind,
+    embedded: bool,
     title_bar: Option<Entity<PlatformTitleBar>>,
     original_window: Option<WindowHandle<MultiWorkspace>>,
     files: Vec<(SettingsUiFile, FocusHandle)>,
@@ -2051,6 +2056,7 @@ impl SettingsWindow {
 
         let mut this = Self {
             kind,
+            embedded: false,
             title_bar,
             original_window,
 
@@ -2119,6 +2125,19 @@ impl SettingsWindow {
             editor.focus_handle(cx).focus(window, cx);
         });
 
+        this
+    }
+
+    /// Creates Omega's settings surface inside the current application window.
+    /// Comet treats Settings as a shell route, not as another OS window.
+    pub fn new_embedded_omega(
+        original_window: Option<WindowHandle<MultiWorkspace>>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> Self {
+        let mut this = Self::new_with_kind(SettingsWindowKind::Omega, original_window, window, cx);
+        this.embedded = true;
+        this.navigate_to_sub_page("llm_providers", window, cx);
         this
     }
 
@@ -3644,6 +3663,13 @@ impl SettingsWindow {
                         .aria_label("Back")
                         .hover(move |style| style.bg(hover_background).text_color(text))
                         .on_click(cx.listener(|this, _, window, cx| {
+                            if this.embedded {
+                                window.dispatch_action(
+                                    omega_actions::CloseEmbeddedSettings.boxed_clone(),
+                                    cx,
+                                );
+                                return;
+                            }
                             if let Some(original_window) = this.original_window {
                                 original_window
                                     .update(cx, |_, original_window, _| {
@@ -4824,95 +4850,99 @@ impl Render for SettingsWindow {
             self.render_nav(window, cx).into_any_element()
         };
 
-        client_side_decorations(
-            v_flex()
-                .text_color(cx.theme().colors().text)
-                .size_full()
-                .children(self.title_bar.clone())
-                .child(
-                    div()
-                        .id("settings-window")
-                        .key_context("SettingsWindow")
-                        .track_focus(&self.focus_handle)
-                        // Escape (and cmd/ctrl-w) bind to `workspace::CloseWindow`
-                        // in the SettingsWindow keymap context. Handle it here —
-                        // Settings is not a Workspace, so the multi-workspace
-                        // close path never sees the action. OMEGA-DELTA-0189.
-                        .on_action(|_: &CloseWindow, window, _cx| {
+        let content = v_flex()
+            .text_color(cx.theme().colors().text)
+            .size_full()
+            .children(self.title_bar.clone())
+            .child(
+                div()
+                    .id("settings-window")
+                    .key_context("SettingsWindow")
+                    .track_focus(&self.focus_handle)
+                    // Escape (and cmd/ctrl-w) bind to `workspace::CloseWindow`
+                    // in the SettingsWindow keymap context. Handle it here —
+                    // Settings is not a Workspace, so the multi-workspace
+                    // close path never sees the action. OMEGA-DELTA-0189.
+                    .when(!self.embedded, |surface| {
+                        surface.on_action(|_: &CloseWindow, window, _cx| {
                             window.remove_window();
                         })
-                        .on_action(cx.listener(|this, _: &OpenCurrentFile, window, cx| {
-                            this.open_current_settings_file(window, cx);
-                        }))
-                        .on_action(|_: &Minimize, window, _cx| {
-                            window.minimize_window();
-                        })
-                        .on_action(cx.listener(|this, _: &search::FocusSearch, window, cx| {
-                            this.search_bar.focus_handle(cx).focus(window, cx);
-                        }))
-                        .on_action(cx.listener(|this, _: &ToggleFocusNav, window, cx| {
-                            if this
-                                .navbar_focus_handle
-                                .focus_handle(cx)
-                                .contains_focused(window, cx)
-                            {
-                                this.open_and_scroll_to_navbar_entry(
-                                    this.navbar_entry,
-                                    None,
-                                    true,
-                                    window,
-                                    cx,
-                                );
-                            } else {
-                                this.focus_and_scroll_to_nav_entry(this.navbar_entry, window, cx);
-                            }
-                        }))
-                        .on_action(cx.listener(
-                            |this, FocusFile(file_index): &FocusFile, window, cx| {
-                                this.focus_file_at_index(*file_index as usize, window, cx);
-                            },
-                        ))
-                        .on_action(cx.listener(|this, _: &FocusNextFile, window, cx| {
-                            let next_index = usize::min(
-                                this.focused_file_index(window, cx) + 1,
-                                this.files.len().saturating_sub(1),
+                    })
+                    .on_action(cx.listener(|this, _: &OpenCurrentFile, window, cx| {
+                        this.open_current_settings_file(window, cx);
+                    }))
+                    .on_action(|_: &Minimize, window, _cx| {
+                        window.minimize_window();
+                    })
+                    .on_action(cx.listener(|this, _: &search::FocusSearch, window, cx| {
+                        this.search_bar.focus_handle(cx).focus(window, cx);
+                    }))
+                    .on_action(cx.listener(|this, _: &ToggleFocusNav, window, cx| {
+                        if this
+                            .navbar_focus_handle
+                            .focus_handle(cx)
+                            .contains_focused(window, cx)
+                        {
+                            this.open_and_scroll_to_navbar_entry(
+                                this.navbar_entry,
+                                None,
+                                true,
+                                window,
+                                cx,
                             );
-                            this.focus_file_at_index(next_index, window, cx);
-                        }))
-                        .on_action(cx.listener(|this, _: &FocusPreviousFile, window, cx| {
-                            let prev_index = this.focused_file_index(window, cx).saturating_sub(1);
-                            this.focus_file_at_index(prev_index, window, cx);
-                        }))
-                        .on_action(cx.listener(|this, _: &menu::SelectNext, window, cx| {
-                            if this
-                                .search_bar
-                                .focus_handle(cx)
-                                .contains_focused(window, cx)
-                            {
-                                this.focus_and_scroll_to_first_visible_nav_entry(window, cx);
-                            } else {
-                                window.focus_next(cx);
-                            }
-                        }))
-                        .on_action(|_: &menu::SelectPrevious, window, cx| {
-                            window.focus_prev(cx);
-                        })
-                        .flex()
-                        .flex_row()
-                        .flex_1()
-                        .min_h_0()
-                        .font(ui_font)
-                        .bg(cx.theme().colors().background)
-                        .text_color(cx.theme().colors().text)
-                        .when(!cfg!(target_os = "macos"), |this| {
-                            this.border_t_1().border_color(cx.theme().colors().border)
-                        })
-                        .child(navigation)
-                        .child(self.render_page(window, cx)),
-                ),
-            window,
-            cx,
-        )
+                        } else {
+                            this.focus_and_scroll_to_nav_entry(this.navbar_entry, window, cx);
+                        }
+                    }))
+                    .on_action(cx.listener(
+                        |this, FocusFile(file_index): &FocusFile, window, cx| {
+                            this.focus_file_at_index(*file_index as usize, window, cx);
+                        },
+                    ))
+                    .on_action(cx.listener(|this, _: &FocusNextFile, window, cx| {
+                        let next_index = usize::min(
+                            this.focused_file_index(window, cx) + 1,
+                            this.files.len().saturating_sub(1),
+                        );
+                        this.focus_file_at_index(next_index, window, cx);
+                    }))
+                    .on_action(cx.listener(|this, _: &FocusPreviousFile, window, cx| {
+                        let prev_index = this.focused_file_index(window, cx).saturating_sub(1);
+                        this.focus_file_at_index(prev_index, window, cx);
+                    }))
+                    .on_action(cx.listener(|this, _: &menu::SelectNext, window, cx| {
+                        if this
+                            .search_bar
+                            .focus_handle(cx)
+                            .contains_focused(window, cx)
+                        {
+                            this.focus_and_scroll_to_first_visible_nav_entry(window, cx);
+                        } else {
+                            window.focus_next(cx);
+                        }
+                    }))
+                    .on_action(|_: &menu::SelectPrevious, window, cx| {
+                        window.focus_prev(cx);
+                    })
+                    .flex()
+                    .flex_row()
+                    .flex_1()
+                    .min_h_0()
+                    .font(ui_font)
+                    .bg(cx.theme().colors().background)
+                    .text_color(cx.theme().colors().text)
+                    .when(!cfg!(target_os = "macos"), |this| {
+                        this.border_t_1().border_color(cx.theme().colors().border)
+                    })
+                    .child(navigation)
+                    .child(self.render_page(window, cx)),
+            );
+
+        if self.embedded {
+            content.into_any_element()
+        } else {
+            client_side_decorations(content, window, cx).into_any_element()
+        }
     }
 }
 
@@ -5624,6 +5654,7 @@ pub mod test {
             };
             Self {
                 kind: SettingsWindowKind::Legacy,
+                embedded: false,
                 title_bar: None,
                 original_window: None,
                 worktree_root_dirs: HashMap::default(),
@@ -5767,6 +5798,7 @@ pub mod test {
 
         let mut settings_window = SettingsWindow {
             kind: SettingsWindowKind::Legacy,
+            embedded: false,
             title_bar: None,
             original_window: None,
             worktree_root_dirs: HashMap::default(),

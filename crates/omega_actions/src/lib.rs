@@ -190,6 +190,10 @@ actions!(
         /// Opens the settings editor.
         #[action(deprecated_aliases = ["zed::OpenSettings", "zed_actions::OpenSettingsEditor"])]
         OpenSettings,
+        /// Opens Settings as a route inside a Comet-mode application window.
+        OpenEmbeddedSettings,
+        /// Closes an embedded settings route and returns to the prior app route.
+        CloseEmbeddedSettings,
         /// Opens the full inherited settings editor.
         OpenLegacySettings,
         /// Opens the settings JSON file.

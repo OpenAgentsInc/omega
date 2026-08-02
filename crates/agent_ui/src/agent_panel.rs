@@ -1395,6 +1395,22 @@ pub fn init(cx: &mut App) {
                         workspace.focus_panel::<AgentPanel>(window, cx);
                     }
                 })
+                .register_action(
+                    |workspace, _: &omega_actions::OpenEmbeddedSettings, window, cx| {
+                        if let Some(panel) = workspace.panel::<AgentPanel>(cx) {
+                            panel.update(cx, |panel, cx| {
+                                panel.open_comet_settings(true, window, cx)
+                            });
+                        }
+                    },
+                )
+                .register_action(
+                    |workspace, _: &omega_actions::CloseEmbeddedSettings, window, cx| {
+                        if let Some(panel) = workspace.panel::<AgentPanel>(cx) {
+                            panel.update(cx, |panel, cx| panel.close_comet_settings(window, cx));
+                        }
+                    },
+                )
                 .register_action(|workspace, _: &NewTerminalThread, window, cx| {
                     if let Some(panel) = workspace.panel::<AgentPanel>(cx) {
                         panel.update(cx, |panel, cx| {
@@ -2272,40 +2288,46 @@ enum BaseView {
     },
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum CometRoute {
+    Thread(ThreadId),
+    Settings,
+}
+
 #[derive(Debug, Default)]
 struct CometNavigationHistory {
-    entries: Vec<ThreadId>,
+    entries: Vec<CometRoute>,
     index: usize,
 }
 
 impl CometNavigationHistory {
-    fn push(&mut self, thread_id: ThreadId) {
-        if self.entries.get(self.index) == Some(&thread_id) {
+    fn push(&mut self, route: CometRoute) {
+        if self.entries.get(self.index) == Some(&route) {
             return;
         }
         if self.entries.is_empty() {
-            self.entries.push(thread_id);
+            self.entries.push(route);
             self.index = 0;
             return;
         }
         self.entries.truncate(self.index + 1);
-        self.entries.push(thread_id);
+        self.entries.push(route);
         self.index += 1;
     }
 
-    fn can_back(&self, mut is_available: impl FnMut(ThreadId) -> bool) -> bool {
+    fn can_back(&self, mut is_available: impl FnMut(CometRoute) -> bool) -> bool {
         self.entries
             .get(..self.index)
             .is_some_and(|entries| entries.iter().rev().copied().any(&mut is_available))
     }
 
-    fn can_forward(&self, mut is_available: impl FnMut(ThreadId) -> bool) -> bool {
+    fn can_forward(&self, mut is_available: impl FnMut(CometRoute) -> bool) -> bool {
         self.entries
             .get(self.index.saturating_add(1)..)
             .is_some_and(|entries| entries.iter().copied().any(&mut is_available))
     }
 
-    fn back(&mut self) -> Option<ThreadId> {
+    fn back(&mut self) -> Option<CometRoute> {
         if self.index == 0 {
             return None;
         }
@@ -2313,7 +2335,7 @@ impl CometNavigationHistory {
         self.entries.get(self.index).copied()
     }
 
-    fn forward(&mut self) -> Option<ThreadId> {
+    fn forward(&mut self) -> Option<CometRoute> {
         if self.index.saturating_add(1) >= self.entries.len() {
             return None;
         }
@@ -3069,6 +3091,7 @@ pub struct AgentPanel {
     comet_known_session_tabs: HashSet<ThreadId>,
     comet_closed_session_tabs: HashSet<ThreadId>,
     comet_navigation_history: CometNavigationHistory,
+    comet_settings: Option<Entity<settings_ui::SettingsWindow>>,
     /// Thread keys whose durable disk selection was already adopted (or
     /// reset), so a render-driven sync does not re-read disk per frame.
     workbench_selection_restore_attempted: HashSet<String>,
@@ -3693,6 +3716,7 @@ impl AgentPanel {
             comet_known_session_tabs: HashSet::default(),
             comet_closed_session_tabs: HashSet::default(),
             comet_navigation_history: CometNavigationHistory::default(),
+            comet_settings: None,
             workbench_selection_restore_attempted: HashSet::default(),
             workbench_sync_failure_log: DistinctFailureLog::default(),
             workbench_files_panel,
@@ -8711,7 +8735,9 @@ impl AgentPanel {
         self.retain_running_thread(old_view, cx);
 
         if let Some(thread_id) = comet_thread_id {
-            self.comet_navigation_history.push(thread_id);
+            self.comet_settings = None;
+            self.comet_navigation_history
+                .push(CometRoute::Thread(thread_id));
         }
 
         if let BaseView::AgentThread { conversation_view } = &self.base_view {
@@ -15686,8 +15712,8 @@ impl AgentPanel {
 
     fn navigate_comet_back(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let starting_index = self.comet_navigation_history.index;
-        while let Some(thread_id) = self.comet_navigation_history.back() {
-            if self.open_comet_history_thread(thread_id, window, cx) {
+        while let Some(route) = self.comet_navigation_history.back() {
+            if self.open_comet_history_route(route, window, cx) {
                 cx.notify();
                 return;
             }
@@ -15698,13 +15724,66 @@ impl AgentPanel {
 
     fn navigate_comet_forward(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let starting_index = self.comet_navigation_history.index;
-        while let Some(thread_id) = self.comet_navigation_history.forward() {
-            if self.open_comet_history_thread(thread_id, window, cx) {
+        while let Some(route) = self.comet_navigation_history.forward() {
+            if self.open_comet_history_route(route, window, cx) {
                 cx.notify();
                 return;
             }
         }
         self.comet_navigation_history.restore_index(starting_index);
+        cx.notify();
+    }
+
+    fn comet_route_available(&self, route: CometRoute, cx: &App) -> bool {
+        match route {
+            CometRoute::Thread(thread_id) => self.comet_history_thread_available(thread_id, cx),
+            CometRoute::Settings => true,
+        }
+    }
+
+    fn open_comet_history_route(
+        &mut self,
+        route: CometRoute,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> bool {
+        match route {
+            CometRoute::Thread(thread_id) => {
+                self.comet_settings = None;
+                self.open_comet_history_thread(thread_id, window, cx)
+            }
+            CometRoute::Settings => {
+                self.open_comet_settings(false, window, cx);
+                true
+            }
+        }
+    }
+
+    fn open_comet_settings(
+        &mut self,
+        record_history: bool,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if self.comet_settings.is_none() {
+            let original_window = window.window_handle().downcast::<MultiWorkspace>();
+            self.comet_settings = Some(cx.new(|cx| {
+                settings_ui::SettingsWindow::new_embedded_omega(original_window, window, cx)
+            }));
+        }
+        if record_history {
+            self.comet_navigation_history.push(CometRoute::Settings);
+        }
+        cx.notify();
+    }
+
+    fn close_comet_settings(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.comet_settings = None;
+        if let Some(thread_id) = self.active_thread_id(cx) {
+            self.comet_navigation_history
+                .push(CometRoute::Thread(thread_id));
+        }
+        window.focus(&self.focus_handle, cx);
         cx.notify();
     }
 
@@ -15865,8 +15944,12 @@ impl AgentPanel {
         }
         let active_thread_id = self.active_thread_id(cx);
         self.reconcile_comet_session_tabs(cx);
-        if let Some(active_thread_id) = active_thread_id {
-            self.comet_navigation_history.push(active_thread_id);
+        let comet_settings_open = self.comet_settings.is_some();
+        if let Some(active_thread_id) = active_thread_id
+            && !comet_settings_open
+        {
+            self.comet_navigation_history
+                .push(CometRoute::Thread(active_thread_id));
         }
         let active_title = self
             .active_conversation_view()
@@ -15979,7 +16062,7 @@ impl AgentPanel {
             IconName::ArrowLeft,
             !self
                 .comet_navigation_history
-                .can_back(|thread_id| self.comet_history_thread_available(thread_id, cx)),
+                .can_back(|route| self.comet_route_available(route, cx)),
             icon_muted,
             hover_background,
             cx.listener(|this, _, window, cx| this.navigate_comet_back(window, cx)),
@@ -15990,7 +16073,7 @@ impl AgentPanel {
             IconName::ArrowRight,
             !self
                 .comet_navigation_history
-                .can_forward(|thread_id| self.comet_history_thread_available(thread_id, cx)),
+                .can_forward(|route| self.comet_route_available(route, cx)),
             icon_muted,
             hover_background,
             cx.listener(|this, _, window, cx| this.navigate_comet_forward(window, cx)),
@@ -16071,24 +16154,43 @@ impl AgentPanel {
                     .child(back)
                     .child(forward),
             )
-            .child(
-                div()
-                    .absolute()
-                    .left(px(tabs_left))
-                    .right(px(16.))
-                    .top_0()
-                    .h_full()
-                    .flex()
-                    .items_center()
-                    .pt(px(2.))
-                    .gap(px(4.))
-                    .overflow_hidden()
-                    .children(session_tabs)
-                    .when(!active_tab_is_persisted, |tabs| {
-                        tabs.child(active_draft_tab)
-                    })
-                    .child(new_session),
-            );
+            .when(!comet_settings_open, |bar| {
+                bar.child(
+                    div()
+                        .absolute()
+                        .left(px(tabs_left))
+                        .right(px(16.))
+                        .top_0()
+                        .h_full()
+                        .flex()
+                        .items_center()
+                        .pt(px(2.))
+                        .gap(px(4.))
+                        .overflow_hidden()
+                        .children(session_tabs)
+                        .when(!active_tab_is_persisted, |tabs| {
+                            tabs.child(active_draft_tab)
+                        })
+                        .child(new_session),
+                )
+            })
+            .when(comet_settings_open, |bar| {
+                bar.child(
+                    div()
+                        .absolute()
+                        .left(px(tabs_left))
+                        .right(px(16.))
+                        .top_0()
+                        .h_full()
+                        .flex()
+                        .items_center()
+                        .pt(px(2.))
+                        .text_size(px(12.))
+                        .font_weight(gpui::FontWeight::MEDIUM)
+                        .text_color(text_muted)
+                        .child("Settings"),
+                )
+            });
 
         let sidebar_session_rows = self.comet_sidebar_session_rows(cx);
         let active_sidebar_row_is_persisted = active_thread_id.is_some_and(|active_thread_id| {
@@ -16361,9 +16463,9 @@ impl AgentPanel {
                     .cursor_pointer()
                     .aria_label("Open Settings")
                     .hover(move |style| style.bg(hover_background))
-                    .on_click(|_, window, cx| {
-                        window.dispatch_action(omega_actions::OpenSettings.boxed_clone(), cx);
-                    })
+                    .on_click(cx.listener(|this, _, window, cx| {
+                        this.open_comet_settings(true, window, cx);
+                    }))
                     .child(
                         div()
                             .size(px(24.))
@@ -16403,6 +16505,8 @@ impl AgentPanel {
             .bg(card_background)
             .child(main_content);
 
+        let settings_surface = self.comet_settings.clone();
+
         div()
             .id("comet-frost-shell")
             .debug_selector(|| "omega.comet.frost-shell".into())
@@ -16413,36 +16517,43 @@ impl AgentPanel {
             .overflow_hidden()
             .bg(shell_background.opacity(if cfg!(target_os = "macos") { 0.94 } else { 1. }))
             .font_family("Geist")
-            .child(
-                div()
-                    .absolute()
-                    .top_0()
-                    .bottom_0()
-                    .left_0()
-                    .w(px(sidebar_width))
-                    .bg(sidebar_background)
-                    .border_r_1()
-                    .border_color(border),
-            )
+            .when(!comet_settings_open, |shell| {
+                shell.child(
+                    div()
+                        .absolute()
+                        .top_0()
+                        .bottom_0()
+                        .left_0()
+                        .w(px(sidebar_width))
+                        .bg(sidebar_background)
+                        .border_r_1()
+                        .border_color(border),
+                )
+            })
             .child(titlebar)
-            .child(
-                h_flex()
-                    .relative()
-                    .flex_1()
-                    .min_h_0()
-                    .items_stretch()
-                    .child(sidebar)
-                    .child(
-                        div()
-                            .flex_1()
-                            .min_w_0()
-                            .h_full()
-                            .pr(px(8.))
-                            .pb(px(8.))
-                            .pl(px(8.))
-                            .child(card),
-                    ),
-            )
+            .when(!comet_settings_open, |shell| {
+                shell.child(
+                    h_flex()
+                        .relative()
+                        .flex_1()
+                        .min_h_0()
+                        .items_stretch()
+                        .child(sidebar)
+                        .child(
+                            div()
+                                .flex_1()
+                                .min_w_0()
+                                .h_full()
+                                .pr(px(8.))
+                                .pb(px(8.))
+                                .pl(px(8.))
+                                .child(card),
+                        ),
+                )
+            })
+            .when_some(settings_surface, |shell, settings| {
+                shell.child(div().flex_1().min_h_0().w_full().child(settings))
+            })
             .into_any_element()
     }
 }
@@ -17908,25 +18019,24 @@ mod tests {
     #[test]
     fn comet_navigation_history_walks_and_branches_like_a_browser() {
         let first = ThreadId::new();
-        let second = ThreadId::new();
         let third = ThreadId::new();
         let branch = ThreadId::new();
         let mut history = CometNavigationHistory::default();
 
-        history.push(first);
-        history.push(second);
-        history.push(third);
+        history.push(CometRoute::Thread(first));
+        history.push(CometRoute::Settings);
+        history.push(CometRoute::Thread(third));
         assert!(history.can_back(|_| true));
         assert!(!history.can_forward(|_| true));
-        assert_eq!(history.back(), Some(second));
-        assert_eq!(history.back(), Some(first));
+        assert_eq!(history.back(), Some(CometRoute::Settings));
+        assert_eq!(history.back(), Some(CometRoute::Thread(first)));
         assert_eq!(history.back(), None);
         assert!(history.can_forward(|_| true));
-        assert_eq!(history.forward(), Some(second));
+        assert_eq!(history.forward(), Some(CometRoute::Settings));
 
-        history.push(branch);
-        assert_eq!(history.back(), Some(second));
-        assert_eq!(history.forward(), Some(branch));
+        history.push(CometRoute::Thread(branch));
+        assert_eq!(history.back(), Some(CometRoute::Settings));
+        assert_eq!(history.forward(), Some(CometRoute::Thread(branch)));
         assert_eq!(history.forward(), None);
     }
 
@@ -17937,14 +18047,14 @@ mod tests {
         let current = ThreadId::new();
         let mut history = CometNavigationHistory::default();
 
-        history.push(first);
-        history.push(unavailable);
-        history.push(current);
+        history.push(CometRoute::Thread(first));
+        history.push(CometRoute::Thread(unavailable));
+        history.push(CometRoute::Thread(current));
 
-        assert!(history.can_back(|thread_id| thread_id == first));
-        assert!(!history.can_back(|thread_id| thread_id == current));
-        assert_eq!(history.back(), Some(unavailable));
-        assert_eq!(history.back(), Some(first));
+        assert!(history.can_back(|route| route == CometRoute::Thread(first)));
+        assert!(!history.can_back(|route| route == CometRoute::Thread(current)));
+        assert_eq!(history.back(), Some(CometRoute::Thread(unavailable)));
+        assert_eq!(history.back(), Some(CometRoute::Thread(first)));
     }
 
     /// The settings-footer version is short and channel-honest: stable shows

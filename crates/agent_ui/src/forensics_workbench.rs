@@ -1238,6 +1238,17 @@ impl Render for ForensicsWorkbenchSurface {
                     | EntropyCampaignPhase::Paused
             )
         });
+        let visible_status = self.status.clone();
+        let status_color = if visible_status.to_ascii_lowercase().contains("failed")
+            || visible_status.to_ascii_lowercase().contains("error")
+            || visible_status.to_ascii_lowercase().contains("configure")
+        {
+            Color::Error
+        } else if entropy_running || entropy_campaign_active {
+            Color::Accent
+        } else {
+            Color::Muted
+        };
 
         v_flex()
             .id("omega.forensics.workbench")
@@ -1248,21 +1259,80 @@ impl Render for ForensicsWorkbenchSurface {
             .aria_label("Forensics preflight workbench")
             .size_full()
             .overflow_y_scroll()
-            .p_3()
-            .gap_3()
+            .p_6()
+            .gap_4()
             .child(
                 h_flex()
+                    .w_full()
+                    .justify_between()
+                    .gap_4()
+                    .child(
+                        v_flex()
+                            .gap_1()
+                            .child(
+                                h_flex()
+                                    .gap_2()
+                                    .child(
+                                        Icon::new(IconName::Crosshair).size(IconSize::Medium),
+                                    )
+                                    .child(Label::new("Entropy forensics").size(LabelSize::Large)),
+                            )
+                            .child(
+                                Label::new(
+                                    "Trace entropy sources, fallbacks, and secret-randomness consumers across pinned source.",
+                                )
+                                .size(LabelSize::Small)
+                                .color(Color::Muted),
+                            ),
+                    )
+                    .child(
+                        h_flex()
+                            .max_w(px(320.))
+                            .gap_2()
+                            .px_3()
+                            .py_1p5()
+                            .rounded_full()
+                            .bg(cx.theme().colors().element_background)
+                            .child(Icon::new(IconName::Folder).size(IconSize::Small))
+                            .child(div().truncate().child(repository_name.clone())),
+                    ),
+            )
+            .child(
+                h_flex()
+                    .id("omega.forensics.entropy.status")
+                    .debug_selector(|| "omega.forensics.entropy.status".into())
+                    .w_full()
                     .gap_2()
-                    .child(Icon::new(IconName::Crosshair).size(IconSize::Small))
-                    .child(Label::new("Forensics").size(LabelSize::Small)),
+                    .px_3()
+                    .py_2()
+                    .rounded(px(8.))
+                    .border_1()
+                    .border_color(cx.theme().colors().border_variant)
+                    .bg(cx.theme().colors().element_background)
+                    .child(div().size(px(7.)).rounded_full().bg(status_color.color(cx)))
+                    .child(
+                        Label::new(visible_status)
+                            .size(LabelSize::XSmall)
+                            .color(status_color),
+                    ),
             )
             .child(
                 v_flex()
-                    .gap_1()
+                    .gap_2()
+                    .p_4()
+                    .rounded(px(10.))
+                    .border_1()
+                    .border_color(cx.theme().colors().border_variant)
+                    .bg(cx.theme().colors().surface_background)
                     .child(
-                        Label::new("Entropy repository run")
-                            .size(LabelSize::XSmall)
-                            .color(Color::Muted),
+                        h_flex()
+                            .justify_between()
+                            .child(Label::new("Repository scan").size(LabelSize::Small))
+                            .child(
+                                Label::new(source_state.clone())
+                                    .size(LabelSize::XSmall)
+                                    .color(Color::Muted),
+                            ),
                     )
                     .child(
                         Label::new(
@@ -1277,7 +1347,16 @@ impl Render for ForensicsWorkbenchSurface {
                             .color(Color::Muted),
                     )
                     .when_some(entropy_prompt_editor, |this, editor| {
-                        this.child(div().min_h_24().p_1().border_1().border_color(cx.theme().colors().border).child(editor))
+                        this.child(
+                            div()
+                                .h(px(128.))
+                                .p_2()
+                                .rounded(px(8.))
+                                .border_1()
+                                .border_color(cx.theme().colors().border_variant)
+                                .bg(cx.theme().colors().background)
+                                .child(editor),
+                        )
                     })
                     .when(self.entropy_prompt_editor.is_none(), |this| {
                         this.child(Label::new(entropy_prompt_draft.clone()).size(LabelSize::XSmall))
@@ -1382,12 +1461,16 @@ impl Render for ForensicsWorkbenchSurface {
                             }),
                     ),
             )
-            .child(div().h_px().bg(cx.theme().colors().border))
             .child(
                 v_flex()
                     .id("omega.forensics.entropy.campaign")
                     .debug_selector(|| "omega.forensics.entropy.campaign".into())
-                    .gap_1()
+                    .gap_2()
+                    .p_4()
+                    .rounded(px(10.))
+                    .border_1()
+                    .border_color(cx.theme().colors().border_variant)
+                    .bg(cx.theme().colors().surface_background)
                     .child(
                         h_flex()
                             .justify_between()

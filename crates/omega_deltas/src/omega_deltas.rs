@@ -27477,8 +27477,9 @@ mod tests {
         }
     }
 
-    /// OMEGA-DELTA-0224. Comet's settings navigation is presentation around
-    /// Omega's focused settings pages, never a second settings authority.
+    /// OMEGA-DELTA-0224. Comet's settings navigation is an in-shell route
+    /// around Omega's focused settings pages, never a second settings window
+    /// or authority.
     #[test]
     fn comet_settings_sidebar_routes_to_omega_settings() {
         let settings = without_comments(&read_repository_file(
@@ -27492,6 +27493,8 @@ mod tests {
             "\"Voice\" => IconName::Mic",
             "navigate_to_sub_page(\"llm_providers\"",
             "omega-comet-settings-back",
+            "if this.embedded",
+            "CloseEmbeddedSettings.boxed_clone()",
             "original_window.activate_window()",
             "window.remove_window()",
         ] {
@@ -27522,17 +27525,27 @@ mod tests {
         let shell = body_of(&panel, "render_comet_shell");
         for required in [
             "comet-open-settings",
-            "omega_actions::OpenSettings.boxed_clone()",
+            "open_comet_settings(true, window, cx)",
         ] {
             assert!(
                 shell.contains(required),
                 "OMEGA-DELTA-0224: the Comet shell lost its working Settings entry `{required}`"
             );
         }
+        for required in [
+            "settings_ui::SettingsWindow::new_embedded_omega",
+            "CometRoute::Settings",
+            "OpenEmbeddedSettings",
+        ] {
+            assert!(
+                panel.contains(required),
+                "OMEGA-DELTA-0224: the embedded Settings route lost `{required}`"
+            );
+        }
     }
 
-    /// OMEGA-DELTA-0225. Comet titlebar history is real browser-style session
-    /// navigation, not permanently disabled decorative controls.
+    /// OMEGA-DELTA-0225. Comet titlebar history is real browser-style route
+    /// navigation across sessions and Settings, not decorative controls.
     #[test]
     fn comet_titlebar_back_and_forward_walk_session_history() {
         let panel = without_comments(&read_repository_file("crates/agent_ui/src/agent_panel.rs"));
@@ -27556,8 +27569,8 @@ mod tests {
             "navigate_comet_back",
             "comet-nav-forward",
             "navigate_comet_forward",
-            "comet_history_thread_available",
-            "comet_navigation_history.push(active_thread_id)",
+            "comet_route_available",
+            "CometRoute::Thread(active_thread_id)",
         ] {
             assert!(
                 shell.contains(required),
