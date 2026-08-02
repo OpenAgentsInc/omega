@@ -15850,11 +15850,39 @@ impl AgentPanel {
         if index >= COMET_TAB_SHORTCUT_LABELS.len() {
             return;
         }
-        if let Some(row) = self.comet_session_tab_rows(cx).get(index).cloned()
-            && Some(row.thread_id) != self.active_thread_id(cx)
-        {
-            self.open_thread_from_threads_sidebar(&row, window, cx);
+        if let Some(row) = self.comet_session_tab_rows(cx).get(index).cloned() {
+            self.show_comet_session_transcript(&row, window, cx);
         }
+    }
+
+    /// Select a Comet session tab as a chat destination, even when its thread
+    /// is already active underneath Settings or a retained work surface.
+    fn show_comet_session_transcript(
+        &mut self,
+        row: &omega_threads_sidebar::ThreadRow,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if Some(row.thread_id) != self.active_thread_id(cx) {
+            self.open_thread_from_threads_sidebar(row, window, cx);
+        }
+        if Some(row.thread_id) != self.active_thread_id(cx) {
+            return;
+        }
+
+        self.show_active_comet_session_transcript(window, cx);
+    }
+
+    fn show_active_comet_session_transcript(
+        &mut self,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.comet_settings = None;
+        if let Err(error) = self.workbench_shell.collapse_dock() {
+            log::warn!("failed to close the Comet work surface for a session tab: {error:#}");
+        }
+        self.focus_thread_transcript(window, cx);
     }
 
     fn render_comet_control(
@@ -15985,6 +16013,7 @@ impl AgentPanel {
         });
         let session_tabs = session_tab_rows.iter().enumerate().map(|(index, row)| {
             let row = row.clone();
+            let click_row = row.clone();
             let title = row.title.clone();
             let icon = comet_thread_icon(&row);
             let is_active = Some(row.thread_id) == active_thread_id;
@@ -15999,13 +16028,13 @@ impl AgentPanel {
                 })
                 .when(!is_active, |tab| {
                     tab.text_color(text_muted)
-                        .cursor_pointer()
                         .hover(move |style| style.bg(hover_background))
-                        .on_click(cx.listener(move |this, _, window, cx| {
-                            cx.stop_propagation();
-                            this.open_thread_from_threads_sidebar(&row, window, cx);
-                        }))
                 })
+                .cursor_pointer()
+                .on_click(cx.listener(move |this, _, window, cx| {
+                    cx.stop_propagation();
+                    this.show_comet_session_transcript(&click_row, window, cx);
+                }))
                 .w(px(TAB_WIDTH))
                 .h(px(28.))
                 .flex_none()
@@ -25055,6 +25084,43 @@ mod tests {
                 workbench_shell::WorkbenchFocusTarget::Transcript
             );
             assert!(panel.front_door_composer_visible_for_tests());
+        });
+    }
+
+    #[gpui::test]
+    async fn test_active_comet_session_tab_leaves_forensics(cx: &mut TestAppContext) {
+        let (panel, mut cx) = setup_visible_panel(cx).await;
+
+        panel.update_in(&mut cx, |panel, window, cx| {
+            panel.new_thread(&NewThread, window, cx);
+        });
+        cx.run_until_parked();
+
+        panel.update(&mut cx, |panel, _cx| {
+            panel
+                .workbench_shell
+                .open_surface_for_tests(omega_workbench_state::WorkSurface::Forensics)
+                .expect("the regression fixture opens Forensics");
+        });
+
+        panel.update_in(&mut cx, |panel, window, cx| {
+            panel.show_active_comet_session_transcript(window, cx);
+        });
+
+        panel.read_with(&cx, |panel, _cx| {
+            assert!(
+                !panel
+                    .workbench_shell
+                    .projection()
+                    .visible_projection()
+                    .expect("the selected session remains active")
+                    .dock_open,
+                "selecting the active chat tab must close Forensics"
+            );
+            assert_eq!(
+                panel.workbench_shell.focus_target(),
+                workbench_shell::WorkbenchFocusTarget::Transcript
+            );
         });
     }
 
