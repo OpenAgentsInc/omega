@@ -467,7 +467,7 @@ pub fn init(cx: &mut App) {
                 );
             })
             .register_action(|_, _: &OpenSettings, window, cx| {
-                if omega_zero_base::is_comet_mode() {
+                if omega_zero_base::is_primary_interface() {
                     window.dispatch_action(omega_actions::OpenEmbeddedSettings.boxed_clone(), cx);
                     return;
                 }
@@ -2130,7 +2130,7 @@ impl SettingsWindow {
     }
 
     /// Creates Omega's settings surface inside the current application window.
-    /// Comet treats Settings as a shell route, not as another OS window.
+    /// Omega treats Settings as a shell route, not as another OS window.
     pub fn new_embedded_omega(
         original_window: Option<WindowHandle<MultiWorkspace>>,
         window: &mut Window,
@@ -3559,7 +3559,7 @@ impl SettingsWindow {
         _window: &mut Window,
         cx: &mut Context<SettingsWindow>,
     ) -> AnyElement {
-        const COMET_SETTINGS_SIDEBAR_WIDTH: f32 = 256.;
+        const OMEGA_SETTINGS_SIDEBAR_WIDTH: f32 = 256.;
 
         let colors = cx.theme().colors();
         let selected_background = colors.element_selected;
@@ -3615,10 +3615,10 @@ impl SettingsWindow {
             .collect::<Vec<_>>();
 
         v_flex()
-            .id("omega-comet-settings-sidebar")
-            .debug_selector(|| "omega.comet.settings-sidebar".into())
+            .id("omega-omega-settings-sidebar")
+            .debug_selector(|| "omega.omega.settings-sidebar".into())
             .key_context("NavigationMenu")
-            .w(px(COMET_SETTINGS_SIDEBAR_WIDTH))
+            .w(px(OMEGA_SETTINGS_SIDEBAR_WIDTH))
             .h_full()
             .flex_none()
             .bg(colors.surface_background)
@@ -3637,7 +3637,7 @@ impl SettingsWindow {
             )
             .child(
                 v_flex()
-                    .id("omega-comet-settings-navigation")
+                    .id("omega-omega-settings-navigation")
                     .role(Role::Navigation)
                     .aria_label("Settings")
                     .flex_1()
@@ -3649,7 +3649,7 @@ impl SettingsWindow {
             .child(
                 div().px_2().pb_3().child(
                     h_flex()
-                        .id("omega-comet-settings-back")
+                        .id("omega-omega-settings-back")
                         .w_full()
                         .gap_1p5()
                         .px_2()

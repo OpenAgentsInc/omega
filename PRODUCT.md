@@ -45,6 +45,7 @@ Sovereign, capable, and direct. Omega should feel like a trustworthy native tool
 - Fail closed and explain the smallest next action without exposing secrets or encouraging repeated permission prompts.
 - No exposition in the UI anywhere: controls are labeled, not narrated; multi-sentence tooltips and status sentences that explain internal mechanics are defects (`OMEGA-DELTA-0189`).
 - Statuses are colors or icons, never words; a one-word tooltip is the maximum copy (`OMEGA-DELTA-0189`).
+- Production navigation is capability-derived. A destination, row, tab, badge, or action appears only when its source-backed route, primary interaction, loading/empty/error/offline states, keyboard behavior, accessibility semantics, and required acceptance evidence are implemented for that build. Unimplemented and fixture-only destinations are absent from normal, candidate, and release builds. They can appear only behind an explicit development/mock gate and must identify their state as non-production.
 - Escape closes every modal and auxiliary window, including Settings (`OMEGA-DELTA-0189`).
 
 ## Accessibility & Inclusion

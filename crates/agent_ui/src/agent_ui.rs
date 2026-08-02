@@ -486,10 +486,10 @@ pub struct SelectPermissionGranularity {
     pub index: usize,
 }
 
-/// Activates one of the first ten visible Comet session tabs by zero-based index.
+/// Activates one of the first ten visible Omega session tabs by zero-based index.
 #[derive(Clone, PartialEq, Deserialize, JsonSchema, Action)]
 #[action(namespace = agent)]
-pub struct ActivateCometSessionTab(pub usize);
+pub struct ActivateOmegaSessionTab(pub usize);
 
 /// Action to toggle a command pattern checkbox in the permission dropdown.
 #[derive(Clone, PartialEq, Deserialize, JsonSchema, Action)]

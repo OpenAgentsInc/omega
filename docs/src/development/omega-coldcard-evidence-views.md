@@ -8,12 +8,12 @@ read-only case reader. The reader consumes a validated projection; it does not
 recompute evidence from prose or grant a renderer access to worker
 credentials, private keys, or source artifacts.
 
-## Comet reader
+## Omega reader
 
 The reader is one bounded list/detail workspace. Its left list contains a case
 overview and all nine ordered proof rungs. Its right detail pane shows the
 selected overview or rung. This replaces the former vertical pile of evidence
-cards while preserving the surrounding Comet sidebar, tabs, composer, and
+cards while preserving the surrounding Omega sidebar, tabs, composer, and
 thread history.
 
 Users can open Forensics from the project sidebar or from **View → Workbench →

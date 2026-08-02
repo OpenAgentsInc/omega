@@ -1776,7 +1776,7 @@ impl ConversationView {
     }
 
     fn submit_before_session(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        if omega_zero_base::is_comet_mode()
+        if omega_zero_base::is_primary_interface()
             && self.project.read(cx).visible_worktrees(cx).next().is_none()
         {
             window.dispatch_action(
@@ -4393,7 +4393,7 @@ impl ConversationView {
             .when(!compact, |this| this.flex_wrap())
             .gap_1()
             .children(executor_menu)
-            .when(omega_zero_base::is_comet_mode(), |this| {
+            .when(omega_zero_base::is_primary_interface(), |this| {
                 this.child(crate::composer_voice::render_composer_voice_controls(
                     self.workspace.entity_id(),
                     cx,
@@ -5899,7 +5899,7 @@ pub(crate) mod tests {
     use super::*;
 
     #[test]
-    fn composer_uses_comet_geometry() {
+    fn composer_uses_omega_geometry() {
         assert_eq!(COMPOSER_COMPACT_HEIGHT, 49.);
         assert_eq!(COMPOSER_EXPANDED_MIN_HEIGHT, 124.);
         assert_eq!(COMPOSER_EXPANDED_MAX_HEIGHT, 308.);

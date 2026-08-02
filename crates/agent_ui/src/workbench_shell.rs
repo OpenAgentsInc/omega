@@ -91,7 +91,7 @@ actions!(
         ActivatePreviousTerminalTab,
         /// Close the active tab in the embedded Terminal pane.
         CloseActiveTerminalTab,
-        /// Close the active Comet session tab.
+        /// Close the active Omega session tab.
         CloseActiveSessionTab,
         /// Open the active thread repository picker.
         ToggleRepositoryPicker,

@@ -32,7 +32,7 @@ const NOUNS: &[&str] = &[
     "acorn", "almond", "anvil", "apricot", "arbor", "atlas", "badge", "badger", "basin", "bay",
     "beacon", "beam", "bell", "birch", "blade", "bloom", "bluff", "bobcat", "bolt", "breeze",
     "bridge", "brook", "bunting", "burrow", "cabin", "cairn", "canyon", "cape", "cedar", "chasm",
-    "cliff", "clover", "coast", "cobble", "colt", "comet", "conch", "condor", "coral", "cove",
+    "cliff", "clover", "coast", "cobble", "colt", "copse", "conch", "condor", "coral", "cove",
     "coyote", "crane", "crater", "creek", "crest", "curlew", "daisy", "dale", "dawn", "den",
     "dove", "drake", "drift", "drum", "dune", "dusk", "eagle", "eel", "egret", "elk", "emu",
     "falcon", "fawn", "fennel", "fern", "ferret", "ferry", "fig", "finch", "fjord", "flicker",

@@ -9211,7 +9211,7 @@ impl Render for Workspace {
         // workspace until the gate is answered and the thread is open, and only
         // then seals.
         let zero_base_sealed = omega_zero_base::is_sealed();
-        let comet_mode = omega_zero_base::is_comet_mode();
+        let primary_interface = omega_zero_base::is_primary_interface();
 
         let theme = cx.theme().clone();
         let colors = theme.colors();
@@ -9253,7 +9253,7 @@ impl Render for Workspace {
             // controls remain absent, while the window retains the standard
             // Zed drag and double-click behavior.
             .when_some(
-                (self.multi_workspace.is_none() && !comet_mode)
+                (self.multi_workspace.is_none() && !primary_interface)
                     .then(|| self.titlebar_item.clone())
                     .flatten(),
                 |this, item| {
@@ -9696,7 +9696,7 @@ impl Render for Workspace {
                                     None => div.top_2().bottom_2().left_2().right_2().border_1(),
                                 })
                             }))
-                            .when(!comet_mode, |parent| {
+                            .when(!primary_interface, |parent| {
                                 parent.children(self.render_notifications(window, cx))
                             }),
                     )
@@ -9707,7 +9707,9 @@ impl Render for Workspace {
                     .when(self.status_bar_visible(cx) && !zero_base_sealed, |parent| {
                         parent.child(self.status_bar.clone())
                     })
-                    .when(!comet_mode, |parent| parent.child(self.toast_layer.clone())),
+                    .when(!primary_interface, |parent| {
+                        parent.child(self.toast_layer.clone())
+                    }),
             )
     }
 }

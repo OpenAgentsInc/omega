@@ -365,7 +365,7 @@ fn bind_on_window_closed(cx: &mut App) -> Option<gpui::Subscription> {
 }
 
 pub fn build_window_options(display_uuid: Option<Uuid>, cx: &mut App) -> WindowOptions {
-    let comet_mode = omega_zero_base::is_comet_mode();
+    let primary_interface = omega_zero_base::is_primary_interface();
     let display = display_uuid.and_then(|uuid| {
         cx.displays()
             .into_iter()
@@ -402,7 +402,7 @@ pub fn build_window_options(display_uuid: Option<Uuid>, cx: &mut App) -> WindowO
         titlebar: Some(TitlebarOptions {
             title: None,
             appears_transparent: true,
-            traffic_light_position: Some(if comet_mode {
+            traffic_light_position: Some(if primary_interface {
                 point(px(14.0), px(14.0))
             } else {
                 point(px(9.0), px(9.0))
@@ -420,7 +420,7 @@ pub fn build_window_options(display_uuid: Option<Uuid>, cx: &mut App) -> WindowO
         // other platforms.
         app_owns_titlebar_drag: true,
         display_id: display.map(|display| display.id()),
-        window_background: if comet_mode && cfg!(target_os = "macos") {
+        window_background: if primary_interface && cfg!(target_os = "macos") {
             gpui::WindowBackgroundAppearance::Blurred
         } else {
             cx.theme().window_background_appearance()
@@ -429,7 +429,7 @@ pub fn build_window_options(display_uuid: Option<Uuid>, cx: &mut App) -> WindowO
         #[cfg(any(target_os = "linux", target_os = "freebsd"))]
         icon: APP_ICON.as_ref().cloned(),
         window_decorations: Some(window_decorations),
-        window_min_size: Some(if comet_mode {
+        window_min_size: Some(if primary_interface {
             gpui::Size {
                 width: px(900.0),
                 height: px(600.0),

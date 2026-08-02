@@ -2198,7 +2198,7 @@ impl Render for MultiWorkspace {
         let text_color = cx.theme().colors().text;
 
         let workspace = self.workspace().clone();
-        let comet_mode = omega_zero_base::is_comet_mode();
+        let primary_interface = omega_zero_base::is_primary_interface();
         let workspace_key_context = workspace.update(cx, |workspace, cx| workspace.key_context(cx));
         let titlebar_item = workspace.read(cx).titlebar_item();
         let titlebar_focus_handle = workspace.read(cx).titlebar_focus_handle();
@@ -2290,7 +2290,7 @@ impl Render for MultiWorkspace {
                     },
                 )
                 .when_some(
-                    (!comet_mode).then_some(titlebar_item).flatten(),
+                    (!primary_interface).then_some(titlebar_item).flatten(),
                     |this, item| {
                         this.child(
                             div()

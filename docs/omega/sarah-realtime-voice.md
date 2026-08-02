@@ -16,9 +16,9 @@ refused it draws one dismissible sentence beside the button. The admission
 page is where a person goes to read the detail, not where a click while writing
 puts them. Focused Settings does not proxy Sarah admission across windows.
 
-In Comet mode, the new/loading composer renders that same shared microphone
+In the Omega interface, the new/loading composer renders that same shared microphone
 control before a conversation session exists. It uses the existing Sarah
-admission, start, mute, and end actions; Comet does not own a separate voice
+admission, start, mute, and end actions; Omega does not own a separate voice
 transport or authority path.
 Before **Start voice** is enabled, the service-backed projection
 must disclose `admissionCohortRef`, the effective rate in msat per million

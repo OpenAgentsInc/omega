@@ -49,7 +49,7 @@ use crate::thread_metadata_store::{
     ThreadId, ThreadMetadataStore, ThreadMetadataStoreEvent, WorktreePaths,
 };
 use crate::{
-    ActivateCometSessionTab, Agent, AgentInitialContent, AgentThreadSource, ExternalSourcePrompt,
+    ActivateOmegaSessionTab, Agent, AgentInitialContent, AgentThreadSource, ExternalSourcePrompt,
     NewExternalAgentThread, NewNativeAgentThreadFromSummary,
 };
 use crate::{
@@ -138,18 +138,18 @@ const LAST_USED_AGENT_KEY: &str = "agent_panel__last_used_external_agent";
 const LAST_CREATED_ENTRY_KIND_KEY: &str = "agent_panel__last_created_entry_kind";
 const TERMINAL_AGENT_TELEMETRY_ID: &str = "terminal";
 const TERMINAL_INIT_COMMAND_STARTUP_TIMEOUT: Duration = Duration::from_secs(5);
-const COMET_SIDEBAR_WIDTH: f32 = 256.;
-const COMET_SIDEBAR_RESIZE_DURATION: Duration = Duration::from_millis(200);
-const COMET_TAB_SHORTCUT_LABELS: [&str; 10] = ["1", "2", "3", "4", "5", "6", "7", "8", "9", "0"];
+const OMEGA_SIDEBAR_WIDTH: f32 = 256.;
+const OMEGA_SIDEBAR_RESIZE_DURATION: Duration = Duration::from_millis(200);
+const OMEGA_TAB_SHORTCUT_LABELS: [&str; 10] = ["1", "2", "3", "4", "5", "6", "7", "8", "9", "0"];
 
 #[derive(Clone, Copy, Debug)]
-struct CometSidebarTween {
+struct OmegaSidebarTween {
     from: f32,
     to: f32,
     started: Instant,
 }
 
-impl CometSidebarTween {
+impl OmegaSidebarTween {
     fn new(from: f32, to: f32) -> Self {
         Self {
             from,
@@ -163,16 +163,16 @@ impl CometSidebarTween {
             return (self.to, false);
         }
         let raw = now.saturating_duration_since(self.started).as_secs_f32()
-            / COMET_SIDEBAR_RESIZE_DURATION.as_secs_f32();
+            / OMEGA_SIDEBAR_RESIZE_DURATION.as_secs_f32();
         if raw >= 1. {
             return (self.to, false);
         }
-        let progress = comet_sidebar_ease_out(raw);
+        let progress = omega_sidebar_ease_out(raw);
         (self.from + (self.to - self.from) * progress, true)
     }
 }
 
-fn comet_sidebar_ease_out(progress: f32) -> f32 {
+fn omega_sidebar_ease_out(progress: f32) -> f32 {
     fn coefficients(first: f32, second: f32) -> (f32, f32, f32) {
         let c = 3. * first;
         let b = 3. * (second - first) - c;
@@ -215,7 +215,7 @@ fn comet_sidebar_ease_out(progress: f32) -> f32 {
     sample(y, (low + high) / 2.).clamp(0., 1.)
 }
 
-fn comet_tab_shortcuts_visible(window: &Window) -> bool {
+fn omega_tab_shortcuts_visible(window: &Window) -> bool {
     let modifiers = window.modifiers();
     if cfg!(target_os = "macos") {
         modifiers.platform
@@ -224,8 +224,8 @@ fn comet_tab_shortcuts_visible(window: &Window) -> bool {
     }
 }
 
-fn comet_tab_shortcut_hint(index: usize, color: Hsla) -> AnyElement {
-    let label = COMET_TAB_SHORTCUT_LABELS
+fn omega_tab_shortcut_hint(index: usize, color: Hsla) -> AnyElement {
+    let label = OMEGA_TAB_SHORTCUT_LABELS
         .get(index)
         .copied()
         .unwrap_or_default();
@@ -237,11 +237,11 @@ fn comet_tab_shortcut_hint(index: usize, color: Hsla) -> AnyElement {
         .into_any_element()
 }
 
-fn comet_sidebar_row_padding(selected: bool) -> (f32, f32) {
+fn omega_sidebar_row_padding(selected: bool) -> (f32, f32) {
     if selected { (7., 6.) } else { (8., 7.) }
 }
 
-fn comet_executor_icon(
+fn omega_executor_icon(
     executor: Option<crate::omega_executor_selector::SelectableExecutor>,
 ) -> IconName {
     use crate::omega_executor_selector::SelectableExecutor;
@@ -254,11 +254,11 @@ fn comet_executor_icon(
     }
 }
 
-fn comet_thread_icon(row: &omega_threads_sidebar::ThreadRow) -> IconName {
-    comet_executor_icon(omega_threads_sidebar::recorded_executor(&row.agent_id))
+fn omega_thread_icon(row: &omega_threads_sidebar::ThreadRow) -> IconName {
+    omega_executor_icon(omega_threads_sidebar::recorded_executor(&row.agent_id))
 }
 
-fn stable_comet_session_rows(
+fn stable_omega_session_rows(
     mut rows: Vec<omega_threads_sidebar::ThreadRow>,
     active_thread_id: Option<ThreadId>,
     oldest_first: bool,
@@ -268,9 +268,9 @@ fn stable_comet_session_rows(
             .position(|row| row.thread_id == active_thread_id)
     });
     let visible_count = if active_position.is_some() {
-        COMET_TAB_SHORTCUT_LABELS.len()
+        OMEGA_TAB_SHORTCUT_LABELS.len()
     } else {
-        COMET_TAB_SHORTCUT_LABELS.len().saturating_sub(1)
+        OMEGA_TAB_SHORTCUT_LABELS.len().saturating_sub(1)
     };
 
     if rows.len() > visible_count {
@@ -300,7 +300,7 @@ fn stable_comet_session_rows(
     rows
 }
 
-fn comet_project_workspaces(
+fn omega_project_workspaces(
     multi_workspace: &MultiWorkspace,
     cx: &App,
 ) -> Vec<(Entity<Workspace>, ProjectGroupKey, SharedString)> {
@@ -323,7 +323,7 @@ fn comet_project_workspaces(
         .collect()
 }
 
-fn reconcile_new_comet_session_rows(
+fn reconcile_new_omega_session_rows(
     rows: Vec<omega_threads_sidebar::ThreadRow>,
     active_thread_id: Option<ThreadId>,
     known_tabs: &mut HashSet<ThreadId>,
@@ -1518,7 +1518,7 @@ pub fn init(cx: &mut App) {
                     |workspace, _: &omega_actions::OpenEmbeddedSettings, window, cx| {
                         if let Some(panel) = workspace.panel::<AgentPanel>(cx) {
                             panel.update(cx, |panel, cx| {
-                                panel.open_comet_settings(true, window, cx)
+                                panel.open_omega_settings(true, window, cx)
                             });
                         }
                     },
@@ -1526,7 +1526,7 @@ pub fn init(cx: &mut App) {
                 .register_action(
                     |workspace, _: &omega_actions::CloseEmbeddedSettings, window, cx| {
                         if let Some(panel) = workspace.panel::<AgentPanel>(cx) {
-                            panel.update(cx, |panel, cx| panel.close_comet_settings(window, cx));
+                            panel.update(cx, |panel, cx| panel.close_omega_settings(window, cx));
                         }
                     },
                 )
@@ -2408,19 +2408,19 @@ enum BaseView {
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
-enum CometRoute {
+enum OmegaRoute {
     Thread(ThreadId),
     Settings,
 }
 
 #[derive(Debug, Default)]
-struct CometNavigationHistory {
-    entries: Vec<CometRoute>,
+struct OmegaNavigationHistory {
+    entries: Vec<OmegaRoute>,
     index: usize,
 }
 
-impl CometNavigationHistory {
-    fn push(&mut self, route: CometRoute) {
+impl OmegaNavigationHistory {
+    fn push(&mut self, route: OmegaRoute) {
         if self.entries.get(self.index) == Some(&route) {
             return;
         }
@@ -2434,19 +2434,19 @@ impl CometNavigationHistory {
         self.index += 1;
     }
 
-    fn can_back(&self, mut is_available: impl FnMut(CometRoute) -> bool) -> bool {
+    fn can_back(&self, mut is_available: impl FnMut(OmegaRoute) -> bool) -> bool {
         self.entries
             .get(..self.index)
             .is_some_and(|entries| entries.iter().rev().copied().any(&mut is_available))
     }
 
-    fn can_forward(&self, mut is_available: impl FnMut(CometRoute) -> bool) -> bool {
+    fn can_forward(&self, mut is_available: impl FnMut(OmegaRoute) -> bool) -> bool {
         self.entries
             .get(self.index.saturating_add(1)..)
             .is_some_and(|entries| entries.iter().copied().any(&mut is_available))
     }
 
-    fn back(&mut self) -> Option<CometRoute> {
+    fn back(&mut self) -> Option<OmegaRoute> {
         if self.index == 0 {
             return None;
         }
@@ -2454,7 +2454,7 @@ impl CometNavigationHistory {
         self.entries.get(self.index).copied()
     }
 
-    fn forward(&mut self) -> Option<CometRoute> {
+    fn forward(&mut self) -> Option<OmegaRoute> {
         if self.index.saturating_add(1) >= self.entries.len() {
             return None;
         }
@@ -3105,7 +3105,7 @@ pub struct AgentPanel {
     pending_terminal_spawn: Option<TerminalId>,
     new_thread_menu_handle: PopoverMenuHandle<ContextMenu>,
     composer_executor_menu_handle:
-        PopoverMenuHandle<crate::omega_composer_executor_menu::CometComposerModelMenu>,
+        PopoverMenuHandle<crate::omega_composer_executor_menu::OmegaComposerModelMenu>,
     agent_panel_menu_handle: PopoverMenuHandle<ContextMenu>,
     thread_repository_menu_handle: PopoverMenuHandle<ContextMenu>,
     thread_worktree_menu_handle: PopoverMenuHandle<ContextMenu>,
@@ -3205,12 +3205,12 @@ pub struct AgentPanel {
     _forensics_workbench_subscriptions: Vec<Subscription>,
     workbench_shell: workbench_shell::WorkbenchShell,
     workbench_shell_enabled: bool,
-    comet_titlebar_dragging: bool,
-    comet_sidebar_tween: Option<CometSidebarTween>,
-    comet_known_session_tabs: HashSet<ThreadId>,
-    comet_closed_session_tabs: HashSet<ThreadId>,
-    comet_navigation_history: CometNavigationHistory,
-    comet_settings: Option<Entity<settings_ui::SettingsWindow>>,
+    omega_titlebar_dragging: bool,
+    omega_sidebar_tween: Option<OmegaSidebarTween>,
+    omega_known_session_tabs: HashSet<ThreadId>,
+    omega_closed_session_tabs: HashSet<ThreadId>,
+    omega_navigation_history: OmegaNavigationHistory,
+    omega_settings: Option<Entity<settings_ui::SettingsWindow>>,
     /// Thread keys whose durable disk selection was already adopted (or
     /// reset), so a render-driven sync does not re-read disk per frame.
     workbench_selection_restore_attempted: HashSet<String>,
@@ -3830,12 +3830,12 @@ impl AgentPanel {
             _forensics_workbench_subscriptions: Vec::new(),
             workbench_shell,
             workbench_shell_enabled: omega_zero_base::is_active(),
-            comet_titlebar_dragging: false,
-            comet_sidebar_tween: None,
-            comet_known_session_tabs: HashSet::default(),
-            comet_closed_session_tabs: HashSet::default(),
-            comet_navigation_history: CometNavigationHistory::default(),
-            comet_settings: None,
+            omega_titlebar_dragging: false,
+            omega_sidebar_tween: None,
+            omega_known_session_tabs: HashSet::default(),
+            omega_closed_session_tabs: HashSet::default(),
+            omega_navigation_history: OmegaNavigationHistory::default(),
+            omega_settings: None,
             workbench_selection_restore_attempted: HashSet::default(),
             workbench_sync_failure_log: DistinctFailureLog::default(),
             workbench_files_panel,
@@ -6146,12 +6146,12 @@ impl AgentPanel {
     /// panel is added to the dock by an async task in `crates/omega`, this runs
     /// from `Workspace::new_local`'s init callback, and `Workspace` emits no
     /// "panel added" event to subscribe to. Normal startup gives up after a
-    /// second instead of holding a task for the window's lifetime. Comet mode
+    /// second instead of holding a task for the window's lifetime. The Omega interface
     /// allows ten seconds because a clean isolated profile can still be
     /// initializing the only surface it is permitted to render.
     pub fn open_front_door(window: &mut Window, cx: &mut Context<Workspace>) {
         cx.spawn_in(window, async move |workspace, cx| {
-            let poll_attempts = if omega_zero_base::is_comet_mode() {
+            let poll_attempts = if omega_zero_base::is_primary_interface() {
                 400
             } else {
                 40
@@ -6273,19 +6273,19 @@ impl AgentPanel {
     /// sidebar whose first section is those threads rather than opening an
     /// overlay that was only threads.
     pub fn toggle_threads_sidebar(&mut self, cx: &mut Context<Self>) {
-        let comet_from = self
+        let omega_from = self
             .sidebar
             .open
-            .then_some(COMET_SIDEBAR_WIDTH)
+            .then_some(OMEGA_SIDEBAR_WIDTH)
             .unwrap_or_default();
         self.sidebar.open = !self.sidebar.open;
-        if omega_zero_base::is_comet_mode() {
-            let comet_to = self
+        if omega_zero_base::is_primary_interface() {
+            let omega_to = self
                 .sidebar
                 .open
-                .then_some(COMET_SIDEBAR_WIDTH)
+                .then_some(OMEGA_SIDEBAR_WIDTH)
                 .unwrap_or_default();
-            self.comet_sidebar_tween = Some(CometSidebarTween::new(comet_from, comet_to));
+            self.omega_sidebar_tween = Some(OmegaSidebarTween::new(omega_from, omega_to));
         }
         // A refusal belongs to the click that produced it. Carrying it across
         // a collapse and an expand would show a sentence about a thread the
@@ -6411,7 +6411,7 @@ impl AgentPanel {
             return;
         }
 
-        self.comet_closed_session_tabs.remove(&row.thread_id);
+        self.omega_closed_session_tabs.remove(&row.thread_id);
         self.threads_sidebar_refusal = None;
         // OMEGA-DELTA-0130. The sidebar stays. It used to close itself here,
         // because it was an overlay covering the thread it had just opened.
@@ -8068,7 +8068,7 @@ impl AgentPanel {
     /// makes the dropdown keyboard-reachable (`OMEGA-DELTA-0184`, omega#165).
     pub(crate) fn composer_executor_menu_handle(
         &self,
-    ) -> PopoverMenuHandle<crate::omega_composer_executor_menu::CometComposerModelMenu> {
+    ) -> PopoverMenuHandle<crate::omega_composer_executor_menu::OmegaComposerModelMenu> {
         self.composer_executor_menu_handle.clone()
     }
 
@@ -8855,7 +8855,7 @@ impl AgentPanel {
         }
         self.public_channels.clear_selection();
 
-        let comet_thread_id = if omega_zero_base::is_comet_mode() {
+        let omega_thread_id = if omega_zero_base::is_primary_interface() {
             match &new_view {
                 BaseView::AgentThread { conversation_view } => {
                     Some(conversation_view.read(cx).thread_id)
@@ -8868,10 +8868,10 @@ impl AgentPanel {
         let old_view = std::mem::replace(&mut self.base_view, new_view);
         self.retain_running_thread(old_view, cx);
 
-        if let Some(thread_id) = comet_thread_id {
-            self.comet_settings = None;
-            self.comet_navigation_history
-                .push(CometRoute::Thread(thread_id));
+        if let Some(thread_id) = omega_thread_id {
+            self.omega_settings = None;
+            self.omega_navigation_history
+                .push(OmegaRoute::Thread(thread_id));
         }
 
         if let BaseView::AgentThread { conversation_view } = &self.base_view {
@@ -11980,8 +11980,8 @@ impl AgentPanel {
         if omega_zero_base::is_active() {
             key_context.add("ZeroBase");
         }
-        if omega_zero_base::is_comet_mode() {
-            key_context.add("CometMode");
+        if omega_zero_base::is_primary_interface() {
+            key_context.add("OmegaInterface");
         }
         key_context
     }
@@ -15814,7 +15814,7 @@ impl AgentPanel {
 }
 
 impl AgentPanel {
-    fn comet_history_thread_available(&self, thread_id: ThreadId, cx: &App) -> bool {
+    fn omega_history_thread_available(&self, thread_id: ThreadId, cx: &App) -> bool {
         self.active_thread_id(cx) == Some(thread_id)
             || self
                 .draft_thread
@@ -15829,19 +15829,19 @@ impl AgentPanel {
             })
     }
 
-    fn open_comet_history_thread(
+    fn open_omega_history_thread(
         &mut self,
         thread_id: ThreadId,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> bool {
-        if !self.comet_history_thread_available(thread_id, cx) {
+        if !self.omega_history_thread_available(thread_id, cx) {
             return false;
         }
         if self.active_thread_id(cx) == Some(thread_id) {
             return true;
         }
-        self.comet_closed_session_tabs.remove(&thread_id);
+        self.omega_closed_session_tabs.remove(&thread_id);
         if self
             .draft_thread
             .as_ref()
@@ -15873,93 +15873,93 @@ impl AgentPanel {
         self.active_thread_id(cx) == Some(thread_id)
     }
 
-    fn navigate_comet_back(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        let starting_index = self.comet_navigation_history.index;
-        while let Some(route) = self.comet_navigation_history.back() {
-            if self.open_comet_history_route(route, window, cx) {
+    fn navigate_omega_back(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let starting_index = self.omega_navigation_history.index;
+        while let Some(route) = self.omega_navigation_history.back() {
+            if self.open_omega_history_route(route, window, cx) {
                 cx.notify();
                 return;
             }
         }
-        self.comet_navigation_history.restore_index(starting_index);
+        self.omega_navigation_history.restore_index(starting_index);
         cx.notify();
     }
 
-    fn navigate_comet_forward(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        let starting_index = self.comet_navigation_history.index;
-        while let Some(route) = self.comet_navigation_history.forward() {
-            if self.open_comet_history_route(route, window, cx) {
+    fn navigate_omega_forward(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let starting_index = self.omega_navigation_history.index;
+        while let Some(route) = self.omega_navigation_history.forward() {
+            if self.open_omega_history_route(route, window, cx) {
                 cx.notify();
                 return;
             }
         }
-        self.comet_navigation_history.restore_index(starting_index);
+        self.omega_navigation_history.restore_index(starting_index);
         cx.notify();
     }
 
-    fn comet_route_available(&self, route: CometRoute, cx: &App) -> bool {
+    fn omega_route_available(&self, route: OmegaRoute, cx: &App) -> bool {
         match route {
-            CometRoute::Thread(thread_id) => self.comet_history_thread_available(thread_id, cx),
-            CometRoute::Settings => true,
+            OmegaRoute::Thread(thread_id) => self.omega_history_thread_available(thread_id, cx),
+            OmegaRoute::Settings => true,
         }
     }
 
-    fn open_comet_history_route(
+    fn open_omega_history_route(
         &mut self,
-        route: CometRoute,
+        route: OmegaRoute,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> bool {
         match route {
-            CometRoute::Thread(thread_id) => {
-                self.comet_settings = None;
-                self.open_comet_history_thread(thread_id, window, cx)
+            OmegaRoute::Thread(thread_id) => {
+                self.omega_settings = None;
+                self.open_omega_history_thread(thread_id, window, cx)
             }
-            CometRoute::Settings => {
-                self.open_comet_settings(false, window, cx);
+            OmegaRoute::Settings => {
+                self.open_omega_settings(false, window, cx);
                 true
             }
         }
     }
 
-    fn open_comet_settings(
+    fn open_omega_settings(
         &mut self,
         record_history: bool,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        if self.comet_settings.is_none() {
+        if self.omega_settings.is_none() {
             let original_window = window.window_handle().downcast::<MultiWorkspace>();
-            self.comet_settings = Some(cx.new(|cx| {
+            self.omega_settings = Some(cx.new(|cx| {
                 settings_ui::SettingsWindow::new_embedded_omega(original_window, window, cx)
             }));
         }
         if record_history {
-            self.comet_navigation_history.push(CometRoute::Settings);
+            self.omega_navigation_history.push(OmegaRoute::Settings);
         }
         cx.notify();
     }
 
-    fn close_comet_settings(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        self.comet_settings = None;
+    fn close_omega_settings(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.omega_settings = None;
         if let Some(thread_id) = self.active_thread_id(cx) {
-            self.comet_navigation_history
-                .push(CometRoute::Thread(thread_id));
+            self.omega_navigation_history
+                .push(OmegaRoute::Thread(thread_id));
         }
         window.focus(&self.focus_handle, cx);
         cx.notify();
     }
 
-    fn close_active_comet_session_tab(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+    fn close_active_omega_session_tab(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let active_thread_id = self.active_thread_id(cx);
         let fallback = self.threads_sidebar_rows(cx).into_iter().find(|row| {
             Some(row.thread_id) != active_thread_id
-                && !self.comet_closed_session_tabs.contains(&row.thread_id)
+                && !self.omega_closed_session_tabs.contains(&row.thread_id)
                 && row.refusal.is_none()
         });
 
         if let Some(active_thread_id) = active_thread_id {
-            self.comet_closed_session_tabs.insert(active_thread_id);
+            self.omega_closed_session_tabs.insert(active_thread_id);
         }
 
         if let Some(fallback) = fallback {
@@ -15970,48 +15970,48 @@ impl AgentPanel {
         cx.notify();
     }
 
-    fn comet_session_tab_rows(&self, cx: &App) -> Vec<omega_threads_sidebar::ThreadRow> {
+    fn omega_session_tab_rows(&self, cx: &App) -> Vec<omega_threads_sidebar::ThreadRow> {
         let active_thread_id = self.active_thread_id(cx);
         let rows = self
             .threads_sidebar_rows(cx)
             .into_iter()
-            .filter(|row| !self.comet_closed_session_tabs.contains(&row.thread_id))
+            .filter(|row| !self.omega_closed_session_tabs.contains(&row.thread_id))
             .collect::<Vec<_>>();
-        stable_comet_session_rows(rows, active_thread_id, true)
+        stable_omega_session_rows(rows, active_thread_id, true)
     }
 
-    fn reconcile_comet_session_tabs(&mut self, cx: &App) {
+    fn reconcile_omega_session_tabs(&mut self, cx: &App) {
         let active_thread_id = self.active_thread_id(cx);
-        reconcile_new_comet_session_rows(
+        reconcile_new_omega_session_rows(
             self.threads_sidebar_rows(cx),
             active_thread_id,
-            &mut self.comet_known_session_tabs,
-            &mut self.comet_closed_session_tabs,
+            &mut self.omega_known_session_tabs,
+            &mut self.omega_closed_session_tabs,
         );
     }
 
-    fn comet_sidebar_session_rows(&self, cx: &App) -> Vec<omega_threads_sidebar::ThreadRow> {
+    fn omega_sidebar_session_rows(&self, cx: &App) -> Vec<omega_threads_sidebar::ThreadRow> {
         let active_thread_id = self.active_thread_id(cx);
-        stable_comet_session_rows(self.threads_sidebar_rows(cx), active_thread_id, false)
+        stable_omega_session_rows(self.threads_sidebar_rows(cx), active_thread_id, false)
     }
 
-    fn activate_comet_session_tab(
+    fn activate_omega_session_tab(
         &mut self,
         index: usize,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        if index >= COMET_TAB_SHORTCUT_LABELS.len() {
+        if index >= OMEGA_TAB_SHORTCUT_LABELS.len() {
             return;
         }
-        if let Some(row) = self.comet_session_tab_rows(cx).get(index).cloned() {
-            self.show_comet_session_transcript(&row, window, cx);
+        if let Some(row) = self.omega_session_tab_rows(cx).get(index).cloned() {
+            self.show_omega_session_transcript(&row, window, cx);
         }
     }
 
-    /// Select a Comet session tab as a chat destination, even when its thread
+    /// Select a Omega session tab as a chat destination, even when its thread
     /// is already active underneath Settings or a retained work surface.
-    fn show_comet_session_transcript(
+    fn show_omega_session_transcript(
         &mut self,
         row: &omega_threads_sidebar::ThreadRow,
         window: &mut Window,
@@ -16024,22 +16024,22 @@ impl AgentPanel {
             return;
         }
 
-        self.show_active_comet_session_transcript(window, cx);
+        self.show_active_omega_session_transcript(window, cx);
     }
 
-    fn show_active_comet_session_transcript(
+    fn show_active_omega_session_transcript(
         &mut self,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        self.comet_settings = None;
+        self.omega_settings = None;
         if let Err(error) = self.workbench_shell.collapse_dock() {
-            log::warn!("failed to close the Comet work surface for a session tab: {error:#}");
+            log::warn!("failed to close the Omega work surface for a session tab: {error:#}");
         }
         self.focus_thread_transcript(window, cx);
     }
 
-    fn render_comet_control(
+    fn render_omega_control(
         &self,
         id: &'static str,
         label: &'static str,
@@ -16080,7 +16080,7 @@ impl AgentPanel {
             .into_any_element()
     }
 
-    fn render_comet_shell(
+    fn render_omega_shell(
         &mut self,
         content: impl IntoElement,
         window: &mut Window,
@@ -16101,8 +16101,8 @@ impl AgentPanel {
         let text_placeholder = colors.text_placeholder;
         let text_accent = colors.text_accent;
         let icon_muted = colors.icon_muted;
-        let tab_shortcuts_visible = comet_tab_shortcuts_visible(window);
-        let comet_forensics_selected = self
+        let tab_shortcuts_visible = omega_tab_shortcuts_visible(window);
+        let omega_forensics_selected = self
             .workbench_shell
             .projection()
             .visible_projection()
@@ -16111,36 +16111,36 @@ impl AgentPanel {
                     && visible.effective_surface
                         == Some(omega_workbench_state::WorkSurface::Forensics)
             });
-        let comet_forensics_host = comet_forensics_selected
+        let omega_forensics_host = omega_forensics_selected
             .then(|| self.workbench_shell.visible_host().cloned())
             .flatten();
-        let main_content = comet_forensics_host
+        let main_content = omega_forensics_host
             .map(|host| host.into_any_element())
             .unwrap_or_else(|| content.into_any_element());
 
         let sidebar_open = self.sidebar.open;
         let sidebar_target = if sidebar_open {
-            COMET_SIDEBAR_WIDTH
+            OMEGA_SIDEBAR_WIDTH
         } else {
             0.
         };
         let (sidebar_width, sidebar_animating) = self
-            .comet_sidebar_tween
+            .omega_sidebar_tween
             .map(|tween| tween.value(Instant::now(), cx.reduce_motion()))
             .unwrap_or((sidebar_target, false));
         if sidebar_animating {
             window.request_animation_frame();
         } else {
-            self.comet_sidebar_tween = None;
+            self.omega_sidebar_tween = None;
         }
         let active_thread_id = self.active_thread_id(cx);
-        self.reconcile_comet_session_tabs(cx);
-        let comet_settings_open = self.comet_settings.is_some();
+        self.reconcile_omega_session_tabs(cx);
+        let omega_settings_open = self.omega_settings.is_some();
         if let Some(active_thread_id) = active_thread_id
-            && !comet_settings_open
+            && !omega_settings_open
         {
-            self.comet_navigation_history
-                .push(CometRoute::Thread(active_thread_id));
+            self.omega_navigation_history
+                .push(OmegaRoute::Thread(active_thread_id));
         }
         let active_title = self
             .active_conversation_view()
@@ -16158,8 +16158,8 @@ impl AgentPanel {
                 )
             })
             .or_else(crate::omega_executor_selector::selected);
-        let active_icon = comet_executor_icon(active_executor);
-        let session_tab_rows = self.comet_session_tab_rows(cx);
+        let active_icon = omega_executor_icon(active_executor);
+        let session_tab_rows = self.omega_session_tab_rows(cx);
         let active_tab_is_persisted = active_thread_id.is_some_and(|active_thread_id| {
             session_tab_rows
                 .iter()
@@ -16169,12 +16169,12 @@ impl AgentPanel {
             let row = row.clone();
             let click_row = row.clone();
             let title = row.title.clone();
-            let icon = comet_thread_icon(&row);
+            let icon = omega_thread_icon(&row);
             let is_active = Some(row.thread_id) == active_thread_id;
             div()
-                .id(("comet-session-tab", index))
+                .id(("omega-session-tab", index))
                 .when(is_active, |tab| {
-                    tab.debug_selector(|| "omega.comet.session-tab.active".into())
+                    tab.debug_selector(|| "omega.omega.session-tab.active".into())
                         .bg(selected_background)
                         .border_1()
                         .border_color(colors.border_selected)
@@ -16187,7 +16187,7 @@ impl AgentPanel {
                 .cursor_pointer()
                 .on_click(cx.listener(move |this, _, window, cx| {
                     cx.stop_propagation();
-                    this.show_comet_session_transcript(&click_row, window, cx);
+                    this.show_omega_session_transcript(&click_row, window, cx);
                 }))
                 .w(px(TAB_WIDTH))
                 .h(px(28.))
@@ -16202,14 +16202,14 @@ impl AgentPanel {
                 .child(Icon::new(icon).size(IconSize::Small).color(Color::Muted))
                 .child(div().min_w_0().flex_1().truncate().child(title))
                 .when(tab_shortcuts_visible, |tab| {
-                    tab.child(comet_tab_shortcut_hint(index, text_placeholder))
+                    tab.child(omega_tab_shortcut_hint(index, text_placeholder))
                 })
         });
 
         let draft_tab_index = session_tab_rows.len();
         let active_draft_tab = div()
-            .id("comet-active-session-tab")
-            .debug_selector(|| "omega.comet.session-tab.active".into())
+            .id("omega-active-session-tab")
+            .debug_selector(|| "omega.omega.session-tab.active".into())
             .w(px(TAB_WIDTH))
             .h(px(28.))
             .flex_none()
@@ -16232,11 +16232,11 @@ impl AgentPanel {
             )
             .child(div().min_w_0().flex_1().truncate().child(active_title))
             .when(tab_shortcuts_visible, |tab| {
-                tab.child(comet_tab_shortcut_hint(draft_tab_index, text_placeholder))
+                tab.child(omega_tab_shortcut_hint(draft_tab_index, text_placeholder))
             });
 
-        let toggle = self.render_comet_control(
-            "comet-toggle-sidebar",
+        let toggle = self.render_omega_control(
+            "omega-toggle-sidebar",
             "Toggle sidebar",
             if sidebar_open {
                 IconName::ThreadsSidebarLeftOpen
@@ -16248,30 +16248,30 @@ impl AgentPanel {
             hover_background,
             cx.listener(|this, _, _, cx| this.toggle_threads_sidebar(cx)),
         );
-        let back = self.render_comet_control(
-            "comet-nav-back",
+        let back = self.render_omega_control(
+            "omega-nav-back",
             "Back",
             IconName::ArrowLeft,
             !self
-                .comet_navigation_history
-                .can_back(|route| self.comet_route_available(route, cx)),
+                .omega_navigation_history
+                .can_back(|route| self.omega_route_available(route, cx)),
             icon_muted,
             hover_background,
-            cx.listener(|this, _, window, cx| this.navigate_comet_back(window, cx)),
+            cx.listener(|this, _, window, cx| this.navigate_omega_back(window, cx)),
         );
-        let forward = self.render_comet_control(
-            "comet-nav-forward",
+        let forward = self.render_omega_control(
+            "omega-nav-forward",
             "Forward",
             IconName::ArrowRight,
             !self
-                .comet_navigation_history
-                .can_forward(|route| self.comet_route_available(route, cx)),
+                .omega_navigation_history
+                .can_forward(|route| self.omega_route_available(route, cx)),
             icon_muted,
             hover_background,
-            cx.listener(|this, _, window, cx| this.navigate_comet_forward(window, cx)),
+            cx.listener(|this, _, window, cx| this.navigate_omega_forward(window, cx)),
         );
-        let new_session = self.render_comet_control(
-            "comet-new-session",
+        let new_session = self.render_omega_control(
+            "omega-new-session",
             "New session",
             IconName::Plus,
             false,
@@ -16279,8 +16279,8 @@ impl AgentPanel {
             hover_background,
             cx.listener(|this, _, window, cx| this.new_thread(&NewThread, window, cx)),
         );
-        let open_project = self.render_comet_control(
-            "comet-open-project",
+        let open_project = self.render_omega_control(
+            "omega-open-project",
             "Open project",
             IconName::Plus,
             false,
@@ -16298,8 +16298,8 @@ impl AgentPanel {
 
         let tabs_left = (sidebar_width + 16.).max(158.);
         let titlebar = div()
-            .id("comet-titlebar")
-            .debug_selector(|| "omega.comet.titlebar".into())
+            .id("omega-titlebar")
+            .debug_selector(|| "omega.omega.titlebar".into())
             .relative()
             .h(px(TITLEBAR_HEIGHT))
             .w_full()
@@ -16307,18 +16307,18 @@ impl AgentPanel {
             .window_control_area(WindowControlArea::Drag)
             .on_mouse_down(
                 MouseButton::Left,
-                cx.listener(|this, _, _, _| this.comet_titlebar_dragging = true),
+                cx.listener(|this, _, _, _| this.omega_titlebar_dragging = true),
             )
             .on_mouse_up(
                 MouseButton::Left,
-                cx.listener(|this, _, _, _| this.comet_titlebar_dragging = false),
+                cx.listener(|this, _, _, _| this.omega_titlebar_dragging = false),
             )
             .on_mouse_move(
                 cx.listener(|this, event: &gpui::MouseMoveEvent, window, _| {
-                    if this.comet_titlebar_dragging
+                    if this.omega_titlebar_dragging
                         && event.pressed_button == Some(MouseButton::Left)
                     {
-                        this.comet_titlebar_dragging = false;
+                        this.omega_titlebar_dragging = false;
                         window.start_window_move();
                     }
                 }),
@@ -16346,7 +16346,7 @@ impl AgentPanel {
                     .child(back)
                     .child(forward),
             )
-            .when(!comet_settings_open, |bar| {
+            .when(!omega_settings_open, |bar| {
                 bar.child(
                     div()
                         .absolute()
@@ -16366,7 +16366,7 @@ impl AgentPanel {
                         .child(new_session),
                 )
             })
-            .when(comet_settings_open, |bar| {
+            .when(omega_settings_open, |bar| {
                 bar.child(
                     div()
                         .absolute()
@@ -16384,7 +16384,7 @@ impl AgentPanel {
                 )
             });
 
-        let sidebar_session_rows = self.comet_sidebar_session_rows(cx);
+        let sidebar_session_rows = self.omega_sidebar_session_rows(cx);
         let active_sidebar_row_is_persisted = active_thread_id.is_some_and(|active_thread_id| {
             sidebar_session_rows
                 .iter()
@@ -16396,13 +16396,13 @@ impl AgentPanel {
             .map(|(index, row)| {
                 let title = row.title.clone();
                 let age = row.age.clone();
-                let icon = comet_thread_icon(&row);
+                let icon = omega_thread_icon(&row);
                 let is_active = Some(row.thread_id) == active_thread_id;
-                let (padding_x, padding_y) = comet_sidebar_row_padding(is_active);
+                let (padding_x, padding_y) = omega_sidebar_row_padding(is_active);
                 div()
-                    .id(("comet-sidebar-session", index))
+                    .id(("omega-sidebar-session", index))
                     .when(is_active, |row| {
-                        row.debug_selector(|| "omega.comet.sidebar-session.active".into())
+                        row.debug_selector(|| "omega.omega.sidebar-session.active".into())
                             .bg(selected_background)
                             .border_1()
                             .border_color(colors.border_selected)
@@ -16438,10 +16438,10 @@ impl AgentPanel {
                     )
             });
 
-        let (active_sidebar_padding_x, active_sidebar_padding_y) = comet_sidebar_row_padding(true);
+        let (active_sidebar_padding_x, active_sidebar_padding_y) = omega_sidebar_row_padding(true);
         let active_draft_sidebar_row = h_flex()
-            .id("comet-sidebar-active-session")
-            .debug_selector(|| "omega.comet.sidebar-session.active".into())
+            .id("omega-sidebar-active-session")
+            .debug_selector(|| "omega.omega.sidebar-session.active".into())
             .w_full()
             .px(px(active_sidebar_padding_x))
             .py(px(active_sidebar_padding_y))
@@ -16486,7 +16486,7 @@ impl AgentPanel {
                     .enumerate()
                     .map(|(index, candidate)| {
                         let binding = candidate.binding.clone();
-                        let debug_selector = format!("omega.comet.project.{}", binding.worktree_id);
+                        let debug_selector = format!("omega.omega.project.{}", binding.worktree_id);
                         let selected = selected_worktree_id.as_ref() == Some(&binding.worktree_id);
                         let source_thread_id = visible.thread_id.clone();
                         let source_binding = visible.binding.clone();
@@ -16494,9 +16494,9 @@ impl AgentPanel {
                         let accessible_label = candidate.accessible_label();
                         let project_name = candidate.project_name.clone();
                         let branch = candidate.branch.label();
-                        let (padding_x, padding_y) = comet_sidebar_row_padding(selected);
+                        let (padding_x, padding_y) = omega_sidebar_row_padding(selected);
                         h_flex()
-                            .id(("comet-project", index))
+                            .id(("omega-project", index))
                             .debug_selector(move || debug_selector)
                             .w_full()
                             .px(px(padding_x))
@@ -16544,7 +16544,7 @@ impl AgentPanel {
             .flatten()
             .map(|multi_workspace| {
                 let project_rows = multi_workspace.read(cx);
-                comet_project_workspaces(&project_rows, cx)
+                omega_project_workspaces(&project_rows, cx)
                     .into_iter()
                     .filter_map(|(target, key, name)| {
                         let selected = key == active_project_key;
@@ -16558,12 +16558,12 @@ impl AgentPanel {
             .enumerate()
             .map(|(index, (target, selected, project_name))| {
                 let multi_workspace = window.root::<MultiWorkspace>().flatten();
-                let debug_selector = format!("omega.comet.project.{index}");
+                let debug_selector = format!("omega.omega.project.{index}");
                 let accessible_label = format!("Open project {project_name}");
                 let source_workspace = source_workspace.clone();
-                let (padding_x, padding_y) = comet_sidebar_row_padding(selected);
+                let (padding_x, padding_y) = omega_sidebar_row_padding(selected);
                 h_flex()
-                    .id(("comet-project", index))
+                    .id(("omega-project", index))
                     .debug_selector(move || debug_selector)
                     .w_full()
                     .px(px(padding_x))
@@ -16604,12 +16604,12 @@ impl AgentPanel {
             .collect::<Vec<_>>();
         let has_projects = !project_rows.is_empty();
         let (forensics_padding_x, forensics_padding_y) =
-            comet_sidebar_row_padding(comet_forensics_selected);
+            omega_sidebar_row_padding(omega_forensics_selected);
 
         let sidebar = div()
-            .id("comet-sidebar")
-            .debug_selector(|| "omega.comet.sidebar".into())
-            .w(px(COMET_SIDEBAR_WIDTH))
+            .id("omega-sidebar")
+            .debug_selector(|| "omega.omega.sidebar".into())
+            .w(px(OMEGA_SIDEBAR_WIDTH))
             .h_full()
             .flex_none()
             .flex()
@@ -16636,7 +16636,7 @@ impl AgentPanel {
             .when(!has_projects, |sidebar| {
                 sidebar.child(
                     h_flex()
-                        .id("comet-open-project-empty")
+                        .id("omega-open-project-empty")
                         .w_full()
                         .px(px(8.))
                         .py(px(7.))
@@ -16660,8 +16660,8 @@ impl AgentPanel {
             .child(
                 div().h(px(40.)).flex_none().pt(px(10.)).child(
                     h_flex()
-                        .id("comet-open-forensics")
-                        .debug_selector(|| "omega.comet.sidebar.forensics".into())
+                        .id("omega-open-forensics")
+                        .debug_selector(|| "omega.omega.sidebar.forensics".into())
                         .w_full()
                         .h(px(30.))
                         .px(px(forensics_padding_x))
@@ -16671,12 +16671,12 @@ impl AgentPanel {
                         .cursor_pointer()
                         .role(gpui::Role::Button)
                         .aria_label("Open Forensics")
-                        .when(comet_forensics_selected, |row| {
+                        .when(omega_forensics_selected, |row| {
                             row.bg(selected_background)
                                 .border_1()
                                 .border_color(colors.border_selected)
                         })
-                        .when(!comet_forensics_selected, |row| {
+                        .when(!omega_forensics_selected, |row| {
                             row.hover(move |style| style.bg(hover_background))
                         })
                         .on_click(cx.listener(|this, _, window, cx| {
@@ -16704,7 +16704,7 @@ impl AgentPanel {
             )
             .child(
                 v_flex()
-                    .id("comet-sidebar-sessions")
+                    .id("omega-sidebar-sessions")
                     .flex_1()
                     .min_h_0()
                     .overflow_y_scroll()
@@ -16716,7 +16716,7 @@ impl AgentPanel {
             )
             .child(
                 h_flex()
-                    .id("comet-open-settings")
+                    .id("omega-open-settings")
                     .h(px(42.))
                     .px(px(8.))
                     .gap(px(8.))
@@ -16725,7 +16725,7 @@ impl AgentPanel {
                     .aria_label("Open Settings")
                     .hover(move |style| style.bg(hover_background))
                     .on_click(cx.listener(|this, _, window, cx| {
-                        this.open_comet_settings(true, window, cx);
+                        this.open_omega_settings(true, window, cx);
                     }))
                     .child(
                         div()
@@ -16754,8 +16754,8 @@ impl AgentPanel {
             .child(sidebar);
 
         let card = div()
-            .id("comet-main-card")
-            .debug_selector(|| "omega.comet.main-card".into())
+            .id("omega-main-card")
+            .debug_selector(|| "omega.omega.main-card".into())
             .flex_1()
             .min_w_0()
             .h_full()
@@ -16766,11 +16766,11 @@ impl AgentPanel {
             .bg(card_background)
             .child(main_content);
 
-        let settings_surface = self.comet_settings.clone();
+        let settings_surface = self.omega_settings.clone();
 
         div()
-            .id("comet-frost-shell")
-            .debug_selector(|| "omega.comet.frost-shell".into())
+            .id("omega-frost-shell")
+            .debug_selector(|| "omega.omega.frost-shell".into())
             .relative()
             .size_full()
             .flex()
@@ -16778,7 +16778,7 @@ impl AgentPanel {
             .overflow_hidden()
             .bg(shell_background.opacity(if cfg!(target_os = "macos") { 0.94 } else { 1. }))
             .font_family("Geist")
-            .when(!comet_settings_open, |shell| {
+            .when(!omega_settings_open, |shell| {
                 shell.child(
                     div()
                         .absolute()
@@ -16792,7 +16792,7 @@ impl AgentPanel {
                 )
             })
             .child(titlebar)
-            .when(!comet_settings_open, |shell| {
+            .when(!omega_settings_open, |shell| {
                 shell.child(
                     h_flex()
                         .relative()
@@ -16822,7 +16822,7 @@ impl AgentPanel {
 impl Render for AgentPanel {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         self.sync_workbench_shell(window, cx);
-        let comet_mode = omega_zero_base::is_comet_mode();
+        let primary_interface = omega_zero_base::is_primary_interface();
 
         // WARNING: Changes to this element hierarchy can have
         // non-obvious implications to the layout of children.
@@ -16834,14 +16834,14 @@ impl Render for AgentPanel {
         // - Scrolling in all views works as expected
         // - Files can be dropped into the panel
         let content = v_flex()
-            .id(if comet_mode {
-                "omega-comet-surface"
+            .id(if primary_interface {
+                "omega-omega-surface"
             } else {
                 "omega-agent-surface"
             })
             .debug_selector(move || {
-                if comet_mode {
-                    "omega.comet.surface".into()
+                if primary_interface {
+                    "omega.omega.surface".into()
                 } else {
                     "omega.agent.surface".into()
                 }
@@ -16857,19 +16857,19 @@ impl Render for AgentPanel {
             }))
             .on_action(cx.listener(
                 |this, _: &workbench_shell::CloseActiveSessionTab, window, cx| {
-                    if omega_zero_base::is_comet_mode() {
+                    if omega_zero_base::is_primary_interface() {
                         cx.stop_propagation();
-                        this.close_active_comet_session_tab(window, cx);
+                        this.close_active_omega_session_tab(window, cx);
                     } else {
                         cx.propagate();
                     }
                 },
             ))
             .on_action(
-                cx.listener(|this, action: &ActivateCometSessionTab, window, cx| {
-                    if omega_zero_base::is_comet_mode() {
+                cx.listener(|this, action: &ActivateOmegaSessionTab, window, cx| {
+                    if omega_zero_base::is_primary_interface() {
                         cx.stop_propagation();
-                        this.activate_comet_session_tab(action.0, window, cx);
+                        this.activate_omega_session_tab(action.0, window, cx);
                     } else {
                         cx.propagate();
                     }
@@ -16939,21 +16939,21 @@ impl Render for AgentPanel {
                     cx.stop_propagation();
                 }
             }))
-            .when(comet_mode, |parent| {
+            .when(primary_interface, |parent| {
                 parent.on_modifiers_changed(cx.listener(|_, _, _, cx| cx.notify()))
             })
-            .when(!comet_mode, |parent| {
+            .when(!primary_interface, |parent| {
                 parent
                     .child(self.render_toolbar(window, cx))
                     .children(self.render_new_user_onboarding(window, cx))
             })
             .map(|parent| {
-                if !comet_mode && self.showing_sarah_admission {
+                if !primary_interface && self.showing_sarah_admission {
                     return parent.child(self.render_sarah_admission(cx));
                 }
                 // Full Auto is a surface of this panel, not a destination
                 // beside it. `OMEGA-DELTA-0020`.
-                if !comet_mode
+                if !primary_interface
                     && self.showing_full_auto
                     && let Some(full_auto) = self.full_auto.clone()
                 {
@@ -17008,8 +17008,8 @@ impl Render for AgentPanel {
                 }
             });
 
-        let content = if comet_mode {
-            self.render_comet_shell(content, window, cx)
+        let content = if primary_interface {
+            self.render_omega_shell(content, window, cx)
         } else if self.workbench_shell_enabled {
             let dock_open = self
                 .workbench_shell
@@ -17376,10 +17376,10 @@ impl Render for AgentPanel {
 }
 
 #[cfg(test)]
-mod comet_sidebar_motion_tests {
+mod omega_sidebar_motion_tests {
     use super::*;
 
-    fn comet_row(
+    fn omega_row(
         title: &'static str,
         created_at: DateTime<Utc>,
     ) -> omega_threads_sidebar::ThreadRow {
@@ -17398,54 +17398,54 @@ mod comet_sidebar_motion_tests {
     }
 
     #[test]
-    fn comet_sidebar_tween_matches_resize_timing_and_reduced_motion() {
+    fn omega_sidebar_tween_matches_resize_timing_and_reduced_motion() {
         let started = Instant::now();
-        let tween = CometSidebarTween {
-            from: COMET_SIDEBAR_WIDTH,
+        let tween = OmegaSidebarTween {
+            from: OMEGA_SIDEBAR_WIDTH,
             to: 0.,
             started,
         };
 
         let (start, active) = tween.value(started, false);
-        assert_eq!(start, COMET_SIDEBAR_WIDTH);
+        assert_eq!(start, OMEGA_SIDEBAR_WIDTH);
         assert!(active);
 
         let (middle, active) = tween.value(started + Duration::from_millis(100), false);
-        assert!((0.0..COMET_SIDEBAR_WIDTH / 2.).contains(&middle));
+        assert!((0.0..OMEGA_SIDEBAR_WIDTH / 2.).contains(&middle));
         assert!(active);
 
         assert_eq!(
-            tween.value(started + COMET_SIDEBAR_RESIZE_DURATION, false),
+            tween.value(started + OMEGA_SIDEBAR_RESIZE_DURATION, false),
             (0., false)
         );
         assert_eq!(tween.value(started, true), (0., false));
     }
 
     #[test]
-    fn comet_sidebar_ease_out_is_bounded_and_monotonic() {
+    fn omega_sidebar_ease_out_is_bounded_and_monotonic() {
         let mut previous = 0.;
         for step in 0..=1_000 {
-            let value = comet_sidebar_ease_out(step as f32 / 1_000.);
+            let value = omega_sidebar_ease_out(step as f32 / 1_000.);
             assert!((0.0..=1.).contains(&value));
             assert!(value >= previous);
             previous = value;
         }
-        assert_eq!(comet_sidebar_ease_out(0.), 0.);
-        assert_eq!(comet_sidebar_ease_out(1.), 1.);
+        assert_eq!(omega_sidebar_ease_out(0.), 0.);
+        assert_eq!(omega_sidebar_ease_out(1.), 1.);
     }
 
     #[test]
-    fn comet_tab_shortcuts_assign_zero_to_the_tenth_tab() {
+    fn omega_tab_shortcuts_assign_zero_to_the_tenth_tab() {
         assert_eq!(
-            COMET_TAB_SHORTCUT_LABELS,
+            OMEGA_TAB_SHORTCUT_LABELS,
             ["1", "2", "3", "4", "5", "6", "7", "8", "9", "0"]
         );
     }
 
     #[test]
-    fn comet_sidebar_selection_border_consumes_padding_without_changing_row_size() {
-        let (resting_x, resting_y) = comet_sidebar_row_padding(false);
-        let (selected_x, selected_y) = comet_sidebar_row_padding(true);
+    fn omega_sidebar_selection_border_consumes_padding_without_changing_row_size() {
+        let (resting_x, resting_y) = omega_sidebar_row_padding(false);
+        let (selected_x, selected_y) = omega_sidebar_row_padding(true);
         let selected_border = 1.;
 
         assert_eq!(resting_x * 2., selected_x * 2. + selected_border * 2.);
@@ -17453,15 +17453,15 @@ mod comet_sidebar_motion_tests {
     }
 
     #[test]
-    fn comet_session_order_does_not_follow_the_active_thread() {
+    fn omega_session_order_does_not_follow_the_active_thread() {
         let now = Utc::now();
-        let oldest = comet_row("oldest", now - chrono::Duration::minutes(2));
-        let middle = comet_row("middle", now - chrono::Duration::minutes(1));
-        let newest = comet_row("newest", now);
+        let oldest = omega_row("oldest", now - chrono::Duration::minutes(2));
+        let middle = omega_row("middle", now - chrono::Duration::minutes(1));
+        let newest = omega_row("newest", now);
         let rows = vec![newest.clone(), middle.clone(), oldest.clone()];
 
         for active_thread_id in [oldest.thread_id, middle.thread_id, newest.thread_id] {
-            let tabs = stable_comet_session_rows(rows.clone(), Some(active_thread_id), true);
+            let tabs = stable_omega_session_rows(rows.clone(), Some(active_thread_id), true);
             assert_eq!(
                 tabs.iter()
                     .map(|row| row.title.as_ref())
@@ -17469,7 +17469,7 @@ mod comet_sidebar_motion_tests {
                 ["oldest", "middle", "newest"]
             );
 
-            let sidebar = stable_comet_session_rows(rows.clone(), Some(active_thread_id), false);
+            let sidebar = stable_omega_session_rows(rows.clone(), Some(active_thread_id), false);
             assert_eq!(
                 sidebar
                     .iter()
@@ -17481,15 +17481,15 @@ mod comet_sidebar_motion_tests {
     }
 
     #[test]
-    fn comet_startup_opens_only_the_active_session_tab() {
+    fn omega_startup_opens_only_the_active_session_tab() {
         let now = Utc::now();
-        let active = comet_row("active", now);
-        let recent = comet_row("recent", now - chrono::Duration::minutes(1));
-        let older = comet_row("older", now - chrono::Duration::minutes(2));
+        let active = omega_row("active", now);
+        let recent = omega_row("recent", now - chrono::Duration::minutes(1));
+        let older = omega_row("older", now - chrono::Duration::minutes(2));
         let mut known_tabs = HashSet::default();
         let mut closed_tabs = HashSet::default();
 
-        reconcile_new_comet_session_rows(
+        reconcile_new_omega_session_rows(
             vec![active.clone(), recent.clone(), older.clone()],
             Some(active.thread_id),
             &mut known_tabs,
@@ -17501,7 +17501,7 @@ mod comet_sidebar_motion_tests {
         assert!(closed_tabs.contains(&older.thread_id));
 
         closed_tabs.remove(&recent.thread_id);
-        reconcile_new_comet_session_rows(
+        reconcile_new_omega_session_rows(
             vec![active, recent.clone(), older],
             Some(recent.thread_id),
             &mut known_tabs,
@@ -18387,48 +18387,48 @@ mod tests {
     }
 
     #[test]
-    fn comet_navigation_history_walks_and_branches_like_a_browser() {
+    fn omega_navigation_history_walks_and_branches_like_a_browser() {
         let first = ThreadId::new();
         let third = ThreadId::new();
         let branch = ThreadId::new();
-        let mut history = CometNavigationHistory::default();
+        let mut history = OmegaNavigationHistory::default();
 
-        history.push(CometRoute::Thread(first));
-        history.push(CometRoute::Settings);
-        history.push(CometRoute::Thread(third));
+        history.push(OmegaRoute::Thread(first));
+        history.push(OmegaRoute::Settings);
+        history.push(OmegaRoute::Thread(third));
         assert!(history.can_back(|_| true));
         assert!(!history.can_forward(|_| true));
-        assert_eq!(history.back(), Some(CometRoute::Settings));
-        assert_eq!(history.back(), Some(CometRoute::Thread(first)));
+        assert_eq!(history.back(), Some(OmegaRoute::Settings));
+        assert_eq!(history.back(), Some(OmegaRoute::Thread(first)));
         assert_eq!(history.back(), None);
         assert!(history.can_forward(|_| true));
-        assert_eq!(history.forward(), Some(CometRoute::Settings));
+        assert_eq!(history.forward(), Some(OmegaRoute::Settings));
 
-        history.push(CometRoute::Thread(branch));
-        assert_eq!(history.back(), Some(CometRoute::Settings));
-        assert_eq!(history.forward(), Some(CometRoute::Thread(branch)));
+        history.push(OmegaRoute::Thread(branch));
+        assert_eq!(history.back(), Some(OmegaRoute::Settings));
+        assert_eq!(history.forward(), Some(OmegaRoute::Thread(branch)));
         assert_eq!(history.forward(), None);
     }
 
     #[test]
-    fn comet_navigation_history_ignores_unavailable_targets() {
+    fn omega_navigation_history_ignores_unavailable_targets() {
         let first = ThreadId::new();
         let unavailable = ThreadId::new();
         let current = ThreadId::new();
-        let mut history = CometNavigationHistory::default();
+        let mut history = OmegaNavigationHistory::default();
 
-        history.push(CometRoute::Thread(first));
-        history.push(CometRoute::Thread(unavailable));
-        history.push(CometRoute::Thread(current));
+        history.push(OmegaRoute::Thread(first));
+        history.push(OmegaRoute::Thread(unavailable));
+        history.push(OmegaRoute::Thread(current));
 
-        assert!(history.can_back(|route| route == CometRoute::Thread(first)));
-        assert!(!history.can_back(|route| route == CometRoute::Thread(current)));
-        assert_eq!(history.back(), Some(CometRoute::Thread(unavailable)));
-        assert_eq!(history.back(), Some(CometRoute::Thread(first)));
+        assert!(history.can_back(|route| route == OmegaRoute::Thread(first)));
+        assert!(!history.can_back(|route| route == OmegaRoute::Thread(current)));
+        assert_eq!(history.back(), Some(OmegaRoute::Thread(unavailable)));
+        assert_eq!(history.back(), Some(OmegaRoute::Thread(first)));
     }
 
     #[gpui::test]
-    async fn comet_project_list_keeps_each_opened_project(cx: &mut TestAppContext) {
+    async fn omega_project_list_keeps_each_opened_project(cx: &mut TestAppContext) {
         init_test(cx);
         let fs = FakeFs::new(cx.executor());
         fs.insert_tree("/project-a", json!({ "file.txt": "" }))
@@ -18447,7 +18447,7 @@ mod tests {
 
         let mut names = multi_workspace
             .read_with(cx, |multi_workspace, cx| {
-                comet_project_workspaces(multi_workspace, cx)
+                omega_project_workspaces(multi_workspace, cx)
                     .into_iter()
                     .map(|(_, _, name)| name.to_string())
                     .collect::<Vec<_>>()
@@ -18458,7 +18458,7 @@ mod tests {
     }
 
     #[gpui::test]
-    async fn comet_sessions_are_scoped_to_the_selected_project(cx: &mut TestAppContext) {
+    async fn omega_sessions_are_scoped_to_the_selected_project(cx: &mut TestAppContext) {
         use crate::thread_metadata_store::{ConversationOwnerVersion, ThreadMetadata};
 
         let (panel, mut cx) = setup_panel(cx).await;
@@ -18494,7 +18494,7 @@ mod tests {
 
         let titles = panel.read_with(&cx, |panel, cx| {
             panel
-                .comet_sidebar_session_rows(cx)
+                .omega_sidebar_session_rows(cx)
                 .into_iter()
                 .map(|row| row.title.to_string())
                 .collect::<Vec<_>>()
@@ -21456,23 +21456,23 @@ mod tests {
     }
 
     #[test]
-    fn comet_session_icons_follow_the_recorded_executor() {
+    fn omega_session_icons_follow_the_recorded_executor() {
         use crate::omega_executor_selector::SelectableExecutor;
 
         assert_eq!(
-            comet_executor_icon(Some(SelectableExecutor::Omega)),
+            omega_executor_icon(Some(SelectableExecutor::Omega)),
             IconName::OmegaAgent
         );
         assert_eq!(
-            comet_executor_icon(Some(SelectableExecutor::Codex)),
+            omega_executor_icon(Some(SelectableExecutor::Codex)),
             IconName::AiOpenAi
         );
         assert_eq!(
-            comet_executor_icon(Some(SelectableExecutor::Claude)),
+            omega_executor_icon(Some(SelectableExecutor::Claude)),
             IconName::AiClaude
         );
         assert_eq!(
-            comet_executor_icon(Some(SelectableExecutor::Grok)),
+            omega_executor_icon(Some(SelectableExecutor::Grok)),
             IconName::AiXAi
         );
     }
@@ -25490,7 +25490,7 @@ mod tests {
     }
 
     #[gpui::test]
-    async fn test_active_comet_session_tab_leaves_forensics(cx: &mut TestAppContext) {
+    async fn test_active_omega_session_tab_leaves_forensics(cx: &mut TestAppContext) {
         let (panel, mut cx) = setup_visible_panel(cx).await;
 
         panel.update_in(&mut cx, |panel, window, cx| {
@@ -25506,7 +25506,7 @@ mod tests {
         });
 
         panel.update_in(&mut cx, |panel, window, cx| {
-            panel.show_active_comet_session_transcript(window, cx);
+            panel.show_active_omega_session_transcript(window, cx);
         });
 
         panel.read_with(&cx, |panel, _cx| {

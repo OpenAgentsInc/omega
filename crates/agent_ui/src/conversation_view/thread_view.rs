@@ -811,8 +811,8 @@ pub struct ThreadView {
     pub list_state: ListState,
     pub session_capabilities: SharedSessionCapabilities,
     pub expanded_tool_call_raw_inputs: HashSet<acp::ToolCallId>,
-    collapsed_comet_tool_groups: HashSet<acp::ToolCallId>,
-    comet_streaming_markdown_veils:
+    collapsed_omega_tool_groups: HashSet<acp::ToolCallId>,
+    omega_streaming_markdown_veils:
         RefCell<HashMap<gpui::EntityId, Rc<RefCell<markdown::StreamingMarkdownVeil>>>>,
     collapsed_sandbox_authorization_details: HashSet<acp::ToolCallId>,
     collapsed_sandbox_network_details: HashSet<acp::ToolCallId>,
@@ -1178,7 +1178,7 @@ impl ThreadView {
             && project.upgrade().is_some_and(|p| p.read(cx).is_local())
             && agent_id.as_ref() == "Codex";
 
-        let comet_streaming_markdown_veils = if omega_zero_base::is_comet_mode() {
+        let omega_streaming_markdown_veils = if omega_zero_base::is_primary_interface() {
             thread
                 .read(cx)
                 .entries()
@@ -1368,8 +1368,8 @@ impl ThreadView {
             last_token_limit_telemetry: None,
             thread_feedback: Default::default(),
             expanded_tool_call_raw_inputs: HashSet::default(),
-            collapsed_comet_tool_groups: HashSet::default(),
-            comet_streaming_markdown_veils: RefCell::new(comet_streaming_markdown_veils),
+            collapsed_omega_tool_groups: HashSet::default(),
+            omega_streaming_markdown_veils: RefCell::new(omega_streaming_markdown_veils),
             collapsed_sandbox_authorization_details: HashSet::default(),
             collapsed_sandbox_network_details: HashSet::default(),
             acknowledged_confusable_warnings: HashSet::default(),
@@ -1892,7 +1892,7 @@ impl ThreadView {
             return;
         }
 
-        if omega_zero_base::is_comet_mode()
+        if omega_zero_base::is_primary_interface()
             && thread
                 .read(cx)
                 .project()
@@ -7086,12 +7086,12 @@ fn sandbox_network_rows(network: &SandboxNetPolicy) -> Vec<SandboxRow> {
 impl ThreadView {
     fn render_entries(&mut self, cx: &mut Context<Self>) -> List {
         let max_content_width = AgentSettings::get_global(cx).max_content_width;
-        let comet_mode = omega_zero_base::is_comet_mode();
+        let primary_interface = omega_zero_base::is_primary_interface();
         let centered_container = move |content: AnyElement| {
             h_flex().w_full().justify_center().child(
                 div()
                     .map(|this| {
-                        if comet_mode {
+                        if primary_interface {
                             this.max_w(px(736.0))
                         } else {
                             this.when_some(max_content_width, |this, max_w| this.max_w(max_w))
@@ -7175,9 +7175,9 @@ impl ThreadView {
                     self.agent_id.clone()
                 };
 
-                if omega_zero_base::is_comet_mode() && !editing {
+                if omega_zero_base::is_primary_interface() && !editing {
                     h_flex()
-                        .id(("comet-user-message", entry_ix))
+                        .id(("omega-user-message", entry_ix))
                         .w_full()
                         .pt(px(7.0))
                         .pb(px(7.0))
@@ -7355,7 +7355,7 @@ impl ThreadView {
             }) => {
                 let mut is_blank = true;
                 let is_last = entry_ix + 1 == total_entries;
-                let comet_streaming_assistant = omega_zero_base::is_comet_mode()
+                let omega_streaming_assistant = omega_zero_base::is_primary_interface()
                     && is_last
                     && matches!(self.thread.read(cx).status(), ThreadStatus::Generating);
 
@@ -7376,9 +7376,9 @@ impl ThreadView {
                                     let markdown_id = md.entity_id();
                                     let mut rendered =
                                         self.render_markdown(md.clone(), style.clone(), cx);
-                                    if comet_streaming_assistant {
+                                    if omega_streaming_assistant {
                                         let veil = self
-                                            .comet_streaming_markdown_veils
+                                            .omega_streaming_markdown_veils
                                             .borrow_mut()
                                             .entry(markdown_id)
                                             .or_insert_with(|| {
@@ -7391,7 +7391,7 @@ impl ThreadView {
                                             .clone();
                                         rendered = rendered.streaming_veil(veil);
                                     } else {
-                                        self.comet_streaming_markdown_veils
+                                        self.omega_streaming_markdown_veils
                                             .borrow_mut()
                                             .remove(&markdown_id);
                                     }
@@ -7428,7 +7428,7 @@ impl ThreadView {
                 } else {
                     v_flex()
                         .map(|this| {
-                            if omega_zero_base::is_comet_mode() {
+                            if omega_zero_base::is_primary_interface() {
                                 this.px_0().py(px(7.0))
                             } else {
                                 this.px_5().py_1p5()
@@ -7463,7 +7463,8 @@ impl ThreadView {
                     }
                 }
 
-                if omega_zero_base::is_comet_mode() && Self::comet_tool_call_is_groupable(tool_call)
+                if omega_zero_base::is_primary_interface()
+                    && Self::omega_tool_call_is_groupable(tool_call)
                 {
                     let entries = self.thread.read(cx).entries();
                     let follows_groupable_tool =
@@ -7471,14 +7472,14 @@ impl ThreadView {
                             matches!(
                                 entries.get(previous_ix),
                                 Some(AgentThreadEntry::ToolCall(previous))
-                                    if Self::comet_tool_call_is_groupable(previous)
+                                    if Self::omega_tool_call_is_groupable(previous)
                             )
                         });
                     if follows_groupable_tool {
                         return Empty.into_any();
                     }
 
-                    return self.render_comet_tool_group(entry_ix, window, cx);
+                    return self.render_omega_tool_group(entry_ix, window, cx);
                 }
 
                 let tool_call = self.render_any_tool_call(
@@ -9409,7 +9410,7 @@ impl ThreadView {
             })
     }
 
-    fn comet_tool_call_is_groupable(tool_call: &ToolCall) -> bool {
+    fn omega_tool_call_is_groupable(tool_call: &ToolCall) -> bool {
         !tool_call.is_subagent()
             && !matches!(
                 tool_call.status,
@@ -9417,7 +9418,7 @@ impl ThreadView {
             )
     }
 
-    fn comet_tool_kind_label(kind: acp::ToolKind) -> &'static str {
+    fn omega_tool_kind_label(kind: acp::ToolKind) -> &'static str {
         match kind {
             acp::ToolKind::Read => "Read",
             acp::ToolKind::Edit => "Edit",
@@ -9432,7 +9433,7 @@ impl ThreadView {
         }
     }
 
-    fn comet_tool_kind_icon(kind: acp::ToolKind) -> IconName {
+    fn omega_tool_kind_icon(kind: acp::ToolKind) -> IconName {
         match kind {
             acp::ToolKind::Read | acp::ToolKind::Search => IconName::ToolSearch,
             acp::ToolKind::Edit => IconName::ToolPencil,
@@ -9445,7 +9446,7 @@ impl ThreadView {
         }
     }
 
-    fn comet_tool_group_summary(tool_calls: &[&ToolCall]) -> String {
+    fn omega_tool_group_summary(tool_calls: &[&ToolCall]) -> String {
         let count = |kind| {
             tool_calls
                 .iter()
@@ -9511,7 +9512,7 @@ impl ThreadView {
         summary
     }
 
-    fn render_comet_tool_group(
+    fn render_omega_tool_group(
         &self,
         first_entry_ix: usize,
         window: &Window,
@@ -9525,7 +9526,7 @@ impl ThreadView {
             .skip(first_entry_ix)
             .map_while(|(entry_ix, entry)| match entry {
                 AgentThreadEntry::ToolCall(tool_call)
-                    if Self::comet_tool_call_is_groupable(tool_call) =>
+                    if Self::omega_tool_call_is_groupable(tool_call) =>
                 {
                     Some((entry_ix, tool_call))
                 }
@@ -9537,13 +9538,13 @@ impl ThreadView {
         };
         let first_tool_call_id = first_tool_call.id.clone();
         let collapsed = self
-            .collapsed_comet_tool_groups
+            .collapsed_omega_tool_groups
             .contains(&first_tool_call_id);
         let summary_calls = tool_calls
             .iter()
             .map(|(_, tool_call)| *tool_call)
             .collect::<Vec<_>>();
-        let summary = Self::comet_tool_group_summary(&summary_calls);
+        let summary = Self::omega_tool_group_summary(&summary_calls);
         let session_id = thread.session_id();
         let focus_handle = self.focus_handle(cx);
         let border = cx.theme().colors().text.opacity(0.07);
@@ -9555,7 +9556,7 @@ impl ThreadView {
             .py(px(4.0))
             .child(
                 h_flex()
-                    .id(("comet-tool-group-header", first_entry_ix))
+                    .id(("omega-tool-group-header", first_entry_ix))
                     .h(px(26.0))
                     .px(px(4.0))
                     .gap(px(8.0))
@@ -9586,8 +9587,8 @@ impl ThreadView {
                             .buffer_font(cx),
                     )
                     .on_click(cx.listener(move |this, _, _, cx| {
-                        if !this.collapsed_comet_tool_groups.remove(&first_tool_call_id) {
-                            this.collapsed_comet_tool_groups
+                        if !this.collapsed_omega_tool_groups.remove(&first_tool_call_id) {
+                            this.collapsed_omega_tool_groups
                                 .insert(first_tool_call_id.clone());
                         }
                         cx.notify();
@@ -9608,10 +9609,10 @@ impl ThreadView {
                             .is_tool_call_expanded(&tool_call.id);
                         let tool_call_id = tool_call.id.clone();
                         let detail = tool_call.label.read(cx).source().trim().to_string();
-                        let label = Self::comet_tool_kind_label(tool_call.kind);
-                        let icon = Self::comet_tool_kind_icon(tool_call.kind);
+                        let label = Self::omega_tool_kind_label(tool_call.kind);
+                        let icon = Self::omega_tool_kind_icon(tool_call.kind);
                         let chip = h_flex()
-                            .id(("comet-tool-chip", entry_ix))
+                            .id(("omega-tool-chip", entry_ix))
                             .h(px(38.0))
                             .w_full()
                             .flex_none()

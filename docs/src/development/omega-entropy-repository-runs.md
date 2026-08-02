@@ -58,9 +58,9 @@ run history after restart. It keeps at most 64 prompt snapshots and 16 runs per
 repository worktree binding. A run interrupted by restart is restored as
 cancelled instead of silently resuming against changed process state.
 
-## Comet Forensics workbench {#comet-forensics-workbench}
+## Omega Forensics workbench {#omega-forensics-workbench}
 
-In Comet mode, choose **Forensics** in the left sidebar. The Forensics surface
+In the Omega interface, choose **Forensics** in the left sidebar. The Forensics surface
 uses the existing main workbench region; it does not add another navigation
 rail. Choose the active session row or choose **Forensics** again to return to
 the transcript.

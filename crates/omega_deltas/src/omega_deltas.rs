@@ -5421,7 +5421,7 @@ mod tests {
             3,
             "{} reaches the front door {openings} time(s); \
              restore_or_create_workspace has two no-restorable-session paths \
-             and both must land there, while Comet mode has one deliberate \
+             and both must land there, while Omega interface has one deliberate \
              fresh-front-door path (OMEGA-DELTA-0019).",
             path.display()
         );
@@ -6322,7 +6322,7 @@ mod tests {
              only surface left that names the executor.",
             path.display()
         );
-        // The Comet model picker needs the live window to mount its popover.
+        // The Omega model picker needs the live window to mount its popover.
         // Keep the attribution assertion aligned with that admitted UI seam:
         // adding the window parameter must not make the bar optional.
         assert!(
@@ -20254,10 +20254,10 @@ mod tests {
         let compact_workspace = without_whitespace(&workspace);
         assert!(
             compact_workspace.contains(&without_whitespace(
-                "(self.multi_workspace.is_none() && !comet_mode).then(|| self.titlebar_item.clone()).flatten()"
+                "(self.multi_workspace.is_none() && !primary_interface).then(|| self.titlebar_item.clone()).flatten()"
             )),
             "OMEGA-DELTA-0147: a standalone workspace no longer renders its \
-             titlebar view outside Comet mode, or a multi-workspace window \
+             titlebar view outside Omega interface, or a multi-workspace window \
              renders the same titlebar twice."
         );
 
@@ -20268,25 +20268,25 @@ mod tests {
             compact_multi_workspace.contains(&without_whitespace(
                 "let titlebar_item = workspace.read(cx).titlebar_item();"
             )) && compact_multi_workspace.contains(&without_whitespace(
-                ".when_some((!comet_mode).then_some(titlebar_item).flatten(),"
+                ".when_some((!primary_interface).then_some(titlebar_item).flatten(),"
             )),
             "OMEGA-DELTA-0147: {} no longer owns the active workspace's \
-             titlebar above the sidebar row outside Comet mode, so the drag \
+             titlebar above the sidebar row outside Omega interface, so the drag \
              strip cannot span the full window.",
             repository_path(multi_workspace_path).display()
         );
 
         let agent_panel_path = "crates/agent_ui/src/agent_panel.rs";
         let agent_panel = without_comments(&read_repository_file(agent_panel_path));
-        let comet_titlebar = body_of(&agent_panel, "render_comet_shell");
+        let omega_titlebar = body_of(&agent_panel, "render_omega_shell");
         for required in [
             ".window_control_area(WindowControlArea::Drag)",
             "window.start_window_move()",
             "window.titlebar_double_click()",
         ] {
             assert!(
-                comet_titlebar.contains(required),
-                "OMEGA-DELTA-0147: Comet mode suppresses the shared titlebar, \
+                omega_titlebar.contains(required),
+                "OMEGA-DELTA-0147: Omega interface suppresses the shared titlebar, \
                  so its unified titlebar in {} must retain `{required}`.",
                 repository_path(agent_panel_path).display()
             );
@@ -26627,7 +26627,7 @@ mod tests {
             );
         }
 
-        // Comet grows the field from its content rather than mounting an
+        // Omega grows the field from its content rather than mounting an
         // extra expand glyph inside the pill. Both lifecycle renderers keep
         // the same automatic compact/expanded contract.
         let connected_field = body_of(&thread_view, "render_message_editor");
@@ -26653,7 +26653,7 @@ mod tests {
             assert!(
                 !body.contains("\"toggle-height\""),
                 "OMEGA-DELTA-0204: `{source}` in {} remounted the extra expand \
-                 glyph that the Comet composer intentionally omits.",
+                 glyph that the Omega composer intentionally omits.",
                 repository_path(path).display()
             );
         }
@@ -26669,10 +26669,10 @@ mod tests {
             repository_path("crates/agent_ui/src/composer_voice.rs").display()
         );
         assert!(
-            pre_session.contains("omega_zero_base::is_comet_mode()")
+            pre_session.contains("omega_zero_base::is_primary_interface()")
                 && pre_session.contains("crate::composer_voice::render_composer_voice_controls("),
             "OMEGA-DELTA-0204: `render_loading_composer` in {} no longer mounts \
-             the shared Sarah voice control in Comet mode. The visible \
+             the shared Sarah voice control in Omega interface. The visible \
              microphone would then disappear before the first session exists.",
             repository_path(CONVERSATION_VIEW_PATH).display()
         );
@@ -27451,20 +27451,20 @@ mod tests {
         );
     }
 
-    /// OMEGA-DELTA-0223. Comet mode exposes real project roots rather than a
+    /// OMEGA-DELTA-0223. Omega interface exposes real project roots rather than a
     /// decorative space, and refuses to launch agent work until one exists.
     #[test]
-    fn comet_projects_own_the_agent_working_directory() {
+    fn omega_projects_own_the_agent_working_directory() {
         let main = without_comments(&read_repository_file("crates/omega/src/main.rs"));
         let restore = body_of(&main, "restore_or_create_workspace");
         assert!(
-            restore.contains("omega_zero_base::is_comet_mode()")
+            restore.contains("omega_zero_base::is_primary_interface()")
                 && restore.contains("open_zero_base_project(&app_state, cx).await"),
-            "OMEGA-DELTA-0223: Comet startup no longer adopts the safe chosen-cwd project path"
+            "OMEGA-DELTA-0223: Omega startup no longer adopts the safe chosen-cwd project path"
         );
 
         let panel = without_comments(&read_repository_file("crates/agent_ui/src/agent_panel.rs"));
-        let shell = body_of(&panel, "render_comet_shell");
+        let shell = body_of(&panel, "render_omega_shell");
         for required in [
             ".child(\"Projects\")",
             ".identity()",
@@ -27474,12 +27474,12 @@ mod tests {
         ] {
             assert!(
                 shell.contains(required),
-                "OMEGA-DELTA-0223: the Comet project sidebar lost `{required}`"
+                "OMEGA-DELTA-0223: the Omega project sidebar lost `{required}`"
             );
         }
         assert!(
             !shell.contains(".child(\"Spaces\")"),
-            "OMEGA-DELTA-0223: the decorative Comet Spaces label returned"
+            "OMEGA-DELTA-0223: the decorative Omega Spaces label returned"
         );
 
         let selection = body_of(&panel, "select_thread_identity");
@@ -27499,29 +27499,29 @@ mod tests {
         let connected_send = body_of(&thread_view, "send");
         for (boundary, source) in [("deferred", deferred_send), ("connected", connected_send)] {
             assert!(
-                source.contains("omega_zero_base::is_comet_mode()")
+                source.contains("omega_zero_base::is_primary_interface()")
                     && source.contains("visible_worktrees(cx)")
                     && source.contains("workspace::Open"),
-                "OMEGA-DELTA-0223: the {boundary} Comet send path can run without a project"
+                "OMEGA-DELTA-0223: the {boundary} Omega send path can run without a project"
             );
         }
     }
 
-    /// OMEGA-DELTA-0224. Comet's settings navigation is an in-shell route
+    /// OMEGA-DELTA-0224. Omega's settings navigation is an in-shell route
     /// around Omega's focused settings pages, never a second settings window
     /// or authority.
     #[test]
-    fn comet_settings_sidebar_routes_to_omega_settings() {
+    fn omega_settings_sidebar_routes_to_omega_settings() {
         let settings = without_comments(&read_repository_file(
             "crates/settings_ui/src/settings_ui.rs",
         ));
         let navigation = body_of(&settings, "render_omega_nav");
         for required in [
-            "COMET_SETTINGS_SIDEBAR_WIDTH",
-            "omega-comet-settings-sidebar",
+            "OMEGA_SETTINGS_SIDEBAR_WIDTH",
+            "omega-omega-settings-sidebar",
             "\"API Keys\" => IconName::Lock",
             "navigate_to_sub_page(\"llm_providers\"",
-            "omega-comet-settings-back",
+            "omega-omega-settings-back",
             "if this.embedded",
             "CloseEmbeddedSettings.boxed_clone()",
             "original_window.activate_window()",
@@ -27529,7 +27529,7 @@ mod tests {
         ] {
             assert!(
                 navigation.contains(required),
-                "OMEGA-DELTA-0224: the Comet settings sidebar lost `{required}`"
+                "OMEGA-DELTA-0224: the Omega settings sidebar lost `{required}`"
             );
         }
 
@@ -27551,19 +27551,19 @@ mod tests {
         );
 
         let panel = without_comments(&read_repository_file("crates/agent_ui/src/agent_panel.rs"));
-        let shell = body_of(&panel, "render_comet_shell");
+        let shell = body_of(&panel, "render_omega_shell");
         for required in [
-            "comet-open-settings",
-            "open_comet_settings(true, window, cx)",
+            "omega-open-settings",
+            "open_omega_settings(true, window, cx)",
         ] {
             assert!(
                 shell.contains(required),
-                "OMEGA-DELTA-0224: the Comet shell lost its working Settings entry `{required}`"
+                "OMEGA-DELTA-0224: the Omega shell lost its working Settings entry `{required}`"
             );
         }
         for required in [
             "settings_ui::SettingsWindow::new_embedded_omega",
-            "CometRoute::Settings",
+            "OmegaRoute::Settings",
             "OpenEmbeddedSettings",
         ] {
             assert!(
@@ -27573,10 +27573,10 @@ mod tests {
         }
     }
 
-    /// OMEGA-DELTA-0225. Comet titlebar history is real browser-style route
+    /// OMEGA-DELTA-0225. Omega titlebar history is real browser-style route
     /// navigation across sessions and Settings, not decorative controls.
     #[test]
-    fn comet_titlebar_back_and_forward_walk_session_history() {
+    fn omega_titlebar_back_and_forward_walk_session_history() {
         let panel = without_comments(&read_repository_file("crates/agent_ui/src/agent_panel.rs"));
         let history = outside_the_tests(&panel);
         for required in [
@@ -27588,31 +27588,31 @@ mod tests {
         ] {
             assert!(
                 history.contains(required),
-                "OMEGA-DELTA-0225: Comet navigation lost browser-history behavior `{required}`"
+                "OMEGA-DELTA-0225: Omega navigation lost browser-history behavior `{required}`"
             );
         }
 
-        let shell = body_of(&panel, "render_comet_shell");
+        let shell = body_of(&panel, "render_omega_shell");
         for required in [
-            "comet-nav-back",
-            "navigate_comet_back",
-            "comet-nav-forward",
-            "navigate_comet_forward",
-            "comet_route_available",
-            "CometRoute::Thread(active_thread_id)",
+            "omega-nav-back",
+            "navigate_omega_back",
+            "omega-nav-forward",
+            "navigate_omega_forward",
+            "omega_route_available",
+            "OmegaRoute::Thread(active_thread_id)",
         ] {
             assert!(
                 shell.contains(required),
-                "OMEGA-DELTA-0225: Comet titlebar control lost `{required}`"
+                "OMEGA-DELTA-0225: Omega titlebar control lost `{required}`"
             );
         }
     }
 
-    /// OMEGA-DELTA-0226. Live assistant text in Comet mode uses Comet's
+    /// OMEGA-DELTA-0226. Live assistant text in Omega interface uses Omega's
     /// cadence-adaptive paint veil, while settled and reduced-motion text stays
     /// immediately readable.
     #[test]
-    fn comet_streaming_text_uses_the_exact_paint_only_veil() {
+    fn omega_streaming_text_uses_the_exact_paint_only_veil() {
         let veil = without_comments(&read_repository_file(
             "crates/markdown/src/streaming_veil.rs",
         ));
@@ -27627,7 +27627,7 @@ mod tests {
         ] {
             assert!(
                 veil.contains(required),
-                "OMEGA-DELTA-0226: the Comet streaming veil lost `{required}`"
+                "OMEGA-DELTA-0226: the Omega streaming veil lost `{required}`"
             );
         }
 
@@ -27650,26 +27650,26 @@ mod tests {
         ));
         let entry = body_of(&thread_view, "render_entry");
         for required in [
-            "omega_zero_base::is_comet_mode()",
+            "omega_zero_base::is_primary_interface()",
             "ThreadStatus::Generating",
             ".streaming_veil(veil)",
             ".remove(&markdown_id)",
         ] {
             assert!(
                 entry.contains(required),
-                "OMEGA-DELTA-0226: Comet transcript lost streaming boundary `{required}`"
+                "OMEGA-DELTA-0226: Omega transcript lost streaming boundary `{required}`"
             );
         }
     }
 
-    /// OMEGA-DELTA-0227. Comet mode collapses its fixed-width sidebar with
-    /// Comet's manually driven 200ms ease-out clip while the tone and tabs ride
+    /// OMEGA-DELTA-0227. Omega interface collapses its fixed-width sidebar with
+    /// Omega's manually driven 200ms ease-out clip while the tone and tabs ride
     /// the same width clock.
     #[test]
-    fn comet_sidebar_uses_the_exact_resize_tween() {
+    fn omega_sidebar_uses_the_exact_resize_tween() {
         let panel = without_comments(&read_repository_file("crates/agent_ui/src/agent_panel.rs"));
         for required in [
-            "COMET_SIDEBAR_RESIZE_DURATION: Duration = Duration::from_millis(200)",
+            "OMEGA_SIDEBAR_RESIZE_DURATION: Duration = Duration::from_millis(200)",
             "let x = coefficients(0., 0.58)",
             "let y = coefficients(0., 1.)",
             "window.request_animation_frame()",
@@ -27681,45 +27681,45 @@ mod tests {
         ] {
             assert!(
                 panel.contains(required),
-                "OMEGA-DELTA-0227: Comet sidebar motion lost `{required}`"
+                "OMEGA-DELTA-0227: Omega sidebar motion lost `{required}`"
             );
         }
 
         let toggle = body_of(&panel, "toggle_threads_sidebar");
         for required in [
-            "omega_zero_base::is_comet_mode()",
-            "CometSidebarTween::new(comet_from, comet_to)",
+            "omega_zero_base::is_primary_interface()",
+            "OmegaSidebarTween::new(omega_from, omega_to)",
         ] {
             assert!(
                 toggle.contains(required),
-                "OMEGA-DELTA-0227: Comet sidebar toggle lost `{required}`"
+                "OMEGA-DELTA-0227: Omega sidebar toggle lost `{required}`"
             );
         }
     }
 
-    /// OMEGA-DELTA-0228. The first ten Comet session tabs have positional
+    /// OMEGA-DELTA-0228. The first ten Omega session tabs have positional
     /// keyboard shortcuts, and their numbers appear only while the shortcut
     /// modifier is held.
     #[test]
-    fn comet_session_tabs_have_visible_positional_shortcuts() {
+    fn omega_session_tabs_have_visible_positional_shortcuts() {
         let panel = without_comments(&read_repository_file("crates/agent_ui/src/agent_panel.rs"));
         for required in [
-            "COMET_TAB_SHORTCUT_LABELS: [&str; 10]",
-            "fn comet_tab_shortcuts_visible",
+            "OMEGA_TAB_SHORTCUT_LABELS: [&str; 10]",
+            "fn omega_tab_shortcuts_visible",
             "window.modifiers()",
             "modifiers.platform",
             "modifiers.control",
-            "fn comet_session_tab_rows",
+            "fn omega_session_tab_rows",
             "left.created_at.cmp(&right.created_at)",
-            "activate_comet_session_tab(action.0, window, cx)",
+            "activate_omega_session_tab(action.0, window, cx)",
             "on_modifiers_changed",
-            "comet_tab_shortcut_hint(index, text_placeholder)",
+            "omega_tab_shortcut_hint(index, text_placeholder)",
             "active_tab_is_persisted",
             "active_sidebar_row_is_persisted",
         ] {
             assert!(
                 panel.contains(required),
-                "OMEGA-DELTA-0228: Comet tab shortcuts lost `{required}`"
+                "OMEGA-DELTA-0228: Omega tab shortcuts lost `{required}`"
             );
         }
 
@@ -27731,23 +27731,23 @@ mod tests {
             let keymap = read_repository_file(keymap);
             for index in 0..10 {
                 assert!(
-                    keymap.contains(&format!("[\"agent::ActivateCometSessionTab\", {index}]")),
+                    keymap.contains(&format!("[\"agent::ActivateOmegaSessionTab\", {index}]")),
                     "OMEGA-DELTA-0228: platform keymap lost tab index {index}"
                 );
             }
         }
     }
 
-    /// OMEGA-DELTA-0229. The Comet composer uses its dedicated harness/model
+    /// OMEGA-DELTA-0229. The Omega composer uses its dedicated harness/model
     /// picker geometry instead of collapsing model selection into a generic
     /// context menu.
     #[test]
-    fn comet_composer_uses_the_comet_model_picker() {
+    fn omega_composer_uses_the_omega_model_picker() {
         let menu = without_comments(&read_repository_file(
             "crates/agent_ui/src/omega_composer_executor_menu.rs",
         ));
         for required in [
-            "struct CometComposerModelMenu",
+            "struct OmegaComposerModelMenu",
             "Label::new(model_label)",
             "w(px(460.))",
             "h(px(420.))",
@@ -27767,13 +27767,13 @@ mod tests {
         ] {
             assert!(
                 menu.contains(required),
-                "OMEGA-DELTA-0229: Comet model picker lost `{required}`"
+                "OMEGA-DELTA-0229: Omega model picker lost `{required}`"
             );
         }
         assert!(
             !menu.contains("Label::new(current_label)"),
             "OMEGA-DELTA-0229: the composer trigger regressed to an executor label instead of \
-             Comet's brand-mark plus model face"
+             Omega's brand-mark plus model face"
         );
     }
 }

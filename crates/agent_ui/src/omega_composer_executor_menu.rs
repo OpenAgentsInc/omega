@@ -131,7 +131,7 @@ struct GlobalComposerExecutorMenuHandles {
     handles: HashMap<
         EntityId,
         (
-            PopoverMenuHandle<CometComposerModelMenu>,
+            PopoverMenuHandle<OmegaComposerModelMenu>,
             WeakEntity<AgentPanel>,
         ),
     >,
@@ -148,7 +148,7 @@ impl Global for GlobalComposerExecutorMenuHandles {}
 /// what a rebuilt panel wants.
 pub(crate) fn register_menu_handle(
     workspace_id: EntityId,
-    handle: PopoverMenuHandle<CometComposerModelMenu>,
+    handle: PopoverMenuHandle<OmegaComposerModelMenu>,
     panel: WeakEntity<AgentPanel>,
     cx: &mut App,
 ) {
@@ -161,7 +161,7 @@ fn menu_handle(
     workspace_id: EntityId,
     cx: &App,
 ) -> Option<(
-    PopoverMenuHandle<CometComposerModelMenu>,
+    PopoverMenuHandle<OmegaComposerModelMenu>,
     WeakEntity<AgentPanel>,
 )> {
     cx.try_global::<GlobalComposerExecutorMenuHandles>()
@@ -321,7 +321,7 @@ pub fn render_composer_executor_menu(
                 let panel = panel.upgrade()?;
                 let rows = panel.read(cx).composer_executor_rows(cx);
                 Some(cx.new(|cx| {
-                    CometComposerModelMenu::new(
+                    OmegaComposerModelMenu::new(
                         panel,
                         workspace_id,
                         rows,
@@ -351,7 +351,7 @@ fn executor_icon(label: &str) -> IconName {
     }
 }
 
-pub(crate) struct CometComposerModelMenu {
+pub(crate) struct OmegaComposerModelMenu {
     panel: gpui::Entity<AgentPanel>,
     workspace_id: EntityId,
     rows: Vec<ComposerExecutorRow>,
@@ -368,7 +368,7 @@ pub(crate) struct CometComposerModelMenu {
     preserve_open_on_blur: bool,
 }
 
-impl CometComposerModelMenu {
+impl OmegaComposerModelMenu {
     fn new(
         panel: gpui::Entity<AgentPanel>,
         workspace_id: EntityId,
@@ -614,15 +614,15 @@ impl CometComposerModelMenu {
     }
 }
 
-impl Focusable for CometComposerModelMenu {
+impl Focusable for OmegaComposerModelMenu {
     fn focus_handle(&self, _cx: &App) -> FocusHandle {
         self.focus_handle.clone()
     }
 }
 
-impl EventEmitter<DismissEvent> for CometComposerModelMenu {}
+impl EventEmitter<DismissEvent> for OmegaComposerModelMenu {}
 
-impl Render for CometComposerModelMenu {
+impl Render for OmegaComposerModelMenu {
     fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let colors = cx.theme().colors();
         let divider = colors.border_variant.opacity(0.45);
@@ -649,7 +649,7 @@ impl Render for CometComposerModelMenu {
                 let icon = executor_icon(&row.label);
                 let is_focused = self.selected_index == index;
                 h_flex()
-                    .id(("comet-agent-row", index))
+                    .id(("omega-agent-row", index))
                     .h(px(30.))
                     .min_w_0()
                     .gap_2()
@@ -702,7 +702,7 @@ impl Render for CometComposerModelMenu {
                 let selectable = self.model_picker_enabled && !model.disabled;
                 let click_model = model.clone();
                 v_flex()
-                    .id(("comet-model-row", index))
+                    .id(("omega-model-row", index))
                     .min_h(px(48.))
                     .justify_center()
                     .gap_0p5()
@@ -753,7 +753,7 @@ impl Render for CometComposerModelMenu {
                 options.push(
                     h_flex()
                         .id((
-                            "comet-trait-option",
+                            "omega-trait-option",
                             group_index.saturating_mul(1_000) + option_index,
                         ))
                         .h(px(26.))
@@ -839,7 +839,7 @@ impl Render for CometComposerModelMenu {
                             )
                             .child(
                                 v_flex()
-                                    .id("comet-agent-scroll")
+                                    .id("omega-agent-scroll")
                                     .flex_1()
                                     .min_h_0()
                                     .overflow_y_scroll()
@@ -847,7 +847,7 @@ impl Render for CometComposerModelMenu {
                             )
                             .child(
                                 h_flex()
-                                    .id("comet-model-add-agents")
+                                    .id("omega-model-add-agents")
                                     .mt_auto()
                                     .h(px(30.))
                                     .px_2()
@@ -885,7 +885,7 @@ impl Render for CometComposerModelMenu {
                                     )
                                     .child(
                                         v_flex()
-                                            .id("comet-model-scroll")
+                                            .id("omega-model-scroll")
                                             .flex_1()
                                             .min_h_0()
                                             .gap_0p5()
@@ -895,7 +895,7 @@ impl Render for CometComposerModelMenu {
                             )
                             .child(
                                 v_flex()
-                                    .id("comet-traits-scroll")
+                                    .id("omega-traits-scroll")
                                     .flex_none()
                                     .max_h(px(190.))
                                     .overflow_y_scroll()

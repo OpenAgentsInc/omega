@@ -136,6 +136,24 @@ impl ForensicsBenchView {
     }
 }
 
+const OMEGA_UI_MOCKS_ENV: &str = "OMEGA_UI_MOCKS";
+
+fn forensics_fixture_views_enabled_for(
+    test_support: bool,
+    debug_assertions: bool,
+    mock_value: Option<&str>,
+) -> bool {
+    test_support || (debug_assertions && mock_value == Some("1"))
+}
+
+fn forensics_fixture_views_enabled() -> bool {
+    forensics_fixture_views_enabled_for(
+        cfg!(any(test, feature = "test-support")),
+        cfg!(debug_assertions),
+        std::env::var(OMEGA_UI_MOCKS_ENV).ok().as_deref(),
+    )
+}
+
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub enum PublicationScene {
     #[default]
@@ -720,6 +738,7 @@ pub struct ForensicsWorkbenchSnapshot {
     pub selected_entropy_project: Option<String>,
     pub source_resolutions: std::collections::BTreeMap<String, ForensicSourceResolution>,
     pub status: SharedString,
+    pub fixture_views_enabled: bool,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -791,17 +810,19 @@ pub struct ForensicsWorkbenchSurface {
     _entropy_prompt_subscription: Option<Subscription>,
     source_resolutions: std::collections::BTreeMap<String, ForensicSourceResolution>,
     status: SharedString,
+    fixture_views_enabled: bool,
 }
 
 impl ForensicsWorkbenchSurface {
     pub fn new(candidate: &ThreadIdentityCandidate, cx: &mut Context<Self>) -> Self {
+        let fixture_views_enabled = forensics_fixture_views_enabled();
         let entropy_catalog = EntropyProjectCatalog::wallet_entropy_v1()
             .expect("the built-in 15-project entropy catalog must remain valid");
         let selected_entropy_project = entropy_catalog
             .projects
             .first()
             .map(|project| project.product_ref.clone());
-        let (coldcard_evidence, coldcard_case_reader_state) =
+        let (coldcard_evidence, coldcard_case_reader_state) = if fixture_views_enabled {
             match bundled_coldcard_evidence_workspace() {
                 Ok(workspace) => (Some(workspace), ColdcardCaseReaderState::Complete),
                 Err(error) => (
@@ -810,7 +831,10 @@ impl ForensicsWorkbenchSurface {
                         format!("Bundled Coldcard case is invalid: {error}").into(),
                     ),
                 ),
-            };
+            }
+        } else {
+            (None, ColdcardCaseReaderState::Empty)
+        };
         Self {
             focus_handle: cx.focus_handle(),
             binding: candidate.binding.clone(),
@@ -859,6 +883,7 @@ impl ForensicsWorkbenchSurface {
             _entropy_prompt_subscription: None,
             source_resolutions: std::collections::BTreeMap::new(),
             status: "Awaiting OpenAgents managed profile".into(),
+            fixture_views_enabled,
         }
     }
 
@@ -876,7 +901,13 @@ impl ForensicsWorkbenchSurface {
         this.entropy_prompt_snapshots = restored.prompt_snapshots;
         this.coldcard_case_selection =
             ColdcardCaseSelection::from_persisted_rung(restored.coldcard_case_rung.as_deref());
-        this.bench_view = ForensicsBenchView::from_persisted(restored.bench_view.as_deref());
+        let restored_bench_view =
+            ForensicsBenchView::from_persisted(restored.bench_view.as_deref());
+        this.bench_view = if this.bench_view_available(restored_bench_view) {
+            restored_bench_view
+        } else {
+            ForensicsBenchView::Entropy
+        };
         this.lifecycle_selection =
             LifecycleSelection::from_persisted(restored.lifecycle_selection.as_deref());
         this.evidence_selection =
@@ -1634,9 +1665,22 @@ impl ForensicsWorkbenchSurface {
     }
 
     pub fn select_bench_view(&mut self, view: ForensicsBenchView, cx: &mut Context<Self>) {
+        if !self.bench_view_available(view) {
+            return;
+        }
         self.bench_view = view;
         self.persist_entropy_state(cx);
         cx.notify();
+    }
+
+    fn bench_view_available(&self, view: ForensicsBenchView) -> bool {
+        match view {
+            ForensicsBenchView::Entropy | ForensicsBenchView::Lifecycle => true,
+            ForensicsBenchView::Case => self.coldcard_evidence.is_some(),
+            ForensicsBenchView::Evidence => self.fixture_views_enabled || self.review.is_some(),
+            ForensicsBenchView::Models => self.fixture_views_enabled || self.matrix.is_some(),
+            ForensicsBenchView::Publication => self.fixture_views_enabled,
+        }
     }
 
     pub fn select_lifecycle_stage(
@@ -1779,6 +1823,7 @@ impl ForensicsWorkbenchSurface {
             selected_entropy_project: self.selected_entropy_project.clone(),
             source_resolutions: self.source_resolutions.clone(),
             status: self.status.clone(),
+            fixture_views_enabled: self.fixture_views_enabled,
         }
     }
 
@@ -1976,6 +2021,7 @@ impl ForensicsWorkbenchSurface {
             .children(
                 ForensicsBenchView::AVAILABLE
                     .into_iter()
+                    .filter(|view| self.bench_view_available(*view))
                     .enumerate()
                     .map(|(index, view)| {
                         let selected = self.bench_view == view;
@@ -2653,11 +2699,12 @@ impl ForensicsWorkbenchSurface {
     }
 
     fn render_model_matrix_workspace(&self, cx: &mut Context<Self>) -> AnyElement {
-        let using_fixture = self.matrix.is_none();
-        let matrix = self
-            .matrix
-            .clone()
-            .or_else(|| bundled_coldcard_model_matrix().ok());
+        let using_fixture = self.matrix.is_none() && self.fixture_views_enabled;
+        let matrix = self.matrix.clone().or_else(|| {
+            using_fixture
+                .then(bundled_coldcard_model_matrix)
+                .and_then(Result::ok)
+        });
         let Some(matrix) = matrix else {
             return v_flex()
                 .id("omega.forensics.models.workspace")
@@ -3147,14 +3194,25 @@ impl ForensicsWorkbenchSurface {
             )
             .child(
                 h_flex()
-                    .max_w(px(320.))
                     .gap_2()
-                    .px_3()
-                    .py_1p5()
-                    .rounded_full()
-                    .bg(cx.theme().colors().element_background)
-                    .child(Icon::new(IconName::Folder).size(IconSize::Small))
-                    .child(div().truncate().child(repository_name)),
+                    .when(self.fixture_views_enabled, |header| {
+                        header.child(
+                            Label::new("DEV MOCKS")
+                                .size(LabelSize::XSmall)
+                                .color(Color::Warning),
+                        )
+                    })
+                    .child(
+                        h_flex()
+                            .max_w(px(320.))
+                            .gap_2()
+                            .px_3()
+                            .py_1p5()
+                            .rounded_full()
+                            .bg(cx.theme().colors().element_background)
+                            .child(Icon::new(IconName::Folder).size(IconSize::Small))
+                            .child(div().truncate().child(repository_name)),
+                    ),
             )
             .into_any_element()
     }
@@ -3557,6 +3615,9 @@ impl Focusable for ForensicsWorkbenchSurface {
 
 impl Render for ForensicsWorkbenchSurface {
     fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        if !self.bench_view_available(self.bench_view) {
+            self.bench_view = ForensicsBenchView::Entropy;
+        }
         let target = self.preflight.as_ref().map(|preflight| &preflight.target);
         let repository_name = target
             .map(|target| SharedString::from(target.display_name.clone()))
@@ -5684,6 +5745,23 @@ mod tests {
         WORKER_PLACEMENT_SCHEMA_V1, WorkerPlacementState,
     };
     use std::path::PathBuf;
+
+    #[test]
+    fn fixture_views_require_test_support_or_explicit_debug_mock_gate() {
+        assert!(forensics_fixture_views_enabled_for(true, false, None));
+        assert!(forensics_fixture_views_enabled_for(false, true, Some("1")));
+        assert!(!forensics_fixture_views_enabled_for(
+            false,
+            false,
+            Some("1")
+        ));
+        assert!(!forensics_fixture_views_enabled_for(
+            false,
+            true,
+            Some("true")
+        ));
+        assert!(!forensics_fixture_views_enabled_for(false, true, None));
+    }
 
     #[gpui::test]
     fn entropy_run_button_emits_start_command(cx: &mut gpui::TestAppContext) {

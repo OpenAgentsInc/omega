@@ -226,9 +226,9 @@ fn main() {
     }
 
     let mut args = Args::parse();
-    if option_env!("OMEGA_COMET_BUILD").is_some() {
-        args.comet = true;
-        log::info!("Omega embedded Comet build is active");
+    if option_env!("OMEGA_PRIMARY_INTERFACE_BUILD").is_some() {
+        args.primary_interface = true;
+        log::info!("Omega embedded primary-interface build is active");
     }
 
     // `zed --askpass` Makes zed operate in nc/netcat mode for use with askpass
@@ -296,12 +296,12 @@ fn main() {
         omega_front_door::enable_exo_from_command_line();
     }
 
-    if args.comet {
-        omega_zero_base::enable_comet_mode();
+    if args.primary_interface {
+        omega_zero_base::enable_primary_interface();
     }
 
     // omega#161. Zero base remains the application and `--zero-base` remains
-    // a compatibility no-op. Comet mode is an additive porting scaffold
+    // a compatibility no-op. The primary interface is an additive scaffold
     // inside that seal, not a route back to the removed editor surface.
     //
     // OMEGA-DELTA-0053, amended by omega#161. Seal here, before any window
@@ -317,7 +317,7 @@ fn main() {
     // surface draws no buffer, so the argument is resolved to the directory
     // the thread can see rather than left as a file to open in a pane that is
     // not there.
-    if !args.comet {
+    if !args.primary_interface {
         resolve_zero_base_project_arguments(&mut args);
     }
 
@@ -825,7 +825,7 @@ fn main() {
             move |cx| {
                 for &mut window in cx.windows().iter_mut() {
                     let background_appearance =
-                        if omega_zero_base::is_comet_mode() && cfg!(target_os = "macos") {
+                        if omega_zero_base::is_primary_interface() && cfg!(target_os = "macos") {
                             gpui::WindowBackgroundAppearance::Blurred
                         } else {
                             cx.theme().window_background_appearance()
@@ -1443,7 +1443,7 @@ pub(crate) async fn restore_or_create_workspace(
     cx: &mut AsyncApp,
 ) -> Result<()> {
     await_identity_ready(cx).await?;
-    if omega_zero_base::is_comet_mode() {
+    if omega_zero_base::is_primary_interface() {
         if !open_zero_base_project(&app_state, cx).await {
             cx.update(|cx| {
                 workspace::open_new(
@@ -2070,10 +2070,9 @@ struct Args {
     #[arg(long)]
     zero_base: bool,
 
-    /// Opens the additive Comet porting surface with only a blank canvas and
-    /// the working composer.
-    #[arg(long)]
-    comet: bool,
+    /// Opens the primary Omega interface used by embedded release builds.
+    #[arg(long, hide = true)]
+    primary_interface: bool,
 
     /// Enables the optional Exo integration for this process.
     ///

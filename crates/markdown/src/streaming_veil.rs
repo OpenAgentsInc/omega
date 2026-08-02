@@ -220,7 +220,7 @@ mod tests {
     }
 
     #[test]
-    fn cadence_and_curve_match_comet() {
+    fn cadence_and_curve_match_omega() {
         assert_eq!(VEIL_EMA_SEED_MS, 160.0);
         assert_eq!(VEIL_MIN_FADE_MS, 120.0);
         assert_eq!(VEIL_MAX_FADE_MS, 400.0);

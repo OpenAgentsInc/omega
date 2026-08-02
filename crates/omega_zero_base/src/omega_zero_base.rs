@@ -2,7 +2,7 @@
 //!
 //! omega#99 built this as a mode: a subtraction of the editor around the
 //! thread, entered from the command line. omega#100 made it the default and
-//! omega#161 removed the editor split entirely. The additive Comet scaffold
+//! omega#161 removed the editor split entirely. The primary Omega scaffold
 //! remains inside this seal: it begins with only the canvas and composer, then
 //! admits ported UI one surface at a time. This crate owns that process choice
 //! and the shared action inventory.
@@ -54,12 +54,12 @@ pub const FLAG: &str = "--zero-base";
 /// [`seal`] themselves when a scene photographs the sealed surface.
 static SEALED: AtomicBool = AtomicBool::new(false);
 
-/// Whether this process is rendering the additive Comet porting surface.
+/// Whether this process is rendering the primary Omega interface.
 ///
-/// Comet mode begins with only the conversation canvas and composer. New
+/// The primary interface begins with only the conversation canvas and composer. New
 /// surfaces must be admitted deliberately instead of inheriting the Omega
 /// workbench shell.
-static COMET_MODE: AtomicBool = AtomicBool::new(false);
+static PRIMARY_INTERFACE: AtomicBool = AtomicBool::new(false);
 
 /// Number of action refusals logged by this process.
 ///
@@ -417,7 +417,7 @@ pub const ADMITTED_ACTIONS: &[&str] = &[
 
 /// Is the zero-base seal active? Constant `true` since omega#161.
 ///
-/// The editor split is gone. Comet mode is a stricter presentation inside the
+/// The editor split is gone. The primary interface is a stricter presentation inside the
 /// same zero-base gate, so callers that protect removed editor capabilities
 /// continue to receive `true` in either presentation.
 #[must_use]
@@ -425,18 +425,18 @@ pub fn is_active() -> bool {
     true
 }
 
-/// Select the additive Comet porting surface for this process.
+/// Select the primary Omega interface for this process.
 ///
 /// This is one-way because changing the surface after a window has opened
 /// could briefly expose controls that the launch contract excludes.
-pub fn enable_comet_mode() {
-    COMET_MODE.store(true, Ordering::SeqCst);
+pub fn enable_primary_interface() {
+    PRIMARY_INTERFACE.store(true, Ordering::SeqCst);
 }
 
-/// Is this process rendering the additive Comet porting surface?
+/// Is this process rendering the primary Omega interface?
 #[must_use]
-pub fn is_comet_mode() -> bool {
-    COMET_MODE.load(Ordering::SeqCst)
+pub fn is_primary_interface() -> bool {
+    PRIMARY_INTERFACE.load(Ordering::SeqCst)
 }
 
 /// The surface owns the window. One-way for the life of the process.
@@ -733,40 +733,40 @@ mod tests {
     }
 
     #[test]
-    fn comet_session_tab_keymaps_win_over_workspace_pane_bindings() {
-        const COMET_CONTEXT: &str = "\"context\": \"AgentPanel && CometMode\"";
+    fn omega_session_tab_keymaps_win_over_workspace_pane_bindings() {
+        const OMEGA_CONTEXT: &str = "\"context\": \"AgentPanel && OmegaInterface\"";
 
         for (platform, keymap, first_shortcut) in [
             (
                 "linux",
                 include_str!("../../../assets/keymaps/default-linux.json"),
-                "\"ctrl-1\": [\"agent::ActivateCometSessionTab\", 0]",
+                "\"ctrl-1\": [\"agent::ActivateOmegaSessionTab\", 0]",
             ),
             (
                 "macos",
                 include_str!("../../../assets/keymaps/default-macos.json"),
-                "\"cmd-1\": [\"agent::ActivateCometSessionTab\", 0]",
+                "\"cmd-1\": [\"agent::ActivateOmegaSessionTab\", 0]",
             ),
             (
                 "windows",
                 include_str!("../../../assets/keymaps/default-windows.json"),
-                "\"ctrl-1\": [\"agent::ActivateCometSessionTab\", 0]",
+                "\"ctrl-1\": [\"agent::ActivateOmegaSessionTab\", 0]",
             ),
         ] {
-            let comet_offset = keymap
-                .rfind(COMET_CONTEXT)
-                .unwrap_or_else(|| panic!("{platform} keymap must contain the Comet context"));
+            let omega_offset = keymap
+                .rfind(OMEGA_CONTEXT)
+                .unwrap_or_else(|| panic!("{platform} keymap must contain the Omega context"));
             let pane_offset = keymap.rfind("workspace::ActivatePane").unwrap_or_else(|| {
                 panic!("{platform} keymap must contain workspace pane bindings")
             });
 
             assert!(
-                comet_offset > pane_offset,
-                "{platform} must place Comet tab bindings after workspace pane bindings so the scoped action wins"
+                omega_offset > pane_offset,
+                "{platform} must place Omega tab bindings after workspace pane bindings so the scoped action wins"
             );
             assert!(
-                keymap[comet_offset..].contains(first_shortcut),
-                "{platform} Comet context must bind its first positional tab shortcut"
+                keymap[omega_offset..].contains(first_shortcut),
+                "{platform} Omega context must bind its first positional tab shortcut"
             );
         }
     }
