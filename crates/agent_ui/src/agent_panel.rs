@@ -4216,6 +4216,15 @@ impl AgentPanel {
         // The default executor is Omega Agent; the composer's executor
         // dropdown is where a different owner is chosen.
         self.compose_on_executor(ConversationTarget::OmegaAgent, window, cx);
+
+        // A work surface belongs to the conversation that opened it. If the
+        // current blank draft is reused, or if the shell still owns surface
+        // focus while switching drafts, New Thread must still land on the
+        // transcript and its composer rather than reopening that surface.
+        if let Err(error) = self.workbench_shell.collapse_dock() {
+            log::warn!("failed to close the work surface for a new conversation: {error:#}");
+        }
+        self.focus_thread_transcript(window, cx);
     }
 
     /// Land a new conversation on `target`, composer focused.
@@ -24978,6 +24987,74 @@ mod tests {
                     .map(|draft| draft.read(cx).agent_key()),
                 Some(Agent::NativeAgent)
             ));
+        });
+    }
+
+    #[gpui::test]
+    async fn test_new_thread_leaves_forensics_for_the_composer(cx: &mut TestAppContext) {
+        let (panel, mut cx) = setup_visible_panel(cx).await;
+
+        panel.update_in(&mut cx, |panel, window, cx| {
+            panel.new_thread(&NewThread, window, cx);
+        });
+        cx.run_until_parked();
+
+        let draft_id = panel.read_with(&cx, |panel, _cx| {
+            panel
+                .draft_thread
+                .as_ref()
+                .expect("New Thread prepares a draft")
+                .entity_id()
+        });
+        panel.update(&mut cx, |panel, _cx| {
+            panel
+                .workbench_shell
+                .open_surface_for_tests(omega_workbench_state::WorkSurface::Forensics)
+                .expect("the regression fixture opens Forensics");
+        });
+        panel.read_with(&cx, |panel, _cx| {
+            let visible = panel
+                .workbench_shell
+                .projection()
+                .visible_projection()
+                .expect("the draft has a workbench projection");
+            assert!(visible.dock_open);
+            assert_eq!(
+                panel.workbench_shell.focus_target(),
+                workbench_shell::WorkbenchFocusTarget::Surface(
+                    omega_workbench_state::WorkSurface::Forensics
+                )
+            );
+        });
+
+        panel.update_in(&mut cx, |panel, window, cx| {
+            panel.new_thread(&NewThread, window, cx);
+        });
+        cx.run_until_parked();
+
+        panel.read_with(&cx, |panel, _cx| {
+            assert_eq!(
+                panel
+                    .draft_thread
+                    .as_ref()
+                    .expect("the blank draft remains reusable")
+                    .entity_id(),
+                draft_id
+            );
+            assert!(
+                !panel
+                    .workbench_shell
+                    .projection()
+                    .visible_projection()
+                    .expect("the draft remains active")
+                    .dock_open,
+                "New Thread must close Forensics on a reused blank draft"
+            );
+            assert_eq!(
+                panel.workbench_shell.focus_target(),
+                workbench_shell::WorkbenchFocusTarget::Transcript
+            );
+            assert!(panel.front_door_composer_visible_for_tests());
         });
     }
 

@@ -3564,6 +3564,27 @@ impl WorkbenchShell {
         self.fail_next_host_creation = Some(surface);
     }
 
+    #[cfg(test)]
+    pub(crate) fn open_surface_for_tests(&mut self, surface: WorkSurface) -> Result<()> {
+        let thread_id = self
+            .projection
+            .active_thread_id
+            .clone()
+            .ok_or_else(|| anyhow!("the test shell has no active thread"))?;
+        let thread = self
+            .projection
+            .threads
+            .get_mut(&thread_id)
+            .ok_or_else(|| anyhow!("the active test thread is missing"))?;
+        thread.binding = Some(RepositoryBinding::new("test-repository", "test-worktree")?);
+        thread.available_surfaces.insert(surface);
+        self.projection
+            .apply(ProjectionTransition::RequestSurface { thread_id, surface })
+            .map_err(anyhow::Error::new)?;
+        self.focus_target = WorkbenchFocusTarget::Surface(surface);
+        Ok(())
+    }
+
     pub fn set_badge(&mut self, surface: WorkSurface, badge: Option<SurfaceBadge>) {
         if let Some(capability) = self.capabilities.get_mut(&surface) {
             capability.badge = badge;
