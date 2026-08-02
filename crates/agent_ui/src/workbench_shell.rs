@@ -567,7 +567,7 @@ impl NativeGitLifecycle {
             Self::Dirty => "Git repository has changes".into(),
             Self::Conflicted => "Git repository has conflicts".into(),
             Self::Detached => "Git repository has a detached HEAD".into(),
-            Self::Unborn => "Git repository has an unborn branch".into(),
+            Self::Unborn => "Git repository has no commits yet".into(),
             Self::OperationPending => "Git operation in progress".into(),
             Self::Offline => "Git repository is unavailable offline".into(),
             Self::Reconnecting => "Reconnecting Git repository".into(),
@@ -3779,6 +3779,14 @@ fn unavailable_capabilities(reason: &'static str) -> BTreeMap<WorkSurface, Surfa
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn empty_repository_status_uses_plain_product_language() {
+        assert_eq!(
+            NativeGitLifecycle::Unborn.accessible_label().as_ref(),
+            "Git repository has no commits yet"
+        );
+    }
 
     #[test]
     fn closed_terminal_owner_bindings_are_reconciled() {

@@ -29,7 +29,7 @@ impl BranchIdentity {
         match self {
             Self::Branch(name) => name.clone(),
             Self::Detached(commit) => format!("Detached at {commit}").into(),
-            Self::Unborn => "Unborn branch".into(),
+            Self::Unborn => "No commits".into(),
             Self::NoGit => "No Git".into(),
         }
     }
@@ -524,5 +524,6 @@ mod tests {
         );
         assert_eq!(BranchIdentity::from_git(None, None), BranchIdentity::Unborn);
         assert_ne!(BranchIdentity::Unborn, BranchIdentity::NoGit);
+        assert_eq!(BranchIdentity::Unborn.label().as_ref(), "No commits");
     }
 }

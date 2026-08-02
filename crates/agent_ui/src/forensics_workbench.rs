@@ -1134,7 +1134,7 @@ impl Render for ForensicsWorkbenchSurface {
         let commit = target
             .map(|target| SharedString::from(target.commit.clone()))
             .or_else(|| self.repository.commit.clone())
-            .unwrap_or_else(|| "Unborn".into());
+            .unwrap_or_else(|| "No commits".into());
         let source_state: SharedString = target
             .map(|target| source_state_label(target.source_state).into())
             .unwrap_or_else(|| {
