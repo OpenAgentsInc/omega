@@ -4632,6 +4632,7 @@ impl ConversationView {
                 label: "Loading models…".into(),
                 current_model: None,
                 models: Vec::new(),
+                traits: Vec::new(),
                 enabled: false,
                 empty_message: "This agent's models appear when its session is ready.".into(),
                 on_select: Rc::new(|_, _, _| {}),

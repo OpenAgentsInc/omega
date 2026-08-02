@@ -14452,7 +14452,7 @@ impl ThreadView {
             let routed = RoutedModel::from_disclosure(&self.executor_disclosure(cx));
             let face = face_for_next_turn(routed.as_ref(), selected(), cx);
             let model_selector = self.model_selector.clone();
-            crate::omega_composer_executor_menu::ComposerModelPicker::omega(
+            let mut picker = crate::omega_composer_executor_menu::ComposerModelPicker::omega(
                 face,
                 enabled,
                 Rc::new(move |tier, _window, cx| {
@@ -14468,9 +14468,93 @@ impl ThreadView {
                         );
                     }
                 }),
-            )
+            );
+            if let Some(thread) = self.as_native_thread(cx) {
+                let (supports_disabling, thinking_enabled, selected_effort, effort_levels) = {
+                    let thread = thread.read(cx);
+                    let Some(model) = thread.model() else {
+                        return picker;
+                    };
+                    (
+                        model.supports_disabling_thinking(),
+                        thread.thinking_enabled(),
+                        thread.thinking_effort().cloned(),
+                        model.supported_effort_levels(),
+                    )
+                };
+                if !effort_levels.is_empty() {
+                    let mut options = Vec::new();
+                    if supports_disabling {
+                        options.push(crate::omega_composer_executor_menu::ComposerTraitOption {
+                            id: "__off".into(),
+                            label: "Off".into(),
+                            selected: !thinking_enabled,
+                        });
+                    }
+                    options.extend(effort_levels.into_iter().map(|level| {
+                        let selected = thinking_enabled
+                            && selected_effort.as_deref() == Some(level.value.as_ref());
+                        crate::omega_composer_executor_menu::ComposerTraitOption {
+                            id: level.value,
+                            label: level.name,
+                            selected,
+                        }
+                    }));
+                    picker
+                        .traits
+                        .push(crate::omega_composer_executor_menu::ComposerTraitGroup {
+                            id: "reasoning".into(),
+                            label: "Reasoning".into(),
+                            options,
+                            on_select: Rc::new(move |effort, _window, cx| {
+                                thread.update(cx, |thread, cx| {
+                                    if effort.as_ref() == "__off" {
+                                        thread.set_thinking_enabled(false, cx);
+                                    } else {
+                                        thread.set_thinking_enabled(true, cx);
+                                        thread.set_thinking_effort(Some(effort.to_string()), cx);
+                                    }
+                                });
+                            }),
+                        });
+                }
+            }
+            picker
         } else if let Some(config_options) = self.config_options_view.clone() {
             let models = config_options.read(cx).composer_models();
+            let traits = config_options
+                .read(cx)
+                .composer_traits()
+                .into_iter()
+                .map(|group| {
+                    let config_options = config_options.clone();
+                    let config_id = group.id.clone();
+                    crate::omega_composer_executor_menu::ComposerTraitGroup {
+                        id: group.id,
+                        label: group.name,
+                        options: group
+                            .choices
+                            .into_iter()
+                            .map(|choice| {
+                                crate::omega_composer_executor_menu::ComposerTraitOption {
+                                    id: choice.id,
+                                    label: choice.name,
+                                    selected: choice.selected,
+                                }
+                            })
+                            .collect(),
+                        on_select: Rc::new(move |choice_id, _window, cx| {
+                            config_options.update(cx, |config_options, cx| {
+                                config_options.select_composer_trait(
+                                    config_id.as_ref(),
+                                    choice_id.as_ref(),
+                                    cx,
+                                );
+                            });
+                        }),
+                    }
+                })
+                .collect();
             let current_model = models.iter().find(|model| model.selected).cloned();
             let options = models
                 .into_iter()
@@ -14491,6 +14575,7 @@ impl ThreadView {
                 current_model: current_model.map(|model| AgentModelId::new(model.id)),
                 enabled: enabled && !options.is_empty(),
                 models: options,
+                traits,
                 empty_message: "Choose one of this agent's models.".into(),
                 on_select: Rc::new(move |model_id, _window, cx| {
                     config_options.update(cx, |config_options, cx| {
@@ -14521,6 +14606,7 @@ impl ThreadView {
                     .unwrap_or_else(|| "Select a model".into()),
                 current_model: active_model.map(|model| model.id),
                 models,
+                traits: Vec::new(),
                 enabled,
                 empty_message: "Choose one of this agent's models.".into(),
                 on_select: Rc::new(move |model_id, _window, cx| {
@@ -14534,6 +14620,7 @@ impl ThreadView {
                 label: self.agent_display_name.clone(),
                 current_model: None,
                 models: Vec::new(),
+                traits: Vec::new(),
                 enabled: false,
                 empty_message: "This agent manages models in its own settings.".into(),
                 on_select: Rc::new(|_, _, _| {}),

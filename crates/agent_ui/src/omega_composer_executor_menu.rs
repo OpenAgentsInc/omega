@@ -54,10 +54,26 @@ pub struct ComposerModelOption {
 }
 
 #[derive(Clone)]
+pub struct ComposerTraitOption {
+    pub id: SharedString,
+    pub label: SharedString,
+    pub selected: bool,
+}
+
+#[derive(Clone)]
+pub struct ComposerTraitGroup {
+    pub id: SharedString,
+    pub label: SharedString,
+    pub options: Vec<ComposerTraitOption>,
+    pub on_select: Rc<dyn Fn(SharedString, &mut Window, &mut App)>,
+}
+
+#[derive(Clone)]
 pub struct ComposerModelPicker {
     pub label: SharedString,
     pub current_model: Option<acp_thread::AgentModelId>,
     pub models: Vec<ComposerModelOption>,
+    pub traits: Vec<ComposerTraitGroup>,
     pub enabled: bool,
     pub empty_message: SharedString,
     pub on_select: Rc<dyn Fn(acp_thread::AgentModelId, &mut Window, &mut App)>,
@@ -86,6 +102,7 @@ impl ComposerModelPicker {
             label: face.label,
             current_model,
             models,
+            traits: Vec::new(),
             enabled,
             empty_message: "Choose a model for the next turn.".into(),
             on_select: Rc::new(move |model_id, window, cx| {
@@ -312,6 +329,7 @@ pub fn render_composer_executor_menu(
                         composer_focus_handle.clone(),
                         model_picker.current_model.clone(),
                         model_picker.models.clone(),
+                        model_picker.traits.clone(),
                         model_picker.enabled,
                         model_picker.empty_message.clone(),
                         model_picker.on_select.clone(),
@@ -341,6 +359,7 @@ pub(crate) struct CometComposerModelMenu {
     composer_focus_handle: FocusHandle,
     current_model: Option<acp_thread::AgentModelId>,
     models: Vec<ComposerModelOption>,
+    traits: Vec<ComposerTraitGroup>,
     model_picker_enabled: bool,
     empty_message: SharedString,
     on_model_select: Rc<dyn Fn(acp_thread::AgentModelId, &mut Window, &mut App)>,
@@ -358,6 +377,7 @@ impl CometComposerModelMenu {
         composer_focus_handle: FocusHandle,
         current_model: Option<acp_thread::AgentModelId>,
         models: Vec<ComposerModelOption>,
+        traits: Vec<ComposerTraitGroup>,
         model_picker_enabled: bool,
         empty_message: SharedString,
         on_model_select: Rc<dyn Fn(acp_thread::AgentModelId, &mut Window, &mut App)>,
@@ -383,6 +403,7 @@ impl CometComposerModelMenu {
             composer_focus_handle,
             current_model,
             models,
+            traits,
             model_picker_enabled,
             empty_message,
             on_model_select,
@@ -404,6 +425,7 @@ impl CometComposerModelMenu {
         self.composer_focus_handle = composer_focus_handle;
         self.current_model = model_picker.current_model;
         self.models = model_picker.models;
+        self.traits = model_picker.traits;
         self.model_picker_enabled = model_picker.enabled;
         self.empty_message = model_picker.empty_message;
         self.on_model_select = model_picker.on_select;
@@ -417,7 +439,22 @@ impl CometComposerModelMenu {
     }
 
     fn item_count(&self) -> usize {
-        self.rows.len() + self.models.len() + 1
+        self.rows.len() + self.models.len() + self.trait_option_count() + 1
+    }
+
+    fn trait_option_count(&self) -> usize {
+        self.traits.iter().map(|group| group.options.len()).sum()
+    }
+
+    fn trait_option_at(&self, index: usize) -> Option<(usize, usize)> {
+        let mut remaining = index;
+        for (group_index, group) in self.traits.iter().enumerate() {
+            if remaining < group.options.len() {
+                return Some((group_index, remaining));
+            }
+            remaining -= group.options.len();
+        }
+        None
     }
 
     fn item_is_selectable(&self, index: usize) -> bool {
@@ -425,10 +462,15 @@ impl CometComposerModelMenu {
             return row.is_selectable();
         }
         let model_index = index.saturating_sub(self.rows.len());
-        self.models
+        if self
+            .models
             .get(model_index)
             .is_some_and(|model| self.model_picker_enabled && !model.disabled)
-            || model_index == self.models.len()
+        {
+            return true;
+        }
+        let trait_index = model_index.saturating_sub(self.models.len());
+        self.trait_option_at(trait_index).is_some() || trait_index == self.trait_option_count()
     }
 
     fn move_selection(&mut self, delta: isize, cx: &mut Context<Self>) {
@@ -472,6 +514,12 @@ impl CometComposerModelMenu {
             self.choose_model(model, window, cx);
             return;
         }
+        let trait_index = model_index.saturating_sub(self.models.len());
+        if let Some((group_index, option_index)) = self.trait_option_at(trait_index) {
+            self.choose_trait(group_index, option_index, window, cx);
+            return;
+        }
+        keep_menu_open(self.workspace_id, false, cx);
         window.dispatch_action(Box::new(omega_actions::AcpRegistry), cx);
         cx.emit(DismissEvent);
     }
@@ -501,12 +549,44 @@ impl CometComposerModelMenu {
         self.selected_index = index;
         self.current_model = None;
         self.models.clear();
+        self.traits.clear();
         self.model_picker_enabled = false;
         self.empty_message = "Loading models…".into();
         self.panel.update(cx, |panel, cx| {
             panel.compose_on_executor(row.target, window, cx);
         });
         cx.emit(DismissEvent);
+        if let Some((handle, _)) = menu_handle(self.workspace_id, cx) {
+            let workspace_id = self.workspace_id;
+            window.on_next_frame(move |window, cx| {
+                if menu_should_stay_open(workspace_id, cx) {
+                    handle.show(window, cx);
+                }
+            });
+        }
+    }
+
+    fn choose_trait(
+        &mut self,
+        group_index: usize,
+        option_index: usize,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(group) = self.traits.get(group_index).cloned() else {
+            return;
+        };
+        let Some(option) = group.options.get(option_index).cloned() else {
+            return;
+        };
+        (group.on_select)(option.id.clone(), window, cx);
+        if let Some(group) = self.traits.get_mut(group_index) {
+            for candidate in &mut group.options {
+                candidate.selected = candidate.id == option.id;
+            }
+        }
+        keep_menu_open(self.workspace_id, true, cx);
+        cx.notify();
     }
 
     fn choose_model(
@@ -660,6 +740,66 @@ impl Render for CometComposerModelMenu {
                     })
             });
 
+        let mut trait_offset = 0usize;
+        let mut trait_groups = Vec::new();
+        for (group_index, group) in self.traits.clone().into_iter().enumerate() {
+            let group_offset = trait_offset;
+            trait_offset += group.options.len();
+            let mut options = Vec::new();
+            for (option_index, option) in group.options.into_iter().enumerate() {
+                let is_focused = self.selected_index
+                    == self.rows.len() + self.models.len() + group_offset + option_index;
+                let selected_option = option.selected;
+                options.push(
+                    h_flex()
+                        .id((
+                            "comet-trait-option",
+                            group_index.saturating_mul(1_000) + option_index,
+                        ))
+                        .h(px(26.))
+                        .px_2()
+                        .rounded(px(7.))
+                        .border_1()
+                        .border_color(if selected_option || is_focused {
+                            colors.border_selected
+                        } else {
+                            divider
+                        })
+                        .bg(if selected_option || is_focused {
+                            selected
+                        } else {
+                            gpui::transparent_black()
+                        })
+                        .text_size(px(11.))
+                        .text_color(if selected_option {
+                            colors.text
+                        } else {
+                            colors.text_muted
+                        })
+                        .cursor_pointer()
+                        .hover(|style| style.bg(colors.element_hover))
+                        .on_click(cx.listener(move |this, _, window, cx| {
+                            this.choose_trait(group_index, option_index, window, cx);
+                        }))
+                        .child(option.label)
+                        .into_any_element(),
+                );
+            }
+            trait_groups.push(
+                v_flex()
+                    .gap_1()
+                    .child(
+                        Label::new(group.label)
+                            .size(LabelSize::XSmall)
+                            .color(Color::Muted),
+                    )
+                    .child(h_flex().flex_wrap().gap_1().children(options))
+                    .into_any_element(),
+            );
+        }
+
+        let add_agents_index = self.rows.len() + self.models.len() + self.trait_option_count();
+
         v_flex()
             .id("omega-composer-model-menu")
             .debug_selector(|| "omega.composer.executor-menu.popup".into())
@@ -716,10 +856,9 @@ impl Render for CometComposerModelMenu {
                                     .text_color(colors.text_muted)
                                     .cursor_pointer()
                                     .hover(|style| style.bg(colors.element_hover))
-                                    .when(
-                                        self.selected_index == self.rows.len() + self.models.len(),
-                                        |this| this.bg(selected),
-                                    )
+                                    .when(self.selected_index == add_agents_index, |this| {
+                                        this.bg(selected)
+                                    })
                                     .on_click(|_, window, cx| {
                                         window.dispatch_action(
                                             Box::new(omega_actions::AcpRegistry),
@@ -756,20 +895,26 @@ impl Render for CometComposerModelMenu {
                             )
                             .child(
                                 v_flex()
+                                    .id("comet-traits-scroll")
                                     .flex_none()
+                                    .max_h(px(190.))
+                                    .overflow_y_scroll()
                                     .gap_1()
                                     .border_t_1()
                                     .border_color(divider)
                                     .p_2()
-                                    .child(
-                                        Label::new("Selection")
-                                            .size(LabelSize::XSmall)
-                                            .color(Color::Muted),
-                                    )
-                                    .child(
-                                        Label::new(self.empty_message.clone())
-                                            .size(LabelSize::Small),
-                                    ),
+                                    .when(self.traits.is_empty(), |this| {
+                                        this.child(
+                                            Label::new("Selection")
+                                                .size(LabelSize::XSmall)
+                                                .color(Color::Muted),
+                                        )
+                                        .child(
+                                            Label::new(self.empty_message.clone())
+                                                .size(LabelSize::Small),
+                                        )
+                                    })
+                                    .children(trait_groups),
                             ),
                     ),
             )
