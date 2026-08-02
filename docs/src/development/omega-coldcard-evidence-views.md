@@ -19,6 +19,11 @@ thread history.
 Users can open Forensics from the project sidebar or from **View → Workbench →
 Forensics**. Both paths select the same native work surface.
 
+The workbench navigation separates the entropy dashboard, Coldcard case, and
+preflight lifecycle. The selected view and lifecycle row are presentation
+state. Omega restores them for the same repository binding without copying a
+preflight, run, review, or evidence projection into UI-owned state.
+
 The overview identifies the Coldcard target, public clone URL, pinned
 vulnerable commit, synthetic fixture state, private/non-reportable boundary,
 highest supported rung, evidence completeness, and provenance health. It also
@@ -30,6 +35,26 @@ list, rows, selected state, status/error scenes, detail group, and read-only
 boundary have explicit accessibility roles and labels. Reader selection is
 presentation state only. Selecting a row does not prepare or launch a run,
 promote a claim, publish a result, or create another authority store.
+
+## Preflight and lifecycle
+
+The lifecycle view is a bounded list/detail workspace. Its rows separate the
+summary, target, coverage, tool profile, runtime, and cleanup. The detail pane
+always names the projected state, exact blocker, and next admitted action.
+
+The presentation distinguishes awaiting-profile, awaiting-coverage, complete,
+incomplete, denied, incompatible-tool, running, cancelled, recovery-required,
+cleaned, and stale scenes. A commit mismatch is stale only when the selected
+project and preflight name the same repository. A profile is incompatible when
+it does not prove the required read-only forensic source capability. Cancelled
+work remains cleanup-blocked until the run projection proves deletion and zero
+residue.
+
+Live prepare and launch controls are visible but disabled. The synthetic
+fixture and existing local projections do not satisfy the live worker and
+source-delivery acceptance gates tracked by OpenAgents issues #9289 and #9290.
+The UI cannot acknowledge those gates or convert a ready preflight into launch
+authority.
 
 ## Evidence ladder
 
@@ -83,5 +108,6 @@ Run the contract and GPUI coverage with:
 ```sh
 cargo test -p omega_forensics coldcard_workspace
 cargo test -p agent_ui forensics_workbench::tests::coldcard --lib
+cargo test -p agent_ui forensics_workbench::tests::lifecycle --lib
 ./script/clippy -p omega_forensics -p agent_ui
 ```

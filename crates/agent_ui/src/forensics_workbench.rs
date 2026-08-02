@@ -29,6 +29,7 @@ use crate::thread_identity::ThreadIdentityCandidate;
 
 const PREPARE_ACTION_REF: &str = "operator-action-ref://omega/forensics/prepare-run";
 const MAX_VISIBLE_ENTROPY_FILES: usize = 500;
+const LIVE_FORENSIC_CONTROLS_ACCEPTED: bool = false;
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub enum ColdcardCaseSelection {
@@ -76,6 +77,159 @@ pub enum ColdcardCaseReaderState {
     Invalid(SharedString),
     Stale(SharedString),
     Complete,
+}
+
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum ForensicsBenchView {
+    #[default]
+    Entropy,
+    Case,
+    Lifecycle,
+    Evidence,
+    Models,
+    Publication,
+}
+
+impl ForensicsBenchView {
+    const AVAILABLE: [Self; 3] = [Self::Entropy, Self::Case, Self::Lifecycle];
+
+    fn label(self) -> &'static str {
+        match self {
+            Self::Entropy => "Entropy",
+            Self::Case => "Case",
+            Self::Lifecycle => "Lifecycle",
+            Self::Evidence => "Evidence",
+            Self::Models => "Models",
+            Self::Publication => "Publication",
+        }
+    }
+
+    fn persisted(self) -> &'static str {
+        match self {
+            Self::Entropy => "entropy",
+            Self::Case => "case",
+            Self::Lifecycle => "lifecycle",
+            Self::Evidence => "evidence",
+            Self::Models => "models",
+            Self::Publication => "publication",
+        }
+    }
+
+    fn from_persisted(value: Option<&str>) -> Self {
+        match value {
+            Some("case") => Self::Case,
+            Some("lifecycle") => Self::Lifecycle,
+            Some("evidence") => Self::Evidence,
+            Some("models") => Self::Models,
+            Some("publication") => Self::Publication,
+            _ => Self::Entropy,
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum LifecycleSelection {
+    #[default]
+    Summary,
+    Target,
+    Coverage,
+    Profile,
+    Runtime,
+    Cleanup,
+}
+
+impl LifecycleSelection {
+    const ALL: [Self; 6] = [
+        Self::Summary,
+        Self::Target,
+        Self::Coverage,
+        Self::Profile,
+        Self::Runtime,
+        Self::Cleanup,
+    ];
+
+    fn label(self) -> &'static str {
+        match self {
+            Self::Summary => "Lifecycle summary",
+            Self::Target => "Target",
+            Self::Coverage => "Coverage",
+            Self::Profile => "Tool profile",
+            Self::Runtime => "Runtime",
+            Self::Cleanup => "Cleanup",
+        }
+    }
+
+    fn persisted(self) -> &'static str {
+        match self {
+            Self::Summary => "summary",
+            Self::Target => "target",
+            Self::Coverage => "coverage",
+            Self::Profile => "profile",
+            Self::Runtime => "runtime",
+            Self::Cleanup => "cleanup",
+        }
+    }
+
+    fn from_persisted(value: Option<&str>) -> Self {
+        match value {
+            Some("target") => Self::Target,
+            Some("coverage") => Self::Coverage,
+            Some("profile") => Self::Profile,
+            Some("runtime") => Self::Runtime,
+            Some("cleanup") => Self::Cleanup,
+            _ => Self::Summary,
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ForensicsLifecycleScene {
+    AwaitingProfile,
+    AwaitingCoverage,
+    Complete,
+    Incomplete,
+    Denied,
+    IncompatibleTool,
+    Running,
+    Cancelled,
+    RecoveryRequired,
+    Cleaned,
+    Stale,
+}
+
+impl ForensicsLifecycleScene {
+    fn label(self) -> &'static str {
+        match self {
+            Self::AwaitingProfile => "Awaiting profile",
+            Self::AwaitingCoverage => "Coverage pending",
+            Self::Complete => "Preflight complete",
+            Self::Incomplete => "Incomplete",
+            Self::Denied => "Denied",
+            Self::IncompatibleTool => "Tool incompatible",
+            Self::Running => "Running",
+            Self::Cancelled => "Cancelled",
+            Self::RecoveryRequired => "Recovery required",
+            Self::Cleaned => "Cleaned",
+            Self::Stale => "Stale",
+        }
+    }
+
+    fn color(self) -> Color {
+        match self {
+            Self::Complete | Self::Cleaned => Color::Success,
+            Self::Running => Color::Accent,
+            Self::AwaitingProfile | Self::AwaitingCoverage => Color::Muted,
+            Self::Incomplete | Self::Cancelled | Self::Stale => Color::Warning,
+            Self::Denied | Self::IncompatibleTool | Self::RecoveryRequired => Color::Error,
+        }
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct ForensicsLifecyclePresentation {
+    scene: ForensicsLifecycleScene,
+    blocker: &'static str,
+    next_action: &'static str,
 }
 
 fn bundled_coldcard_evidence_workspace() -> anyhow::Result<ColdcardEvidenceWorkspaceProjection> {
@@ -149,6 +303,8 @@ pub struct ForensicsRepositoryContext {
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct ForensicsWorkbenchSnapshot {
     pub binding: RepositoryBinding,
+    pub bench_view: ForensicsBenchView,
+    pub lifecycle_selection: LifecycleSelection,
     pub selected_arm: ColdcardBenchmarkArm,
     pub readiness: Option<PreflightReadiness>,
     pub prepared_intent: Option<ForensicsLaunchIntent>,
@@ -210,6 +366,8 @@ pub struct ForensicsWorkbenchSurface {
     focus_handle: FocusHandle,
     binding: RepositoryBinding,
     repository: ForensicsRepositoryContext,
+    bench_view: ForensicsBenchView,
+    lifecycle_selection: LifecycleSelection,
     selected_arm: ColdcardBenchmarkArm,
     preflight: Option<ForensicsPreflightProjection>,
     prepared_intent: Option<ForensicsLaunchIntent>,
@@ -266,6 +424,8 @@ impl ForensicsWorkbenchSurface {
                 commit: candidate.head_commit.clone(),
                 dirty_files: candidate.git.dirty_files,
             },
+            bench_view: ForensicsBenchView::Entropy,
+            lifecycle_selection: LifecycleSelection::Summary,
             selected_arm: ColdcardBenchmarkArm::Vulnerable,
             preflight: None,
             prepared_intent: None,
@@ -316,6 +476,9 @@ impl ForensicsWorkbenchSurface {
         this.entropy_prompt_snapshots = restored.prompt_snapshots;
         this.coldcard_case_selection =
             ColdcardCaseSelection::from_persisted_rung(restored.coldcard_case_rung.as_deref());
+        this.bench_view = ForensicsBenchView::from_persisted(restored.bench_view.as_deref());
+        this.lifecycle_selection =
+            LifecycleSelection::from_persisted(restored.lifecycle_selection.as_deref());
         let mut campaigns = restored.campaigns;
         if let Some(mut active_campaign) = campaigns.pop() {
             if matches!(
@@ -643,6 +806,8 @@ impl ForensicsWorkbenchSurface {
                 .coldcard_case_selection
                 .persisted_rung()
                 .map(str::to_string),
+            bench_view: Some(self.bench_view.persisted().into()),
+            lifecycle_selection: Some(self.lifecycle_selection.persisted().into()),
         }
     }
 
@@ -1040,6 +1205,22 @@ impl ForensicsWorkbenchSurface {
         cx.notify();
     }
 
+    pub fn select_bench_view(&mut self, view: ForensicsBenchView, cx: &mut Context<Self>) {
+        self.bench_view = view;
+        self.persist_entropy_state(cx);
+        cx.notify();
+    }
+
+    pub fn select_lifecycle_stage(
+        &mut self,
+        selection: LifecycleSelection,
+        cx: &mut Context<Self>,
+    ) {
+        self.lifecycle_selection = selection;
+        self.persist_entropy_state(cx);
+        cx.notify();
+    }
+
     pub fn open_source(&mut self, citation: ForensicSourceCitation, cx: &mut Context<Self>) {
         let repository_root = self
             .selected_entropy_project
@@ -1112,6 +1293,8 @@ impl ForensicsWorkbenchSurface {
     pub fn snapshot(&self) -> ForensicsWorkbenchSnapshot {
         ForensicsWorkbenchSnapshot {
             binding: self.binding.clone(),
+            bench_view: self.bench_view,
+            lifecycle_selection: self.lifecycle_selection,
             selected_arm: self.selected_arm,
             readiness: self
                 .preflight
@@ -1183,6 +1366,486 @@ impl ForensicsWorkbenchSurface {
         self.status = "Active prompt pointer changed; prepare the run again".into();
         cx.notify();
         Ok(())
+    }
+
+    fn lifecycle_presentation(&self) -> ForensicsLifecyclePresentation {
+        if let Some(preflight) = self.preflight.as_ref() {
+            let same_repository = self
+                .repository
+                .clone_url
+                .as_deref()
+                .is_some_and(|clone_url| clone_url == preflight.target.clone_url);
+            if same_repository
+                && self.repository.commit.as_deref().is_some_and(|commit| {
+                    commit != preflight.target.commit
+                        && !commit.starts_with(&preflight.target.commit)
+                })
+            {
+                return ForensicsLifecyclePresentation {
+                    scene: ForensicsLifecycleScene::Stale,
+                    blocker: "The preflight commit no longer matches the selected project",
+                    next_action: "Refresh preflight for the current commit",
+                };
+            }
+            if !preflight
+                .worker
+                .capability_refs
+                .iter()
+                .any(|capability| capability.contains("forensics/source-read"))
+            {
+                return ForensicsLifecyclePresentation {
+                    scene: ForensicsLifecycleScene::IncompatibleTool,
+                    blocker: "The managed profile does not prove read-only forensic source access",
+                    next_action: "Select an admitted compatible profile",
+                };
+            }
+        }
+
+        if let Some(run) = self.run.as_ref() {
+            let failure_text = run
+                .failure
+                .as_ref()
+                .map(|failure| {
+                    format!("{} {}", failure.reason_ref, failure.message).to_ascii_lowercase()
+                })
+                .unwrap_or_default();
+            if failure_text.contains("stale") {
+                return ForensicsLifecyclePresentation {
+                    scene: ForensicsLifecycleScene::Stale,
+                    blocker: "The worker observation is older than the selected run generation",
+                    next_action: "Refresh the run projection before acting",
+                };
+            }
+            if failure_text.contains("incompatible") || failure_text.contains("tool-contract") {
+                return ForensicsLifecyclePresentation {
+                    scene: ForensicsLifecycleScene::IncompatibleTool,
+                    blocker: "The worker tool contract is incompatible with this prompt profile",
+                    next_action: "Select a compatible prompt and profile pair",
+                };
+            }
+            return match run.phase {
+                ForensicsRunPhase::Cleaned => ForensicsLifecyclePresentation {
+                    scene: ForensicsLifecycleScene::Cleaned,
+                    blocker: "No lifecycle blocker",
+                    next_action: "Inspect retained private evidence",
+                },
+                ForensicsRunPhase::RecoveryRequired | ForensicsRunPhase::Failed => {
+                    ForensicsLifecyclePresentation {
+                        scene: ForensicsLifecycleScene::RecoveryRequired,
+                        blocker: "The worker did not prove terminal cleanup",
+                        next_action: "Recover the exact worker generation and verify cleanup",
+                    }
+                }
+                ForensicsRunPhase::Refused => ForensicsLifecyclePresentation {
+                    scene: ForensicsLifecycleScene::Denied,
+                    blocker: "Managed placement was refused",
+                    next_action: "Inspect the refusal receipt before retrying",
+                },
+                ForensicsRunPhase::CancelRequested
+                | ForensicsRunPhase::Interrupting
+                | ForensicsRunPhase::Settled
+                    if run.timestamps.cancel_requested_at.is_some() =>
+                {
+                    ForensicsLifecyclePresentation {
+                        scene: ForensicsLifecycleScene::Cancelled,
+                        blocker: "Cancellation is retained until cleanup is proven",
+                        next_action: "Verify deletion and zero-residue cleanup",
+                    }
+                }
+                ForensicsRunPhase::Admitting
+                | ForensicsRunPhase::WorkerReady
+                | ForensicsRunPhase::Running
+                | ForensicsRunPhase::CancelRequested
+                | ForensicsRunPhase::Interrupting
+                | ForensicsRunPhase::Settled
+                | ForensicsRunPhase::Deleting => ForensicsLifecyclePresentation {
+                    scene: ForensicsLifecycleScene::Running,
+                    blocker: "Live run controls remain evidence-gated",
+                    next_action: "Observe the host-owned lifecycle projection",
+                },
+                ForensicsRunPhase::Prepared => ForensicsLifecyclePresentation {
+                    scene: ForensicsLifecycleScene::Complete,
+                    blocker: "Worker launch is not accepted for this build",
+                    next_action: "Wait for accepted live worker and source-delivery receipts",
+                },
+            };
+        }
+
+        match self
+            .preflight
+            .as_ref()
+            .map(|preflight| preflight.readiness())
+        {
+            None => ForensicsLifecyclePresentation {
+                scene: ForensicsLifecycleScene::AwaitingProfile,
+                blocker: "No admitted OpenAgents managed profile is attached",
+                next_action: "Attach an admitted managed profile",
+            },
+            Some(PreflightReadiness::AwaitingCoverage) => ForensicsLifecyclePresentation {
+                scene: ForensicsLifecycleScene::AwaitingCoverage,
+                blocker: "The coverage manifest is not terminal",
+                next_action: "Wait for a complete, incomplete, or denied manifest",
+            },
+            Some(PreflightReadiness::Ready) => ForensicsLifecyclePresentation {
+                scene: ForensicsLifecycleScene::Complete,
+                blocker: "Live prepare and launch are not accepted for this build",
+                next_action: "Inspect the preflight receipt and source boundary",
+            },
+            Some(PreflightReadiness::IncompleteResearch) => ForensicsLifecyclePresentation {
+                scene: ForensicsLifecycleScene::Incomplete,
+                blocker: "Coverage is incomplete and remains visible in every result",
+                next_action: "Inspect missing and excluded source before acknowledgment",
+            },
+            Some(PreflightReadiness::Denied) => ForensicsLifecyclePresentation {
+                scene: ForensicsLifecycleScene::Denied,
+                blocker: "Coverage or placement policy denied the run",
+                next_action: "Inspect the exact denial reason refs",
+            },
+        }
+    }
+
+    fn render_bench_navigation(&self, cx: &mut Context<Self>) -> AnyElement {
+        h_flex()
+            .id("omega.forensics.bench.navigation")
+            .debug_selector(|| "omega.forensics.bench.navigation".into())
+            .w_full()
+            .gap_1()
+            .p_1()
+            .rounded(px(8.))
+            .bg(cx.theme().colors().element_background)
+            .role(gpui::Role::List)
+            .aria_label("Forensics bench views")
+            .children(
+                ForensicsBenchView::AVAILABLE
+                    .into_iter()
+                    .enumerate()
+                    .map(|(index, view)| {
+                        let selected = self.bench_view == view;
+                        div()
+                            .id(("omega.forensics.bench.view", index))
+                            .px_3()
+                            .py_1p5()
+                            .rounded(px(6.))
+                            .cursor_pointer()
+                            .tab_index(0)
+                            .role(gpui::Role::ListItem)
+                            .aria_label(format!("{} forensics view", view.label()))
+                            .aria_selected(selected)
+                            .when(selected, |item| {
+                                item.bg(cx.theme().colors().element_selected)
+                            })
+                            .hover(|item| item.bg(cx.theme().colors().element_hover))
+                            .child(Label::new(view.label()).size(LabelSize::Small))
+                            .on_click(
+                                cx.listener(move |this, _, _, cx| this.select_bench_view(view, cx)),
+                            )
+                            .on_key_down(cx.listener(
+                                move |this, event: &gpui::KeyDownEvent, _, cx| {
+                                    if matches!(event.keystroke.key.as_str(), "enter" | "space") {
+                                        this.select_bench_view(view, cx);
+                                        cx.stop_propagation();
+                                    }
+                                },
+                            ))
+                    }),
+            )
+            .into_any_element()
+    }
+
+    fn render_lifecycle_workspace(&self, cx: &mut Context<Self>) -> AnyElement {
+        let presentation = self.lifecycle_presentation();
+        let target = self.preflight.as_ref().map(|preflight| &preflight.target);
+        let coverage = self.preflight.as_ref().map(|preflight| &preflight.coverage);
+        let run = self.run.as_ref();
+        let selected = self.lifecycle_selection;
+
+        let list = v_flex()
+            .id("omega.forensics.lifecycle.list")
+            .w(px(260.))
+            .flex_shrink_0()
+            .gap_1()
+            .p_2()
+            .border_r_1()
+            .border_color(cx.theme().colors().border_variant)
+            .role(gpui::Role::List)
+            .aria_label("Forensic lifecycle stages")
+            .children(
+                LifecycleSelection::ALL
+                    .into_iter()
+                    .enumerate()
+                    .map(|(index, stage)| {
+                        let is_selected = selected == stage;
+                        div()
+                            .id(("omega.forensics.lifecycle.stage", index))
+                            .px_3()
+                            .py_2()
+                            .rounded(px(6.))
+                            .cursor_pointer()
+                            .tab_index(0)
+                            .role(gpui::Role::ListItem)
+                            .aria_label(stage.label())
+                            .aria_selected(is_selected)
+                            .when(is_selected, |row| {
+                                row.bg(cx.theme().colors().element_selected)
+                            })
+                            .hover(|row| row.bg(cx.theme().colors().element_hover))
+                            .child(
+                                h_flex()
+                                    .w_full()
+                                    .justify_between()
+                                    .child(Label::new(stage.label()).size(LabelSize::Small))
+                                    .child(
+                                        Icon::new(if stage == LifecycleSelection::Summary {
+                                            IconName::Crosshair
+                                        } else {
+                                            IconName::ChevronRight
+                                        })
+                                        .size(IconSize::XSmall)
+                                        .color(Color::Muted),
+                                    ),
+                            )
+                            .on_click(cx.listener(move |this, _, _, cx| {
+                                this.select_lifecycle_stage(stage, cx)
+                            }))
+                            .on_key_down(cx.listener(
+                                move |this, event: &gpui::KeyDownEvent, _, cx| {
+                                    if matches!(event.keystroke.key.as_str(), "enter" | "space") {
+                                        this.select_lifecycle_stage(stage, cx);
+                                        cx.stop_propagation();
+                                    }
+                                },
+                            ))
+                    }),
+            );
+
+        let detail = v_flex()
+            .id("omega.forensics.lifecycle.detail")
+            .min_w_0()
+            .flex_1()
+            .gap_3()
+            .p_4()
+            .role(gpui::Role::Group)
+            .aria_label(format!("{} detail", selected.label()))
+            .child(
+                h_flex()
+                    .w_full()
+                    .justify_between()
+                    .gap_3()
+                    .child(Label::new(selected.label()).size(LabelSize::Large))
+                    .child(
+                        Label::new(presentation.scene.label())
+                            .size(LabelSize::XSmall)
+                            .color(presentation.scene.color()),
+                    ),
+            )
+            .when(selected == LifecycleSelection::Summary, |detail| {
+                detail
+                    .child(Self::render_fact("State", presentation.scene.label()))
+                    .child(Self::render_fact("Blocker", presentation.blocker))
+                    .child(Self::render_fact("Next action", presentation.next_action))
+                    .child(Self::render_fact("Authority", "OpenAgents projections"))
+            })
+            .when(selected == LifecycleSelection::Target, |detail| {
+                detail
+                    .child(Self::render_fact(
+                        "Repository",
+                        target.map_or(self.repository.display_name.to_string(), |target| {
+                            target.display_name.clone()
+                        }),
+                    ))
+                    .child(Self::render_fact(
+                        "Commit",
+                        target.map_or_else(
+                            || {
+                                self.repository
+                                    .commit
+                                    .clone()
+                                    .unwrap_or_else(|| "Unavailable".into())
+                            },
+                            |target| target.commit.clone().into(),
+                        ),
+                    ))
+                    .child(Self::render_fact(
+                        "Source",
+                        target.map_or("Local project", |target| {
+                            source_state_label(target.source_state)
+                        }),
+                    ))
+            })
+            .when(selected == LifecycleSelection::Coverage, |detail| {
+                detail
+                    .child(Self::render_fact(
+                        "Manifest",
+                        coverage
+                            .and_then(|coverage| coverage.manifest_ref.clone())
+                            .unwrap_or_else(|| "Unavailable".into()),
+                    ))
+                    .child(Self::render_fact(
+                        "Present / missing",
+                        coverage.map_or_else(
+                            || "Unavailable".into(),
+                            |coverage| format!("{} / {}", coverage.present, coverage.missing),
+                        ),
+                    ))
+                    .child(Self::render_fact(
+                        "Reason refs",
+                        coverage.map_or_else(
+                            || "Unavailable".into(),
+                            |coverage| {
+                                if coverage.reason_refs.is_empty() {
+                                    "None".into()
+                                } else {
+                                    coverage.reason_refs.join(" · ")
+                                }
+                            },
+                        ),
+                    ))
+            })
+            .when(selected == LifecycleSelection::Profile, |detail| {
+                detail
+                    .child(Self::render_fact(
+                        "Profile",
+                        self.preflight.as_ref().map_or("Unavailable", |preflight| {
+                            preflight.worker.profile_digest.as_str()
+                        }),
+                    ))
+                    .child(Self::render_fact(
+                        "Capabilities",
+                        self.preflight.as_ref().map_or_else(
+                            || "Unavailable".into(),
+                            |preflight| preflight.worker.capability_refs.join(" · "),
+                        ),
+                    ))
+                    .child(Self::render_fact("Network", "Broker only"))
+            })
+            .when(selected == LifecycleSelection::Runtime, |detail| {
+                detail
+                    .child(Self::render_fact(
+                        "Run",
+                        run.map_or("Not prepared", |run| run.run_ref.as_str()),
+                    ))
+                    .child(Self::render_fact(
+                        "Phase",
+                        run.map_or("Not started", |run| run_phase_label(run.phase)),
+                    ))
+                    .child(Self::render_fact(
+                        "Failure",
+                        run.and_then(|run| run.failure.as_ref())
+                            .map_or("None", |failure| failure.message.as_str()),
+                    ))
+            })
+            .when(selected == LifecycleSelection::Cleanup, |detail| {
+                detail
+                    .child(Self::render_fact(
+                        "Deletion receipt",
+                        run.and_then(|run| run.placement.as_ref())
+                            .and_then(|placement| placement.deletion_receipt_ref.as_deref())
+                            .unwrap_or("Unavailable"),
+                    ))
+                    .child(Self::render_fact(
+                        "Cleanup receipt",
+                        run.and_then(|run| run.placement.as_ref())
+                            .and_then(|placement| placement.cleanup_receipt_ref.as_deref())
+                            .unwrap_or("Unavailable"),
+                    ))
+                    .child(Self::render_fact(
+                        "Residue",
+                        if presentation.scene == ForensicsLifecycleScene::Cleaned {
+                            "Zero residue observed"
+                        } else {
+                            "Not proven"
+                        },
+                    ))
+            })
+            .child(
+                h_flex()
+                    .gap_2()
+                    .pt_2()
+                    .child(
+                        Button::new("omega.forensics.lifecycle.prepare", "Prepare run")
+                            .size(ButtonSize::Compact)
+                            .disabled(!LIVE_FORENSIC_CONTROLS_ACCEPTED),
+                    )
+                    .child(
+                        Button::new("omega.forensics.lifecycle.launch", "Launch worker")
+                            .size(ButtonSize::Compact)
+                            .disabled(!LIVE_FORENSIC_CONTROLS_ACCEPTED),
+                    )
+                    .child(
+                        Label::new("Live controls require accepted worker and source receipts")
+                            .size(LabelSize::XSmall)
+                            .color(Color::Muted),
+                    ),
+            );
+
+        v_flex()
+            .id("omega.forensics.lifecycle.workspace")
+            .debug_selector(|| "omega.forensics.lifecycle.workspace".into())
+            .w_full()
+            .rounded(px(10.))
+            .border_1()
+            .border_color(cx.theme().colors().border_variant)
+            .bg(cx.theme().colors().surface_background)
+            .role(gpui::Role::Region)
+            .aria_label("Forensic preflight and lifecycle workspace")
+            .child(
+                h_flex()
+                    .w_full()
+                    .justify_between()
+                    .gap_3()
+                    .px_4()
+                    .py_3()
+                    .border_b_1()
+                    .border_color(cx.theme().colors().border_variant)
+                    .child(Label::new("Preflight and lifecycle").size(LabelSize::Small))
+                    .child(
+                        Label::new(presentation.scene.label())
+                            .size(LabelSize::XSmall)
+                            .color(presentation.scene.color()),
+                    ),
+            )
+            .child(h_flex().w_full().items_stretch().child(list).child(detail))
+            .into_any_element()
+    }
+
+    fn render_workbench_header(
+        &self,
+        repository_name: SharedString,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
+        h_flex()
+            .w_full()
+            .justify_between()
+            .gap_4()
+            .child(
+                v_flex()
+                    .gap_1()
+                    .child(
+                        h_flex()
+                            .gap_2()
+                            .child(Icon::new(IconName::Crosshair).size(IconSize::Medium))
+                            .child(Label::new("Entropy forensics").size(LabelSize::Large)),
+                    )
+                    .child(
+                        Label::new(
+                            "Trace entropy sources, evidence, and lifecycle truth across pinned source.",
+                        )
+                        .size(LabelSize::Small)
+                        .color(Color::Muted),
+                    ),
+            )
+            .child(
+                h_flex()
+                    .max_w(px(320.))
+                    .gap_2()
+                    .px_3()
+                    .py_1p5()
+                    .rounded_full()
+                    .bg(cx.theme().colors().element_background)
+                    .child(Icon::new(IconName::Folder).size(IconSize::Small))
+                    .child(div().truncate().child(repository_name)),
+            )
+            .into_any_element()
     }
 
     fn render_fact(
@@ -1612,36 +2275,41 @@ impl Render for ForensicsWorkbenchSurface {
             .as_ref()
             .map(|preflight| preflight.readiness());
         let coverage = self.preflight.as_ref().map(|preflight| &preflight.coverage);
-        let can_prepare = self.preflight.as_ref().is_some_and(|preflight| {
-            matches!(preflight.readiness(), PreflightReadiness::Ready)
-                || (preflight.readiness() == PreflightReadiness::IncompleteResearch
-                    && preflight.incomplete_acknowledged)
-        });
+        let can_prepare = LIVE_FORENSIC_CONTROLS_ACCEPTED
+            && self.preflight.as_ref().is_some_and(|preflight| {
+                matches!(preflight.readiness(), PreflightReadiness::Ready)
+                    || (preflight.readiness() == PreflightReadiness::IncompleteResearch
+                        && preflight.incomplete_acknowledged)
+            });
         let needs_acknowledgment = self.preflight.as_ref().is_some_and(|preflight| {
             preflight.coverage.status == CoverageStatus::Incomplete
                 && !preflight.incomplete_acknowledged
         });
         let run_phase = self.run.as_ref().map(|run| run.phase);
-        let can_launch = self.prepared_intent.is_some() && self.run.is_none();
-        let can_refresh = run_phase.is_some_and(|phase| {
-            !matches!(
-                phase,
-                ForensicsRunPhase::Prepared
-                    | ForensicsRunPhase::Admitting
-                    | ForensicsRunPhase::Cleaned
-                    | ForensicsRunPhase::Refused
-                    | ForensicsRunPhase::Failed
-            )
-        });
-        let can_cancel = run_phase.is_some_and(|phase| matches!(phase, ForensicsRunPhase::Running));
-        let can_cleanup = run_phase.is_some_and(|phase| {
-            matches!(
-                phase,
-                ForensicsRunPhase::WorkerReady
-                    | ForensicsRunPhase::Settled
-                    | ForensicsRunPhase::RecoveryRequired
-            )
-        });
+        let can_launch =
+            LIVE_FORENSIC_CONTROLS_ACCEPTED && self.prepared_intent.is_some() && self.run.is_none();
+        let can_refresh = LIVE_FORENSIC_CONTROLS_ACCEPTED
+            && run_phase.is_some_and(|phase| {
+                !matches!(
+                    phase,
+                    ForensicsRunPhase::Prepared
+                        | ForensicsRunPhase::Admitting
+                        | ForensicsRunPhase::Cleaned
+                        | ForensicsRunPhase::Refused
+                        | ForensicsRunPhase::Failed
+                )
+            });
+        let can_cancel = LIVE_FORENSIC_CONTROLS_ACCEPTED
+            && run_phase.is_some_and(|phase| matches!(phase, ForensicsRunPhase::Running));
+        let can_cleanup = LIVE_FORENSIC_CONTROLS_ACCEPTED
+            && run_phase.is_some_and(|phase| {
+                matches!(
+                    phase,
+                    ForensicsRunPhase::WorkerReady
+                        | ForensicsRunPhase::Settled
+                        | ForensicsRunPhase::RecoveryRequired
+                )
+            });
         let review = self.review.clone();
         let source_resolutions = self.source_resolutions.clone();
         let prompt_workspace = self.prompt_workspace.clone();
@@ -1709,6 +2377,43 @@ impl Render for ForensicsWorkbenchSurface {
             Color::Muted
         };
         let coldcard_case_reader = self.render_coldcard_case_reader(cx);
+        let header = self.render_workbench_header(repository_name.clone(), cx);
+        let navigation = self.render_bench_navigation(cx);
+
+        if self.bench_view == ForensicsBenchView::Case {
+            return v_flex()
+                .id("omega.forensics.workbench")
+                .track_focus(&self.focus_handle)
+                .tab_index(0)
+                .role(gpui::Role::Group)
+                .aria_label("Forensics case workspace")
+                .size_full()
+                .overflow_y_scroll()
+                .p_6()
+                .gap_4()
+                .child(header)
+                .child(navigation)
+                .child(coldcard_case_reader)
+                .into_any_element();
+        }
+
+        if self.bench_view == ForensicsBenchView::Lifecycle {
+            let lifecycle = self.render_lifecycle_workspace(cx);
+            return v_flex()
+                .id("omega.forensics.workbench")
+                .track_focus(&self.focus_handle)
+                .tab_index(0)
+                .role(gpui::Role::Group)
+                .aria_label("Forensics lifecycle workspace")
+                .size_full()
+                .overflow_y_scroll()
+                .p_6()
+                .gap_4()
+                .child(header)
+                .child(navigation)
+                .child(lifecycle)
+                .into_any_element();
+        }
 
         v_flex()
             .id("omega.forensics.workbench")
@@ -1721,42 +2426,8 @@ impl Render for ForensicsWorkbenchSurface {
             .overflow_y_scroll()
             .p_6()
             .gap_4()
-            .child(
-                h_flex()
-                    .w_full()
-                    .justify_between()
-                    .gap_4()
-                    .child(
-                        v_flex()
-                            .gap_1()
-                            .child(
-                                h_flex()
-                                    .gap_2()
-                                    .child(
-                                        Icon::new(IconName::Crosshair).size(IconSize::Medium),
-                                    )
-                                    .child(Label::new("Entropy forensics").size(LabelSize::Large)),
-                            )
-                            .child(
-                                Label::new(
-                                    "Trace entropy sources, fallbacks, and secret-randomness consumers across pinned source.",
-                                )
-                                .size(LabelSize::Small)
-                                .color(Color::Muted),
-                            ),
-                    )
-                    .child(
-                        h_flex()
-                            .max_w(px(320.))
-                            .gap_2()
-                            .px_3()
-                            .py_1p5()
-                            .rounded_full()
-                            .bg(cx.theme().colors().element_background)
-                            .child(Icon::new(IconName::Folder).size(IconSize::Small))
-                            .child(div().truncate().child(repository_name.clone())),
-                    ),
-            )
+            .child(header)
+            .child(navigation)
             .child(
                 h_flex()
                     .id("omega.forensics.entropy.status")
@@ -1776,7 +2447,6 @@ impl Render for ForensicsWorkbenchSurface {
                             .color(status_color),
                     ),
             )
-            .child(coldcard_case_reader)
             .child(
                 v_flex()
                     .gap_2()
@@ -3269,6 +3939,7 @@ impl Render for ForensicsWorkbenchSurface {
                         })),
                 )
             })
+            .into_any_element()
     }
 }
 
@@ -3817,6 +4488,131 @@ mod tests {
                 assert_eq!(surface.read(cx).snapshot().selected_arm, arm);
                 assert_eq!(surface.read(cx).snapshot().readiness, None);
             }
+        });
+    }
+
+    #[gpui::test]
+    fn lifecycle_projection_covers_every_named_ui_scene(cx: &mut gpui::TestAppContext) {
+        cx.update(|cx| {
+            let binding = RepositoryBinding::new("repo", "worktree").expect("valid binding");
+            let surface = cx.new(|cx| ForensicsWorkbenchSurface::new(&candidate(binding), cx));
+            assert_eq!(
+                surface.read(cx).lifecycle_presentation().scene,
+                ForensicsLifecycleScene::AwaitingProfile
+            );
+
+            let mut preflight = complete_preflight();
+            preflight.coverage = CoverageSummaryProjection::pending();
+            surface.update(cx, |surface, _| surface.preflight = Some(preflight));
+            assert_eq!(
+                surface.read(cx).lifecycle_presentation().scene,
+                ForensicsLifecycleScene::AwaitingCoverage
+            );
+
+            surface.update(cx, |surface, _| {
+                surface.preflight = Some(complete_preflight())
+            });
+            assert_eq!(
+                surface.read(cx).lifecycle_presentation().scene,
+                ForensicsLifecycleScene::Complete
+            );
+
+            let mut preflight = complete_preflight();
+            preflight.coverage.status = CoverageStatus::Incomplete;
+            preflight.coverage.missing = 2;
+            surface.update(cx, |surface, _| surface.preflight = Some(preflight));
+            assert_eq!(
+                surface.read(cx).lifecycle_presentation().scene,
+                ForensicsLifecycleScene::Incomplete
+            );
+
+            let mut preflight = complete_preflight();
+            preflight.coverage.status = CoverageStatus::Denied;
+            preflight.coverage.present = 0;
+            preflight.coverage.reason_refs = vec!["reason.policy-denied".into()];
+            surface.update(cx, |surface, _| surface.preflight = Some(preflight));
+            assert_eq!(
+                surface.read(cx).lifecycle_presentation().scene,
+                ForensicsLifecycleScene::Denied
+            );
+
+            let mut preflight = complete_preflight();
+            preflight.worker.capability_refs = vec!["capability.forensics.metadata".into()];
+            surface.update(cx, |surface, _| surface.preflight = Some(preflight));
+            assert_eq!(
+                surface.read(cx).lifecycle_presentation().scene,
+                ForensicsLifecycleScene::IncompatibleTool
+            );
+
+            surface.update(cx, |surface, _| {
+                surface.preflight = Some(complete_preflight());
+                let mut run = ForensicsRunProjection::prepared("run.lifecycle.fixture".into())
+                    .expect("run projection");
+                run.phase = ForensicsRunPhase::Running;
+                surface.run = Some(run);
+            });
+            assert_eq!(
+                surface.read(cx).lifecycle_presentation().scene,
+                ForensicsLifecycleScene::Running
+            );
+
+            surface.update(cx, |surface, _| {
+                let run = surface.run.as_mut().expect("run");
+                run.phase = ForensicsRunPhase::Settled;
+                run.timestamps.cancel_requested_at = Some("2026-08-02T16:00:00Z".into());
+            });
+            assert_eq!(
+                surface.read(cx).lifecycle_presentation().scene,
+                ForensicsLifecycleScene::Cancelled
+            );
+
+            surface.update(cx, |surface, _| {
+                surface.run.as_mut().expect("run").phase = ForensicsRunPhase::RecoveryRequired;
+            });
+            assert_eq!(
+                surface.read(cx).lifecycle_presentation().scene,
+                ForensicsLifecycleScene::RecoveryRequired
+            );
+
+            surface.update(cx, |surface, _| {
+                surface.run.as_mut().expect("run").phase = ForensicsRunPhase::Cleaned;
+            });
+            assert_eq!(
+                surface.read(cx).lifecycle_presentation().scene,
+                ForensicsLifecycleScene::Cleaned
+            );
+
+            surface.update(cx, |surface, _| {
+                surface.run = None;
+                let preflight = complete_preflight();
+                surface.repository.clone_url = Some(preflight.target.clone_url.clone().into());
+                surface.repository.commit = Some("ffffffffffffffffffffffffffffffffffffffff".into());
+                surface.preflight = Some(preflight);
+            });
+            assert_eq!(
+                surface.read(cx).lifecycle_presentation().scene,
+                ForensicsLifecycleScene::Stale
+            );
+        });
+    }
+
+    #[gpui::test]
+    fn bench_and_lifecycle_selection_are_presentation_only(cx: &mut gpui::TestAppContext) {
+        cx.update(|cx| {
+            let binding = RepositoryBinding::new("repo", "worktree").expect("valid binding");
+            let surface = cx.new(|cx| ForensicsWorkbenchSurface::new(&candidate(binding), cx));
+            let before = surface.read(cx).snapshot();
+            surface.update(cx, |surface, cx| {
+                surface.select_bench_view(ForensicsBenchView::Lifecycle, cx);
+                surface.select_lifecycle_stage(LifecycleSelection::Cleanup, cx);
+            });
+            let after = surface.read(cx).snapshot();
+            assert_eq!(after.bench_view, ForensicsBenchView::Lifecycle);
+            assert_eq!(after.lifecycle_selection, LifecycleSelection::Cleanup);
+            assert_eq!(after.prepared_intent, before.prepared_intent);
+            assert_eq!(after.run, before.run);
+            assert_eq!(after.review, before.review);
+            assert!(!LIVE_FORENSIC_CONTROLS_ACCEPTED);
         });
     }
 

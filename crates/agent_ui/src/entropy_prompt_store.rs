@@ -28,6 +28,10 @@ pub struct EntropyForensicsRestoreState {
     pub campaigns: Vec<EntropyCampaignProjection>,
     #[serde(default)]
     pub coldcard_case_rung: Option<String>,
+    #[serde(default)]
+    pub bench_view: Option<String>,
+    #[serde(default)]
+    pub lifecycle_selection: Option<String>,
 }
 
 impl Default for EntropyForensicsRestoreState {
@@ -40,6 +44,8 @@ impl Default for EntropyForensicsRestoreState {
             runs: Vec::new(),
             campaigns: Vec::new(),
             coldcard_case_rung: None,
+            bench_view: None,
+            lifecycle_selection: None,
         }
     }
 }
@@ -80,6 +86,26 @@ impl EntropyForensicsRestoreState {
             )
         }) {
             anyhow::bail!("Coldcard case restore contains an unknown evidence rung");
+        }
+        if self.bench_view.as_deref().is_some_and(|view| {
+            !matches!(
+                view,
+                "entropy" | "case" | "lifecycle" | "evidence" | "models" | "publication"
+            )
+        }) {
+            anyhow::bail!("forensics restore contains an unknown bench view");
+        }
+        if self
+            .lifecycle_selection
+            .as_deref()
+            .is_some_and(|selection| {
+                !matches!(
+                    selection,
+                    "summary" | "target" | "coverage" | "profile" | "runtime" | "cleanup"
+                )
+            })
+        {
+            anyhow::bail!("forensics restore contains an unknown lifecycle selection");
         }
         if let Some(parent_prompt_ref) = &self.parent_prompt_ref
             && !self
@@ -180,6 +206,8 @@ mod tests {
             runs: Vec::new(),
             campaigns: Vec::new(),
             coldcard_case_rung: Some("entity".into()),
+            bench_view: Some("lifecycle".into()),
+            lifecycle_selection: Some("cleanup".into()),
         };
         state.validate().expect("valid restore state");
         let encoded = serde_json::to_string(&state).expect("encode restore state");
