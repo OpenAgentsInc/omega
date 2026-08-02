@@ -1845,6 +1845,8 @@ pub enum ForensicMatrixOutcome {
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct ForensicMatrixArm {
     pub arm_ref: String,
+    pub model_family_ref: String,
+    pub role_ref: String,
     pub prompt_digest: String,
     pub model_digest: String,
     pub effort_ref: String,
@@ -1877,6 +1879,8 @@ impl ForensicMatrixArm {
         }
         for value in [
             &self.arm_ref,
+            &self.model_family_ref,
+            &self.role_ref,
             &self.effort_ref,
             &self.scope_ref,
             &self.dependency_policy_ref,
@@ -3826,6 +3830,8 @@ mod tests {
     fn matrix_arm(suffix: &str, digest_character: char) -> ForensicMatrixArm {
         ForensicMatrixArm {
             arm_ref: format!("arm.forensic.{suffix}"),
+            model_family_ref: format!("model-family.forensic.{suffix}"),
+            role_ref: format!("role.forensic.{suffix}"),
             prompt_digest: digest(digest_character),
             model_digest: digest('1'),
             effort_ref: "effort.high".into(),

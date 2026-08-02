@@ -79,6 +79,25 @@ bench and queue row and activate it with Enter or Space. Selected rows publish
 their selected accessibility state and the list/detail regions have explicit
 labels.
 
+## Model panel and run matrix
+
+The **Models** bench view shows a bounded run list and one scorecard. Each run
+keeps its model family, forensic role, eligibility, typed outcome, right-censor
+boundary, prompt and model digests, token exactness, cost exactness, qualified
+findings, and arm-specific disagreement. An unavailable token or cost value is
+shown as unavailable, never as zero.
+
+The matched-comparison block exposes the frozen dataset, metric-definition, and
+evaluator digests plus common findings. Agreement is not truth, and a majority
+vote cannot promote a forensic claim. The projection's hard gates and promotion
+state remain authoritative.
+
+Before an observed matrix exists, Omega displays a validated synthetic
+Coldcard matrix with an explicit **Synthetic fixture** badge. It contains an
+eligible hit, a right-censored miss, and an ineligible clean control so that the
+important scenes stay inspectable without implying a live run. Model-run
+selection is restored presentation state only.
+
 ## Evidence ladder
 
 The ladder always contains nine ordered rungs: source flaw, artifact reality,
@@ -133,5 +152,6 @@ cargo test -p omega_forensics coldcard_workspace
 cargo test -p agent_ui forensics_workbench::tests::coldcard --lib
 cargo test -p agent_ui forensics_workbench::tests::lifecycle --lib
 cargo test -p agent_ui forensics_workbench::tests::evidence --lib
+cargo test -p agent_ui forensics_workbench::tests::model --lib
 ./script/clippy -p omega_forensics -p agent_ui
 ```

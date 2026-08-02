@@ -34,6 +34,8 @@ pub struct EntropyForensicsRestoreState {
     pub lifecycle_selection: Option<String>,
     #[serde(default)]
     pub evidence_selection: Option<String>,
+    #[serde(default)]
+    pub model_run_ref: Option<String>,
 }
 
 impl Default for EntropyForensicsRestoreState {
@@ -49,6 +51,7 @@ impl Default for EntropyForensicsRestoreState {
             bench_view: None,
             lifecycle_selection: None,
             evidence_selection: None,
+            model_run_ref: None,
         }
     }
 }
@@ -117,6 +120,13 @@ impl EntropyForensicsRestoreState {
             )
         }) {
             anyhow::bail!("forensics restore contains an unknown evidence selection");
+        }
+        if self
+            .model_run_ref
+            .as_deref()
+            .is_some_and(|run_ref| run_ref.len() > 256 || !run_ref.starts_with("run."))
+        {
+            anyhow::bail!("forensics restore contains an invalid model run ref");
         }
         if let Some(parent_prompt_ref) = &self.parent_prompt_ref
             && !self
@@ -220,6 +230,7 @@ mod tests {
             bench_view: Some("lifecycle".into()),
             lifecycle_selection: Some("cleanup".into()),
             evidence_selection: Some("disputes".into()),
+            model_run_ref: Some("run.matrix.fixture".into()),
         };
         state.validate().expect("valid restore state");
         let encoded = serde_json::to_string(&state).expect("encode restore state");

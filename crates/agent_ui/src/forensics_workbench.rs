@@ -91,7 +91,13 @@ pub enum ForensicsBenchView {
 }
 
 impl ForensicsBenchView {
-    const AVAILABLE: [Self; 4] = [Self::Entropy, Self::Case, Self::Lifecycle, Self::Evidence];
+    const AVAILABLE: [Self; 5] = [
+        Self::Entropy,
+        Self::Case,
+        Self::Lifecycle,
+        Self::Evidence,
+        Self::Models,
+    ];
 
     fn label(self) -> &'static str {
         match self {
@@ -290,6 +296,176 @@ fn bundled_coldcard_evidence_workspace() -> anyhow::Result<ColdcardEvidenceWorks
     Ok(workspace)
 }
 
+fn fixture_digest(character: char) -> String {
+    format!("sha256:{}", character.to_string().repeat(64))
+}
+
+fn bundled_coldcard_model_matrix() -> anyhow::Result<ForensicsMatrixProjection> {
+    use omega_forensics::{
+        ForensicDatasetSplit, ForensicMatrixArm, ForensicMatrixHardGates, ForensicMatrixOutcome,
+        ForensicMatrixPopulation, ForensicMatrixRun, ForensicParetoStatus,
+    };
+
+    let prompt_digest = fixture_digest('1');
+    let arm =
+        |suffix: &str, model_family_ref: &str, role_ref: &str, model: char| ForensicMatrixArm {
+            arm_ref: format!("arm.forensic.{suffix}"),
+            model_family_ref: model_family_ref.into(),
+            role_ref: role_ref.into(),
+            prompt_digest: prompt_digest.clone(),
+            model_digest: fixture_digest(model),
+            effort_ref: "effort.high".into(),
+            scope_ref: "scope.coldcard.entropy".into(),
+            dependency_policy_ref: "dependency.pinned-recursive".into(),
+            random_seed: 7,
+            tool_surface_digest: fixture_digest('2'),
+            analysis_mode_ref: "analysis.static-build-and-fixture".into(),
+            worker_image_digest: fixture_digest('3'),
+            worker_profile_digest: fixture_digest('4'),
+            source_bundle_digest: fixture_digest(model),
+            writable_disk_ref: format!("disk.forensic.{suffix}"),
+            provider_session_ref: format!("provider-session.forensic.{suffix}"),
+            auth_home_ref: format!("auth-home.forensic.{suffix}"),
+            environment_ref: format!("environment.forensic.{suffix}"),
+            worker_state_ref: format!("worker-state.forensic.{suffix}"),
+        };
+    let specialist = arm(
+        "entropy-specialist",
+        "model-family.openai.gpt-5",
+        "role.forensic.entropy-specialist",
+        '6',
+    );
+    let generalist = arm(
+        "general-reviewer",
+        "model-family.anthropic.claude",
+        "role.forensic.general-reviewer",
+        '7',
+    );
+    let clean_control = arm(
+        "clean-control",
+        "model-family.openai.gpt-5",
+        "role.forensic.clean-control",
+        '8',
+    );
+    let run = |run_ref: &str,
+               run_digest_character: char,
+               arm_ref: String,
+               split,
+               population,
+               outcome,
+               censored,
+               censor_at_milliseconds,
+               identification_milliseconds,
+               identification_tokens,
+               total_tokens,
+               token_exactness,
+               cost_micros,
+               cost_exactness,
+               findings: Vec<String>| ForensicMatrixRun {
+        run_ref: run_ref.into(),
+        run_digest: fixture_digest(run_digest_character),
+        arm_ref,
+        dataset_split: split,
+        population,
+        coverage_status: CoverageStatus::Complete,
+        outcome,
+        censored,
+        censor_at_milliseconds,
+        identification_milliseconds,
+        identification_tokens,
+        total_tokens,
+        token_exactness,
+        cost_micros,
+        cost_exactness,
+        causal_links_supported: if findings.is_empty() { 0 } else { 4 },
+        causal_links_required: if findings.is_empty() { 0 } else { 4 },
+        false_positive_count: 0,
+        reviewer_active_seconds: Some(90),
+        budget_compliant: true,
+        cleanup_observed: true,
+        qualified_finding_refs: findings,
+        failure_refs: Vec::new(),
+        event_refs: vec![format!("event.{run_ref}")],
+        receipt_refs: vec![format!("receipt.{run_ref}")],
+    };
+    let specialist_run = run(
+        "run.matrix.entropy-specialist",
+        'c',
+        specialist.arm_ref.clone(),
+        ForensicDatasetSplit::Holdout,
+        ForensicMatrixPopulation::Vulnerable,
+        ForensicMatrixOutcome::Hit,
+        false,
+        None,
+        Some(82_000),
+        Some(18_400),
+        Some(31_200),
+        ForensicExactness::Exact,
+        Some(740_000),
+        ForensicExactness::Exact,
+        vec![
+            "finding.coldcard.entropy-fallback".into(),
+            "finding.coldcard.provider-guard".into(),
+        ],
+    );
+    let generalist_run = run(
+        "run.matrix.general-reviewer",
+        'd',
+        generalist.arm_ref.clone(),
+        ForensicDatasetSplit::Holdout,
+        ForensicMatrixPopulation::Vulnerable,
+        ForensicMatrixOutcome::Miss,
+        true,
+        Some(120_000),
+        None,
+        None,
+        Some(28_000),
+        ForensicExactness::Exact,
+        Some(620_000),
+        ForensicExactness::Estimated,
+        Vec::new(),
+    );
+    let control_run = run(
+        "run.matrix.clean-control",
+        'e',
+        clean_control.arm_ref.clone(),
+        ForensicDatasetSplit::CleanHoldout,
+        ForensicMatrixPopulation::CleanControl,
+        ForensicMatrixOutcome::NotEligible,
+        false,
+        None,
+        None,
+        None,
+        None,
+        ForensicExactness::Unavailable,
+        None,
+        ForensicExactness::Unavailable,
+        Vec::new(),
+    );
+
+    ForensicsMatrixProjection::rebuild(
+        "matrix.forensic.coldcard.synthetic".into(),
+        fixture_digest('9'),
+        fixture_digest('a'),
+        fixture_digest('b'),
+        3,
+        vec![specialist, generalist, clean_control],
+        vec![specialist_run, generalist_run, control_run],
+        ForensicMatrixHardGates {
+            input_complete: true,
+            isolation_complete: true,
+            clean_control: true,
+            evidence_quality: true,
+            budget_compliant: true,
+            cleanup_complete: true,
+            hit_rate_not_regressed: true,
+        },
+        ForensicParetoStatus::Incomparable,
+        false,
+    )
+    .map_err(Into::into)
+}
+
 pub(crate) fn entropy_campaign_checkout_root(
     campaign_ref: &str,
     product_ref: &str,
@@ -356,6 +532,7 @@ pub struct ForensicsWorkbenchSnapshot {
     pub bench_view: ForensicsBenchView,
     pub lifecycle_selection: LifecycleSelection,
     pub evidence_selection: EvidenceSelection,
+    pub selected_model_run_ref: Option<String>,
     pub selected_arm: ColdcardBenchmarkArm,
     pub readiness: Option<PreflightReadiness>,
     pub prepared_intent: Option<ForensicsLaunchIntent>,
@@ -420,6 +597,7 @@ pub struct ForensicsWorkbenchSurface {
     bench_view: ForensicsBenchView,
     lifecycle_selection: LifecycleSelection,
     evidence_selection: EvidenceSelection,
+    selected_model_run_ref: Option<String>,
     selected_arm: ColdcardBenchmarkArm,
     preflight: Option<ForensicsPreflightProjection>,
     prepared_intent: Option<ForensicsLaunchIntent>,
@@ -479,6 +657,7 @@ impl ForensicsWorkbenchSurface {
             bench_view: ForensicsBenchView::Entropy,
             lifecycle_selection: LifecycleSelection::Summary,
             evidence_selection: EvidenceSelection::Findings,
+            selected_model_run_ref: None,
             selected_arm: ColdcardBenchmarkArm::Vulnerable,
             preflight: None,
             prepared_intent: None,
@@ -534,6 +713,7 @@ impl ForensicsWorkbenchSurface {
             LifecycleSelection::from_persisted(restored.lifecycle_selection.as_deref());
         this.evidence_selection =
             EvidenceSelection::from_persisted(restored.evidence_selection.as_deref());
+        this.selected_model_run_ref = restored.model_run_ref;
         let mut campaigns = restored.campaigns;
         if let Some(mut active_campaign) = campaigns.pop() {
             if matches!(
@@ -864,6 +1044,7 @@ impl ForensicsWorkbenchSurface {
             bench_view: Some(self.bench_view.persisted().into()),
             lifecycle_selection: Some(self.lifecycle_selection.persisted().into()),
             evidence_selection: Some(self.evidence_selection.persisted().into()),
+            model_run_ref: self.selected_model_run_ref.clone(),
         }
     }
 
@@ -1287,6 +1468,12 @@ impl ForensicsWorkbenchSurface {
         cx.notify();
     }
 
+    pub fn select_model_run(&mut self, run_ref: String, cx: &mut Context<Self>) {
+        self.selected_model_run_ref = Some(run_ref);
+        self.persist_entropy_state(cx);
+        cx.notify();
+    }
+
     pub fn open_source(&mut self, citation: ForensicSourceCitation, cx: &mut Context<Self>) {
         let repository_root = self
             .selected_entropy_project
@@ -1362,6 +1549,7 @@ impl ForensicsWorkbenchSurface {
             bench_view: self.bench_view,
             lifecycle_selection: self.lifecycle_selection,
             evidence_selection: self.evidence_selection,
+            selected_model_run_ref: self.selected_model_run_ref.clone(),
             selected_arm: self.selected_arm,
             readiness: self
                 .preflight
@@ -2261,6 +2449,280 @@ impl ForensicsWorkbenchSurface {
             .into_any_element()
     }
 
+    fn render_model_matrix_workspace(&self, cx: &mut Context<Self>) -> AnyElement {
+        let using_fixture = self.matrix.is_none();
+        let matrix = self
+            .matrix
+            .clone()
+            .or_else(|| bundled_coldcard_model_matrix().ok());
+        let Some(matrix) = matrix else {
+            return v_flex()
+                .id("omega.forensics.models.workspace")
+                .w_full()
+                .gap_2()
+                .p_4()
+                .rounded(px(10.))
+                .border_1()
+                .border_color(cx.theme().colors().border_variant)
+                .bg(cx.theme().colors().surface_background)
+                .role(gpui::Role::Region)
+                .aria_label("Forensic model run matrix unavailable")
+                .child(Label::new("Model run matrix unavailable").size(LabelSize::Large))
+                .child(
+                    Label::new("No validated matrix projection can be displayed.")
+                        .size(LabelSize::Small)
+                        .color(Color::Error),
+                )
+                .into_any_element();
+        };
+        let selected_run_ref = self
+            .selected_model_run_ref
+            .as_deref()
+            .filter(|run_ref| matrix.runs.iter().any(|run| run.run_ref == *run_ref))
+            .or_else(|| matrix.runs.first().map(|run| run.run_ref.as_str()));
+        let selected_run = selected_run_ref
+            .and_then(|run_ref| matrix.runs.iter().find(|run| run.run_ref == run_ref));
+        let selected_arm =
+            selected_run.and_then(|run| matrix.arms.iter().find(|arm| arm.arm_ref == run.arm_ref));
+
+        let list =
+            v_flex()
+                .id("omega.forensics.models.list")
+                .w(px(300.))
+                .flex_shrink_0()
+                .gap_1()
+                .p_2()
+                .border_r_1()
+                .border_color(cx.theme().colors().border_variant)
+                .role(gpui::Role::List)
+                .aria_label("Forensic model runs")
+                .children(matrix.runs.iter().enumerate().map(|(index, run)| {
+                    let is_selected = selected_run_ref == Some(run.run_ref.as_str());
+                    let arm = matrix.arms.iter().find(|arm| arm.arm_ref == run.arm_ref);
+                    let run_ref = run.run_ref.clone();
+                    let keyboard_run_ref = run_ref.clone();
+                    div()
+                        .id(("omega.forensics.models.run", index))
+                        .px_3()
+                        .py_2()
+                        .rounded(px(6.))
+                        .cursor_pointer()
+                        .tab_index(0)
+                        .role(gpui::Role::ListItem)
+                        .aria_label(format!(
+                            "{} model run, {}, {}",
+                            arm.map_or("Unknown role", |arm| arm.role_ref.as_str()),
+                            matrix_outcome_label(run.outcome),
+                            if run.eligible_for_identification() {
+                                "eligible"
+                            } else {
+                                "not eligible"
+                            }
+                        ))
+                        .aria_selected(is_selected)
+                        .when(is_selected, |row| {
+                            row.bg(cx.theme().colors().element_selected)
+                        })
+                        .hover(|row| row.bg(cx.theme().colors().element_hover))
+                        .child(
+                            v_flex()
+                                .gap_1()
+                                .child(
+                                    Label::new(arm.map_or("Unknown model family", |arm| {
+                                        arm.model_family_ref.as_str()
+                                    }))
+                                    .size(LabelSize::Small),
+                                )
+                                .child(
+                                    h_flex()
+                                        .w_full()
+                                        .justify_between()
+                                        .gap_2()
+                                        .child(
+                                            Label::new(arm.map_or("Unknown role", |arm| {
+                                                arm.role_ref.as_str()
+                                            }))
+                                            .size(LabelSize::XSmall)
+                                            .color(Color::Muted),
+                                        )
+                                        .child(
+                                            Label::new(matrix_outcome_label(run.outcome))
+                                                .size(LabelSize::XSmall)
+                                                .color(matrix_outcome_color(run.outcome)),
+                                        ),
+                                ),
+                        )
+                        .on_click(cx.listener(move |this, _, _, cx| {
+                            this.select_model_run(run_ref.clone(), cx)
+                        }))
+                        .on_key_down(cx.listener(move |this, event: &gpui::KeyDownEvent, _, cx| {
+                            if matches!(event.keystroke.key.as_str(), "enter" | "space") {
+                                this.select_model_run(keyboard_run_ref.clone(), cx);
+                                cx.stop_propagation();
+                            }
+                        }))
+                }));
+
+        let mut detail = v_flex()
+            .id("omega.forensics.models.detail")
+            .min_w_0()
+            .flex_1()
+            .gap_3()
+            .p_4()
+            .role(gpui::Role::Group)
+            .aria_label("Selected forensic model run detail")
+            .child(
+                h_flex()
+                    .w_full()
+                    .justify_between()
+                    .gap_3()
+                    .child(Label::new("Run scorecard").size(LabelSize::Large))
+                    .child(
+                        Label::new(if using_fixture {
+                            "Synthetic fixture"
+                        } else {
+                            "Observed projection"
+                        })
+                        .size(LabelSize::XSmall)
+                        .color(if using_fixture {
+                            Color::Warning
+                        } else {
+                            Color::Success
+                        }),
+                    ),
+            );
+        if let (Some(run), Some(arm)) = (selected_run, selected_arm) {
+            let unique_findings = matrix
+                .finding_divergence
+                .unique_finding_refs_by_arm
+                .get(&run.arm_ref)
+                .cloned()
+                .unwrap_or_default();
+            detail = detail
+                .child(Self::render_fact("Model family", &arm.model_family_ref))
+                .child(Self::render_fact("Role", &arm.role_ref))
+                .child(Self::render_fact(
+                    "Eligibility",
+                    if run.eligible_for_identification() {
+                        "Eligible for identification metrics"
+                    } else {
+                        "Not eligible for identification metrics"
+                    },
+                ))
+                .child(Self::render_fact("Typed outcome", matrix_outcome_label(run.outcome)))
+                .child(Self::render_fact(
+                    "Censoring",
+                    if run.censored {
+                        format!(
+                            "Right-censored at {} ms",
+                            run.censor_at_milliseconds.unwrap_or_default()
+                        )
+                    } else {
+                        "Not censored".into()
+                    },
+                ))
+                .child(Self::render_fact("Prompt digest", &arm.prompt_digest))
+                .child(Self::render_fact("Model digest", &arm.model_digest))
+                .child(Self::render_fact(
+                    "Tokens",
+                    aggregate_truth_label(run.total_tokens, run.token_exactness, "tokens"),
+                ))
+                .child(Self::render_fact(
+                    "Cost",
+                    aggregate_truth_label(run.cost_micros, run.cost_exactness, "µUSD"),
+                ))
+                .child(Self::render_fact(
+                    "Qualified findings",
+                    if run.qualified_finding_refs.is_empty() {
+                        "None".into()
+                    } else {
+                        run.qualified_finding_refs.join(" · ")
+                    },
+                ))
+                .child(Self::render_fact(
+                    "Unique disagreement",
+                    if unique_findings.is_empty() {
+                        "None".into()
+                    } else {
+                        unique_findings.join(" · ")
+                    },
+                ))
+                .child(div().h_px().bg(cx.theme().colors().border_variant))
+                .child(Label::new("Matched comparison").size(LabelSize::Small))
+                .child(Self::render_fact(
+                    "Dataset revision",
+                    &matrix.dataset_revision_digest,
+                ))
+                .child(Self::render_fact(
+                    "Metric definition",
+                    &matrix.metric_definition_revision_digest,
+                ))
+                .child(Self::render_fact(
+                    "Evaluator revision",
+                    &matrix.evaluator_revision_digest,
+                ))
+                .child(Self::render_fact(
+                    "Common findings",
+                    if matrix.finding_divergence.common_finding_refs.is_empty() {
+                        "None".into()
+                    } else {
+                        matrix.finding_divergence.common_finding_refs.join(" · ")
+                    },
+                ))
+                .child(
+                    Label::new(
+                        "Models are compared under frozen inputs. Agreement is not truth, and majority vote never promotes a claim.",
+                    )
+                    .size(LabelSize::XSmall)
+                    .color(Color::Muted),
+                );
+        } else {
+            detail = detail.child(
+                Label::new("The validated matrix contains no selectable runs.")
+                    .size(LabelSize::Small)
+                    .color(Color::Muted),
+            );
+        }
+
+        v_flex()
+            .id("omega.forensics.models.workspace")
+            .debug_selector(|| "omega.forensics.models.workspace".into())
+            .w_full()
+            .rounded(px(10.))
+            .border_1()
+            .border_color(cx.theme().colors().border_variant)
+            .bg(cx.theme().colors().surface_background)
+            .role(gpui::Role::Region)
+            .aria_label("Forensic model panel and run matrix")
+            .child(
+                h_flex()
+                    .w_full()
+                    .justify_between()
+                    .gap_3()
+                    .px_4()
+                    .py_3()
+                    .border_b_1()
+                    .border_color(cx.theme().colors().border_variant)
+                    .child(Label::new("Model panel and run matrix").size(LabelSize::Small))
+                    .child(
+                        Label::new(format!(
+                            "{} arms · {} runs · promotion {}",
+                            matrix.arms.len(),
+                            matrix.runs.len(),
+                            if matrix.promoted {
+                                "admitted"
+                            } else {
+                                "blocked"
+                            }
+                        ))
+                        .size(LabelSize::XSmall)
+                        .color(Color::Muted),
+                    ),
+            )
+            .child(h_flex().w_full().items_stretch().child(list).child(detail))
+            .into_any_element()
+    }
+
     fn render_workbench_header(
         &self,
         repository_name: SharedString,
@@ -2883,6 +3345,24 @@ impl Render for ForensicsWorkbenchSurface {
                 .child(header)
                 .child(navigation)
                 .child(evidence)
+                .into_any_element();
+        }
+
+        if self.bench_view == ForensicsBenchView::Models {
+            let models = self.render_model_matrix_workspace(cx);
+            return v_flex()
+                .id("omega.forensics.workbench")
+                .track_focus(&self.focus_handle)
+                .tab_index(0)
+                .role(gpui::Role::Group)
+                .aria_label("Forensics model matrix workspace")
+                .size_full()
+                .overflow_y_scroll()
+                .p_6()
+                .gap_4()
+                .child(header)
+                .child(navigation)
+                .child(models)
                 .into_any_element();
         }
 
@@ -4702,6 +5182,27 @@ fn aggregate_truth_label(value: Option<u64>, exactness: ForensicExactness, unit:
     }
 }
 
+fn matrix_outcome_label(outcome: omega_forensics::ForensicMatrixOutcome) -> &'static str {
+    use omega_forensics::ForensicMatrixOutcome;
+    match outcome {
+        ForensicMatrixOutcome::Hit => "Hit",
+        ForensicMatrixOutcome::Miss => "Miss",
+        ForensicMatrixOutcome::NotEligible => "Not eligible",
+        ForensicMatrixOutcome::Failed => "Failed",
+        ForensicMatrixOutcome::Cancelled => "Cancelled",
+    }
+}
+
+fn matrix_outcome_color(outcome: omega_forensics::ForensicMatrixOutcome) -> Color {
+    use omega_forensics::ForensicMatrixOutcome;
+    match outcome {
+        ForensicMatrixOutcome::Hit => Color::Success,
+        ForensicMatrixOutcome::Miss | ForensicMatrixOutcome::NotEligible => Color::Muted,
+        ForensicMatrixOutcome::Failed => Color::Error,
+        ForensicMatrixOutcome::Cancelled => Color::Warning,
+    }
+}
+
 fn budget_state_label(state: ForensicBudgetState) -> &'static str {
     match state {
         ForensicBudgetState::WithinBudget => "Within budget",
@@ -5416,6 +5917,8 @@ mod tests {
             let surface = cx.new(|cx| ForensicsWorkbenchSurface::new(&candidate(binding), cx));
             let arm = omega_forensics::ForensicMatrixArm {
                 arm_ref: "arm.forensic.candidate".into(),
+                model_family_ref: "model-family.openai.gpt-5".into(),
+                role_ref: "role.forensic.entropy-specialist".into(),
                 prompt_digest: digest('a'),
                 model_digest: digest('b'),
                 effort_ref: "effort.high".into(),
@@ -5488,6 +5991,67 @@ mod tests {
             let matrix = snapshot.matrix.expect("matrix state");
             assert_eq!(matrix.rows[0].run_refs, vec!["run.matrix.candidate"]);
             assert_eq!(matrix.rows[0].hit_count, 1);
+        });
+    }
+
+    #[test]
+    fn bundled_model_matrix_preserves_roles_outcomes_and_unavailable_truth() {
+        let matrix = bundled_coldcard_model_matrix().expect("valid bundled model matrix");
+        matrix.validate().expect("validated model matrix");
+        assert_eq!(matrix.arms.len(), 3);
+        assert_eq!(matrix.runs.len(), 3);
+        assert!(
+            matrix
+                .arms
+                .iter()
+                .all(|arm| !arm.model_family_ref.is_empty() && !arm.role_ref.is_empty())
+        );
+        assert!(
+            matrix
+                .arms
+                .windows(2)
+                .all(|arms| arms[0].prompt_digest == arms[1].prompt_digest)
+        );
+        assert!(matrix.runs.iter().any(|run| {
+            run.outcome == omega_forensics::ForensicMatrixOutcome::Miss && run.censored
+        }));
+        assert!(matrix.runs.iter().any(|run| {
+            run.outcome == omega_forensics::ForensicMatrixOutcome::NotEligible
+                && run.total_tokens.is_none()
+                && run.token_exactness == ForensicExactness::Unavailable
+                && run.cost_micros.is_none()
+                && run.cost_exactness == ForensicExactness::Unavailable
+        }));
+        assert!(!matrix.promoted);
+    }
+
+    #[gpui::test]
+    fn model_run_selection_is_presentation_only(cx: &mut gpui::TestAppContext) {
+        cx.update(|cx| {
+            let binding = RepositoryBinding::new("repo", "worktree").expect("valid binding");
+            let surface = cx.new(|cx| ForensicsWorkbenchSurface::new(&candidate(binding), cx));
+            let before = surface.read(cx).snapshot();
+            surface.update(cx, |surface, cx| {
+                surface.select_bench_view(ForensicsBenchView::Models, cx);
+                surface.select_model_run("run.matrix.general-reviewer".into(), cx);
+            });
+            let after = surface.read(cx).snapshot();
+            assert_eq!(after.bench_view, ForensicsBenchView::Models);
+            assert_eq!(
+                after.selected_model_run_ref.as_deref(),
+                Some("run.matrix.general-reviewer")
+            );
+            assert_eq!(after.matrix, before.matrix);
+            assert_eq!(after.review, before.review);
+            assert_eq!(after.run, before.run);
+            assert_eq!(
+                surface
+                    .read(cx)
+                    .entropy_restore_state()
+                    .model_run_ref
+                    .as_deref(),
+                Some("run.matrix.general-reviewer")
+            );
         });
     }
 
