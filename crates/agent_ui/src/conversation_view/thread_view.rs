@@ -6928,21 +6928,24 @@ impl ThreadView {
                 };
 
                 if omega_zero_base::is_comet_mode() && !editing {
-                    v_flex()
+                    h_flex()
                         .id(("comet-user-message", entry_ix))
                         .w_full()
                         .pt(px(7.0))
                         .pb(px(7.0))
-                        .items_end()
+                        .justify_end()
                         .child(
                             div()
+                                .flex_none()
                                 .max_w(relative(0.8))
                                 .px(px(16.0))
                                 .py(px(10.0))
                                 .rounded(px(16.0))
                                 .bg(cx.theme().colors().elevated_surface_background)
                                 .text_size(px(14.0))
-                                .child(editor.into_any_element()),
+                                .child(SharedString::from(
+                                    message.content.to_markdown(cx).to_string(),
+                                )),
                         )
                         .into_any()
                 } else {
