@@ -15,6 +15,7 @@ mod openagents_session;
 mod protocol;
 mod sarah_conversation;
 mod supervisor;
+mod work_cutover;
 
 use std::{
     collections::BTreeMap,
@@ -93,6 +94,7 @@ pub use supervisor::{
     OmegaEffectdHostHandler, OmegaEffectdSupervisor, OmegaEffectdSupervisorOptions,
     SupervisorError, default_options, fixture_command, resolve_effectd_command,
 };
+pub use work_cutover::*;
 
 pub type SharedOmegaEffectdSupervisor = Rc<AsyncMutex<OmegaEffectdSupervisor>>;
 pub type SharedIssue31HostController = Arc<RwLock<Issue31HostController>>;

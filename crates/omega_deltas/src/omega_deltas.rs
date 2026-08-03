@@ -28352,4 +28352,41 @@ mod tests {
             );
         }
     }
+
+    /// OMEGA-DELTA-0236. The GitHub-to-Omega Work writer switch is an explicit
+    /// generation-fenced transition with a receipt and a history-safe rollback.
+    #[test]
+    fn omega_work_cutover_cannot_self_activate_or_drop_native_history() {
+        let cutover = without_comments(&read_repository_file(
+            "crates/omega_effectd/src/work_cutover.rs",
+        ));
+        for required in [
+            "WorkWriter::LegacyGithub",
+            "WorkWriter::NativeOmega",
+            "expected_revision",
+            "expected_generation",
+            "github_write_count",
+            "ActivateNative",
+            "activation_receipt_ref",
+            "RecordNativeWrite",
+            "native_high_watermark",
+            "RollbackLegacy",
+            "NativeHistoryGap",
+            "SourceChanged",
+            "pub fn store",
+            "pub fn load",
+            "from_mode(0o700)",
+            "from_mode(0o600)",
+            "file.sync_all()",
+        ] {
+            assert!(
+                cutover.contains(required),
+                "OMEGA-DELTA-0236: Work cutover authority lost `{required}`"
+            );
+        }
+        assert!(
+            !cutover.contains("impl Default for WorkCutoverLedger"),
+            "OMEGA-DELTA-0236: Work cutover gained an implicit default activation state"
+        );
+    }
 }
