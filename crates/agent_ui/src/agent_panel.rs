@@ -42,14 +42,16 @@ use crate::ManageProfiles;
 use crate::agent_connection_store::AgentConnectionStore;
 use crate::completion_provider::{AgentContextSelection, AgentContextSource};
 use crate::forensics_work_projection::{ForensicsWorkProjection, project_forensics_work};
-use crate::omega_work_detail_surface::{WorkDetailSurface, WorkDetailSurfaceEvent};
+use crate::omega_work_detail_surface::{
+    WorkDelegationCandidate, WorkDetailSurface, WorkDetailSurfaceEvent,
+};
 use crate::omega_work_index_surface::{WorkIndexSurface, WorkIndexSurfaceEvent};
 use crate::terminal_thread_metadata_store::{
     TerminalThreadMetadata, TerminalThreadMetadataStore, compose_terminal_thread_title,
     terminal_title_without_prefix,
 };
 use crate::thread_metadata_store::{
-    ThreadId, ThreadMetadataStore, ThreadMetadataStoreEvent, WorktreePaths,
+    ConversationOwner, ThreadId, ThreadMetadataStore, ThreadMetadataStoreEvent, WorktreePaths,
 };
 use crate::{
     ActivateOmegaThreadTab, Agent, AgentInitialContent, AgentThreadSource, ExternalSourcePrompt,
@@ -112,7 +114,8 @@ use omega_front_door::{
 use omega_work_detail::{
     SnapshotLinks, WorkCanonicalEvent, WorkDetail, WorkDetailSourceState, WorkIntent,
     WorkIntentOutcome, WorkMutationCapability, WorkMutationKind, WorkMutationOperation,
-    WorkPresentation, default_blocks, read_journal, snapshot_from_index_item, write_journal_value,
+    WorkPresentation, default_blocks, read_journal, read_participation_journal,
+    snapshot_from_index_item, write_journal_value, write_participation_journal,
 };
 use omega_work_index::{
     EFFECT_ADAPTER_ID, FORENSICS_ADAPTER_ID, NativeForensicsPhase, NativeForensicsRecord,
@@ -4395,6 +4398,34 @@ impl AgentPanel {
                     .read(cx)
                     .entries()
                     .map(|metadata| {
+                        let thread_ref = metadata.thread_id.to_key_string();
+                        let metadata_revision = metadata.updated_at.timestamp_millis().max(0) as u64;
+                        let participation = omega_effectd::all_work_contract::WorkRef::try_from(
+                            format!("work:omega:thread:{thread_ref}"),
+                        )
+                        .ok()
+                        .zip(
+                            omega_effectd::all_work_contract::SourceRef::try_from(format!(
+                                "thread:omega:{thread_ref}"
+                            ))
+                            .ok(),
+                        )
+                        .and_then(|(work_ref, source_ref)| {
+                            match read_participation_journal(
+                                paths::data_dir(),
+                                &work_ref,
+                                &source_ref,
+                            ) {
+                                Ok(journal) => journal,
+                                Err(error) => {
+                                    log::warn!(
+                                        "ignored an invalid Work participation journal: {error}"
+                                    );
+                                    None
+                                }
+                            }
+                        })
+                        .filter(|journal| journal.revision.0 >= metadata_revision);
                         let lifecycle = match metadata.lifecycle {
                             crate::omega_agent_supervision::SupervisedThreadLifecycle::Running => {
                                 NativeThreadLifecycle::Running
@@ -4412,16 +4443,45 @@ impl AgentPanel {
                                 NativeThreadLifecycle::Canceled
                             }
                         };
+                        let revision = participation
+                            .as_ref()
+                            .map_or(metadata_revision, |journal| journal.revision.0);
+                        let updated_at = participation.as_ref().map_or_else(
+                            || {
+                                metadata
+                                    .updated_at
+                                    .to_rfc3339_opts(chrono::SecondsFormat::Millis, true)
+                            },
+                            |journal| journal.updated_at.0.clone(),
+                        );
+                        let assignee = participation
+                            .as_ref()
+                            .and_then(|journal| journal.assignee.clone());
+                        let agent_delegate = participation.as_ref().and_then(|journal| {
+                            journal
+                                .delegation_grants
+                                .iter()
+                                .rev()
+                                .find(|grant| {
+                                    grant.state
+                                        == omega_work_detail::DelegationGrantState::Active
+                                })
+                                .map(|grant| omega_effectd::all_work_contract::AgentDelegate {
+                                    agent_ref: grant.agent_ref.clone(),
+                                    delegation_grant_ref: grant.grant_ref.clone(),
+                                    generation: grant.generation,
+                                })
+                        });
                         adapt_thread(NativeThreadRecord {
-                            thread_ref: metadata.thread_id.to_key_string(),
+                            thread_ref,
                             title: metadata.display_title().to_string(),
-                            updated_at: metadata
-                                .updated_at
-                                .to_rfc3339_opts(chrono::SecondsFormat::Millis, true),
+                            updated_at,
                             observed_at: observed_at.clone(),
-                            revision: metadata.updated_at.timestamp_millis().max(0) as u64,
+                            revision,
                             archived: metadata.archived,
                             lifecycle,
+                            assignee,
+                            agent_delegate,
                         })
                     })
                     .collect::<Result<Vec<_>, _>>()
@@ -17148,10 +17208,48 @@ impl AgentPanel {
         let mut projected_blocks = None;
         match &item.source_entity {
             WorkSourceEntity::Thread { thread_ref } => {
-                match omega_effectd::all_work_contract::ThreadRef::try_from(thread_ref.clone()) {
+                match omega_effectd::all_work_contract::ThreadRef::try_from(format!(
+                    "thread:omega:{thread_ref}"
+                )) {
                     Ok(thread_ref) => links.thread_refs.push(thread_ref),
                     Err(error) => {
                         log::warn!("could not project the Work Thread reference: {error}")
+                    }
+                }
+                if let Ok(thread_id) = ThreadId::from_key_string(thread_ref)
+                    && let Some(metadata) = ThreadMetadataStore::try_global(cx)
+                        .and_then(|store| store.read(cx).entry(thread_id).cloned())
+                    && let Some(session_id) = metadata.session_id
+                {
+                    let digest = format!("{:x}", Sha256::digest(session_id.0.as_bytes()));
+                    if let Some(prefix) = digest.get(..24) {
+                        match omega_effectd::all_work_contract::SessionRef::try_from(format!(
+                            "session:omega:{prefix}"
+                        )) {
+                            Ok(session_ref) => links.session_refs.push(session_ref),
+                            Err(error) => {
+                                log::warn!("could not project the Work Session reference: {error}")
+                            }
+                        }
+                        match omega_effectd::all_work_contract::AgentSessionRef::try_from(format!(
+                            "agent-session:omega:{prefix}"
+                        )) {
+                            Ok(agent_session_ref) => {
+                                links.agent_session_refs.push(agent_session_ref)
+                            }
+                            Err(error) => log::warn!(
+                                "could not project the Work Agent Session reference: {error}"
+                            ),
+                        }
+                        match omega_effectd::all_work_contract::AgentActivityRef::try_from(format!(
+                            "activity:omega:thread-lifecycle:{prefix}:{}",
+                            item.summary.revision.0
+                        )) {
+                            Ok(activity_ref) => links.agent_activity_refs.push(activity_ref),
+                            Err(error) => log::warn!(
+                                "could not project the Work Agent Activity reference: {error}"
+                            ),
+                        }
                     }
                 }
             }
@@ -17287,13 +17385,85 @@ impl AgentPanel {
                 }
             }
         };
+        if matches!(item.source_entity, WorkSourceEntity::Thread { .. }) {
+            let work_ref = detail.snapshot().summary.work_ref.clone();
+            let source_ref = detail
+                .snapshot()
+                .summary
+                .source_authority
+                .source_ref
+                .clone();
+            match read_participation_journal(paths::data_dir(), &work_ref, &source_ref) {
+                Ok(Some(participation)) => {
+                    if let Err(error) = detail.restore_participation(participation) {
+                        log::warn!("ignored an invalid Work participation journal: {error}");
+                    }
+                }
+                Ok(None) => {}
+                Err(error) => {
+                    log::warn!("could not read the Work participation journal: {error}")
+                }
+            }
+        }
         detail.set_presentation(presentation);
 
         self.omega_settings = None;
         self.omega_unavailable_route = None;
         self.clear_omega_work_detail();
         let surface_item = item.clone();
-        let surface = cx.new(|cx| WorkDetailSurface::new(surface_item, detail, window, cx));
+        let delegation_candidate = match &item.source_entity {
+            WorkSourceEntity::Thread { thread_ref } => ThreadId::from_key_string(thread_ref)
+                .ok()
+                .and_then(|thread_id| {
+                    ThreadMetadataStore::try_global(cx)
+                        .and_then(|store| store.read(cx).entry(thread_id).cloned())
+                })
+                .and_then(|metadata| {
+                    let (agent_id, label) = match metadata.conversation_owner() {
+                        ConversationOwner::Exact(agent_id) => {
+                            let label =
+                                crate::omega_composer_executor_menu::named_direct_agent_label(
+                                    agent_id.as_ref(),
+                                )
+                                .unwrap_or(agent_id.as_ref())
+                                .to_string();
+                            (agent_id.as_ref().to_string(), label)
+                        }
+                        ConversationOwner::LegacyOmega => {
+                            ("omega".to_string(), "Omega".to_string())
+                        }
+                        ConversationOwner::LegacyAmbiguous(_) => return None,
+                    };
+                    let agent_ref = match omega_effectd::all_work_contract::AgentRef::try_from(
+                        format!("agent:omega:{agent_id}"),
+                    ) {
+                        Ok(agent_ref) => agent_ref,
+                        Err(error) => {
+                            log::warn!("could not identify the Work delegation candidate: {error}");
+                            return None;
+                        }
+                    };
+                    let host_ref = if metadata.remote_connection.is_none() {
+                        omega_effectd::all_work_contract::SourceRef::try_from(
+                            "host:omega:local".to_string(),
+                        )
+                        .ok()
+                    } else {
+                        None
+                    };
+                    Some(WorkDelegationCandidate {
+                        agent_ref,
+                        label,
+                        host_ref,
+                    })
+                }),
+            WorkSourceEntity::ForensicsCase { .. }
+            | WorkSourceEntity::ForensicsRun { .. }
+            | WorkSourceEntity::EffectWork { .. } => None,
+        };
+        let surface = cx.new(|cx| {
+            WorkDetailSurface::new(surface_item, detail, delegation_candidate, window, cx)
+        });
         self._omega_work_detail_subscription = Some(cx.subscribe_in(
             &surface,
             window,
@@ -17320,6 +17490,10 @@ impl AgentPanel {
                 }
                 WorkDetailSurfaceEvent::JournalChanged => {
                     this.persist_omega_work_detail(cx);
+                }
+                WorkDetailSurfaceEvent::ParticipationChanged => {
+                    this.persist_omega_work_detail(cx);
+                    this.refresh_native_work_index(cx);
                 }
             },
         ));
@@ -17531,11 +17705,10 @@ impl AgentPanel {
     }
 
     fn persist_omega_work_detail(&mut self, cx: &mut Context<Self>) {
-        let Some(journal) = self
-            .omega_work_detail
-            .as_ref()
-            .map(|surface| surface.read(cx).journal())
-        else {
+        let Some((journal, participation)) = self.omega_work_detail.as_ref().map(|surface| {
+            let surface = surface.read(cx);
+            (surface.journal(), surface.participation_journal())
+        }) else {
             return;
         };
         let data_dir = paths::data_dir().clone();
@@ -17555,6 +17728,11 @@ impl AgentPanel {
             }
             if let Err(error) = write_journal_value(&data_dir, &journal) {
                 log::warn!("could not persist the Work detail journal: {error}");
+            }
+            if let Some(participation) = participation
+                && let Err(error) = write_participation_journal(&data_dir, &participation)
+            {
+                log::warn!("could not persist the Work participation journal: {error}");
             }
         })
         .detach();
@@ -27679,6 +27857,8 @@ mod tests {
                 revision: 1,
                 archived: false,
                 lifecycle: NativeThreadLifecycle::WaitingForPerson,
+                assignee: None,
+                agent_delegate: None,
             })
             .expect("valid native Thread fixture");
             let forensics = adapt_forensics(NativeForensicsRecord {

@@ -8,12 +8,14 @@ use gpui::{
     uniform_list,
 };
 use omega_effectd::all_work_contract::{
-    IntentRef, IsoTimestamp, SafeInteger, ShortText, SourceRef, WorkSnapshot,
+    AgentRef, AssigneeKind, DelegationGrantRef, HumanAssignee, IntentRef, IsoTimestamp,
+    OwnerDispositionRef, SafeInteger, ShortText, SourceRef, WorkSnapshot,
 };
 use omega_work_detail::{
-    BoundedWorkHistory, SubmitIntentDisposition, WorkBlock, WorkBlockFactState, WorkCanonicalEvent,
-    WorkDetail, WorkDetailJournal, WorkDetailSourceState, WorkIntent, WorkIntentOutcome,
-    WorkMutationKind, WorkMutationOperation, WorkPresentation,
+    BoundedDelegationGrant, BoundedWorkHistory, DelegationGrantState, OwnerDispositionKind,
+    OwnerDispositionRecord, SubmitIntentDisposition, WorkBlock, WorkBlockFactState,
+    WorkCanonicalEvent, WorkDetail, WorkDetailJournal, WorkDetailSourceState, WorkIntent,
+    WorkIntentOutcome, WorkMutationKind, WorkMutationOperation, WorkPresentation,
 };
 use omega_work_index::WorkIndexItem;
 use settings::Settings as _;
@@ -30,6 +32,14 @@ pub enum WorkDetailSurfaceEvent {
     OpenSource(WorkIndexItem),
     PresentationChanged(WorkPresentation),
     JournalChanged,
+    ParticipationChanged,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct WorkDelegationCandidate {
+    pub agent_ref: AgentRef,
+    pub label: String,
+    pub host_ref: Option<SourceRef>,
 }
 
 pub struct WorkDetailSurface {
@@ -37,6 +47,7 @@ pub struct WorkDetailSurface {
     title_editor: Entity<Editor>,
     item: WorkIndexItem,
     detail: WorkDetail,
+    delegation_candidate: Option<WorkDelegationCandidate>,
     history: BoundedWorkHistory,
     history_scroll: UniformListScrollHandle,
     editing_title: bool,
@@ -49,6 +60,7 @@ impl WorkDetailSurface {
     pub fn new(
         item: WorkIndexItem,
         detail: WorkDetail,
+        delegation_candidate: Option<WorkDelegationCandidate>,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> Self {
@@ -67,6 +79,7 @@ impl WorkDetailSurface {
             title_editor,
             item,
             detail,
+            delegation_candidate,
             history,
             history_scroll: UniformListScrollHandle::new(),
             editing_title: false,
@@ -94,6 +107,12 @@ impl WorkDetailSurface {
 
     pub fn journal(&self) -> WorkDetailJournal {
         self.detail.journal()
+    }
+
+    pub fn participation_journal(&self) -> Option<omega_work_detail::WorkParticipationJournal> {
+        self.detail
+            .can_change_participation()
+            .then(|| self.detail.participation_journal())
     }
 
     pub fn snapshot(&self) -> &WorkSnapshot {
@@ -188,6 +207,199 @@ impl WorkDetailSurface {
     fn toggle_command_menu(&mut self, cx: &mut Context<Self>) {
         self.command_menu_open = !self.command_menu_open;
         cx.notify();
+    }
+
+    fn participation_timestamp(&mut self, cx: &mut Context<Self>) -> Option<IsoTimestamp> {
+        match IsoTimestamp::try_from(Utc::now().to_rfc3339_opts(SecondsFormat::Millis, true)) {
+            Ok(timestamp) => Some(timestamp),
+            Err(error) => {
+                self.status = Some(format!("Could not timestamp the Work command · {error}"));
+                cx.notify();
+                None
+            }
+        }
+    }
+
+    fn participation_ref_digest(&self, operation: &str, sequence: u64) -> String {
+        let mut digest = Sha256::new();
+        digest.update(self.detail.snapshot().summary.work_ref.0.as_bytes());
+        digest.update(operation.as_bytes());
+        digest.update(sequence.to_be_bytes());
+        format!("{:x}", digest.finalize())
+            .chars()
+            .take(24)
+            .collect()
+    }
+
+    fn finish_participation_change(&mut self, cx: &mut Context<Self>) {
+        self.item.summary = self.detail.snapshot().summary.clone();
+        self.history = self
+            .detail
+            .history(omega_work_detail::MAX_WORK_HISTORY_ROWS);
+        self.status = None;
+        cx.emit(WorkDetailSurfaceEvent::ParticipationChanged);
+        cx.notify();
+    }
+
+    fn assign_local_owner(&mut self, cx: &mut Context<Self>) {
+        let Some(admitted_at) = self.participation_timestamp(cx) else {
+            return;
+        };
+        let assignee = HumanAssignee {
+            kind: AssigneeKind::Human,
+            principal_ref: self.detail.snapshot().summary.owner_ref.clone(),
+        };
+        match self.detail.assign(assignee, admitted_at) {
+            Ok(()) => self.finish_participation_change(cx),
+            Err(error) => {
+                self.status = Some(format!("Assign refused · {error}"));
+                cx.notify();
+            }
+        }
+    }
+
+    fn delegate_to_candidate(&mut self, cx: &mut Context<Self>) {
+        let Some(candidate) = self.delegation_candidate.clone() else {
+            return;
+        };
+        let Some(issued_at) = self.participation_timestamp(cx) else {
+            return;
+        };
+        let generation = self
+            .detail
+            .participation_journal()
+            .delegation_grants
+            .iter()
+            .map(|grant| grant.generation.0)
+            .max()
+            .unwrap_or(0)
+            .saturating_add(1);
+        let digest = self.participation_ref_digest("delegate", generation);
+        let grant_ref =
+            match DelegationGrantRef::try_from(format!("grant:omega:work:{digest}:{generation}")) {
+                Ok(reference) => reference,
+                Err(error) => {
+                    self.status = Some(format!("Delegate refused · {error}"));
+                    cx.notify();
+                    return;
+                }
+            };
+        let Some(issued_by) = self
+            .detail
+            .snapshot()
+            .summary
+            .assignee
+            .0
+            .as_ref()
+            .map(|assignee| assignee.principal_ref.clone())
+        else {
+            self.status = Some("Assign a human before delegating.".into());
+            cx.notify();
+            return;
+        };
+        let source_ref = |value: &str| SourceRef::try_from(value.to_string());
+        let (Ok(thread_message), Ok(thread_stop), Ok(privacy), Ok(owner_review)) = (
+            source_ref("capability:omega:thread-message"),
+            source_ref("capability:omega:thread-stop"),
+            source_ref("policy:omega:private-work-v1"),
+            source_ref("requirement:omega:owner-review"),
+        ) else {
+            self.status = Some("Delegate refused · invalid local capability contract.".into());
+            cx.notify();
+            return;
+        };
+        let grant = BoundedDelegationGrant {
+            grant_ref,
+            agent_ref: candidate.agent_ref,
+            issued_by,
+            generation: SafeInteger(generation),
+            issued_at: issued_at.clone(),
+            capability_refs: vec![thread_message, thread_stop],
+            tool_refs: Vec::new(),
+            host_ref: candidate.host_ref,
+            budget_ref: None,
+            deadline: None,
+            privacy_policy_ref: privacy,
+            evidence_requirement_refs: vec![owner_review],
+            state: DelegationGrantState::Active,
+            revoked_at: None,
+            revocation_ref: None,
+        };
+        match self.detail.delegate(grant, issued_at) {
+            Ok(()) => self.finish_participation_change(cx),
+            Err(error) => {
+                self.status = Some(format!("Delegate refused · {error}"));
+                cx.notify();
+            }
+        }
+    }
+
+    fn revoke_delegate(&mut self, cx: &mut Context<Self>) {
+        let Some(grant_ref) = self
+            .detail
+            .active_delegation_grant()
+            .map(|grant| grant.grant_ref.clone())
+        else {
+            return;
+        };
+        let Some(revoked_at) = self.participation_timestamp(cx) else {
+            return;
+        };
+        let digest = self.participation_ref_digest(
+            "revoke",
+            self.detail.snapshot().summary.revision.0.saturating_add(1),
+        );
+        let revocation_ref = match SourceRef::try_from(format!("revocation:omega:work:{digest}")) {
+            Ok(reference) => reference,
+            Err(error) => {
+                self.status = Some(format!("Revoke refused · {error}"));
+                cx.notify();
+                return;
+            }
+        };
+        match self
+            .detail
+            .revoke_delegate(&grant_ref, revoked_at, revocation_ref)
+        {
+            Ok(()) => self.finish_participation_change(cx),
+            Err(error) => {
+                self.status = Some(format!("Revoke refused · {error}"));
+                cx.notify();
+            }
+        }
+    }
+
+    fn record_owner_disposition(&mut self, kind: OwnerDispositionKind, cx: &mut Context<Self>) {
+        let Some(recorded_at) = self.participation_timestamp(cx) else {
+            return;
+        };
+        let sequence = u64::try_from(self.detail.participation_journal().owner_dispositions.len())
+            .unwrap_or(u64::MAX)
+            .saturating_add(1);
+        let digest = self.participation_ref_digest("owner-disposition", sequence);
+        let disposition_ref = match OwnerDispositionRef::try_from(format!(
+            "disposition:omega:work:{digest}:{sequence}"
+        )) {
+            Ok(reference) => reference,
+            Err(error) => {
+                self.status = Some(format!("Disposition refused · {error}"));
+                cx.notify();
+                return;
+            }
+        };
+        let record = OwnerDispositionRecord {
+            disposition_ref,
+            actor_ref: self.detail.snapshot().summary.owner_ref.clone(),
+            kind,
+            recorded_at,
+        };
+        match self.detail.record_owner_disposition(record) {
+            Ok(()) => self.finish_participation_change(cx),
+            Err(error) => {
+                self.status = Some(format!("Disposition refused · {error}"));
+                cx.notify();
+            }
+        }
     }
 
     pub fn admit_event(
@@ -993,6 +1205,13 @@ impl WorkDetailSurface {
             ("Subscribers", "Not supplied by source".into()),
             ("Nostr references", "Not supplied by source".into()),
         ];
+        let can_change_participation = self.detail.can_change_participation();
+        let has_assignee = summary.assignee.0.is_some();
+        let has_active_delegate = self.detail.active_delegation_grant().is_some();
+        let delegate_label = self
+            .delegation_candidate
+            .as_ref()
+            .map(|candidate| format!("Delegate to {}", candidate.label));
         v_flex()
             .id("omega-work-inspector")
             .debug_selector(|| "omega.omega.work-detail.inspector".into())
@@ -1026,6 +1245,78 @@ impl WorkDetailSurface {
                             .map(|(label, value)| inspector_row(label, value, cx)),
                     ),
             )
+            .when(can_change_participation, |inspector| {
+                inspector.child(
+                    v_flex()
+                        .gap_2()
+                        .child(section_heading("Accountability", cx))
+                        .child(
+                            h_flex()
+                                .gap_1()
+                                .flex_wrap()
+                                .when(!has_assignee, |actions| {
+                                    actions.child(
+                                        Button::new("work-assign-owner", "Assign to me")
+                                            .style(ButtonStyle::Outlined)
+                                            .size(ButtonSize::Compact)
+                                            .on_click(cx.listener(|this, _, _, cx| {
+                                                this.assign_local_owner(cx);
+                                            })),
+                                    )
+                                })
+                                .when_some(
+                                    (!has_active_delegate).then_some(delegate_label).flatten(),
+                                    |actions, label| {
+                                        actions.child(
+                                            Button::new("work-delegate-agent", label)
+                                                .style(ButtonStyle::Outlined)
+                                                .size(ButtonSize::Compact)
+                                                .disabled(!has_assignee)
+                                                .on_click(cx.listener(|this, _, _, cx| {
+                                                    this.delegate_to_candidate(cx);
+                                                })),
+                                        )
+                                    },
+                                )
+                                .when(has_active_delegate, |actions| {
+                                    actions.child(
+                                        Button::new("work-revoke-delegate", "Revoke delegate")
+                                            .style(ButtonStyle::Subtle)
+                                            .size(ButtonSize::Compact)
+                                            .on_click(cx.listener(|this, _, _, cx| {
+                                                this.revoke_delegate(cx);
+                                            })),
+                                    )
+                                }),
+                        )
+                        .child(
+                            h_flex()
+                                .gap_1()
+                                .child(
+                                    Button::new("work-owner-accept", "Accept")
+                                        .style(ButtonStyle::Subtle)
+                                        .size(ButtonSize::Compact)
+                                        .on_click(cx.listener(|this, _, _, cx| {
+                                            this.record_owner_disposition(
+                                                OwnerDispositionKind::Accepted,
+                                                cx,
+                                            );
+                                        })),
+                                )
+                                .child(
+                                    Button::new("work-owner-needs-changes", "Needs changes")
+                                        .style(ButtonStyle::Subtle)
+                                        .size(ButtonSize::Compact)
+                                        .on_click(cx.listener(|this, _, _, cx| {
+                                            this.record_owner_disposition(
+                                                OwnerDispositionKind::NeedsChanges,
+                                                cx,
+                                            );
+                                        })),
+                                ),
+                        ),
+                )
+            })
             .when_some(portfolio, |inspector, portfolio| {
                 inspector.child(
                     v_flex()

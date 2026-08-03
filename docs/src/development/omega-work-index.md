@@ -43,6 +43,13 @@ The identity rules are explicit. A Thread maps to
 generated Work reference in the adapter envelope. A source/entity mismatch is
 rejected before it enters the index.
 
+For Omega-native Thread Work, the adapter can also project the validated local
+participation journal. It preserves the human assignee and the one active agent
+delegate with its grant and generation. Revocation removes the active delegate
+from the row but does not delete grant history. The adapter ignores a journal
+with a different Work or source identity, an invalid record, or a revision
+older than the current Thread metadata.
+
 ## Refresh and offline behavior {#refresh-and-offline-behavior}
 
 Each adapter refreshes in a staging lane. A paginated result replaces the

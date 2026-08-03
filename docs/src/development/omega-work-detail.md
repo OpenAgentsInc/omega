@@ -48,15 +48,32 @@ the Thread authority, and then emits a canonical Event. Work, Issue, and the
 Work Index advance to that one revision. Forensics and Effect-backed Work stay
 read-only unless their source later supplies an admitted mutation capability.
 
+Omega-native Thread Work also has a separate participation journal. The owner
+can assign the Work to the local human principal, delegate it to the Thread's
+verified Direct Agent, revoke that grant, and record an owner disposition. A
+grant names its agent, issuer, generation, allowed Thread capabilities, host
+when known, privacy policy, and evidence requirement. It grants no tools,
+budget, deadline, release authority, settlement authority, or public-claim
+authority by default. Assignment and delegation remain separate facts. Omega
+rejects delegation without a human assignee, a second active delegate, a stale
+generation, or a grant issued by a different principal.
+
+The participation journal is local authority for Omega-native Thread Work
+only. It cannot add authority to Forensics or Effect-backed Work. The Work
+Index projects the journal's current assignee and active delegate without
+changing Thread ownership. A revoked grant stays in bounded history and cannot
+become active again.
+
 Offline, rejected, stale-generation, and revision-conflict outcomes remain
 visible and do not change canonical Work. Replaying the same idempotency key
 returns the recorded outcome. Reusing the key for a different request is an
 error.
 
-Omega stores bounded view state and Intent outcomes under
-`work-detail-v1/`. The directory uses mode `0700`, and journal files use mode
-`0600` on Unix. The journal does not copy the source authority or canonical
-Work summary.
+Omega stores bounded view state, Intent outcomes, and the separate
+participation journal under `work-detail-v1/`. The directory uses mode `0700`,
+and journal files use mode `0600` on Unix. The view journal does not copy the
+source authority or canonical Work summary. The participation journal is
+identity-bound to its Work and source and is validated again before projection.
 
 ## Interface and navigation {#interface-and-navigation}
 
@@ -70,6 +87,11 @@ detail:
 - press Left/Right or H/L to switch Blocks;
 - press O to open the source;
 - press C or `/` to open the command menu.
+
+For writable Omega-native Thread Work, the Inspector also provides explicit
+**Assign to me**, **Delegate**, **Revoke delegate**, **Accept**, and **Needs
+changes** actions. A legacy ambiguous Thread owner does not become a delegation
+candidate.
 
 The same actions are available to pointer users. Focus returns to the detail
 surface after edit submission or cancellation.
@@ -87,11 +109,12 @@ cargo test -p omega_deltas omega_work_detail_keeps_issue_identity_and_source_adm
 
 The model suite checks same-identity projection, pending Intent behavior,
 idempotent replay, rejected/offline/conflict/stale outcomes, Event and revision
-fences, secure journal round trips, 10,000-row history bounds, and deterministic
-replay. The GPUI test uses a real Thread metadata source and verifies keyboard
-inspection, the command menu, Issue identity, title admission, source revision,
-Work Index reconciliation, and source navigation. It does not control an
-installed application UI.
+fences, secure journal round trips, bounded delegation generations, revocation,
+owner disposition, 10,000-row history bounds, and deterministic replay. The
+GPUI test uses a real Thread metadata source and verifies keyboard inspection,
+the command menu, Issue identity, title admission, source revision, Work Index
+reconciliation, and source navigation. It does not control an installed
+application UI.
 
 ## OAW-005 installed receipt {#oaw-005-installed-receipt}
 

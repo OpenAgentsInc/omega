@@ -13,10 +13,11 @@ use std::{
 };
 
 use omega_effectd::all_work_contract::{
-    Completeness, CompletenessState, ContractValidate, ContractVersion, Freshness, FreshnessState,
-    IsoTimestamp, Nullable, PrincipalRef, PrivacyClass, RedactionMetadata, SafeInteger, ShortText,
-    SourceAuthority, SourceAuthorityKind, SourceRef, WorkClass, WorkCursor, WorkDomain,
-    WorkIndexReadResult, WorkPriority, WorkRef, WorkState, WorkSummary,
+    AgentDelegate, Completeness, CompletenessState, ContractValidate, ContractVersion, Freshness,
+    FreshnessState, HumanAssignee, IsoTimestamp, Nullable, PrincipalRef, PrivacyClass,
+    RedactionMetadata, SafeInteger, ShortText, SourceAuthority, SourceAuthorityKind, SourceRef,
+    WorkClass, WorkCursor, WorkDomain, WorkIndexReadResult, WorkPriority, WorkRef, WorkState,
+    WorkSummary,
 };
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
@@ -814,6 +815,8 @@ pub struct NativeThreadRecord {
     pub revision: u64,
     pub archived: bool,
     pub lifecycle: NativeThreadLifecycle,
+    pub assignee: Option<HumanAssignee>,
+    pub agent_delegate: Option<AgentDelegate>,
 }
 
 pub fn adapt_thread(record: NativeThreadRecord) -> Result<WorkIndexItem, WorkIndexError> {
@@ -845,10 +848,18 @@ pub fn adapt_thread(record: NativeThreadRecord) -> Result<WorkIndexItem, WorkInd
         revision: record.revision,
         updated_at: record.updated_at,
         observed_at: record.observed_at,
+        assignee: record.assignee,
+        agent_delegate: record.agent_delegate,
     })?;
     let mut accountability = BTreeSet::new();
     accountability.insert(AccountabilityKind::Owner);
     accountability.insert(AccountabilityKind::Participant);
+    if summary.assignee.0.is_some() {
+        accountability.insert(AccountabilityKind::Assignee);
+    }
+    if summary.agent_delegate.as_ref().is_some_and(Option::is_some) {
+        accountability.insert(AccountabilityKind::DelegatedAgent);
+    }
     let item = WorkIndexItem {
         attention: attention_for(&summary, hint)?,
         summary,
@@ -918,6 +929,8 @@ pub fn adapt_forensics(
         revision: record.revision,
         updated_at: record.updated_at.clone(),
         observed_at: record.observed_at.clone(),
+        assignee: None,
+        agent_delegate: None,
     })?;
     let mut accountability = BTreeSet::new();
     accountability.insert(AccountabilityKind::Owner);
@@ -952,6 +965,8 @@ pub fn adapt_forensics(
             revision: record.revision,
             updated_at: record.updated_at.clone(),
             observed_at: record.observed_at.clone(),
+            assignee: None,
+            agent_delegate: None,
         })?;
         let run = WorkIndexItem {
             attention: attention_for(&run_summary, hint)?,
@@ -1013,6 +1028,8 @@ struct SummaryInput {
     revision: u64,
     updated_at: String,
     observed_at: String,
+    assignee: Option<HumanAssignee>,
+    agent_delegate: Option<AgentDelegate>,
 }
 
 fn make_summary(input: SummaryInput) -> Result<WorkSummary, WorkIndexError> {
@@ -1030,8 +1047,8 @@ fn make_summary(input: SummaryInput) -> Result<WorkSummary, WorkIndexError> {
         state: input.state,
         priority: input.priority,
         owner_ref,
-        assignee: Nullable(None),
-        agent_delegate: Some(None),
+        assignee: Nullable(input.assignee),
+        agent_delegate: Some(input.agent_delegate),
         portfolio: None,
         source_authority: SourceAuthority {
             kind: input.source_kind,
@@ -1201,6 +1218,8 @@ mod tests {
             revision: index + 1,
             archived: false,
             lifecycle,
+            assignee: None,
+            agent_delegate: None,
         })
         .expect("valid thread")
     }
@@ -1664,6 +1683,8 @@ mod tests {
                 revision,
                 archived: false,
                 lifecycle: NativeThreadLifecycle::Running,
+                assignee: None,
+                agent_delegate: None,
             }).expect("valid thread");
             apply_native(&mut index, THREAD_ADAPTER_ID, vec![item.clone(), item], revision);
             prop_assert_eq!(index.projection().rows.len(), 1);

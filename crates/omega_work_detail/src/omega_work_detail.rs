@@ -7,10 +7,11 @@ use std::{
 };
 
 use omega_effectd::all_work_contract::{
-    AgentActivityRef, AgentSessionRef, ContractValidate, EventRef, EvidenceRef, FreshnessState,
-    IntentRef, IsoTimestamp, IssueProjection, LongText, OwnerDispositionRef, ReceiptRef, RunRef,
-    SafeInteger, SessionRef, ShortText, SourceRef, ThreadRef, VerificationRef, WorkPriority,
-    WorkRef, WorkRelation, WorkSnapshot, WorkState,
+    AgentActivityRef, AgentDelegate, AgentRef, AgentSessionRef, AssigneeKind, ContractValidate,
+    DelegationGrantRef, EventRef, EvidenceRef, FreshnessState, HumanAssignee, IntentRef,
+    IsoTimestamp, IssueProjection, LongText, Nullable, OwnerDispositionRef, PrincipalRef,
+    ReceiptRef, RunRef, SafeInteger, SessionRef, ShortText, SourceAuthorityKind, SourceRef,
+    ThreadRef, VerificationRef, WorkPriority, WorkRef, WorkRelation, WorkSnapshot, WorkState,
 };
 use omega_work_index::{WorkIndexItem, WorkSourceEntity};
 use serde::{Deserialize, Serialize};
@@ -18,6 +19,8 @@ use sha2::{Digest, Sha256};
 use thiserror::Error;
 
 pub const WORK_DETAIL_JOURNAL_SCHEMA_V1: &str = "openagents.omega.work-detail-journal.v1";
+pub const WORK_PARTICIPATION_JOURNAL_SCHEMA_V1: &str =
+    "openagents.omega.work-participation-journal.v1";
 pub const MAX_WORK_BLOCKS: usize = 64;
 pub const MAX_WORK_BLOCK_FACTS: usize = 1_024;
 pub const MAX_WORK_HISTORY_ROWS: usize = 10_000;
@@ -45,6 +48,20 @@ pub enum WorkDetailError {
     InvalidBlockFact,
     #[error("Work detail journal does not belong to this Work and source")]
     JournalIdentityMismatch,
+    #[error("Work participation journal does not belong to this Work and source")]
+    ParticipationIdentityMismatch,
+    #[error("Work participation changes require a writable Omega-native source")]
+    ParticipationAuthorityUnavailable,
+    #[error("Work must have an accountable Assignee before it can have an Agent Delegate")]
+    MissingAssignee,
+    #[error("Work already has an active Agent Delegate")]
+    ActiveDelegateExists,
+    #[error("the Delegation Grant generation is stale or non-monotonic")]
+    StaleDelegationGeneration,
+    #[error("the active Delegation Grant does not match this revocation")]
+    DelegationGrantMismatch,
+    #[error("Work participation history exceeds its bounded limit")]
+    TooManyParticipationRecords,
     #[error("unsupported Work detail journal schema {0:?}")]
     UnsupportedJournalSchema(String),
     #[error("idempotency key is already bound to a different Work Intent")]
@@ -361,6 +378,68 @@ pub struct SnapshotLinks {
     pub relations: Vec<WorkRelation>,
 }
 
+const MAX_DELEGATION_GRANTS: usize = 256;
+const MAX_OWNER_DISPOSITIONS: usize = 256;
+const MAX_GRANT_REFS: usize = 64;
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum DelegationGrantState {
+    Active,
+    Revoked,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct BoundedDelegationGrant {
+    pub grant_ref: DelegationGrantRef,
+    pub agent_ref: AgentRef,
+    pub issued_by: PrincipalRef,
+    pub generation: SafeInteger,
+    pub issued_at: IsoTimestamp,
+    pub capability_refs: Vec<SourceRef>,
+    pub tool_refs: Vec<SourceRef>,
+    pub host_ref: Option<SourceRef>,
+    pub budget_ref: Option<SourceRef>,
+    pub deadline: Option<IsoTimestamp>,
+    pub privacy_policy_ref: SourceRef,
+    pub evidence_requirement_refs: Vec<SourceRef>,
+    pub state: DelegationGrantState,
+    pub revoked_at: Option<IsoTimestamp>,
+    pub revocation_ref: Option<SourceRef>,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum OwnerDispositionKind {
+    Accepted,
+    Rejected,
+    NeedsChanges,
+    Dismissed,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct OwnerDispositionRecord {
+    pub disposition_ref: OwnerDispositionRef,
+    pub actor_ref: PrincipalRef,
+    pub kind: OwnerDispositionKind,
+    pub recorded_at: IsoTimestamp,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct WorkParticipationJournal {
+    pub schema: String,
+    pub work_ref: WorkRef,
+    pub source_ref: SourceRef,
+    pub revision: SafeInteger,
+    pub updated_at: IsoTimestamp,
+    pub assignee: Option<HumanAssignee>,
+    pub delegation_grants: Vec<BoundedDelegationGrant>,
+    pub owner_dispositions: Vec<OwnerDispositionRecord>,
+}
+
 pub fn snapshot_from_index_item(
     item: &WorkIndexItem,
     links: SnapshotLinks,
@@ -483,6 +562,7 @@ pub struct WorkDetail {
     capability: Option<WorkMutationCapability>,
     records: Vec<WorkIntentRecord>,
     idempotency: HashMap<String, usize>,
+    participation: WorkParticipationJournal,
 }
 
 impl WorkDetail {
@@ -559,6 +639,16 @@ impl WorkDetail {
                 return Err(WorkDetailError::IdempotencyConflict);
             }
         }
+        let participation = WorkParticipationJournal {
+            schema: WORK_PARTICIPATION_JOURNAL_SCHEMA_V1.to_string(),
+            work_ref: snapshot.summary.work_ref.clone(),
+            source_ref: snapshot.summary.source_authority.source_ref.clone(),
+            revision: snapshot.summary.revision,
+            updated_at: snapshot.summary.updated_at.clone(),
+            assignee: snapshot.summary.assignee.0.clone(),
+            delegation_grants: Vec::new(),
+            owner_dispositions: Vec::new(),
+        };
         Ok(Self {
             snapshot,
             blocks,
@@ -568,6 +658,7 @@ impl WorkDetail {
             capability,
             records,
             idempotency,
+            participation,
         })
     }
 
@@ -635,6 +726,216 @@ impl WorkDetail {
                 .capability
                 .as_ref()
                 .is_some_and(|capability| capability.operations.contains(&kind))
+    }
+
+    pub fn participation_journal(&self) -> WorkParticipationJournal {
+        self.participation.clone()
+    }
+
+    pub fn can_change_participation(&self) -> bool {
+        self.require_participation_authority().is_ok()
+    }
+
+    pub fn active_delegation_grant(&self) -> Option<&BoundedDelegationGrant> {
+        self.participation
+            .delegation_grants
+            .iter()
+            .rev()
+            .find(|grant| grant.state == DelegationGrantState::Active)
+    }
+
+    pub fn restore_participation(
+        &mut self,
+        journal: WorkParticipationJournal,
+    ) -> Result<(), WorkDetailError> {
+        self.require_participation_authority()?;
+        validate_participation_journal(&journal, &self.snapshot)?;
+        self.participation = journal;
+        self.snapshot.summary.revision = self.participation.revision;
+        self.snapshot.summary.updated_at = self.participation.updated_at.clone();
+        self.snapshot.summary.freshness.observed_at = self.participation.updated_at.clone();
+        self.snapshot.summary.freshness.source_updated_at =
+            Some(Some(self.participation.updated_at.clone()));
+        if let Some(Some(issue)) = self.snapshot.issue.as_mut() {
+            issue.revision = self.participation.revision;
+        }
+        self.apply_participation_projection();
+        Ok(())
+    }
+
+    pub fn assign(
+        &mut self,
+        assignee: HumanAssignee,
+        admitted_at: IsoTimestamp,
+    ) -> Result<(), WorkDetailError> {
+        self.require_participation_authority()?;
+        assignee.validate()?;
+        if assignee.kind != AssigneeKind::Human {
+            return Err(WorkDetailError::ParticipationAuthorityUnavailable);
+        }
+        if self.participation.assignee.as_ref() == Some(&assignee) {
+            return Ok(());
+        }
+        self.participation.assignee = Some(assignee);
+        self.advance_participation_revision(admitted_at);
+        Ok(())
+    }
+
+    pub fn unassign(&mut self, admitted_at: IsoTimestamp) -> Result<(), WorkDetailError> {
+        self.require_participation_authority()?;
+        if self.active_delegation_grant().is_some() {
+            return Err(WorkDetailError::ActiveDelegateExists);
+        }
+        if self.participation.assignee.is_none() {
+            return Ok(());
+        }
+        self.participation.assignee = None;
+        self.advance_participation_revision(admitted_at);
+        Ok(())
+    }
+
+    pub fn delegate(
+        &mut self,
+        grant: BoundedDelegationGrant,
+        admitted_at: IsoTimestamp,
+    ) -> Result<(), WorkDetailError> {
+        self.require_participation_authority()?;
+        if self.participation.assignee.is_none() {
+            return Err(WorkDetailError::MissingAssignee);
+        }
+        if self.active_delegation_grant().is_some() {
+            return Err(WorkDetailError::ActiveDelegateExists);
+        }
+        validate_delegation_grant(&grant)?;
+        if self
+            .participation
+            .assignee
+            .as_ref()
+            .is_none_or(|assignee| assignee.principal_ref != grant.issued_by)
+        {
+            return Err(WorkDetailError::ParticipationAuthorityUnavailable);
+        }
+        let expected_generation = self
+            .participation
+            .delegation_grants
+            .iter()
+            .map(|grant| grant.generation.0)
+            .max()
+            .unwrap_or(0)
+            .saturating_add(1);
+        if grant.generation.0 != expected_generation
+            || grant.state != DelegationGrantState::Active
+            || grant.revoked_at.is_some()
+            || grant.revocation_ref.is_some()
+        {
+            return Err(WorkDetailError::StaleDelegationGeneration);
+        }
+        if self.participation.delegation_grants.len() >= MAX_DELEGATION_GRANTS {
+            return Err(WorkDetailError::TooManyParticipationRecords);
+        }
+        self.participation.delegation_grants.push(grant);
+        self.advance_participation_revision(admitted_at);
+        Ok(())
+    }
+
+    pub fn revoke_delegate(
+        &mut self,
+        grant_ref: &DelegationGrantRef,
+        revoked_at: IsoTimestamp,
+        revocation_ref: SourceRef,
+    ) -> Result<(), WorkDetailError> {
+        self.require_participation_authority()?;
+        revocation_ref.validate()?;
+        let Some(grant) = self
+            .participation
+            .delegation_grants
+            .iter_mut()
+            .rev()
+            .find(|grant| grant.state == DelegationGrantState::Active)
+        else {
+            return Err(WorkDetailError::DelegationGrantMismatch);
+        };
+        if &grant.grant_ref != grant_ref {
+            return Err(WorkDetailError::DelegationGrantMismatch);
+        }
+        grant.state = DelegationGrantState::Revoked;
+        grant.revoked_at = Some(revoked_at.clone());
+        grant.revocation_ref = Some(revocation_ref);
+        self.advance_participation_revision(revoked_at);
+        Ok(())
+    }
+
+    pub fn record_owner_disposition(
+        &mut self,
+        disposition: OwnerDispositionRecord,
+    ) -> Result<(), WorkDetailError> {
+        self.require_participation_authority()?;
+        validate_owner_disposition(&disposition)?;
+        if disposition.actor_ref != self.snapshot.summary.owner_ref {
+            return Err(WorkDetailError::ParticipationAuthorityUnavailable);
+        }
+        if self
+            .participation
+            .owner_dispositions
+            .iter()
+            .any(|record| record.disposition_ref == disposition.disposition_ref)
+        {
+            return Ok(());
+        }
+        if self.participation.owner_dispositions.len() >= MAX_OWNER_DISPOSITIONS {
+            return Err(WorkDetailError::TooManyParticipationRecords);
+        }
+        let recorded_at = disposition.recorded_at.clone();
+        self.participation.owner_dispositions.push(disposition);
+        self.advance_participation_revision(recorded_at);
+        Ok(())
+    }
+
+    fn require_participation_authority(&self) -> Result<(), WorkDetailError> {
+        if matches!(self.source_state, WorkDetailSourceState::Ready)
+            && self.snapshot.summary.source_authority.writable
+            && self.snapshot.summary.source_authority.kind == SourceAuthorityKind::OmegaNative
+        {
+            Ok(())
+        } else {
+            Err(WorkDetailError::ParticipationAuthorityUnavailable)
+        }
+    }
+
+    fn advance_participation_revision(&mut self, admitted_at: IsoTimestamp) {
+        self.participation.revision =
+            SafeInteger(self.snapshot.summary.revision.0.saturating_add(1));
+        self.participation.updated_at = admitted_at.clone();
+        self.snapshot.summary.revision = self.participation.revision;
+        self.snapshot.summary.updated_at = admitted_at.clone();
+        self.snapshot.summary.freshness.state = FreshnessState::Fresh;
+        self.snapshot.summary.freshness.observed_at = admitted_at.clone();
+        self.snapshot.summary.freshness.source_updated_at = Some(Some(admitted_at));
+        if let Some(Some(issue)) = self.snapshot.issue.as_mut() {
+            issue.revision = self.snapshot.summary.revision;
+        }
+        self.apply_participation_projection();
+    }
+
+    fn apply_participation_projection(&mut self) {
+        let active_delegate = self.active_delegation_grant().map(|grant| AgentDelegate {
+            agent_ref: grant.agent_ref.clone(),
+            delegation_grant_ref: grant.grant_ref.clone(),
+            generation: grant.generation,
+        });
+        self.snapshot.summary.assignee = Nullable(self.participation.assignee.clone());
+        self.snapshot.summary.agent_delegate = Some(active_delegate);
+        for disposition in &self.participation.owner_dispositions {
+            if !self
+                .snapshot
+                .owner_disposition_refs
+                .contains(&disposition.disposition_ref)
+            {
+                self.snapshot
+                    .owner_disposition_refs
+                    .push(disposition.disposition_ref.clone());
+            }
+        }
     }
 
     pub fn records(&self) -> &[WorkIntentRecord] {
@@ -1082,6 +1383,135 @@ fn validate_journal(
     Ok(())
 }
 
+fn validate_participation_journal(
+    journal: &WorkParticipationJournal,
+    snapshot: &WorkSnapshot,
+) -> Result<(), WorkDetailError> {
+    if journal.work_ref != snapshot.summary.work_ref
+        || journal.source_ref != snapshot.summary.source_authority.source_ref
+    {
+        return Err(WorkDetailError::ParticipationIdentityMismatch);
+    }
+    if journal.revision.0 < snapshot.summary.revision.0 {
+        return Err(WorkDetailError::RevisionRegression);
+    }
+    validate_participation_records(journal)?;
+    if journal
+        .owner_dispositions
+        .iter()
+        .any(|disposition| disposition.actor_ref != snapshot.summary.owner_ref)
+    {
+        return Err(WorkDetailError::ParticipationAuthorityUnavailable);
+    }
+    Ok(())
+}
+
+fn validate_participation_records(
+    journal: &WorkParticipationJournal,
+) -> Result<(), WorkDetailError> {
+    if journal.schema != WORK_PARTICIPATION_JOURNAL_SCHEMA_V1 {
+        return Err(WorkDetailError::UnsupportedJournalSchema(
+            journal.schema.clone(),
+        ));
+    }
+    journal.revision.validate()?;
+    journal.updated_at.validate()?;
+    journal.assignee.validate()?;
+    if journal
+        .assignee
+        .as_ref()
+        .is_some_and(|assignee| assignee.kind != AssigneeKind::Human)
+    {
+        return Err(WorkDetailError::ParticipationAuthorityUnavailable);
+    }
+    if journal.delegation_grants.len() > MAX_DELEGATION_GRANTS
+        || journal.owner_dispositions.len() > MAX_OWNER_DISPOSITIONS
+    {
+        return Err(WorkDetailError::TooManyParticipationRecords);
+    }
+    let mut previous_generation = 0;
+    let mut active_count = 0;
+    let mut grant_refs = HashSet::new();
+    for grant in &journal.delegation_grants {
+        validate_delegation_grant(grant)?;
+        if grant.generation.0 <= previous_generation || !grant_refs.insert(grant.grant_ref.clone())
+        {
+            return Err(WorkDetailError::StaleDelegationGeneration);
+        }
+        previous_generation = grant.generation.0;
+        if grant.state == DelegationGrantState::Active {
+            active_count += 1;
+        }
+    }
+    if active_count > 1 {
+        return Err(WorkDetailError::ActiveDelegateExists);
+    }
+    if active_count == 1 && journal.assignee.is_none() {
+        return Err(WorkDetailError::MissingAssignee);
+    }
+    if let Some(active_grant) = journal
+        .delegation_grants
+        .iter()
+        .find(|grant| grant.state == DelegationGrantState::Active)
+        && journal
+            .assignee
+            .as_ref()
+            .is_none_or(|assignee| assignee.principal_ref != active_grant.issued_by)
+    {
+        return Err(WorkDetailError::ParticipationAuthorityUnavailable);
+    }
+    let mut disposition_refs = HashSet::new();
+    for disposition in &journal.owner_dispositions {
+        validate_owner_disposition(disposition)?;
+        if !disposition_refs.insert(disposition.disposition_ref.clone()) {
+            return Err(WorkDetailError::TooManyParticipationRecords);
+        }
+    }
+    Ok(())
+}
+
+fn validate_delegation_grant(grant: &BoundedDelegationGrant) -> Result<(), WorkDetailError> {
+    grant.grant_ref.validate()?;
+    grant.agent_ref.validate()?;
+    grant.issued_by.validate()?;
+    grant.generation.validate()?;
+    grant.issued_at.validate()?;
+    grant.host_ref.validate()?;
+    grant.budget_ref.validate()?;
+    grant.deadline.validate()?;
+    grant.privacy_policy_ref.validate()?;
+    grant.revoked_at.validate()?;
+    grant.revocation_ref.validate()?;
+    if grant.capability_refs.len() > MAX_GRANT_REFS
+        || grant.tool_refs.len() > MAX_GRANT_REFS
+        || grant.evidence_requirement_refs.len() > MAX_GRANT_REFS
+    {
+        return Err(WorkDetailError::TooManyParticipationRecords);
+    }
+    grant.capability_refs.validate()?;
+    grant.tool_refs.validate()?;
+    grant.evidence_requirement_refs.validate()?;
+    let revocation_is_consistent = match grant.state {
+        DelegationGrantState::Active => {
+            grant.revoked_at.is_none() && grant.revocation_ref.is_none()
+        }
+        DelegationGrantState::Revoked => {
+            grant.revoked_at.is_some() && grant.revocation_ref.is_some()
+        }
+    };
+    if !revocation_is_consistent {
+        return Err(WorkDetailError::DelegationGrantMismatch);
+    }
+    Ok(())
+}
+
+fn validate_owner_disposition(disposition: &OwnerDispositionRecord) -> Result<(), WorkDetailError> {
+    disposition.disposition_ref.validate()?;
+    disposition.actor_ref.validate()?;
+    disposition.recorded_at.validate()?;
+    Ok(())
+}
+
 fn append_refs<'a>(
     rows: &mut Vec<WorkActivityRow>,
     seen: &mut HashSet<String>,
@@ -1119,6 +1549,91 @@ fn journal_path(data_dir: &Path, work_ref: &WorkRef, source_ref: &SourceRef) -> 
     data_dir
         .join(JOURNAL_DIR)
         .join(format!("{:x}.json", digest.finalize()))
+}
+
+fn participation_journal_path(
+    data_dir: &Path,
+    work_ref: &WorkRef,
+    source_ref: &SourceRef,
+) -> PathBuf {
+    let mut digest = Sha256::new();
+    digest.update(b"participation\0");
+    digest.update(work_ref.0.as_bytes());
+    digest.update([0]);
+    digest.update(source_ref.0.as_bytes());
+    data_dir
+        .join(JOURNAL_DIR)
+        .join(format!("{:x}.participation.json", digest.finalize()))
+}
+
+pub fn write_participation_journal(
+    data_dir: &Path,
+    journal: &WorkParticipationJournal,
+) -> Result<PathBuf, WorkDetailError> {
+    let path = participation_journal_path(data_dir, &journal.work_ref, &journal.source_ref);
+    let Some(parent) = path.parent() else {
+        return Err(
+            std::io::Error::other("Work participation journal has no parent directory").into(),
+        );
+    };
+    fs::create_dir_all(parent)?;
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt as _;
+        fs::set_permissions(parent, fs::Permissions::from_mode(0o700))?;
+    }
+    let suffix = NEXT_TEMP_FILE.fetch_add(1, Ordering::Relaxed);
+    let temp_path = parent.join(format!(
+        ".participation-{}-{suffix}.tmp",
+        std::process::id()
+    ));
+    let bytes = serde_json::to_vec_pretty(journal)?;
+    let mut options = fs::OpenOptions::new();
+    options.write(true).create_new(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt as _;
+        options.mode(0o600);
+    }
+    let result = (|| {
+        let mut file = options.open(&temp_path)?;
+        file.write_all(&bytes)?;
+        file.sync_all()?;
+        fs::rename(&temp_path, &path)?;
+        Ok::<(), std::io::Error>(())
+    })();
+    if result.is_err()
+        && let Err(error) = fs::remove_file(&temp_path)
+        && error.kind() != std::io::ErrorKind::NotFound
+    {
+        return Err(error.into());
+    }
+    result?;
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt as _;
+        fs::set_permissions(&path, fs::Permissions::from_mode(0o600))?;
+    }
+    Ok(path)
+}
+
+pub fn read_participation_journal(
+    data_dir: &Path,
+    work_ref: &WorkRef,
+    source_ref: &SourceRef,
+) -> Result<Option<WorkParticipationJournal>, WorkDetailError> {
+    let path = participation_journal_path(data_dir, work_ref, source_ref);
+    let bytes = match fs::read(path) {
+        Ok(bytes) => bytes,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+        Err(error) => return Err(error.into()),
+    };
+    let journal: WorkParticipationJournal = serde_json::from_slice(&bytes)?;
+    if journal.work_ref != *work_ref || journal.source_ref != *source_ref {
+        return Err(WorkDetailError::ParticipationIdentityMismatch);
+    }
+    validate_participation_records(&journal)?;
+    Ok(Some(journal))
 }
 
 pub fn write_journal(data_dir: &Path, detail: &WorkDetail) -> Result<PathBuf, WorkDetailError> {
@@ -1342,6 +1857,36 @@ mod tests {
         }
     }
 
+    fn assignee() -> HumanAssignee {
+        HumanAssignee {
+            kind: AssigneeKind::Human,
+            principal_ref: PrincipalRef::try_from("principal:omega:local-owner".to_string())
+                .expect("valid principal"),
+        }
+    }
+
+    fn grant(generation: u64) -> BoundedDelegationGrant {
+        BoundedDelegationGrant {
+            grant_ref: DelegationGrantRef::try_from(format!("grant:omega:thread:abc:{generation}"))
+                .expect("valid grant ref"),
+            agent_ref: AgentRef::try_from("agent:omega:codex".to_string())
+                .expect("valid agent ref"),
+            issued_by: assignee().principal_ref,
+            generation: SafeInteger(generation),
+            issued_at: timestamp("2026-08-02T12:00:04Z"),
+            capability_refs: vec![source("capability:omega:thread-send")],
+            tool_refs: vec![source("tool:omega:repository")],
+            host_ref: Some(source("host:omega:local")),
+            budget_ref: Some(source("budget:omega:owner-local")),
+            deadline: Some(timestamp("2026-08-02T14:00:00Z")),
+            privacy_policy_ref: source("policy:omega:private-work-v1"),
+            evidence_requirement_refs: vec![source("requirement:omega:diff-review")],
+            state: DelegationGrantState::Active,
+            revoked_at: None,
+            revocation_ref: None,
+        }
+    }
+
     #[test]
     fn work_and_issue_share_identity_revision_state_and_history() {
         let detail = detail(true);
@@ -1526,6 +2071,167 @@ mod tests {
         let encoded = serde_json::to_string(&journal).expect("encode journal");
         assert!(!encoded.contains("\"summary\""));
         assert!(!encoded.contains("sourceAuthority"));
+    }
+
+    #[test]
+    fn assignee_delegate_and_owner_disposition_remain_separate_durable_facts() {
+        let directory = tempdir().expect("tempdir");
+        let mut detail = detail(true);
+        detail.snapshot.summary.assignee = Nullable(None);
+        detail.participation.assignee = None;
+
+        assert!(matches!(
+            detail.delegate(grant(1), timestamp("2026-08-02T12:00:05Z")),
+            Err(WorkDetailError::MissingAssignee)
+        ));
+        detail
+            .assign(assignee(), timestamp("2026-08-02T12:00:06Z"))
+            .expect("assign");
+        detail
+            .delegate(grant(1), timestamp("2026-08-02T12:00:07Z"))
+            .expect("delegate");
+
+        let summary = &detail.snapshot().summary;
+        assert_eq!(
+            summary
+                .assignee
+                .0
+                .as_ref()
+                .map(|value| &value.principal_ref),
+            Some(&summary.owner_ref)
+        );
+        let delegate = summary
+            .agent_delegate
+            .as_ref()
+            .and_then(Option::as_ref)
+            .expect("active delegate");
+        assert_eq!(delegate.agent_ref.0, "agent:omega:codex");
+        assert_eq!(delegate.generation.0, 1);
+        assert!(detail.snapshot().receipt_refs.is_empty());
+        assert!(detail.snapshot().verification_refs.is_empty());
+        assert!(detail.snapshot().owner_disposition_refs.is_empty());
+
+        let owner_ref = summary.owner_ref.clone();
+        detail
+            .record_owner_disposition(OwnerDispositionRecord {
+                disposition_ref: OwnerDispositionRef::try_from(
+                    "disposition:omega:thread:abc:1".to_string(),
+                )
+                .expect("valid disposition ref"),
+                actor_ref: owner_ref,
+                kind: OwnerDispositionKind::NeedsChanges,
+                recorded_at: timestamp("2026-08-02T12:00:08Z"),
+            })
+            .expect("owner disposition");
+        assert_eq!(detail.snapshot().owner_disposition_refs.len(), 1);
+        assert!(detail.snapshot().verification_refs.is_empty());
+        assert_eq!(detail.snapshot().summary.state, WorkState::Active);
+
+        let journal = detail.participation_journal();
+        let path = write_participation_journal(directory.path(), &journal).expect("write");
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt as _;
+            assert_eq!(
+                fs::metadata(path).expect("metadata").permissions().mode() & 0o777,
+                0o600
+            );
+        }
+        let restored =
+            read_participation_journal(directory.path(), &journal.work_ref, &journal.source_ref)
+                .expect("read")
+                .expect("journal");
+        let mut reopened = detail(true);
+        reopened
+            .restore_participation(restored)
+            .expect("restore participation");
+        assert_eq!(reopened.snapshot().summary.assignee.0, Some(assignee()));
+        assert!(
+            reopened
+                .snapshot()
+                .summary
+                .agent_delegate
+                .as_ref()
+                .is_some_and(Option::is_some)
+        );
+        assert_eq!(reopened.snapshot().owner_disposition_refs.len(), 1);
+    }
+
+    #[test]
+    fn revocation_fences_the_generation_without_changing_accountability() {
+        let mut detail = detail(true);
+        detail.snapshot.summary.assignee = Nullable(None);
+        detail.participation.assignee = None;
+        detail
+            .assign(assignee(), timestamp("2026-08-02T12:00:05Z"))
+            .expect("assign");
+        detail
+            .delegate(grant(1), timestamp("2026-08-02T12:00:06Z"))
+            .expect("delegate");
+        assert!(matches!(
+            detail.delegate(grant(2), timestamp("2026-08-02T12:00:07Z")),
+            Err(WorkDetailError::ActiveDelegateExists)
+        ));
+        let grant_ref = detail
+            .active_delegation_grant()
+            .expect("active grant")
+            .grant_ref
+            .clone();
+        detail
+            .revoke_delegate(
+                &grant_ref,
+                timestamp("2026-08-02T12:00:08Z"),
+                source("revocation:omega:thread:abc:1"),
+            )
+            .expect("revoke");
+        assert!(
+            detail
+                .snapshot()
+                .summary
+                .agent_delegate
+                .as_ref()
+                .is_some_and(Option::is_none)
+        );
+        assert_eq!(detail.snapshot().summary.assignee.0, Some(assignee()));
+        assert_eq!(
+            detail.participation_journal().delegation_grants[0].state,
+            DelegationGrantState::Revoked
+        );
+        assert!(matches!(
+            detail.delegate(grant(1), timestamp("2026-08-02T12:00:09Z")),
+            Err(WorkDetailError::StaleDelegationGeneration)
+        ));
+        detail
+            .delegate(grant(2), timestamp("2026-08-02T12:00:10Z"))
+            .expect("new generation");
+        assert_eq!(
+            detail
+                .snapshot()
+                .summary
+                .agent_delegate
+                .as_ref()
+                .and_then(Option::as_ref)
+                .expect("second delegate")
+                .generation
+                .0,
+            2
+        );
+    }
+
+    #[test]
+    fn read_only_and_effect_work_cannot_create_local_participation_authority() {
+        let mut read_only = detail(false);
+        assert!(matches!(
+            read_only.assign(assignee(), timestamp("2026-08-02T12:00:05Z")),
+            Err(WorkDetailError::ParticipationAuthorityUnavailable)
+        ));
+
+        let mut effect = detail(true);
+        effect.snapshot.summary.source_authority.kind = SourceAuthorityKind::EffectService;
+        assert!(matches!(
+            effect.assign(assignee(), timestamp("2026-08-02T12:00:05Z")),
+            Err(WorkDetailError::ParticipationAuthorityUnavailable)
+        ));
     }
 
     #[test]
