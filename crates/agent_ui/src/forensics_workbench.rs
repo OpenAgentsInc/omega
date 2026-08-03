@@ -7,11 +7,11 @@ use omega_forensics::{
     ColdcardBenchmarkArm, ColdcardClaimRung, ColdcardEvidenceWorkspaceProjection,
     ColdcardRungState, CoverageStatus, DEFAULT_ENTROPY_ANALYSIS_PROMPT, DependencyPolicy,
     EntropyCampaignComparison, EntropyCampaignPhase, EntropyCampaignProjection,
-    EntropyFileAnalysisOutput, EntropyFileState, EntropyFileTask, EntropyLimitation,
-    EntropyProjectCatalog, EntropyPromptSnapshot, EntropyRunPhase, EntropyRunProjection,
-    ExplicitOperatorAction, FORENSIC_FINDING_SCHEMA_V1, FORENSIC_HYPOTHESIS_SCHEMA_V1,
-    ForensicBudgetState, ForensicEvidenceTier, ForensicExactness, ForensicLifecycleState,
-    ForensicPromptIr, ForensicPromptWorkspace, ForensicPublicationGate,
+    EntropyDependencyAvailability, EntropyFileAnalysisOutput, EntropyFileState, EntropyFileTask,
+    EntropyLimitation, EntropyProjectCatalog, EntropyPromptSnapshot, EntropyRunPhase,
+    EntropyRunProjection, ExplicitOperatorAction, FORENSIC_FINDING_SCHEMA_V1,
+    FORENSIC_HYPOTHESIS_SCHEMA_V1, ForensicBudgetState, ForensicEvidenceTier, ForensicExactness,
+    ForensicLifecycleState, ForensicPromptIr, ForensicPromptWorkspace, ForensicPublicationGate,
     ForensicPublicationGateKind, ForensicPublicationGateProjection, ForensicPublicationGateState,
     ForensicReviewDecisionKind, ForensicReviewOutcome, ForensicSourceCitation, ForensicStatistic,
     ForensicWorkerObservation, ForensicWorkerPlacement, ForensicsFailureProjection,
@@ -644,10 +644,6 @@ pub(crate) struct EntropyRepositorySource {
 }
 
 impl EntropyRepositorySource {
-    pub(crate) fn selected(root: std::path::PathBuf) -> Self {
-        Self { root, _guard: None }
-    }
-
     pub(crate) fn snapshot(root: std::path::PathBuf, guard: tempfile::TempDir) -> Self {
         Self {
             root,
@@ -820,8 +816,8 @@ pub struct ForensicsWorkbenchSurface {
 impl ForensicsWorkbenchSurface {
     pub fn new(candidate: &ThreadIdentityCandidate, cx: &mut Context<Self>) -> Self {
         let fixture_views_enabled = forensics_fixture_views_enabled();
-        let entropy_catalog = EntropyProjectCatalog::wallet_entropy_v1()
-            .expect("the built-in 15-project entropy catalog must remain valid");
+        let entropy_catalog = EntropyProjectCatalog::wallet_entropy_v2()
+            .expect("the built-in entropy catalog must remain valid");
         let selected_entropy_project = entropy_catalog
             .projects
             .first()
@@ -1059,7 +1055,11 @@ impl ForensicsWorkbenchSurface {
         )?;
         self.entropy_prompt_snapshots.push(snapshot.clone());
         self.entropy_repository_source = None;
-        self.status = "Preparing the 15-project entropy campaign…".into();
+        self.status = format!(
+            "Preparing the {}-target entropy campaign…",
+            self.entropy_catalog.projects.len()
+        )
+        .into();
         cx.emit(ForensicsWorkbenchCommand::StartEntropyCampaign {
             prompt_snapshot: snapshot,
             catalog: self.entropy_catalog.clone(),
@@ -1077,7 +1077,11 @@ impl ForensicsWorkbenchSurface {
         if let Some(previous) = self.entropy_campaign.replace(campaign) {
             self.entropy_campaign_history.push(previous);
         }
-        self.status = "15-project entropy campaign started".into();
+        self.status = format!(
+            "{}-target entropy campaign started",
+            self.entropy_catalog.projects.len()
+        )
+        .into();
         self.persist_entropy_state(cx);
         cx.notify();
     }
@@ -4047,7 +4051,10 @@ impl Render for ForensicsWorkbenchSurface {
                             .child(
                                 Button::new(
                                     "omega.forensics.entropy.campaign.start",
-                                    "Run 15-project campaign",
+                                    format!(
+                                        "Run {}-target campaign",
+                                        entropy_catalog.projects.len()
+                                    ),
                                 )
                                 .size(ButtonSize::Compact)
                                 .disabled(
@@ -4093,7 +4100,11 @@ impl Render for ForensicsWorkbenchSurface {
                         h_flex()
                             .justify_between()
                             .child(
-                                Label::new("15-project entropy campaign").size(LabelSize::Small),
+                                Label::new(format!(
+                                    "{}-target entropy campaign",
+                                    entropy_catalog.projects.len()
+                                ))
+                                .size(LabelSize::Small),
                             )
                             .child(
                                 Label::new(
@@ -4333,11 +4344,15 @@ impl Render for ForensicsWorkbenchSurface {
                                     ))
                                     .child(Self::render_fact(
                                         "License / access",
-                                        product.license_or_access_status,
+                                        product.license_or_access_status.clone(),
                                     ))
                                     .child(Self::render_fact(
                                         "Dependencies",
-                                        product.dependency_policy_ref,
+                                        product.dependency_policy_ref.clone(),
+                                    ))
+                                    .child(Self::render_fact(
+                                        "Analysis profile",
+                                        product.analysis_profile_ref(),
                                     ))
                                     .child(Self::render_fact(
                                         "Limitations",
@@ -4412,6 +4427,13 @@ impl Render for ForensicsWorkbenchSurface {
                 let counts = run.counts();
                 let completed = counts.analyzed + counts.candidate + counts.skipped + counts.failed + counts.cancelled;
                 let elapsed = entropy_elapsed_label(&run);
+                let dependencies = run.manifest.dependencies.clone();
+                let incomplete_dependencies = dependencies
+                    .iter()
+                    .filter(|dependency| {
+                        dependency.availability != EntropyDependencyAvailability::Available
+                    })
+                    .count();
                 let visible_files = run
                     .files
                     .iter()
@@ -4443,6 +4465,80 @@ impl Render for ForensicsWorkbenchSurface {
                                 ),
                             ))
                             .child(Self::render_fact("Elapsed", elapsed))
+                            .child(Self::render_fact(
+                                "Recursive source",
+                                if dependencies.is_empty() {
+                                    "No submodules declared".to_string()
+                                } else if incomplete_dependencies == 0 {
+                                    format!("Complete · {} pinned dependencies", dependencies.len())
+                                } else {
+                                    format!(
+                                        "Incomplete · {incomplete_dependencies}/{} dependencies unavailable or mismatched",
+                                        dependencies.len()
+                                    )
+                                },
+                            ))
+                            .when(!dependencies.is_empty(), |this| {
+                                this.child(
+                                    v_flex()
+                                        .id("omega.forensics.entropy.dependencies")
+                                        .gap_1()
+                                        .p_2()
+                                        .border_1()
+                                        .border_color(cx.theme().colors().border)
+                                        .child(
+                                            Label::new("Pinned dependency inventory")
+                                                .size(LabelSize::XSmall)
+                                                .color(Color::Muted),
+                                        )
+                                        .children(dependencies.into_iter().enumerate().map(
+                                            |(index, dependency)| {
+                                                let available = dependency.availability
+                                                    == EntropyDependencyAvailability::Available;
+                                                v_flex()
+                                                    .id(("omega-entropy-dependency", index))
+                                                    .gap_1()
+                                                    .child(
+                                                        Label::new(dependency.path)
+                                                            .size(LabelSize::XSmall),
+                                                    )
+                                                    .child(Self::render_fact(
+                                                        "Status",
+                                                        entropy_dependency_availability_label(
+                                                            dependency.availability,
+                                                        ),
+                                                    ))
+                                                    .child(Self::render_fact(
+                                                        "Expected",
+                                                        dependency.expected_revision.unwrap_or_else(
+                                                            || "Unavailable".into(),
+                                                        ),
+                                                    ))
+                                                    .child(Self::render_fact(
+                                                        "Observed",
+                                                        dependency.observed_revision.unwrap_or_else(
+                                                            || "Unavailable".into(),
+                                                        ),
+                                                    ))
+                                                    .when_some(
+                                                        dependency.materialization_error,
+                                                        |this, error| {
+                                                            this.child(
+                                                                Label::new(error)
+                                                                    .size(LabelSize::XSmall)
+                                                                    .color(Color::Warning),
+                                                            )
+                                                        },
+                                                    )
+                                                    .when(!available, |this| {
+                                                        this.border_l_2().border_color(
+                                                            cx.theme().status().warning_border,
+                                                        ).pl_2()
+                                                    })
+                                            },
+                                        )),
+                                )
+                            })
                             .child(Self::render_fact(
                                 "Usage exactness",
                                 "Unavailable · selected model route did not report exact usage",
@@ -4608,7 +4704,7 @@ impl Render for ForensicsWorkbenchSurface {
             )
             .child(div().h_px().bg(cx.theme().colors().border))
             .child(
-                Label::new("Coldcard benchmark")
+                Label::new("Coldcard target")
                     .size(LabelSize::XSmall)
                     .color(Color::Muted),
             )
@@ -5450,6 +5546,17 @@ fn source_state_label(source_state: SourceState) -> &'static str {
 fn dependency_policy_label(dependency_policy: DependencyPolicy) -> &'static str {
     match dependency_policy {
         DependencyPolicy::PinnedRecursive => "Pinned recursive",
+    }
+}
+
+fn entropy_dependency_availability_label(
+    availability: EntropyDependencyAvailability,
+) -> &'static str {
+    match availability {
+        EntropyDependencyAvailability::Available => "Available at pinned revision",
+        EntropyDependencyAvailability::Missing => "Missing",
+        EntropyDependencyAvailability::WrongRevision => "Wrong revision",
+        EntropyDependencyAvailability::SourceUnavailable => "Source unavailable",
     }
 }
 
@@ -6363,13 +6470,13 @@ mod tests {
     }
 
     #[gpui::test]
-    fn entropy_campaign_keeps_all_fifteen_rows_and_selected_project_state(
+    fn entropy_campaign_keeps_every_target_and_selected_project_state(
         cx: &mut gpui::TestAppContext,
     ) {
         cx.update(|cx| {
             let binding = RepositoryBinding::new("repo", "worktree").expect("valid binding");
             let surface = cx.new(|cx| ForensicsWorkbenchSurface::new(&candidate(binding), cx));
-            let catalog = EntropyProjectCatalog::wallet_entropy_v1().expect("wallet catalog");
+            let catalog = EntropyProjectCatalog::wallet_entropy_v2().expect("wallet catalog");
             let prompt = EntropyPromptSnapshot::new(
                 "prompt.entropy.campaign.fixture".into(),
                 None,
@@ -6410,7 +6517,7 @@ mod tests {
                     .expect("campaign")
                     .projects
                     .len(),
-                15
+                17
             );
             assert_eq!(
                 snapshot.selected_entropy_project.as_deref(),

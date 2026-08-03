@@ -1,6 +1,7 @@
 use super::{
-    EntropyLimitation, EntropyLimitationClass, EntropyModelParameters, EntropyPromptSnapshot,
-    EntropyRunPhase, EntropyRunProjection, ForensicsError,
+    COLDCARD_CURRENT_COMMIT, COLDCARD_FIXED_COMMIT, COLDCARD_VULNERABLE_COMMIT, EntropyLimitation,
+    EntropyLimitationClass, EntropyModelParameters, EntropyPromptSnapshot, EntropyRunPhase,
+    EntropyRunProjection, ForensicsError,
 };
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
@@ -11,9 +12,14 @@ pub const ENTROPY_PROJECT_CATALOG_SCHEMA_V1: &str = "openagents.omega.entropy-pr
 pub const ENTROPY_CAMPAIGN_SCHEMA_V1: &str = "openagents.omega.entropy-campaign.v1";
 pub const ENTROPY_CAMPAIGN_COMPARISON_SCHEMA_V1: &str =
     "openagents.omega.entropy-campaign-comparison.v1";
-pub const WALLET_ENTROPY_CATALOG_REF_V1: &str = "catalog.omega.wallet-entropy.2026-08-02.v1";
+pub const WALLET_ENTROPY_CATALOG_REF_V2: &str = "catalog.omega.wallet-entropy.2026-08-03.v2";
 pub const ENTROPY_FILE_SELECTION_POLICY_REF_V1: &str =
     "policy.omega.entropy.supported-source-files.v1";
+pub const COLDCARD_CURRENT_PRODUCT_REF: &str = "product.coldcard.mk4-q1";
+pub const COLDCARD_VULNERABLE_PRODUCT_REF: &str = "product.coldcard.mk4.historical-vulnerable";
+pub const COLDCARD_FIXED_PRODUCT_REF: &str = "product.coldcard.mk4.immediate-fixed-control";
+pub const ENTROPY_GENERIC_ANALYSIS_PROFILE_REF: &str =
+    "scan-profile-ref://entropy/repository-source-v1";
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -48,6 +54,15 @@ pub struct EntropyProjectRecord {
 }
 
 impl EntropyProjectRecord {
+    pub fn analysis_profile_ref(&self) -> &'static str {
+        match self.product_ref.as_str() {
+            COLDCARD_VULNERABLE_PRODUCT_REF => "scan-profile-ref://coldcard/complete-vulnerable-v1",
+            COLDCARD_FIXED_PRODUCT_REF => "scan-profile-ref://coldcard/fixed-v1",
+            COLDCARD_CURRENT_PRODUCT_REF => "scan-profile-ref://coldcard/current-post-fix-v1",
+            _ => ENTROPY_GENERIC_ANALYSIS_PROFILE_REF,
+        }
+    }
+
     pub fn validate(&self) -> Result<(), ForensicsError> {
         validate_ref("product", &self.product_ref)?;
         validate_ref("dependency policy", &self.dependency_policy_ref)?;
@@ -138,7 +153,7 @@ impl EntropyProjectCatalog {
         Ok(catalog)
     }
 
-    pub fn wallet_entropy_v1() -> Result<Self, ForensicsError> {
+    pub fn wallet_entropy_v2() -> Result<Self, ForensicsError> {
         let available = |product_ref: &str,
                          product_name: &str,
                          repository_ref: &str,
@@ -156,16 +171,32 @@ impl EntropyProjectCatalog {
             limitation_refs: Vec::new(),
         };
         Self::new(
-            WALLET_ENTROPY_CATALOG_REF_V1.into(),
-            "2026-08-02T08:15:00Z".into(),
-            "observation.openagents.wallet-comparison-table.sha256.32e10ba1c09a234330567b67e0f561127a168f8fb540273a06dc6c57d37f962a".into(),
+            WALLET_ENTROPY_CATALOG_REF_V2.into(),
+            "2026-08-03T12:00:00Z".into(),
+            "observation.openagents.wallet-comparison-plus-coldcard-controls.v2".into(),
             vec![
                 available(
-                    "product.coldcard.mk4-q1",
-                    "Coldcard MK4 / Q1",
+                    COLDCARD_CURRENT_PRODUCT_REF,
+                    "Coldcard MK4 / Q1 · current post-fix",
                     "repository.github.coldcard.firmware",
                     "https://github.com/Coldcard/firmware",
-                    "c849c4e04a978335937a0fd0c96e76f5bd70bbb6",
+                    COLDCARD_CURRENT_COMMIT,
+                    "Public source; repository license is not machine-readable",
+                ),
+                available(
+                    COLDCARD_VULNERABLE_PRODUCT_REF,
+                    "Coldcard MK4 · historical vulnerable",
+                    "repository.github.coldcard.firmware",
+                    "https://github.com/Coldcard/firmware",
+                    COLDCARD_VULNERABLE_COMMIT,
+                    "Public historical source; repository license is not machine-readable",
+                ),
+                available(
+                    COLDCARD_FIXED_PRODUCT_REF,
+                    "Coldcard MK4 · immediate fixed control",
+                    "repository.github.coldcard.firmware",
+                    "https://github.com/Coldcard/firmware",
+                    COLDCARD_FIXED_COMMIT,
                     "Public source; repository license is not machine-readable",
                 ),
                 available(
@@ -253,9 +284,7 @@ impl EntropyProjectCatalog {
                     product_name: "Ledger".into(),
                     repository_ref: Some("repository.github.ledgerhq.ledger-secure-sdk".into()),
                     repository_url: Some("https://github.com/LedgerHQ/ledger-secure-sdk".into()),
-                    pinned_revision: Some(
-                        "63e94edeb12edd36e66ff5cf5efa998fafb2d7ee".into(),
-                    ),
+                    pinned_revision: Some("63e94edeb12edd36e66ff5cf5efa998fafb2d7ee".into()),
                     license_or_access_status:
                         "Apache-2.0 public SDK; complete device source not supplied".into(),
                     dependency_policy_ref: "policy.omega.dependencies.pinned-recursive.v1".into(),
@@ -1070,7 +1099,7 @@ mod tests {
     }
 
     fn small_catalog() -> EntropyProjectCatalog {
-        let all = EntropyProjectCatalog::wallet_entropy_v1().expect("wallet catalog");
+        let all = EntropyProjectCatalog::wallet_entropy_v2().expect("wallet catalog");
         EntropyProjectCatalog::new(
             "catalog.fixture.entropy.v1".into(),
             all.observed_at,
@@ -1088,7 +1117,11 @@ mod tests {
                     source_availability: EntropyProjectSourceAvailability::SourceUnavailable,
                     limitation_refs: vec!["limitation.entropy.source_unavailable".into()],
                 },
-                all.projects[11].clone(),
+                all.projects
+                    .iter()
+                    .find(|project| project.product_ref == "product.ledger")
+                    .expect("Ledger fixture")
+                    .clone(),
             ],
         )
         .expect("small catalog")
@@ -1180,14 +1213,31 @@ mod tests {
     }
 
     #[test]
-    fn wallet_catalog_preserves_all_fifteen_intake_rows_without_grades() {
-        let catalog = EntropyProjectCatalog::wallet_entropy_v1().expect("wallet catalog");
-        assert_eq!(catalog.projects.len(), 15);
-        assert_eq!(catalog.projects[0].product_name, "Coldcard MK4 / Q1");
+    fn wallet_catalog_preserves_intake_rows_and_coldcard_differential_controls_without_grades() {
+        let catalog = EntropyProjectCatalog::wallet_entropy_v2().expect("wallet catalog");
+        assert_eq!(catalog.projects.len(), 17);
         assert_eq!(
-            catalog.projects[11].source_availability,
+            catalog.projects[0].product_name,
+            "Coldcard MK4 / Q1 · current post-fix"
+        );
+        assert_eq!(
+            catalog
+                .projects
+                .iter()
+                .find(|project| project.product_ref == "product.ledger")
+                .expect("Ledger row")
+                .source_availability,
             EntropyProjectSourceAvailability::InputIncomplete
         );
+        assert_eq!(
+            catalog.projects[1].pinned_revision.as_deref(),
+            Some(COLDCARD_VULNERABLE_COMMIT)
+        );
+        assert_eq!(
+            catalog.projects[2].pinned_revision.as_deref(),
+            Some(COLDCARD_FIXED_COMMIT)
+        );
+        assert_ne!(COLDCARD_VULNERABLE_COMMIT, crate::COLDCARD_VULNERABLE_TREE);
         assert!(catalog.projects.iter().all(|project| {
             !project.license_or_access_status.contains("green")
                 && !project.license_or_access_status.contains("yellow")
@@ -1214,16 +1264,32 @@ mod tests {
 
     #[test]
     fn campaign_retains_clean_candidate_provider_failure_and_mixed_terminal_states() {
-        let all = EntropyProjectCatalog::wallet_entropy_v1().expect("wallet catalog");
+        let all = EntropyProjectCatalog::wallet_entropy_v2().expect("wallet catalog");
         let catalog = EntropyProjectCatalog::new(
             "catalog.fixture.entropy.mixed.v1".into(),
             all.observed_at,
             all.source_observation_ref,
             vec![
-                all.projects[0].clone(),
-                all.projects[1].clone(),
-                all.projects[2].clone(),
-                all.projects[11].clone(),
+                all.projects
+                    .iter()
+                    .find(|project| project.product_ref == COLDCARD_CURRENT_PRODUCT_REF)
+                    .expect("Coldcard fixture")
+                    .clone(),
+                all.projects
+                    .iter()
+                    .find(|project| project.product_ref == "product.trezor.model-one-model-t")
+                    .expect("Trezor fixture")
+                    .clone(),
+                all.projects
+                    .iter()
+                    .find(|project| project.product_ref == "product.seedsigner")
+                    .expect("SeedSigner fixture")
+                    .clone(),
+                all.projects
+                    .iter()
+                    .find(|project| project.product_ref == "product.ledger")
+                    .expect("Ledger fixture")
+                    .clone(),
             ],
         )
         .expect("mixed catalog");
@@ -1315,7 +1381,7 @@ mod tests {
 
     #[test]
     fn prompt_comparison_preserves_campaign_run_and_source_identities() {
-        let all = EntropyProjectCatalog::wallet_entropy_v1().expect("wallet catalog");
+        let all = EntropyProjectCatalog::wallet_entropy_v2().expect("wallet catalog");
         let catalog = EntropyProjectCatalog::new(
             "catalog.fixture.compare.v1".into(),
             all.observed_at,

@@ -52,6 +52,8 @@ pub struct EntropyDependencyBinding {
     pub expected_revision: Option<String>,
     pub observed_revision: Option<String>,
     pub availability: EntropyDependencyAvailability,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub materialization_error: Option<String>,
 }
 
 impl EntropyDependencyBinding {
@@ -68,6 +70,22 @@ impl EntropyDependencyBinding {
         {
             return Err(ForensicsError::InvalidEntropyRun(
                 "available dependencies must match their expected revision".into(),
+            ));
+        }
+        if self
+            .materialization_error
+            .as_ref()
+            .is_some_and(|error| error.trim().is_empty() || error.len() > 4_096)
+        {
+            return Err(ForensicsError::InvalidEntropyRun(
+                "dependency materialization errors must contain 1 to 4096 bytes".into(),
+            ));
+        }
+        if self.availability == EntropyDependencyAvailability::Available
+            && self.materialization_error.is_some()
+        {
+            return Err(ForensicsError::InvalidEntropyRun(
+                "available dependencies cannot retain materialization errors".into(),
             ));
         }
         Ok(())
@@ -728,9 +746,19 @@ impl EntropyRunProjection {
                 limitations.push(EntropyLimitation {
                     class: EntropyLimitationClass::IncompleteDependency,
                     reason_ref: "limitation.entropy.incomplete_dependency".into(),
-                    message: format!(
-                        "Dependency {} is {:?}",
-                        dependency.path, dependency.availability
+                    message: dependency.materialization_error.as_ref().map_or_else(
+                        || {
+                            format!(
+                                "Dependency {} is {:?}",
+                                dependency.path, dependency.availability
+                            )
+                        },
+                        |error| {
+                            format!(
+                                "Dependency {} is {:?}: {error}",
+                                dependency.path, dependency.availability
+                            )
+                        },
                     ),
                     file_path: Some(dependency.path.clone()),
                 });
@@ -1372,6 +1400,7 @@ mod tests {
                 expected_revision: Some("537519a829259622ea6b0334fbafd6cae852852f".into()),
                 observed_revision: None,
                 availability: EntropyDependencyAvailability::Missing,
+                materialization_error: Some("network transport failed".into()),
             }],
         );
         let mut run = EntropyRunProjection::new(run_binding(&manifest), manifest)
@@ -1393,6 +1422,11 @@ mod tests {
 
         assert_eq!(run.phase, EntropyRunPhase::CompletedWithLimitations);
         assert_eq!(run.counts().failed, 1);
+        assert!(
+            run.limitations
+                .iter()
+                .any(|limitation| { limitation.message.contains("network transport failed") })
+        );
         assert!(run.limitations.iter().any(|limitation| {
             limitation.class == EntropyLimitationClass::IncompleteDependency
         }));

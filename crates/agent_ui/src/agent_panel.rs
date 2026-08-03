@@ -396,14 +396,18 @@ Target\n\
 - Frozen prompt digest: {prompt_digest}\n\n\
 Source handling\n\
 - Verify the repository and exact HEAD before analysis.\n\
-- If the selected worktree is dirty, create a temporary clean detached worktree or local clone at the exact HEAD, analyze only that snapshot, and remove it when the scan finishes. Do not include uncommitted files.\n\
-- If it is clean, analyze the selected repository in place after verifying HEAD.\n\
+- Create a temporary clean detached worktree or local clone at the exact HEAD and analyze only that snapshot. Do not include uncommitted files, even when the selected worktree is clean.\n\
+- In the snapshot, run `git submodule sync --recursive` followed by `git submodule update --init --recursive`. Do not use a shallow submodule update for a historical pin.\n\
+- Inventory every declared recursive submodule, its expected Git link, and its observed revision before inspecting findings. Run `git submodule status --recursive`; any `-`, `+`, or `U` prefix makes source delivery incomplete. Preserve the exact path and Git error.\n\
 - Do not modify repository source. Handle snapshot creation and cleanup yourself; do not ask the user to pin or prepare a worktree.\n\n\
 Analysis prompt\n\
 {analysis_prompt}\n\n\
 Execution and result\n\
 - Start immediately and keep all tool activity and progress visible in this task.\n\
 - Traverse the repository, following relevant definitions and consumers across files and dependencies.\n\
+- Reconstruct build source selection, preprocessor values, duplicate providers, and linker resolution whenever they determine which entropy implementation reaches a secret sink.\n\
+- Label material claims as repository-source, build, artifact, or executed evidence. Source inspection alone cannot establish final artifact provenance.\n\
+- A missing dependency, unavailable build input, or unresolved provider selection forbids a clean conclusion.\n\
 - Ground every claim in exact file and line references from the verified snapshot.\n\
 - Separate observations, hypotheses, limitations, and the next falsifiable checks.\n\
 - Do not claim a linked artifact contains a source path without artifact evidence.\n\
@@ -418,15 +422,50 @@ Execution and result\n\
     )
 }
 
+fn entropy_project_analysis_guidance(
+    project: &omega_forensics::EntropyProjectRecord,
+) -> &'static str {
+    match project.product_ref.as_str() {
+        omega_forensics::COLDCARD_VULNERABLE_PRODUCT_REF => {
+            r#"Coldcard historical acceptance target
+- This target must resolve to commit bcc2c382a324690a2fcf972c0bac3b79bf923f7b. The related 7abc9a4c680b5623fc8a64f70555dd2d3802e488 identifier is a tree object, not the target commit.
+- Establish or refute all six links: the wallet-seed `ngu.random.bytes()` sink; `MICROPY_HW_ENABLE_RNG (0)` in board configuration; libNgU's definedness guard; MicroPython's Boolean interpretation and deterministic fallback; competing `rng_get()` implementations and build selection; and the linker-selected provider reaching the secret sink.
+- Inspect recursive dependencies, build manifests, preprocessor output, and symbol/linker evidence. If the artifact cannot be built or inspected, keep final provider selection unverified rather than reporting a clean result."#
+        }
+        omega_forensics::COLDCARD_FIXED_PRODUCT_REF => {
+            r#"Coldcard immediate fixed control
+- This target must resolve to fix commit ca72463709f4e3f8964952039d5caf955f566a87, whose parent is the vulnerable bcc2c382a324690a2fcf972c0bac3b79bf923f7b revision.
+- Differentially verify the entropy-provider changes: the explicit hardware-backed `rng_get()`, suppression of MicroPython's deterministic fallback object, and build-time checks for missing or duplicate providers.
+- Prove what the fixed build selects when build or artifact evidence is available. Do not treat a source diff alone as artifact confirmation."#
+        }
+        omega_forensics::COLDCARD_CURRENT_PRODUCT_REF => {
+            r#"Coldcard current post-fix audit
+- This target must resolve to c849c4e04a978335937a0fd0c96e76f5bd70bbb6.
+- Compare it with the vulnerable bcc2c382a324690a2fcf972c0bac3b79bf923f7b and immediate fixed ca72463709f4e3f8964952039d5caf955f566a87 revisions. Verify that the explicit hardware RNG provider, fallback exclusion, and provider-count build invariant still survive in current MK4 and Q1 builds.
+- Search for new entropy consumers, provider-selection paths, and regressions after the fix. Report source-level persistence separately from reproducible-build, linker-map, binary-symbol, or executed evidence."#
+        }
+        _ => {
+            r#"Repository entropy profile
+- Trace sources through seeding, provider selection, build configuration, and every secret consumer.
+- Distinguish fresh secret entropy, deterministic derivation, non-secret randomness, and test-only deterministic behavior."#
+        }
+    }
+}
+
 fn entropy_catalog_agent_task_prompt(
     project: &omega_forensics::EntropyProjectRecord,
     repository_root: &Path,
     prompt_snapshot: &omega_forensics::EntropyPromptSnapshot,
+    dependency_materialization_error: Option<&str>,
 ) -> Result<String> {
     let revision = project
         .pinned_revision
         .as_deref()
         .context("the selected catalog project has no pinned revision")?;
+    let dependency_delivery = dependency_materialization_error.map_or_else(
+        || "Complete: the workbench synchronized and materialized recursive submodules before opening this task.".to_string(),
+        |error| format!("Incomplete: recursive dependency materialization failed: {error}"),
+    );
     Ok(format!(
         "Run a read-only entropy forensics scan of the selected project now.\n\n\
 Target\n\
@@ -435,21 +474,26 @@ Target\n\
 - Selected path: {path}\n\
 - Exact HEAD: {revision}\n\
 - Worktree: clean pinned catalog checkout\n\
+- Analysis profile: {analysis_profile}\n\
 - Frozen prompt digest: {prompt_digest}\n\n\
 Source handling\n\
 - Work only inside the selected path above. It is the working directory attached to this session.\n\
 - Verify the repository and exact HEAD before analysis.\n\
-- Before analyzing files, run `git submodule sync --recursive` and `git submodule update --init --recursive` from the selected path. The top-level checkout alone is not complete analysis source.\n\
-- If a recursive submodule cannot be materialized, name its exact path and Git error as a limitation, then continue with every source tree that is available.\n\
+- Dependency delivery: {dependency_delivery}\n\
+- Verify delivery with `git submodule status --recursive`. Inventory every exact path, expected Git link, observed revision, and status prefix. Any `-`, `+`, or `U` prefix makes the source incomplete.\n\
+- If a recursive submodule is unavailable, retain its exact path and Git error as a limitation, continue with available source, and do not return a clean result.\n\
 - Analyze the selected pinned checkout in place and do not modify repository source.\n\
 - Do not substitute the workspace that launched Forensics or another open working folder.\n\n\
+Target-specific acceptance criteria\n\
+{target_guidance}\n\n\
 Analysis prompt\n\
 {analysis_prompt}\n\n\
 Execution and result\n\
 - Start immediately and keep all tool activity and progress visible in this task.\n\
 - Traverse the repository, following relevant definitions and consumers across files and dependencies.\n\
+- Reconstruct build source selection, preprocessor values, duplicate providers, and linker resolution whenever they determine which implementation reaches a secret sink.\n\
 - Ground every claim in exact file and line references from the verified snapshot.\n\
-- Separate observations, hypotheses, limitations, and the next falsifiable checks.\n\
+- Separate repository-source, build, artifact, and executed evidence; then separate observations, hypotheses, limitations, and next falsifiable checks.\n\
 - Do not claim a linked artifact contains a source path without artifact evidence.\n\
 - Present the final result as readable Markdown, not as a raw JSON object. Preserve every field requested by the analysis prompt under clear Summary, Findings, Hypotheses, Limitations, and Next checks sections.\n\
 - Begin the final response with `Entropy scan complete` or `Entropy scan complete with limitations`, as applicable.\n\
@@ -457,22 +501,23 @@ Execution and result\n\
         project_name = project.product_name,
         repository = project.repository_ref.as_deref().unwrap_or("unavailable"),
         path = repository_root.display(),
+        analysis_profile = project.analysis_profile_ref(),
+        dependency_delivery = dependency_delivery,
+        target_guidance = entropy_project_analysis_guidance(project),
         prompt_digest = prompt_snapshot.canonical_digest,
         analysis_prompt = prompt_snapshot.text,
     ))
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-enum EntropySubmoduleMaterialization {
-    AgentTask,
-    BeforeAnalysis,
+struct EntropyMaterializedCheckout {
+    root: PathBuf,
+    dependency_materialization_error: Option<String>,
 }
 
 async fn materialize_entropy_campaign_project(
     campaign_ref: &str,
     project: &omega_forensics::EntropyProjectRecord,
-    submodules: EntropySubmoduleMaterialization,
-) -> Result<PathBuf> {
+) -> Result<EntropyMaterializedCheckout> {
     let repository_url = project
         .repository_url
         .as_deref()
@@ -486,7 +531,7 @@ async fn materialize_entropy_campaign_project(
         &project.product_ref,
     );
     smol::fs::create_dir_all(&root).await?;
-    let mut commands = vec![
+    let commands = vec![
         (
             "initialize the checkout",
             vec!["init".to_string(), "--quiet".to_string()],
@@ -508,7 +553,6 @@ async fn materialize_entropy_campaign_project(
                 "-c".to_string(),
                 "protocol.ext.allow=never".to_string(),
                 "fetch".to_string(),
-                "--depth=1".to_string(),
                 "--no-tags".to_string(),
                 "origin".to_string(),
                 revision.to_string(),
@@ -524,22 +568,6 @@ async fn materialize_entropy_campaign_project(
             ],
         ),
     ];
-    if submodules == EntropySubmoduleMaterialization::BeforeAnalysis {
-        commands.push((
-            "materialize recursive submodules",
-            vec![
-                "-c".to_string(),
-                "protocol.file.allow=never".to_string(),
-                "-c".to_string(),
-                "protocol.ext.allow=never".to_string(),
-                "submodule".to_string(),
-                "update".to_string(),
-                "--init".to_string(),
-                "--recursive".to_string(),
-                "--depth=1".to_string(),
-            ],
-        ));
-    }
     for (operation, args) in commands {
         let output = run_entropy_git(&root, operation, &args).await?;
         anyhow::ensure!(
@@ -562,7 +590,12 @@ async fn materialize_entropy_campaign_project(
         String::from_utf8_lossy(&output.stdout).trim() == revision,
         "materialized campaign source does not match the catalog revision"
     );
-    Ok(root)
+
+    let dependency_materialization_error = materialize_entropy_submodules(&root).await?;
+    Ok(EntropyMaterializedCheckout {
+        root,
+        dependency_materialization_error,
+    })
 }
 
 async fn run_entropy_git(
@@ -570,7 +603,15 @@ async fn run_entropy_git(
     operation: &str,
     args: &[String],
 ) -> Result<std::process::Output> {
-    const TIMEOUT: Duration = Duration::from_secs(120);
+    run_entropy_git_with_timeout(root, operation, args, Duration::from_secs(5 * 60)).await
+}
+
+async fn run_entropy_git_with_timeout(
+    root: &Path,
+    operation: &str,
+    args: &[String],
+    timeout: Duration,
+) -> Result<std::process::Output> {
     let mut command = smol::process::Command::new("git");
     command
         .arg("-C")
@@ -582,16 +623,89 @@ async fn run_entropy_git(
         .env("GCM_INTERACTIVE", "Never")
         .stdin(std::process::Stdio::null())
         .kill_on_drop(true);
-    async_std::future::timeout(TIMEOUT, command.output())
+    async_std::future::timeout(timeout, command.output())
         .await
         .with_context(|| format!("timed out while trying to {operation}"))?
         .with_context(|| format!("could not start Git to {operation}"))
 }
 
+fn git_failure_message(output: &std::process::Output) -> String {
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let message = if stderr.trim().is_empty() {
+        stdout.trim()
+    } else {
+        stderr.trim()
+    };
+    let message = if message.is_empty() {
+        format!("Git exited with {}", output.status)
+    } else {
+        message.to_string()
+    };
+    message.chars().take(4_096).collect()
+}
+
+fn entropy_submodule_update_arguments() -> Vec<String> {
+    [
+        "-c",
+        "protocol.file.allow=never",
+        "-c",
+        "protocol.ext.allow=never",
+        "submodule",
+        "update",
+        "--init",
+        "--recursive",
+        "--jobs=4",
+    ]
+    .into_iter()
+    .map(str::to_string)
+    .collect()
+}
+
+async fn materialize_entropy_submodules(root: &Path) -> Result<Option<String>> {
+    let sync = run_entropy_git(
+        root,
+        "synchronize recursive submodule URLs",
+        &[
+            "submodule".to_string(),
+            "sync".to_string(),
+            "--recursive".to_string(),
+        ],
+    )
+    .await?;
+    anyhow::ensure!(
+        sync.status.success(),
+        "could not synchronize recursive submodule URLs: {}",
+        git_failure_message(&sync)
+    );
+
+    let submodule_arguments = entropy_submodule_update_arguments();
+    let submodules = run_entropy_git_with_timeout(
+        root,
+        "materialize recursive submodules",
+        &submodule_arguments,
+        Duration::from_secs(15 * 60),
+    )
+    .await;
+    Ok(match submodules {
+        Ok(output) if output.status.success() => None,
+        Ok(output) => Some(format!(
+            "git submodule update --init --recursive --jobs=4: {}",
+            git_failure_message(&output)
+        )),
+        Err(error) => Some(format!(
+            "git submodule update --init --recursive --jobs=4: {error}"
+        )),
+    })
+}
+
 async fn materialize_entropy_repository_checkout(
     repository_root: &Path,
     revision: &str,
-) -> Result<crate::forensics_workbench::EntropyRepositorySource> {
+) -> Result<(
+    crate::forensics_workbench::EntropyRepositorySource,
+    Option<String>,
+)> {
     let guard = tempfile::Builder::new()
         .prefix("omega-entropy-repository-")
         .tempdir()
@@ -638,7 +752,11 @@ async fn materialize_entropy_repository_checkout(
         observed.status.success() && String::from_utf8_lossy(&observed.stdout).trim() == revision,
         "the entropy source snapshot does not match the selected revision"
     );
-    Ok(crate::forensics_workbench::EntropyRepositorySource::snapshot(checkout_root, guard))
+    let dependency_materialization_error = materialize_entropy_submodules(&checkout_root).await?;
+    Ok((
+        crate::forensics_workbench::EntropyRepositorySource::snapshot(checkout_root, guard),
+        dependency_materialization_error,
+    ))
 }
 
 fn spawn_entropy_campaign(
@@ -668,26 +786,23 @@ fn spawn_entropy_campaign(
                     .context("the entropy campaign is unavailable")
             })??;
             let campaign_ref = campaign.binding.campaign_ref.clone();
-            let root = match materialize_entropy_campaign_project(
-                &campaign_ref,
-                &project,
-                EntropySubmoduleMaterialization::BeforeAnalysis,
-            )
-            .await
-            {
-                Ok(root) => root,
-                Err(error) => {
-                    surface.update(cx, |surface, cx| {
-                        surface.fail_entropy_campaign_source(
-                            &project.product_ref,
-                            error.to_string(),
-                            Some(started.elapsed().as_millis() as u64),
-                            cx,
-                        )
-                    })??;
-                    continue;
-                }
-            };
+            let materialized =
+                match materialize_entropy_campaign_project(&campaign_ref, &project).await {
+                    Ok(materialized) => materialized,
+                    Err(error) => {
+                        surface.update(cx, |surface, cx| {
+                            surface.fail_entropy_campaign_source(
+                                &project.product_ref,
+                                error.to_string(),
+                                Some(started.elapsed().as_millis() as u64),
+                                cx,
+                            )
+                        })??;
+                        continue;
+                    }
+                };
+            let root = materialized.root;
+            let dependency_materialization_error = materialized.dependency_materialization_error;
             surface.update(cx, |surface, cx| {
                 surface.install_entropy_campaign_root(project.product_ref.clone(), root.clone(), cx)
             })?;
@@ -707,7 +822,11 @@ fn spawn_entropy_campaign(
             let manifest_repository = repository.clone();
             let manifest = cx
                 .background_spawn(async move {
-                    let dependencies = inspect_entropy_dependencies(&manifest_root).await;
+                    let dependencies = inspect_entropy_dependencies(
+                        &manifest_root,
+                        dependency_materialization_error.as_deref(),
+                    )
+                    .await;
                     omega_forensics::EntropyManifest::build(
                         &manifest_root,
                         manifest_ref,
@@ -979,10 +1098,12 @@ fn sync_active_campaign_run(
 
 async fn inspect_entropy_dependencies(
     root: &Path,
+    materialization_error: Option<&str>,
 ) -> Vec<omega_forensics::EntropyDependencyBinding> {
     if !root.join(".gitmodules").is_file() {
         return Vec::new();
     }
+    let declared_paths = declared_submodule_paths(root).await;
     let output = smol::process::Command::new("git")
         .arg("-C")
         .arg(root)
@@ -995,6 +1116,13 @@ async fn inspect_entropy_dependencies(
             expected_revision: None,
             observed_revision: None,
             availability: omega_forensics::EntropyDependencyAvailability::SourceUnavailable,
+            materialization_error: Some(
+                materialization_error
+                    .unwrap_or("could not start git submodule status --recursive")
+                    .chars()
+                    .take(4_096)
+                    .collect(),
+            ),
         }];
     };
     if !output.status.success() {
@@ -1003,6 +1131,11 @@ async fn inspect_entropy_dependencies(
             expected_revision: None,
             observed_revision: None,
             availability: omega_forensics::EntropyDependencyAvailability::SourceUnavailable,
+            materialization_error: Some(
+                materialization_error
+                    .map(str::to_string)
+                    .unwrap_or_else(|| git_failure_message(&output)),
+            ),
         }];
     }
     let output = String::from_utf8_lossy(&output.stdout);
@@ -1025,9 +1158,11 @@ async fn inspect_entropy_dependencies(
         if path.is_empty() || reported_revision.len() != 40 {
             continue;
         }
-        let expected_revision = git_submodule_revision(root, path)
-            .await
-            .or_else(|| (indicator == '-').then(|| reported_revision.to_string()));
+        let expected_revision = if matches!(indicator, ' ' | '-') {
+            Some(reported_revision.to_string())
+        } else {
+            git_submodule_revision(root, path).await
+        };
         let (observed_revision, mut availability) = match indicator {
             '-' => (
                 None,
@@ -1056,9 +1191,70 @@ async fn inspect_entropy_dependencies(
             expected_revision,
             observed_revision,
             availability,
+            materialization_error: (availability
+                != omega_forensics::EntropyDependencyAvailability::Available)
+                .then(|| materialization_error.map(str::to_string))
+                .flatten(),
+        });
+    }
+    for path in declared_paths {
+        if dependencies
+            .iter()
+            .any(|dependency| dependency.path == path)
+        {
+            continue;
+        }
+        dependencies.push(omega_forensics::EntropyDependencyBinding {
+            expected_revision: git_submodule_revision(root, &path).await,
+            observed_revision: None,
+            availability: omega_forensics::EntropyDependencyAvailability::Missing,
+            materialization_error: materialization_error.map(str::to_string),
+            path,
+        });
+    }
+    if dependencies.iter().all(|dependency| {
+        dependency.availability == omega_forensics::EntropyDependencyAvailability::Available
+    }) && let Some(error) = materialization_error
+    {
+        dependencies.push(omega_forensics::EntropyDependencyBinding {
+            path: ".gitmodules".into(),
+            expected_revision: None,
+            observed_revision: None,
+            availability: omega_forensics::EntropyDependencyAvailability::SourceUnavailable,
+            materialization_error: Some(error.chars().take(4_096).collect()),
         });
     }
     dependencies
+}
+
+async fn declared_submodule_paths(root: &Path) -> Vec<String> {
+    let output = smol::process::Command::new("git")
+        .arg("-C")
+        .arg(root)
+        .args([
+            "config",
+            "--file",
+            ".gitmodules",
+            "--get-regexp",
+            r"^submodule\..*\.path$",
+        ])
+        .output()
+        .await;
+    let Ok(output) = output else {
+        return Vec::new();
+    };
+    if !output.status.success() {
+        return Vec::new();
+    }
+    let mut paths = String::from_utf8_lossy(&output.stdout)
+        .lines()
+        .filter_map(|line| line.split_once(char::is_whitespace))
+        .map(|(_, path)| path.trim().to_string())
+        .filter(|path| !path.is_empty())
+        .collect::<Vec<_>>();
+    paths.sort();
+    paths.dedup();
+    paths
 }
 
 async fn git_submodule_revision(root: &Path, path: &str) -> Option<String> {
@@ -14347,21 +14543,22 @@ impl AgentPanel {
                         cx,
                     )
                 })?;
-                if let Err(error) = materialize_entropy_campaign_project(
-                    &source_ref,
-                    &project,
-                    EntropySubmoduleMaterialization::AgentTask,
-                )
-                .await
-                {
-                    surface.update(cx, |surface, cx| {
-                        surface.set_entropy_error(
-                            format!("Selected project materialization failed · {error}"),
-                            cx,
-                        )
-                    })?;
-                    return anyhow::Ok(());
-                }
+                let materialized =
+                    match materialize_entropy_campaign_project(&source_ref, &project).await {
+                        Ok(materialized) => materialized,
+                        Err(error) => {
+                            surface.update(cx, |surface, cx| {
+                                surface.set_entropy_error(
+                                    format!("Selected project materialization failed · {error}"),
+                                    cx,
+                                )
+                            })?;
+                            return anyhow::Ok(());
+                        }
+                    };
+                let dependency_materialization_error =
+                    materialized.dependency_materialization_error;
+                let dependencies_are_incomplete = dependency_materialization_error.is_some();
 
                 let (worktree, _) = match project_entity
                     .update(cx, |project_graph, cx| {
@@ -14390,6 +14587,7 @@ impl AgentPanel {
                     &project,
                     &repository_root,
                     &prompt_snapshot,
+                    dependency_materialization_error.as_deref(),
                 )?;
                 let thread_title: SharedString =
                     format!("{} Entropy Forensics", project.product_name).into();
@@ -14416,11 +14614,19 @@ impl AgentPanel {
                 surface.update(cx, |surface, cx| {
                     surface.install_entropy_campaign_root(project_ref, repository_root.clone(), cx);
                     surface.set_entropy_status(
-                        format!(
-                            "Opened {} entropy scan in task {}",
-                            project.product_name,
-                            thread_id.to_key_string()
-                        ),
+                        if dependencies_are_incomplete {
+                            format!(
+                                "Opened {} entropy scan with incomplete dependencies in task {}",
+                                project.product_name,
+                                thread_id.to_key_string()
+                            )
+                        } else {
+                            format!(
+                                "Opened {} entropy scan in task {}",
+                                project.product_name,
+                                thread_id.to_key_string()
+                            )
+                        },
                         cx,
                     );
                 })?;
@@ -14511,7 +14717,6 @@ impl AgentPanel {
                 return;
             };
             let repository_root = candidate.worktree_abs_path;
-            let repository_is_dirty = candidate.git.dirty_files > 0;
             let model = configured_model.model;
             let model_route_ref = entropy_model_route_ref(
                 &configured_model.provider.id().to_string(),
@@ -14533,11 +14738,15 @@ impl AgentPanel {
             let manifest_ref = format!("manifest.omega.entropy.{}", uuid::Uuid::new_v4().simple());
             let surface = surface.downgrade();
             cx.spawn(async move |_, cx| {
-                let repository_source = if repository_is_dirty {
-                    surface.update(cx, |surface, cx| {
-                        surface.set_entropy_status("Preparing a clean snapshot of HEAD…", cx)
-                    })?;
-                    match materialize_entropy_repository_checkout(&repository_root, &revision).await {
+                surface.update(cx, |surface, cx| {
+                    surface.set_entropy_status(
+                        "Preparing a clean snapshot and recursive dependencies…",
+                        cx,
+                    )
+                })?;
+                let (repository_source, dependency_materialization_error) =
+                    match materialize_entropy_repository_checkout(&repository_root, &revision).await
+                    {
                         Ok(checkout) => checkout,
                         Err(error) => {
                             surface.update(cx, |surface, cx| {
@@ -14548,12 +14757,7 @@ impl AgentPanel {
                             })?;
                             return anyhow::Ok(());
                         }
-                    }
-                } else {
-                    crate::forensics_workbench::EntropyRepositorySource::selected(
-                        repository_root.clone(),
-                    )
-                };
+                    };
                 let manifest_root = repository_source.root().to_path_buf();
                 surface.update(cx, |surface, cx| {
                     surface.set_entropy_repository_source(repository_source, cx)
@@ -14562,7 +14766,11 @@ impl AgentPanel {
                 let manifest_repository = repository.clone();
                 let manifest = cx
                     .background_spawn(async move {
-                        let dependencies = inspect_entropy_dependencies(&manifest_build_root).await;
+                        let dependencies = inspect_entropy_dependencies(
+                            &manifest_build_root,
+                            dependency_materialization_error.as_deref(),
+                        )
+                        .await;
                         omega_forensics::EntropyManifest::build(
                             &manifest_build_root,
                             manifest_ref,
@@ -21374,7 +21582,11 @@ mod tests {
         assert!(prompt.contains("Run a read-only entropy forensics scan"));
         assert!(prompt.contains("dirty (3 changed files)"));
         assert!(prompt.contains("0123456789abcdef0123456789abcdef01234567"));
-        assert!(prompt.contains("create a temporary clean detached worktree or local clone"));
+        assert!(prompt.contains("Create a temporary clean detached worktree or local clone"));
+        assert!(prompt.contains("git submodule sync --recursive"));
+        assert!(prompt.contains("git submodule update --init --recursive"));
+        assert!(prompt.contains("Do not use a shallow submodule update"));
+        assert!(prompt.contains("repository-source, build, artifact, or executed evidence"));
         assert!(prompt.contains("do not ask the user to pin or prepare a worktree"));
         assert!(prompt.contains("Trace every entropy source and secret consumer."));
         assert!(prompt.contains("Present the final result as readable Markdown"));
@@ -21383,7 +21595,7 @@ mod tests {
 
     #[test]
     fn entropy_catalog_task_prompt_uses_the_selected_project_and_working_folder() {
-        let catalog = omega_forensics::EntropyProjectCatalog::wallet_entropy_v1()
+        let catalog = omega_forensics::EntropyProjectCatalog::wallet_entropy_v2()
             .expect("the entropy catalog should be valid");
         let bitkey = catalog
             .projects
@@ -21400,7 +21612,7 @@ mod tests {
         .expect("valid prompt snapshot");
         let selected_root = Path::new("/tmp/omega-entropy-campaigns/bitkey-selected");
 
-        let prompt = entropy_catalog_agent_task_prompt(bitkey, selected_root, &snapshot)
+        let prompt = entropy_catalog_agent_task_prompt(bitkey, selected_root, &snapshot, None)
             .expect("the selected project has a complete source pin");
 
         assert!(prompt.contains("Project: Bitkey"));
@@ -21408,11 +21620,110 @@ mod tests {
         assert!(prompt.contains("/tmp/omega-entropy-campaigns/bitkey-selected"));
         assert!(prompt.contains("cf16705543d0c66ff982635733d380944cc2677d"));
         assert!(prompt.contains("working directory attached to this session"));
-        assert!(prompt.contains("git submodule sync --recursive"));
-        assert!(prompt.contains("git submodule update --init --recursive"));
-        assert!(prompt.contains("name its exact path and Git error as a limitation"));
+        assert!(prompt.contains("workbench synchronized and materialized recursive submodules"));
+        assert!(prompt.contains("git submodule status --recursive"));
+        assert!(prompt.contains("exact path and Git error as a limitation"));
         assert!(prompt.contains("Do not substitute the workspace that launched Forensics"));
         assert!(!prompt.contains("/work/openagents"));
+    }
+
+    #[test]
+    fn coldcard_catalog_prompts_encode_historical_fixed_and_current_acceptance_targets() {
+        let catalog = omega_forensics::EntropyProjectCatalog::wallet_entropy_v2()
+            .expect("the entropy catalog should be valid");
+        let snapshot = omega_forensics::EntropyPromptSnapshot::new(
+            "prompt.omega.entropy.coldcard-targets".to_string(),
+            None,
+            None,
+            "Trace every entropy source and secret consumer.".to_string(),
+            "2026-08-02T20:30:00.000Z".to_string(),
+        )
+        .expect("valid prompt snapshot");
+        let prompt_for = |product_ref: &str, materialization_error: Option<&str>| {
+            let project = catalog
+                .projects
+                .iter()
+                .find(|project| project.product_ref == product_ref)
+                .expect("Coldcard target");
+            entropy_catalog_agent_task_prompt(
+                project,
+                Path::new("/tmp/coldcard"),
+                &snapshot,
+                materialization_error,
+            )
+            .expect("Coldcard prompt")
+        };
+
+        let vulnerable = prompt_for(
+            omega_forensics::COLDCARD_VULNERABLE_PRODUCT_REF,
+            Some("external/libngu: transport timed out"),
+        );
+        assert!(vulnerable.contains(omega_forensics::COLDCARD_VULNERABLE_COMMIT));
+        assert!(vulnerable.contains(omega_forensics::COLDCARD_VULNERABLE_TREE));
+        assert!(vulnerable.contains("tree object, not the target commit"));
+        assert!(vulnerable.contains("all six links"));
+        assert!(vulnerable.contains("external/libngu: transport timed out"));
+        assert!(vulnerable.contains("do not return a clean result"));
+
+        let fixed = prompt_for(omega_forensics::COLDCARD_FIXED_PRODUCT_REF, None);
+        assert!(fixed.contains(omega_forensics::COLDCARD_FIXED_COMMIT));
+        assert!(fixed.contains("suppression of MicroPython's deterministic fallback object"));
+        assert!(fixed.contains("source diff alone as artifact confirmation"));
+
+        let current = prompt_for(omega_forensics::COLDCARD_CURRENT_PRODUCT_REF, None);
+        assert!(current.contains(omega_forensics::COLDCARD_CURRENT_COMMIT));
+        assert!(current.contains(omega_forensics::COLDCARD_FIXED_COMMIT));
+        assert!(current.contains("still survive in current MK4 and Q1 builds"));
+        assert!(current.contains("Report source-level persistence separately"));
+    }
+
+    #[test]
+    fn recursive_dependency_materialization_is_complete_and_not_shallow() {
+        let arguments = entropy_submodule_update_arguments();
+        assert!(
+            arguments
+                .windows(2)
+                .any(|pair| pair == ["submodule", "update"])
+        );
+        assert!(arguments.iter().any(|argument| argument == "--init"));
+        assert!(arguments.iter().any(|argument| argument == "--recursive"));
+        assert!(arguments.iter().any(|argument| argument == "--jobs=4"));
+        assert!(!arguments.iter().any(|argument| argument == "--depth=1"));
+    }
+
+    #[test]
+    fn dependency_inspection_preserves_declared_path_and_materialization_error() {
+        let repository = tempfile::tempdir().expect("temporary Git repository");
+        std::fs::write(
+            repository.path().join(".gitmodules"),
+            "[submodule \"libngu\"]\n\tpath = external/libngu\n\turl = https://example.invalid/libngu.git\n",
+        )
+        .expect("write submodule declaration");
+        let output = smol::block_on(
+            smol::process::Command::new("git")
+                .arg("-C")
+                .arg(repository.path())
+                .args(["init", "--quiet"])
+                .output(),
+        )
+        .expect("initialize Git repository");
+        assert!(output.status.success());
+
+        let dependencies = smol::block_on(inspect_entropy_dependencies(
+            repository.path(),
+            Some("git transport timed out"),
+        ));
+
+        assert_eq!(dependencies.len(), 1);
+        assert_eq!(dependencies[0].path, "external/libngu");
+        assert_eq!(
+            dependencies[0].availability,
+            omega_forensics::EntropyDependencyAvailability::Missing
+        );
+        assert_eq!(
+            dependencies[0].materialization_error.as_deref(),
+            Some("git transport timed out")
+        );
     }
 
     #[test]
@@ -21456,11 +21767,11 @@ mod tests {
         std::fs::write(&source_path, "const SOURCE: &str = \"dirty\";\n")
             .expect("write dirty source");
 
-        let checkout = smol::block_on(materialize_entropy_repository_checkout(
-            repository.path(),
-            &revision,
-        ))
+        let (checkout, dependency_materialization_error) = smol::block_on(
+            materialize_entropy_repository_checkout(repository.path(), &revision),
+        )
         .expect("materialize pinned source");
+        assert_eq!(dependency_materialization_error, None);
         let checkout_root = checkout.root().to_path_buf();
         assert_eq!(
             std::fs::read_to_string(checkout_root.join("entropy.rs"))

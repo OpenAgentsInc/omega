@@ -29,8 +29,10 @@ pub const BROKER_NETWORK_POLICY_REF: &str =
     "network-policy-ref://openagents/managed-sandbox/broker-only-v1";
 pub const COLDCARD_REPOSITORY_REF: &str = "repository-ref://coldcard/firmware";
 pub const COLDCARD_CLONE_URL: &str = "https://github.com/Coldcard/firmware.git";
-pub const COLDCARD_VULNERABLE_COMMIT: &str = "7abc9a4c680b5623fc8a64f70555dd2d3802e488";
+pub const COLDCARD_VULNERABLE_COMMIT: &str = "bcc2c382a324690a2fcf972c0bac3b79bf923f7b";
+pub const COLDCARD_VULNERABLE_TREE: &str = "7abc9a4c680b5623fc8a64f70555dd2d3802e488";
 pub const COLDCARD_FIXED_COMMIT: &str = "ca72463709f4e3f8964952039d5caf955f566a87";
+pub const COLDCARD_CURRENT_COMMIT: &str = "c849c4e04a978335937a0fd0c96e76f5bd70bbb6";
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -38,17 +40,25 @@ pub enum ColdcardBenchmarkArm {
     Vulnerable,
     Incomplete,
     Fixed,
+    Current,
     Clean,
 }
 
 impl ColdcardBenchmarkArm {
-    pub const ALL: [Self; 4] = [Self::Vulnerable, Self::Incomplete, Self::Fixed, Self::Clean];
+    pub const ALL: [Self; 5] = [
+        Self::Vulnerable,
+        Self::Incomplete,
+        Self::Fixed,
+        Self::Current,
+        Self::Clean,
+    ];
 
     pub const fn label(self) -> &'static str {
         match self {
             Self::Vulnerable => "Vulnerable",
             Self::Incomplete => "Incomplete",
             Self::Fixed => "Fixed",
+            Self::Current => "Current post-fix",
             Self::Clean => "Clean",
         }
     }
@@ -58,6 +68,7 @@ impl ColdcardBenchmarkArm {
             Self::Vulnerable => "scan-profile-ref://coldcard/complete-vulnerable-v1",
             Self::Incomplete => "scan-profile-ref://coldcard/incomplete-v1",
             Self::Fixed => "scan-profile-ref://coldcard/fixed-v1",
+            Self::Current => "scan-profile-ref://coldcard/current-post-fix-v1",
             Self::Clean => "scan-profile-ref://coldcard/clean-control-v1",
         }
     }
@@ -66,6 +77,7 @@ impl ColdcardBenchmarkArm {
         match self {
             Self::Vulnerable | Self::Incomplete => COLDCARD_VULNERABLE_COMMIT,
             Self::Fixed | Self::Clean => COLDCARD_FIXED_COMMIT,
+            Self::Current => COLDCARD_CURRENT_COMMIT,
         }
     }
 }
@@ -106,6 +118,17 @@ impl RepositoryTargetProjection {
         if self.display_name.trim().is_empty() || self.display_name.len() > 128 {
             return Err(ForensicsError::InvalidTarget(
                 "repository display name must contain 1 to 128 bytes".into(),
+            ));
+        }
+        if let Some(arm) = self.benchmark_arm
+            && (self.repository_ref != COLDCARD_REPOSITORY_REF
+                || self.clone_url != COLDCARD_CLONE_URL
+                || self.commit != arm.commit()
+                || self.scan_profile_ref != arm.profile_ref()
+                || self.dependency_policy != DependencyPolicy::PinnedRecursive)
+        {
+            return Err(ForensicsError::InvalidTarget(
+                "Coldcard target identity does not match its selected arm".into(),
             ));
         }
         Ok(())
@@ -3498,6 +3521,29 @@ mod tests {
             assert_eq!(projection.target.scan_profile_ref, arm.profile_ref());
             assert_eq!(projection.coverage.status, CoverageStatus::Pending);
         }
+    }
+
+    #[test]
+    fn coldcard_targets_keep_commit_and_tree_identity_separate() {
+        assert_eq!(
+            ColdcardBenchmarkArm::Vulnerable.commit(),
+            "bcc2c382a324690a2fcf972c0bac3b79bf923f7b"
+        );
+        assert_eq!(
+            COLDCARD_VULNERABLE_TREE,
+            "7abc9a4c680b5623fc8a64f70555dd2d3802e488"
+        );
+        assert_ne!(COLDCARD_VULNERABLE_COMMIT, COLDCARD_VULNERABLE_TREE);
+        assert_eq!(ColdcardBenchmarkArm::Fixed.commit(), COLDCARD_FIXED_COMMIT);
+        assert_eq!(
+            ColdcardBenchmarkArm::Current.commit(),
+            COLDCARD_CURRENT_COMMIT
+        );
+        assert_ne!(COLDCARD_FIXED_COMMIT, COLDCARD_CURRENT_COMMIT);
+
+        let mut target = RepositoryTargetProjection::coldcard(ColdcardBenchmarkArm::Vulnerable);
+        target.commit = COLDCARD_VULNERABLE_TREE.into();
+        assert!(target.validate().is_err());
     }
 
     #[test]
