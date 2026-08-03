@@ -51,6 +51,7 @@ use crate::omega_dogfood_surface::{
     DogfoodProviderEventProjection, DogfoodSurface, DogfoodSurfaceEvent, DogfoodWorkCommandAction,
     DogfoodWorkCommandContext,
 };
+use crate::omega_planning_surface::{OmegaPlanningSurface, PlanningSurfaceEvent};
 use crate::omega_work_detail_surface::{
     WorkDelegationCandidate, WorkDetailSurface, WorkDetailSurfaceEvent,
 };
@@ -130,8 +131,8 @@ use omega_work_index::{
     DOGFOOD_PROJECT_ID, DogfoodFixtureAdapter, DogfoodFixtureGate, DogfoodPlanningOrigin,
     DogfoodPlanningSourceState, DogfoodPlanningViewModel, EFFECT_ADAPTER_ID, FORENSICS_ADAPTER_ID,
     NativeForensicsPhase, NativeForensicsRecord, NativeThreadLifecycle, NativeThreadRecord,
-    SECURITY_PROJECT_ID, THREAD_ADAPTER_ID, WorkIndex, WorkIndexItem, WorkIndexView,
-    WorkSourceEntity, adapt_forensics, adapt_thread, github_work_ref,
+    PlanningDestinationState, SECURITY_PROJECT_ID, THREAD_ADAPTER_ID, WorkIndex, WorkIndexItem,
+    WorkIndexView, WorkSourceEntity, adapt_forensics, adapt_thread, github_work_ref,
     read_dogfood_planning_snapshot, write_dogfood_planning_snapshot,
 };
 use omega_workbench_state::{
@@ -4345,6 +4346,14 @@ pub struct AgentPanel {
     /// of its own: what advances is how many times this window looked.
     runtime_service_revision: u64,
     _runtime_service_observation: Option<Subscription>,
+    /// omega#239. The production planning destination's state and its view.
+    /// Deliberately beside, and not behind, `dogfood_fixture`: this pair must
+    /// stay reachable when the development fixture is absent, which in a
+    /// release build is always.
+    omega_planning_state: PlanningDestinationState,
+    omega_planning_surface: Option<Entity<OmegaPlanningSurface>>,
+    _omega_planning_subscription: Option<Subscription>,
+    _omega_planning_read: Option<Task<()>>,
     dogfood_fixture: Option<DogfoodPlanningViewModel>,
     dogfood_surface: Option<Entity<DogfoodSurface>>,
     _dogfood_surface_subscription: Option<Subscription>,
@@ -5130,6 +5139,10 @@ impl AgentPanel {
             runtime_service_health: HashMap::default(),
             runtime_service_revision: 0,
             _runtime_service_observation: None,
+            omega_planning_state: PlanningDestinationState::Loading,
+            omega_planning_surface: None,
+            _omega_planning_subscription: None,
+            _omega_planning_read: None,
             dogfood_fixture,
             dogfood_surface: None,
             _dogfood_surface_subscription: None,
@@ -18546,6 +18559,10 @@ impl AgentPanel {
                     RouteUnavailableReason::Unknown,
                 )),
             OmegaRoute::Settings => RouteAvailability::Available,
+            // omega#209 explicitly keeps a real feature visible when its
+            // service is unavailable: an unreachable boundary is a state this
+            // destination draws, not a reason to make the destination vanish.
+            OmegaRoute::Planning => RouteAvailability::Available,
             OmegaRoute::Project(project_ref)
                 if self.dogfood_fixture.as_ref().is_some_and(|fixture| {
                     fixture
@@ -18696,6 +18713,7 @@ impl AgentPanel {
                     self.open_omega_work_detail(item, WorkPresentation::Issue, window, cx)
                 })
             }
+            OmegaRoute::Planning => self.open_omega_planning(false, window, cx),
             OmegaRoute::Project(project_ref) => {
                 self.open_dogfood_project(project_ref.as_str(), false, window, cx)
             }
@@ -18920,6 +18938,115 @@ impl AgentPanel {
         surface.focus_handle(cx).focus(window, cx);
         cx.notify();
         true
+    }
+
+    /// Open the production planning destination.
+    ///
+    /// omega#239. Unlike `open_dogfood_project` this cannot fail closed on a
+    /// missing fixture, because it reads no fixture: it always opens, and what
+    /// varies is which of the five states it shows. That is the whole point —
+    /// a destination that refuses to open when the service is unreachable is
+    /// indistinguishable, to the person clicking, from a control that does
+    /// nothing at all.
+    fn open_omega_planning(
+        &mut self,
+        record_history: bool,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> bool {
+        self.omega_settings = None;
+        self.omega_unavailable_route = None;
+        self.omega_unavailable_surface = None;
+        self.clear_omega_work_detail();
+        if let Err(error) = self.workbench_shell.collapse_dock() {
+            log::warn!("failed to collapse a work surface before opening Planning: {error:#}");
+        }
+        let surface = if let Some(surface) = self.omega_planning_surface.as_ref() {
+            surface.clone()
+        } else {
+            let state = self.omega_planning_state.clone();
+            let surface = cx.new(|cx| OmegaPlanningSurface::new(state, cx));
+            self._omega_planning_subscription = Some(cx.subscribe_in(
+                &surface,
+                window,
+                |this, _surface, event, _window, cx| match event.clone() {
+                    PlanningSurfaceEvent::Refresh => this.refresh_omega_planning(cx),
+                    PlanningSurfaceEvent::SelectionChanged(_) => cx.notify(),
+                },
+            ));
+            self.omega_planning_surface = Some(surface.clone());
+            surface
+        };
+        let state = self.omega_planning_state.clone();
+        surface.update(cx, |surface, cx| surface.set_state(state, cx));
+        if record_history && self.omega_navigation_history.push(OmegaRoute::Planning) {
+            self.serialize(cx);
+        }
+        self.refresh_omega_planning(cx);
+        surface.focus_handle(cx).focus(window, cx);
+        cx.notify();
+        true
+    }
+
+    /// Read canonical planning Work from the All Work boundary.
+    ///
+    /// The supervisor's refusal is carried through as a refusal rather than
+    /// flattened with `.ok()` or `to_string()`. A component that predates the
+    /// All Work boundary and a component that could not be reached are
+    /// different facts with different remedies, and this is the only place
+    /// that could lose the difference.
+    fn refresh_omega_planning(&mut self, cx: &mut Context<Self>) {
+        let supervisor = omega_effectd::shared_supervisor(cx).ok();
+        self.set_omega_planning_state(PlanningDestinationState::Loading, cx);
+        self._omega_planning_read = Some(cx.spawn(async move |this, cx| {
+            let state = async {
+                let Some(supervisor) = supervisor else {
+                    return PlanningDestinationState::Unavailable {
+                        detail: "omega-effectd is not available in this process.".to_string(),
+                    };
+                };
+                let mut guard = supervisor.lock().await;
+                // A component that will not start is unreachable, not a
+                // component that refuses the boundary: only the supervisor's
+                // own typed All Work errors can say a build cannot serve it.
+                if let Err(error) = guard.ensure_started().await {
+                    return PlanningDestinationState::Unavailable {
+                        detail: format!("omega-effectd did not start: {error}"),
+                    };
+                }
+                let answer = guard
+                    .read_planning_graph(
+                        omega_effectd::all_work_contract::PlanningGraphReadRequest {
+                            after_revision: None,
+                        },
+                    )
+                    .await;
+                match answer {
+                    Ok(result) => {
+                        PlanningDestinationState::from_supervisor_result(Ok(&result.graph))
+                    }
+                    Err(error) => PlanningDestinationState::from_supervisor_result(Err(&error)),
+                }
+            }
+            .await;
+            this.update(cx, |panel, cx| panel.set_omega_planning_state(state, cx))
+                .log_err();
+        }));
+    }
+
+    fn set_omega_planning_state(
+        &mut self,
+        state: PlanningDestinationState,
+        cx: &mut Context<Self>,
+    ) {
+        if self.omega_planning_state == state {
+            return;
+        }
+        self.omega_planning_state = state.clone();
+        if let Some(surface) = self.omega_planning_surface.as_ref() {
+            surface.update(cx, |surface, cx| surface.set_state(state, cx));
+        }
+        cx.notify();
     }
 
     fn refresh_dogfood_planning(&mut self, cx: &mut Context<Self>) {
@@ -20804,6 +20931,12 @@ impl AgentPanel {
             cx.notify();
             return;
         }
+        if self.omega_planning_surface.is_some()
+            && self.omega_navigation_history.current() == Some(&OmegaRoute::Planning)
+        {
+            self.show_active_omega_thread_transcript(window, cx);
+            return;
+        }
         if self.work_index_surface.is_some()
             && self
                 .omega_navigation_history
@@ -21125,6 +21258,13 @@ impl AgentPanel {
             .omega_work_detail
             .clone()
             .filter(|_| self.omega_settings.is_none() && self.omega_unavailable_route.is_none());
+        let planning_route_active = self.omega_settings.is_none()
+            && self.omega_unavailable_route.is_none()
+            && self.omega_unavailable_surface.is_none()
+            && self.omega_navigation_history.current() == Some(&OmegaRoute::Planning);
+        let active_planning_surface = planning_route_active
+            .then(|| self.omega_planning_surface.as_ref().cloned())
+            .flatten();
         let active_dogfood_project = self
             .omega_navigation_history
             .current()
@@ -21187,6 +21327,7 @@ impl AgentPanel {
             .map(|state| Self::render_omega_unavailable_surface(state, cx));
         let main_content = unavailable_surface_content
             .or(unavailable_content)
+            .or_else(|| active_planning_surface.map(|surface| surface.into_any_element()))
             .or_else(|| active_dogfood_surface.map(|surface| surface.into_any_element()))
             .or_else(|| active_work_index_surface.map(|surface| surface.into_any_element()))
             .or_else(|| {
@@ -21229,6 +21370,8 @@ impl AgentPanel {
                 "unavailable destination".into()
             } else if self.omega_unavailable_surface.is_some() {
                 "unavailable work surface".into()
+            } else if planning_route_active {
+                "Planning".into()
             } else if let Some(view) = active_work_index_view {
                 view.title().into()
             } else if active_work_detail.is_some() {
@@ -21243,6 +21386,7 @@ impl AgentPanel {
             let is_thread = !omega_settings_open
                 && self.omega_unavailable_route.is_none()
                 && self.omega_unavailable_surface.is_none()
+                && !planning_route_active
                 && active_work_index_view.is_none()
                 && active_work_detail.is_none()
                 && !omega_forensics_selected
@@ -21989,6 +22133,41 @@ impl AgentPanel {
         } else {
             Vec::new()
         };
+        // omega#239. The one production destination for canonical planning
+        // Work. It is not conditional on the development fixture, on a release
+        // channel string, or on the boundary being reachable: it is a real
+        // source-backed feature, so it is present and its runtime state is
+        // drawn inside it.
+        let planning_row = {
+            let (padding_x, padding_y) = omega_sidebar_row_padding(planning_route_active);
+            let planning_state_label = self.omega_planning_state.headline();
+            h_flex()
+                .id("omega-open-planning")
+                .debug_selector(|| "omega.omega.sidebar.planning".into())
+                .w_full()
+                .px(px(padding_x))
+                .py(px(padding_y))
+                .gap(px(8.))
+                .rounded(px(8.))
+                .cursor_pointer()
+                .role(gpui::Role::Button)
+                .tab_index(0isize)
+                .aria_label(format!("Open Planning, {planning_state_label}"))
+                .when(planning_route_active, |row| {
+                    row.bg(selected_background)
+                        .border_1()
+                        .border_color(colors.border_selected)
+                })
+                .when(!planning_route_active, |row| {
+                    row.hover(move |style| style.bg(hover_background))
+                })
+                .on_click(cx.listener(|this, _, window, cx| {
+                    this.open_omega_planning(true, window, cx);
+                }))
+                .child(Icon::new(IconName::ListTree).size(IconSize::Small))
+                .child(div().min_w_0().flex_1().truncate().child("Planning"))
+                .into_any_element()
+        };
         let dogfood_project_rows = self
             .dogfood_fixture
             .as_ref()
@@ -22140,6 +22319,23 @@ impl AgentPanel {
                     )
                     .children(dogfood_project_rows)
             })
+            .child(
+                div()
+                    .id("omega-planning-heading")
+                    .debug_selector(|| "omega.omega.sidebar.planning-heading".into())
+                    .role(gpui::Role::Label)
+                    .aria_label("Planning")
+                    .mt(px(10.))
+                    .h(px(28.))
+                    .px(px(8.))
+                    .flex()
+                    .items_center()
+                    .text_size(px(11.))
+                    .font_weight(gpui::FontWeight::MEDIUM)
+                    .text_color(text_placeholder)
+                    .child("Planning"),
+            )
+            .child(planning_row)
             .when(work_index_admitted, |sidebar| {
                 sidebar
                     .child(
@@ -34687,6 +34883,608 @@ mod tests {
             Some("Document unavailable. This destination was deleted."),
             "the announced text is the value: {tree}"
         );
+    }
+
+    // ---------------------------------------------------------------
+    // omega#239. The production planning destination.
+    // ---------------------------------------------------------------
+
+    /// Build each of the five states the destination can be in, from the same
+    /// classification the running panel uses.
+    fn planning_states_for_tests() -> Vec<PlanningDestinationState> {
+        use omega_effectd::all_work_contract as contract;
+
+        fn graph(work: Vec<contract::WorkSnapshot>) -> contract::PlanningGraph {
+            contract::PlanningGraph {
+                contract_version: contract::ContractVersion::OpenagentsAllWorkBoundaryV1,
+                graph_ref: contract::PlanningResourceRef("planning-graph:all-work".into()),
+                revision: contract::SafeInteger(1),
+                event_cursor: contract::WorkCursor("cursor:test:1".into()),
+                reconciliation_digest: contract::ContractDigest(
+                    "0000000000000000000000000000000000000000000000000000000000000000".into(),
+                ),
+                generated_at: contract::IsoTimestamp("2026-08-03T09:15:00Z".into()),
+                resources: Vec::new(),
+                work,
+                planning_links: Vec::new(),
+                label_links: Vec::new(),
+                text_records: Vec::new(),
+                release_scope_links: Vec::new(),
+                source_coordinates: Vec::new(),
+                projection_issues: Vec::new(),
+                completeness: contract::Completeness {
+                    state: contract::CompletenessState::Complete,
+                    cursor: Some(Some(contract::WorkCursor("cursor:test:1".into()))),
+                    gap_refs: Vec::new(),
+                },
+                freshness: contract::Freshness {
+                    state: contract::FreshnessState::Fresh,
+                    observed_at: contract::IsoTimestamp("2026-08-03T09:15:00Z".into()),
+                    source_updated_at: None,
+                },
+            }
+        }
+
+        fn work(work_ref: &str, title: &str) -> contract::WorkSnapshot {
+            contract::WorkSnapshot {
+                summary: contract::WorkSummary {
+                    contract_version: contract::ContractVersion::OpenagentsAllWorkBoundaryV1,
+                    work_ref: contract::WorkRef(work_ref.into()),
+                    title: contract::ShortText(title.into()),
+                    description: None,
+                    domain: contract::WorkDomain::Development,
+                    work_class: contract::WorkClass::Task,
+                    state: contract::WorkState::Planned,
+                    priority: contract::WorkPriority::High,
+                    owner_ref: contract::PrincipalRef("principal:organization:openagents".into()),
+                    assignee: contract::Nullable(Some(contract::HumanAssignee {
+                        kind: contract::AssigneeKind::Human,
+                        principal_ref: contract::PrincipalRef("principal:human:owner".into()),
+                    })),
+                    agent_delegate: Some(Some(contract::AgentDelegate {
+                        agent_ref: contract::AgentRef("agent:omega:coder".into()),
+                        delegation_grant_ref: contract::DelegationGrantRef("grant:omega:1".into()),
+                        generation: contract::SafeInteger(1),
+                    })),
+                    portfolio: None,
+                    source_authority: contract::SourceAuthority {
+                        kind: contract::SourceAuthorityKind::ImportedReadOnly,
+                        source_ref: contract::SourceRef("github:openagentsinc-omega:160".into()),
+                        adapter_version: contract::ShortText("github-bootstrap-v1".into()),
+                        writable: false,
+                    },
+                    revision: contract::SafeInteger(1),
+                    updated_at: contract::IsoTimestamp("2026-08-03T05:00:00Z".into()),
+                    freshness: contract::Freshness {
+                        state: contract::FreshnessState::Fresh,
+                        observed_at: contract::IsoTimestamp("2026-08-03T09:15:00Z".into()),
+                        source_updated_at: None,
+                    },
+                    completeness: contract::Completeness {
+                        state: contract::CompletenessState::Complete,
+                        cursor: Some(Some(contract::WorkCursor("cursor:test:1".into()))),
+                        gap_refs: Vec::new(),
+                    },
+                    redaction: contract::RedactionMetadata {
+                        privacy_class: contract::PrivacyClass::Organization,
+                        redacted_field_count: contract::SafeInteger(0),
+                        policy_ref: contract::SourceRef("policy:all-work:public".into()),
+                    },
+                },
+                issue: None,
+                relations: Vec::new(),
+                thread_refs: vec![contract::ThreadRef("thread:omega:1".into())],
+                session_refs: Vec::new(),
+                agent_session_refs: Vec::new(),
+                agent_activity_refs: Vec::new(),
+                run_refs: vec![contract::RunRef("run:omega:1".into())],
+                session_projections: None,
+                agent_activity_projections: None,
+                intent_refs: Vec::new(),
+                event_refs: Vec::new(),
+                receipt_refs: Vec::new(),
+                evidence_refs: Vec::new(),
+                verification_refs: Vec::new(),
+                owner_disposition_refs: Vec::new(),
+            }
+        }
+
+        vec![
+            PlanningDestinationState::Loading,
+            PlanningDestinationState::from_supervisor_result(Ok(&graph(vec![work(
+                "work:github:openagentsinc-omega:160",
+                "Cut and verify the Omega 0.2.0 candidate",
+            )]))),
+            PlanningDestinationState::from_supervisor_result(Ok(&graph(Vec::new()))),
+            PlanningDestinationState::from_supervisor_result(Err(
+                &omega_effectd::SupervisorError::Protocol {
+                    code: omega_effectd::ProtocolErrorCode::Unavailable,
+                    message: "omega-effectd closed stdout".into(),
+                },
+            )),
+            PlanningDestinationState::from_supervisor_result(Err(
+                &omega_effectd::SupervisorError::AllWorkBoundaryAbsent {
+                    method: "planning.graph.read",
+                },
+            )),
+        ]
+    }
+
+    /// omega#239. The defect this issue exists for: `open_dogfood_project`
+    /// returns `false` without the omega#209 mock fixture, so an installed
+    /// build reached no planning destination at all. The production
+    /// destination must open on exactly the same panel where that one refuses.
+    #[gpui::test]
+    async fn omega_planning_opens_where_the_development_fixture_refuses(cx: &mut TestAppContext) {
+        let (panel, mut cx) = setup_visible_panel(cx).await;
+        panel.update_in(&mut cx, |panel, window, cx| {
+            panel.force_omega_primary_interface_for_tests = true;
+            panel.new_thread(&NewThread, window, cx);
+        });
+        cx.run_until_parked();
+
+        let fixture_route_opened = panel.update_in(&mut cx, |panel, window, cx| {
+            assert!(
+                panel.dogfood_fixture.is_none(),
+                "this panel must stand in for a build with no mock opt-in"
+            );
+            panel.open_dogfood_project(DOGFOOD_PROJECT_ID, true, window, cx)
+        });
+        assert!(
+            !fixture_route_opened,
+            "the development destination must still fail closed without the fixture"
+        );
+
+        let planning_opened = panel.update_in(&mut cx, |panel, window, cx| {
+            panel.open_omega_planning(true, window, cx)
+        });
+        assert!(
+            planning_opened,
+            "the production planning destination must open with no mock opt-in"
+        );
+        cx.run_until_parked();
+
+        panel.read_with(&cx, |panel, _cx| {
+            assert_eq!(
+                panel.omega_navigation_history.current(),
+                Some(&OmegaRoute::Planning),
+                "the destination must own a route, not only a widget"
+            );
+            assert!(panel.dogfood_fixture.is_none());
+            assert!(panel.dogfood_surface.is_none());
+        });
+
+        let snapshot = cx.debug_render_snapshot();
+        assert_eq!(
+            snapshot.selector_count(crate::omega_planning_surface::OMEGA_PLANNING_SURFACE_SELECTOR),
+            1,
+            "the production planning destination must be the drawn destination"
+        );
+        assert!(
+            cx.debug_bounds("omega.omega.sidebar.planning").is_some(),
+            "the destination must have a navigation row that does not depend on the fixture"
+        );
+    }
+
+    /// omega#209/omega#239. Empty, unavailable and refused are three different
+    /// facts. Collapsing them is how a silent no-op survives, so each must be
+    /// separately findable on screen.
+    #[gpui::test]
+    async fn omega_planning_states_are_distinguishable_on_screen(cx: &mut TestAppContext) {
+        let (panel, mut cx) = setup_visible_panel(cx).await;
+        panel.update_in(&mut cx, |panel, window, cx| {
+            panel.force_omega_primary_interface_for_tests = true;
+            panel.new_thread(&NewThread, window, cx);
+            panel.open_omega_planning(true, window, cx);
+        });
+        cx.run_until_parked();
+        cx.set_debug_accessibility_active(true);
+        cx.run_until_parked();
+
+        let states = planning_states_for_tests();
+        let every_selector = states
+            .iter()
+            .map(PlanningDestinationState::debug_selector)
+            .collect::<Vec<_>>();
+        assert_eq!(
+            every_selector
+                .iter()
+                .collect::<std::collections::BTreeSet<_>>()
+                .len(),
+            states.len(),
+            "the states must not share a selector before they are ever drawn"
+        );
+
+        for state in &states {
+            let expected = state.debug_selector();
+            panel.update(&mut cx, |panel, cx| {
+                panel.set_omega_planning_state(state.clone(), cx);
+            });
+            cx.run_until_parked();
+            let snapshot = cx.debug_render_snapshot();
+            assert_eq!(
+                snapshot.selector_count(&expected),
+                1,
+                "{expected} must be on screen in the {:?} state",
+                state.kind()
+            );
+            for other in &every_selector {
+                if other == &expected {
+                    continue;
+                }
+                assert_eq!(
+                    snapshot.selector_count(other),
+                    0,
+                    "{other} must not be on screen while the destination is {:?}",
+                    state.kind()
+                );
+            }
+            let tree = snapshot
+                .accessibility_tree_json()
+                .expect("the destination publishes an accessibility tree");
+            assert!(
+                tree.contains(&state.headline()),
+                "the {:?} state must be announced, not only drawn: {tree}",
+                state.kind()
+            );
+        }
+    }
+
+    /// omega#239 acceptance: an answered planning graph with no Work renders
+    /// the empty state, not the unavailable state.
+    #[gpui::test]
+    async fn an_answered_empty_planning_graph_is_not_drawn_as_unavailable(cx: &mut TestAppContext) {
+        let (panel, mut cx) = setup_visible_panel(cx).await;
+        panel.update_in(&mut cx, |panel, window, cx| {
+            panel.force_omega_primary_interface_for_tests = true;
+            panel.new_thread(&NewThread, window, cx);
+            panel.open_omega_planning(true, window, cx);
+        });
+        cx.run_until_parked();
+        cx.set_debug_accessibility_active(true);
+
+        let empty = planning_states_for_tests()
+            .into_iter()
+            .find(|state| state.kind() == omega_work_index::PlanningDestinationStateKind::Empty)
+            .expect("an empty state");
+        panel.update(&mut cx, |panel, cx| {
+            panel.set_omega_planning_state(empty, cx);
+        });
+        cx.run_until_parked();
+
+        let snapshot = cx.debug_render_snapshot();
+        assert_eq!(
+            snapshot.selector_count("omega.omega.planning.state.empty"),
+            1
+        );
+        assert_eq!(
+            snapshot.selector_count("omega.omega.planning.state.unavailable"),
+            0,
+            "an answered graph must never be reported as an unreachable boundary"
+        );
+        assert_eq!(
+            snapshot.selector_count("omega.omega.planning.state.refused"),
+            0
+        );
+        let tree = snapshot
+            .accessibility_tree_json()
+            .expect("the empty state publishes an accessibility tree");
+        assert!(
+            tree.contains("The All Work boundary answered and its planning graph has no Work."),
+            "the empty state must say the service answered: {tree}"
+        );
+    }
+
+    /// omega#239 acceptance: a component that cannot serve `planning.graph.read`
+    /// renders a refusal that names the absent boundary — not a generic error,
+    /// and not an empty list.
+    #[gpui::test]
+    async fn a_component_that_cannot_serve_planning_names_the_absent_boundary(
+        cx: &mut TestAppContext,
+    ) {
+        let (panel, mut cx) = setup_visible_panel(cx).await;
+        panel.update_in(&mut cx, |panel, window, cx| {
+            panel.force_omega_primary_interface_for_tests = true;
+            panel.new_thread(&NewThread, window, cx);
+            panel.open_omega_planning(true, window, cx);
+        });
+        cx.run_until_parked();
+        cx.set_debug_accessibility_active(true);
+
+        panel.update(&mut cx, |panel, cx| {
+            panel.set_omega_planning_state(
+                PlanningDestinationState::from_supervisor_result(Err(
+                    &omega_effectd::SupervisorError::AllWorkCapabilityWithheld {
+                        method: "planning.graph.read",
+                        capability: "planning.graph.read".into(),
+                    },
+                )),
+                cx,
+            );
+        });
+        cx.run_until_parked();
+
+        let snapshot = cx.debug_render_snapshot();
+        assert_eq!(
+            snapshot.selector_count("omega.omega.planning.state.refused"),
+            1
+        );
+        assert_eq!(
+            snapshot.selector_count("omega.omega.planning.state.empty"),
+            0
+        );
+        assert_eq!(
+            snapshot.selector_count("omega.omega.planning.detail"),
+            0,
+            "a refusal owns no Work, so it can draw no Work detail"
+        );
+        let tree = snapshot
+            .accessibility_tree_json()
+            .expect("the refusal publishes an accessibility tree");
+        assert!(
+            tree.contains("planning.graph.read"),
+            "the refusal must name the absent capability: {tree}"
+        );
+        assert!(
+            tree.contains("did not negotiate"),
+            "the refusal must say the component withheld it: {tree}"
+        );
+        assert!(
+            !tree.contains("No planning Work"),
+            "a refusal must never read as an empty list: {tree}"
+        );
+    }
+
+    /// omega#239. A build with no `omega-effectd` runtime is unreachable, not
+    /// empty. This is the state an installed build actually lands in when the
+    /// component fails, and it is the one most easily mistaken for success.
+    #[gpui::test]
+    async fn omega_planning_without_a_runtime_reads_as_unavailable_not_empty(
+        cx: &mut TestAppContext,
+    ) {
+        let (panel, mut cx) = setup_visible_panel(cx).await;
+        panel.update_in(&mut cx, |panel, window, cx| {
+            panel.force_omega_primary_interface_for_tests = true;
+            panel.new_thread(&NewThread, window, cx);
+            panel.open_omega_planning(true, window, cx);
+        });
+        cx.run_until_parked();
+
+        panel.read_with(&cx, |panel, _cx| {
+            assert_eq!(
+                panel.omega_planning_state.kind(),
+                omega_work_index::PlanningDestinationStateKind::Unavailable,
+                "a panel with no omega-effectd runtime must report an unreachable \
+                 boundary rather than an answered-and-empty graph"
+            );
+        });
+        let snapshot = cx.debug_render_snapshot();
+        assert_eq!(
+            snapshot.selector_count("omega.omega.planning.state.unavailable"),
+            1
+        );
+        assert_eq!(
+            snapshot.selector_count("omega.omega.planning.state.empty"),
+            0
+        );
+    }
+
+    /// omega#214. The destination exists so Assignee, Agent Delegate, Thread,
+    /// Session and Run can be seen apart. If the populated state does not draw
+    /// them apart, it cannot be their production surface.
+    #[gpui::test]
+    async fn a_populated_planning_destination_draws_the_accountability_kinds_apart(
+        cx: &mut TestAppContext,
+    ) {
+        let (panel, mut cx) = setup_visible_panel(cx).await;
+        panel.update_in(&mut cx, |panel, window, cx| {
+            panel.force_omega_primary_interface_for_tests = true;
+            panel.new_thread(&NewThread, window, cx);
+            panel.open_omega_planning(true, window, cx);
+        });
+        cx.run_until_parked();
+        cx.set_debug_accessibility_active(true);
+
+        let populated = planning_states_for_tests()
+            .into_iter()
+            .find(|state| state.kind() == omega_work_index::PlanningDestinationStateKind::Populated)
+            .expect("a populated state");
+        panel.update(&mut cx, |panel, cx| {
+            panel.set_omega_planning_state(populated, cx);
+        });
+        cx.run_until_parked();
+
+        let snapshot = cx.debug_render_snapshot();
+        assert_eq!(snapshot.selector_count("omega.omega.planning.detail"), 1);
+        let tree = snapshot
+            .accessibility_tree_json()
+            .expect("the populated state publishes an accessibility tree");
+        for expected in [
+            "principal:human:owner",
+            "agent:omega:coder",
+            "thread:omega:1",
+            "run:omega:1",
+            "No session",
+            "No agent session",
+        ] {
+            assert!(
+                tree.contains(expected),
+                "{expected} must be visible on the destination: {tree}"
+            );
+        }
+    }
+
+    /// omega#209. The route is persisted, so it must survive a round trip
+    /// without becoming a different destination.
+    #[gpui::test]
+    async fn the_planning_route_survives_persistence(cx: &mut TestAppContext) {
+        let (panel, mut cx) = setup_visible_panel(cx).await;
+        panel.update_in(&mut cx, |panel, window, cx| {
+            panel.force_omega_primary_interface_for_tests = true;
+            panel.new_thread(&NewThread, window, cx);
+            panel.open_omega_planning(true, window, cx);
+        });
+        cx.run_until_parked();
+
+        let persisted =
+            panel.read_with(&cx, |panel, _cx| panel.omega_navigation_history.persisted());
+        let restored = OmegaNavigationHistory::from_persisted(
+            serde_json::from_str(&serde_json::to_string(&persisted).expect("the route serializes"))
+                .expect("the route deserializes"),
+        )
+        .expect("the persisted history is valid");
+        assert_eq!(restored.current(), Some(&OmegaRoute::Planning));
+        assert_eq!(OmegaRoute::Planning.stable_key(), "planning");
+        assert_eq!(OmegaRoute::Planning.default_title(), "Planning");
+    }
+
+    /// omega#209/omega#239. A restored route must reach the destination it
+    /// names. A persisted development project route still fails closed in a
+    /// build with no mock opt-in, and the persisted Planning route opens the
+    /// production destination rather than the development one.
+    #[gpui::test]
+    async fn restored_routes_reach_planning_and_still_refuse_the_development_project(
+        cx: &mut TestAppContext,
+    ) {
+        let (panel, mut cx) = setup_visible_panel(cx).await;
+        panel.update_in(&mut cx, |panel, window, cx| {
+            panel.force_omega_primary_interface_for_tests = true;
+            panel.new_thread(&NewThread, window, cx);
+        });
+        cx.run_until_parked();
+        cx.set_debug_accessibility_active(true);
+
+        let development_route =
+            OmegaRoute::project(DOGFOOD_PROJECT_ID).expect("a valid development project route");
+        let handled = panel.update_in(&mut cx, |panel, window, cx| {
+            // Restoration always runs with the history index already on the
+            // route, exactly as `navigate_omega_back` leaves it.
+            panel
+                .omega_navigation_history
+                .push(development_route.clone());
+            panel.open_omega_history_route(development_route, window, cx)
+        });
+        cx.run_until_parked();
+        assert!(
+            handled,
+            "a restored route is always handled, by landing on a refusal if not by opening"
+        );
+        panel.read_with(&cx, |panel, _cx| {
+            assert!(
+                panel.omega_unavailable_route.is_some(),
+                "a persisted development project route must fail closed in production"
+            );
+            assert!(panel.dogfood_surface.is_none());
+        });
+        assert_eq!(
+            cx.debug_render_snapshot()
+                .selector_count(crate::omega_planning_surface::OMEGA_PLANNING_SURFACE_SELECTOR),
+            0,
+            "the refused development route must not silently land on Planning"
+        );
+
+        let opened = panel.update_in(&mut cx, |panel, window, cx| {
+            panel.omega_navigation_history.push(OmegaRoute::Planning);
+            panel.open_omega_history_route(OmegaRoute::Planning, window, cx)
+        });
+        cx.run_until_parked();
+        assert!(
+            opened,
+            "the restored Planning route must open its destination"
+        );
+
+        panel.read_with(&cx, |panel, _cx| {
+            assert!(
+                panel.omega_planning_surface.is_some(),
+                "the restored Planning route must build the production destination"
+            );
+            assert!(
+                panel.dogfood_surface.is_none(),
+                "the Planning route must never reach the development surface"
+            );
+            assert!(panel.omega_unavailable_route.is_none());
+        });
+        let snapshot = cx.debug_render_snapshot();
+        assert_eq!(
+            snapshot.selector_count(crate::omega_planning_surface::OMEGA_PLANNING_SURFACE_SELECTOR),
+            1,
+            "the restored Planning route must draw the production destination"
+        );
+        let tree = snapshot
+            .accessibility_tree_json()
+            .expect("the restored destination publishes an accessibility tree");
+        assert!(
+            tree.contains("Planning"),
+            "the restored destination must announce itself: {tree}"
+        );
+    }
+
+    /// omega#239. Arrow keys move the selection, and the detail pane follows.
+    #[gpui::test]
+    async fn omega_planning_selection_moves_with_the_keyboard(cx: &mut TestAppContext) {
+        let (panel, mut cx) = setup_visible_panel(cx).await;
+        panel.update_in(&mut cx, |panel, window, cx| {
+            panel.force_omega_primary_interface_for_tests = true;
+            panel.new_thread(&NewThread, window, cx);
+            panel.open_omega_planning(true, window, cx);
+        });
+        cx.run_until_parked();
+
+        let two_rows = {
+            let populated = planning_states_for_tests()
+                .into_iter()
+                .find(|state| {
+                    state.kind() == omega_work_index::PlanningDestinationStateKind::Populated
+                })
+                .expect("a populated state");
+            let mut rows = populated.rows().to_vec();
+            let mut second = rows[0].clone();
+            second.work_ref = "work:github:openagentsinc-omega:161".into();
+            second.title = "A second canonical planning Work item".into();
+            rows.push(second);
+            let identity = populated
+                .identity()
+                .expect("a populated state knows its revision")
+                .clone();
+            PlanningDestinationState::Populated(omega_work_index::PlanningDestinationSnapshot {
+                identity,
+                rows,
+            })
+        };
+        panel.update(&mut cx, |panel, cx| {
+            panel.set_omega_planning_state(two_rows, cx);
+        });
+        cx.run_until_parked();
+
+        let surface = panel
+            .read_with(&cx, |panel, _cx| panel.omega_planning_surface.clone())
+            .expect("the destination has a view");
+        surface.read_with(&cx, |surface, _cx| {
+            assert_eq!(
+                surface.selected_work_ref(),
+                Some("work:github:openagentsinc-omega:160"),
+                "the first row is selected when the destination opens"
+            );
+        });
+
+        cx.simulate_keystrokes("down");
+        cx.run_until_parked();
+        surface.read_with(&cx, |surface, _cx| {
+            assert_eq!(
+                surface.selected_work_ref(),
+                Some("work:github:openagentsinc-omega:161"),
+                "down must move the selection"
+            );
+        });
+        cx.simulate_keystrokes("up");
+        cx.run_until_parked();
+        surface.read_with(&cx, |surface, _cx| {
+            assert_eq!(
+                surface.selected_work_ref(),
+                Some("work:github:openagentsinc-omega:160"),
+                "up must move the selection back"
+            );
+        });
     }
 
     /// omega#237. `render_omega_shell` draws exactly one work-surface

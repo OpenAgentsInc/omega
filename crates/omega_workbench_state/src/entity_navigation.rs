@@ -72,6 +72,7 @@ pub enum EntityRouteKind {
     Thread,
     WorkIndex,
     Work,
+    Planning,
     IssueProjection,
     Project,
     Document,
@@ -87,6 +88,7 @@ pub enum EntityRouteIcon {
     Inbox,
     MyWork,
     Work,
+    Planning,
     Issue,
     Project,
     Document,
@@ -101,6 +103,7 @@ pub enum EntityRouteFocus {
     ThreadTranscript,
     WorkList,
     WorkBlock,
+    PlanningList,
     IssueProjection,
     ProjectOverview,
     DocumentBody,
@@ -170,7 +173,15 @@ pub enum EntityRoute {
     Thread(EntityRef),
     WorkIndex(WorkIndexRoute),
     Work(WorkRoute),
-    IssueProjection { work_ref: EntityRef },
+    /// The production destination for canonical All Work planning state.
+    ///
+    /// omega#239. A unit variant on purpose: this route names one destination
+    /// rather than an entity, so there is nothing a persisted value could
+    /// point at that a later build might have to resolve or reject.
+    Planning,
+    IssueProjection {
+        work_ref: EntityRef,
+    },
     Project(EntityRef),
     Document(EntityRef),
     Decision(EntityRef),
@@ -223,6 +234,7 @@ impl EntityRoute {
             Self::Thread(_) => EntityRouteKind::Thread,
             Self::WorkIndex(_) => EntityRouteKind::WorkIndex,
             Self::Work(_) => EntityRouteKind::Work,
+            Self::Planning => EntityRouteKind::Planning,
             Self::IssueProjection { .. } => EntityRouteKind::IssueProjection,
             Self::Project(_) => EntityRouteKind::Project,
             Self::Document(_) => EntityRouteKind::Document,
@@ -238,6 +250,7 @@ impl EntityRoute {
             Self::WorkIndex(WorkIndexRoute::Inbox) => EntityRouteIcon::Inbox,
             Self::WorkIndex(WorkIndexRoute::MyWork) => EntityRouteIcon::MyWork,
             Self::Work(_) => EntityRouteIcon::Work,
+            Self::Planning => EntityRouteIcon::Planning,
             Self::IssueProjection { .. } => EntityRouteIcon::Issue,
             Self::Project(_) => EntityRouteIcon::Project,
             Self::Document(_) => EntityRouteIcon::Document,
@@ -252,6 +265,7 @@ impl EntityRoute {
             Self::Thread(_) => EntityRouteFocus::ThreadTranscript,
             Self::WorkIndex(_) => EntityRouteFocus::WorkList,
             Self::Work(_) => EntityRouteFocus::WorkBlock,
+            Self::Planning => EntityRouteFocus::PlanningList,
             Self::IssueProjection { .. } => EntityRouteFocus::IssueProjection,
             Self::Project(_) => EntityRouteFocus::ProjectOverview,
             Self::Document(_) => EntityRouteFocus::DocumentBody,
@@ -266,6 +280,7 @@ impl EntityRoute {
             Self::Thread(_) => "Thread",
             Self::WorkIndex(view) => view.title(),
             Self::Work(_) => "Work",
+            Self::Planning => "Planning",
             Self::IssueProjection { .. } => "Issue",
             Self::Project(_) => "Project",
             Self::Document(_) => "Document",
@@ -289,6 +304,7 @@ impl EntityRoute {
                 ),
                 None => format!("work:{}", route.work_ref.as_str()),
             },
+            Self::Planning => "planning".to_string(),
             Self::IssueProjection { work_ref } => {
                 format!("issue_projection:{}", work_ref.as_str())
             }

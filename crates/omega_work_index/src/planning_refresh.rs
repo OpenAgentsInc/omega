@@ -354,10 +354,10 @@ fn state(resource: &PlanningResource) -> Option<&str> {
     resource.state.as_ref().map(|value| value.0.as_str())
 }
 
-fn resources<'a>(
-    graph: &'a PlanningGraph,
+fn resources(
+    graph: &PlanningGraph,
     kind: PlanningResourceKind,
-) -> impl Iterator<Item = &'a PlanningResource> {
+) -> impl Iterator<Item = &PlanningResource> {
     graph
         .resources
         .iter()
@@ -1107,7 +1107,7 @@ mod tests {
             "work": [{
                 "summary": {
                     "contractVersion": "openagents.all_work_boundary.v1",
-                    "workRef": work_ref.clone(),
+                    "workRef": work_ref,
                     "title": issue.title.clone(),
                     "domain": "development",
                     "workClass": "task",
@@ -1133,7 +1133,7 @@ mod tests {
                 "receiptRefs": [], "evidenceRefs": [], "verificationRefs": [], "ownerDispositionRefs": []
             }],
             "planningLinks": [{
-                "workRef": work_ref.clone(),
+                "workRef": work_ref,
                 "projectRef": issue.project_id.clone(),
                 "projectMilestoneRef": null,
                 "cycleRef": null,

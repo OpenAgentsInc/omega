@@ -6,11 +6,13 @@
 //! another lane or a last-qualified offline snapshot.
 
 mod dogfood_fixture;
+mod planning_destination;
 mod planning_refresh;
 mod planning_views;
 mod work_domain_profile;
 
 pub use dogfood_fixture::*;
+pub use planning_destination::*;
 pub use planning_refresh::*;
 pub use planning_views::*;
 pub use work_domain_profile::*;

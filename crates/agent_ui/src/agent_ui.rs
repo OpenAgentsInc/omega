@@ -50,6 +50,7 @@ pub mod omega_model_tier;
 pub mod omega_nostr_activity;
 pub mod omega_nostr_group_join;
 pub mod omega_nostr_profile_transport;
+pub mod omega_planning_surface;
 pub mod omega_public_channel_livekit;
 pub mod omega_public_channel_media;
 pub mod omega_public_channel_publish;
