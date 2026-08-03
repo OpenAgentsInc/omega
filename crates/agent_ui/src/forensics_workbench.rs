@@ -27,6 +27,7 @@ use ui::{
     v_flex,
 };
 
+use crate::omega_status_cue::{OmegaStatus, omega_status_cue};
 use crate::thread_identity::ThreadIdentityCandidate;
 
 const PREPARE_ACTION_REF: &str = "operator-action-ref://omega/forensics/prepare-run";
@@ -2982,18 +2983,26 @@ impl ForensicsWorkbenchSurface {
                     .border_color(cx.theme().colors().border_variant)
                     .child(Label::new("Model panel and run matrix").size(LabelSize::Small))
                     .child(
-                        Label::new(format!(
-                            "{} arms · {} runs · promotion {}",
-                            matrix.arms.len(),
-                            matrix.runs.len(),
-                            if matrix.promoted {
-                                "admitted"
-                            } else {
-                                "blocked"
-                            }
-                        ))
-                        .size(LabelSize::XSmall)
-                        .color(Color::Muted),
+                        h_flex()
+                            .gap_2()
+                            .child(
+                                Label::new(format!(
+                                    "{} arms · {} runs",
+                                    matrix.arms.len(),
+                                    matrix.runs.len(),
+                                ))
+                                .size(LabelSize::XSmall)
+                                .color(Color::Muted),
+                            )
+                            .child(omega_status_cue(
+                                "omega.forensics.matrix.promotion-status",
+                                if matrix.promoted {
+                                    OmegaStatus::Ready
+                                } else {
+                                    OmegaStatus::Blocked
+                                },
+                                "Promotion",
+                            )),
                     ),
             )
             .child(h_flex().w_full().items_stretch().child(list).child(detail))
@@ -3011,11 +3020,11 @@ impl ForensicsWorkbenchSurface {
                 .border_1()
                 .border_color(cx.theme().colors().border_variant)
                 .child(Label::new("Publication authority").size(LabelSize::Large))
-                .child(
-                    Label::new("PRIVATE · PUBLICATION BLOCKED")
-                        .size(LabelSize::XSmall)
-                        .color(Color::Error),
-                )
+                .child(omega_status_cue(
+                    "omega.forensics.publication.source-status",
+                    OmegaStatus::Blocked,
+                    "Publication",
+                ))
                 .child(
                     Label::new(
                         "No source-owned publication gate projection is attached. A completed run, clean worker, relay state, or model agreement cannot authorize a claim.",
@@ -3089,11 +3098,11 @@ impl ForensicsWorkbenchSurface {
                     .justify_between()
                     .gap_3()
                     .child(Label::new("Publication readiness").size(LabelSize::Large))
-                    .child(
-                        Label::new("PRIVATE · PUBLICATION BLOCKED")
-                            .size(LabelSize::XSmall)
-                            .color(Color::Error),
-                    ),
+                    .child(omega_status_cue(
+                        "omega.forensics.publication.detail-status",
+                        OmegaStatus::Blocked,
+                        "Publication",
+                    )),
             )
             .child(
                 Label::new(

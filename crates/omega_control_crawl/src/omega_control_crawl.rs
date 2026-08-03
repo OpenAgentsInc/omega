@@ -627,6 +627,26 @@ pub fn lint_copy<'a>(
     offenders
 }
 
+/// Status vocabulary admitted for one-word tooltips and accessibility cues.
+pub const REGISTERED_STATUS_WORDS: &[&str] = &[
+    "Blocked", "Complete", "Failed", "Offline", "Ready", "Running", "Warning",
+];
+
+/// Lint strings declared as presentation statuses. Multi-word and unknown
+/// labels fail; detailed domain facts belong outside this status channel.
+pub fn lint_status_words<'a>(strings: impl IntoIterator<Item = &'a str>) -> Vec<String> {
+    let mut offenders = strings
+        .into_iter()
+        .filter(|value| {
+            value.split_whitespace().count() != 1 || !REGISTERED_STATUS_WORDS.contains(value)
+        })
+        .map(str::to_string)
+        .collect::<Vec<_>>();
+    offenders.sort();
+    offenders.dedup();
+    offenders
+}
+
 // ---------------------------------------------------------------------------
 // Paths
 // ---------------------------------------------------------------------------
@@ -910,6 +930,19 @@ mod tests {
             }],
         };
         assert!(lint_copy([essay], &allowed).is_empty());
+    }
+
+    #[test]
+    fn status_lint_rejects_prose_and_unregistered_words() {
+        assert!(lint_status_words(["Ready", "Blocked", "Offline"]).is_empty());
+        assert_eq!(
+            lint_status_words(["Awaiting profile", "PRIVATE · PUBLICATION BLOCKED", "Maybe"]),
+            vec![
+                "Awaiting profile".to_string(),
+                "Maybe".to_string(),
+                "PRIVATE · PUBLICATION BLOCKED".to_string(),
+            ]
+        );
     }
 
     #[test]

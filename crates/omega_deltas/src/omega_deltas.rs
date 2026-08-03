@@ -28294,4 +28294,62 @@ mod tests {
             "OMEGA-DELTA-0234: hard-coded Anonymous identity returned"
         );
     }
+
+    /// OMEGA-DELTA-0235. Omega-owned presentation status uses one shared
+    /// icon/color cue with a one-word tooltip and exact accessible context.
+    /// Forensics domain records remain readable in detail views.
+    #[test]
+    fn omega_status_chrome_is_concise_and_accessible() {
+        let cue = without_comments(&read_repository_file(
+            "crates/agent_ui/src/omega_status_cue.rs",
+        ));
+        for required in [
+            "enum OmegaStatus",
+            "IconName::Circle",
+            "Role::Status",
+            "Tooltip::text(word)",
+            "aria_label",
+            "split_whitespace().count(), 1",
+        ] {
+            assert!(
+                cue.contains(required),
+                "OMEGA-DELTA-0235: shared status cue lost `{required}`"
+            );
+        }
+
+        let forensics = without_comments(&read_repository_file(
+            "crates/agent_ui/src/forensics_workbench.rs",
+        ));
+        assert!(
+            !forensics.contains("PRIVATE · PUBLICATION BLOCKED"),
+            "OMEGA-DELTA-0235: Forensics restored a prominent status sentence"
+        );
+        for required in [
+            "omega.forensics.matrix.promotion-status",
+            "omega.forensics.publication.source-status",
+            "omega.forensics.publication.detail-status",
+            "omega_status_cue",
+            "No source-owned publication gate projection is attached",
+        ] {
+            assert!(
+                forensics.contains(required),
+                "OMEGA-DELTA-0235: concise Forensics status/evidence split lost `{required}`"
+            );
+        }
+
+        let crawl = without_comments(&read_repository_file(
+            "crates/omega_control_crawl/src/omega_control_crawl.rs",
+        ));
+        for required in [
+            "REGISTERED_STATUS_WORDS",
+            "lint_status_words",
+            "value.split_whitespace().count() != 1",
+            "PRIVATE · PUBLICATION BLOCKED",
+        ] {
+            assert!(
+                crawl.contains(required),
+                "OMEGA-DELTA-0235: status copy lint lost `{required}`"
+            );
+        }
+    }
 }

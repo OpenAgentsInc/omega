@@ -61,6 +61,7 @@ pub mod omega_router;
 pub mod omega_send_queue;
 pub mod omega_sidebar;
 pub mod omega_signing_assurance;
+pub mod omega_status_cue;
 pub mod omega_thread_worktree;
 pub mod omega_threads_sidebar;
 pub mod omega_work_detail_surface;
