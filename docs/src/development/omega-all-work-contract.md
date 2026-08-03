@@ -49,6 +49,31 @@ closed Work rows. GitHub remains an imported read-only source. A successful
 read does not grant command, claim, delegation, verification, release, or
 owner-disposition authority. Release Planning Records remain planning metadata.
 
+## Dogfood planning refresh
+
+The development-only v0.2.0 Work screens use one
+`DogfoodPlanningViewModel` for fixture and owned-client data. Opening either
+dogfood Project asks the supervised `omega-effectd.v2` client for a generated
+`PlanningGraphReadResult`. The adapter stages and validates the whole revision
+before it swaps the visible graph.
+
+The screen keeps the last complete revision when a refresh is partial,
+truncated, has a cursor gap, regresses its revision or adapter generation, or
+fails. It updates the visible freshness and projection-loss facts without
+mixing rows from two revisions. A complete live revision is written through an
+atomic last-known-good file replacement. A later offline start restores that
+file with an explicit `Offline` state. Native Work without a GitHub coordinate
+keeps its canonical Work identity and is not presented as a GitHub issue.
+The client makes at most three refresh attempts with bounded backoff. The
+Effect-owned graph has already reconciled source pagination; the Omega adapter
+rejects duplicate canonical identities and normalizes display ordering instead
+of creating a second pagination authority.
+
+The persisted cache is read only when the existing debug fixture gate is
+enabled. The refresh does not make this development route available in a
+release build, and neither the cache nor a successful read grants command or
+release authority.
+
 ## Verify
 
 Run:
@@ -56,6 +81,7 @@ Run:
 ```sh
 cargo test -p omega_effectd typed_all_work_reads_cross_the_supervised_process_boundary
 cargo test -p omega_effectd all_work
+cargo test -p omega_work_index planning_refresh --features test-support
 OPENAGENTS_ALL_WORK_SOURCE_ROOT=/path/to/pinned/openagents \
   cargo test -p omega_effectd typed_all_work_index_crosses_the_openagents_process_boundary \
   -- --ignored

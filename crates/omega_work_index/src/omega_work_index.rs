@@ -6,8 +6,10 @@
 //! another lane or a last-qualified offline snapshot.
 
 mod dogfood_fixture;
+mod planning_refresh;
 
 pub use dogfood_fixture::*;
+pub use planning_refresh::*;
 
 use std::{
     collections::{BTreeMap, BTreeSet},

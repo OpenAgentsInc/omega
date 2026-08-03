@@ -63,6 +63,14 @@ snapshot has no public delegate, session, diff, pull request, or review. The
 screen repeats the development-mock boundary and fixture provenance instead of
 creating a plausible live state.
 
+That same surface now accepts the generated canonical `PlanningGraph` through
+the owned `omega-effectd.v2` client. Fixture and live input decode into one
+view model. The header distinguishes **DEV MOCKS**, **OWNED READ**, stale,
+offline, partial, and cursor-gap states. A partial or failed refresh changes
+only freshness and loss metadata; the rows stay on the last complete revision.
+The last complete live projection is restored visibly as an offline cache, not
+as fresh data. This client refresh remains behind the development fixture gate.
+
 The development surface stores only its Project, Issue, and scene selection.
 It validates those IDs against the checked fixture before restoration and
 defaults to omega#214 when no valid state exists. A build without the fixture

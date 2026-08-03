@@ -5,8 +5,8 @@ use gpui::{
 #[cfg(all(test, feature = "test-support"))]
 use omega_work_index::DogfoodFixtureAdapter;
 use omega_work_index::{
-    DOGFOOD_PROJECT_ID, DogfoodFixtureProjection, FixtureIssue, FixtureIssueRelationKind,
-    FixtureLifecycleType, FixturePriority, SECURITY_PROJECT_ID,
+    DOGFOOD_PROJECT_ID, DogfoodPlanningOrigin, DogfoodPlanningViewModel, FixtureIssue,
+    FixtureIssueRelationKind, FixtureLifecycleType, FixturePriority, SECURITY_PROJECT_ID,
 };
 use serde::{Deserialize, Serialize};
 use ui::{Button, ButtonSize, ButtonStyle, Color, Icon, IconName, Label, LabelSize, prelude::*};
@@ -56,7 +56,7 @@ pub enum DogfoodSurfaceEvent {
 
 pub struct DogfoodSurface {
     focus_handle: FocusHandle,
-    fixture: DogfoodFixtureProjection,
+    fixture: DogfoodPlanningViewModel,
     project_id: String,
     selected_issue_id: String,
     scene: DogfoodScene,
@@ -71,7 +71,7 @@ struct PersistedDogfoodSurfaceState {
 }
 
 impl DogfoodSurface {
-    pub fn new(fixture: DogfoodFixtureProjection, cx: &mut Context<Self>) -> Self {
+    pub fn new(fixture: DogfoodPlanningViewModel, cx: &mut Context<Self>) -> Self {
         let persisted = KeyValueStore::global(cx)
             .read_kvp(DOGFOOD_SURFACE_STATE_KEY)
             .ok()
@@ -98,6 +98,36 @@ impl DogfoodSurface {
 
     pub fn scene(&self) -> DogfoodScene {
         self.scene
+    }
+
+    /// Atomically swaps one complete planning projection while preserving a
+    /// valid selection. An incomplete refresh is retained by the model layer
+    /// and reaches this method only as updated freshness/loss metadata.
+    pub fn set_planning_view(&mut self, fixture: DogfoodPlanningViewModel, cx: &mut Context<Self>) {
+        let selection_is_valid =
+            fixture.graph.issues.iter().any(|issue| {
+                issue.id == self.selected_issue_id && issue.project_id == self.project_id
+            });
+        self.fixture = fixture;
+        if !selection_is_valid {
+            if let Some(issue) = self
+                .fixture
+                .graph
+                .issues
+                .iter()
+                .find(|issue| issue.project_id == self.project_id && !issue.completed)
+                .or_else(|| {
+                    self.fixture
+                        .graph
+                        .issues
+                        .iter()
+                        .find(|issue| issue.project_id == self.project_id)
+                })
+            {
+                self.selected_issue_id = issue.id.clone();
+            }
+        }
+        cx.notify();
     }
 
     fn project_issues(&self) -> Vec<&FixtureIssue> {
@@ -271,15 +301,28 @@ impl DogfoodSurface {
                                             .child(self.project_name().to_string()),
                                     )
                                     .child(
-                                        Label::new("DEV MOCKS")
+                                        Label::new(if self.fixture.origin
+                                            == DogfoodPlanningOrigin::Fixture
+                                        {
+                                            "DEV MOCKS"
+                                        } else {
+                                            "OWNED READ"
+                                        })
                                             .size(LabelSize::XSmall)
-                                            .color(Color::Warning),
+                                            .color(if self.fixture.is_fresh_live() {
+                                                Color::Success
+                                            } else {
+                                                Color::Warning
+                                            }),
                                     ),
                             )
                             .child(
                                 Label::new(format!(
-                                    "v0.2.0 issue snapshot · {} · {} open · {}…",
-                                    self.fixture.source_snapshot_at, open, digest_prefix
+                                    "v0.2.0 planning graph · {} · {} open · r{} · {}…",
+                                    self.fixture.source_snapshot_at,
+                                    open,
+                                    self.fixture.revision,
+                                    digest_prefix
                                 ))
                                 .size(LabelSize::XSmall)
                                 .color(Color::Muted),
@@ -311,7 +354,7 @@ impl DogfoodSurface {
                                     this.select_project(SECURITY_PROJECT_ID, cx)
                                 }),
                             )),
-                    ),
+                    )
             )
             .child(h_flex().gap_1().children(DogfoodScene::ALL.map(|scene| {
                 Button::new(format!("dogfood-scene-{}", scene.label()), scene.label())
@@ -413,7 +456,7 @@ impl DogfoodSurface {
                         }),
                 ),
             )
-            .child(section_heading("Fixture provenance", cx))
+            .child(section_heading("Planning provenance", cx))
             .child(
                 v_flex()
                     .gap_1()
@@ -426,9 +469,29 @@ impl DogfoodSurface {
                             .size(LabelSize::XSmall),
                     )
                     .child(
-                        Label::new("Development mock data · no command or release authority")
+                        Label::new(format!(
+                            "{} · cursor {} · {} gap(s) · {} projection issue(s) · no command or release authority",
+                            self.fixture.provenance_label(),
+                            self.fixture.event_cursor,
+                            self.fixture.refresh_gap_refs.len(),
+                            self.fixture.refresh_projection_issues.len()
+                        ))
                             .size(LabelSize::XSmall)
-                            .color(Color::Warning),
+                            .color(if self.fixture.is_fresh_live() {
+                                Color::Success
+                            } else {
+                                Color::Warning
+                            }),
+                    )
+                    .child(
+                        Label::new(
+                            self.fixture
+                                .last_error
+                                .clone()
+                                .unwrap_or_else(|| "No refresh loss reported".into()),
+                        )
+                        .size(LabelSize::XSmall)
+                        .color(Color::Muted),
                     ),
             )
     }
@@ -565,6 +628,12 @@ impl DogfoodSurface {
                 .iter()
                 .find(|milestone| &milestone.id == id)
         });
+        let repository = self
+            .fixture
+            .graph
+            .source_repositories
+            .iter()
+            .find(|repository| repository.id == issue.repository_id);
         h_flex()
             .items_start()
             .gap_4()
@@ -655,11 +724,20 @@ impl DogfoodSurface {
                     .child(section_heading("Inspector", cx))
                     .child(inspector_row(
                         "Work identity",
-                        format!("work:fixture:{}", issue.id),
+                        if self.fixture.origin == DogfoodPlanningOrigin::Fixture {
+                            format!("work:fixture:{}", issue.id)
+                        } else {
+                            issue.identifier.clone()
+                        },
                         cx,
                     ))
                     .child(inspector_row("Issue projection", issue.id.clone(), cx))
                     .child(inspector_row("Repository", issue.repository_id.clone(), cx))
+                    .child(inspector_row(
+                        "Source revision",
+                        repository.map_or("Not supplied".into(), |value| value.revision.clone()),
+                        cx,
+                    ))
                     .child(inspector_row(
                         "Milestone",
                         milestone.map_or("Not supplied".into(), |value| value.name.clone()),
@@ -675,7 +753,31 @@ impl DogfoodSurface {
                     .child(inspector_row("Session", "None".into(), cx))
                     .child(inspector_row(
                         "Authority",
-                        "Simulation · read only".into(),
+                        if self.fixture.origin == DogfoodPlanningOrigin::Fixture {
+                            "Simulation · read only".into()
+                        } else {
+                            "Canonical read · no command authority".into()
+                        },
+                        cx,
+                    ))
+                    .child(inspector_row(
+                        "Planning source",
+                        self.fixture.provenance_label().into(),
+                        cx,
+                    ))
+                    .child(inspector_row(
+                        "Revision / cursor",
+                        format!("{} / {}", self.fixture.revision, self.fixture.event_cursor),
+                        cx,
+                    ))
+                    .child(inspector_row(
+                        "Adapter generation",
+                        self.fixture.adapter_generation.to_string(),
+                        cx,
+                    ))
+                    .child(inspector_row(
+                        "Projection version",
+                        self.fixture.projection_version.clone(),
                         cx,
                     )),
             )
@@ -789,7 +891,7 @@ fn default_fixture_state() -> PersistedDogfoodSurfaceState {
 }
 
 fn fixture_state_is_valid(
-    fixture: &DogfoodFixtureProjection,
+    fixture: &DogfoodPlanningViewModel,
     state: &PersistedDogfoodSurfaceState,
 ) -> bool {
     fixture
@@ -917,7 +1019,9 @@ mod tests {
 
     #[test]
     fn persisted_scene_keeps_one_issue_identity_and_rejects_cross_project_state() {
-        let fixture = DogfoodFixtureAdapter::load_for_tests().expect("valid fixture");
+        let fixture = DogfoodPlanningViewModel::from_fixture(
+            DogfoodFixtureAdapter::load_for_tests().expect("valid fixture"),
+        );
         for scene in DogfoodScene::ALL {
             let state = PersistedDogfoodSurfaceState {
                 project_id: DOGFOOD_PROJECT_ID.into(),

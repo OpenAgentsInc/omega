@@ -119,10 +119,11 @@ use omega_work_detail::{
     snapshot_from_index_item, write_journal_value, write_participation_journal,
 };
 use omega_work_index::{
-    DOGFOOD_PROJECT_ID, DogfoodFixtureAdapter, DogfoodFixtureGate, DogfoodFixtureProjection,
-    EFFECT_ADAPTER_ID, FORENSICS_ADAPTER_ID, NativeForensicsPhase, NativeForensicsRecord,
-    NativeThreadLifecycle, NativeThreadRecord, SECURITY_PROJECT_ID, THREAD_ADAPTER_ID, WorkIndex,
-    WorkIndexItem, WorkIndexView, WorkSourceEntity, adapt_forensics, adapt_thread,
+    DOGFOOD_PROJECT_ID, DogfoodFixtureAdapter, DogfoodFixtureGate, DogfoodPlanningSourceState,
+    DogfoodPlanningViewModel, EFFECT_ADAPTER_ID, FORENSICS_ADAPTER_ID, NativeForensicsPhase,
+    NativeForensicsRecord, NativeThreadLifecycle, NativeThreadRecord, SECURITY_PROJECT_ID,
+    THREAD_ADAPTER_ID, WorkIndex, WorkIndexItem, WorkIndexView, WorkSourceEntity, adapt_forensics,
+    adapt_thread, read_dogfood_planning_snapshot, write_dogfood_planning_snapshot,
 };
 use omega_workbench_state::{
     DomainBlockRoute, EntityNavigationHistory as OmegaNavigationHistory, EntityRoute as OmegaRoute,
@@ -3378,9 +3379,11 @@ pub struct AgentPanel {
     _work_index_thread_observation: Subscription,
     _work_index_effect_refresh: Option<Task<()>>,
     _work_index_persist: Option<Task<()>>,
-    dogfood_fixture: Option<DogfoodFixtureProjection>,
+    dogfood_fixture: Option<DogfoodPlanningViewModel>,
     dogfood_surface: Option<Entity<DogfoodSurface>>,
     _dogfood_surface_subscription: Option<Subscription>,
+    _dogfood_planning_refresh: Option<Task<()>>,
+    _dogfood_planning_persist: Option<Task<()>>,
     omega_work_detail: Option<Entity<WorkDetailSurface>>,
     _omega_work_detail_subscription: Option<Subscription>,
     _omega_work_detail_load: Option<Task<()>>,
@@ -4016,7 +4019,18 @@ impl AgentPanel {
         };
         let dogfood_fixture =
             match DogfoodFixtureAdapter::load(DogfoodFixtureGate::from_process_environment()) {
-                Ok(fixture) => fixture,
+                Ok(Some(fixture)) => {
+                    let fixture = DogfoodPlanningViewModel::from_fixture(fixture);
+                    match read_dogfood_planning_snapshot(paths::data_dir()) {
+                        Ok(Some(cached)) => Some(cached),
+                        Ok(None) => Some(fixture),
+                        Err(error) => {
+                            log::warn!("could not restore the dogfood planning graph: {error}");
+                            Some(fixture)
+                        }
+                    }
+                }
+                Ok(None) => None,
                 Err(error) => {
                     log::warn!("could not load the v0.2.0 development fixture: {error}");
                     None
@@ -4125,6 +4139,8 @@ impl AgentPanel {
             dogfood_fixture,
             dogfood_surface: None,
             _dogfood_surface_subscription: None,
+            _dogfood_planning_refresh: None,
+            _dogfood_planning_persist: None,
             omega_work_detail: None,
             _omega_work_detail_subscription: None,
             _omega_work_detail_load: None,
@@ -17184,6 +17200,102 @@ impl AgentPanel {
         true
     }
 
+    fn refresh_dogfood_planning(&mut self, cx: &mut Context<Self>) {
+        let Some(previous) = self.dogfood_fixture.clone() else {
+            return;
+        };
+        let supervisor = omega_effectd::shared_supervisor(cx).ok();
+        let executor = cx.background_executor().clone();
+        self._dogfood_planning_refresh = Some(cx.spawn(async move |this, cx| {
+            let refreshed = async {
+                let Some(supervisor) = supervisor else {
+                    return Err("omega-effectd is unavailable".to_string());
+                };
+                let after_revision = (previous.revision > 0).then_some(Some(
+                    omega_effectd::all_work_contract::SafeInteger(previous.revision),
+                ));
+                let mut last_error = "planning refresh did not start".to_string();
+                let mut response = None;
+                for attempt in 0..3 {
+                    let request = {
+                        let mut guard = supervisor.lock().await;
+                        match guard.ensure_started().await {
+                            Ok(()) => {
+                                let generation = guard.generation();
+                                guard
+                                    .read_planning_graph(
+                                        omega_effectd::all_work_contract::PlanningGraphReadRequest {
+                                            after_revision: after_revision.clone(),
+                                        },
+                                    )
+                                    .await
+                                    .map(|result| (result, generation))
+                                    .map_err(|error| error.to_string())
+                            }
+                            Err(error) => Err(error.to_string()),
+                        }
+                    };
+                    match request {
+                        Ok(result) => {
+                            response = Some(result);
+                            break;
+                        }
+                        Err(error) => last_error = error,
+                    }
+                    if attempt < 2 {
+                        executor
+                            .timer(std::time::Duration::from_millis(100 * (1 << attempt)))
+                            .await;
+                    }
+                }
+                let Some((result, generation)) = response else {
+                    return Err(format!(
+                        "planning refresh failed after three bounded attempts: {last_error}"
+                    ));
+                };
+                match previous.stage_live(result.graph.clone(), generation) {
+                    Ok(view) => Ok(view),
+                    Err(error) => {
+                        Ok(previous.retain_rejected_graph(&result.graph, error.to_string()))
+                    }
+                }
+            }
+            .await;
+            let _ = this.update(cx, |panel, cx| {
+                let view = match refreshed {
+                    Ok(view) => view,
+                    Err(error) => panel
+                        .dogfood_fixture
+                        .as_ref()
+                        .map(|view| {
+                            view.retain_after_failure(DogfoodPlanningSourceState::Offline, error)
+                        })
+                        .unwrap_or_else(|| {
+                            previous.retain_after_failure(
+                                DogfoodPlanningSourceState::Error,
+                                "No planning graph is available.",
+                            )
+                        }),
+                };
+                panel.dogfood_fixture = Some(view.clone());
+                if let Some(surface) = &panel.dogfood_surface {
+                    surface.update(cx, |surface, cx| {
+                        surface.set_planning_view(view.clone(), cx)
+                    });
+                }
+                if view.origin != omega_work_index::DogfoodPlanningOrigin::Fixture {
+                    let data_dir = paths::data_dir().clone();
+                    panel._dogfood_planning_persist = Some(cx.background_spawn(async move {
+                        if let Err(error) = write_dogfood_planning_snapshot(&data_dir, &view) {
+                            log::warn!("could not persist the dogfood planning graph: {error}");
+                        }
+                    }));
+                }
+                cx.notify();
+            });
+        }));
+    }
+
     fn open_dogfood_project(
         &mut self,
         project_id: &str,
@@ -17242,6 +17354,7 @@ impl AgentPanel {
             surface
         };
         surface.update(cx, |surface, cx| surface.select_project(project_id, cx));
+        self.refresh_dogfood_planning(cx);
         surface.read(cx).focus_handle(cx).focus(window, cx);
         cx.notify();
         true
