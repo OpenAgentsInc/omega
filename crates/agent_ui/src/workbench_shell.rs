@@ -2358,6 +2358,11 @@ impl WorkbenchShell {
             .active()
             .ok_or_else(|| anyhow!("active thread identity disappeared during synchronization"))?;
         let binding = identity.binding().cloned();
+        // `available_surfaces_for_identity` only drops a surface from the full
+        // set once a worktree is selected and it turns out to have no Git
+        // repository. Without a selected worktree it returns Plan alone, and
+        // the missing surfaces are missing for want of a project.
+        let has_selected_worktree = identity.selected.is_some();
         let mut available_surfaces = available_surfaces_for_identity(identity);
         let has_retained_terminal = self
             .hosts
@@ -2390,7 +2395,8 @@ impl WorkbenchShell {
                 anyhow!("thread {thread_id:?} disappeared during capability sync")
             })?;
         let available_surfaces = thread.available_surfaces.clone();
-        let mut capabilities = capabilities_for_surfaces(&available_surfaces);
+        let mut capabilities =
+            capabilities_for_surfaces(&available_surfaces, has_selected_worktree);
         for (surface, capability) in &mut capabilities {
             // omega#170. `capabilities_for_surfaces` already marked every
             // absent surface unavailable with a per-surface reason a person
@@ -3752,20 +3758,22 @@ fn available_surfaces_for_identity(identity: &ThreadIdentityState) -> Vec<WorkSu
 
 fn capabilities_for_surfaces(
     available_surfaces: &std::collections::BTreeSet<WorkSurface>,
+    has_selected_worktree: bool,
 ) -> BTreeMap<WorkSurface, SurfaceCapability> {
     WorkSurface::FALLBACK_ORDER
         .into_iter()
         .map(|surface| {
             let capability = if available_surfaces.contains(&surface) {
                 SurfaceCapability::available()
+            } else if has_selected_worktree {
+                // A worktree is selected, so the only reason a surface is absent
+                // is that it needs Git and this worktree has none. omega#237:
+                // this reason is now shown to the user as a destination, and
+                // telling somebody with a folder open to "open a project" sends
+                // them nowhere.
+                SurfaceCapability::unavailable("This worktree has no Git repository")
             } else {
-                SurfaceCapability::unavailable(
-                    if matches!(surface, WorkSurface::Git | WorkSurface::Review) {
-                        "This worktree has no Git repository"
-                    } else {
-                        "Open a project to use this surface"
-                    },
-                )
+                SurfaceCapability::unavailable("Open a project to use this surface")
             };
             (surface, capability)
         })

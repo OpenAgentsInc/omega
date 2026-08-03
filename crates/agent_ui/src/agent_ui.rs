@@ -148,6 +148,30 @@ pub use conversation_view::{ConversationView, StateChange};
 pub use external_source_prompt::ExternalSourcePrompt;
 pub(crate) use mode_selector::ModeSelector;
 
+/// Close the workspace docks the workbench panels register themselves into.
+///
+/// omega#234. These three panels exist so the workbench can rehome them into
+/// its work surfaces; the Omega surface never shows a workspace dock beside
+/// itself. `ProjectPanel::starts_open` is true whenever the window has a
+/// directory worktree, and `Dock::restore_state` reopens a dock that a previous
+/// session serialized as visible, so registering them opens a dock nobody asked
+/// for. The Omega surface is a zoomed panel drawn as an absolute overlay across
+/// the whole workspace area, so that dock ends up behind it: never seen, still
+/// laid out, and still published to AccessKit as an open landmark. In the
+/// sealed presentation the zoomed dock renders as nothing and the centre is
+/// absent, so the leftover dock is also the first child of the row — which is
+/// how a 240-point Project panel became a "Right dock" landmark sitting over
+/// the left sidebar, announcing file rows that were never on screen.
+pub fn close_workbench_panel_docks(
+    workspace: &Workspace,
+    window: &mut Window,
+    cx: &mut Context<Workspace>,
+) {
+    workspace.close_panel::<ProjectPanel>(window, cx);
+    workspace.close_panel::<GitPanel>(window, cx);
+    workspace.close_panel::<TerminalPanel>(window, cx);
+}
+
 /// Registers the native workbench panels before `AgentPanel` construction because
 /// `AgentPanel::new` snapshots these workspace entities.
 pub async fn initialize_workbench_panels(
@@ -187,6 +211,8 @@ pub async fn initialize_workbench_panels(
                 && workspace.panel::<TerminalPanel>(cx).is_some(),
             "the Files, Git, and Terminal panels must be registered before AgentPanel is constructed"
         );
+
+        close_workbench_panel_docks(workspace, window, cx);
 
         anyhow::Ok(())
     })??;

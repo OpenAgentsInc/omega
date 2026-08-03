@@ -174,6 +174,15 @@ const OMEGA_SIDEBAR_WIDTH: f32 = 256.;
 const OMEGA_SIDEBAR_RESIZE_DURATION: Duration = Duration::from_millis(200);
 const OMEGA_TAB_SHORTCUT_LABELS: [&str; 10] = ["1", "2", "3", "4", "5", "6", "7", "8", "9", "0"];
 
+/// A work surface the Omega surface declined to open, kept so the refusal can
+/// be drawn where the user is looking instead of being reported to a surface
+/// that this presentation does not render. See `omega#237`.
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct OmegaUnavailableSurface {
+    surface: omega_workbench_state::WorkSurface,
+    reason: SharedString,
+}
+
 #[derive(Clone, Copy, Debug)]
 struct OmegaSidebarTween {
     from: f32,
@@ -3086,6 +3095,26 @@ fn omega_forensics_route(work_ref: &str) -> Option<OmegaRoute> {
     .ok()
 }
 
+/// Does `render_omega_shell` draw a destination for this work surface?
+///
+/// `omega#237`. The primary Omega interface renders exactly one work surface —
+/// the Forensics host, through `omega_forensics_host`. Every other surface has
+/// a `WorkbenchShell` host that only the activity-rail presentation puts on
+/// screen, so selecting one changed projection state that nothing drew. The
+/// match is exhaustive on purpose: adding a destination has to be a decision
+/// made here, not an omission discovered by a user.
+fn omega_shell_draws_work_surface(surface: omega_workbench_state::WorkSurface) -> bool {
+    match surface {
+        omega_workbench_state::WorkSurface::Forensics => true,
+        omega_workbench_state::WorkSurface::Files
+        | omega_workbench_state::WorkSurface::Search
+        | omega_workbench_state::WorkSurface::Review
+        | omega_workbench_state::WorkSurface::Git
+        | omega_workbench_state::WorkSurface::Terminal
+        | omega_workbench_state::WorkSurface::Plan => false,
+    }
+}
+
 fn is_omega_forensics_route(route: &OmegaRoute) -> bool {
     matches!(
         route,
@@ -4262,6 +4291,12 @@ pub struct AgentPanel {
     omega_closed_thread_tabs: HashSet<ThreadId>,
     omega_navigation_history: OmegaNavigationHistory,
     omega_unavailable_route: Option<EntityRouteState>,
+    /// The work surface the surface refused to open, and the reason it
+    /// gave. `omega#237`: the reason used to go to `Workspace::show_toast`,
+    /// and the primary interface renders neither the toast layer nor the
+    /// activity rail that carries `WorkbenchShell::last_error`, so every
+    /// refusal reached the user as nothing at all.
+    omega_unavailable_surface: Option<OmegaUnavailableSurface>,
     omega_settings: Option<Entity<settings_ui::SettingsWindow>>,
     #[cfg(any(test, feature = "test-support"))]
     force_omega_primary_interface_for_tests: bool,
@@ -5030,6 +5065,7 @@ impl AgentPanel {
             omega_closed_thread_tabs: HashSet::default(),
             omega_navigation_history: OmegaNavigationHistory::default(),
             omega_unavailable_route: None,
+            omega_unavailable_surface: None,
             omega_settings: None,
             #[cfg(any(test, feature = "test-support"))]
             force_omega_primary_interface_for_tests: false,
@@ -10797,6 +10833,7 @@ impl AgentPanel {
         if let Some(thread_id) = omega_thread_id {
             self.omega_settings = None;
             self.omega_unavailable_route = None;
+            self.omega_unavailable_surface = None;
             if let Some(route) = omega_thread_route(thread_id) {
                 omega_navigation_changed = self.omega_navigation_history.push(route);
             }
@@ -17138,9 +17175,18 @@ impl AgentPanel {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> bool {
+        let renders_primary_interface = self.renders_omega_primary_interface();
         let unavailable_reason = if !self.workbench_shell_enabled {
             Some(SharedString::from(
                 "Workbench surfaces are available in Omega's default thread view",
+            ))
+        } else if renders_primary_interface && !omega_shell_draws_work_surface(surface) {
+            // The refusal has to happen before the surface is prepared. A
+            // prepared Files or Git surface rehomes the workspace panel into a
+            // dock this presentation never draws, which is how the selection
+            // used to leave real state behind and still show the user nothing.
+            Some(SharedString::from(
+                "This destination is not available in this build.",
             ))
         } else {
             self.workbench_shell
@@ -17155,6 +17201,10 @@ impl AgentPanel {
         };
         if let Some(reason) = unavailable_reason {
             self.workbench_shell.record_error(reason.clone());
+            if renders_primary_interface {
+                self.show_omega_unavailable_surface(surface, reason, window, cx);
+                return false;
+            }
             let workspace = self.workspace.clone();
             cx.defer(move |cx| {
                 workspace
@@ -17176,6 +17226,7 @@ impl AgentPanel {
             cx.notify();
             return false;
         }
+        self.omega_unavailable_surface = None;
 
         let (files_panel, previous_scope, previous_scope_was_unavailable) =
             if surface == omega_workbench_state::WorkSurface::Files {
@@ -17299,6 +17350,7 @@ impl AgentPanel {
             Ok(workbench_shell::SurfaceSelection::Collapsed) => {
                 self.persist_active_workbench_selection(cx);
                 self.omega_unavailable_route = None;
+                self.omega_unavailable_surface = None;
                 if surface == omega_workbench_state::WorkSurface::Forensics {
                     self.omega_settings = None;
                     self.clear_omega_work_detail();
@@ -17396,6 +17448,7 @@ impl AgentPanel {
                     host.update(cx, |_host, cx| cx.notify());
                 }
                 self.omega_unavailable_route = None;
+                self.omega_unavailable_surface = None;
                 if record_history
                     && surface == omega_workbench_state::WorkSurface::Forensics
                     && let Some(route) = self.active_forensics_route()
@@ -17467,6 +17520,7 @@ impl AgentPanel {
         match self.workbench_shell.collapse_dock() {
             Ok(true) => {
                 self.omega_unavailable_route = None;
+                self.omega_unavailable_surface = None;
                 if let Some(route) = self.active_thread_id(cx).and_then(omega_thread_route)
                     && self.omega_navigation_history.push(route)
                 {
@@ -18304,6 +18358,35 @@ impl AgentPanel {
         cx.notify();
     }
 
+    /// Draw a refused work surface as a destination the user lands on, with the
+    /// reason the surface gave.
+    ///
+    /// `omega#237`. The refusal used to be reported twice, and neither report
+    /// reaches a person in this presentation: `Workspace::show_toast` writes to
+    /// a toast layer that `Workspace::render` omits while
+    /// `omega_zero_base::is_primary_interface()` holds, and
+    /// `WorkbenchShell::record_error` is only drawn by the activity rail, which
+    /// belongs to the other presentation. The menu item, the key binding and
+    /// the sidebar row therefore all did nothing at all, which is worse than a
+    /// refusal because the user cannot tell it apart from a missed click.
+    fn show_omega_unavailable_surface(
+        &mut self,
+        surface: omega_workbench_state::WorkSurface,
+        reason: SharedString,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.omega_settings = None;
+        self.clear_omega_work_detail();
+        if let Err(error) = self.workbench_shell.collapse_dock() {
+            log::warn!("failed to collapse a prior work surface: {error:#}");
+        }
+        self.omega_unavailable_route = None;
+        self.omega_unavailable_surface = Some(OmegaUnavailableSurface { surface, reason });
+        self.focus_handle.focus(window, cx);
+        cx.notify();
+    }
+
     fn open_omega_history_route(
         &mut self,
         route: OmegaRoute,
@@ -18322,6 +18405,7 @@ impl AgentPanel {
                 };
                 self.omega_settings = None;
                 self.omega_unavailable_route = None;
+                self.omega_unavailable_surface = None;
                 self.open_omega_history_thread(thread_id, window, cx)
             }
             OmegaRoute::WorkIndex(view) => self.open_work_index(
@@ -18336,6 +18420,7 @@ impl AgentPanel {
             OmegaRoute::Work(work) => {
                 self.omega_settings = None;
                 self.omega_unavailable_route = None;
+                self.omega_unavailable_surface = None;
                 let item = self.work_index.item(work.work_ref.as_str());
                 let opens_forensics = is_omega_forensics_route(&OmegaRoute::Work(work));
                 if opens_forensics {
@@ -18368,6 +18453,7 @@ impl AgentPanel {
             }
             OmegaRoute::Settings => {
                 self.omega_unavailable_route = None;
+                self.omega_unavailable_surface = None;
                 self.open_omega_settings(false, window, cx);
                 true
             }
@@ -18408,6 +18494,7 @@ impl AgentPanel {
         cx: &mut Context<Self>,
     ) {
         self.omega_unavailable_route = None;
+        self.omega_unavailable_surface = None;
         if self.omega_settings.is_none() {
             let original_window = window.window_handle().downcast::<MultiWorkspace>();
             self.omega_settings = Some(cx.new(|cx| {
@@ -18521,6 +18608,7 @@ impl AgentPanel {
     fn show_active_omega_thread_transcript(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         self.omega_settings = None;
         self.omega_unavailable_route = None;
+        self.omega_unavailable_surface = None;
         self.clear_omega_work_detail();
         if let Err(error) = self.workbench_shell.collapse_dock() {
             log::warn!("failed to close the Omega work surface for a thread tab: {error:#}");
@@ -18545,6 +18633,7 @@ impl AgentPanel {
         }
         self.omega_settings = None;
         self.omega_unavailable_route = None;
+        self.omega_unavailable_surface = None;
         self.clear_omega_work_detail();
         if let Err(error) = self.workbench_shell.collapse_dock() {
             log::warn!(
@@ -19712,6 +19801,7 @@ impl AgentPanel {
         }
         self.omega_settings = None;
         self.omega_unavailable_route = None;
+        self.omega_unavailable_surface = None;
         self.clear_omega_work_detail();
         if let Err(error) = self.workbench_shell.collapse_dock() {
             log::warn!(
@@ -20119,6 +20209,7 @@ impl AgentPanel {
 
         self.omega_settings = None;
         self.omega_unavailable_route = None;
+        self.omega_unavailable_surface = None;
         self.clear_omega_work_detail();
         let surface_item = item.clone();
         let delegation_candidate = match &item.source_entity {
@@ -20499,6 +20590,7 @@ impl AgentPanel {
     fn omega_non_thread_route_open(&self) -> bool {
         self.omega_settings.is_some()
             || self.omega_unavailable_route.is_some()
+            || self.omega_unavailable_surface.is_some()
             || self
                 .omega_navigation_history
                 .current()
@@ -20574,6 +20666,46 @@ impl AgentPanel {
                     .text_size(px(12.))
                     .text_color(cx.theme().colors().text_muted)
                     .child(reason),
+            )
+            .into_any_element()
+    }
+
+    fn render_omega_unavailable_surface(state: &OmegaUnavailableSurface, cx: &App) -> AnyElement {
+        use workbench_shell::WorkSurfaceExt as _;
+
+        v_flex()
+            .id("omega-surface-unavailable")
+            .debug_selector(|| "omega.omega.surface.unavailable".into())
+            .role(gpui::Role::Status)
+            .aria_label(format!(
+                "{} unavailable. {}",
+                state.surface.label(),
+                state.reason
+            ))
+            .size_full()
+            .items_center()
+            .justify_center()
+            .gap(px(8.))
+            .px(px(32.))
+            .child(
+                Icon::new(IconName::Warning)
+                    .size(IconSize::XLarge)
+                    .color(Color::Muted),
+            )
+            .child(
+                div()
+                    .text_size(px(16.))
+                    .font_weight(gpui::FontWeight::MEDIUM)
+                    .text_color(cx.theme().colors().text)
+                    .child(format!("{} unavailable", state.surface.label())),
+            )
+            .child(
+                div()
+                    .max_w(px(420.))
+                    .text_center()
+                    .text_size(px(12.))
+                    .text_color(cx.theme().colors().text_muted)
+                    .child(state.reason.clone()),
             )
             .into_any_element()
     }
@@ -20726,7 +20858,12 @@ impl AgentPanel {
             })
         })
         .flatten();
-        let main_content = unavailable_content
+        let unavailable_surface_content = self
+            .omega_unavailable_surface
+            .as_ref()
+            .map(|state| Self::render_omega_unavailable_surface(state, cx));
+        let main_content = unavailable_surface_content
+            .or(unavailable_content)
             .or_else(|| active_dogfood_surface.map(|surface| surface.into_any_element()))
             .or_else(|| active_work_index_surface.map(|surface| surface.into_any_element()))
             .or_else(|| {
@@ -33481,5 +33618,234 @@ mod tests {
                 "an explicitly targeted task must not inherit /project"
             );
         });
+    }
+
+    /// omega#237. A working folder with no Git repository is the window the
+    /// report reproduced in. Selecting a work surface there refused, wrote the
+    /// reason to a toast layer the primary interface does not render and to the
+    /// activity rail the primary interface does not render, and showed the user
+    /// nothing. The refusal now has to be somewhere a person can read it.
+    #[gpui::test]
+    async fn omega_workbench_refusal_is_visible_in_the_primary_interface(cx: &mut TestAppContext) {
+        let (panel, mut cx) = setup_visible_panel(cx).await;
+        panel.update_in(&mut cx, |panel, window, cx| {
+            panel.force_omega_primary_interface_for_tests = true;
+            panel.new_thread(&NewThread, window, cx);
+        });
+        cx.run_until_parked();
+        cx.set_debug_accessibility_active(true);
+        cx.run_until_parked();
+
+        panel.read_with(&cx, |panel, _cx| {
+            assert_eq!(
+                panel
+                    .workbench_shell
+                    .capability(omega_workbench_state::WorkSurface::Forensics)
+                    .and_then(|capability| capability.availability.reason().cloned())
+                    .as_deref(),
+                Some("This worktree has no Git repository"),
+                "the fixture window must be the non-Git window from the report, \
+                 and it must not tell somebody with a folder open to open a project"
+            );
+        });
+
+        let opened = panel.update_in(&mut cx, |panel, window, cx| {
+            panel.select_work_surface_with_history(
+                omega_workbench_state::WorkSurface::Forensics,
+                true,
+                window,
+                cx,
+            )
+        });
+        assert!(!opened, "Forensics cannot open without a Git repository");
+        cx.run_until_parked();
+
+        let snapshot = cx.debug_render_snapshot();
+        assert_eq!(
+            snapshot.selector_count("omega.omega.surface.unavailable"),
+            1,
+            "the refusal must land on a destination the user can see"
+        );
+        let tree = snapshot
+            .accessibility_tree_json()
+            .expect("forced accessibility should capture the refused destination");
+        assert!(
+            tree.contains("Forensics unavailable. This worktree has no Git repository"),
+            "assistive technology must be told which surface refused and why: {tree}"
+        );
+
+        // The refusal is a destination, not a mode: going back to the thread
+        // has to leave it.
+        panel.update_in(&mut cx, |panel, window, cx| {
+            panel.show_active_omega_thread_transcript(window, cx);
+        });
+        cx.run_until_parked();
+        assert_eq!(
+            cx.debug_render_snapshot()
+                .selector_count("omega.omega.surface.unavailable"),
+            0,
+            "returning to the transcript must clear the refused destination"
+        );
+    }
+
+    /// omega#237. `render_omega_shell` draws exactly one work-surface
+    /// destination. Selecting any other surface used to run the whole
+    /// preparation path — including rehoming the workspace Files panel out of
+    /// its dock — and then render the conversation, unchanged.
+    #[gpui::test]
+    async fn omega_workbench_surface_without_a_destination_says_so(cx: &mut TestAppContext) {
+        let (panel, mut cx) = setup_visible_panel(cx).await;
+        panel.update_in(&mut cx, |panel, window, cx| {
+            panel.force_omega_primary_interface_for_tests = true;
+            panel.new_thread(&NewThread, window, cx);
+        });
+        cx.run_until_parked();
+        cx.set_debug_accessibility_active(true);
+        cx.run_until_parked();
+
+        panel.read_with(&cx, |panel, _cx| {
+            assert!(
+                panel
+                    .workbench_shell
+                    .capability(omega_workbench_state::WorkSurface::Files)
+                    .is_some_and(|capability| capability.availability.is_available()),
+                "Files is available on this worktree, so the refusal under test \
+                 is the missing destination and not the capability gate"
+            );
+        });
+
+        let opened = panel.update_in(&mut cx, |panel, window, cx| {
+            panel.select_work_surface_with_history(
+                omega_workbench_state::WorkSurface::Files,
+                true,
+                window,
+                cx,
+            )
+        });
+        assert!(!opened);
+        cx.run_until_parked();
+
+        panel.read_with(&cx, |panel, _cx| {
+            assert!(
+                !panel.workbench_files_panel_handed_off,
+                "a surface with no destination must refuse before it moves the \
+                 workspace Files panel out of its dock"
+            );
+            assert!(
+                !panel
+                    .workbench_shell
+                    .projection()
+                    .visible_projection()
+                    .expect("the thread stays active")
+                    .dock_open,
+                "the refused surface must not leave the work-surface dock open"
+            );
+        });
+
+        let snapshot = cx.debug_render_snapshot();
+        assert_eq!(
+            snapshot.selector_count("omega.omega.surface.unavailable"),
+            1
+        );
+        let tree = snapshot
+            .accessibility_tree_json()
+            .expect("forced accessibility should capture the refused destination");
+        assert!(
+            tree.contains("Files unavailable. This destination is not available in this build."),
+            "the user must be told the destination does not exist here: {tree}"
+        );
+    }
+
+    /// omega#234. The Files, Git and Terminal panels are registered so the
+    /// workbench can rehome them into work surfaces, never to be shown in a
+    /// workspace dock. `ProjectPanel::starts_open` opens one anyway whenever the
+    /// window has a directory worktree. The Omega surface is a zoomed panel
+    /// drawn as an absolute overlay across the whole workspace area, so that
+    /// dock lands behind it — invisible, still laid out, and still published to
+    /// AccessKit as an open complementary landmark holding rows nobody can see.
+    #[gpui::test]
+    async fn workbench_panels_leave_no_workspace_dock_published(cx: &mut TestAppContext) {
+        init_test(cx);
+        cx.update(|cx| {
+            agent::ThreadStore::init_global(cx);
+            language_model::LanguageModelRegistry::test(cx);
+        });
+        let fs = FakeFs::new(cx.executor());
+        cx.update(|cx| <dyn fs::Fs>::set_global(fs.clone(), cx));
+        fs.insert_tree("/project", json!({ "file.txt": "" })).await;
+        let project = Project::test(fs.clone(), [Path::new("/project")], cx).await;
+        let multi_workspace =
+            cx.add_window(|window, cx| MultiWorkspace::test_new(project.clone(), window, cx));
+        let workspace = multi_workspace
+            .read_with(cx, |multi_workspace, _cx| {
+                multi_workspace.workspace().clone()
+            })
+            .expect("the test window owns a workspace");
+        let mut cx = VisualTestContext::from_window(multi_workspace.into(), cx);
+        cx.set_debug_accessibility_active(true);
+        cx.run_until_parked();
+
+        let panel = cx
+            .update(|window, cx| {
+                window.spawn(cx, {
+                    let workspace = workspace.downgrade();
+                    async move |cx| project_panel::ProjectPanel::load(workspace, cx.clone()).await
+                })
+            })
+            .await
+            .expect("the Files panel loads for the workbench");
+        workspace.update_in(&mut cx, |workspace, window, cx| {
+            workspace.add_panel(panel, window, cx);
+        });
+        cx.run_until_parked();
+
+        // The reproduction: nobody opened this dock.
+        let opened_by_registration = workspace.read_with(&cx, |workspace, cx| {
+            workspace
+                .dock_at_position(workspace::dock::DockPosition::Right)
+                .read(cx)
+                .is_open()
+        });
+        assert!(
+            opened_by_registration,
+            "the fixture depends on ProjectPanel opening its own dock; if this \
+             stops being true the test no longer covers omega#234"
+        );
+        let snapshot = cx.debug_render_snapshot();
+        let tree = snapshot
+            .accessibility_tree_json()
+            .expect("forced accessibility should capture the dock landmark");
+        assert!(
+            tree.contains("Right dock"),
+            "the fixture must first publish the landmark the fix removes: {tree}"
+        );
+
+        workspace.update_in(&mut cx, |workspace, window, cx| {
+            crate::close_workbench_panel_docks(workspace, window, cx);
+        });
+        cx.run_until_parked();
+
+        workspace.read_with(&cx, |workspace, cx| {
+            for position in [
+                workspace::dock::DockPosition::Left,
+                workspace::dock::DockPosition::Right,
+                workspace::dock::DockPosition::Bottom,
+            ] {
+                assert!(
+                    !workspace.dock_at_position(position).read(cx).is_open(),
+                    "{position:?} dock must not stay open behind the Omega surface"
+                );
+            }
+        });
+        let snapshot = cx.debug_render_snapshot();
+        let tree = snapshot
+            .accessibility_tree_json()
+            .expect("forced accessibility should still capture a tree");
+        for landmark in ["Left dock", "Right dock", "Bottom dock"] {
+            assert!(
+                !tree.contains(landmark),
+                "a dock the user cannot see must not be published as {landmark}: {tree}"
+            );
+        }
     }
 }
