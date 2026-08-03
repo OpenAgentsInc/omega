@@ -294,6 +294,7 @@ impl DogfoodSurface {
                                     .gap_2()
                                     .child(
                                         div()
+                                            .id("omega-dogfood-project-heading")
                                             .role(gpui::Role::Heading)
                                             .aria_level(1)
                                             .text_size(px(22.))
@@ -649,6 +650,7 @@ impl DogfoodSurface {
                     )
                     .child(
                         div()
+                            .id("omega-dogfood-issue-heading")
                             .role(gpui::Role::Heading)
                             .aria_level(2)
                             .text_size(px(20.))
@@ -801,7 +803,7 @@ impl DogfoodSurface {
                 } else {
                     IconName::OmegaAgent
                 })
-                .size(IconSize::Large)
+                .size(IconSize::XLarge)
                 .color(Color::Muted),
             )
             .child(
@@ -973,6 +975,7 @@ fn metric_card(label: &str, value: impl Into<String>, cx: &App) -> impl IntoElem
 
 fn section_heading(label: &str, cx: &App) -> impl IntoElement {
     div()
+        .id(format!("omega-dogfood-section-heading-{label}"))
         .role(gpui::Role::Heading)
         .aria_level(2)
         .text_size(px(13.))
