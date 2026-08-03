@@ -10,7 +10,7 @@ use omega_effectd::all_work_contract::{
     SignedWorkroomProjectionProfile, SourceRef, ThreadRef, WorkCommandActivityKind,
     WorkSessionState, WorkSnapshot, WorkroomAudience,
 };
-#[cfg(all(test, feature = "test-support"))]
+#[cfg(test)]
 use omega_work_index::DogfoodFixtureAdapter;
 use omega_work_index::{
     DOGFOOD_PROJECT_ID, DogfoodPlanningOrigin, DogfoodPlanningViewModel, FixtureIssue,
@@ -3443,7 +3443,7 @@ fn planning_sort_label(sort: PlanningSort) -> &'static str {
     }
 }
 
-#[cfg(all(test, feature = "test-support"))]
+#[cfg(test)]
 mod tests {
     use super::*;
     use gpui::{TestAppContext, VisualTestContext};

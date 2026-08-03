@@ -2143,7 +2143,7 @@ mod tests {
             read_participation_journal(directory.path(), &journal.work_ref, &journal.source_ref)
                 .expect("read")
                 .expect("journal");
-        let mut reopened = detail(true);
+        let mut reopened = self::detail(true);
         reopened
             .restore_participation(restored)
             .expect("restore participation");
