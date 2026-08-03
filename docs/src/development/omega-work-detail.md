@@ -87,3 +87,39 @@ replay. The GPUI test uses a real Thread metadata source and verifies keyboard
 inspection, the command menu, Issue identity, title admission, source revision,
 Work Index reconciliation, and source navigation. It does not control an
 installed application UI.
+
+## OAW-005 installed receipt {#oaw-005-installed-receipt}
+
+The installed development build was produced from source commit
+`afbac88b38186c1685e4107e5b2458712aeac700`, whose parent is
+`607f76401ba09f7cce215255c22c23a7a72f0a19`. The release-fast build embeds the
+same source commit in its `omega` executable.
+
+- Application: `/Applications/Omega Dev.app`
+- Bundle identifier: `com.openagents.omega.dev`
+- Bundle version: `20260803.022357`
+- Architecture: arm64
+- Installed and bundled `omega` SHA-256:
+  `e5fe01a17bd1efcd9bade101a0c089fcfc3204d2bc7b9c7476f2e2e8333b835e`
+- DMG SHA-256:
+  `a3dc6cff64bd296bbf296544a4d8867b88b420f090dcbefe59b17585e762ef39`
+- CLI receipt: `Omega 0.2.0 – /Applications/Omega Dev.app`
+- Signature receipt: ad hoc arm64 signature; `codesign --verify --deep
+--strict` passed before and after installation.
+- Recoverable previous development build:
+  `/private/tmp/Omega-Dev-before-oaw005-20260802.app`
+
+The exact source passed 8 Work-detail model tests, 9 Work Index tests, 21
+workbench-state tests, the focused release GPUI Work/Issue admission test, the
+Forensics source-route regression, all 315 delta checks, the pinned mdBook
+build, documentation formatting, and release all-target lint for the affected
+packages. The GPUI journey creates a real durable Thread metadata row, admits a
+revision-bound title Intent at that source, receives the canonical Event,
+advances the same-identity Issue projection, refreshes the Work Index, and
+opens the exact Thread source.
+
+Installed-artifact verification used hashes, bundle metadata, CLI output,
+embedded source provenance, and code-sign checks only. It did not launch or
+control the installed UI. `/Applications/Omega.app` was not changed; its
+`omega` executable remained
+`0475b4f52bd0c79b53a9b4dfafd83a9ed081b7ee8858ba48966ead53ae5a5f73`.
