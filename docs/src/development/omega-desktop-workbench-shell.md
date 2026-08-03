@@ -966,3 +966,30 @@ For each follow-up surface:
    behavior with deterministic GPUI tests.
 9. Add reviewed whole-workbench and rail/dock pixel baselines after semantic
    checks pass.
+
+## Project-gated thread build receipt {#project-gated-thread-build-receipt}
+
+On 2026-08-03, the project-gated new-thread change was built from source
+commit `ab74fe4e0f0c46864665bb6758e8ecc2b47bf5af`, whose parent was
+`989b5fe73078aa850ef64e466bcb15b100ee83e2`.
+
+- Application: `/Applications/Omega Dev.app`
+- Bundle identifier: `com.openagents.omega.dev`
+- Bundle version: `20260803.042233`
+- Short version: `0.2.0`
+- Architecture: `arm64`
+- Installed and bundled `omega` binary SHA-256:
+  `48c45bc6017699ae3cfbc3b3c5abd181833417b92262fc13a62d59ce88d98756`
+- DMG SHA-256:
+  `f7b9c450120183f81e989cde9e42b6a0ac204f77adcf9eb4d25ee8110a6bd9ee`
+- CLI receipt: `Omega 0.2.0 – /Applications/Omega Dev.app`
+- Signature: ad hoc; deep strict verification passed.
+- Previous development app backup:
+  `/private/tmp/Omega-Dev-before-project-gated-thread-20260803-ab74fe4e.app`
+- Unchanged production binary SHA-256:
+  `0475b4f52bd0c79b53a9b4dfafd83a9ed081b7ee8858ba48966ead53ae5a5f73`
+
+The focused projectless-startup, Command-N focus, delayed-front-door, and
+Forensics-to-composer tests passed. `./script/clippy -p agent_ui -p ui`, Rust
+formatting, the documentation build, and diff checks also passed. The app was
+not launched, and no GUI automation was used for this receipt.

@@ -13,12 +13,12 @@ Use **Panel Layout > Agentic** from the user menu in the title bar (or the {#act
 
 By default, when you open a folder in Zed, it opens as a new project in your current window's threads sidebar rather than creating a new window. This keeps related work together and preserves your agent threads and layout.
 
-| Action                         | Result                                    |
-| ------------------------------ | ----------------------------------------- |
-| Thread > Choose Folder…        | Opens in current window (threads sidebar) |
-| Open Recent (removed surface)  | Opens in current window (threads sidebar) |
-| Drag folder to Zed             | Opens in current window (threads sidebar) |
-| `zed ~/project`                | Opens in current window (threads sidebar) |
+| Action                        | Result                                    |
+| ----------------------------- | ----------------------------------------- |
+| Thread > Choose Folder…       | Opens in current window (threads sidebar) |
+| Open Recent (removed surface) | Opens in current window (threads sidebar) |
+| Drag folder to Zed            | Opens in current window (threads sidebar) |
+| `zed ~/project`               | Opens in current window (threads sidebar) |
 
 ## Working with Multiple Projects
 
