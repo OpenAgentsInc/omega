@@ -20,6 +20,32 @@ Effect service is available. The index stays read-only. The Work detail surface
 can submit a typed Intent only when the named source supplies a matching
 mutation capability. The source remains the authority.
 
+## v0.2.0 development fixture boundary {#v020-development-fixture-boundary}
+
+The typed `openagents.omega.dogfood-fixture.v1` preview graph contains the
+source-pinned v0.2.0 dogfood snapshot. It preserves the Organization, Team,
+Initiative, two Projects, five Project Milestones, Cycle, Release Pipeline,
+Release Stages, Release Planning Record, workflow states, labels, Documents,
+Project Updates, saved Views, 28 same-identity Work/Issue rows, and their typed
+blocking relations. Ten open rows belong to the dogfood Project, 12 open rows
+belong to adjacent Security Work, and six closed rows explain the completed
+foundation.
+
+The preview is not a Work Index adapter lane. It cannot satisfy production
+admission, persist a production route, or admit a command. It loads only when
+debug assertions are active and `OMEGA_UI_MOCKS=1`. A release or release-fast
+binary ignores the environment request and receives no fixture. The normalized
+graph has a checked SHA-256 digest and fixed source time. Every issue retains
+its repository, number, URL, and source revision. All assignee, delegate,
+claim, lease, Thread, Session, Run, Receipt, Evidence, Verification, and owner
+disposition fields remain absent.
+
+The fixture uses Linear-shaped planning names, but `releases[]` decodes only to
+a Release Planning Record. It has no canonical release authority. The
+OpenAgents extension envelope marks the complete graph as simulated, lists the
+lost authority, and grants no commands. Screen composition over this one graph
+is owned by OAW-016; the fixture module itself does not add navigation.
+
 ## Preserved source facts {#preserved-source-facts}
 
 Every row uses the generated `WorkSummary` type. Omega preserves the exact

@@ -5,6 +5,10 @@
 //! complete pages before replacing a lane, so one failed source cannot erase
 //! another lane or a last-qualified offline snapshot.
 
+mod dogfood_fixture;
+
+pub use dogfood_fixture::*;
+
 use std::{
     collections::{BTreeMap, BTreeSet},
     io::Write as _,

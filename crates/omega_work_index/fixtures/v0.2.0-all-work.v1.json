@@ -1,0 +1,220 @@
+{
+  "fixtureVersion": "openagents.omega.dogfood-fixture.v1",
+  "fixtureSha256": "037cfda2bfc86f20ed2eca3c0169d9660c305c0f33bb88a4f9894d5613f4f839",
+  "generatedAt": "2026-08-03T05:00:00Z",
+  "sourceSnapshotAt": "2026-08-03T05:00:00Z",
+  "simulation": true,
+  "graph": {
+    "sourceRepositories": [
+      {
+        "id": "repository:omega",
+        "name": "omega",
+        "owner": "OpenAgentsInc",
+        "url": "https://github.com/OpenAgentsInc/omega",
+        "revision": "989b5fe73078aa850ef64e466bcb15b100ee83e2",
+        "defaultBranch": "main"
+      },
+      {
+        "id": "repository:openagents",
+        "name": "openagents",
+        "owner": "OpenAgentsInc",
+        "url": "https://github.com/OpenAgentsInc/openagents",
+        "revision": "2b3ca74b051ad12f259aed573716d84540564ef6",
+        "defaultBranch": "main"
+      }
+    ],
+    "organization": { "id": "organization:openagentsinc", "name": "OpenAgentsInc" },
+    "teams": [
+      {
+        "id": "team:omega",
+        "name": "Omega",
+        "key": "OMEGA",
+        "organizationId": "organization:openagentsinc"
+      }
+    ],
+    "initiatives": [
+      {
+        "id": "initiative:omega-all-work-client",
+        "name": "Omega as the first-class All Work client",
+        "organizationId": "organization:openagentsinc",
+        "projectIds": ["project:omega-v0.2.0-dogfood", "project:forensics-security-work"]
+      }
+    ],
+    "projects": [
+      {
+        "id": "project:omega-v0.2.0-dogfood",
+        "name": "Omega v0.2.0 dogfood",
+        "teamId": "team:omega",
+        "initiativeId": "initiative:omega-all-work-client",
+        "statusId": "project-status:started"
+      },
+      {
+        "id": "project:forensics-security-work",
+        "name": "Forensics Security Work",
+        "teamId": "team:omega",
+        "initiativeId": "initiative:omega-all-work-client",
+        "statusId": "project-status:started"
+      }
+    ],
+    "projectStatuses": [{ "id": "project-status:started", "name": "Started" }],
+    "projectMilestones": [
+      { "id": "milestone:all-work-foundation", "name": "All Work foundation", "projectId": "project:omega-v0.2.0-dogfood" },
+      { "id": "milestone:agentic-execution-loop", "name": "Agentic execution loop", "projectId": "project:omega-v0.2.0-dogfood" },
+      { "id": "milestone:planning-projections-sdk", "name": "Planning, projections, and SDK", "projectId": "project:omega-v0.2.0-dogfood" },
+      { "id": "milestone:candidate-launch-proof", "name": "Candidate and launch proof", "projectId": "project:omega-v0.2.0-dogfood" },
+      { "id": "milestone:live-evidence-completion", "name": "Live evidence completion", "projectId": "project:forensics-security-work" }
+    ],
+    "cycles": [
+      { "id": "cycle:v0.2.0-dogfood", "name": "v0.2.0 dogfood", "teamId": "team:omega", "projectId": "project:omega-v0.2.0-dogfood" }
+    ],
+    "releasePipelines": [
+      { "id": "release-pipeline:omega-desktop", "name": "Omega desktop", "organizationId": "organization:openagentsinc" }
+    ],
+    "releaseStages": [
+      { "id": "release-stage:dogfood", "name": "Dogfood", "pipelineId": "release-pipeline:omega-desktop", "lifecycleType": "started", "position": 0 },
+      { "id": "release-stage:candidate", "name": "Candidate", "pipelineId": "release-pipeline:omega-desktop", "lifecycleType": "planned", "position": 1 },
+      { "id": "release-stage:verification", "name": "Verification", "pipelineId": "release-pipeline:omega-desktop", "lifecycleType": "planned", "position": 2 },
+      { "id": "release-stage:published", "name": "Published", "pipelineId": "release-pipeline:omega-desktop", "lifecycleType": "planned", "position": 3 }
+    ],
+    "releases": [
+      {
+        "id": "release-planning:omega-0.2.0",
+        "name": "Omega 0.2.0",
+        "pipelineId": "release-pipeline:omega-desktop",
+        "stageId": "release-stage:dogfood",
+        "projectId": "project:omega-v0.2.0-dogfood",
+        "targetVersion": "0.2.0",
+        "targetDate": null,
+        "targetCommit": null,
+        "scopeIssueIds": ["issue:omega:160"],
+        "canonicalReleaseAuthority": false
+      }
+    ],
+    "workflowStates": [
+      { "id": "workflow:backlog", "name": "Backlog", "lifecycleType": "backlog" },
+      { "id": "workflow:ready", "name": "Ready", "lifecycleType": "unstarted" },
+      { "id": "workflow:in-progress", "name": "In Progress", "lifecycleType": "started" },
+      { "id": "workflow:in-review", "name": "In Review", "lifecycleType": "started" },
+      { "id": "workflow:verification", "name": "Verification", "lifecycleType": "started" },
+      { "id": "workflow:done", "name": "Done", "lifecycleType": "completed" },
+      { "id": "workflow:canceled", "name": "Canceled", "lifecycleType": "canceled" }
+    ],
+    "labels": [
+      { "id": "label:all-work", "name": "All Work" },
+      { "id": "label:release", "name": "Release" },
+      { "id": "label:accessibility", "name": "Accessibility" },
+      { "id": "label:copy", "name": "Copy" },
+      { "id": "label:security", "name": "Security" },
+      { "id": "label:s0", "name": "S0" },
+      { "id": "label:s2", "name": "S2" }
+    ],
+    "issues": [
+      { "id": "issue:omega:160", "identifier": "omega#160", "title": "Cut and verify the Omega 0.2.0 candidate", "repositoryId": "repository:omega", "number": 160, "sourceUrl": "https://github.com/OpenAgentsInc/omega/issues/160", "projectId": "project:omega-v0.2.0-dogfood", "projectMilestoneId": "milestone:candidate-launch-proof", "cycleId": "cycle:v0.2.0-dogfood", "releasePlanningRecordId": "release-planning:omega-0.2.0", "workflowStateId": "workflow:ready", "priority": "high", "labelIds": ["label:release"], "completed": false, "assigneeUserId": null, "delegateUserId": null },
+      { "id": "issue:omega:208", "identifier": "omega#208", "title": "Make Omega the first-class All Work client", "repositoryId": "repository:omega", "number": 208, "sourceUrl": "https://github.com/OpenAgentsInc/omega/issues/208", "projectId": "project:omega-v0.2.0-dogfood", "projectMilestoneId": null, "cycleId": "cycle:v0.2.0-dogfood", "releasePlanningRecordId": null, "workflowStateId": "workflow:in-progress", "priority": "high", "labelIds": ["label:all-work"], "completed": false, "assigneeUserId": null, "delegateUserId": null },
+      { "id": "issue:omega:214", "identifier": "omega#214", "title": "Separate Assignee, Agent Delegate, Thread, Session, and Run in Omega", "repositoryId": "repository:omega", "number": 214, "sourceUrl": "https://github.com/OpenAgentsInc/omega/issues/214", "projectId": "project:omega-v0.2.0-dogfood", "projectMilestoneId": "milestone:agentic-execution-loop", "cycleId": "cycle:v0.2.0-dogfood", "releasePlanningRecordId": null, "workflowStateId": "workflow:ready", "priority": "high", "labelIds": ["label:all-work"], "completed": false, "assigneeUserId": null, "delegateUserId": null },
+      { "id": "issue:omega:215", "identifier": "omega#215", "title": "Add Linear-class portfolio, planning, triage, and review UI for any Work Domain", "repositoryId": "repository:omega", "number": 215, "sourceUrl": "https://github.com/OpenAgentsInc/omega/issues/215", "projectId": "project:omega-v0.2.0-dogfood", "projectMilestoneId": "milestone:planning-projections-sdk", "cycleId": "cycle:v0.2.0-dogfood", "releasePlanningRecordId": null, "workflowStateId": "workflow:ready", "priority": "normal", "labelIds": ["label:all-work"], "completed": false, "assigneeUserId": null, "delegateUserId": null },
+      { "id": "issue:openagents:9304", "identifier": "openagents#9304", "title": "Define signed Nostr Work and Workroom projections", "repositoryId": "repository:openagents", "number": 9304, "sourceUrl": "https://github.com/OpenAgentsInc/openagents/issues/9304", "projectId": "project:omega-v0.2.0-dogfood", "projectMilestoneId": "milestone:planning-projections-sdk", "cycleId": "cycle:v0.2.0-dogfood", "releasePlanningRecordId": null, "workflowStateId": "workflow:ready", "priority": "high", "labelIds": ["label:all-work"], "completed": false, "assigneeUserId": null, "delegateUserId": null },
+      { "id": "issue:openagents:9305", "identifier": "openagents#9305", "title": "Generate the All Work API and SDK from owned contracts", "repositoryId": "repository:openagents", "number": 9305, "sourceUrl": "https://github.com/OpenAgentsInc/openagents/issues/9305", "projectId": "project:omega-v0.2.0-dogfood", "projectMilestoneId": "milestone:planning-projections-sdk", "cycleId": "cycle:v0.2.0-dogfood", "releasePlanningRecordId": null, "workflowStateId": "workflow:ready", "priority": "normal", "labelIds": ["label:all-work"], "completed": false, "assigneeUserId": null, "delegateUserId": null },
+      { "id": "issue:omega:216", "identifier": "omega#216", "title": "Integrate signed Work and Workroom activity into Omega", "repositoryId": "repository:omega", "number": 216, "sourceUrl": "https://github.com/OpenAgentsInc/omega/issues/216", "projectId": "project:omega-v0.2.0-dogfood", "projectMilestoneId": "milestone:planning-projections-sdk", "cycleId": "cycle:v0.2.0-dogfood", "releasePlanningRecordId": null, "workflowStateId": "workflow:ready", "priority": "normal", "labelIds": ["label:all-work"], "completed": false, "assigneeUserId": null, "delegateUserId": null },
+      { "id": "issue:omega:217", "identifier": "omega#217", "title": "Restore a complete macOS accessibility tree for installed Omega", "repositoryId": "repository:omega", "number": 217, "sourceUrl": "https://github.com/OpenAgentsInc/omega/issues/217", "projectId": "project:omega-v0.2.0-dogfood", "projectMilestoneId": "milestone:candidate-launch-proof", "cycleId": "cycle:v0.2.0-dogfood", "releasePlanningRecordId": null, "workflowStateId": "workflow:ready", "priority": "urgent", "labelIds": ["label:accessibility", "label:s0"], "completed": false, "assigneeUserId": null, "delegateUserId": null },
+      { "id": "issue:omega:218", "identifier": "omega#218", "title": "Show effective principal and Organization identity in Omega", "repositoryId": "repository:omega", "number": 218, "sourceUrl": "https://github.com/OpenAgentsInc/omega/issues/218", "projectId": "project:omega-v0.2.0-dogfood", "projectMilestoneId": "milestone:agentic-execution-loop", "cycleId": "cycle:v0.2.0-dogfood", "releasePlanningRecordId": null, "workflowStateId": "workflow:ready", "priority": "normal", "labelIds": ["label:all-work"], "completed": false, "assigneeUserId": null, "delegateUserId": null },
+      { "id": "issue:omega:219", "identifier": "omega#219", "title": "Enforce concise Omega copy and non-text status cues", "repositoryId": "repository:omega", "number": 219, "sourceUrl": "https://github.com/OpenAgentsInc/omega/issues/219", "projectId": "project:omega-v0.2.0-dogfood", "projectMilestoneId": "milestone:candidate-launch-proof", "cycleId": "cycle:v0.2.0-dogfood", "releasePlanningRecordId": null, "workflowStateId": "workflow:ready", "priority": "high", "labelIds": ["label:copy", "label:s2"], "completed": false, "assigneeUserId": null, "delegateUserId": null },
+
+      { "id": "issue:openagents:9289", "identifier": "openagents#9289", "title": "Admit the OpenAgents Cloud forensic worker", "repositoryId": "repository:openagents", "number": 9289, "sourceUrl": "https://github.com/OpenAgentsInc/openagents/issues/9289", "projectId": "project:forensics-security-work", "projectMilestoneId": "milestone:live-evidence-completion", "cycleId": null, "releasePlanningRecordId": null, "workflowStateId": "workflow:ready", "priority": "high", "labelIds": ["label:security"], "completed": false, "assigneeUserId": null, "delegateUserId": null },
+      { "id": "issue:openagents:9290", "identifier": "openagents#9290", "title": "Materialize immutable forensic source bundles", "repositoryId": "repository:openagents", "number": 9290, "sourceUrl": "https://github.com/OpenAgentsInc/openagents/issues/9290", "projectId": "project:forensics-security-work", "projectMilestoneId": "milestone:live-evidence-completion", "cycleId": null, "releasePlanningRecordId": null, "workflowStateId": "workflow:ready", "priority": "normal", "labelIds": ["label:security"], "completed": false, "assigneeUserId": null, "delegateUserId": null },
+      { "id": "issue:openagents:9291", "identifier": "openagents#9291", "title": "Import the Coldcard forensic benchmark", "repositoryId": "repository:openagents", "number": 9291, "sourceUrl": "https://github.com/OpenAgentsInc/openagents/issues/9291", "projectId": "project:forensics-security-work", "projectMilestoneId": "milestone:live-evidence-completion", "cycleId": null, "releasePlanningRecordId": null, "workflowStateId": "workflow:ready", "priority": "normal", "labelIds": ["label:security"], "completed": false, "assigneeUserId": null, "delegateUserId": null },
+      { "id": "issue:openagents:9292", "identifier": "openagents#9292", "title": "Measure forensic identification quality and efficiency", "repositoryId": "repository:openagents", "number": 9292, "sourceUrl": "https://github.com/OpenAgentsInc/openagents/issues/9292", "projectId": "project:forensics-security-work", "projectMilestoneId": "milestone:live-evidence-completion", "cycleId": null, "releasePlanningRecordId": null, "workflowStateId": "workflow:ready", "priority": "normal", "labelIds": ["label:security"], "completed": false, "assigneeUserId": null, "delegateUserId": null },
+      { "id": "issue:openagents:9293", "identifier": "openagents#9293", "title": "Add a configurable Loupe forensic adapter", "repositoryId": "repository:openagents", "number": 9293, "sourceUrl": "https://github.com/OpenAgentsInc/openagents/issues/9293", "projectId": "project:forensics-security-work", "projectMilestoneId": "milestone:live-evidence-completion", "cycleId": null, "releasePlanningRecordId": null, "workflowStateId": "workflow:ready", "priority": "normal", "labelIds": ["label:security"], "completed": false, "assigneeUserId": null, "delegateUserId": null },
+      { "id": "issue:openagents:9294", "identifier": "openagents#9294", "title": "Repair and prove the Loupe verification path", "repositoryId": "repository:openagents", "number": 9294, "sourceUrl": "https://github.com/OpenAgentsInc/openagents/issues/9294", "projectId": "project:forensics-security-work", "projectMilestoneId": "milestone:live-evidence-completion", "cycleId": null, "releasePlanningRecordId": null, "workflowStateId": "workflow:ready", "priority": "high", "labelIds": ["label:security"], "completed": false, "assigneeUserId": null, "delegateUserId": null },
+      { "id": "issue:openagents:9295", "identifier": "openagents#9295", "title": "Compile and govern optimized forensic prompts", "repositoryId": "repository:openagents", "number": 9295, "sourceUrl": "https://github.com/OpenAgentsInc/openagents/issues/9295", "projectId": "project:forensics-security-work", "projectMilestoneId": "milestone:live-evidence-completion", "cycleId": null, "releasePlanningRecordId": null, "workflowStateId": "workflow:ready", "priority": "normal", "labelIds": ["label:security"], "completed": false, "assigneeUserId": null, "delegateUserId": null },
+      { "id": "issue:openagents:9296", "identifier": "openagents#9296", "title": "Build the Coldcard artifact witness", "repositoryId": "repository:openagents", "number": 9296, "sourceUrl": "https://github.com/OpenAgentsInc/openagents/issues/9296", "projectId": "project:forensics-security-work", "projectMilestoneId": "milestone:live-evidence-completion", "cycleId": null, "releasePlanningRecordId": null, "workflowStateId": "workflow:ready", "priority": "normal", "labelIds": ["label:security"], "completed": false, "assigneeUserId": null, "delegateUserId": null },
+      { "id": "issue:openagents:9297", "identifier": "openagents#9297", "title": "Reproduce the Coldcard generator and owned fixture", "repositoryId": "repository:openagents", "number": 9297, "sourceUrl": "https://github.com/OpenAgentsInc/openagents/issues/9297", "projectId": "project:forensics-security-work", "projectMilestoneId": "milestone:live-evidence-completion", "cycleId": null, "releasePlanningRecordId": null, "workflowStateId": "workflow:ready", "priority": "normal", "labelIds": ["label:security"], "completed": false, "assigneeUserId": null, "delegateUserId": null },
+      { "id": "issue:openagents:9298", "identifier": "openagents#9298", "title": "Scan frozen chain data for Coldcard fingerprints", "repositoryId": "repository:openagents", "number": 9298, "sourceUrl": "https://github.com/OpenAgentsInc/openagents/issues/9298", "projectId": "project:forensics-security-work", "projectMilestoneId": "milestone:live-evidence-completion", "cycleId": null, "releasePlanningRecordId": null, "workflowStateId": "workflow:ready", "priority": "normal", "labelIds": ["label:security"], "completed": false, "assigneeUserId": null, "delegateUserId": null },
+      { "id": "issue:openagents:9299", "identifier": "openagents#9299", "title": "Derive the Coldcard evidence graph and claim history", "repositoryId": "repository:openagents", "number": 9299, "sourceUrl": "https://github.com/OpenAgentsInc/openagents/issues/9299", "projectId": "project:forensics-security-work", "projectMilestoneId": "milestone:live-evidence-completion", "cycleId": null, "releasePlanningRecordId": null, "workflowStateId": "workflow:ready", "priority": "normal", "labelIds": ["label:security"], "completed": false, "assigneeUserId": null, "delegateUserId": null },
+      { "id": "issue:openagents:9300", "identifier": "openagents#9300", "title": "Track the Omega forensic analysis roadmap", "repositoryId": "repository:openagents", "number": 9300, "sourceUrl": "https://github.com/OpenAgentsInc/openagents/issues/9300", "projectId": "project:forensics-security-work", "projectMilestoneId": "milestone:live-evidence-completion", "cycleId": null, "releasePlanningRecordId": null, "workflowStateId": "workflow:ready", "priority": "high", "labelIds": ["label:security"], "completed": false, "assigneeUserId": null, "delegateUserId": null },
+
+      { "id": "issue:openagents:9303", "identifier": "openagents#9303", "title": "Generate the owned All Work boundary for Effect and Rust", "repositoryId": "repository:openagents", "number": 9303, "sourceUrl": "https://github.com/OpenAgentsInc/openagents/issues/9303", "projectId": "project:omega-v0.2.0-dogfood", "projectMilestoneId": "milestone:all-work-foundation", "cycleId": "cycle:v0.2.0-dogfood", "releasePlanningRecordId": null, "workflowStateId": "workflow:done", "priority": "normal", "completed": true, "assigneeUserId": null, "delegateUserId": null },
+      { "id": "issue:omega:209", "identifier": "omega#209", "title": "Hide unimplemented and fixture-only production destinations", "repositoryId": "repository:omega", "number": 209, "sourceUrl": "https://github.com/OpenAgentsInc/omega/issues/209", "projectId": "project:omega-v0.2.0-dogfood", "projectMilestoneId": "milestone:all-work-foundation", "cycleId": "cycle:v0.2.0-dogfood", "releasePlanningRecordId": null, "workflowStateId": "workflow:done", "priority": "normal", "completed": true, "assigneeUserId": null, "delegateUserId": null },
+      { "id": "issue:omega:210", "identifier": "omega#210", "title": "Add typed entity routes and correct repository/thread terminology", "repositoryId": "repository:omega", "number": 210, "sourceUrl": "https://github.com/OpenAgentsInc/omega/issues/210", "projectId": "project:omega-v0.2.0-dogfood", "projectMilestoneId": "milestone:all-work-foundation", "cycleId": "cycle:v0.2.0-dogfood", "releasePlanningRecordId": null, "workflowStateId": "workflow:done", "priority": "normal", "completed": true, "assigneeUserId": null, "delegateUserId": null },
+      { "id": "issue:omega:211", "identifier": "omega#211", "title": "Project a read-only Work Index into Inbox and My Work", "repositoryId": "repository:omega", "number": 211, "sourceUrl": "https://github.com/OpenAgentsInc/omega/issues/211", "projectId": "project:omega-v0.2.0-dogfood", "projectMilestoneId": "milestone:all-work-foundation", "cycleId": "cycle:v0.2.0-dogfood", "releasePlanningRecordId": null, "workflowStateId": "workflow:done", "priority": "normal", "completed": true, "assigneeUserId": null, "delegateUserId": null },
+      { "id": "issue:omega:212", "identifier": "omega#212", "title": "Build Work/Issue detail and inspector surfaces", "repositoryId": "repository:omega", "number": 212, "sourceUrl": "https://github.com/OpenAgentsInc/omega/issues/212", "projectId": "project:omega-v0.2.0-dogfood", "projectMilestoneId": "milestone:all-work-foundation", "cycleId": "cycle:v0.2.0-dogfood", "releasePlanningRecordId": null, "workflowStateId": "workflow:done", "priority": "normal", "completed": true, "assigneeUserId": null, "delegateUserId": null },
+      { "id": "issue:omega:213", "identifier": "omega#213", "title": "Normalize Forensics as the first Security Work domain", "repositoryId": "repository:omega", "number": 213, "sourceUrl": "https://github.com/OpenAgentsInc/omega/issues/213", "projectId": "project:omega-v0.2.0-dogfood", "projectMilestoneId": "milestone:all-work-foundation", "cycleId": "cycle:v0.2.0-dogfood", "releasePlanningRecordId": null, "workflowStateId": "workflow:done", "priority": "normal", "completed": true, "assigneeUserId": null, "delegateUserId": null }
+    ],
+    "issueRelations": [
+      { "id": "relation:214-blocks-215", "issueId": "issue:omega:214", "relatedIssueId": "issue:omega:215", "kind": "blocks" },
+      { "id": "relation:214-blocks-216", "issueId": "issue:omega:214", "relatedIssueId": "issue:omega:216", "kind": "blocks" },
+      { "id": "relation:9304-blocks-216", "issueId": "issue:openagents:9304", "relatedIssueId": "issue:omega:216", "kind": "blocks" },
+      { "id": "relation:214-blocks-218", "issueId": "issue:omega:214", "relatedIssueId": "issue:omega:218", "kind": "blocks" },
+      { "id": "relation:9289-blocks-9290", "issueId": "issue:openagents:9289", "relatedIssueId": "issue:openagents:9290", "kind": "blocks" },
+      { "id": "relation:9290-blocks-9291", "issueId": "issue:openagents:9290", "relatedIssueId": "issue:openagents:9291", "kind": "blocks" },
+      { "id": "relation:9289-blocks-9292", "issueId": "issue:openagents:9289", "relatedIssueId": "issue:openagents:9292", "kind": "blocks" },
+      { "id": "relation:9291-blocks-9292", "issueId": "issue:openagents:9291", "relatedIssueId": "issue:openagents:9292", "kind": "blocks" },
+      { "id": "relation:9289-blocks-9293", "issueId": "issue:openagents:9289", "relatedIssueId": "issue:openagents:9293", "kind": "blocks" },
+      { "id": "relation:9290-blocks-9293", "issueId": "issue:openagents:9290", "relatedIssueId": "issue:openagents:9293", "kind": "blocks" },
+      { "id": "relation:9289-blocks-9294", "issueId": "issue:openagents:9289", "relatedIssueId": "issue:openagents:9294", "kind": "blocks" },
+      { "id": "relation:9291-blocks-9294", "issueId": "issue:openagents:9291", "relatedIssueId": "issue:openagents:9294", "kind": "blocks" },
+      { "id": "relation:9293-blocks-9294", "issueId": "issue:openagents:9293", "relatedIssueId": "issue:openagents:9294", "kind": "blocks" },
+      { "id": "relation:9291-blocks-9295", "issueId": "issue:openagents:9291", "relatedIssueId": "issue:openagents:9295", "kind": "blocks" },
+      { "id": "relation:9292-blocks-9295", "issueId": "issue:openagents:9292", "relatedIssueId": "issue:openagents:9295", "kind": "blocks" },
+      { "id": "relation:9293-blocks-9295", "issueId": "issue:openagents:9293", "relatedIssueId": "issue:openagents:9295", "kind": "blocks" },
+      { "id": "relation:9289-blocks-9296", "issueId": "issue:openagents:9289", "relatedIssueId": "issue:openagents:9296", "kind": "blocks" },
+      { "id": "relation:9291-blocks-9296", "issueId": "issue:openagents:9291", "relatedIssueId": "issue:openagents:9296", "kind": "blocks" },
+      { "id": "relation:9289-blocks-9297", "issueId": "issue:openagents:9289", "relatedIssueId": "issue:openagents:9297", "kind": "blocks" },
+      { "id": "relation:9291-blocks-9297", "issueId": "issue:openagents:9291", "relatedIssueId": "issue:openagents:9297", "kind": "blocks" },
+      { "id": "relation:9296-blocks-9297", "issueId": "issue:openagents:9296", "relatedIssueId": "issue:openagents:9297", "kind": "blocks" },
+      { "id": "relation:9289-blocks-9298", "issueId": "issue:openagents:9289", "relatedIssueId": "issue:openagents:9298", "kind": "blocks" },
+      { "id": "relation:9291-blocks-9298", "issueId": "issue:openagents:9291", "relatedIssueId": "issue:openagents:9298", "kind": "blocks" },
+      { "id": "relation:9291-blocks-9299", "issueId": "issue:openagents:9291", "relatedIssueId": "issue:openagents:9299", "kind": "blocks" },
+      { "id": "relation:9298-blocks-9299", "issueId": "issue:openagents:9298", "relatedIssueId": "issue:openagents:9299", "kind": "blocks" },
+      { "id": "relation:9289-blocks-9300", "issueId": "issue:openagents:9289", "relatedIssueId": "issue:openagents:9300", "kind": "blocks" },
+      { "id": "relation:9290-blocks-9300", "issueId": "issue:openagents:9290", "relatedIssueId": "issue:openagents:9300", "kind": "blocks" },
+      { "id": "relation:9291-blocks-9300", "issueId": "issue:openagents:9291", "relatedIssueId": "issue:openagents:9300", "kind": "blocks" },
+      { "id": "relation:9292-blocks-9300", "issueId": "issue:openagents:9292", "relatedIssueId": "issue:openagents:9300", "kind": "blocks" },
+      { "id": "relation:9293-blocks-9300", "issueId": "issue:openagents:9293", "relatedIssueId": "issue:openagents:9300", "kind": "blocks" },
+      { "id": "relation:9294-blocks-9300", "issueId": "issue:openagents:9294", "relatedIssueId": "issue:openagents:9300", "kind": "blocks" },
+      { "id": "relation:9295-blocks-9300", "issueId": "issue:openagents:9295", "relatedIssueId": "issue:openagents:9300", "kind": "blocks" },
+      { "id": "relation:9296-blocks-9300", "issueId": "issue:openagents:9296", "relatedIssueId": "issue:openagents:9300", "kind": "blocks" },
+      { "id": "relation:9297-blocks-9300", "issueId": "issue:openagents:9297", "relatedIssueId": "issue:openagents:9300", "kind": "blocks" },
+      { "id": "relation:9298-blocks-9300", "issueId": "issue:openagents:9298", "relatedIssueId": "issue:openagents:9300", "kind": "blocks" },
+      { "id": "relation:9299-blocks-9300", "issueId": "issue:openagents:9299", "relatedIssueId": "issue:openagents:9300", "kind": "blocks" }
+    ],
+    "documents": [
+      { "id": "document:dogfood-plan", "title": "Omega v0.2.0 All Work dogfooding plan", "url": "https://github.com/OpenAgentsInc/openagents/blob/72e78764da28b1120ae72d85bc25c0330335e578/docs/omega/2026-08-02-v0.2.0-all-work-dogfooding-plan.md", "projectId": "project:omega-v0.2.0-dogfood" }
+    ],
+    "projectUpdates": [
+      { "id": "project-update:dogfood-snapshot", "projectId": "project:omega-v0.2.0-dogfood", "health": "at_risk", "summary": "Fresh candidate required; All Work dogfood is adjacent to the narrow v0.2.0 release gate." },
+      { "id": "project-update:security-snapshot", "projectId": "project:forensics-security-work", "health": "blocked", "summary": "Adjacent Security Work remains outside the v0.2.0 release scope." }
+    ],
+    "customViews": [
+      { "id": "view:critical-path", "name": "v0.2.0 critical path", "projectId": "project:omega-v0.2.0-dogfood", "filter": "releaseScope=true OR blocks>0" },
+      { "id": "view:unassigned", "name": "Unassigned", "projectId": "project:omega-v0.2.0-dogfood", "filter": "assignee=null" },
+      { "id": "view:blocked", "name": "Blocked", "projectId": "project:omega-v0.2.0-dogfood", "filter": "blockedBy>0" },
+      { "id": "view:agent-active", "name": "Agent active", "projectId": "project:omega-v0.2.0-dogfood", "filter": "agentSession.status=active" },
+      { "id": "view:needs-owner", "name": "Needs owner", "projectId": "project:omega-v0.2.0-dogfood", "filter": "ownerDisposition=needs_owner" },
+      { "id": "view:in-review", "name": "In review", "projectId": "project:omega-v0.2.0-dogfood", "filter": "state=in_review" },
+      { "id": "view:verification", "name": "Verification", "projectId": "project:omega-v0.2.0-dogfood", "filter": "state=verification" }
+    ],
+    "users": [],
+    "agentSessions": [],
+    "agentActivities": [],
+    "pullRequests": [],
+    "diffs": [],
+    "openAgentsExtensions": {
+      "workIdentityScheme": "work:fixture:{issueId}",
+      "issueProjectionIdentityScheme": "{issueId}",
+      "sourceSnapshotAt": "2026-08-03T05:00:00Z",
+      "simulation": true,
+      "canonicalAuthority": false,
+      "allowedCommands": [],
+      "authorityLossFacts": [
+        "fixture_snapshot_not_live",
+        "github_read_grants_no_command_authority",
+        "release_planning_record_is_not_release",
+        "no_assignee_delegate_claim_lease_session_run_receipt_evidence_verification_or_owner_disposition"
+      ]
+    },
+    "projectionIssues": [
+      { "id": "projection-issue:release-target", "field": "releases[0].targetCommit", "reason": "Fresh candidate required; the snapshot does not contain an admitted target commit." }
+    ]
+  }
+}
