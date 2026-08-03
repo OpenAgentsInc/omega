@@ -8952,23 +8952,6 @@ impl AgentPanel {
         }
     }
 
-    /// Leave the tester-channel destination for another one.
-    ///
-    /// omega#238. The primary interface draws one destination in its main
-    /// column, so a channel that stays selected while the person navigates
-    /// elsewhere would sit on top of the destination they chose. The workbench
-    /// presentation draws the channel in a dock beside the content and is left
-    /// alone.
-    fn leave_public_channel_destination(&mut self, cx: &mut Context<Self>) {
-        if !self.renders_omega_primary_interface() {
-            return;
-        }
-        if self.public_channels.selected_channel_id().is_none() {
-            return;
-        }
-        self.close_selected_public_channel(cx);
-    }
-
     fn close_selected_public_channel(&mut self, cx: &mut Context<Self>) {
         if let Some(view) = self
             .public_channels
@@ -17426,7 +17409,6 @@ impl AgentPanel {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> bool {
-        self.leave_public_channel_destination(cx);
         let renders_primary_interface = self.renders_omega_primary_interface();
         let unavailable_reason = if !self.workbench_shell_enabled {
             Some(SharedString::from(
@@ -18645,7 +18627,6 @@ impl AgentPanel {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> bool {
-        self.leave_public_channel_destination(cx);
         let state = self.omega_route_state(route, cx);
         if !matches!(state.availability, RouteAvailability::Available) {
             self.show_omega_unavailable_route(state, window, cx);
@@ -18746,7 +18727,6 @@ impl AgentPanel {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        self.leave_public_channel_destination(cx);
         self.omega_unavailable_route = None;
         self.omega_unavailable_surface = None;
         if self.omega_settings.is_none() {
@@ -18885,7 +18865,6 @@ impl AgentPanel {
         if !self.work_index.admitted() {
             return false;
         }
-        self.leave_public_channel_destination(cx);
         self.omega_settings = None;
         self.omega_unavailable_route = None;
         self.omega_unavailable_surface = None;
@@ -20044,7 +20023,6 @@ impl AgentPanel {
         {
             return false;
         }
-        self.leave_public_channel_destination(cx);
         let route = match OmegaRoute::project(project_id.to_string()) {
             Ok(route) => route,
             Err(error) => {
@@ -21105,21 +21083,6 @@ impl AgentPanel {
         const TITLEBAR_HEIGHT: f32 = 38.;
         const TAB_WIDTH: f32 = 140.;
 
-        // omega#238. `omega#156` shipped the tester-channel destination into
-        // `render_sidebar`, which only the workbench presentation calls, so the
-        // interface every launch renders drew no channels at all. Both halves
-        // of the destination — the sidebar rows and the surface selecting one
-        // opens — are built here, before `colors` borrows `cx`, because
-        // everything below this line only has the theme.
-        let tester_channel_destinations = self.render_public_channel_destinations(cx);
-        let selected_public_channel_label = self
-            .public_channels
-            .selected_channel()
-            .map(|channel| channel.destination_label());
-        let selected_public_channel = selected_public_channel_label
-            .is_some()
-            .then(|| self.render_selected_public_channel(cx));
-
         let colors = cx.theme().colors();
         let shell_background = colors.title_bar_background;
         let sidebar_background = colors.surface_background;
@@ -21222,27 +21185,7 @@ impl AgentPanel {
             .omega_unavailable_surface
             .as_ref()
             .map(|state| Self::render_omega_unavailable_surface(state, cx));
-        // omega#238. Selecting a tester channel has to change what the window
-        // shows. The workbench presentation drew the channel in its dock; the
-        // shell has one main column, so the channel is a destination in it and
-        // navigating to another destination leaves the channel
-        // (`leave_public_channel_destination`).
-        let public_channel_content = selected_public_channel
-            .zip(selected_public_channel_label.as_ref())
-            .map(|(channel, label)| {
-                div()
-                    .id("omega-public-channel-destination")
-                    .debug_selector(|| "omega.public.channel.destination".into())
-                    .size_full()
-                    .min_h_0()
-                    .overflow_hidden()
-                    .role(gpui::Role::Group)
-                    .aria_label(format!("{label} channel"))
-                    .child(channel)
-                    .into_any_element()
-            });
-        let main_content = public_channel_content
-            .or(unavailable_surface_content)
+        let main_content = unavailable_surface_content
             .or(unavailable_content)
             .or_else(|| active_dogfood_surface.map(|surface| surface.into_any_element()))
             .or_else(|| active_work_index_surface.map(|surface| surface.into_any_element()))
@@ -21280,9 +21223,7 @@ impl AgentPanel {
             .unwrap_or_else(|| "New thread".into());
         let active_sidebar_title = active_title.clone();
         let omega_live_region = {
-            let kind: SharedString = if selected_public_channel_label.is_some() {
-                "tester channel".into()
-            } else if omega_settings_open {
+            let kind: SharedString = if omega_settings_open {
                 "settings".into()
             } else if self.omega_unavailable_route.is_some() {
                 "unavailable destination".into()
@@ -21299,8 +21240,7 @@ impl AgentPanel {
             } else {
                 "thread".into()
             };
-            let is_thread = selected_public_channel_label.is_none()
-                && !omega_settings_open
+            let is_thread = !omega_settings_open
                 && self.omega_unavailable_route.is_none()
                 && self.omega_unavailable_surface.is_none()
                 && active_work_index_view.is_none()
@@ -22254,38 +22194,6 @@ impl AgentPanel {
                         |rows| rows.child(active_draft_sidebar_row),
                     )
                     .children(sidebar_rows),
-            )
-            .child(
-                // omega#238. `omega#156` shipped this destination into
-                // `render_sidebar`, which only the workbench presentation ever
-                // calls, so the primary interface — the only presentation the
-                // application launches — drew no tester channels at all. The
-                // section belongs in the shell that is actually rendered, and
-                // its title still comes from `SectionId` so the two cannot
-                // drift apart.
-                div()
-                    .id("omega-tester-channels-heading")
-                    .debug_selector(|| "omega.omega.sidebar.tester-channels".into())
-                    .role(gpui::Role::Label)
-                    .aria_label(omega_sidebar::SectionId::PublicChannels.title())
-                    .mt(px(10.))
-                    .h(px(28.))
-                    .px(px(8.))
-                    .flex_none()
-                    .flex()
-                    .items_center()
-                    .text_size(px(11.))
-                    .font_weight(gpui::FontWeight::MEDIUM)
-                    .text_color(text_placeholder)
-                    .child(omega_sidebar::SectionId::PublicChannels.title()),
-            )
-            .child(
-                div()
-                    .id("omega-sidebar-tester-channels")
-                    .role(gpui::Role::Tree)
-                    .aria_label(omega_sidebar::SectionId::PublicChannels.title())
-                    .flex_none()
-                    .child(tester_channel_destinations),
             )
             .child(
                 div()
@@ -34779,117 +34687,6 @@ mod tests {
             Some("Document unavailable. This destination was deleted."),
             "the announced text is the value: {tree}"
         );
-    }
-
-    /// omega#238. The tester-channel destination is on the sidebar the
-    /// application actually draws, and selecting it changes what the window
-    /// shows.
-    ///
-    /// omega#156 shipped the destination into `render_sidebar`, which only the
-    /// workbench presentation calls. `main.rs` sets `primary_interface`
-    /// unconditionally, so every launch takes `render_omega_shell` and nobody
-    /// ever saw a channel. The source-shape checks kept passing because they
-    /// asserted the shape of code that nothing selected — so this test forces
-    /// the presentation the application takes and reads the drawn surface.
-    #[gpui::test]
-    async fn the_primary_interface_draws_the_tester_channel_destination(cx: &mut TestAppContext) {
-        let (panel, mut cx) = setup_visible_panel(cx).await;
-        panel.update_in(&mut cx, |panel, window, cx| {
-            panel.force_omega_primary_interface_for_tests = true;
-            panel.new_thread(&NewThread, window, cx);
-        });
-        cx.run_until_parked();
-        cx.set_debug_accessibility_active(true);
-        cx.run_until_parked();
-
-        panel.read_with(&cx, |panel, _cx| {
-            assert!(
-                panel
-                    .public_channels
-                    .destinations()
-                    .iter()
-                    .any(|destination| destination.channel_id == "alpha-feedback"),
-                "the bundled alpha destination must exist, otherwise this test \
-                 would pass on an empty registry"
-            );
-        });
-
-        let threads = cx
-            .debug_bounds("omega.omega.sidebar.threads")
-            .expect("the shell draws the Threads section");
-        let heading = cx
-            .debug_bounds("omega.omega.sidebar.tester-channels")
-            .expect(
-                "the shell the application renders must draw the tester-channel \
-             destination",
-            );
-        let experimental = cx
-            .debug_bounds("omega.omega.sidebar.experimental")
-            .expect("the shell draws the Experimental section");
-        assert!(
-            heading.origin.y > threads.origin.y && heading.origin.y < experimental.origin.y,
-            "the destination sits between Threads and Experimental"
-        );
-        assert!(
-            cx.debug_bounds("omega-public-channel-alpha-feedback")
-                .is_some(),
-            "the alpha feedback row is the destination a tester clicks"
-        );
-        let snapshot = cx.debug_render_snapshot();
-        let tree = snapshot
-            .accessibility_tree_json()
-            .expect("forced accessibility should capture the sidebar");
-        assert!(
-            tree.contains(omega_sidebar::SectionId::PublicChannels.title()),
-            "a screen reader must reach the destination by its shipped name: {tree}"
-        );
-
-        // Deliberately not `select_public_channel`: that opens a live relay
-        // session, which is real network activity a deterministic test cannot
-        // hold. The claim under test is the one that regressed — the shell
-        // draws the channel when one is selected — so the selection is set and
-        // the drawn surface is read.
-        panel.update(&mut cx, |panel, cx| {
-            assert!(
-                panel.public_channels.select("alpha-feedback"),
-                "the bundled destination must be selectable"
-            );
-            cx.notify();
-        });
-        cx.run_until_parked();
-        assert!(
-            cx.debug_bounds("omega.public.channel.destination")
-                .is_some(),
-            "selecting the destination must change what the shell's main column \
-             shows"
-        );
-
-        panel.update_in(&mut cx, |panel, window, cx| {
-            panel.select_work_surface_with_history(
-                omega_workbench_state::WorkSurface::Files,
-                true,
-                window,
-                cx,
-            )
-        });
-        cx.run_until_parked();
-        assert!(
-            cx.debug_bounds("omega.public.channel.destination")
-                .is_none(),
-            "choosing another destination must leave the channel rather than \
-             leaving it selected behind what the person chose"
-        );
-        assert!(
-            cx.debug_bounds("omega.omega.surface.unavailable").is_some(),
-            "the refusal the person navigated into is what the main column \
-             shows"
-        );
-        panel.read_with(&cx, |panel, _cx| {
-            assert!(
-                panel.public_channels.selected_channel().is_none(),
-                "the selection is released, not merely undrawn"
-            );
-        });
     }
 
     /// omega#237. `render_omega_shell` draws exactly one work-surface
