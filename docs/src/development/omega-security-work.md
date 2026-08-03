@@ -89,3 +89,39 @@ cargo test -p agent_ui bundled_publication_scenes_are_private_blocked_and_separa
 
 These checks use source-backed contract projections and GPUI route state. They
 do not control an installed application UI.
+
+## Installed development receipt {#installed-development-receipt}
+
+The development artifact was built from source commit
+`3a06d5b9cad0a4d82aa1a3e9251ac367dac2ed0e`, whose parent was
+`7a9154734fc5daa7af6b6b8d7815cce8f67a693c`, with
+`OMEGA_PRIMARY_INTERFACE_BUILD=1 script/bundle-mac -f`.
+
+The resulting artifact and installed development application have these
+properties:
+
+- application: `/Applications/Omega Dev.app`;
+- bundle identifier: `com.openagents.omega.dev`;
+- bundle version: `20260803.031121`;
+- short version and CLI output: `Omega 0.2.0`;
+- architecture: thin arm64 Mach-O;
+- installed and bundled `omega` binary SHA-256:
+  `17a6798a027b8bb6cb3e761f8b720e4e18d6533eee223c60f0fd81b1ca77de2c`;
+- DMG SHA-256:
+  `859ced2c5cd46413f112d16782e0709a2c6dd0df66613530c5081a891064449b`;
+- the installed binary contains the exact source commit recorded above;
+- `codesign --verify --deep --strict` accepted the installed application;
+- the replaced development application remains recoverable at
+  `/private/tmp/Omega-Dev-replaced-oaw006-20260803.app`, and the earlier
+  pre-build copy remains at
+  `/private/tmp/Omega-Dev-before-oaw006-20260802.app`;
+- the production `/Applications/Omega.app` binary stayed unchanged at SHA-256
+  `0475b4f52bd0c79b53a9b4dfafd83a9ed081b7ee8858ba48966ead53ae5a5f73`.
+
+The source verification included 36 Forensics tests, 11 Work Index tests, 9
+Work detail tests, 2 differential projection tests, focused GPUI route and
+Work detail tests, the publication fixture-boundary test, 316 delta tests,
+release all-target and all-feature lint, scoped Prettier, and the pinned mdBook
+build. Installed verification used only hashes, metadata, CLI output, embedded
+source identity, and signature checks. It did not launch or control the
+installed application UI.
