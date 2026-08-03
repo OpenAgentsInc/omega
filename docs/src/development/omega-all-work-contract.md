@@ -132,8 +132,16 @@ The inspector enables command controls only when the displayed account supplies
 both an enrolled Effective Principal and verified Organization membership. The
 current account registry does not own Organization membership, so the controls
 fail closed and explain that dependency. Fixture controls remain simulated.
-Starting and controlling a real Agent Session, recording portable activity,
-and the installed owner journey remain incomplete.
+
+After delegation, **Link session** admits the exact active local Omega Thread
+only when it has a real ACP session and its Direct Agent is the admitted Agent
+Delegate. The command creates separate OpenAgents Thread, Session, Agent
+Session, and Run references at the active grant generation; it does not start a
+provider process. **Record handoff** then records only the exact link fact as
+portable progress. It supplies no provider event or Effect and retains an
+explicit `loss:omega:provider-event-not-supplied` fact. Provider event ingestion,
+real execution control/effects, and the installed owner journey remain
+incomplete.
 
 ## Verify
 

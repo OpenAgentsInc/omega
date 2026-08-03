@@ -102,6 +102,14 @@ grant is private, expires after one hour, requires evidence, and carries only
 the bounded Thread message and stop capabilities. A fixture, remote Thread
 without admitted Host identity, or ambiguous legacy owner remains read only.
 
+Once the active local Thread has a real ACP session and its owner matches the
+admitted Agent Delegate, **Link session** registers distinct Thread, Session,
+Agent Session, and Run identities at the grant generation. This is a link to an
+already active Omega conversation, not a request to launch an agent. **Record
+handoff** records that exact link as audience-safe progress with no Effect and
+an explicit missing-provider-event loss fact. Omega does not translate that
+activity into completion, verification, or owner acceptance.
+
 The same actions are available to pointer users. Focus returns to the detail
 surface after edit submission or cancellation.
 

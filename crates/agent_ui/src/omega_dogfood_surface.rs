@@ -3,8 +3,9 @@ use gpui::{
     Window, prelude::*,
 };
 use omega_effectd::all_work_contract::{
-    AgentRef, HostRef, OrganizationRef, PrincipalRef, RepositoryClaimLedger, RepositoryWorkClaim,
-    RepositoryWorkClaimState, SignedWorkroomLedger, WorkSnapshot, WorkroomAudience,
+    AgentRef, AgentSessionRef, HostRef, OrganizationRef, PrincipalRef, RepositoryClaimLedger,
+    RepositoryWorkClaim, RepositoryWorkClaimState, SignedWorkroomLedger, ThreadRef, WorkSnapshot,
+    WorkroomAudience,
 };
 #[cfg(all(test, feature = "test-support"))]
 use omega_work_index::DogfoodFixtureAdapter;
@@ -96,6 +97,8 @@ pub enum DogfoodWorkCommandAction {
     Unassign,
     Delegate,
     RevokeDelegate,
+    LinkAgentSession,
+    RecordHandoff,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -103,6 +106,8 @@ pub struct DogfoodDelegationCandidate {
     pub agent_ref: AgentRef,
     pub host_ref: HostRef,
     pub label: String,
+    pub thread_ref: ThreadRef,
+    pub agent_session_ref: Option<AgentSessionRef>,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -1265,6 +1270,17 @@ impl DogfoodSurface {
             .work_command_context
             .as_ref()
             .and_then(|context| context.delegation_candidate.as_ref());
+        let execution_candidate = delegation_candidate.filter(|candidate| {
+            candidate.agent_session_ref.is_some()
+                && command_snapshot.is_some_and(|snapshot| {
+                    snapshot
+                        .summary
+                        .agent_delegate
+                        .as_ref()
+                        .and_then(|delegate| delegate.as_ref())
+                        .is_some_and(|delegate| delegate.agent_ref == candidate.agent_ref)
+                })
+        });
         let command_revision = command_snapshot
             .map(|snapshot| snapshot.summary.revision.0)
             .or(issue.work_revision);
@@ -1402,6 +1418,13 @@ impl DogfoodSurface {
                         cx,
                     ))
                     .child(inspector_row(
+                        "Active Agent Session",
+                        execution_candidate
+                            .and_then(|candidate| candidate.agent_session_ref.as_ref())
+                            .map_or("None".into(), |session| session.0.clone()),
+                        cx,
+                    ))
+                    .child(inspector_row(
                         "Authority",
                         if self.fixture.origin == DogfoodPlanningOrigin::Fixture {
                             "Simulation · read only".into()
@@ -1507,7 +1530,50 @@ impl DogfoodSurface {
                                         )
                                     })),
                                 )
-                            }),
+                            })
+                            .when(
+                                has_active_delegate
+                                    && command_snapshot
+                                        .is_some_and(|snapshot| snapshot.session_refs.is_empty())
+                                    && execution_candidate.is_some(),
+                                |controls| {
+                                    controls.child(
+                                        claim_button(
+                                            "work-command-link-agent-session",
+                                            "Link session",
+                                            self.work_command_busy || !command_mutation_ready,
+                                        )
+                                        .on_click(cx.listener(|this, _, _, cx| {
+                                            this.request_work_command(
+                                                DogfoodWorkCommandAction::LinkAgentSession,
+                                                cx,
+                                            )
+                                        })),
+                                    )
+                                },
+                            )
+                            .when(
+                                has_active_delegate
+                                    && command_snapshot.is_some_and(|snapshot| {
+                                        !snapshot.session_refs.is_empty()
+                                            && snapshot.agent_activity_refs.is_empty()
+                                    }),
+                                |controls| {
+                                    controls.child(
+                                        claim_button(
+                                            "work-command-record-handoff",
+                                            "Record handoff",
+                                            self.work_command_busy || !command_mutation_ready,
+                                        )
+                                        .on_click(cx.listener(|this, _, _, cx| {
+                                            this.request_work_command(
+                                                DogfoodWorkCommandAction::RecordHandoff,
+                                                cx,
+                                            )
+                                        })),
+                                    )
+                                },
+                            ),
                     )
                     .child(
                         Label::new(
@@ -1645,7 +1711,7 @@ impl DogfoodSurface {
                         "Projection version",
                         self.fixture.projection_version.clone(),
                         cx,
-                    )),
+                    ))
             )
             .into_any_element()
     }

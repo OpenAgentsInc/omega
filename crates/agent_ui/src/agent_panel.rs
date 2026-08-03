@@ -2859,6 +2859,8 @@ fn dogfood_work_command_action_label(action: DogfoodWorkCommandAction) -> &'stat
         DogfoodWorkCommandAction::Unassign => "unassign",
         DogfoodWorkCommandAction::Delegate => "delegate",
         DogfoodWorkCommandAction::RevokeDelegate => "revoke-delegate",
+        DogfoodWorkCommandAction::LinkAgentSession => "link-agent-session",
+        DogfoodWorkCommandAction::RecordHandoff => "record-handoff",
     }
 }
 
@@ -4653,6 +4655,19 @@ impl AgentPanel {
             )
             .ok()?,
             label,
+            thread_ref: omega_effectd::all_work_contract::ThreadRef::try_from(format!(
+                "thread:omega:{}",
+                metadata.thread_id.0
+            ))
+            .ok()?,
+            agent_session_ref: metadata.session_id.as_ref().and_then(|session_id| {
+                let digest = format!("{:x}", Sha256::digest(session_id.0.as_bytes()));
+                omega_effectd::all_work_contract::AgentSessionRef::try_from(format!(
+                    "agent-session:acp:{}",
+                    &digest[..24]
+                ))
+                .ok()
+            }),
         })
     }
 
@@ -18185,6 +18200,80 @@ impl AgentPanel {
                         reason: omega_effectd::all_work_contract::ShortText::try_from(
                             "The accountable human revoked the Omega delegation.".to_string(),
                         )?,
+                    }
+                }
+                DogfoodWorkCommandAction::LinkAgentSession => {
+                    let delegate = snapshot
+                        .summary
+                        .agent_delegate
+                        .as_ref()
+                        .and_then(|delegate| delegate.as_ref())
+                        .context("The canonical Work has no active Agent Delegate.")?;
+                    let candidate = context
+                        .delegation_candidate
+                        .clone()
+                        .context("No verified local Direct Agent is available to link.")?;
+                    if candidate.agent_ref != delegate.agent_ref {
+                        anyhow::bail!(
+                            "The active Thread owner is not the admitted Agent Delegate."
+                        );
+                    }
+                    let provider_agent_session_ref = candidate
+                        .agent_session_ref
+                        .context("The active Thread is still a draft and has no ACP session.")?;
+                    let generation = delegate.generation.0;
+                    omega_effectd::all_work_contract::WorkCommand::StartAgentSession {
+                        thread_ref: candidate.thread_ref,
+                        session_ref: omega_effectd::all_work_contract::SessionRef::try_from(
+                            format!("session:omega-ui:{work_key}:g{generation}"),
+                        )?,
+                        agent_session_ref:
+                            omega_effectd::all_work_contract::AgentSessionRef::try_from(format!(
+                                "{}:g{generation}",
+                                provider_agent_session_ref.0
+                            ))?,
+                        run_ref: omega_effectd::all_work_contract::RunRef::try_from(format!(
+                            "run:omega-ui:{work_key}:g{generation}"
+                        ))?,
+                        grant_ref: delegate.delegation_grant_ref.clone(),
+                        expected_generation: delegate.generation.clone(),
+                        host_ref: candidate.host_ref,
+                    }
+                }
+                DogfoodWorkCommandAction::RecordHandoff => {
+                    let delegate = snapshot
+                        .summary
+                        .agent_delegate
+                        .as_ref()
+                        .and_then(|delegate| delegate.as_ref())
+                        .context("The canonical Work has no active Agent Delegate.")?;
+                    let session_ref = snapshot
+                        .session_refs
+                        .last()
+                        .cloned()
+                        .context("No bounded Session is linked to this Work.")?;
+                    let run_ref = snapshot
+                        .run_refs
+                        .last()
+                        .cloned()
+                        .context("No bounded Run is linked to this Work.")?;
+                    let generation = delegate.generation.0;
+                    omega_effectd::all_work_contract::WorkCommand::RecordActivity {
+                        activity_ref: omega_effectd::all_work_contract::AgentActivityRef::try_from(
+                            format!("agent-activity:omega-ui:{work_key}:handoff:g{generation}"),
+                        )?,
+                        session_ref,
+                        run_ref,
+                        expected_generation: delegate.generation.clone(),
+                        kind: omega_effectd::all_work_contract::WorkCommandActivityKind::Progress,
+                        summary: omega_effectd::all_work_contract::ShortText::try_from(
+                            "Active Omega Thread linked to delegated Work.".to_string(),
+                        )?,
+                        provider_event_ref: omega_effectd::all_work_contract::Nullable(None),
+                        loss_refs: vec![omega_effectd::all_work_contract::SourceRef::try_from(
+                            "loss:omega:provider-event-not-supplied".to_string(),
+                        )?],
+                        effect_ref: omega_effectd::all_work_contract::Nullable(None),
                     }
                 }
                 DogfoodWorkCommandAction::Refresh => unreachable!(),
