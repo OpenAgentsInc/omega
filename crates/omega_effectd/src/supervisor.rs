@@ -32,9 +32,11 @@ use crate::all_work::generated::{
     RepositoryClaimExecuteResult, RepositoryClaimReadRequest, RepositoryClaimReadResult,
     SignedWorkroomDeliveryRequest, SignedWorkroomDeliveryResult, SignedWorkroomEnqueueRequest,
     SignedWorkroomEnqueueResult, SignedWorkroomReadRequest, SignedWorkroomReadResult,
-    WorkCommandExecuteRequest, WorkCommandExecuteResult, WorkCutoverExecuteRequest,
-    WorkCutoverExecuteResult, WorkCutoverReadRequest, WorkCutoverReadResult, WorkIndexReadRequest,
-    WorkIndexReadResult, WorkSnapshotReadRequest, WorkSnapshotReadResult,
+    StrictBugCandidateExecuteRequest, StrictBugCandidateExecuteResult,
+    StrictBugCandidateReadRequest, StrictBugCandidateReadResult, WorkCommandExecuteRequest,
+    WorkCommandExecuteResult, WorkCutoverExecuteRequest, WorkCutoverExecuteResult,
+    WorkCutoverReadRequest, WorkCutoverReadResult, WorkIndexReadRequest, WorkIndexReadResult,
+    WorkSnapshotReadRequest, WorkSnapshotReadResult,
 };
 use crate::protocol::{
     HealthResult, HostMethod, HostRequestFrame, HostResponseError, HostResponseErrorCode,
@@ -156,6 +158,8 @@ impl OmegaEffectdSupervisor {
                 AllWorkProtocolCapability::WorkCommandExecute,
                 AllWorkProtocolCapability::WorkCutoverRead,
                 AllWorkProtocolCapability::WorkCutoverExecute,
+                AllWorkProtocolCapability::StrictBugCandidateRead,
+                AllWorkProtocolCapability::StrictBugCandidateExecute,
             ],
         };
         all_work
@@ -430,6 +434,55 @@ impl OmegaEffectdSupervisor {
         if result.receipt.github_write_count.0 != 0 {
             return Err(SupervisorError::Anyhow(anyhow!(
                 "Work cutover receipt reported a GitHub write"
+            )));
+        }
+        Ok(result)
+    }
+
+    pub async fn read_strict_bug_candidates(
+        &mut self,
+        params: StrictBugCandidateReadRequest,
+    ) -> Result<StrictBugCandidateReadResult, SupervisorError> {
+        params
+            .validate()
+            .map_err(|error| SupervisorError::Anyhow(error.into()))?;
+        let result = self
+            .request(
+                "strict_bug.candidate.read",
+                Some(serde_json::to_value(params).context("encode strict bug candidate read")?),
+                self.generation(),
+            )
+            .await?;
+        let result: StrictBugCandidateReadResult =
+            serde_json::from_value(result).context("decode strict bug candidate read")?;
+        result
+            .validate()
+            .map_err(|error| SupervisorError::Anyhow(error.into()))?;
+        Ok(result)
+    }
+
+    pub async fn execute_strict_bug_candidate(
+        &mut self,
+        params: StrictBugCandidateExecuteRequest,
+    ) -> Result<StrictBugCandidateExecuteResult, SupervisorError> {
+        params
+            .validate()
+            .map_err(|error| SupervisorError::Anyhow(error.into()))?;
+        let result = self
+            .request(
+                "strict_bug.candidate.execute",
+                Some(serde_json::to_value(params).context("encode strict bug candidate command")?),
+                self.generation(),
+            )
+            .await?;
+        let result: StrictBugCandidateExecuteResult =
+            serde_json::from_value(result).context("decode strict bug candidate command")?;
+        result
+            .validate()
+            .map_err(|error| SupervisorError::Anyhow(error.into()))?;
+        if result.receipt.github_write_count.0 != 0 {
+            return Err(SupervisorError::Anyhow(anyhow!(
+                "strict bug candidate receipt reported a GitHub write"
             )));
         }
         Ok(result)
@@ -982,6 +1035,8 @@ impl OmegaEffectdSupervisor {
                             | "work.command.execute"
                             | "work.cutover.read"
                             | "work.cutover.execute"
+                            | "strict_bug.candidate.read"
+                            | "strict_bug.candidate.execute"
                     ) {
                         MAX_ALL_WORK_GRAPH_RESPONSE_BYTES
                     } else {

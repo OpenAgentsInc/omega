@@ -9,10 +9,10 @@ adapter creates a second writable store.
 
 | Field                 | Value                                                              |
 | --------------------- | ------------------------------------------------------------------ |
-| OpenAgents commit     | `12b91d5946770104a0cb40648262b12b64c0bac0`                         |
+| OpenAgents commit     | `1a7d624c5ee87810e2ed6c70249878bad2ddbfa2`                         |
 | Contract              | `openagents.all_work_boundary.v1`                                  |
-| Definition SHA-256    | `1c2c6414f05fc2bf0c8a2e56ac124e366d107e126236790a33e05b68ced298e6` |
-| Rust artifact SHA-256 | `ed7ea095093012304e0027e3a7f14a00e1d8bfcb952e184159dcbf4f7cba49e3` |
+| Definition SHA-256    | `2797ea64aba30c5ccc19cf2f4771d47955b126a3d91576f24409ad2d23f47a03` |
+| Rust artifact SHA-256 | `cf4a42d8e3b1cb5d366841e16e7cab09b5b376f095fdf7054dea0eae90f1f154` |
 | Omega receipt         | `crates/omega_effectd/all-work-contract/SOURCE.json`               |
 
 The generated Rust file, compatibility manifest, and shared fixtures are
@@ -30,7 +30,7 @@ separate All Work profile:
 - `omega-effectd.v2` enables `work.index.read`, `work.snapshot.read`,
   `planning.graph.read`, `repository.claim.read`, and separately negotiated
   claim execution, signed Workroom read/enqueue/delivery, Work command, and
-  Work cutover capabilities;
+  Work cutover and strict bug candidate capabilities;
 - a v1 client that calls any All Work read method receives
   `incompatible_version`;
 - request and result domain payloads use generated Rust and Effect types;
@@ -120,6 +120,20 @@ explicit receipt reference. Native events advance a retained high-water
 cursor. Rollback requires exact reconciliation through that cursor. The
 vendored boundary does not activate the writer switch; installed journey and
 policy/tooling gates remain required.
+
+## Strict bug candidate ingress
+
+The generated profile includes `strict_bug.candidate.read` and
+`strict_bug.candidate.execute`. The Rust supervisor validates each generated
+request and result and refuses a receipt that reports a GitHub write. A strict
+public GitHub bug enters the OpenAgents ledger as an untrusted, pending
+candidate. Only a separate owner-local triage command can reject it or link it
+to canonical Work. That link does not grant Work command authority.
+
+Omega does not verify GitHub webhook signatures. The production transport must
+verify the delivery first and supply the public-safe verification evidence ref
+to the OpenAgents authority. The vendored client boundary is not a claim that
+the production webhook or candidate inbox is installed.
 
 ## Work command admission
 

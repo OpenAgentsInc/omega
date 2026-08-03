@@ -991,6 +991,67 @@ mod tests {
                 all_work_contract::WorkWriter::NativeOmega
             );
             assert_eq!(activated.receipt.github_write_count.0, 0);
+            let candidate = supervisor
+                .execute_strict_bug_candidate(
+                    serde_json::from_value(serde_json::json!({
+                        "intentRef": "intent:fixture:strict-bug:ingest",
+                        "idempotencyKey": "github-delivery:source:github:webhook:delivery:10001",
+                        "expectedRevision": 0,
+                        "effectivePrincipalRef": "principal:github:webhook",
+                        "capabilityRef": "capability:strict-bug-candidate:ingest",
+                        "occurredAt": "2026-08-03T12:01:00Z",
+                        "githubWriteCount": 0,
+                        "command": {
+                            "command": "ingest",
+                            "candidateRef": "strict-bug-candidate:omega:10001",
+                            "sourceRef": "source:github:omega:issue:10001",
+                            "deliveryRef": "source:github:webhook:delivery:10001",
+                            "repositoryRef": "repository:omega",
+                            "issueNumber": 10001,
+                            "sourceUrl": "https://github.com/OpenAgentsInc/omega/issues/10001",
+                            "title": "Strict fixture failure",
+                            "affectedSurface": "Work candidate inbox",
+                            "actualBehavior": "The report is absent.",
+                            "expectedBehavior": "The report enters pending triage.",
+                            "reproductionSteps": "1. Submit the strict form. 2. Open Work.",
+                            "publicSafeEvidence": "The public issue exists.",
+                            "severity": "s2",
+                            "environment": "Fixture process at 2026-08-03T12:01:00Z.",
+                            "safetyRedaction": "Sensitive values were removed.",
+                            "requiredConfirmations": [
+                                "specific_reproducible_bug",
+                                "searched_existing_reports",
+                                "sensitive_material_removed",
+                                "exact_reproduction_and_evidence",
+                                "malformed_report_policy_understood"
+                            ],
+                            "reporterRef": "source:github:user:fixture",
+                            "attachmentRefs": [],
+                            "signatureVerificationRef": "evidence:github-webhook-signature:delivery:10001"
+                        }
+                    }))
+                    .expect("typed strict bug ingest request"),
+                )
+                .await
+                .expect("typed strict bug candidate ingest");
+            assert_eq!(candidate.receipt.github_write_count.0, 0);
+            let candidate = candidate
+                .ledger
+                .candidates
+                .first()
+                .expect("one strict bug candidate");
+            assert!(candidate.untrusted);
+            assert_eq!(
+                candidate.disposition,
+                all_work_contract::StrictBugDisposition::Pending
+            );
+            let candidates = supervisor
+                .read_strict_bug_candidates(all_work_contract::StrictBugCandidateReadRequest {
+                    candidate_ref: None,
+                })
+                .await
+                .expect("typed strict bug candidate read");
+            assert_eq!(candidates.ledger.candidates.len(), 1);
             let claims = supervisor
                 .read_repository_claims(all_work_contract::RepositoryClaimReadRequest {
                     after_revision: None,

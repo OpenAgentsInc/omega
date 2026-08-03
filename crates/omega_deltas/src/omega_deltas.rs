@@ -28476,4 +28476,41 @@ mod tests {
             );
         }
     }
+
+    /// OMEGA-DELTA-0238. The final public strict-bug exception enters Omega
+    /// as untrusted candidate data and cannot report a GitHub write.
+    #[test]
+    fn strict_bug_candidate_client_preserves_untrusted_ingress_boundary() {
+        let contract = without_comments(&read_repository_file(
+            "crates/omega_effectd/all-work-contract/generated/rust/all_work_v1.rs",
+        ));
+        let supervisor = without_comments(&read_repository_file(
+            "crates/omega_effectd/src/supervisor.rs",
+        ));
+        for required in [
+            "StrictBugCandidate",
+            "StrictBugConfirmation",
+            "StrictBugDisposition",
+            "required_confirmations",
+            "signature_verification_ref",
+            "untrusted",
+        ] {
+            assert!(
+                contract.contains(required),
+                "OMEGA-DELTA-0238: strict bug candidate contract lost `{required}`"
+            );
+        }
+        for required in [
+            "read_strict_bug_candidates",
+            "execute_strict_bug_candidate",
+            "strict_bug.candidate.read",
+            "strict_bug.candidate.execute",
+            "strict bug candidate receipt reported a GitHub write",
+        ] {
+            assert!(
+                supervisor.contains(required),
+                "OMEGA-DELTA-0238: strict bug candidate client lost `{required}`"
+            );
+        }
+    }
 }

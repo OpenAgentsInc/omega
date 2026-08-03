@@ -27,6 +27,12 @@ request/result, and rejects any receipt with a nonzero GitHub-write count. The
 former Omega-local state machine is removed; Omega is now a client, not a
 second cutover authority.
 
+The same generated client now carries the final public strict-bug exception.
+Its read and execute methods validate the untrusted candidate ledger and
+reject any receipt that reports a GitHub write. The OpenAgents authority, not
+Omega, owns ingestion and triage. A separate production transport must still
+verify the GitHub delivery signature before it can submit a candidate.
+
 This state machine does not activate the cutover and is not yet the complete
 OAW-020 journey. Activation remains blocked until all issue dependencies close,
 the imported graph and claims reconcile, policy/tooling refuse new internal

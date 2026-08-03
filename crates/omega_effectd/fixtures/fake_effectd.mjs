@@ -41,6 +41,8 @@ const supportedAllWorkCapabilities = [
   "work.command.execute",
   "work.cutover.read",
   "work.cutover.execute",
+  "strict_bug.candidate.read",
+  "strict_bug.candidate.execute",
 ]
 let allWorkCapabilities = []
 let workCutoverState = {
@@ -55,6 +57,18 @@ let workCutoverState = {
   nativeHighWatermark: null,
   activationReceiptRef: null,
   rollbackReceiptRef: null,
+}
+let strictBugCandidateLedger = {
+  contractVersion: "openagents.all_work_boundary.v1",
+  revision: 0,
+  eventCursor: "cursor:strict-bug-candidate:0",
+  candidates: [],
+  completeness: {
+    state: "complete",
+    cursor: "cursor:strict-bug-candidate:0",
+    gapRefs: [],
+  },
+  freshness: { state: "fresh", observedAt: "2026-08-03T12:00:00Z" },
 }
 let claimLedger = {
   contractVersion: "openagents.all_work_boundary.v1",
@@ -497,7 +511,7 @@ for await (const line of rl) {
       allWork: {
         selectedVersion: allWorkVersion,
         contractRef: "openagents.all_work_boundary.v1",
-        contractDigest: "2f3119cf7822fe9bd770d2c97f913d609dd49e8918fb3ea4c7df9662d20492c4",
+        contractDigest: "2797ea64aba30c5ccc19cf2f4771d47955b126a3d91576f24409ad2d23f47a03",
         capabilities: allWorkCapabilities,
       },
       dataRoot,
@@ -852,6 +866,113 @@ for await (const line of rl) {
         revision: workCutoverState.revision,
         generation: workCutoverState.generation,
         writer: workCutoverState.writer,
+        effectivePrincipalRef: input.effectivePrincipalRef,
+        acceptedAt: input.occurredAt,
+        githubWriteCount: 0,
+      },
+    })
+    continue
+  }
+  if (request.method === "strict_bug.candidate.read") {
+    if (!allWorkCapabilities.includes("strict_bug.candidate.read")) {
+      respond(request.id, generation, false, undefined, {
+        code: "incompatible_version",
+        message: "strict_bug.candidate.read was not negotiated.",
+      })
+      continue
+    }
+    const candidateRef = request.params?.candidateRef
+    respond(request.id, generation, true, {
+      ledger: {
+        ...strictBugCandidateLedger,
+        candidates:
+          candidateRef == null
+            ? strictBugCandidateLedger.candidates
+            : strictBugCandidateLedger.candidates.filter(
+                (candidate) => candidate.candidateRef === candidateRef,
+              ),
+      },
+    })
+    continue
+  }
+  if (request.method === "strict_bug.candidate.execute") {
+    if (!allWorkCapabilities.includes("strict_bug.candidate.execute")) {
+      respond(request.id, generation, false, undefined, {
+        code: "incompatible_version",
+        message: "strict_bug.candidate.execute was not negotiated.",
+      })
+      continue
+    }
+    const input = request.params
+    const command = input.command
+    const previousRevision = strictBugCandidateLedger.revision
+    const revision = previousRevision + 1
+    if (command.command === "ingest") {
+      strictBugCandidateLedger.candidates.push({
+        contractVersion: "openagents.all_work_boundary.v1",
+        candidateRef: command.candidateRef,
+        sourceRef: command.sourceRef,
+        deliveryRef: command.deliveryRef,
+        repositoryRef: command.repositoryRef,
+        issueNumber: command.issueNumber,
+        sourceUrl: command.sourceUrl,
+        title: command.title,
+        affectedSurface: command.affectedSurface,
+        actualBehavior: command.actualBehavior,
+        expectedBehavior: command.expectedBehavior,
+        reproductionSteps: command.reproductionSteps,
+        publicSafeEvidence: command.publicSafeEvidence,
+        severity: command.severity,
+        environment: command.environment,
+        safetyRedaction: command.safetyRedaction,
+        requiredConfirmations: command.requiredConfirmations,
+        reporterRef: command.reporterRef,
+        attachmentRefs: command.attachmentRefs,
+        signatureVerificationRef: command.signatureVerificationRef,
+        untrusted: true,
+        disposition: "pending",
+        linkedWorkRef: null,
+        dispositionReceiptRef: null,
+        observedAt: input.occurredAt,
+        revision: 1,
+      })
+    } else if (command.command === "dispose") {
+      const candidate = strictBugCandidateLedger.candidates.find(
+        (value) => value.candidateRef === command.candidateRef,
+      )
+      if (!candidate) {
+        respond(request.id, generation, false, undefined, {
+          code: "not_found",
+          message: "Fixture strict bug candidate was not found.",
+        })
+        continue
+      }
+      candidate.disposition = command.disposition
+      candidate.linkedWorkRef = command.linkedWorkRef
+      candidate.dispositionReceiptRef = command.dispositionReceiptRef
+      candidate.revision += 1
+    }
+    strictBugCandidateLedger = {
+      ...strictBugCandidateLedger,
+      revision,
+      eventCursor: `cursor:strict-bug-candidate:${revision}`,
+      completeness: {
+        state: "complete",
+        cursor: `cursor:strict-bug-candidate:${revision}`,
+        gapRefs: [],
+      },
+      freshness: { state: "fresh", observedAt: input.occurredAt },
+    }
+    respond(request.id, generation, true, {
+      ledger: strictBugCandidateLedger,
+      receipt: {
+        intentRef: input.intentRef,
+        idempotencyKey: input.idempotencyKey,
+        commandDigest: "c".repeat(64),
+        candidateRef: command.candidateRef,
+        previousRevision,
+        revision,
+        eventCursor: strictBugCandidateLedger.eventCursor,
         effectivePrincipalRef: input.effectivePrincipalRef,
         acceptedAt: input.occurredAt,
         githubWriteCount: 0,
