@@ -15,7 +15,6 @@ mod openagents_session;
 mod protocol;
 mod sarah_conversation;
 mod supervisor;
-mod work_cutover;
 
 use std::{
     collections::BTreeMap,
@@ -94,8 +93,6 @@ pub use supervisor::{
     OmegaEffectdHostHandler, OmegaEffectdSupervisor, OmegaEffectdSupervisorOptions,
     SupervisorError, default_options, fixture_command, resolve_effectd_command,
 };
-pub use work_cutover::*;
-
 pub type SharedOmegaEffectdSupervisor = Rc<AsyncMutex<OmegaEffectdSupervisor>>;
 pub type SharedIssue31HostController = Arc<RwLock<Issue31HostController>>;
 
@@ -941,6 +938,59 @@ mod tests {
                 .expect("typed planning graph read");
             assert_eq!(planning.graph.revision.0, 1);
             assert_eq!(planning.graph.graph_ref.0, "planning-graph:fixture");
+            let cutover = supervisor
+                .read_work_cutover(all_work_contract::WorkCutoverReadRequest {})
+                .await
+                .expect("typed Work cutover read");
+            assert_eq!(
+                cutover.state.writer,
+                all_work_contract::WorkWriter::LegacyGithub
+            );
+            let activated = supervisor
+                .execute_work_cutover(all_work_contract::WorkCutoverExecuteRequest {
+                    intent_ref: all_work_contract::IntentRef::try_from(
+                        "intent:fixture:cutover".to_string(),
+                    )
+                    .expect("intent ref"),
+                    idempotency_key: all_work_contract::IdempotencyKey::try_from(
+                        "fixture-work-cutover".to_string(),
+                    )
+                    .expect("idempotency key"),
+                    expected_revision: cutover.state.revision,
+                    expected_generation: cutover.state.generation,
+                    effective_principal_ref: all_work_contract::PrincipalRef::try_from(
+                        "principal:omega:local-owner".to_string(),
+                    )
+                    .expect("principal ref"),
+                    organization_ref: all_work_contract::OrganizationRef::try_from(
+                        "organization:openagents".to_string(),
+                    )
+                    .expect("organization ref"),
+                    capability_ref: all_work_contract::CapabilityRef::try_from(
+                        "capability:work-cutover:write".to_string(),
+                    )
+                    .expect("capability ref"),
+                    occurred_at: all_work_contract::IsoTimestamp::try_from(
+                        "2026-08-03T12:00:00.000Z".to_string(),
+                    )
+                    .expect("timestamp"),
+                    github_write_count: all_work_contract::ZeroInteger(0),
+                    command: all_work_contract::WorkCutoverCommand::ActivateNative {
+                        source_digest: cutover.state.source_digest,
+                        reconciled_cursor: cutover.state.source_cursor,
+                        receipt_ref: all_work_contract::ReceiptRef::try_from(
+                            "receipt:fixture:cutover".to_string(),
+                        )
+                        .expect("receipt ref"),
+                    },
+                })
+                .await
+                .expect("typed Work cutover command");
+            assert_eq!(
+                activated.state.writer,
+                all_work_contract::WorkWriter::NativeOmega
+            );
+            assert_eq!(activated.receipt.github_write_count.0, 0);
             let claims = supervisor
                 .read_repository_claims(all_work_contract::RepositoryClaimReadRequest {
                     after_revision: None,
@@ -1117,8 +1167,8 @@ mod tests {
                 })
                 .await
                 .expect("typed planning graph read from OpenAgents process");
-            assert_eq!(planning.graph.work.len(), 28);
-            assert_eq!(planning.graph.source_coordinates.len(), 28);
+            assert_eq!(planning.graph.work.len(), 34);
+            assert_eq!(planning.graph.source_coordinates.len(), 34);
             assert_eq!(
                 planning
                     .graph

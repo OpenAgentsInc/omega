@@ -9,10 +9,10 @@ adapter creates a second writable store.
 
 | Field                 | Value                                                              |
 | --------------------- | ------------------------------------------------------------------ |
-| OpenAgents commit     | `41ff4cb5327aac61e3f366dead7e508bdbe89340`                         |
+| OpenAgents commit     | `12b91d5946770104a0cb40648262b12b64c0bac0`                         |
 | Contract              | `openagents.all_work_boundary.v1`                                  |
-| Definition SHA-256    | `287a9c3803c15e73743d0b452b79c5755b1fdd34fb42882a6ccb1125f2c5250b` |
-| Rust artifact SHA-256 | `cf7c01d7d03553cbd1766b563f93e9d39d3cd5b3fae102ce36b7fc649a2d6dc2` |
+| Definition SHA-256    | `1c2c6414f05fc2bf0c8a2e56ac124e366d107e126236790a33e05b68ced298e6` |
+| Rust artifact SHA-256 | `ed7ea095093012304e0027e3a7f14a00e1d8bfcb952e184159dcbf4f7cba49e3` |
 | Omega receipt         | `crates/omega_effectd/all-work-contract/SOURCE.json`               |
 
 The generated Rust file, compatibility manifest, and shared fixtures are
@@ -29,8 +29,8 @@ separate All Work profile:
 - an omitted All Work request selects `omega-effectd.v1` with no Work methods;
 - `omega-effectd.v2` enables `work.index.read`, `work.snapshot.read`,
   `planning.graph.read`, `repository.claim.read`, and separately negotiated
-  claim execution, signed Workroom read/enqueue/delivery, and
-  `work.command.execute` capabilities;
+  claim execution, signed Workroom read/enqueue/delivery, Work command, and
+  Work cutover capabilities;
 - a v1 client that calls any All Work read method receives
   `incompatible_version`;
 - request and result domain payloads use generated Rust and Effect types;
@@ -105,6 +105,21 @@ persist-before-publish enqueue boundary. Signed identity, audience, causal
 parents, generation, outbox state, and revocation remain projection facts.
 They do not become command or effect authority. See
 [Omega signed Workroom projection](./omega-signed-workroom.md).
+
+## Internal Work writer cutover
+
+The generated profile includes `work.cutover.read` and
+`work.cutover.execute`. OpenAgents owns the only persistent writer ledger;
+Omega validates the generated request/result and refuses a receipt with a
+nonzero GitHub-write count. The ledger starts in `legacy_github` shadow mode.
+Import, startup, tests, and UI rendering cannot activate it.
+
+Native activation requires the exact shadow digest and cursor, current
+revision and generation, authorized Effective Principal and capability, and an
+explicit receipt reference. Native events advance a retained high-water
+cursor. Rollback requires exact reconciliation through that cursor. The
+vendored boundary does not activate the writer switch; installed journey and
+policy/tooling gates remain required.
 
 ## Work command admission
 

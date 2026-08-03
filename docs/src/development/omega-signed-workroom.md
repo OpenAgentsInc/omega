@@ -1,8 +1,8 @@
 # Omega signed Workroom projection
 
 Omega consumes the generated signed Workroom boundary from OpenAgents commit
-`41ff4cb5327aac61e3f366dead7e508bdbe89340`. The contract definition SHA-256
-is `287a9c3803c15e73743d0b452b79c5755b1fdd34fb42882a6ccb1125f2c5250b`.
+`12b91d5946770104a0cb40648262b12b64c0bac0`. The contract definition SHA-256
+is `1c2c6414f05fc2bf0c8a2e56ac124e366d107e126236790a33e05b68ced298e6`.
 
 The Rust supervisor negotiates `workroom.activity.read` and
 `workroom.activity.enqueue`, plus the transport-only

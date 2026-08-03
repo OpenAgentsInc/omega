@@ -4,11 +4,14 @@ The internal Work writer cutover is an explicit state transition, not a side
 effect of importing issues, rendering Omega, passing tests, or receiving a
 signed relay message.
 
-`omega_effectd::WorkCutoverLedger` starts in `LegacyGithub` shadow mode with an
-exact source digest and cursor. Native activation requires the current ledger
-revision and generation, the same reconciled source digest and cursor, an
-explicit receipt reference, and a zero GitHub-write count. Activation advances
-the generation and makes `NativeOmega` the only admitted internal Work writer.
+The generated `work.cutover.read` and `work.cutover.execute` boundary reads and
+transitions the OpenAgents-owned Effect ledger. That ledger starts in
+`legacy_github` shadow mode with an exact source digest and cursor. Native
+activation requires the current ledger revision and generation, the same
+reconciled source digest and cursor, an explicit receipt reference, the
+authorized Effective Principal and capability, and a structurally zero GitHub-
+write count. Activation advances the generation and makes `native_omega` the
+only admitted internal Work writer.
 
 Each admitted native write advances the native high-water cursor. Rollback is
 not a blind writer flip: it requires another explicit receipt and proof that
@@ -17,10 +20,12 @@ cursor. A stale revision/generation, changed legacy source, GitHub write
 attempt, repeated cursor, wrong writer, or incomplete reconciliation refuses
 before mutation.
 
-The public-safe ledger is stored through an atomic temporary-file replacement
-with restrictive directory/file permissions and an `fsync` before rename. A
-load validates schema, revision, generation, digest, writer, and receipt refs;
-invalid or partial state never becomes an implicit shadow or native default.
+The OpenAgents service stores the public-safe ledger through an atomic
+temporary-file replacement with restrictive permissions. Omega vendors the
+digest-bound generated Rust contract, negotiates both methods, validates every
+request/result, and rejects any receipt with a nonzero GitHub-write count. The
+former Omega-local state machine is removed; Omega is now a client, not a
+second cutover authority.
 
 This state machine does not activate the cutover and is not yet the complete
 OAW-020 journey. Activation remains blocked until all issue dependencies close,

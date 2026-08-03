@@ -32,8 +32,9 @@ use crate::all_work::generated::{
     RepositoryClaimExecuteResult, RepositoryClaimReadRequest, RepositoryClaimReadResult,
     SignedWorkroomDeliveryRequest, SignedWorkroomDeliveryResult, SignedWorkroomEnqueueRequest,
     SignedWorkroomEnqueueResult, SignedWorkroomReadRequest, SignedWorkroomReadResult,
-    WorkCommandExecuteRequest, WorkCommandExecuteResult, WorkIndexReadRequest, WorkIndexReadResult,
-    WorkSnapshotReadRequest, WorkSnapshotReadResult,
+    WorkCommandExecuteRequest, WorkCommandExecuteResult, WorkCutoverExecuteRequest,
+    WorkCutoverExecuteResult, WorkCutoverReadRequest, WorkCutoverReadResult, WorkIndexReadRequest,
+    WorkIndexReadResult, WorkSnapshotReadRequest, WorkSnapshotReadResult,
 };
 use crate::protocol::{
     HealthResult, HostMethod, HostRequestFrame, HostResponseError, HostResponseErrorCode,
@@ -153,6 +154,8 @@ impl OmegaEffectdSupervisor {
                 AllWorkProtocolCapability::WorkroomActivityEnqueue,
                 AllWorkProtocolCapability::WorkroomActivityDeliver,
                 AllWorkProtocolCapability::WorkCommandExecute,
+                AllWorkProtocolCapability::WorkCutoverRead,
+                AllWorkProtocolCapability::WorkCutoverExecute,
             ],
         };
         all_work
@@ -378,6 +381,55 @@ impl OmegaEffectdSupervisor {
         if result.receipt.github_write_count.0 != 0 {
             return Err(SupervisorError::Anyhow(anyhow!(
                 "Work command receipt reported a GitHub write"
+            )));
+        }
+        Ok(result)
+    }
+
+    pub async fn read_work_cutover(
+        &mut self,
+        params: WorkCutoverReadRequest,
+    ) -> Result<WorkCutoverReadResult, SupervisorError> {
+        params
+            .validate()
+            .map_err(|error| SupervisorError::Anyhow(error.into()))?;
+        let result = self
+            .request(
+                "work.cutover.read",
+                Some(serde_json::to_value(params).context("encode Work cutover read")?),
+                self.generation(),
+            )
+            .await?;
+        let result: WorkCutoverReadResult =
+            serde_json::from_value(result).context("decode Work cutover read")?;
+        result
+            .validate()
+            .map_err(|error| SupervisorError::Anyhow(error.into()))?;
+        Ok(result)
+    }
+
+    pub async fn execute_work_cutover(
+        &mut self,
+        params: WorkCutoverExecuteRequest,
+    ) -> Result<WorkCutoverExecuteResult, SupervisorError> {
+        params
+            .validate()
+            .map_err(|error| SupervisorError::Anyhow(error.into()))?;
+        let result = self
+            .request(
+                "work.cutover.execute",
+                Some(serde_json::to_value(params).context("encode Work cutover command")?),
+                self.generation(),
+            )
+            .await?;
+        let result: WorkCutoverExecuteResult =
+            serde_json::from_value(result).context("decode Work cutover command")?;
+        result
+            .validate()
+            .map_err(|error| SupervisorError::Anyhow(error.into()))?;
+        if result.receipt.github_write_count.0 != 0 {
+            return Err(SupervisorError::Anyhow(anyhow!(
+                "Work cutover receipt reported a GitHub write"
             )));
         }
         Ok(result)
@@ -928,6 +980,8 @@ impl OmegaEffectdSupervisor {
                             | "workroom.activity.enqueue"
                             | "workroom.activity.deliver"
                             | "work.command.execute"
+                            | "work.cutover.read"
+                            | "work.cutover.execute"
                     ) {
                         MAX_ALL_WORK_GRAPH_RESPONSE_BYTES
                     } else {

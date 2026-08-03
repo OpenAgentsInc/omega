@@ -37,9 +37,25 @@ const supportedAllWorkCapabilities = [
   "repository.claim.execute",
   "workroom.activity.read",
   "workroom.activity.enqueue",
+  "workroom.activity.deliver",
   "work.command.execute",
+  "work.cutover.read",
+  "work.cutover.execute",
 ]
 let allWorkCapabilities = []
+let workCutoverState = {
+  contractVersion: "openagents.all_work_boundary.v1",
+  organizationRef: "organization:openagents",
+  authorizedPrincipalRefs: ["principal:omega:local-owner"],
+  revision: 1,
+  generation: 1,
+  writer: "legacy_github",
+  sourceDigest: "a".repeat(64),
+  sourceCursor: "cursor:planning:1",
+  nativeHighWatermark: null,
+  activationReceiptRef: null,
+  rollbackReceiptRef: null,
+}
 let claimLedger = {
   contractVersion: "openagents.all_work_boundary.v1",
   revision: 0,
@@ -788,6 +804,56 @@ for await (const line of rl) {
         organizationRef: input.organizationRef,
         acceptedAt: input.occurredAt,
         outcome: { admitted: true, eventRef, effectRef: null, refusalReason: null },
+        githubWriteCount: 0,
+      },
+    })
+    continue
+  }
+  if (request.method === "work.cutover.read") {
+    if (!allWorkCapabilities.includes("work.cutover.read")) {
+      respond(request.id, generation, false, undefined, {
+        code: "incompatible_version",
+        message: "work.cutover.read was not negotiated.",
+      })
+      continue
+    }
+    respond(request.id, generation, true, { state: workCutoverState })
+    continue
+  }
+  if (request.method === "work.cutover.execute") {
+    if (!allWorkCapabilities.includes("work.cutover.execute")) {
+      respond(request.id, generation, false, undefined, {
+        code: "incompatible_version",
+        message: "work.cutover.execute was not negotiated.",
+      })
+      continue
+    }
+    const input = request.params
+    const previousRevision = workCutoverState.revision
+    const command = input.command
+    if (command.command === "activate_native") {
+      workCutoverState = {
+        ...workCutoverState,
+        revision: previousRevision + 1,
+        generation: workCutoverState.generation + 1,
+        writer: "native_omega",
+        nativeHighWatermark: command.reconciledCursor,
+        activationReceiptRef: command.receiptRef,
+        rollbackReceiptRef: null,
+      }
+    }
+    respond(request.id, generation, true, {
+      state: workCutoverState,
+      receipt: {
+        intentRef: input.intentRef,
+        idempotencyKey: input.idempotencyKey,
+        commandDigest: "b".repeat(64),
+        previousRevision,
+        revision: workCutoverState.revision,
+        generation: workCutoverState.generation,
+        writer: workCutoverState.writer,
+        effectivePrincipalRef: input.effectivePrincipalRef,
+        acceptedAt: input.occurredAt,
         githubWriteCount: 0,
       },
     })

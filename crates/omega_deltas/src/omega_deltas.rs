@@ -28383,12 +28383,15 @@ mod tests {
     /// generation-fenced transition with a receipt and a history-safe rollback.
     #[test]
     fn omega_work_cutover_cannot_self_activate_or_drop_native_history() {
-        let cutover = without_comments(&read_repository_file(
-            "crates/omega_effectd/src/work_cutover.rs",
+        let contract = without_comments(&read_repository_file(
+            "crates/omega_effectd/all-work-contract/generated/rust/all_work_v1.rs",
+        ));
+        let supervisor = without_comments(&read_repository_file(
+            "crates/omega_effectd/src/supervisor.rs",
         ));
         for required in [
-            "WorkWriter::LegacyGithub",
-            "WorkWriter::NativeOmega",
+            "LegacyGithub",
+            "NativeOmega",
             "expected_revision",
             "expected_generation",
             "github_write_count",
@@ -28397,23 +28400,24 @@ mod tests {
             "RecordNativeWrite",
             "native_high_watermark",
             "RollbackLegacy",
-            "NativeHistoryGap",
-            "SourceChanged",
-            "pub fn store",
-            "pub fn load",
-            "from_mode(0o700)",
-            "from_mode(0o600)",
-            "file.sync_all()",
         ] {
             assert!(
-                cutover.contains(required),
+                contract.contains(required),
                 "OMEGA-DELTA-0236: Work cutover authority lost `{required}`"
             );
         }
-        assert!(
-            !cutover.contains("impl Default for WorkCutoverLedger"),
-            "OMEGA-DELTA-0236: Work cutover gained an implicit default activation state"
-        );
+        for required in [
+            "read_work_cutover",
+            "execute_work_cutover",
+            "work.cutover.read",
+            "work.cutover.execute",
+            "Work cutover receipt reported a GitHub write",
+        ] {
+            assert!(
+                supervisor.contains(required),
+                "OMEGA-DELTA-0236: generated Work cutover client lost `{required}`"
+            );
+        }
     }
 
     /// OMEGA-DELTA-0237. Packet C Agent Session scenes are deterministic,
