@@ -28578,4 +28578,31 @@ mod tests {
             );
         }
     }
+
+    /// OAW-008. Local named Views remain one bounded configuration layer over
+    /// the shared planning query; they do not fork identity or renderer state.
+    #[test]
+    fn named_planning_views_share_one_query_plane_and_migrate_the_single_slot() {
+        let surface = without_comments(&read_repository_file(
+            "crates/agent_ui/src/omega_dogfood_surface.rs",
+        ));
+        for required in [
+            "MAX_USER_SAVED_VIEWS",
+            "NamedSavedPlanningView",
+            "NamedSavedPlanningViews",
+            "view:omega-local:1",
+            "current_saved_planning_query",
+            "project_planning_view",
+            "planning-create-user-view",
+            "planning-update-user-view",
+            "planning-rename-user-view",
+            "planning-remove-user-view",
+            "View names must be 1–48 public-safe characters.",
+        ] {
+            assert!(
+                surface.contains(required),
+                "OAW-008: named planning View boundary lost `{required}`"
+            );
+        }
+    }
 }

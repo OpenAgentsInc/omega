@@ -18760,7 +18760,7 @@ impl AgentPanel {
         let surface = if let Some(surface) = self.dogfood_surface.as_ref() {
             surface.clone()
         } else {
-            let surface = cx.new(|cx| DogfoodSurface::new(fixture, cx));
+            let surface = cx.new(|cx| DogfoodSurface::new(fixture, window, cx));
             self._dogfood_surface_subscription = Some(cx.subscribe_in(
                 &surface,
                 window,

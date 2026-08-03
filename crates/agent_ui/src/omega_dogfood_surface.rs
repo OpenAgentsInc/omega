@@ -1,6 +1,7 @@
+use editor::{Editor, EditorElement, EditorStyle};
 use gpui::{
-    App, Context, EventEmitter, FocusHandle, Focusable, IntoElement, KeyContext, Render, Styled,
-    Window, prelude::*,
+    App, Context, Entity, EventEmitter, FocusHandle, Focusable, IntoElement, KeyContext, Render,
+    Styled, TextStyle, Window, prelude::*,
 };
 use omega_effectd::all_work_contract::{
     AgentRef, AgentSessionRef, HostRef, OrganizationRef, PrincipalRef, RepositoryClaimLedger,
@@ -17,12 +18,15 @@ use omega_work_index::{
     github_work_ref, project_planning_view,
 };
 use serde::{Deserialize, Serialize};
+use settings::Settings as _;
+use theme_settings::ThemeSettings;
 use ui::{Button, ButtonSize, ButtonStyle, Color, Icon, IconName, Label, LabelSize, prelude::*};
 
 use crate::omega_agent_session_simulation::{AgentSessionSimulation, AgentSessionSimulationScene};
 use crate::omega_status_cue::{OmegaStatus, omega_status_cue};
 
 const DOGFOOD_SURFACE_STATE_KEY: &str = "omega_dogfood_surface_state_v1";
+const MAX_USER_SAVED_VIEWS: usize = 8;
 
 #[derive(Clone, Copy, Debug, Default, Deserialize, Eq, PartialEq, Serialize)]
 pub enum DogfoodScene {
@@ -154,7 +158,10 @@ pub struct DogfoodSurface {
     filter: PlanningFilter,
     group: PlanningGroup,
     sort: PlanningSort,
-    user_saved_view: EditableSavedPlanningView,
+    user_saved_views: NamedSavedPlanningViews,
+    view_name_editor: Entity<Editor>,
+    user_saved_view_error: Option<String>,
+    _view_name_subscription: gpui::Subscription,
 }
 
 #[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
@@ -166,38 +173,169 @@ struct SavedPlanningQuery {
     sort: PlanningSort,
 }
 
-#[derive(Clone, Debug, Default, Eq, PartialEq)]
-struct EditableSavedPlanningView {
-    query: Option<SavedPlanningQuery>,
-    active: bool,
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct NamedSavedPlanningView {
+    id: String,
+    name: String,
+    query: SavedPlanningQuery,
 }
 
-impl EditableSavedPlanningView {
-    fn from_persisted(query: Option<SavedPlanningQuery>, active: bool) -> Self {
+#[derive(Clone, Debug, Default, Eq, PartialEq)]
+struct NamedSavedPlanningViews {
+    views: Vec<NamedSavedPlanningView>,
+    selected_id: Option<String>,
+    active: bool,
+    next_sequence: u64,
+}
+
+impl NamedSavedPlanningViews {
+    fn from_persisted(
+        views: Vec<NamedSavedPlanningView>,
+        active_id: Option<String>,
+        selected_id: Option<String>,
+        selected_matches_query: bool,
+        next_sequence: u64,
+        legacy_query: Option<SavedPlanningQuery>,
+        legacy_active: bool,
+    ) -> Self {
+        let mut admitted = Vec::new();
+        for view in views.into_iter().take(MAX_USER_SAVED_VIEWS) {
+            if saved_view_name(&view.name).is_some()
+                && view.id.starts_with("view:omega-local:")
+                && !admitted.iter().any(|candidate: &NamedSavedPlanningView| {
+                    candidate.id == view.id || candidate.name.eq_ignore_ascii_case(&view.name)
+                })
+            {
+                admitted.push(view);
+            }
+        }
+        let had_legacy_query = legacy_query.is_some();
+        if admitted.is_empty()
+            && let Some(query) = legacy_query
+        {
+            admitted.push(NamedSavedPlanningView {
+                id: "view:omega-local:1".into(),
+                name: "My view".into(),
+                query,
+            });
+        }
+        let active_id = active_id
+            .filter(|id| admitted.iter().any(|view| &view.id == id))
+            .or_else(|| {
+                legacy_active
+                    .then(|| admitted.first().map(|view| view.id.clone()))
+                    .flatten()
+            });
+        let selected_id = selected_id
+            .filter(|id| admitted.iter().any(|view| &view.id == id))
+            .or_else(|| active_id.clone())
+            .or_else(|| had_legacy_query.then(|| admitted.first()?.id.clone()));
+        let observed_next_sequence = admitted
+            .iter()
+            .filter_map(|view| view.id.rsplit(':').next()?.parse::<u64>().ok())
+            .max()
+            .unwrap_or(0)
+            .saturating_add(1);
         Self {
-            active: active && query.is_some(),
-            query,
+            next_sequence: next_sequence.max(observed_next_sequence).max(1),
+            views: admitted,
+            active: active_id.is_some() || (selected_matches_query && selected_id.is_some()),
+            selected_id,
         }
     }
 
-    fn save(&mut self, query: SavedPlanningQuery) {
-        self.query = Some(query);
+    fn create(&mut self, name: &str, query: SavedPlanningQuery) -> Result<(), &'static str> {
+        if self.views.len() >= MAX_USER_SAVED_VIEWS {
+            return Err("At most eight local Views can be saved.");
+        }
+        let name =
+            saved_view_name(name).ok_or("View names must be 1–48 public-safe characters.")?;
+        if self
+            .views
+            .iter()
+            .any(|view| view.name.eq_ignore_ascii_case(&name))
+        {
+            return Err("A View with that name already exists.");
+        }
+        let id = format!("view:omega-local:{}", self.next_sequence.max(1));
+        self.next_sequence = self.next_sequence.max(1).saturating_add(1);
+        self.views.push(NamedSavedPlanningView {
+            id: id.clone(),
+            name,
+            query,
+        });
+        self.selected_id = Some(id);
         self.active = true;
+        Ok(())
     }
 
-    fn apply(&mut self) -> Option<SavedPlanningQuery> {
-        self.active = self.query.is_some();
-        self.query
+    fn apply(&mut self, id: &str) -> Option<SavedPlanningQuery> {
+        let query = self.views.iter().find(|view| view.id == id)?.query;
+        self.selected_id = Some(id.to_string());
+        self.active = true;
+        Some(query)
     }
 
     fn diverge(&mut self) {
         self.active = false;
     }
 
-    fn remove(&mut self) {
-        self.query = None;
-        self.active = false;
+    fn update_active(&mut self, query: SavedPlanningQuery) -> bool {
+        let Some(selected_id) = self.selected_id.as_deref() else {
+            return false;
+        };
+        let Some(view) = self.views.iter_mut().find(|view| view.id == selected_id) else {
+            return false;
+        };
+        view.query = query;
+        self.active = true;
+        true
     }
+
+    fn rename_active(&mut self, name: &str) -> Result<(), &'static str> {
+        let selected_id = self
+            .selected_id
+            .as_deref()
+            .ok_or("Select a local View before renaming it.")?;
+        let name =
+            saved_view_name(name).ok_or("View names must be 1–48 public-safe characters.")?;
+        if self
+            .views
+            .iter()
+            .any(|view| view.id != selected_id && view.name.eq_ignore_ascii_case(&name))
+        {
+            return Err("A View with that name already exists.");
+        }
+        let view = self
+            .views
+            .iter_mut()
+            .find(|view| view.id == selected_id)
+            .ok_or("The selected local View is unavailable.")?;
+        view.name = name;
+        Ok(())
+    }
+
+    fn remove_active(&mut self) -> bool {
+        let Some(selected_id) = self.selected_id.take() else {
+            return false;
+        };
+        let previous_len = self.views.len();
+        self.views.retain(|view| view.id != selected_id);
+        self.active = false;
+        self.views.len() != previous_len
+    }
+}
+
+fn saved_view_name(value: &str) -> Option<String> {
+    let value = value.trim();
+    let lower = value.to_ascii_lowercase();
+    (!value.is_empty()
+        && value.chars().count() <= 48
+        && !value.chars().any(char::is_control)
+        && !lower.contains("nsec1")
+        && !lower.contains("ncryptsec1"))
+    .then(|| value.to_string())
 }
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
@@ -218,10 +356,24 @@ struct PersistedDogfoodSurfaceState {
     user_saved_view: Option<SavedPlanningQuery>,
     #[serde(default)]
     user_saved_view_active: bool,
+    #[serde(default)]
+    user_saved_views: Vec<NamedSavedPlanningView>,
+    #[serde(default)]
+    active_user_saved_view_id: Option<String>,
+    #[serde(default)]
+    selected_user_saved_view_id: Option<String>,
+    #[serde(default)]
+    user_saved_view_matches_query: bool,
+    #[serde(default)]
+    next_user_saved_view_sequence: u64,
 }
 
 impl DogfoodSurface {
-    pub fn new(fixture: DogfoodPlanningViewModel, cx: &mut Context<Self>) -> Self {
+    pub fn new(
+        fixture: DogfoodPlanningViewModel,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> Self {
         let persisted = KeyValueStore::global(cx)
             .read_kvp(DOGFOOD_SURFACE_STATE_KEY)
             .ok()
@@ -229,6 +381,17 @@ impl DogfoodSurface {
             .and_then(|json| serde_json::from_str::<PersistedDogfoodSurfaceState>(&json).ok())
             .filter(|state| fixture_state_is_valid(&fixture, state));
         let state = persisted.unwrap_or_else(default_fixture_state);
+        let view_name_editor = cx.new(|cx| {
+            let mut editor = Editor::single_line(window, cx);
+            editor.set_placeholder_text("View name…", window, cx);
+            editor
+        });
+        let view_name_subscription = cx.subscribe(&view_name_editor, |this, _, event, cx| {
+            if matches!(event, editor::EditorEvent::Edited { .. }) {
+                this.user_saved_view_error = None;
+                cx.notify();
+            }
+        });
         Self {
             focus_handle: cx.focus_handle(),
             fixture,
@@ -252,10 +415,18 @@ impl DogfoodSurface {
             filter: state.filter,
             group: state.group,
             sort: state.sort,
-            user_saved_view: EditableSavedPlanningView::from_persisted(
+            user_saved_views: NamedSavedPlanningViews::from_persisted(
+                state.user_saved_views,
+                state.active_user_saved_view_id,
+                state.selected_user_saved_view_id,
+                state.user_saved_view_matches_query,
+                state.next_user_saved_view_sequence,
                 state.user_saved_view,
                 state.user_saved_view_active,
             ),
+            view_name_editor,
+            user_saved_view_error: None,
+            _view_name_subscription: view_name_subscription,
         }
     }
 
@@ -466,14 +637,14 @@ impl DogfoodSurface {
 
     fn set_filter(&mut self, filter: PlanningFilter, cx: &mut Context<Self>) {
         self.filter = filter;
-        self.user_saved_view.diverge();
+        self.user_saved_views.diverge();
         self.save_state(cx);
         cx.notify();
     }
 
     fn set_saved_view(&mut self, saved_view: PlanningSavedView, cx: &mut Context<Self>) {
         self.saved_view = saved_view;
-        self.user_saved_view.diverge();
+        self.user_saved_views.diverge();
         self.save_state(cx);
         cx.notify();
     }
@@ -485,7 +656,7 @@ impl DogfoodSurface {
             PlanningGroup::Project => PlanningGroup::Priority,
             PlanningGroup::Priority => PlanningGroup::Lifecycle,
         };
-        self.user_saved_view.diverge();
+        self.user_saved_views.diverge();
         self.save_state(cx);
         cx.notify();
     }
@@ -496,7 +667,7 @@ impl DogfoodSurface {
             PlanningSort::Priority => PlanningSort::Title,
             PlanningSort::Title => PlanningSort::SourceOrder,
         };
-        self.user_saved_view.diverge();
+        self.user_saved_views.diverge();
         self.save_state(cx);
         cx.notify();
     }
@@ -510,15 +681,20 @@ impl DogfoodSurface {
         }
     }
 
-    fn save_user_view(&mut self, cx: &mut Context<Self>) {
+    fn create_user_view(&mut self, cx: &mut Context<Self>) {
+        let name = self.view_name_editor.read(cx).text(cx);
         let query = self.current_saved_planning_query();
-        self.user_saved_view.save(query);
+        self.user_saved_view_error = self
+            .user_saved_views
+            .create(&name, query)
+            .err()
+            .map(str::to_string);
         self.save_state(cx);
         cx.notify();
     }
 
-    fn apply_user_view(&mut self, cx: &mut Context<Self>) {
-        let Some(query) = self.user_saved_view.apply() else {
+    fn apply_user_view(&mut self, id: &str, cx: &mut Context<Self>) {
+        let Some(query) = self.user_saved_views.apply(id) else {
             return;
         };
         self.saved_view = query.saved_view;
@@ -529,8 +705,34 @@ impl DogfoodSurface {
         cx.notify();
     }
 
+    fn update_user_view(&mut self, cx: &mut Context<Self>) {
+        let query = self.current_saved_planning_query();
+        if !self.user_saved_views.update_active(query) {
+            self.user_saved_view_error = Some("Select a local View before updating it.".into());
+        } else {
+            self.user_saved_view_error = None;
+        }
+        self.save_state(cx);
+        cx.notify();
+    }
+
+    fn rename_user_view(&mut self, cx: &mut Context<Self>) {
+        let name = self.view_name_editor.read(cx).text(cx);
+        self.user_saved_view_error = self
+            .user_saved_views
+            .rename_active(&name)
+            .err()
+            .map(str::to_string);
+        self.save_state(cx);
+        cx.notify();
+    }
+
     fn remove_user_view(&mut self, cx: &mut Context<Self>) {
-        self.user_saved_view.remove();
+        if !self.user_saved_views.remove_active() {
+            self.user_saved_view_error = Some("Select a local View before removing it.".into());
+        } else {
+            self.user_saved_view_error = None;
+        }
         self.save_state(cx);
         cx.notify();
     }
@@ -612,8 +814,17 @@ impl DogfoodSurface {
             filter: self.filter,
             group: self.group,
             sort: self.sort,
-            user_saved_view: self.user_saved_view.query,
-            user_saved_view_active: self.user_saved_view.active,
+            user_saved_view: None,
+            user_saved_view_active: false,
+            user_saved_views: self.user_saved_views.views.clone(),
+            active_user_saved_view_id: self
+                .user_saved_views
+                .active
+                .then(|| self.user_saved_views.selected_id.clone())
+                .flatten(),
+            selected_user_saved_view_id: self.user_saved_views.selected_id.clone(),
+            user_saved_view_matches_query: self.user_saved_views.active,
+            next_user_saved_view_sequence: self.user_saved_views.next_sequence,
         };
         let Ok(json) = serde_json::to_string(&state) else {
             return;
@@ -670,6 +881,29 @@ impl DogfoodSurface {
             .iter()
             .find(|project| project.id == self.project_id)
             .map_or("Unknown Project", |project| project.name.as_str())
+    }
+
+    fn render_view_name_input(&self, cx: &mut Context<Self>) -> impl IntoElement {
+        let settings = ThemeSettings::get_global(cx);
+        let text_style = TextStyle {
+            color: cx.theme().colors().text,
+            font_family: settings.ui_font.family.clone(),
+            font_features: settings.ui_font.features.clone(),
+            font_fallbacks: settings.ui_font.fallbacks.clone(),
+            font_size: rems(0.75).into(),
+            font_weight: settings.ui_font.weight,
+            line_height: relative(1.3),
+            ..Default::default()
+        };
+        div().w(px(150.)).child(EditorElement::new(
+            &self.view_name_editor,
+            EditorStyle {
+                background: cx.theme().colors().editor_background,
+                local_player: cx.theme().players().local(),
+                text: text_style,
+                ..Default::default()
+            },
+        ))
     }
 
     fn render_header(&self, cx: &mut Context<Self>) -> impl IntoElement {
@@ -809,42 +1043,56 @@ impl DogfoodSurface {
                             this.set_saved_view(saved_view, cx)
                         }))
                     }))
-                    .child(
-                        Button::new("planning-user-saved-view", "My view")
-                            .style(if self.user_saved_view.active {
+                    .children(self.user_saved_views.views.iter().map(|view| {
+                        let id = view.id.clone();
+                        Button::new(("planning-user-saved-view", view.id.clone()), view.name.clone())
+                            .style(if self.user_saved_views.active
+                                && self.user_saved_views.selected_id.as_deref() == Some(view.id.as_str()) {
                                 ButtonStyle::Filled
                             } else {
                                 ButtonStyle::Subtle
                             })
                             .size(ButtonSize::Compact)
-                            .aria_description(if self.user_saved_view.active {
-                                "Current user-saved Work view"
+                            .aria_description(if self.user_saved_views.active
+                                && self.user_saved_views.selected_id.as_deref() == Some(view.id.as_str()) {
+                                "Current local saved Work view"
                             } else {
-                                "Apply user-saved Work view"
+                                "Apply local saved Work view"
                             })
-                            .disabled(self.user_saved_view.query.is_none())
-                            .on_click(cx.listener(|this, _, _, cx| this.apply_user_view(cx))),
-                    )
+                            .on_click(cx.listener(move |this, _, _, cx| this.apply_user_view(&id, cx)))
+                    }))
+                    .child(self.render_view_name_input(cx))
                     .child(
-                        Button::new(
-                            "planning-save-user-view",
-                            if self.user_saved_view.query.is_some() {
-                                "Update"
-                            } else {
-                                "Save"
-                            },
-                        )
+                        Button::new("planning-create-user-view", "Save new")
                         .style(ButtonStyle::Subtle)
                         .size(ButtonSize::Compact)
-                        .on_click(cx.listener(|this, _, _, cx| this.save_user_view(cx))),
+                        .disabled(self.user_saved_views.views.len() >= MAX_USER_SAVED_VIEWS)
+                        .on_click(cx.listener(|this, _, _, cx| this.create_user_view(cx))),
+                    )
+                    .child(
+                        Button::new("planning-update-user-view", "Update")
+                            .style(ButtonStyle::Subtle)
+                            .size(ButtonSize::Compact)
+                            .disabled(self.user_saved_views.selected_id.is_none())
+                            .on_click(cx.listener(|this, _, _, cx| this.update_user_view(cx))),
+                    )
+                    .child(
+                        Button::new("planning-rename-user-view", "Rename")
+                            .style(ButtonStyle::Subtle)
+                            .size(ButtonSize::Compact)
+                            .disabled(self.user_saved_views.selected_id.is_none())
+                            .on_click(cx.listener(|this, _, _, cx| this.rename_user_view(cx))),
                     )
                     .child(
                         Button::new("planning-remove-user-view", "Remove")
                             .style(ButtonStyle::Subtle)
                             .size(ButtonSize::Compact)
-                            .disabled(self.user_saved_view.query.is_none())
+                            .disabled(self.user_saved_views.selected_id.is_none())
                             .on_click(cx.listener(|this, _, _, cx| this.remove_user_view(cx))),
-                    ),
+                    )
+                    .when_some(self.user_saved_view_error.as_ref(), |row, error| {
+                        row.child(Label::new(error.clone()).size(LabelSize::XSmall).color(Color::Error))
+                    }),
             )
             .child(
                 h_flex()
@@ -2490,8 +2738,10 @@ impl Render for DogfoodSurface {
             .gap_5()
             .role(gpui::Role::Main)
             .aria_label("Omega v0.2.0 development mock planning surface")
-            .on_key_down(cx.listener(|this, event: &gpui::KeyDownEvent, _, cx| {
-                if event.keystroke.modifiers.modified() {
+            .on_key_down(cx.listener(|this, event: &gpui::KeyDownEvent, window, cx| {
+                if event.keystroke.modifiers.modified()
+                    || this.view_name_editor.focus_handle(cx).is_focused(window)
+                {
                     return;
                 }
                 match event.keystroke.key.as_str() {
@@ -2544,6 +2794,11 @@ fn default_fixture_state() -> PersistedDogfoodSurfaceState {
         sort: PlanningSort::SourceOrder,
         user_saved_view: None,
         user_saved_view_active: false,
+        user_saved_views: Vec::new(),
+        active_user_saved_view_id: None,
+        selected_user_saved_view_id: None,
+        user_saved_view_matches_query: false,
+        next_user_saved_view_sequence: 1,
     }
 }
 
@@ -2761,6 +3016,11 @@ mod tests {
                 sort: PlanningSort::Priority,
                 user_saved_view: None,
                 user_saved_view_active: false,
+                user_saved_views: Vec::new(),
+                active_user_saved_view_id: None,
+                selected_user_saved_view_id: None,
+                user_saved_view_matches_query: false,
+                next_user_saved_view_sequence: 1,
             };
             assert!(fixture_state_is_valid(&fixture, &state));
         }
@@ -2774,6 +3034,11 @@ mod tests {
             sort: PlanningSort::SourceOrder,
             user_saved_view: None,
             user_saved_view_active: false,
+            user_saved_views: Vec::new(),
+            active_user_saved_view_id: None,
+            selected_user_saved_view_id: None,
+            user_saved_view_matches_query: false,
+            next_user_saved_view_sequence: 1,
         };
         assert!(!fixture_state_is_valid(&fixture, &invalid));
     }
@@ -2795,7 +3060,7 @@ mod tests {
     }
 
     #[test]
-    fn editable_saved_view_captures_reapplies_updates_and_removes_one_exact_query() {
+    fn named_saved_views_create_apply_update_rename_remove_and_stay_bounded() {
         let initial = SavedPlanningQuery {
             saved_view: PlanningSavedView::CriticalPath,
             filter: PlanningFilter::Open,
@@ -2808,20 +3073,50 @@ mod tests {
             group: PlanningGroup::Priority,
             sort: PlanningSort::Title,
         };
-        let mut editable = EditableSavedPlanningView::default();
+        let mut views = NamedSavedPlanningViews::default();
 
-        editable.save(initial);
-        assert_eq!(editable.apply(), Some(initial));
-        assert!(editable.active);
+        views.create("Critical now", initial).expect("first View");
+        let first_id = views.selected_id.clone().expect("selected View");
+        views.create("Blocked later", updated).expect("second View");
+        assert_eq!(views.views.len(), 2);
+        assert_eq!(views.apply(&first_id), Some(initial));
 
-        editable.diverge();
-        assert!(!editable.active);
-        editable.save(updated);
-        assert_eq!(editable.apply(), Some(updated));
+        views.diverge();
+        assert!(!views.active);
+        assert_eq!(views.selected_id.as_deref(), Some(first_id.as_str()));
+        assert_eq!(views.apply(&first_id), Some(initial));
+        assert!(views.update_active(updated));
+        views.rename_active("Critical reviewed").expect("rename");
+        assert_eq!(views.views[0].name, "Critical reviewed");
+        assert!(views.remove_active());
+        assert_eq!(views.views.len(), 1);
 
-        editable.remove();
-        assert_eq!(editable.apply(), None);
-        assert!(!editable.active);
+        assert!(views.create("nsec1-secret", initial).is_err());
+        assert!(views.create("Blocked later", initial).is_err());
+    }
+
+    #[test]
+    fn legacy_single_saved_view_migrates_to_one_stable_named_view() {
+        let query = SavedPlanningQuery {
+            saved_view: PlanningSavedView::CriticalPath,
+            filter: PlanningFilter::Open,
+            group: PlanningGroup::Milestone,
+            sort: PlanningSort::Priority,
+        };
+        let views = NamedSavedPlanningViews::from_persisted(
+            Vec::new(),
+            None,
+            None,
+            false,
+            0,
+            Some(query),
+            true,
+        );
+        assert_eq!(views.views.len(), 1);
+        assert_eq!(views.views[0].id, "view:omega-local:1");
+        assert_eq!(views.views[0].name, "My view");
+        assert_eq!(views.selected_id.as_deref(), Some("view:omega-local:1"));
+        assert!(views.active);
     }
 
     #[test]

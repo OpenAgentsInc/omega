@@ -40,10 +40,15 @@ The v0.2.0 dogfood Project exposes Overview, List, Board, Table, Timeline,
 Roadmap, Issue, Session, and Review scenes behind the existing debug/mock gate.
 List and Board now use the same reducer as the three added views. Saved View,
 filter, group, and sort controls update one persisted query state. Older saved
-state defaults to All Work. The inline My view slot captures that exact typed
-Saved View, filter, group, and sort tuple. It can reapply, update, or remove the
-tuple without introducing a renderer-owned copy. Changing any shared control
-makes the slot inactive until it is reapplied or updated. Table provides a
+state defaults to All Work. The local View editor stores up to eight ordered,
+stable-ID, user-named queries. Each captures that exact typed Saved View,
+filter, group, and sort tuple and can be selected, updated, renamed, or removed
+without introducing a renderer-owned copy. Names are trimmed, bounded,
+duplicate-free, control-free, and reject private-key-shaped text. Changing any
+shared control clears the active View until a saved query is reapplied or
+updated. The former single **My view** record migrates to
+`view:omega-local:1` without losing its query. These Views are owner-local;
+their existence does not claim Organization sharing or Sync. Table provides a
 dense keyboard-addressable field view. Timeline shows grouped Work tracks with
 non-text completion and blocker cues. Roadmap shows group progress without
 turning a portfolio Project or milestone into the root Work object.
@@ -57,9 +62,9 @@ the planning views remain read-only.
 ## Scope boundary
 
 This is a substantive OAW-008 slice, not its close proof. Production portfolio
-navigation remains absent. Native Organization switching, multiple named and
-shared saved Views, real attention-state inputs, Inbox/triage interaction, bulk
-actions, inline mutations, drag/drop Intent admission, large-dataset
-performance, installed accessibility, and complete two-domain workflows remain
-required before omega#215 can close. Test execution is deferred to the single
-final omega#208 build gate by owner direction.
+navigation remains absent. Native Organization switching, Organization-shared
+Views, real attention-state inputs, Inbox/triage interaction, bulk actions,
+inline mutations, drag/drop Intent admission, large-dataset performance,
+installed accessibility, and complete two-domain workflows remain required
+before omega#215 can close. Test execution is deferred to the single final
+omega#208 build gate by owner direction.
