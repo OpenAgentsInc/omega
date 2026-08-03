@@ -877,6 +877,14 @@ mod tests {
                 snapshot.snapshot.run_refs.first().expect("one Run ref").0,
                 "run:fixture:1"
             );
+            let planning = supervisor
+                .read_planning_graph(all_work_contract::PlanningGraphReadRequest {
+                    after_revision: None,
+                })
+                .await
+                .expect("typed planning graph read");
+            assert_eq!(planning.graph.revision.0, 1);
+            assert_eq!(planning.graph.graph_ref.0, "planning-graph:fixture");
             supervisor.stop().await.expect("stop");
         });
     }
@@ -927,6 +935,25 @@ mod tests {
                 .await
                 .expect("typed Work Index read from OpenAgents process");
             assert!(index.items.is_empty());
+            let planning = supervisor
+                .read_planning_graph(all_work_contract::PlanningGraphReadRequest {
+                    after_revision: None,
+                })
+                .await
+                .expect("typed planning graph read from OpenAgents process");
+            assert_eq!(planning.graph.work.len(), 28);
+            assert_eq!(planning.graph.source_coordinates.len(), 28);
+            assert_eq!(
+                planning
+                    .graph
+                    .work
+                    .iter()
+                    .filter(|work| {
+                        work.summary.state == all_work_contract::WorkState::Completed
+                    })
+                    .count(),
+                6
+            );
             supervisor.stop().await.expect("stop OpenAgents process");
         });
     }

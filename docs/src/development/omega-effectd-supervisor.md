@@ -20,7 +20,7 @@ GPUI is not run authority.
 | Version | `0.1.0` |
 | Pack SHA-256 | `4cc1cb2e5d71ff8af6f730248871ee779488a991f21a848880e885331ef31831` |
 | Protocol | `openagents.omega.effectd.v1` |
-| All Work profile | generated `omega-effectd.v2` Work Index and snapshot reads |
+| All Work profile | generated `omega-effectd.v2` Work Index, snapshot, and planning graph reads |
 | Omega crate | `crates/omega_effectd` |
 | Runtime release | `omega-effectd-v0.1.0-rc.8` |
 | macOS arm64 archive SHA-256 | `01d11597b054d009296d0381b6cd6ed3d31c83b93e75a58845f2ae47bf33226a` |
@@ -39,7 +39,9 @@ GPUI is not run authority.
   development runs.
 - A missing component fails closed. Production never searches a sibling
   OpenAgents checkout and never substitutes the test fixture.
-- Request, response, and reverse-host frames are limited to 64 KiB. A
+- Request and reverse-host frames, and ordinary response frames, are limited to
+  64 KiB. The generated `planning.graph.read` response alone has a 2 MiB bound;
+  host frames observed while waiting for it retain the 64 KiB bound. A
   malformed, oversized, timed-out, or prematurely closed response tears down
   the child before a later request may restart it.
 - While awaiting a service response, the supervisor multiplexes typed

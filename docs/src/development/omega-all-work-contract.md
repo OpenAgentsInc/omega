@@ -1,17 +1,18 @@
 # Omega All Work contract
 
-Omega reads Work through the generated OpenAgents boundary. The first adapter
-shows durable Full Auto runs as redacted Work summaries and snapshots. It does
-not create a second writable store.
+Omega reads Work through the generated OpenAgents boundary. The Full Auto
+adapter shows durable runs as redacted Work summaries and snapshots. The
+planning adapter reads the persistent OpenAgents planning authority. Neither
+adapter creates a second writable store.
 
 ## Immutable source
 
 | Field                 | Value                                                              |
 | --------------------- | ------------------------------------------------------------------ |
-| OpenAgents commit     | `1ea08b1429cbd888875fef195f9b94bef666e70e`                         |
+| OpenAgents commit     | `f169754d09f3c56532c7f11660ed3de007c7c612`                         |
 | Contract              | `openagents.all_work_boundary.v1`                                  |
-| Definition SHA-256    | `f40c1d09b12103f0247a6354e020ed7322415c8b228e45a8fd3f8d7ccd3294f8` |
-| Rust artifact SHA-256 | `298aa826cb7bdf182742251d53c9ab6a436ba8e386fd292a22701a7dec40cefb` |
+| Definition SHA-256    | `f41f9e8b44f95936694c74799027fa78b9e35ffe102a1a85e4b86027bb15748b` |
+| Rust artifact SHA-256 | `da18308417540bbac93124ebf15dda7bb192649afc2460fa591f592d3945ab14` |
 | Omega receipt         | `crates/omega_effectd/all-work-contract/SOURCE.json`               |
 
 The generated Rust file, compatibility manifest, and shared fixtures are
@@ -26,11 +27,14 @@ clients continue to initialize. Its initialization payload negotiates a
 separate All Work profile:
 
 - an omitted All Work request selects `omega-effectd.v1` with no Work methods;
-- `omega-effectd.v2` enables `work.index.read` and `work.snapshot.read`;
-- a v1 client that calls either Work method receives
+- `omega-effectd.v2` enables `work.index.read`, `work.snapshot.read`, and
+  `planning.graph.read`;
+- a v1 client that calls any All Work read method receives
   `incompatible_version`;
 - request and result domain payloads use generated Rust and Effect types;
-- objective and done-condition text do not enter the Work Index.
+- objective and done-condition text do not enter the Work Index;
+- the planning graph retains its OpenAgents revision, event cursor,
+  reconciliation digest, source coordinates, completeness, and loss facts.
 
 The Effect adapter reads the Full Auto registry. That registry remains the
 writable authority. Omega combines its generated summaries with separate
@@ -38,6 +42,12 @@ read-only native adapters for Threads and Forensics. Each adapter retains its
 own source authority and cursor. The qualified rows feed
 [Omega Work Index](./omega-work-index.md); they do not create a second writable
 store.
+
+The planning authority is Effect-owned state beneath the injected application
+data root. Its initial bounded GitHub reconciliation contains 22 open and six
+closed Work rows. GitHub remains an imported read-only source. A successful
+read does not grant command, claim, delegation, verification, release, or
+owner-disposition authority. Release Planning Records remain planning metadata.
 
 ## Verify
 
@@ -57,4 +67,5 @@ against its TypeScript binary. The Omega test uses the Rust supervisor and a
 newline-framed child process to verify negotiation, Work Index decoding, and
 Work snapshot decoding. The ignored cross-repository smoke starts that actual
 OpenAgents TypeScript process through the Omega Rust supervisor; it requires
-the immutable source checkout named above.
+the immutable source checkout named above and also verifies all 28 planning
+rows through the generated `PlanningGraphReadResult`.

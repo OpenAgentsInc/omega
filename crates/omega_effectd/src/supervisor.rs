@@ -25,7 +25,8 @@ use util::process::Child;
 use util::redact::redact_command;
 
 use crate::all_work::generated::{
-    ContractValidate, ProtocolCapability as AllWorkProtocolCapability,
+    ContractValidate, PlanningGraphReadRequest, PlanningGraphReadResult,
+    ProtocolCapability as AllWorkProtocolCapability,
     ProtocolInitializeRequest as AllWorkProtocolInitializeRequest,
     ProtocolVersion as AllWorkProtocolVersion, WorkIndexReadRequest, WorkIndexReadResult,
     WorkSnapshotReadRequest, WorkSnapshotReadResult,
@@ -37,6 +38,7 @@ use crate::protocol::{
 };
 
 pub use crate::protocol::MAX_FRAME_BYTES;
+const MAX_PLANNING_GRAPH_RESPONSE_BYTES: usize = 2 * 1024 * 1024;
 const SHUTDOWN_GRACE_PERIOD: Duration = Duration::from_secs(2);
 const AGENT_COMPUTER_TURN_TIMEOUT: Duration = Duration::from_secs(180);
 const DEFAULT_REQUEST_TIMEOUT: Duration = Duration::from_secs(180);
@@ -140,6 +142,7 @@ impl OmegaEffectdSupervisor {
             requested_capabilities: vec![
                 AllWorkProtocolCapability::WorkIndexRead,
                 AllWorkProtocolCapability::WorkSnapshotRead,
+                AllWorkProtocolCapability::PlanningGraphRead,
             ],
         };
         all_work
@@ -205,6 +208,28 @@ impl OmegaEffectdSupervisor {
             .await?;
         let result: WorkSnapshotReadResult =
             serde_json::from_value(result).context("decode Work snapshot result")?;
+        result
+            .validate()
+            .map_err(|error| SupervisorError::Anyhow(error.into()))?;
+        Ok(result)
+    }
+
+    pub async fn read_planning_graph(
+        &mut self,
+        params: PlanningGraphReadRequest,
+    ) -> Result<PlanningGraphReadResult, SupervisorError> {
+        params
+            .validate()
+            .map_err(|error| SupervisorError::Anyhow(error.into()))?;
+        let result = self
+            .request(
+                "planning.graph.read",
+                Some(serde_json::to_value(params).context("encode planning graph request")?),
+                self.generation(),
+            )
+            .await?;
+        let result: PlanningGraphReadResult =
+            serde_json::from_value(result).context("decode planning graph result")?;
         result
             .validate()
             .map_err(|error| SupervisorError::Anyhow(error.into()))?;
@@ -747,10 +772,16 @@ impl OmegaEffectdSupervisor {
         let response_result = smol::future::or(
             async {
                 loop {
+                    let response_limit = if method == "planning.graph.read" {
+                        MAX_PLANNING_GRAPH_RESPONSE_BYTES
+                    } else {
+                        MAX_FRAME_BYTES
+                    };
                     let line = read_bounded_line(
                         self.stdout
                             .as_mut()
                             .ok_or_else(|| anyhow!("omega-effectd stdout missing"))?,
+                        response_limit,
                     )
                     .await?
                     .ok_or_else(|| anyhow!("omega-effectd closed stdout"))?;
@@ -758,6 +789,9 @@ impl OmegaEffectdSupervisor {
                         .context("decode omega-effectd protocol frame")?;
                     match frame.get("kind").and_then(Value::as_str) {
                         Some("host_request") => {
+                            if line.len() > MAX_FRAME_BYTES {
+                                bail!("omega-effectd host request frame exceeds {MAX_FRAME_BYTES} bytes");
+                            }
                             let request: HostRequestFrame = serde_json::from_value(frame)
                                 .context("decode omega-effectd host request")?;
                             self.respond_to_host_request(request, generation).await?;
@@ -929,6 +963,7 @@ fn truncate_utf8(message: &str, max_bytes: usize) -> String {
 
 async fn read_bounded_line(
     reader: &mut BufReader<smol::process::ChildStdout>,
+    max_bytes: usize,
 ) -> Result<Option<String>> {
     let mut frame = Vec::new();
     loop {
@@ -949,8 +984,8 @@ async fn read_bounded_line(
             } else {
                 consumed
             };
-            if frame.len() + payload_length > MAX_FRAME_BYTES {
-                bail!("omega-effectd response frame exceeds {MAX_FRAME_BYTES} bytes");
+            if frame.len() + payload_length > max_bytes {
+                bail!("omega-effectd response frame exceeds {max_bytes} bytes");
             }
             frame.extend_from_slice(&available[..payload_length]);
             (consumed, payload_length < consumed)

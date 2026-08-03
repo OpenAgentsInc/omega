@@ -425,16 +425,16 @@ for await (const line of rl) {
         "sarah_send_message",
         "sarah_interrupt_turn",
         ...(allWorkVersion === "omega-effectd.v2"
-          ? ["work.index.read", "work.snapshot.read"]
+          ? ["work.index.read", "work.snapshot.read", "planning.graph.read"]
           : []),
       ],
       allWork: {
         selectedVersion: allWorkVersion,
         contractRef: "openagents.all_work_boundary.v1",
-        contractDigest: "f40c1d09b12103f0247a6354e020ed7322415c8b228e45a8fd3f8d7ccd3294f8",
+        contractDigest: "f41f9e8b44f95936694c74799027fa78b9e35ffe102a1a85e4b86027bb15748b",
         capabilities:
           allWorkVersion === "omega-effectd.v2"
-            ? ["work.index.read", "work.snapshot.read"]
+            ? ["work.index.read", "work.snapshot.read", "planning.graph.read"]
             : [],
       },
       dataRoot,
@@ -449,7 +449,11 @@ for await (const line of rl) {
     })
     continue
   }
-  if (request.method === "work.index.read" || request.method === "work.snapshot.read") {
+  if (
+    request.method === "work.index.read" ||
+    request.method === "work.snapshot.read" ||
+    request.method === "planning.graph.read"
+  ) {
     if (allWorkVersion !== "omega-effectd.v2") {
       respond(request.id, generation, false, undefined, {
         code: "incompatible_version",
@@ -463,6 +467,30 @@ for await (const line of rl) {
         nextCursor: null,
         completeness: { state: "complete", cursor: null, gapRefs: [] },
         generatedAt: "2026-08-02T12:00:01Z",
+      })
+      continue
+    }
+    if (request.method === "planning.graph.read") {
+      respond(request.id, generation, true, {
+        graph: {
+          contractVersion: "openagents.all_work_boundary.v1",
+          graphRef: "planning-graph:fixture",
+          revision: 1,
+          eventCursor: "cursor:planning:1",
+          reconciliationDigest:
+            "f41f9e8b44f95936694c74799027fa78b9e35ffe102a1a85e4b86027bb15748b",
+          generatedAt: "2026-08-03T05:00:00Z",
+          resources: [],
+          work: [],
+          planningLinks: [],
+          labelLinks: [],
+          textRecords: [],
+          releaseScopeLinks: [],
+          sourceCoordinates: [],
+          projectionIssues: [],
+          completeness: { state: "complete", cursor: "cursor:planning:1", gapRefs: [] },
+          freshness: { state: "fresh", observedAt: "2026-08-03T05:00:00Z" },
+        },
       })
       continue
     }
