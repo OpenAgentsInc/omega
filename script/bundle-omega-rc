@@ -28,12 +28,12 @@ readonly OMEGA_SOURCE_VERIFIER_PATH="script/verify-omega-identity"
 readonly OMEGA_IDENTITY_BOUNDARY_LIST="BUZZ_PRIVATE_KEY,identity.key,get_nsec"
 readonly OMEGA_BRAND_VERIFIER_PATH="script/verify-omega-brand"
 readonly OMEGA_BRAND_POLICY_PATH="script/omega-brand-gate.json"
-readonly OMEGA_EFFECTD_RELEASE_TAG="omega-effectd-v0.1.0-rc.10"
+readonly OMEGA_EFFECTD_RELEASE_TAG="omega-effectd-v0.1.0-rc.12"
 readonly OMEGA_EFFECTD_ASSET_NAME="omega-effectd-v0.1.0-macos-arm64.tar.gz"
-readonly OMEGA_EFFECTD_ASSET_SHA256="e3ab92ffe0baa0cb3082ea4bc83720d1677b633f3f0725b7c7571930ae19f7ac"
-readonly OMEGA_EFFECTD_MANIFEST_ASSET_SHA256="d797f749f57d2ab88cdad74f5ff81e882bc6052951a026c028a84fb7b022b5eb"
-readonly OMEGA_EFFECTD_SOURCE_COMMIT="e3280b4795efe189474e12b4c6cd06123cfda359"
-readonly OMEGA_EFFECTD_SOURCE_TREE="af28ecd0a57523640a96b6f3ed7411f07a7da228"
+readonly OMEGA_EFFECTD_ASSET_SHA256="7b4b34501aa9b53755413188ab67166fe7309ef9d12b59777bbd3644c21f1fdd"
+readonly OMEGA_EFFECTD_MANIFEST_ASSET_SHA256="8f2760ba3a127b9141da747fd0015df96999aca573c0f6f454bc50b714f29f32"
+readonly OMEGA_EFFECTD_SOURCE_COMMIT="43c090a191e779a97f0abe9cf7f14d9ff8317e91"
+readonly OMEGA_EFFECTD_SOURCE_TREE="d77915cfe228a3b85d8241c03b8b2cba56579e0d"
 readonly OMEGA_EFFECTD_DOWNLOAD_URL="https://github.com/OpenAgentsInc/openagents/releases/download/${OMEGA_EFFECTD_RELEASE_TAG}/${OMEGA_EFFECTD_ASSET_NAME}"
 
 DRY_RUN=false
@@ -244,6 +244,7 @@ expected_files = {
     "omega-effectd/bin/omega-effectd",
     "omega-effectd/component-manifest.json",
     "omega-effectd/dist/omega-effectd.mjs",
+    "omega-effectd/dist/omega-effectd.mjs.LEGAL.txt",
     "omega-effectd/licenses/Node-LICENSE.txt",
     "omega-effectd/licenses/OpenAgents-Apache-2.0.txt",
     "omega-effectd/licenses/THIRD_PARTY_LICENSES.txt",
@@ -614,12 +615,12 @@ expected_effectd = {
     "service_version": "0.1.0",
     "protocol": "openagents.omega.effectd.v1",
     "platform": "darwin-arm64",
-    "release_tag": "omega-effectd-v0.1.0-rc.10",
+    "release_tag": "omega-effectd-v0.1.0-rc.12",
     "asset_name": "omega-effectd-v0.1.0-macos-arm64.tar.gz",
-    "archive_sha256": "e3ab92ffe0baa0cb3082ea4bc83720d1677b633f3f0725b7c7571930ae19f7ac",
-    "manifest_sha256": "d797f749f57d2ab88cdad74f5ff81e882bc6052951a026c028a84fb7b022b5eb",
-    "source_commit": "e3280b4795efe189474e12b4c6cd06123cfda359",
-    "source_tree": "af28ecd0a57523640a96b6f3ed7411f07a7da228",
+    "archive_sha256": "7b4b34501aa9b53755413188ab67166fe7309ef9d12b59777bbd3644c21f1fdd",
+    "manifest_sha256": "8f2760ba3a127b9141da747fd0015df96999aca573c0f6f454bc50b714f29f32",
+    "source_commit": "43c090a191e779a97f0abe9cf7f14d9ff8317e91",
+    "source_tree": "d77915cfe228a3b85d8241c03b8b2cba56579e0d",
 }
 for key, expected in expected_effectd.items():
     if effectd.get(key) != expected:
