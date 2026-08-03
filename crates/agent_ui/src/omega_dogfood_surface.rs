@@ -19,6 +19,7 @@ use serde::{Deserialize, Serialize};
 use ui::{Button, ButtonSize, ButtonStyle, Color, Icon, IconName, Label, LabelSize, prelude::*};
 
 use crate::omega_agent_session_simulation::{AgentSessionSimulation, AgentSessionSimulationScene};
+use crate::omega_status_cue::{OmegaStatus, omega_status_cue};
 
 const DOGFOOD_SURFACE_STATE_KEY: &str = "omega_dogfood_surface_state_v1";
 
@@ -990,26 +991,33 @@ impl DogfoodSurface {
                             .size(LabelSize::XSmall),
                     )
                     .child(
-                        Label::new(format!(
-                            "{} · cursor {} · {} gap(s) · {} projection issue(s) · no command or release authority",
-                            self.fixture.provenance_label(),
-                            self.fixture.event_cursor,
-                            self.fixture.refresh_gap_refs.len(),
-                            self.fixture.refresh_projection_issues.len()
-                        ))
-                            .size(LabelSize::XSmall)
-                            .color(if self.fixture.is_fresh_live() {
-                                Color::Success
-                            } else {
-                                Color::Warning
-                            }),
+                        h_flex()
+                            .gap_2()
+                            .child(omega_status_cue(
+                                "planning-provenance-status",
+                                if self.fixture.is_fresh_live() {
+                                    OmegaStatus::Ready
+                                } else {
+                                    OmegaStatus::Warning
+                                },
+                                "Planning source",
+                            ))
+                            .child(
+                                Label::new(format!(
+                                    "{} · {} gap(s) · {} issue(s)",
+                                    self.fixture.provenance_label(),
+                                    self.fixture.refresh_gap_refs.len(),
+                                    self.fixture.refresh_projection_issues.len()
+                                ))
+                                .size(LabelSize::XSmall),
+                            ),
                     )
                     .child(
                         Label::new(
                             self.fixture
                                 .last_error
                                 .clone()
-                                .unwrap_or_else(|| "No refresh loss reported".into()),
+                                .unwrap_or_else(|| "No projection loss".into()),
                         )
                         .size(LabelSize::XSmall)
                         .color(Color::Muted),
@@ -1055,7 +1063,12 @@ impl DogfoodSurface {
                             .on_click(cx.listener(move |this, _, _, cx| {
                                 this.select_issue(issue_id.clone(), true, cx)
                             }))
-                            .child(status_icon(issue.completed, blockers > 0))
+                            .child(work_status_cue(
+                                format!("work-list-status-{}", issue.id),
+                                &issue.identifier,
+                                issue.completed,
+                                blockers > 0,
+                            ))
                             .child(
                                 Label::new(issue.identifier.clone())
                                     .size(LabelSize::XSmall)
@@ -1070,7 +1083,7 @@ impl DogfoodSurface {
                             )
                             .when(blockers > 0, |row| {
                                 row.child(
-                                    Label::new(format!("Blocked · {blockers}"))
+                                    Label::new(format!("{blockers} blocker(s)"))
                                         .size(LabelSize::XSmall)
                                         .color(Color::Warning),
                                 )
@@ -1152,7 +1165,12 @@ impl DogfoodSurface {
                             .child(
                                 h_flex()
                                     .gap_2()
-                                    .child(status_icon(issue.completed, blocked))
+                                    .child(work_status_cue(
+                                        format!("work-board-status-{}", issue.id),
+                                        &issue.identifier,
+                                        issue.completed,
+                                        blocked,
+                                    ))
                                     .child(
                                         Label::new(issue.identifier.clone())
                                             .size(LabelSize::XSmall)
@@ -1220,7 +1238,17 @@ impl DogfoodSurface {
                             .w(px(84.))
                             .text_size(px(11.))
                             .text_color(colors.text_muted)
-                            .child(row.identifier),
+                            .child(
+                                h_flex()
+                                    .gap_1()
+                                    .child(work_status_cue(
+                                        format!("work-table-status-{}", row.issue_id),
+                                        &row.identifier,
+                                        row.completed,
+                                        row.blocked_by_count > 0,
+                                    ))
+                                    .child(row.identifier),
+                            ),
                     )
                     .child(div().min_w_0().flex_1().truncate().child(row.title))
                     .child(
@@ -1294,6 +1322,12 @@ impl DogfoodSurface {
                                 row.completed,
                             ))
                             .aria_selected(selected)
+                            .child(work_status_cue(
+                                format!("work-timeline-status-{}", row.issue_id),
+                                &row.identifier,
+                                row.completed,
+                                row.blocked_by_count > 0,
+                            ))
                             .on_click(cx.listener(move |this, _, _, cx| {
                                 this.select_issue(issue_id.clone(), true, cx)
                             }))
@@ -1319,7 +1353,7 @@ impl DogfoodSurface {
                             )
                             .child(
                                 Label::new(if row.blocked_by_count > 0 {
-                                    format!("Blocked · {} blocker(s)", row.blocked_by_count)
+                                    format!("{} blocker(s)", row.blocked_by_count)
                                 } else {
                                     lifecycle_label(row.lifecycle).into()
                                 })
@@ -1377,8 +1411,9 @@ impl DogfoodSurface {
                     .children(group_rows.into_iter().take(6).map(|row| {
                         let issue_id = row.issue_id.clone();
                         let selected = row.issue_id == self.selected_issue_id;
-                        div()
+                        h_flex()
                             .id(format!("roadmap-{}", row.issue_id))
+                            .gap_2()
                             .cursor_pointer()
                             .role(gpui::Role::Button)
                             .tab_index(0isize)
@@ -1391,20 +1426,21 @@ impl DogfoodSurface {
                                 row.completed,
                             ))
                             .aria_selected(selected)
-                            .text_size(px(11.))
-                            .text_color(if row.blocked_by_count > 0 {
-                                Color::Warning.color(cx)
-                            } else {
-                                Color::Muted.color(cx)
-                            })
                             .on_click(cx.listener(move |this, _, _, cx| {
                                 this.select_issue(issue_id.clone(), true, cx)
                             }))
-                            .child(if row.blocked_by_count > 0 {
-                                format!("Blocked · {} · {}", row.identifier, row.title)
-                            } else {
-                                format!("{} · {}", row.identifier, row.title)
-                            })
+                            .child(work_status_cue(
+                                format!("work-roadmap-status-{}", row.issue_id),
+                                &row.identifier,
+                                row.completed,
+                                row.blocked_by_count > 0,
+                            ))
+                            .child(
+                                div()
+                                    .text_size(px(11.))
+                                    .text_color(Color::Muted.color(cx))
+                                    .child(format!("{} · {}", row.identifier, row.title)),
+                            )
                     }))
             }))
     }
@@ -1525,7 +1561,12 @@ impl DogfoodSurface {
                     .child(
                         h_flex()
                             .gap_2()
-                            .child(status_icon(issue.completed, !blockers.is_empty()))
+                            .child(work_status_cue(
+                                "work-detail-status",
+                                &issue.identifier,
+                                issue.completed,
+                                !blockers.is_empty(),
+                            ))
                             .child(
                                 Label::new(
                                     issue
@@ -2011,16 +2052,13 @@ impl DogfoodSurface {
             )
             .child(
                 Label::new(issue.map_or("Select an Issue first.".into(), |issue| {
-                    format!(
-                        "{} is unassigned and has no simulated or live execution.",
-                        issue.identifier
-                    )
+                    format!("{} · Unassigned · No session", issue.identifier)
                 }))
                 .size(LabelSize::Small)
                 .color(Color::Muted),
             )
             .child(
-                Label::new("Development mock data · no evidence or owner disposition")
+                Label::new("Mock · no authority")
                     .size(LabelSize::XSmall)
                     .color(Color::Warning),
             )
@@ -2054,18 +2092,31 @@ impl DogfoodSurface {
             .aria_label("Signed Work history")
             .child(section_heading("Signed Work history", cx))
             .child(
-                Label::new(self.signed_workroom_error.clone().unwrap_or_else(|| {
-                    "Signature proves signer and bytes; relay acceptance is transport evidence, not command or effect authority.".into()
-                }))
+                Label::new(
+                    self.signed_workroom_error
+                        .clone()
+                        .unwrap_or_else(|| "Signed transport · non-authoritative".into()),
+                )
                 .size(LabelSize::XSmall)
-                .color(if self.signed_workroom_error.is_some() { Color::Error } else { Color::Muted }),
+                .color(if self.signed_workroom_error.is_some() {
+                    Color::Error
+                } else {
+                    Color::Muted
+                }),
             )
-            .when(activities.is_empty(), |view| view.child(
-                v_flex().min_h(px(220.)).items_center().justify_center().gap_2()
-                    .rounded_lg().border_1().border_color(colors.border_variant)
-                    .child(Label::new("No signed Workroom activity").size(LabelSize::Large))
-                    .child(Label::new("No activity is not an execution, verification, or owner-disposition fact.").size(LabelSize::Small).color(Color::Muted)),
-            ))
+            .when(activities.is_empty(), |view| {
+                view.child(
+                    v_flex()
+                        .min_h(px(220.))
+                        .items_center()
+                        .justify_center()
+                        .gap_2()
+                        .rounded_lg()
+                        .border_1()
+                        .border_color(colors.border_variant)
+                        .child(Label::new("No signed activity").size(LabelSize::Large)),
+                )
+            })
             .children(activities.into_iter().map(|activity| {
                 let delivery = self.signed_workroom_ledger.as_ref().and_then(|ledger| {
                     ledger
@@ -2076,7 +2127,12 @@ impl DogfoodSurface {
                 let delivery_state = delivery
                     .map(|record| signed_workroom_outbox_state_label(&record.state))
                     .unwrap_or("Unavailable");
-                v_flex().gap_1().p_3().rounded_lg().border_1().border_color(colors.border_variant)
+                v_flex()
+                    .gap_1()
+                    .p_3()
+                    .rounded_lg()
+                    .border_1()
+                    .border_color(colors.border_variant)
                     .role(gpui::Role::ListItem)
                     .aria_label(format!(
                         "Signed Workroom {:?} by {}, audience {}, delivery {delivery_state}",
@@ -2084,33 +2140,123 @@ impl DogfoodSurface {
                         activity.actor_ref.0,
                         workroom_audience_label(&activity.audience)
                     ))
-                    .child(h_flex().justify_between()
-                        .child(Label::new(format!("{:?}", activity.kind)).size(LabelSize::Small))
-                        .child(Label::new(workroom_audience_label(&activity.audience)).size(LabelSize::XSmall).color(Color::Muted)))
-                    .child(Label::new(format!("Actor {} · signer {}…", activity.actor_ref.0, &activity.signer_pubkey.0[..12])).size(LabelSize::XSmall))
-                    .child(Label::new(format!("{} · generation {} · {} parent(s)", activity.occurred_at.0, activity.generation.0, activity.causal_parent_refs.len())).size(LabelSize::XSmall).color(Color::Muted))
+                    .child(
+                        h_flex()
+                            .justify_between()
+                            .child(
+                                Label::new(format!("{:?}", activity.kind)).size(LabelSize::Small),
+                            )
+                            .child(
+                                Label::new(workroom_audience_label(&activity.audience))
+                                    .size(LabelSize::XSmall)
+                                    .color(Color::Muted),
+                            ),
+                    )
+                    .child(
+                        Label::new(format!(
+                            "Actor {} · signer {}…",
+                            activity.actor_ref.0,
+                            &activity.signer_pubkey.0[..12]
+                        ))
+                        .size(LabelSize::XSmall),
+                    )
+                    .child(
+                        Label::new(format!(
+                            "{} · generation {} · {} parent(s)",
+                            activity.occurred_at.0,
+                            activity.generation.0,
+                            activity.causal_parent_refs.len()
+                        ))
+                        .size(LabelSize::XSmall)
+                        .color(Color::Muted),
+                    )
                     .when_some(delivery, |card, record| {
-                        let attempts = record.delivery_attempts.iter().rev().take(3).map(|attempt| {
-                            h_flex().justify_between()
-                                .role(gpui::Role::ListItem)
-                                .aria_label(format!("{} at {} on {}", signed_workroom_delivery_outcome_label(&attempt.outcome), attempt.attempted_at.0, attempt.relay_url.0))
-                                .child(Label::new(signed_workroom_delivery_outcome_label(&attempt.outcome)).size(LabelSize::XSmall).color(signed_workroom_delivery_outcome_color(&attempt.outcome)))
-                                .child(Label::new(format!("{} · {}", attempt.relay_url.0, attempt.attempted_at.0)).size(LabelSize::XSmall).color(Color::Muted))
-                        }).collect::<Vec<_>>();
+                        let attempts = record
+                            .delivery_attempts
+                            .iter()
+                            .rev()
+                            .take(3)
+                            .map(|attempt| {
+                                h_flex()
+                                    .justify_between()
+                                    .role(gpui::Role::ListItem)
+                                    .aria_label(format!(
+                                        "{} at {} on {}",
+                                        signed_workroom_delivery_outcome_label(&attempt.outcome),
+                                        attempt.attempted_at.0,
+                                        attempt.relay_url.0
+                                    ))
+                                    .child(
+                                        Label::new(signed_workroom_delivery_outcome_label(
+                                            &attempt.outcome,
+                                        ))
+                                        .size(LabelSize::XSmall)
+                                        .color(
+                                            signed_workroom_delivery_outcome_color(
+                                                &attempt.outcome,
+                                            ),
+                                        ),
+                                    )
+                                    .child(
+                                        Label::new(format!(
+                                            "{} · {}",
+                                            attempt.relay_url.0, attempt.attempted_at.0
+                                        ))
+                                        .size(LabelSize::XSmall)
+                                        .color(Color::Muted),
+                                    )
+                            })
+                            .collect::<Vec<_>>();
                         card.child(
-                            v_flex().gap_1().pt_2().border_t_1().border_color(colors.border_variant)
+                            v_flex()
+                                .gap_1()
+                                .pt_2()
+                                .border_t_1()
+                                .border_color(colors.border_variant)
                                 .role(gpui::Role::List)
                                 .aria_label("Relay delivery attempts")
-                                .child(h_flex().justify_between()
-                                    .child(Label::new(format!("Delivery · {}", signed_workroom_outbox_state_label(&record.state))).size(LabelSize::XSmall).color(signed_workroom_outbox_state_color(&record.state)))
-                                    .child(Label::new(format!("{}/{} relays · {} attempts", record.accepted_relay_urls.len(), record.relay_urls.len(), record.attempt_count.0)).size(LabelSize::XSmall).color(Color::Muted)))
-                                .when(record.delivery_attempts.len() > 3, |history| history.child(Label::new(format!("{} earlier attempts", record.delivery_attempts.len() - 3)).size(LabelSize::XSmall).color(Color::Muted)))
-                                .children(attempts)
+                                .child(
+                                    h_flex()
+                                        .justify_between()
+                                        .child(omega_status_cue(
+                                            format!(
+                                                "signed-delivery-status-{}",
+                                                activity.event_ref.0
+                                            ),
+                                            signed_workroom_outbox_status(&record.state),
+                                            "Relay delivery",
+                                        ))
+                                        .child(
+                                            Label::new(format!(
+                                                "{}/{} relays · {} attempts",
+                                                record.accepted_relay_urls.len(),
+                                                record.relay_urls.len(),
+                                                record.attempt_count.0
+                                            ))
+                                            .size(LabelSize::XSmall)
+                                            .color(Color::Muted),
+                                        ),
+                                )
+                                .when(record.delivery_attempts.len() > 3, |history| {
+                                    history.child(
+                                        Label::new(format!(
+                                            "{} earlier attempts",
+                                            record.delivery_attempts.len() - 3
+                                        ))
+                                        .size(LabelSize::XSmall)
+                                        .color(Color::Muted),
+                                    )
+                                })
+                                .children(attempts),
                         )
                     })
-                    .when(delivery.is_none(), |card| card.child(
-                        Label::new("Delivery status unavailable").size(LabelSize::XSmall).color(Color::Warning)
-                    ))
+                    .when(delivery.is_none(), |card| {
+                        card.child(omega_status_cue(
+                            format!("signed-delivery-status-{}", activity.event_ref.0),
+                            OmegaStatus::Warning,
+                            "Relay delivery unavailable",
+                        ))
+                    })
             }))
     }
 
@@ -2140,11 +2286,11 @@ impl DogfoodSurface {
                         h_flex()
                             .justify_between()
                             .child(Label::new("Agent Session simulation").size(LabelSize::Large))
-                            .child(
-                                Label::new("SIMULATED · EPHEMERAL")
-                                    .size(LabelSize::XSmall)
-                                    .color(Color::Warning),
-                            ),
+                            .child(omega_status_cue(
+                                "agent-session-simulation-status",
+                                OmegaStatus::Warning,
+                                "Agent Session simulation",
+                            )),
                     )
                     .child(
                         h_flex().gap_1().flex_wrap().children(
@@ -2261,14 +2407,14 @@ fn signed_workroom_outbox_state_label(state: &SignedWorkroomOutboxState) -> &'st
     }
 }
 
-fn signed_workroom_outbox_state_color(state: &SignedWorkroomOutboxState) -> Color {
+fn signed_workroom_outbox_status(state: &SignedWorkroomOutboxState) -> OmegaStatus {
     match state {
-        SignedWorkroomOutboxState::Accepted => Color::Success,
-        SignedWorkroomOutboxState::Failed => Color::Error,
-        SignedWorkroomOutboxState::Pending | SignedWorkroomOutboxState::Publishing => {
-            Color::Warning
-        }
-        SignedWorkroomOutboxState::Superseded | SignedWorkroomOutboxState::Revoked => Color::Muted,
+        SignedWorkroomOutboxState::Pending => OmegaStatus::Ready,
+        SignedWorkroomOutboxState::Publishing => OmegaStatus::Running,
+        SignedWorkroomOutboxState::Accepted => OmegaStatus::Complete,
+        SignedWorkroomOutboxState::Failed => OmegaStatus::Failed,
+        SignedWorkroomOutboxState::Superseded => OmegaStatus::Warning,
+        SignedWorkroomOutboxState::Revoked => OmegaStatus::Blocked,
     }
 }
 
@@ -2411,19 +2557,26 @@ fn project_button(
         .on_click(listener)
 }
 
-fn status_icon(completed: bool, blocked: bool) -> Icon {
+fn work_status_cue(
+    id: impl Into<gpui::ElementId>,
+    context: &str,
+    completed: bool,
+    blocked: bool,
+) -> gpui::AnyElement {
+    omega_status_cue(
+        id,
+        work_omega_status(completed, blocked),
+        &format!("{context} Work"),
+    )
+}
+
+fn work_omega_status(completed: bool, blocked: bool) -> OmegaStatus {
     if completed {
-        Icon::new(IconName::Check)
-            .size(IconSize::Small)
-            .color(Color::Success)
+        OmegaStatus::Complete
     } else if blocked {
-        Icon::new(IconName::Warning)
-            .size(IconSize::Small)
-            .color(Color::Warning)
+        OmegaStatus::Blocked
     } else {
-        Icon::new(IconName::Circle)
-            .size(IconSize::Small)
-            .color(Color::Muted)
+        OmegaStatus::Ready
     }
 }
 
@@ -2660,6 +2813,25 @@ mod tests {
             signed_workroom_delivery_outcome_label(&SignedWorkroomDeliveryOutcome::Unreachable),
             "Unreachable"
         );
+        assert_eq!(
+            signed_workroom_outbox_status(&SignedWorkroomOutboxState::Pending),
+            OmegaStatus::Ready
+        );
+        assert_eq!(
+            signed_workroom_outbox_status(&SignedWorkroomOutboxState::Accepted),
+            OmegaStatus::Complete
+        );
+        assert_eq!(
+            signed_workroom_outbox_status(&SignedWorkroomOutboxState::Failed),
+            OmegaStatus::Failed
+        );
+    }
+
+    #[test]
+    fn work_status_prefers_completion_then_blocker_then_readiness() {
+        assert_eq!(work_omega_status(true, true), OmegaStatus::Complete);
+        assert_eq!(work_omega_status(false, true), OmegaStatus::Blocked);
+        assert_eq!(work_omega_status(false, false), OmegaStatus::Ready);
     }
 
     #[test]
