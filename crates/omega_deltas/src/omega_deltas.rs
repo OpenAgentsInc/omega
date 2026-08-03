@@ -1257,6 +1257,17 @@ pub const NEW_THREAD_CHORDS: &[(&str, &str)] = &[
     ("assets/keymaps/default-windows.json", "ctrl-shift-a"),
 ];
 
+/// OMEGA-DELTA-0013. The platform's primary New Thread chord.
+///
+/// Unlike the retained `cmd-shift-a`/`ctrl-shift-a` compatibility chord,
+/// this is the shortcut drawn by the Thread menu. It must be present in the
+/// Workspace context so a missing or stale auxiliary host cannot swallow it.
+pub const PRIMARY_NEW_THREAD_CHORDS: &[(&str, &str)] = &[
+    ("assets/keymaps/default-macos.json", "cmd-n"),
+    ("assets/keymaps/default-linux.json", "ctrl-n"),
+    ("assets/keymaps/default-windows.json", "ctrl-n"),
+];
+
 /// OMEGA-DELTA-0013. The narrower surfaces admitted to take the chord back.
 ///
 /// An allowlist and not a count. omega#76 asked for the shadowed lower-priority
@@ -7044,6 +7055,38 @@ mod tests {
     /// binding that exists proves nothing if something narrower shadows it, and
     /// counting bindings would either forbid the modal pickers that legitimately
     /// hold the chord or permit any new binding at all.
+    #[test]
+    fn the_primary_new_thread_chord_reaches_the_workspace() {
+        for (keymap, chord) in PRIMARY_NEW_THREAD_CHORDS {
+            let path = repository_path(keymap);
+            let raw = std::fs::read_to_string(&path)
+                .unwrap_or_else(|error| panic!("cannot read {}: {error}", path.display()));
+            let sections: serde_json::Value = serde_json::from_str(&strip_jsonc(&raw))
+                .unwrap_or_else(|error| panic!("cannot parse {}: {error}", path.display()));
+            let sections = sections
+                .as_array()
+                .unwrap_or_else(|| panic!("{keymap} is not an array of sections"));
+
+            let workspace_bindings = sections
+                .iter()
+                .filter(|section| {
+                    section.get("context").and_then(serde_json::Value::as_str) == Some("Workspace")
+                })
+                .filter_map(|section| section.get("bindings")?.get(*chord))
+                .collect::<Vec<_>>();
+            assert_eq!(
+                workspace_bindings.len(),
+                1,
+                "OMEGA-DELTA-0013: {keymap} must bind the primary New Thread chord {chord:?} exactly once in Workspace"
+            );
+            assert_eq!(
+                workspace_bindings[0].as_str(),
+                Some("agent::NewThread"),
+                "OMEGA-DELTA-0013: {keymap} lets a focused auxiliary route replace the primary New Thread chord {chord:?}"
+            );
+        }
+    }
+
     #[test]
     fn the_new_thread_chord_is_window_global() {
         for (keymap, chord) in NEW_THREAD_CHORDS {

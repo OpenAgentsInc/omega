@@ -723,6 +723,7 @@
       "cmd-s": "workspace::Save",
       "cmd-k s": "workspace::SaveWithoutFormat",
       "alt-shift-enter": "toast::RunAction",
+      "cmd-n": "agent::NewThread",
       "cmd-shift-a": "agent::NewThread",
       "cmd-shift-n": "workspace::NewWindow",
       "ctrl-`": "terminal_panel::Toggle",

@@ -3738,7 +3738,11 @@ impl AgentPanel {
                     window.defer(cx, move |window, cx| {
                         panel
                             .update(cx, |panel, cx| {
-                                panel.open_omega_history_route(restored_route, window, cx);
+                                panel.open_restored_omega_history_route_if_current(
+                                    restored_route,
+                                    window,
+                                    cx,
+                                );
                             })
                             .log_err();
                     });
@@ -4867,11 +4871,10 @@ impl AgentPanel {
         // A work surface belongs to the conversation that opened it. If the
         // current blank draft is reused, or if the shell still owns surface
         // focus while switching drafts, New Thread must still land on the
-        // transcript and its composer rather than reopening that surface.
-        if let Err(error) = self.workbench_shell.collapse_dock() {
-            log::warn!("failed to close the work surface for a new conversation: {error:#}");
-        }
-        self.focus_thread_transcript(window, cx);
+        // transcript and its composer rather than reopening that surface. Use
+        // the full route transition so Settings, Work detail, unavailable
+        // routes, and a persisted Forensics route are all cleared together.
+        self.show_active_omega_thread_transcript(window, cx);
     }
 
     /// Land a new conversation on `target`, composer focused.
@@ -16800,6 +16803,22 @@ impl AgentPanel {
         }
     }
 
+    /// Apply a route restored during panel construction only while it remains
+    /// the current destination. Restoration is deferred until the panel is in
+    /// the window; a user can press New Thread or choose another destination
+    /// before that callback runs, and that newer intent must win.
+    fn open_restored_omega_history_route_if_current(
+        &mut self,
+        restored_route: OmegaRoute,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> bool {
+        if self.omega_navigation_history.current() != Some(&restored_route) {
+            return false;
+        }
+        self.open_omega_history_route(restored_route, window, cx)
+    }
+
     fn open_omega_settings(
         &mut self,
         record_history: bool,
@@ -27479,10 +27498,11 @@ mod tests {
     }
 
     #[gpui::test]
-    async fn test_new_thread_leaves_forensics_for_the_composer(cx: &mut TestAppContext) {
+    async fn test_new_thread_supersedes_a_deferred_forensics_restore(cx: &mut TestAppContext) {
         let (panel, mut cx) = setup_visible_panel(cx).await;
 
         panel.update_in(&mut cx, |panel, window, cx| {
+            panel.force_omega_primary_interface_for_tests = true;
             panel.new_thread(&NewThread, window, cx);
         });
         cx.run_until_parked();
@@ -27494,33 +27514,29 @@ mod tests {
                 .expect("New Thread prepares a draft")
                 .entity_id()
         });
-        panel.update(&mut cx, |panel, _cx| {
-            panel
-                .workbench_shell
-                .open_surface_for_tests(omega_workbench_state::WorkSurface::Forensics)
-                .expect("the regression fixture opens Forensics");
+        let restored_route = omega_forensics_route("work:omega:forensics:repository:1")
+            .expect("valid persisted Forensics route");
+        panel.update(&mut cx, |panel, cx| {
+            panel.omega_navigation_history.push(restored_route.clone());
+            cx.notify();
         });
         panel.read_with(&cx, |panel, _cx| {
-            let visible = panel
-                .workbench_shell
-                .projection()
-                .visible_projection()
-                .expect("the draft has a workbench projection");
-            assert!(visible.dock_open);
             assert_eq!(
-                panel.workbench_shell.focus_target(),
-                workbench_shell::WorkbenchFocusTarget::Surface(
-                    omega_workbench_state::WorkSurface::Forensics
-                )
+                panel.omega_navigation_history.current(),
+                Some(&restored_route),
+                "the fixture starts on the persisted Forensics destination"
             );
-        });
-
-        panel.update_in(&mut cx, |panel, window, cx| {
-            panel.new_thread(&NewThread, window, cx);
+            assert!(panel.omega_non_thread_route_open());
         });
         cx.run_until_parked();
+        cx.dispatch_action(NewThread);
+        cx.run_until_parked();
 
-        panel.read_with(&cx, |panel, _cx| {
+        panel.update_in(&mut cx, |panel, window, cx| {
+            assert!(
+                !panel.open_restored_omega_history_route_if_current(restored_route, window, cx,),
+                "a deferred startup restore must yield to the newer New Thread route"
+            );
             assert_eq!(
                 panel
                     .draft_thread
@@ -27542,7 +27558,24 @@ mod tests {
                 panel.workbench_shell.focus_target(),
                 workbench_shell::WorkbenchFocusTarget::Transcript
             );
+            assert!(
+                matches!(
+                    panel.omega_navigation_history.current(),
+                    Some(OmegaRoute::Thread(_))
+                ),
+                "the deferred Forensics restore must not overwrite New Thread"
+            );
+            assert!(panel.omega_unavailable_route.is_none());
             assert!(panel.front_door_composer_visible_for_tests());
+            let composer_focus = panel
+                .active_conversation_view()
+                .expect("New Thread reveals the conversation")
+                .read(cx)
+                .activation_focus_handle(cx);
+            assert!(
+                composer_focus.is_focused(window),
+                "New Thread must leave focus in the composer after Forensics"
+            );
         });
     }
 

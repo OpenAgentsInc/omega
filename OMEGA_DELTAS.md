@@ -296,6 +296,14 @@ cargo test -p omega_deltas
 - **`cmd-shift-a` / `ctrl-shift-a`** now opens a new agent thread globally.
   `agent::NewThread` previously existed only in panel-scoped contexts bound to
   `cmd-n`, so it could not start a thread unless the panel already had focus.
+- **The primary `cmd-n` / `ctrl-n` shortcut is global too.** It is the shortcut
+  drawn by the Thread menu and must work while an auxiliary or unavailable
+  route owns focus. A persisted Forensics route is restored on a deferred
+  callback during startup; that callback now applies only while the restored
+  route remains current, so a newer New Thread action cannot be overwritten by
+  stale restoration. New Thread also performs the complete transcript-route
+  transition, clearing Settings, Work detail, unavailable-route, and workbench
+  surface state before focusing the composer.
 - **The default model is `openagents/gpt-5.6-luna`** (owner direction
   2026-07-30: the core Omega Agent always hits the OpenAgents hosted API
   first; Gemini is the backup — see `OMEGA-DELTA-0201`). Earlier revisions of
@@ -310,10 +318,15 @@ cargo test -p omega_deltas
   that test, but it leaves the model string unpinned: a rebase could change
   `gpt-5.6-luna` to any other hosted model and every check would stay
   green.
-- **Enforced by:** `the_agent_ships_enabled`, `the_default_model_is_pinned`, and
-  `the_new_thread_chord_is_window_global`, which asserts the chord is bound
-  window-globally to `agent::NewThread` in all three default keymaps and that
-  every narrower binding of it is one of the deliberately admitted surfaces —
+- **Enforced by:** `the_agent_ships_enabled`, `the_default_model_is_pinned`,
+  `the_primary_new_thread_chord_reaches_the_workspace`,
+  `the_new_thread_chord_is_window_global`, and
+  `test_new_thread_supersedes_a_deferred_forensics_restore`. Together they
+  assert both New Thread chords reach `agent::NewThread` from the window,
+  reject a late restored Forensics route after newer user intent, and prove the
+  resulting destination is the focused composer. The compatibility-chord test
+  also asserts that every narrower binding of it is one of the deliberately
+  admitted surfaces —
   the toolchain and recent-projects pickers, and (on Linux and Windows, where
   the chord is `ctrl-shift-a`) a terminal's select-all. omega#76 asked for the
   shadowed lower-priority bindings to be resolved deliberately; this is that
