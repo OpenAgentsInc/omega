@@ -35,6 +35,8 @@ const supportedAllWorkCapabilities = [
   "planning.graph.read",
   "repository.claim.read",
   "repository.claim.execute",
+  "workroom.activity.read",
+  "workroom.activity.enqueue",
 ]
 let allWorkCapabilities = []
 let claimLedger = {
@@ -46,6 +48,15 @@ let claimLedger = {
   audit: [],
   completeness: { state: "complete", cursor: "cursor:repository-claim:0", gapRefs: [] },
   freshness: { state: "fresh", observedAt: "2026-08-03T05:00:00Z" },
+}
+let signedWorkroomLedger = {
+  contractVersion: "openagents.all_work_boundary.v1",
+  revision: 0,
+  eventCursor: "cursor:signed-workroom:0",
+  activities: [],
+  outbox: [],
+  completeness: { state: "complete", cursor: "cursor:signed-workroom:0", gapRefs: [] },
+  freshness: { state: "fresh", observedAt: "2026-08-03T10:00:00Z" },
 }
 
 const allWorkSummary = {
@@ -453,7 +464,7 @@ for await (const line of rl) {
       allWork: {
         selectedVersion: allWorkVersion,
         contractRef: "openagents.all_work_boundary.v1",
-        contractDigest: "aa933ba19f0245905ce21c8ed6b90e6279c68b09f3352101a026a10786362535",
+        contractDigest: "e504e3084007e8bddab99e9703f1f62c6bf62e1aa7a9f612de75fb522848b628",
         capabilities: allWorkCapabilities,
       },
       dataRoot,
@@ -713,6 +724,62 @@ for await (const line of rl) {
         admitted: true,
         refusalReason: null,
         githubWriteCount: 0,
+      },
+    })
+    continue
+  }
+  if (request.method === "workroom.activity.read") {
+    if (!allWorkCapabilities.includes("workroom.activity.read")) {
+      respond(request.id, generation, false, undefined, {
+        code: "incompatible_version",
+        message: "workroom.activity.read was not negotiated.",
+      })
+      continue
+    }
+    respond(request.id, generation, true, { ledger: signedWorkroomLedger })
+    continue
+  }
+  if (request.method === "workroom.activity.enqueue") {
+    if (!allWorkCapabilities.includes("workroom.activity.enqueue")) {
+      respond(request.id, generation, false, undefined, {
+        code: "incompatible_version",
+        message: "workroom.activity.enqueue was not negotiated.",
+      })
+      continue
+    }
+    const input = request.params
+    const previousRevision = signedWorkroomLedger.revision
+    const revision = previousRevision + 1
+    const eventCursor = `cursor:signed-workroom:${revision}`
+    signedWorkroomLedger = {
+      ...signedWorkroomLedger,
+      revision,
+      eventCursor,
+      activities: [...signedWorkroomLedger.activities, input.activity],
+      outbox: [...signedWorkroomLedger.outbox, {
+        activity: input.activity,
+        canonicalPersistedAt: input.activity.occurredAt,
+        state: "pending",
+        relayUrls: input.relayUrls,
+        acceptedRelayUrls: [],
+        attemptCount: 0,
+        lastAttemptAt: null,
+        lastError: null,
+      }],
+      completeness: { state: "complete", cursor: eventCursor, gapRefs: [] },
+      freshness: { state: "fresh", observedAt: input.activity.occurredAt },
+    }
+    respond(request.id, generation, true, {
+      ledger: signedWorkroomLedger,
+      receipt: {
+        idempotencyKey: input.idempotencyKey,
+        previousRevision,
+        revision,
+        eventCursor,
+        eventRef: input.activity.eventRef,
+        persistedBeforePublish: true,
+        relayAcceptanceIsAuthority: false,
+        admittedEffect: false,
       },
     })
     continue

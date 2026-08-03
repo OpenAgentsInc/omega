@@ -91,6 +91,12 @@ event cursor while applying one filter/group/sort query. The three additional
 scenes remain development-only with the dogfood route; they do not admit
 production portfolio navigation. See [Omega planning views](./omega-planning-views.md).
 
+The development Session scene reads the selected Work's generated signed
+Workroom projection. It renders exact signer, actor, audience, generation, and
+causal facts or an explicit empty/offline error. It does not infer a Session,
+admitted effect, verification, or owner disposition from a signed event or
+relay result. See [Omega signed Workroom projection](./omega-signed-workroom.md).
+
 Use Up/Down or J/K to change the selected Issue and Enter to open its Issue
 scene. Keys 1 through 6 open Overview, List, Board, Table, Timeline, and
 Roadmap. Keys 7 and 8 open the empty Session and Review scenes. The same controls are available as standard

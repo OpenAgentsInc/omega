@@ -234,6 +234,7 @@
   - [Omega-effectd Rust supervisor](./development/omega-effectd-supervisor.md)
   - [Omega All Work contract](./development/omega-all-work-contract.md)
   - [Omega repository work claims](./development/omega-repository-work-claims.md)
+  - [Omega signed Workroom projection](./development/omega-signed-workroom.md)
   - [Omega planning views](./development/omega-planning-views.md)
   - [Omega Work Index](./development/omega-work-index.md)
   - [Omega Work and Issue detail](./development/omega-work-detail.md)

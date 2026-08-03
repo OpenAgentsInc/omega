@@ -9,10 +9,10 @@ adapter creates a second writable store.
 
 | Field                 | Value                                                              |
 | --------------------- | ------------------------------------------------------------------ |
-| OpenAgents commit     | `963dc8384b00c52aa0774ea2ce3e64ead5cbbf0f`                         |
+| OpenAgents commit     | `c82cbe7394f68615e3a3a189b07037c1204f2d83`                         |
 | Contract              | `openagents.all_work_boundary.v1`                                  |
-| Definition SHA-256    | `aa933ba19f0245905ce21c8ed6b90e6279c68b09f3352101a026a10786362535` |
-| Rust artifact SHA-256 | `3d6ba1402f2681ea5c1a34d6c0d191e82bff3285ca64bdc9f0fbd71ab7624ecc` |
+| Definition SHA-256    | `e504e3084007e8bddab99e9703f1f62c6bf62e1aa7a9f612de75fb522848b628` |
+| Rust artifact SHA-256 | `2fa857cfd6f52c51723e7572b8f682a8251fc5f046e0a873a3ccb894b8d7f7ca` |
 | Omega receipt         | `crates/omega_effectd/all-work-contract/SOURCE.json`               |
 
 The generated Rust file, compatibility manifest, and shared fixtures are
@@ -98,6 +98,12 @@ worktree audit also proves abandonment. Imported GitHub claim comments remain
 canceled historical packets and audit records; they cannot become native
 post-cutover commands. See
 [Omega repository work claims](./omega-repository-work-claims.md).
+
+The generated profile also includes signed Workroom activity reads and a
+persist-before-publish enqueue boundary. Signed identity, audience, causal
+parents, generation, outbox state, and revocation remain projection facts.
+They do not become command or effect authority. See
+[Omega signed Workroom projection](./omega-signed-workroom.md).
 
 ## Verify
 

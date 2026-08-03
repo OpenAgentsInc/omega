@@ -990,6 +990,21 @@ mod tests {
             assert_eq!(claimed.ledger.revision.0, 2);
             assert_eq!(claimed.ledger.claims.len(), 1);
             assert_eq!(claimed.ledger.claims[0].generation.0, 1);
+            let workroom = supervisor
+                .read_signed_workroom(all_work_contract::SignedWorkroomReadRequest {
+                    after_revision: None,
+                    workroom_ref: None,
+                    work_ref: Some(Some(
+                        all_work_contract::WorkRef::try_from(
+                            "work:github:openagentsinc/omega:216".to_string(),
+                        )
+                        .expect("Work ref"),
+                    )),
+                })
+                .await
+                .expect("typed signed Workroom read");
+            assert!(workroom.ledger.activities.is_empty());
+            assert!(workroom.ledger.outbox.is_empty());
             supervisor.stop().await.expect("stop");
         });
     }

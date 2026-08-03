@@ -3484,6 +3484,7 @@ pub struct AgentPanel {
     _dogfood_planning_refresh: Option<Task<()>>,
     _dogfood_planning_persist: Option<Task<()>>,
     _dogfood_claim_task: Option<Task<()>>,
+    _dogfood_workroom_refresh: Option<Task<()>>,
     omega_work_detail: Option<Entity<WorkDetailSurface>>,
     _omega_work_detail_subscription: Option<Subscription>,
     _omega_work_detail_load: Option<Task<()>>,
@@ -4242,6 +4243,7 @@ impl AgentPanel {
             _dogfood_planning_refresh: None,
             _dogfood_planning_persist: None,
             _dogfood_claim_task: None,
+            _dogfood_workroom_refresh: None,
             omega_work_detail: None,
             _omega_work_detail_subscription: None,
             _omega_work_detail_load: None,
@@ -17646,6 +17648,65 @@ impl AgentPanel {
         }));
     }
 
+    fn refresh_dogfood_workroom(&mut self, issue_id: &str, cx: &mut Context<Self>) {
+        let Some(fixture) = self.dogfood_fixture.as_ref() else {
+            return;
+        };
+        let Some(issue) = fixture
+            .graph
+            .issues
+            .iter()
+            .find(|value| value.id == issue_id)
+        else {
+            return;
+        };
+        let Some(repository) = fixture
+            .graph
+            .source_repositories
+            .iter()
+            .find(|value| value.id == issue.repository_id)
+        else {
+            return;
+        };
+        let work_ref = format!(
+            "work:github:{}/{}:{}",
+            repository.owner.to_ascii_lowercase(),
+            repository.name.to_ascii_lowercase(),
+            issue.number,
+        );
+        let supervisor = omega_effectd::shared_supervisor(cx).ok();
+        let surface = self.dogfood_surface.clone();
+        self._dogfood_workroom_refresh = Some(cx.spawn(async move |_this, cx| {
+            let result: Result<omega_effectd::all_work_contract::SignedWorkroomLedger> = async {
+                let supervisor = supervisor.context("omega-effectd is unavailable")?;
+                let mut guard = supervisor.lock().await;
+                guard.ensure_started().await?;
+                guard
+                    .read_signed_workroom(
+                        omega_effectd::all_work_contract::SignedWorkroomReadRequest {
+                            after_revision: None,
+                            workroom_ref: None,
+                            work_ref: Some(Some(
+                                omega_effectd::all_work_contract::WorkRef::try_from(work_ref)?,
+                            )),
+                        },
+                    )
+                    .await
+                    .map(|value| value.ledger)
+                    .map_err(anyhow::Error::from)
+            }
+            .await;
+            if let Some(surface) = surface {
+                let _ = surface.update(cx, |surface, cx| match result {
+                    Ok(ledger) => surface.set_signed_workroom_state(Some(ledger), None, cx),
+                    Err(error) => {
+                        surface.set_signed_workroom_state(None, Some(error.to_string()), cx)
+                    }
+                });
+            }
+        }));
+    }
+
     fn open_dogfood_project(
         &mut self,
         project_id: &str,
@@ -17704,6 +17765,7 @@ impl AgentPanel {
                             DogfoodClaimAction::Refresh,
                             cx,
                         );
+                        this.refresh_dogfood_workroom(&issue_id, cx);
                         cx.notify();
                     }
                     DogfoodSurfaceEvent::RepositoryClaimRequested { issue_id, action } => {
@@ -17718,6 +17780,7 @@ impl AgentPanel {
         self.refresh_dogfood_planning(cx);
         let selected_issue_id = surface.read(cx).selected_issue_id().to_string();
         self.execute_dogfood_claim_action(&selected_issue_id, DogfoodClaimAction::Refresh, cx);
+        self.refresh_dogfood_workroom(&selected_issue_id, cx);
         surface.read(cx).focus_handle(cx).focus(window, cx);
         cx.notify();
         true

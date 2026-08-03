@@ -3,7 +3,8 @@ use gpui::{
     Window, prelude::*,
 };
 use omega_effectd::all_work_contract::{
-    RepositoryClaimLedger, RepositoryWorkClaim, RepositoryWorkClaimState,
+    RepositoryClaimLedger, RepositoryWorkClaim, RepositoryWorkClaimState, SignedWorkroomLedger,
+    WorkroomAudience,
 };
 #[cfg(all(test, feature = "test-support"))]
 use omega_work_index::DogfoodFixtureAdapter;
@@ -90,6 +91,8 @@ pub struct DogfoodSurface {
     repository_claim_ledger: Option<RepositoryClaimLedger>,
     repository_claim_error: Option<String>,
     repository_claim_busy: bool,
+    signed_workroom_ledger: Option<SignedWorkroomLedger>,
+    signed_workroom_error: Option<String>,
     filter: PlanningFilter,
     group: PlanningGroup,
     sort: PlanningSort,
@@ -127,6 +130,8 @@ impl DogfoodSurface {
             repository_claim_ledger: None,
             repository_claim_error: None,
             repository_claim_busy: false,
+            signed_workroom_ledger: None,
+            signed_workroom_error: None,
             filter: state.filter,
             group: state.group,
             sort: state.sort,
@@ -187,6 +192,19 @@ impl DogfoodSurface {
         }
         self.repository_claim_error = error;
         self.repository_claim_busy = busy;
+        cx.notify();
+    }
+
+    pub fn set_signed_workroom_state(
+        &mut self,
+        ledger: Option<SignedWorkroomLedger>,
+        error: Option<String>,
+        cx: &mut Context<Self>,
+    ) {
+        if let Some(ledger) = ledger {
+            self.signed_workroom_ledger = Some(ledger);
+        }
+        self.signed_workroom_error = error;
         cx.notify();
     }
 
@@ -1355,6 +1373,65 @@ impl DogfoodSurface {
                     .color(Color::Warning),
             )
     }
+
+    fn render_signed_workroom(&self, cx: &mut Context<Self>) -> impl IntoElement {
+        let colors = cx.theme().colors();
+        let work_ref = self.selected_work_ref();
+        let activities = self
+            .signed_workroom_ledger
+            .as_ref()
+            .map(|ledger| {
+                ledger
+                    .activities
+                    .iter()
+                    .filter(|activity| {
+                        work_ref.as_ref().is_some_and(|work_ref| {
+                            activity
+                                .work_ref
+                                .0
+                                .as_ref()
+                                .is_some_and(|value| &value.0 == work_ref)
+                        })
+                    })
+                    .collect::<Vec<_>>()
+            })
+            .unwrap_or_default();
+        v_flex()
+            .gap_3()
+            .child(section_heading("Signed Work history", cx))
+            .child(
+                Label::new(self.signed_workroom_error.clone().unwrap_or_else(|| {
+                    "Signature proves signer and bytes; relay acceptance is transport evidence, not command or effect authority.".into()
+                }))
+                .size(LabelSize::XSmall)
+                .color(if self.signed_workroom_error.is_some() { Color::Error } else { Color::Muted }),
+            )
+            .when(activities.is_empty(), |view| view.child(
+                v_flex().min_h(px(220.)).items_center().justify_center().gap_2()
+                    .rounded_lg().border_1().border_color(colors.border_variant)
+                    .child(Label::new("No signed Workroom activity").size(LabelSize::Large))
+                    .child(Label::new("No activity is not an execution, verification, or owner-disposition fact.").size(LabelSize::Small).color(Color::Muted)),
+            ))
+            .children(activities.into_iter().map(|activity| {
+                v_flex().gap_1().p_3().rounded_lg().border_1().border_color(colors.border_variant)
+                    .child(h_flex().justify_between()
+                        .child(Label::new(format!("{:?}", activity.kind)).size(LabelSize::Small))
+                        .child(Label::new(workroom_audience_label(&activity.audience)).size(LabelSize::XSmall).color(Color::Muted)))
+                    .child(Label::new(format!("Actor {} · signer {}…", activity.actor_ref.0, &activity.signer_pubkey.0[..12])).size(LabelSize::XSmall))
+                    .child(Label::new(format!("{} · generation {} · {} parent(s)", activity.occurred_at.0, activity.generation.0, activity.causal_parent_refs.len())).size(LabelSize::XSmall).color(Color::Muted))
+            }))
+    }
+}
+
+fn workroom_audience_label(audience: &WorkroomAudience) -> &'static str {
+    match audience {
+        WorkroomAudience::Public => "Public",
+        WorkroomAudience::Organization => "Organization",
+        WorkroomAudience::Team => "Team",
+        WorkroomAudience::Workroom => "Workroom",
+        WorkroomAudience::Private => "Private",
+        WorkroomAudience::OwnerOnly => "Owner only",
+    }
 }
 
 fn repository_claim_state_label(state: &RepositoryWorkClaimState) -> &'static str {
@@ -1417,7 +1494,7 @@ impl Render for DogfoodSurface {
                 DogfoodScene::Timeline => self.render_timeline(cx).into_any_element(),
                 DogfoodScene::Roadmap => self.render_roadmap(cx).into_any_element(),
                 DogfoodScene::Issue => self.render_issue(cx).into_any_element(),
-                DogfoodScene::Session => self.render_empty_execution(false, cx).into_any_element(),
+                DogfoodScene::Session => self.render_signed_workroom(cx).into_any_element(),
                 DogfoodScene::Review => self.render_empty_execution(true, cx).into_any_element(),
             })
     }
