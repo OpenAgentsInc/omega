@@ -79,17 +79,44 @@ ROOT = Path(__file__).resolve().parent.parent
 REFUSAL_MARKERS = ("is not part of Omega", "controls that operate it")
 
 #: OCR phrases that prove the flag-free launch reached the shipped composer
-#: front door (OMEGA-DELTA-0184: the composer executor dropdown is the
-#: new-conversation front door; its trigger face reads the active executor).
-FRONT_DOOR_POSITIVE = ("Omega Agent",)
+#: front door.
+#:
+#: The marker is the composer's own placeholder. `placeholder_text` in
+#: `crates/agent_ui/src/conversation_view.rs` renders "Message " plus the
+#: executor's name, and folds the router's own `Omega Agent` id down to
+#: `Omega`; a clean profile has chosen no executor, so the pre-session composer
+#: drawn at launch reads exactly "Message Omega" while the field is still empty.
+#: It is on screen at launch, it is the composer rather than something beside
+#: it, and it does not move when the routed model changes.
+#:
+#: This used to be `Omega Agent`, read off the executor dropdown's trigger face
+#: (OMEGA-DELTA-0184). OMEGA-DELTA-0208 replaced that trigger's `provider/model`
+#: wire pair with the model's own name, so the chip now reads the model — `Luna`
+#: on a v0.2.0-rc31 launch — and the phrase survives only as a zero-size
+#: `AXApplicationStatus` node that appears after a turn completes. A marker that
+#: is never on screen at launch cannot be OCR'd, and a marker that tracks the
+#: routed model would make this row fail every time the default model changed.
+FRONT_DOOR_POSITIVE = ("Message Omega",)
 
 #: OCR phrases that prove the launch did NOT land on a chooser or onboarding
 #: page (OMEGA-DELTA-0184 removed the interstitial chooser; onboarding renders
 #: "Welcome to Omega").
 FRONT_DOOR_NEGATIVE = ("Welcome to Omega",)
 
-#: The tester-channel sidebar section label (omega#156).
+#: The tester-channel sidebar section label (omega#156,
+#: `SectionId::PublicChannels` in `crates/agent_ui/src/omega_sidebar.rs`).
 TESTER_CHANNEL_LABEL = "Tester channels"
+
+#: Sidebar section headings that prove a sidebar was drawn and OCR'd at all.
+#:
+#: The tester-channel row needs this because a missing phrase has two very
+#: different causes and the receipt must not merge them: a sidebar that is on
+#: screen without the destination in it is a product failure, and a launch where
+#: no sidebar was read at all is a row nobody could observe. `Recent threads` is
+#: the heading the zero-base sidebar draws (`SectionId::RecentThreads`);
+#: `Working folders` and `Threads` are the headings the primary interface's own
+#: shell draws.
+SIDEBAR_SECTION_MARKERS = ("Working folders", "Recent threads", "Threads")
 
 #: The version the footer Settings row renders (`footer_version_label` in
 #: `crates/agent_ui/src/agent_panel.rs`). A release-candidate bundle renders
@@ -1163,6 +1190,76 @@ def ocr_contains(lines: list[dict], phrase: str) -> bool:
     return any(lowered in line.get("text", "").lower() for line in lines)
 
 
+def front_door_verdict(lines: list[dict]) -> tuple[str, dict]:
+    """Judge the flag-free launch from one launch capture.
+
+    omega#151's property is that a flag-free launch from a clean profile lands
+    on the composer front door rather than a chooser or an onboarding page. So
+    the composer has to be the thing that is seen, and the chooser/onboarding
+    copy has to be absent.
+
+    Returns the row status and the facts that justify it.
+    """
+    positives = {
+        phrase: ocr_contains(lines, phrase) for phrase in FRONT_DOOR_POSITIVE
+    }
+    negatives = {
+        phrase: ocr_contains(lines, phrase) for phrase in FRONT_DOOR_NEGATIVE
+    }
+    facts = {
+        "front_door_markers_seen": positives,
+        "forbidden_markers_seen": negatives,
+    }
+    reached = all(positives.values()) and not any(negatives.values())
+    if not reached:
+        facts["failure_reason"] = (
+            "the launched window does not draw the composer front door: "
+            f"expected every one of {list(FRONT_DOOR_POSITIVE)} and none of "
+            f"{list(FRONT_DOOR_NEGATIVE)}"
+        )
+    return ("automated-pass" if reached else "automated-fail"), facts
+
+
+def tester_channel_verdict(lines: list[dict]) -> tuple[str, dict]:
+    """Judge the tester-channel destination from one launch capture.
+
+    omega#156 asks for the alpha feedback destination to be unmistakable on
+    first launch, so the property this row owns is "the destination is on the
+    sidebar the candidate actually drew" — not "the phrase appears somewhere".
+    Those come apart in exactly the way this harness refuses to blur elsewhere:
+
+    * a sidebar was read and the destination is not in it — the destination is
+      absent from the shipped launch, which is a product failure;
+    * no sidebar was read at all — nobody could look, which is `blocked` and
+      must never be recorded as the product failing.
+
+    Returns the row status and the facts that justify it.
+    """
+    seen = ocr_contains(lines, TESTER_CHANNEL_LABEL)
+    sidebar_markers = {
+        marker: ocr_contains(lines, marker) for marker in SIDEBAR_SECTION_MARKERS
+    }
+    sidebar_drawn = any(sidebar_markers.values())
+    facts = {
+        "tester_channel_label_seen": seen,
+        "sidebar_section_markers_seen": sidebar_markers,
+        "sidebar_drawn": sidebar_drawn,
+    }
+    if seen:
+        return "automated-pass", facts
+    if sidebar_drawn:
+        facts["failure_reason"] = (
+            "a sidebar was drawn and OCR'd and it carries no "
+            f"{TESTER_CHANNEL_LABEL!r} destination"
+        )
+        return "automated-fail", facts
+    facts["blocked_reason"] = (
+        "no sidebar section heading was OCR'd, so the tester-channel "
+        "destination could not be looked for on this capture"
+    )
+    return "blocked", facts
+
+
 def sweep_refusals(log_text: str) -> int:
     return sum(
         1
@@ -1183,6 +1280,62 @@ def self_test() -> int:
         return 3
     if sweep_refusals("ordinary log line about the editor\n") != 0:
         print("self-test: the refusal sweep fires on ordinary text", file=sys.stderr)
+        return 3
+
+    def ocr(*texts: str) -> list[dict]:
+        return [{"text": text, "confidence": 1} for text in texts]
+
+    # The shape a current candidate draws at launch: the primary interface's
+    # sidebar headings, the executor chip reading the routed model rather than
+    # a fixed name (OMEGA-DELTA-0208), and the pre-session composer.
+    launched = ocr(
+        "Working folders",
+        "Open Folder",
+        "Threads",
+        "Experimental",
+        "Open Forensics",
+        "Luna",
+        "Message Omega",
+    )
+    if front_door_verdict(launched)[0] != "automated-pass":
+        print(
+            "self-test: the front-door row rejects a launch that drew the composer",
+            file=sys.stderr,
+        )
+        return 3
+    # Onboarding is the shape this row exists to catch, whatever else is drawn.
+    if front_door_verdict(launched + ocr("Welcome to Omega"))[0] != "automated-fail":
+        print("self-test: the front-door row accepts onboarding", file=sys.stderr)
+        return 3
+    # A window with the pre-0208 chrome phrase but no composer must not pass.
+    # This is the stale marker the row used to accept (omega#236).
+    if front_door_verdict(ocr("Omega Agent · GPT-5.6 Luna"))[0] != "automated-fail":
+        print(
+            "self-test: the front-door row still passes on executor chrome alone",
+            file=sys.stderr,
+        )
+        return 3
+
+    tester_launched = tester_channel_verdict(launched)
+    if tester_launched[0] != "automated-fail":
+        print(
+            "self-test: a drawn sidebar with no tester-channel destination "
+            "is not reported as a failure",
+            file=sys.stderr,
+        )
+        return 3
+    if tester_channel_verdict(launched + ocr("Tester channels"))[0] != "automated-pass":
+        print(
+            "self-test: the tester-channel row rejects a visible destination",
+            file=sys.stderr,
+        )
+        return 3
+    # No sidebar in the capture is "nobody looked", never "the product failed".
+    if tester_channel_verdict(ocr("Message Omega"))[0] != "blocked":
+        print(
+            "self-test: an unread sidebar is reported as a product failure",
+            file=sys.stderr,
+        )
         return 3
     receipt = {"schema": SCHEMA, "rows": [{"id": "x", "status": "automated-pass"}]}
     bound = dict(receipt, evidence_sha256=canonical_digest(receipt))
@@ -1990,25 +2143,9 @@ def main() -> int:
                     launch_refs.append(
                         evidence.write_json("flag-free-launch-ocr.json", {"lines": lines})
                     )
-                    positives = {
-                        phrase: ocr_contains(lines, phrase)
-                        for phrase in FRONT_DOOR_POSITIVE
-                    }
-                    negatives = {
-                        phrase: ocr_contains(lines, phrase)
-                        for phrase in FRONT_DOOR_NEGATIVE
-                    }
-                    launch_facts["front_door_markers_seen"] = positives
-                    launch_facts["forbidden_markers_seen"] = negatives
-                    front_door_ok = all(positives.values()) and not any(
-                        negatives.values()
-                    )
-                    launch_status = (
-                        "automated-pass" if front_door_ok else "automated-fail"
-                    )
-                    tester_seen = ocr_contains(lines, TESTER_CHANNEL_LABEL)
-                    tester_facts = {"tester_channel_label_seen": tester_seen}
-                    tester_status = "automated-pass" if tester_seen else "automated-fail"
+                    launch_status, front_door_facts = front_door_verdict(lines)
+                    launch_facts.update(front_door_facts)
+                    tester_status, tester_facts = tester_channel_verdict(lines)
                     tester_refs = list(launch_refs)
                     # Vision reads the digit 0 as the letter O in this font;
                     # normalise before matching so the footer version row does

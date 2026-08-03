@@ -24548,6 +24548,32 @@ mod tests {
                  sweep fragment `{fragment}`."
             );
         }
+        // The flag-free launch row's OCR marker is bound to the placeholder the
+        // composer actually draws, for the same reason the refusal sweep is
+        // bound to the refusal sentence.
+        //
+        // omega#236: that row used to look for `Omega Agent`, read off the
+        // executor dropdown's trigger face. OMEGA-DELTA-0208 replaced that face
+        // with the routed model's own name and nothing failed, so the row went
+        // on asserting a phrase no launched window draws and reported a correct
+        // build as a product defect. A marker with no binding rots silently;
+        // this one moves in the same commit as the copy it names.
+        let composer = read_repository_file(CONVERSATION_VIEW_PATH);
+        assert!(
+            composer.contains("format!(\"Message {agent_name}\")")
+                && composer.contains("agent_name == agent::OMEGA_AGENT_ID.as_ref()"),
+            "OMEGA-DELTA-0185: `placeholder_text` in {CONVERSATION_VIEW_PATH} no \
+             longer folds the router's own id down to `Omega` in `Message \
+             {{agent_name}}`. Update FRONT_DOOR_POSITIVE in \
+             script/omega-release-gate and this check together, or the \
+             installed flag-free launch row looks for a composer placeholder \
+             the product no longer draws."
+        );
+        assert!(
+            gate.contains("FRONT_DOOR_POSITIVE = (\"Message Omega\",)"),
+            "OMEGA-DELTA-0185: script/omega-release-gate no longer proves the \
+             composer front door with the placeholder the composer draws."
+        );
         for honesty in [
             "openagents.omega.release-gate.v2",
             "openagents.omega.release-gate-owner-evidence.v1",
