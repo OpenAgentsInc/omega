@@ -123,6 +123,32 @@ send(
         },
     }
 )
+frames = {}
+deadline = time.time() + 30
+
+
+def read_until(frame_id):
+    """Read responses until `frame_id` arrives, the child dies, or we time out."""
+    while time.time() < deadline and frame_id not in frames:
+        line = child.stdout.readline()
+        if not line:
+            return
+        try:
+            frame = json.loads(line)
+        except json.JSONDecodeError:
+            continue
+        if frame.get("kind") == "response":
+            frames[frame.get("id")] = frame
+
+
+# Wait for `initialize` to be ANSWERED before probing. `serveStdio` handles
+# lines concurrently and `initialize` awaits, so a pipelined probe races it and
+# can come back `invalid_request: Call initialize first`. This script only
+# hard-fails the probe on `unknown_method`, so pipelining did not produce a
+# false PASS -- but it made the probe weaker than it reads, which is the same
+# class of defect this script exists to catch.
+read_until("initialize")
+
 # One probe method, so an absent boundary is visible on the wire and not only
 # in the negotiation.
 send(
@@ -136,21 +162,19 @@ send(
     }
 )
 child.stdin.close()
-
-frames = {}
-deadline = time.time() + 30
-while time.time() < deadline and len(frames) < 2:
-    line = child.stdout.readline()
-    if not line:
-        break
-    try:
-        frame = json.loads(line)
-    except json.JSONDecodeError:
-        continue
-    if frame.get("kind") == "response":
-        frames[frame.get("id")] = frame
+read_until("probe")
 
 child.kill()
+
+# An `initialize`-ordering failure now means the probe never ran, not that the
+# boundary is absent. Say so rather than reporting it as a capability result.
+probe_frame = frames.get("probe") or {}
+if not probe_frame.get("ok"):
+    probe_code = ((probe_frame.get("error") or {}).get("code")) or ""
+    if probe_code == "invalid_request":
+        print("FAIL: the probe was refused as out-of-order, so it proved nothing.")
+        print(f"      planning.graph.read answered: {probe_code!r}")
+        raise SystemExit(1)
 
 initialize = frames.get("initialize")
 if initialize is None or not initialize.get("ok"):
