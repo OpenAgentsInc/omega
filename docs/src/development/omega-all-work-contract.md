@@ -9,10 +9,10 @@ adapter creates a second writable store.
 
 | Field                 | Value                                                              |
 | --------------------- | ------------------------------------------------------------------ |
-| OpenAgents commit     | `f84fc2ea958169db59109c71c43d4c526aae4d1b`                         |
+| OpenAgents commit     | `b0ff32b73ff61cccfca8107ac8984252371c9e5f`                         |
 | Contract              | `openagents.all_work_boundary.v1`                                  |
-| Definition SHA-256    | `818f7960246a0811d8193523afd83197183f9defccf507e31991624f65f7d1e8` |
-| Rust artifact SHA-256 | `b3da995bbe8301ab4a5401759f67627ead83d377ee477a27f4a050aab9c5b8bb` |
+| Definition SHA-256    | `513432ed4d7deee1a8511f59b86cc1958d33cc32b76b314ebb0b901500dfb56d` |
+| Rust artifact SHA-256 | `97edd7447145d7d52140e60549b465dfe5f3440a0b9f1748f20ad9469b54e560` |
 | Omega receipt         | `crates/omega_effectd/all-work-contract/SOURCE.json`               |
 
 The generated Rust file, compatibility manifest, and shared fixtures are
@@ -29,9 +29,9 @@ separate All Work profile:
 - an omitted All Work request selects `omega-effectd.v1` with no Work methods;
 - `omega-effectd.v2` enables `work.index.read`, `work.snapshot.read`,
   `planning.graph.read`, `repository.claim.read`, and separately negotiated
-  claim execution, signed Workroom read/enqueue/delivery, Work command, and
-  Work cutover, Organization membership read, and strict bug candidate
-  capabilities;
+  claim execution, signed Workroom read/enqueue/delivery/publication, Work
+  command, and Work cutover, Organization membership read, and strict bug
+  candidate capabilities;
 - a v1 client that calls any All Work read method receives
   `incompatible_version`;
 - request and result domain payloads use generated Rust and Effect types;

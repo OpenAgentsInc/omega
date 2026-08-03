@@ -3914,6 +3914,7 @@ pub struct AgentPanel {
     _dogfood_planning_persist: Option<Task<()>>,
     _dogfood_claim_task: Option<Task<()>>,
     _dogfood_workroom_refresh: Option<Task<()>>,
+    _dogfood_workroom_publish: Option<Task<()>>,
     _dogfood_work_command_task: Option<Task<()>>,
     omega_work_detail: Option<Entity<WorkDetailSurface>>,
     _omega_work_detail_subscription: Option<Subscription>,
@@ -4681,6 +4682,7 @@ impl AgentPanel {
             _dogfood_planning_persist: None,
             _dogfood_claim_task: None,
             _dogfood_workroom_refresh: None,
+            _dogfood_workroom_publish: None,
             _dogfood_work_command_task: None,
             omega_work_detail: None,
             _omega_work_detail_subscription: None,
@@ -18721,6 +18723,74 @@ impl AgentPanel {
         }));
     }
 
+    fn publish_dogfood_workroom_event(
+        &mut self,
+        event_ref: String,
+        effective_principal_ref: String,
+        attempt_count: u64,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(surface) = self.dogfood_surface.clone() else {
+            return;
+        };
+        let supervisor = omega_effectd::shared_supervisor(cx).ok();
+        self._dogfood_workroom_publish = Some(cx.spawn(async move |_this, cx| {
+            let requested_event_ref = event_ref.clone();
+            let result: Result<omega_effectd::all_work_contract::SignedWorkroomDeliveryResult> =
+                async {
+                    let supervisor = supervisor.context("omega-effectd is unavailable")?;
+                    let mut guard = supervisor.lock().await;
+                    guard.ensure_started().await?;
+                    let result = guard
+                        .publish_signed_workroom(
+                            omega_effectd::all_work_contract::SignedWorkroomPublishRequest {
+                                idempotency_key:
+                                    omega_effectd::all_work_contract::IdempotencyKey::try_from(
+                                        format!(
+                                            "omega-ui-workroom-publish-{event_ref}-a{attempt_count}"
+                                        ),
+                                    )?,
+                                effective_principal_ref:
+                                    omega_effectd::all_work_contract::PrincipalRef::try_from(
+                                        effective_principal_ref,
+                                    )?,
+                                capability_ref:
+                                    omega_effectd::all_work_contract::CapabilityRef::try_from(
+                                        "capability:workroom-activity:publish".to_string(),
+                                    )?,
+                                event_ref:
+                                    omega_effectd::all_work_contract::SignedProjectionEventRef::try_from(
+                                        event_ref,
+                                    )?,
+                            },
+                        )
+                        .await?;
+                    if result.receipt.event_ref.0.as_str() != requested_event_ref {
+                        return Err(anyhow!("signed Workroom publish returned another event"));
+                    }
+                    if result.receipt.relay_acceptance_is_authority
+                        || result.receipt.admitted_effect
+                    {
+                        return Err(anyhow!(
+                            "signed Workroom publish receipt exceeded transport authority"
+                        ));
+                    }
+                    Ok(result)
+                }
+                .await;
+            let _ = surface.update(cx, |surface, cx| match result {
+                Ok(result) => {
+                    surface.finish_signed_workroom_publish(Some(result.ledger), None, cx)
+                }
+                Err(error) => surface.finish_signed_workroom_publish(
+                    None,
+                    Some(format!("Relay publication failed: {error}")),
+                    cx,
+                ),
+            });
+        }));
+    }
+
     fn open_dogfood_project(
         &mut self,
         project_id: &str,
@@ -18789,6 +18859,16 @@ impl AgentPanel {
                     DogfoodSurfaceEvent::WorkCommandRequested { issue_id, action } => {
                         this.execute_dogfood_work_command(&issue_id, action, cx);
                     }
+                    DogfoodSurfaceEvent::SignedWorkroomPublishRequested {
+                        event_ref,
+                        effective_principal_ref,
+                        attempt_count,
+                    } => this.publish_dogfood_workroom_event(
+                        event_ref,
+                        effective_principal_ref,
+                        attempt_count,
+                        cx,
+                    ),
                 },
             ));
             self.dogfood_surface = Some(surface.clone());

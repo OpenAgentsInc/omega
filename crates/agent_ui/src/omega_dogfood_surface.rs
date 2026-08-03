@@ -85,6 +85,11 @@ pub enum DogfoodSurfaceEvent {
         issue_id: String,
         action: DogfoodWorkCommandAction,
     },
+    SignedWorkroomPublishRequested {
+        event_ref: String,
+        effective_principal_ref: String,
+        attempt_count: u64,
+    },
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -149,6 +154,7 @@ pub struct DogfoodSurface {
     repository_claim_busy: bool,
     signed_workroom_ledger: Option<SignedWorkroomLedger>,
     signed_workroom_error: Option<String>,
+    signed_workroom_publish_in_flight: Option<String>,
     work_command_context: Option<DogfoodWorkCommandContext>,
     work_command_context_error: Option<String>,
     work_command_snapshot: Option<WorkSnapshot>,
@@ -404,6 +410,7 @@ impl DogfoodSurface {
             repository_claim_busy: false,
             signed_workroom_ledger: None,
             signed_workroom_error: None,
+            signed_workroom_publish_in_flight: None,
             work_command_context: None,
             work_command_context_error: Some(
                 "Live commands need a verified Effective Principal and Organization.".into(),
@@ -505,6 +512,20 @@ impl DogfoodSurface {
         cx.notify();
     }
 
+    pub fn finish_signed_workroom_publish(
+        &mut self,
+        ledger: Option<SignedWorkroomLedger>,
+        error: Option<String>,
+        cx: &mut Context<Self>,
+    ) {
+        if let Some(ledger) = ledger {
+            self.signed_workroom_ledger = Some(ledger);
+        }
+        self.signed_workroom_error = error;
+        self.signed_workroom_publish_in_flight = None;
+        cx.notify();
+    }
+
     pub fn set_work_command_context(
         &mut self,
         context: Option<DogfoodWorkCommandContext>,
@@ -596,6 +617,26 @@ impl DogfoodSurface {
         cx.emit(DogfoodSurfaceEvent::WorkCommandRequested {
             issue_id: self.selected_issue_id.clone(),
             action,
+        });
+        cx.notify();
+    }
+
+    fn request_signed_workroom_publish(
+        &mut self,
+        event_ref: String,
+        effective_principal_ref: String,
+        attempt_count: u64,
+        cx: &mut Context<Self>,
+    ) {
+        if self.signed_workroom_publish_in_flight.is_some() {
+            return;
+        }
+        self.signed_workroom_publish_in_flight = Some(event_ref.clone());
+        self.signed_workroom_error = None;
+        cx.emit(DogfoodSurfaceEvent::SignedWorkroomPublishRequested {
+            event_ref,
+            effective_principal_ref,
+            attempt_count,
         });
         cx.notify();
     }
@@ -2458,6 +2499,14 @@ impl DogfoodSurface {
                         .color(Color::Muted),
                     )
                     .when_some(delivery, |card, record| {
+                        let publish_label = signed_workroom_publish_action(&record.state);
+                        let event_ref = activity.event_ref.0.clone();
+                        let effective_principal_ref = activity.actor_ref.0.clone();
+                        let attempt_count = record.attempt_count.0;
+                        let publish_in_flight = self
+                            .signed_workroom_publish_in_flight
+                            .as_deref()
+                            == Some(event_ref.as_str());
                         let attempts = record
                             .delivery_attempts
                             .iter()
@@ -2524,6 +2573,44 @@ impl DogfoodSurface {
                                             .color(Color::Muted),
                                         ),
                                 )
+                                .when_some(publish_label, |history, label| {
+                                    history.child(
+                                        h_flex()
+                                            .gap_2()
+                                            .child(
+                                                Button::new(
+                                                    (
+                                                        "signed-workroom-publish",
+                                                        event_ref.clone(),
+                                                    ),
+                                                    if publish_in_flight {
+                                                        "Publishing…"
+                                                    } else {
+                                                        label
+                                                    },
+                                                )
+                                                .style(ButtonStyle::Subtle)
+                                                .size(ButtonSize::Compact)
+                                                .disabled(publish_in_flight)
+                                                .aria_description(
+                                                    "Transport retry for the existing signed outbox event; this does not sign, enqueue, verify, merge, or release Work",
+                                                )
+                                                .on_click(cx.listener(move |this, _, _, cx| {
+                                                    this.request_signed_workroom_publish(
+                                                        event_ref.clone(),
+                                                        effective_principal_ref.clone(),
+                                                        attempt_count,
+                                                        cx,
+                                                    )
+                                                })),
+                                            )
+                                            .child(
+                                                Label::new("Existing signed event only")
+                                                    .size(LabelSize::XSmall)
+                                                    .color(Color::Muted),
+                                            ),
+                                    )
+                                })
                                 .when(record.delivery_attempts.len() > 3, |history| {
                                     history.child(
                                         Label::new(format!(
@@ -2727,6 +2814,18 @@ fn signed_workroom_outbox_status(state: &SignedWorkroomOutboxState) -> OmegaStat
         SignedWorkroomOutboxState::Failed => OmegaStatus::Failed,
         SignedWorkroomOutboxState::Superseded => OmegaStatus::Warning,
         SignedWorkroomOutboxState::Revoked => OmegaStatus::Blocked,
+    }
+}
+
+fn signed_workroom_publish_action(state: &SignedWorkroomOutboxState) -> Option<&'static str> {
+    match state {
+        SignedWorkroomOutboxState::Pending => Some("Publish to relays"),
+        SignedWorkroomOutboxState::Publishing | SignedWorkroomOutboxState::Failed => {
+            Some("Retry unresolved relays")
+        }
+        SignedWorkroomOutboxState::Accepted
+        | SignedWorkroomOutboxState::Superseded
+        | SignedWorkroomOutboxState::Revoked => None,
     }
 }
 
@@ -3212,6 +3311,30 @@ mod tests {
         assert_eq!(
             signed_workroom_outbox_status(&SignedWorkroomOutboxState::Failed),
             OmegaStatus::Failed
+        );
+        assert_eq!(
+            signed_workroom_publish_action(&SignedWorkroomOutboxState::Pending),
+            Some("Publish to relays")
+        );
+        assert_eq!(
+            signed_workroom_publish_action(&SignedWorkroomOutboxState::Publishing),
+            Some("Retry unresolved relays")
+        );
+        assert_eq!(
+            signed_workroom_publish_action(&SignedWorkroomOutboxState::Failed),
+            Some("Retry unresolved relays")
+        );
+        assert_eq!(
+            signed_workroom_publish_action(&SignedWorkroomOutboxState::Accepted),
+            None
+        );
+        assert_eq!(
+            signed_workroom_publish_action(&SignedWorkroomOutboxState::Superseded),
+            None
+        );
+        assert_eq!(
+            signed_workroom_publish_action(&SignedWorkroomOutboxState::Revoked),
+            None
         );
     }
 

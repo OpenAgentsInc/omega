@@ -53,7 +53,20 @@ mod tests {
         );
         assert_eq!(
             source["sourceCommit"].as_str(),
-            Some("f84fc2ea958169db59109c71c43d4c526aae4d1b")
+            Some("b0ff32b73ff61cccfca8107ac8984252371c9e5f")
+        );
+        assert!(
+            compatibility["protocol"]["methods"]
+                .as_array()
+                .expect("protocol methods")
+                .iter()
+                .any(|entry| {
+                    entry["method"] == "workroom.activity.publish"
+                        && entry["capability"] == "workroom.activity.publish"
+                        && entry["params"] == "SignedWorkroomPublishRequest"
+                        && entry["result"] == "SignedWorkroomDeliveryResult"
+                }),
+            "generated compatibility manifest must expose the authority-owned publisher"
         );
     }
 

@@ -32,8 +32,8 @@ use crate::all_work::generated::{
     ProtocolVersion as AllWorkProtocolVersion, RepositoryClaimExecuteRequest,
     RepositoryClaimExecuteResult, RepositoryClaimReadRequest, RepositoryClaimReadResult,
     SignedWorkroomDeliveryRequest, SignedWorkroomDeliveryResult, SignedWorkroomEnqueueRequest,
-    SignedWorkroomEnqueueResult, SignedWorkroomReadRequest, SignedWorkroomReadResult,
-    StrictBugCandidateExecuteRequest, StrictBugCandidateExecuteResult,
+    SignedWorkroomEnqueueResult, SignedWorkroomPublishRequest, SignedWorkroomReadRequest,
+    SignedWorkroomReadResult, StrictBugCandidateExecuteRequest, StrictBugCandidateExecuteResult,
     StrictBugCandidateReadRequest, StrictBugCandidateReadResult, WorkCommandExecuteRequest,
     WorkCommandExecuteResult, WorkCutoverExecuteRequest, WorkCutoverExecuteResult,
     WorkCutoverReadRequest, WorkCutoverReadResult, WorkIndexReadRequest, WorkIndexReadResult,
@@ -156,6 +156,7 @@ impl OmegaEffectdSupervisor {
                 AllWorkProtocolCapability::WorkroomActivityRead,
                 AllWorkProtocolCapability::WorkroomActivityEnqueue,
                 AllWorkProtocolCapability::WorkroomActivityDeliver,
+                AllWorkProtocolCapability::WorkroomActivityPublish,
                 AllWorkProtocolCapability::WorkCommandExecute,
                 AllWorkProtocolCapability::WorkCutoverRead,
                 AllWorkProtocolCapability::WorkCutoverExecute,
@@ -359,6 +360,28 @@ impl OmegaEffectdSupervisor {
             .await?;
         let result: SignedWorkroomDeliveryResult =
             serde_json::from_value(result).context("decode signed Workroom delivery")?;
+        result
+            .validate()
+            .map_err(|error| SupervisorError::Anyhow(error.into()))?;
+        Ok(result)
+    }
+
+    pub async fn publish_signed_workroom(
+        &mut self,
+        params: SignedWorkroomPublishRequest,
+    ) -> Result<SignedWorkroomDeliveryResult, SupervisorError> {
+        params
+            .validate()
+            .map_err(|error| SupervisorError::Anyhow(error.into()))?;
+        let result = self
+            .request(
+                "workroom.activity.publish",
+                Some(serde_json::to_value(params).context("encode signed Workroom publish")?),
+                self.generation(),
+            )
+            .await?;
+        let result: SignedWorkroomDeliveryResult =
+            serde_json::from_value(result).context("decode signed Workroom publish")?;
         result
             .validate()
             .map_err(|error| SupervisorError::Anyhow(error.into()))?;
@@ -1056,6 +1079,7 @@ impl OmegaEffectdSupervisor {
                             | "workroom.activity.read"
                             | "workroom.activity.enqueue"
                             | "workroom.activity.deliver"
+                            | "workroom.activity.publish"
                             | "work.command.execute"
                             | "work.cutover.read"
                             | "work.cutover.execute"
