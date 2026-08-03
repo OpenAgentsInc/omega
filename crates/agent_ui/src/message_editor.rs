@@ -1928,7 +1928,6 @@ impl MessageEditor {
         });
     }
 
-    #[cfg(any(test, feature = "test-support"))]
     pub fn set_text(&mut self, text: &str, window: &mut Window, cx: &mut Context<Self>) {
         self.editor.update(cx, |editor, cx| {
             editor.set_text(text, window, cx);

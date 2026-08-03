@@ -32,6 +32,7 @@ const MAX_USER_SAVED_VIEWS: usize = 8;
 pub const DOGFOOD_SIGNED_WORKROOM_REF: &str = "workroom:omega:release-v0.2.0";
 
 #[derive(Clone, Copy, Debug, Default, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "snake_case")]
 pub enum DogfoodScene {
     #[default]
     Overview,
@@ -244,7 +245,11 @@ impl NamedSavedPlanningViews {
         let selected_id = selected_id
             .filter(|id| admitted.iter().any(|view| &view.id == id))
             .or_else(|| active_id.clone())
-            .or_else(|| had_legacy_query.then(|| admitted.first()?.id.clone()));
+            .or_else(|| {
+                had_legacy_query
+                    .then(|| admitted.first().map(|view| view.id.clone()))
+                    .flatten()
+            });
         let observed_next_sequence = admitted
             .iter()
             .filter_map(|view| view.id.rsplit(':').next()?.parse::<u64>().ok())
@@ -1180,7 +1185,10 @@ impl DogfoodSurface {
                     }))
                     .children(self.user_saved_views.views.iter().map(|view| {
                         let id = view.id.clone();
-                        Button::new(("planning-user-saved-view", view.id.clone()), view.name.clone())
+                        Button::new(
+                            format!("planning-user-saved-view-{}", view.id),
+                            view.name.clone(),
+                        )
                             .style(if self.user_saved_views.active
                                 && self.user_saved_views.selected_id.as_deref() == Some(view.id.as_str()) {
                                 ButtonStyle::Filled
@@ -1440,6 +1448,7 @@ impl DogfoodSurface {
     fn render_list(&self, cx: &mut Context<Self>) -> impl IntoElement {
         let colors = cx.theme().colors();
         v_flex()
+            .id("omega-dogfood-work-list")
             .rounded_lg()
             .border_1()
             .border_color(colors.border_variant)
@@ -1522,8 +1531,11 @@ impl DogfoodSurface {
             ("Done", FixtureLifecycleType::Completed),
         ];
         h_flex()
+            .id("omega-dogfood-work-board")
             .items_start()
             .gap_3()
+            .role(gpui::Role::Group)
+            .aria_label("Work board")
             .children(columns.map(|(label, lifecycle)| {
                 let cards = self
                     .visible_issues(PlanningViewKind::Board)
@@ -1537,6 +1549,7 @@ impl DogfoodSurface {
                             .is_some_and(|state| state.lifecycle_type == lifecycle)
                     });
                 v_flex()
+                    .id(format!("omega-dogfood-board-column-{label}"))
                     .min_w(px(210.))
                     .flex_1()
                     .gap_2()
@@ -1599,6 +1612,7 @@ impl DogfoodSurface {
         let projection = self.planning_projection(PlanningViewKind::Table);
         let rows = projection.rows;
         v_flex()
+            .id("omega-dogfood-work-table")
             .rounded_lg()
             .border_1()
             .border_color(colors.border_variant)
@@ -1690,6 +1704,7 @@ impl DogfoodSurface {
         let rows = projection.rows;
         let groups = projection.groups;
         v_flex()
+            .id("omega-dogfood-work-timeline")
             .gap_3()
             .role(gpui::Role::List)
             .aria_label("Work timeline")
@@ -1704,6 +1719,7 @@ impl DogfoodSurface {
             .children(groups.into_iter().map(|(group, work_refs)| {
                 let group_rows = rows.iter().filter(|row| work_refs.contains(&row.work_ref));
                 v_flex()
+                    .id(format!("omega-dogfood-timeline-group-{group}"))
                     .gap_2()
                     .role(gpui::Role::List)
                     .aria_label(format!("{group} timeline group"))
@@ -1780,6 +1796,7 @@ impl DogfoodSurface {
         let rows = projection.rows;
         let groups = projection.groups;
         h_flex()
+            .id("omega-dogfood-work-roadmap")
             .items_start()
             .gap_3()
             .flex_wrap()
@@ -1792,6 +1809,7 @@ impl DogfoodSurface {
                     .collect::<Vec<_>>();
                 let completed = group_rows.iter().filter(|row| row.completed).count();
                 v_flex()
+                    .id(format!("omega-dogfood-roadmap-group-{group}"))
                     .min_w(px(220.))
                     .flex_1()
                     .gap_2()
@@ -1990,6 +2008,7 @@ impl DogfoodSurface {
             .gap_4()
             .child(
                 v_flex()
+                    .id("omega-dogfood-work-detail")
                     .min_w_0()
                     .flex_1()
                     .gap_4()
@@ -2031,26 +2050,36 @@ impl DogfoodSurface {
                     .child(section_heading("Dependencies", cx))
                     .child(
                         v_flex()
+                            .id("omega-dogfood-work-dependencies")
                             .gap_1()
                             .role(gpui::Role::List)
                             .aria_label("Work dependencies")
                             .when(blockers.is_empty(), |list| {
                                 list.child(
-                                    div().role(gpui::Role::ListItem).child(
-                                        Label::new("No typed blockers in this snapshot.")
-                                            .size(LabelSize::Small)
-                                            .color(Color::Muted),
-                                    ),
+                                    div()
+                                        .id("omega-dogfood-work-dependencies-empty")
+                                        .role(gpui::Role::ListItem)
+                                        .child(
+                                            Label::new("No typed blockers in this snapshot.")
+                                                .size(LabelSize::Small)
+                                                .color(Color::Muted),
+                                        ),
                                 )
                             })
                             .children(blockers.iter().map(|blocker| {
-                                div().role(gpui::Role::ListItem).child(
-                                    Label::new(format!(
-                                        "Blocked by {} · {}",
-                                        blocker.identifier, blocker.title
+                                div()
+                                    .id(format!(
+                                        "omega-dogfood-work-dependency-{}",
+                                        blocker.id
                                     ))
-                                    .size(LabelSize::Small),
-                                )
+                                    .role(gpui::Role::ListItem)
+                                    .child(
+                                        Label::new(format!(
+                                            "Blocked by {} · {}",
+                                            blocker.identifier, blocker.title
+                                        ))
+                                        .size(LabelSize::Small),
+                                    )
                             })),
                     )
                     .child(section_heading("Source", cx))
@@ -2062,16 +2091,22 @@ impl DogfoodSurface {
                     .child(section_heading("Labels", cx))
                     .child(
                         h_flex()
+                            .id("omega-dogfood-work-labels")
                             .gap_1()
                             .flex_wrap()
                             .role(gpui::Role::List)
                             .aria_label("Work labels")
                             .children(issue.label_ids.iter().map(|label_id| {
-                                div().role(gpui::Role::ListItem).child(
-                                    Label::new(label_id.trim_start_matches("label:").to_string())
+                                div()
+                                    .id(format!("omega-dogfood-work-label-{label_id}"))
+                                    .role(gpui::Role::ListItem)
+                                    .child(
+                                        Label::new(
+                                            label_id.trim_start_matches("label:").to_string(),
+                                        )
                                         .size(LabelSize::XSmall)
                                         .color(Color::Muted),
-                                )
+                                    )
                             })),
                     )
                     .child(section_heading("Execution", cx))
@@ -2085,6 +2120,7 @@ impl DogfoodSurface {
             )
             .child(
                 v_flex()
+                    .id("omega-dogfood-work-inspector")
                     .w(px(300.))
                     .flex_none()
                     .gap_2()
@@ -2572,6 +2608,7 @@ impl DogfoodSurface {
         let any_signed_workroom_operation =
             checkpoint_busy || self.signed_workroom_publish_in_flight.is_some();
         v_flex()
+            .id("omega-dogfood-signed-work-history")
             .gap_3()
             .role(gpui::Role::List)
             .aria_label("Signed Work history")
@@ -2648,6 +2685,7 @@ impl DogfoodSurface {
                     .map(|record| signed_workroom_outbox_state_label(&record.state))
                     .unwrap_or("Unavailable");
                 v_flex()
+                    .id(format!("omega-dogfood-signed-work-{}", activity.event_ref.0))
                     .gap_1()
                     .p_3()
                     .rounded_lg()
@@ -2713,6 +2751,10 @@ impl DogfoodSurface {
                             .take(3)
                             .map(|attempt| {
                                 h_flex()
+                                    .id(format!(
+                                        "omega-dogfood-relay-attempt-{}-{}",
+                                        attempt.relay_url.0, attempt.attempted_at.0
+                                    ))
                                     .justify_between()
                                     .role(gpui::Role::ListItem)
                                     .aria_label(format!(
@@ -2744,6 +2786,10 @@ impl DogfoodSurface {
                             .collect::<Vec<_>>();
                         card.child(
                             v_flex()
+                                .id(format!(
+                                    "omega-dogfood-relay-attempts-{}",
+                                    activity.event_ref.0
+                                ))
                                 .gap_1()
                                 .pt_2()
                                 .border_t_1()
@@ -2778,9 +2824,8 @@ impl DogfoodSurface {
                                             .gap_2()
                                             .child(
                                                 Button::new(
-                                                    (
-                                                        "signed-workroom-publish",
-                                                        event_ref.clone(),
+                                                    format!(
+                                                        "signed-workroom-publish-{event_ref}"
                                                     ),
                                                     if publish_in_flight {
                                                         "Publishing…"
@@ -3401,6 +3446,15 @@ fn planning_sort_label(sort: PlanningSort) -> &'static str {
 #[cfg(all(test, feature = "test-support"))]
 mod tests {
     use super::*;
+    use gpui::{TestAppContext, VisualTestContext};
+
+    struct DogfoodTestWindow(Entity<DogfoodSurface>);
+
+    impl Render for DogfoodTestWindow {
+        fn render(&mut self, _window: &mut Window, _cx: &mut Context<Self>) -> impl IntoElement {
+            self.0.clone()
+        }
+    }
 
     #[test]
     fn fresh_fixture_state_opens_the_dogfood_project_on_omega_214() {
@@ -3662,6 +3716,54 @@ mod tests {
         );
         for forbidden in ["https://", "/Users/", "signature", "payload", "token"] {
             assert!(!label.contains(forbidden), "leaked {forbidden}");
+        }
+    }
+
+    #[gpui::test]
+    async fn every_planning_scene_publishes_stable_named_accessibility_regions(
+        cx: &mut TestAppContext,
+    ) {
+        crate::test_support::init_test(cx);
+        let fixture = DogfoodPlanningViewModel::from_fixture(
+            DogfoodFixtureAdapter::load_for_tests().expect("valid dogfood fixture"),
+        );
+        let window = cx.add_window(|window, cx| {
+            DogfoodTestWindow(cx.new(|cx| DogfoodSurface::new(fixture, window, cx)))
+        });
+        let surface = window
+            .read_with(cx, |window, _cx| window.0.clone())
+            .expect("dogfood test window");
+        let mut cx = VisualTestContext::from_window(window.clone().into(), cx);
+        cx.set_debug_accessibility_active(true);
+
+        for (scene, required_name) in [
+            (DogfoodScene::List, "Work list"),
+            (DogfoodScene::Board, "Work board"),
+            (DogfoodScene::Table, "Work table"),
+            (DogfoodScene::Timeline, "Work timeline"),
+            (DogfoodScene::Roadmap, "Work roadmap"),
+            (DogfoodScene::Issue, "Work detail"),
+        ] {
+            surface.update(&mut cx, |surface, cx| {
+                surface.scene = scene;
+                cx.notify();
+            });
+            cx.run_until_parked();
+            let tree = cx
+                .debug_render_snapshot()
+                .accessibility_tree_json()
+                .expect("accessibility tree must be active")
+                .to_string();
+            assert!(
+                tree.contains(required_name),
+                "{scene:?} did not publish {required_name:?}: {tree}"
+            );
+            for forbidden in ["nsec1", "ncryptsec1", "/Users/", "BEGIN PRIVATE KEY"] {
+                assert!(
+                    !tree.contains(forbidden),
+                    "{scene:?} leaked {forbidden:?} into the accessibility tree"
+                );
+            }
         }
     }
 }

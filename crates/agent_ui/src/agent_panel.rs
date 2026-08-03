@@ -5224,7 +5224,7 @@ impl AgentPanel {
             label,
             thread_ref: omega_effectd::all_work_contract::ThreadRef::try_from(format!(
                 "thread:omega:{}",
-                metadata.thread_id.0
+                metadata.thread_id.to_key_string()
             ))
             .ok()?,
             thread_key: metadata.thread_id.to_key_string(),

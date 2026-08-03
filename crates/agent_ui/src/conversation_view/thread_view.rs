@@ -4024,7 +4024,6 @@ impl ThreadView {
         // window, so they render as a dark halo; only apply them when opaque.
         let opaque_window =
             cx.theme().window_background_appearance() == gpui::WindowBackgroundAppearance::Opaque;
-
         h_flex()
             .w_full()
             .px_2()
@@ -5284,6 +5283,63 @@ impl ThreadView {
         let pill_border = cx.theme().colors().text.opacity(0.08);
         let opaque_window =
             cx.theme().window_background_appearance() == gpui::WindowBackgroundAppearance::Opaque;
+        let composer_focus = self.message_editor.focus_handle(cx);
+        let composer_entity = self.message_editor.clone();
+        let render_accessible_editor = || {
+            let composer_value = editor_text.clone();
+            let composer_text = composer_value.clone();
+            let composer_editor = composer_entity.downgrade();
+            let composer_a11y_focus = composer_focus.clone();
+
+            div()
+                .id("omega-workbench-composer-input")
+                .size_full()
+                .min_w_0()
+                .min_h_0()
+                .track_focus(&composer_focus)
+                .role(gpui::Role::MultilineTextInput)
+                .aria_label("Message composer")
+                .aria_placeholder("Message Omega")
+                .aria_value(composer_value)
+                .a11y_synthetic_children(move |builder| {
+                    let run_id = builder.synthetic_node_id(0);
+                    let mut run = gpui::accesskit::Node::new(gpui::Role::TextRun);
+                    run.set_text_direction(gpui::accesskit::TextDirection::LeftToRight);
+                    run.set_value(composer_text.clone());
+                    run.set_character_lengths(
+                        composer_text
+                            .chars()
+                            .map(|character| character.len_utf8() as u8)
+                            .collect::<Vec<_>>(),
+                    );
+                    builder.push_child(run_id, run);
+                    let caret = gpui::accesskit::TextPosition {
+                        node: run_id,
+                        character_index: composer_text.chars().count(),
+                    };
+                    builder
+                        .parent_node()
+                        .set_text_selection(gpui::accesskit::TextSelection {
+                            anchor: caret,
+                            focus: caret,
+                        });
+                })
+                .on_a11y_action(gpui::AccessibleAction::Focus, move |_, window, cx| {
+                    composer_a11y_focus.focus(window, cx);
+                })
+                .on_a11y_action(gpui::AccessibleAction::SetValue, move |data, window, cx| {
+                    let Some(gpui::accesskit::ActionData::Value(value)) = data else {
+                        return;
+                    };
+                    let Some(editor) = composer_editor.upgrade() else {
+                        return;
+                    };
+                    editor.update(cx, |editor, cx| {
+                        editor.set_text(value, window, cx);
+                    });
+                })
+                .child(composer_entity.clone())
+        };
 
         let controls = if omega_zero_base::is_active() {
             self.render_zero_base_executor_bar(compact, window, cx)
@@ -5353,7 +5409,7 @@ impl ThreadView {
                                     .pl(px(COMPOSER_TEXT_INSET))
                                     .pr_2()
                                     .py_3()
-                                    .child(self.message_editor.clone()),
+                                    .child(render_accessible_editor()),
                             )
                             .child(
                                 h_flex()
@@ -5381,7 +5437,7 @@ impl ThreadView {
                                 .px(px(COMPOSER_TEXT_INSET))
                                 .pt_4()
                                 .pb_1()
-                                .child(self.message_editor.clone()),
+                                .child(render_accessible_editor()),
                         )
                         .child(
                             h_flex()

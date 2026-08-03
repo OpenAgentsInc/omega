@@ -9063,6 +9063,10 @@ pub(crate) mod tests {
             .accessibility_tree_json()
             .expect("forced accessibility should capture the indicator");
         assert!(
+            normal_tree.contains("Message composer") && normal_tree.contains("MultilineTextInput"),
+            "the installed workbench composer must publish its text-input role: {normal_tree}"
+        );
+        assert!(
             normal_tree.contains("Vim mode: NORMAL"),
             "the indicator should announce the focused composer's normal mode: {normal_tree}"
         );

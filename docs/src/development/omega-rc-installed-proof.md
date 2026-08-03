@@ -749,6 +749,18 @@ the appearance block still calls `ocr_lines`, `confident_lines`, and
 `differing_pixels`, so the decision cannot quietly stop being wired to the
 pixels.
 
+For OAW-012 closure, inspect the same installed application through the macOS
+accessibility API after the automated collector passes. Record the exact
+application path and accessibility-tree text. Navigate from the working-folder
+and Thread controls into Work detail, the inspector, a Thread, and the
+composer. Activate at least one control through its accessibility action, then
+confirm that focus and visible state match the keyboard or pointer journey.
+Repeat the inspection after a route change and a Work-list update so stable
+node identity and virtualized collection semantics are observed, not inferred.
+The tree text must not contain a secret-key marker, credential, token, hidden
+reasoning, or private local path. This inspection corroborates the collector;
+it does not replace any blocked collector row.
+
 Every keystroke the collector sends brings the candidate to the front first and
 refuses if it is not there. macOS routes a synthesized key to whichever
 application is frontmost, not to the process the script names, so an unchecked

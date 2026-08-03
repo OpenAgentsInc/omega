@@ -401,7 +401,7 @@ mod tests {
             .enumerate()
             .map(|(index, account_ref)| {
                 let secret = format!("{}", index + 1).repeat(64);
-                let keys = Keys::new(SecretKey::from_hex(secret).expect("secret key"));
+                let keys = Keys::new(SecretKey::from_hex(&secret).expect("secret key"));
                 AccountDashboardEntry {
                     account_ref: AccountRef::new(*account_ref).expect("account ref"),
                     identity: PublicIdentity::from_public_key_hex(

@@ -28195,7 +28195,9 @@ mod tests {
         for required in [
             "if !self.fixture_views_enabled",
             "omega.forensics.publication.source-required",
-            "PRIVATE · PUBLICATION BLOCKED",
+            "omega.forensics.publication.source-status",
+            "OmegaStatus::Blocked",
+            "No source-owned publication gate projection is attached",
             "Synthetic publication scenes are available only in explicit development and mock builds.",
         ] {
             assert!(
@@ -28496,7 +28498,8 @@ mod tests {
         ));
         for required in [
             "omega.dogfood.agent-session-simulation",
-            "SIMULATED · EPHEMERAL",
+            "Simulated Agent Session",
+            "OmegaStatus::Warning",
             "AgentSessionSimulationScene::ALL",
             "No live command, claim, lease, evidence, verification, receipt, release, or owner authority.",
         ] {
@@ -28569,7 +28572,7 @@ mod tests {
         ));
         for required in [
             "DogfoodProviderEventProjection",
-            "Provider event",
+            "Canonical provider event",
             "Record provider event",
         ] {
             assert!(
