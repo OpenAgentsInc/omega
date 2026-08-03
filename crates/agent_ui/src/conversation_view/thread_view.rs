@@ -5286,59 +5286,21 @@ impl ThreadView {
         let composer_focus = self.message_editor.focus_handle(cx);
         let composer_entity = self.message_editor.clone();
         let render_accessible_editor = || {
-            let composer_value = editor_text.clone();
-            let composer_text = composer_value.clone();
             let composer_editor = composer_entity.downgrade();
-            let composer_a11y_focus = composer_focus.clone();
-
-            div()
-                .id("omega-workbench-composer-input")
-                .size_full()
-                .min_w_0()
-                .min_h_0()
-                .track_focus(&composer_focus)
-                .role(gpui::Role::MultilineTextInput)
-                .aria_label("Message composer")
-                .aria_placeholder("Message Omega")
-                .aria_value(composer_value)
-                .a11y_synthetic_children(move |builder| {
-                    let run_id = builder.synthetic_node_id(0);
-                    let mut run = gpui::accesskit::Node::new(gpui::Role::TextRun);
-                    run.set_text_direction(gpui::accesskit::TextDirection::LeftToRight);
-                    run.set_value(composer_text.clone());
-                    run.set_character_lengths(
-                        composer_text
-                            .chars()
-                            .map(|character| character.len_utf8() as u8)
-                            .collect::<Vec<_>>(),
-                    );
-                    builder.push_child(run_id, run);
-                    let caret = gpui::accesskit::TextPosition {
-                        node: run_id,
-                        character_index: composer_text.chars().count(),
-                    };
-                    builder
-                        .parent_node()
-                        .set_text_selection(gpui::accesskit::TextSelection {
-                            anchor: caret,
-                            focus: caret,
-                        });
-                })
-                .on_a11y_action(gpui::AccessibleAction::Focus, move |_, window, cx| {
-                    composer_a11y_focus.focus(window, cx);
-                })
-                .on_a11y_action(gpui::AccessibleAction::SetValue, move |data, window, cx| {
-                    let Some(gpui::accesskit::ActionData::Value(value)) = data else {
-                        return;
-                    };
+            super::accessible_composer_input(
+                "omega-workbench-composer-input",
+                editor_text.clone(),
+                &composer_focus,
+                move |value, window, cx| {
                     let Some(editor) = composer_editor.upgrade() else {
                         return;
                     };
                     editor.update(cx, |editor, cx| {
-                        editor.set_text(value, window, cx);
+                        editor.set_text(&value, window, cx);
                     });
-                })
-                .child(composer_entity.clone())
+                },
+                composer_entity.clone().into_any_element(),
+            )
         };
 
         let controls = if omega_zero_base::is_active() {

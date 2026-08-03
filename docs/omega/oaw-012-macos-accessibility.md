@@ -17,6 +17,33 @@ The internal tree remains useful for deterministic semantic tests and the
 `dev: dump accessibility tree` diagnostic. It does not replace an installed
 observation of the operating-system tree.
 
+## Where an accessibility defect can be observed
+
+There are three points, not two, and knowing which one a piece of evidence
+comes from decides what a failure means.
+
+1. **The element tree.** What `render` built. Only elements with both an
+   `.id(...)` and a `.role(...)` reach the next point.
+2. **The `accesskit::TreeUpdate` handed to the platform adapter.** GPUI builds
+   one per frame in `Window::draw_roots` and sends it to
+   `MacWindow::a11y_tree_update`. `A11yDebug` retains that exact update, so
+   `Window::debug_a11y_tree_json`, the `DebugRenderSnapshot`
+   `accessibility_tree_json()` used by tests, and the shipped
+   `dev: dump accessibility tree` / `dev: copy accessibility tree` actions all
+   serialize the same object. A test assertion here is an assertion about what
+   the platform was given, not about an internal representation that the
+   platform never sees.
+3. **The macOS AX tree.** What AccessKit's adapter publishes after
+   `accesskit_consumer`'s `common_filter` runs, and what VoiceOver and
+   Computer Use read.
+
+Between 2 and 3, `common_filter` excludes a node only when it is hidden, is a
+graft, or has role `GenericContainer` or `TextRun`; a focused node is included
+unconditionally. GPUI never marks a node hidden or grafted. So a node that is
+present at point 2 and absent at point 3 is a narrow platform-adapter question,
+and a node absent at point 3 with no assertion at point 2 is usually not a
+platform question at all.
+
 ## Work-screen semantics
 
 The v0.2.0 development Work surface publishes named List, Board-column, Table,
@@ -84,9 +111,45 @@ SetValue actions, placeholder and value state, and synthetic text runs. The
 macOS tree returned to Computer Use promotes the adjacent model, voice, and
 send controls but omits that composer node. Three bounded candidate rebuilds
 with the input node attached at different valid layout boundaries produced the
-same result. This is now the smallest reproducible close blocker; do not claim
-an installed composer or close omega#217 until the macOS adapter result changes
-and a new installed VoiceOver journey reaches it.
+same result.
+
+### 2026-08-03 root cause: there are two composers
+
+The discrepancy was not a platform-adapter defect and not a layout boundary.
+Omega draws **two** composers, and the evidence on each side of the gap was
+looking at a different one.
+
+- `ThreadView::render_message_editor` draws the thread composer. It carried
+  the text-input node, and it is what the source regression mounted.
+- `ConversationView::render_loading_composer` draws the pre-session composer,
+  used while an executor connects (`ServerState::Loading`) **and** while
+  Omega's router is ready with its first executor session deliberately
+  deferred (`ConversationPreparation::RouterReady`). That is the state a
+  launched window and a new thread are in, so it is the composer the installed
+  observation was actually looking at. It drew a bare `EditorElement` with no
+  id, no role, no name, no value, no text runs, and no Focus or SetValue
+  action, while still drawing the executor menu, voice controls, and send
+  button beside it.
+
+That is the complete explanation for the reported shape of the failure: the
+installed tree published the model, voice, and send controls with no field
+between them, and moving the thread composer's node to three different valid
+layout boundaries could not change it, because that element was never on
+screen during the observation.
+
+Both composers now build their accessible node through one
+`accessible_composer_input` helper in `conversation_view.rs`, so the pair
+cannot drift apart again, and
+`pre_session_composer_publishes_its_text_input_node` asserts the pre-session
+composer's node in the same `TreeUpdate` that GPUI hands the platform adapter.
+That regression fails on the previous source and passes on the current source.
+
+The installed close evidence is still outstanding. A candidate carrying this
+fix must be built, and an installed VoiceOver journey must reach the composer,
+before omega#217 can close. The prediction is that the node now appears,
+because `common_filter` does not exclude `MultilineTextInput` and the same
+adapter already publishes Omega's other roles; a prediction is not the
+observation.
 
 Source admission is only the first slice of omega#217. Close the issue only
 after one installed v0.2.0 candidate supplies the complete automated

@@ -203,6 +203,71 @@ fn composer_max_width(configured: Option<Pixels>) -> Pixels {
         .min(COMPOSER_MAX_WIDTH))
 }
 
+/// Wraps a composer's editor element in the accessibility node that screen
+/// readers and voice control read as Omega's message field.
+///
+/// omega#217. There are two composers — the thread composer and the
+/// pre-session composer drawn while the executor connects or while Omega's
+/// router waits for a first send — and only the first one carried this node.
+/// A launched window therefore published its model, voice, and send controls
+/// to macOS with no text field between them, which read as the composer being
+/// missing from the platform tree rather than as one of two composers being
+/// unlabelled. Both call sites go through here so the pair cannot drift again.
+fn accessible_composer_input(
+    id: &'static str,
+    text: String,
+    focus_handle: &FocusHandle,
+    set_value: impl Fn(String, &mut Window, &mut App) + 'static,
+    editor: AnyElement,
+) -> gpui::Stateful<Div> {
+    let run_text = text.clone();
+    let focus_for_action = focus_handle.clone();
+
+    div()
+        .id(id)
+        .size_full()
+        .min_w_0()
+        .min_h_0()
+        .track_focus(focus_handle)
+        .role(gpui::Role::MultilineTextInput)
+        .aria_label("Message composer")
+        .aria_placeholder("Message Omega")
+        .aria_value(text)
+        .a11y_synthetic_children(move |builder| {
+            let run_id = builder.synthetic_node_id(0);
+            let mut run = gpui::accesskit::Node::new(gpui::Role::TextRun);
+            run.set_text_direction(gpui::accesskit::TextDirection::LeftToRight);
+            run.set_value(run_text.clone());
+            run.set_character_lengths(
+                run_text
+                    .chars()
+                    .map(|character| character.len_utf8() as u8)
+                    .collect::<Vec<_>>(),
+            );
+            builder.push_child(run_id, run);
+            let caret = gpui::accesskit::TextPosition {
+                node: run_id,
+                character_index: run_text.chars().count(),
+            };
+            builder
+                .parent_node()
+                .set_text_selection(gpui::accesskit::TextSelection {
+                    anchor: caret,
+                    focus: caret,
+                });
+        })
+        .on_a11y_action(gpui::AccessibleAction::Focus, move |_, window, cx| {
+            focus_for_action.focus(window, cx);
+        })
+        .on_a11y_action(gpui::AccessibleAction::SetValue, move |data, window, cx| {
+            let Some(gpui::accesskit::ActionData::Value(value)) = data else {
+                return;
+            };
+            set_value(value.to_string(), window, cx);
+        })
+        .child(editor)
+}
+
 pub(crate) mod elicitation;
 mod message_queue;
 mod thread_search_bar;
@@ -4348,6 +4413,27 @@ impl ConversationView {
         let layout = composer_layout(self.loading_composer_expanded, &editor_text);
         let compact = layout == ComposerLayout::Compact;
         let manually_expanded = layout == ComposerLayout::ManuallyExpanded;
+        // omega#217. Built once, before the layout branches, because only one
+        // of them draws and an element is consumed when it is drawn.
+        let accessible_editor = {
+            let composer_focus = editor.focus_handle(cx);
+            let set_value_editor = editor.downgrade();
+            accessible_composer_input(
+                "omega-workbench-pre-session-composer-input",
+                editor_text.clone(),
+                &composer_focus,
+                move |value, window, cx| {
+                    let Some(editor) = set_value_editor.upgrade() else {
+                        return;
+                    };
+                    editor.update(cx, |editor, cx| {
+                        editor.set_text(value, window, cx);
+                    });
+                },
+                EditorElement::new(&editor, crate::message_editor::composer_editor_style(cx))
+                    .into_any_element(),
+            )
+        };
         let status: Option<SharedString> = if router_ready {
             // Logically ready and idle: nothing is connecting, so nothing
             // pulses. The deferred-session window between the first send and
@@ -4448,151 +4534,126 @@ impl ConversationView {
             }))
             .children(pending_turns)
             .child(
-                h_flex()
-                    .w_full()
-                    .justify_center()
-                    .child(
-                        div()
+                h_flex().w_full().justify_center().child(
+                    div().w_full().max_w(max_content_width).px_6().pb_6().child(
+                        v_flex()
+                            .debug_selector(|| "omega.workbench.composer".into())
                             .w_full()
-                            .max_w(max_content_width)
-                            .px_6()
-                            .pb_6()
-                            .child(
-                                v_flex()
-                                    .debug_selector(|| "omega.workbench.composer".into())
-                                    .w_full()
-                                    .min_w_0()
-                                    .overflow_hidden()
-                                    .rounded(px(COMPOSER_RADIUS))
-                                    .bg(pill_background)
-                                    .border_1()
-                                    .border_color(pill_border)
-                                    .when(opaque_window, |this| {
-                                        this.shadow(vec![
-                                            gpui::BoxShadow::new(
-                                                px(0.),
-                                                px(4.),
-                                                gpui::black().opacity(0.12),
-                                            )
-                                            .blur_radius(px(8.)),
-                                        ])
-                                    })
-                                    .map(|this| {
-                                        if compact {
-                                            this.h(px(COMPOSER_COMPACT_HEIGHT)).child(
-                                                h_flex()
-                                                    .size_full()
+                            .min_w_0()
+                            .overflow_hidden()
+                            .rounded(px(COMPOSER_RADIUS))
+                            .bg(pill_background)
+                            .border_1()
+                            .border_color(pill_border)
+                            .when(opaque_window, |this| {
+                                this.shadow(vec![
+                                    gpui::BoxShadow::new(
+                                        px(0.),
+                                        px(4.),
+                                        gpui::black().opacity(0.12),
+                                    )
+                                    .blur_radius(px(8.)),
+                                ])
+                            })
+                            .map(|this| {
+                                if compact {
+                                    this.h(px(COMPOSER_COMPACT_HEIGHT)).child(
+                                        h_flex()
+                                            .size_full()
+                                            .min_w_0()
+                                            .child(
+                                                div()
+                                                    .flex_1()
                                                     .min_w_0()
-                                                    .child(
-                                                        div()
-                                                            .flex_1()
-                                                            .min_w_0()
-                                                            .h_full()
-                                                            .overflow_hidden()
-                                                            .pl(px(COMPOSER_TEXT_INSET))
-                                                            .pr_2()
-                                                            .py_3()
-                                                            .child(EditorElement::new(
-                                                                &editor,
-                                                                crate::message_editor::composer_editor_style(cx),
-                                                            )),
-                                                    )
-                                                    .child(
-                                                        h_flex()
-                                                            .flex_none()
-                                                            .min_w_0()
-                                                            .gap_1()
-                                                            .pr_2()
-                                                            .when(
-                                                                omega_zero_base::is_active(),
-                                                                |this| {
-                                                                    this.child(
-                                                                        self.vim_mode_indicator
-                                                                            .clone(),
-                                                                    )
-                                                                },
-                                                            )
-                                                            .child(action_controls),
-                                                    ),
+                                                    .h_full()
+                                                    .overflow_hidden()
+                                                    .pl(px(COMPOSER_TEXT_INSET))
+                                                    .pr_2()
+                                                    .py_3()
+                                                    .child(accessible_editor),
                                             )
-                                        } else {
-                                            this.min_h(px(COMPOSER_EXPANDED_MIN_HEIGHT))
-                                                .max_h(px(COMPOSER_EXPANDED_MAX_HEIGHT))
-                                                .when(manually_expanded, |this| {
-                                                    this.h(px(COMPOSER_EXPANDED_MAX_HEIGHT))
-                                                })
-                                                .child(
-                                                    v_flex()
-                                                        .relative()
-                                                        .w_full()
-                                                        .min_w_0()
-                                                        .min_h(px(
-                                                            COMPOSER_EXPANDED_MIN_HEIGHT
-                                                                - COMPOSER_ACTIONS_HEIGHT,
-                                                        ))
-                                                        .flex_1()
-                                                        .overflow_hidden()
-                                                        .px(px(COMPOSER_TEXT_INSET))
-                                                        .pt_4()
-                                                        .pb_1()
-                                                        .child(EditorElement::new(
-                                                            &editor,
-                                                            crate::message_editor::composer_editor_style(cx),
-                                                        )),
-                                                )
+                                            .child(
+                                                h_flex()
+                                                    .flex_none()
+                                                    .min_w_0()
+                                                    .gap_1()
+                                                    .pr_2()
+                                                    .when(omega_zero_base::is_active(), |this| {
+                                                        this.child(self.vim_mode_indicator.clone())
+                                                    })
+                                                    .child(action_controls),
+                                            ),
+                                    )
+                                } else {
+                                    this.min_h(px(COMPOSER_EXPANDED_MIN_HEIGHT))
+                                        .max_h(px(COMPOSER_EXPANDED_MAX_HEIGHT))
+                                        .when(manually_expanded, |this| {
+                                            this.h(px(COMPOSER_EXPANDED_MAX_HEIGHT))
+                                        })
+                                        .child(
+                                            v_flex()
+                                                .relative()
+                                                .w_full()
+                                                .min_w_0()
+                                                .min_h(px(COMPOSER_EXPANDED_MIN_HEIGHT
+                                                    - COMPOSER_ACTIONS_HEIGHT))
+                                                .flex_1()
+                                                .overflow_hidden()
+                                                .px(px(COMPOSER_TEXT_INSET))
+                                                .pt_4()
+                                                .pb_1()
+                                                .child(accessible_editor),
+                                        )
+                                        .child(
+                                            h_flex()
+                                                .w_full()
+                                                .min_w_0()
+                                                .h(px(COMPOSER_ACTIONS_HEIGHT))
+                                                .flex_none()
+                                                .flex_wrap()
+                                                .gap_1()
+                                                .justify_between()
+                                                .px_3()
+                                                .pt_1()
+                                                .pb(px(10.))
                                                 .child(
                                                     h_flex()
-                                                        .w_full()
                                                         .min_w_0()
-                                                        .h(px(COMPOSER_ACTIONS_HEIGHT))
-                                                        .flex_none()
-                                                        .flex_wrap()
                                                         .gap_1()
-                                                        .justify_between()
-                                                        .px_3()
-                                                        .pt_1()
-                                                        .pb(px(10.))
-                                                        .child(
-                                                            h_flex()
-                                                                .min_w_0()
-                                                                .gap_1()
-                                                                .when(
-                                                                    omega_zero_base::is_active(),
-                                                                    |this| {
-                                                                        this.child(
-                                                                            self.vim_mode_indicator
-                                                                                .clone(),
-                                                                        )
+                                                        .when(
+                                                            omega_zero_base::is_active(),
+                                                            |this| {
+                                                                this.child(
+                                                                    self.vim_mode_indicator.clone(),
+                                                                )
+                                                            },
+                                                        )
+                                                        .children(status.map(|status| {
+                                                            Label::new(status)
+                                                                .size(LabelSize::Small)
+                                                                .color(Color::Muted)
+                                                                .with_animation(
+                                                                    "loading-agent-label",
+                                                                    Animation::new(
+                                                                        Duration::from_secs(2),
+                                                                    )
+                                                                    .repeat()
+                                                                    .with_easing(pulsating_between(
+                                                                        0.3, 0.7,
+                                                                    )),
+                                                                    |label, delta| {
+                                                                        label.alpha(delta)
                                                                     },
                                                                 )
-                                                                .children(status.map(|status| {
-                                                                    Label::new(status)
-                                                                        .size(LabelSize::Small)
-                                                                        .color(Color::Muted)
-                                                                        .with_animation(
-                                                                            "loading-agent-label",
-                                                                            Animation::new(
-                                                                                Duration::from_secs(2),
-                                                                            )
-                                                                            .repeat()
-                                                                            .with_easing(
-                                                                                pulsating_between(
-                                                                                    0.3, 0.7,
-                                                                                ),
-                                                                            ),
-                                                                            |label, delta| {
-                                                                                label.alpha(delta)
-                                                                            },
-                                                                        )
-                                                                })),
-                                                        )
-                                                        .child(action_controls),
+                                                        })),
                                                 )
-                                        }
-                                    }),
-                            ),
-                        ),
-                    )
+                                                .child(action_controls),
+                                        )
+                                }
+                            }),
+                    ),
+                ),
+            )
             .into_any()
     }
 
@@ -8778,6 +8839,61 @@ pub(crate) mod tests {
             ));
             assert!(this.pending_connect_messages.is_empty());
         });
+    }
+
+    /// omega#217. A launched window with Omega's router ready and no executor
+    /// session yet draws the pre-session composer, not the thread composer.
+    /// That is the composer macOS assistive technology could not find: the
+    /// thread composer carried the text-input node, this one carried nothing,
+    /// so the installed tree published the model, voice, and send controls
+    /// with no field between them. The assertion is on the same
+    /// `accesskit::TreeUpdate` that GPUI hands the platform adapter.
+    #[gpui::test]
+    async fn pre_session_composer_publishes_its_text_input_node(cx: &mut TestAppContext) {
+        init_test(cx);
+
+        let directory = tempfile::tempdir().expect("temporary route journal directory");
+        let (conversation_view, cx) = setup_conversation_view_for_agent_without_settling(
+            RouterTestServer {
+                native: StubAgentConnection::new(),
+                journal_path: directory.path().join("routes.json"),
+            },
+            Agent::NativeAgent,
+            None,
+            None,
+            cx,
+        )
+        .await;
+        cx.run_until_parked();
+
+        conversation_view.read_with(cx, |this, cx| {
+            assert_eq!(
+                this.preparation_state(cx),
+                ConversationPreparation::RouterReady,
+                "this test only means something while the pre-session composer is on screen"
+            );
+            assert!(
+                this.active_thread().is_none(),
+                "a thread composer would defeat the point of the test"
+            );
+        });
+
+        add_to_workspace(conversation_view.clone(), cx);
+        cx.set_debug_accessibility_active(true);
+
+        let snapshot = cx.debug_render_snapshot();
+        let tree = snapshot
+            .accessibility_tree_json()
+            .expect("forced accessibility should capture the pre-session composer");
+        assert!(
+            tree.contains("MultilineTextInput") && tree.contains("Message composer"),
+            "the pre-session composer must publish its text-input role and name: {tree}"
+        );
+        assert!(
+            tree.contains("SetValue") && tree.contains("Focus"),
+            "assistive technology must be able to focus the pre-session composer and \
+             set its text: {tree}"
+        );
     }
 
     /// omega#153. Direct Agent is deliberately not a logical router: its

@@ -16677,6 +16677,22 @@ mod tests {
              what is in it at the exact moment the handover happens.",
             view_path.display()
         );
+        // omega#217. Wearing the composer's face is not enough: it has to
+        // wear the composer's name. Both composers build their accessibility
+        // node through one helper, because when only the thread composer had
+        // one, a launched window published its model, voice, and send controls
+        // to macOS with no field between them — and three rebuilds moved the
+        // node that was never on screen.
+        assert!(
+            composer.contains("accessible_composer_input(")
+                && view.contains("fn accessible_composer_input(")
+                && view.contains("Role::MultilineTextInput"),
+            "OMEGA-DELTA-0122: the pre-session composer in {} no longer builds \
+             its accessible text-input node through the shared helper. A \
+             composer assistive technology cannot find is not a composer for \
+             the person using it.",
+            view_path.display()
+        );
 
         // 2. What was typed is moved across, caret and all, and nothing on the
         //    receiving side is thrown away to make room for it.
