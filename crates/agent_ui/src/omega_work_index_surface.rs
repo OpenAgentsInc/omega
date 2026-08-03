@@ -35,6 +35,7 @@ enum DisplayRow {
 #[derive(Clone, Debug)]
 pub enum WorkIndexSurfaceEvent {
     Open(WorkIndexItem),
+    Inspect(WorkIndexItem),
     Refresh,
     SelectionChanged(Option<String>),
 }
@@ -205,6 +206,15 @@ impl WorkIndexSurface {
         }
     }
 
+    fn inspect_selected(&self, cx: &mut Context<Self>) {
+        let Some(work_ref) = self.selected_work_ref.as_deref() else {
+            return;
+        };
+        if let Some(item) = self.index.item(work_ref) {
+            cx.emit(WorkIndexSurfaceEvent::Inspect(item));
+        }
+    }
+
     fn select_item(&mut self, item: &WorkIndexItem, cx: &mut Context<Self>) {
         let work_ref = item.work_ref().to_string();
         if self.selected_work_ref.as_deref() == Some(work_ref.as_str()) {
@@ -272,6 +282,7 @@ impl WorkIndexSurface {
                     let selected = self.selected_work_ref.as_deref() == Some(item.work_ref());
                     let click_item = item.clone();
                     let keyboard_item = item.clone();
+                    let inspect_item = item.clone();
                     let source = source_label(&item).to_string();
                     h_flex()
                         .id(("omega-work-row", range_start + offset))
@@ -284,7 +295,7 @@ impl WorkIndexSurface {
                         .gap_3()
                         .rounded_md()
                         .cursor_pointer()
-                        .role(gpui::Role::Button)
+                        .role(gpui::Role::ListItem)
                         .tab_index(0)
                         .aria_label(format!(
                             "{} · {} · {}",
@@ -309,7 +320,11 @@ impl WorkIndexSurface {
                         .on_key_down(cx.listener(move |this, event: &gpui::KeyDownEvent, _, cx| {
                             if matches!(event.keystroke.key.as_str(), "enter" | "space") {
                                 this.select_item(&keyboard_item, cx);
-                                cx.emit(WorkIndexSurfaceEvent::Open(keyboard_item.clone()));
+                                if event.keystroke.key.as_str() == "enter" {
+                                    cx.emit(WorkIndexSurfaceEvent::Open(keyboard_item.clone()));
+                                } else {
+                                    cx.emit(WorkIndexSurfaceEvent::Inspect(keyboard_item.clone()));
+                                }
                                 cx.stop_propagation();
                             }
                         }))
@@ -329,6 +344,21 @@ impl WorkIndexSurface {
                             Label::new(item.attention.label())
                                 .size(LabelSize::XSmall)
                                 .color(Color::Muted),
+                        )
+                        .child(
+                            Button::new(
+                                ("inspect-work-index-item", range_start + offset),
+                                "Details",
+                            )
+                            .style(ButtonStyle::Subtle)
+                            .size(ButtonSize::Compact)
+                            .on_click(cx.listener(
+                                move |this, _, _, cx| {
+                                    this.select_item(&inspect_item, cx);
+                                    cx.emit(WorkIndexSurfaceEvent::Inspect(inspect_item.clone()));
+                                    cx.stop_propagation();
+                                },
+                            )),
                         )
                         .into_any_element()
                 }
@@ -431,6 +461,7 @@ impl Render for WorkIndexSurface {
                     "down" | "j" => this.select_relative(1, cx),
                     "up" | "k" => this.select_relative(-1, cx),
                     "enter" => this.open_selected(cx),
+                    "space" | "i" => this.inspect_selected(cx),
                     _ => return,
                 }
                 cx.stop_propagation();

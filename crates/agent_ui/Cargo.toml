@@ -107,6 +107,7 @@ omega_front_door.workspace = true
 omega_harness.workspace = true
 omega_workbench_harness = { workspace = true, features = ["gpui-support"], optional = true }
 omega_workbench_state.workspace = true
+omega_work_detail.workspace = true
 omega_work_index.workspace = true
 omega_forensics.workspace = true
 omega_agent_detect.workspace = true

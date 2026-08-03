@@ -16,8 +16,9 @@ The first native adapters are:
   runs.
 
 `openagents.omega-effectd.v2` adds generated All Work summaries when the
-Effect service is available. The source authority remains writable only at the
-source. Omega's projection and detail surface are read-only.
+Effect service is available. The index stays read-only. The Work detail surface
+can submit a typed Intent only when the named source supplies a matching
+mutation capability. The source remains the authority.
 
 ## Preserved source facts {#preserved-source-facts}
 
@@ -54,14 +55,17 @@ and rejects gaps, non-advancing cursors, and conflicting identities.
 ## Interface {#interface}
 
 Inbox and My Work have search, attention and lifecycle filters, grouped rows,
-stable selection, keyboard navigation, and accessible row labels. The surface
-shows loading, partial, offline, error, conflict, and empty states explicitly.
-A source failure is never rendered as successful emptiness.
+stable selection, keyboard navigation, and accessible row labels. Press Enter
+to open the source. Press Space or I, or select **Details**, to inspect the Work
+without changing source identity. The surface shows loading, partial, offline,
+error, conflict, and empty states explicitly. A source failure is never
+rendered as successful emptiness.
 
 Opening a Thread row returns to its durable Thread route. Opening a Forensics
-row selects its repository-bound Forensics Work route. Other admitted Work
-opens a read-only detail with its authority, source reference, revision,
-cursor, freshness, completeness, visibility, and accountability.
+row selects its repository-bound Forensics Work route. The detail surface
+shows the exact authority, source reference, revision, cursor, freshness,
+completeness, visibility, and accountability. See [Omega Work and Issue
+detail](./omega-work-detail.md) for its mutation boundary.
 
 ## Verification {#verification}
 

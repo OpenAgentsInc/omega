@@ -27795,7 +27795,7 @@ mod tests {
             "THREAD_ADAPTER_ID",
             "FORENSICS_ADAPTER_ID",
             "EFFECT_ADAPTER_ID",
-            "writable: false",
+            "source_writable",
             "source entity and Work identity disagree",
             "fn begin_refresh",
             "fn begin_resume",
@@ -27828,7 +27828,8 @@ mod tests {
             "omega.omega.sidebar.inbox",
             "omega.omega.sidebar.my-work",
             "open_work_index(view, true, window, cx)",
-            "render_omega_work_detail",
+            "active_work_detail",
+            "surface.clone().into_any_element()",
         ] {
             assert!(
                 shell.contains(required),
@@ -27842,13 +27843,14 @@ mod tests {
         for required in [
             "UniformListScrollHandle",
             "uniform_list(",
-            ".role(gpui::Role::Button)",
+            ".role(gpui::Role::ListItem)",
             ".tab_index(0)",
             ".aria_label(",
             ".on_key_down(",
             "\"down\" | \"j\"",
             "\"up\" | \"k\"",
             "\"enter\"",
+            "\"space\" | \"i\"",
             "WorkIndexHealth::Offline",
             "WorkIndexHealth::Partial",
             "WorkIndexHealth::Error",
@@ -27857,6 +27859,118 @@ mod tests {
             assert!(
                 surface.contains(required),
                 "OMEGA-DELTA-0230: Work Index interaction or state truth lost `{required}`"
+            );
+        }
+    }
+
+    /// OMEGA-DELTA-0231. Work and Issue share one generated identity and one
+    /// canonical source revision. A pending Intent cannot change that identity;
+    /// only an admitted Event can advance it. Omega persists its bounded view
+    /// state and Intent outcomes, not a second Work database.
+    #[test]
+    fn omega_work_detail_keeps_issue_identity_and_source_admission_explicit() {
+        let detail = without_comments(&read_repository_file(
+            "crates/omega_work_detail/src/omega_work_detail.rs",
+        ));
+        for required in [
+            "WorkSnapshot",
+            "IssueIdentityMismatch",
+            "WorkPresentation",
+            "WorkBlockKind",
+            "Conversation",
+            "Editor",
+            "Diff",
+            "Plan",
+            "Terminal",
+            "Review",
+            "Preview",
+            "Metric",
+            "Guide",
+            "Artifact",
+            "Receipt",
+            "WorkIntentOutcome::Pending",
+            "fn submit_intent",
+            "fn admit_event",
+            "EventRevisionMismatch",
+            "fn resolve_intent",
+            "MAX_WORK_HISTORY_ROWS",
+            "MAX_WORK_INTENT_RECORDS",
+            "write_journal_value",
+            "from_mode(0o700)",
+            "from_mode(0o600)",
+        ] {
+            assert!(
+                detail.contains(required),
+                "OMEGA-DELTA-0231: Work detail identity or admission lost `{required}`"
+            );
+        }
+        for duplicate in ["pub struct WorkSnapshot", "pub struct IssueProjection"] {
+            assert!(
+                !detail.contains(duplicate),
+                "OMEGA-DELTA-0231: Omega duplicated the generated contract as `{duplicate}`"
+            );
+        }
+
+        let surface = without_comments(&read_repository_file(
+            "crates/agent_ui/src/omega_work_detail_surface.rs",
+        ));
+        for required in [
+            "omega.omega.work-detail.inspector",
+            "omega.omega.work-detail.command-menu",
+            "UniformListScrollHandle",
+            "uniform_list(",
+            "Edit title",
+            "Open source",
+            "Toggle Work / Issue",
+            "summary.description",
+            "summary.state",
+            "summary.priority",
+            "summary.domain",
+            "summary.work_class",
+            "Relations",
+            "Organization",
+            "Team",
+            "Initiative",
+            "Project",
+            "Cycle",
+            "Project milestone",
+            "No source-backed Issue projection is available.",
+            "Pending · waiting for a canonical source Event.",
+            "Effective mutation authority",
+            "Capability generation",
+            "Participants",
+            "Watchers",
+            "Subscribers",
+            "Nostr references",
+            "Receipts",
+            "Evidence",
+            "Verification",
+            "Owner disposition",
+            "Release",
+            "Settlement",
+            "Public claim",
+        ] {
+            assert!(
+                surface.contains(required),
+                "OMEGA-DELTA-0231: Work detail interaction truth lost `{required}`"
+            );
+        }
+
+        let panel = without_comments(&read_repository_file("crates/agent_ui/src/agent_panel.rs"));
+        for required in [
+            "fn inspect_work_index_item",
+            "fn open_omega_work_detail",
+            "fn load_effect_work_snapshot",
+            "fn submit_omega_work_intent",
+            "ThreadMetadataStore::try_global",
+            "previous_revision",
+            "refresh_native_work_index(cx)",
+            "OmegaRoute::issue_projection",
+            "omega_work_and_issue_detail_admit_thread_title_intents_as_canonical_events",
+        ] {
+            assert!(
+                panel.contains(required),
+                "OMEGA-DELTA-0231: Work detail source admission lost `{required}`"
             );
         }
     }

@@ -841,6 +841,7 @@ pub fn adapt_thread(record: NativeThreadRecord) -> Result<WorkIndexItem, WorkInd
         source_ref,
         source_kind: SourceAuthorityKind::OmegaNative,
         adapter_version: THREAD_ADAPTER_ID.into(),
+        source_writable: true,
         revision: record.revision,
         updated_at: record.updated_at,
         observed_at: record.observed_at,
@@ -912,6 +913,7 @@ pub fn adapt_forensics(
         source_ref: format!("forensics:case:{}", record.case_ref),
         source_kind: SourceAuthorityKind::OmegaNative,
         adapter_version: FORENSICS_ADAPTER_ID.into(),
+        source_writable: false,
         revision: record.revision,
         updated_at: record.updated_at.clone(),
         observed_at: record.observed_at.clone(),
@@ -939,6 +941,7 @@ pub fn adapt_forensics(
             source_ref: run_ref.clone(),
             source_kind: SourceAuthorityKind::OmegaNative,
             adapter_version: FORENSICS_ADAPTER_ID.into(),
+            source_writable: false,
             revision: record.revision,
             updated_at: record.updated_at,
             observed_at: record.observed_at,
@@ -999,6 +1002,7 @@ struct SummaryInput {
     source_ref: String,
     source_kind: SourceAuthorityKind,
     adapter_version: String,
+    source_writable: bool,
     revision: u64,
     updated_at: String,
     observed_at: String,
@@ -1026,7 +1030,7 @@ fn make_summary(input: SummaryInput) -> Result<WorkSummary, WorkIndexError> {
             kind: input.source_kind,
             source_ref: SourceRef::try_from(input.source_ref)?,
             adapter_version: ShortText::try_from(input.adapter_version)?,
-            writable: false,
+            writable: input.source_writable,
         },
         revision,
         updated_at: updated_at.clone(),
@@ -1250,12 +1254,14 @@ mod tests {
             projection.rows[0].summary.domain,
             projection.rows[1].summary.domain
         );
-        assert!(
-            projection
-                .rows
-                .iter()
-                .all(|row| !row.summary.source_authority.writable)
-        );
+        assert!(projection.rows.iter().any(|row| {
+            matches!(row.source_entity, WorkSourceEntity::Thread { .. })
+                && row.summary.source_authority.writable
+        }));
+        assert!(projection.rows.iter().all(|row| {
+            !matches!(row.source_entity, WorkSourceEntity::ForensicsCase { .. })
+                || !row.summary.source_authority.writable
+        }));
 
         let inbox = index.query(&WorkIndexQuery {
             view: WorkIndexView::Inbox,

@@ -133,6 +133,7 @@ members = [
     "crates/omega_workbench_conformance",
     "crates/omega_workbench_harness",
     "crates/omega_workbench_state",
+    "crates/omega_work_detail",
     "crates/omega_work_index",
     "crates/omega_effectd",
     "crates/omega_exo_episode",
@@ -386,6 +387,7 @@ omega_harness = { path = "crates/omega_harness" }
 omega_workbench_conformance = { path = "crates/omega_workbench_conformance" }
 omega_workbench_harness = { path = "crates/omega_workbench_harness" }
 omega_workbench_state = { path = "crates/omega_workbench_state" }
+omega_work_detail = { path = "crates/omega_work_detail" }
 omega_work_index = { path = "crates/omega_work_index" }
 omega_effectd = { path = "crates/omega_effectd" }
 omega_exo_episode = { path = "crates/omega_exo_episode" }

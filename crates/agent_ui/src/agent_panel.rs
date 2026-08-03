@@ -41,6 +41,7 @@ use crate::ExpandMessageEditor;
 use crate::ManageProfiles;
 use crate::agent_connection_store::AgentConnectionStore;
 use crate::completion_provider::{AgentContextSelection, AgentContextSource};
+use crate::omega_work_detail_surface::{WorkDetailSurface, WorkDetailSurfaceEvent};
 use crate::omega_work_index_surface::{WorkIndexSurface, WorkIndexSurfaceEvent};
 use crate::terminal_thread_metadata_store::{
     TerminalThreadMetadata, TerminalThreadMetadataStore, compose_terminal_thread_title,
@@ -106,6 +107,11 @@ use language_model::{
 use notifications::status_toast::StatusToast;
 use omega_front_door::{
     ConversationTarget, DirectAgentId, ModeReadiness, ModeSetupAction, PreparationReceipt,
+};
+use omega_work_detail::{
+    SnapshotLinks, WorkCanonicalEvent, WorkDetail, WorkDetailSourceState, WorkIntent,
+    WorkIntentOutcome, WorkMutationCapability, WorkMutationKind, WorkMutationOperation,
+    WorkPresentation, default_blocks, read_journal, snapshot_from_index_item, write_journal_value,
 };
 use omega_work_index::{
     EFFECT_ADAPTER_ID, FORENSICS_ADAPTER_ID, NativeForensicsPhase, NativeForensicsRecord,
@@ -2494,16 +2500,35 @@ fn is_omega_forensics_route(route: &OmegaRoute) -> bool {
     )
 }
 
-fn work_contract_label(value: &impl fmt::Debug) -> String {
-    let raw = format!("{value:?}");
-    let mut label = String::with_capacity(raw.len() + 4);
-    for (index, character) in raw.chars().enumerate() {
-        if index > 0 && character.is_ascii_uppercase() {
-            label.push(' ');
-        }
-        label.push(character.to_ascii_lowercase());
-    }
-    label
+fn work_issue_identifier(work_ref: &str) -> Option<omega_effectd::all_work_contract::ShortText> {
+    let mut digest = Sha256::new();
+    digest.update(work_ref.as_bytes());
+    let digest = format!("{:x}", digest.finalize());
+    let Some(prefix) = digest.get(..8) else {
+        log::warn!("could not derive the Issue identifier digest");
+        return None;
+    };
+    omega_effectd::all_work_contract::ShortText::try_from(format!("OMEGA-{prefix}"))
+        .map_err(|error| log::warn!("could not construct the Issue identifier: {error}"))
+        .ok()
+}
+
+fn work_event_ref(
+    work_ref: &str,
+    revision: u64,
+) -> Option<omega_effectd::all_work_contract::EventRef> {
+    let mut digest = Sha256::new();
+    digest.update(work_ref.as_bytes());
+    let digest = format!("{:x}", digest.finalize());
+    let Some(prefix) = digest.get(..16) else {
+        log::warn!("could not derive the Work Event digest");
+        return None;
+    };
+    omega_effectd::all_work_contract::EventRef::try_from(format!(
+        "event:omega:work-detail:{prefix}:{revision}"
+    ))
+    .map_err(|error| log::warn!("could not construct the Work Event reference: {error}"))
+    .ok()
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -3248,7 +3273,11 @@ pub struct AgentPanel {
     _work_index_thread_observation: Subscription,
     _work_index_effect_refresh: Option<Task<()>>,
     _work_index_persist: Option<Task<()>>,
-    omega_work_detail: Option<WorkIndexItem>,
+    omega_work_detail: Option<Entity<WorkDetailSurface>>,
+    _omega_work_detail_subscription: Option<Subscription>,
+    _omega_work_detail_load: Option<Task<()>>,
+    omega_work_detail_persist_order: Arc<std::sync::atomic::AtomicU64>,
+    omega_work_detail_persist_lock: Arc<std::sync::Mutex<()>>,
     workbench_shell: workbench_shell::WorkbenchShell,
     workbench_shell_enabled: bool,
     omega_titlebar_dragging: bool,
@@ -3933,6 +3962,10 @@ impl AgentPanel {
             _work_index_effect_refresh: None,
             _work_index_persist: None,
             omega_work_detail: None,
+            _omega_work_detail_subscription: None,
+            _omega_work_detail_load: None,
+            omega_work_detail_persist_order: Arc::new(std::sync::atomic::AtomicU64::new(0)),
+            omega_work_detail_persist_lock: Arc::new(std::sync::Mutex::new(())),
             workbench_shell,
             workbench_shell_enabled: omega_zero_base::is_active(),
             omega_titlebar_dragging: false,
@@ -15419,7 +15452,7 @@ impl AgentPanel {
                 self.omega_unavailable_route = None;
                 if surface == omega_workbench_state::WorkSurface::Forensics {
                     self.omega_settings = None;
-                    self.omega_work_detail = None;
+                    self.clear_omega_work_detail();
                 }
                 if record_history
                     && surface == omega_workbench_state::WorkSurface::Forensics
@@ -15436,7 +15469,7 @@ impl AgentPanel {
                 self.persist_active_workbench_selection(cx);
                 if surface == omega_workbench_state::WorkSurface::Forensics {
                     self.omega_settings = None;
-                    self.omega_work_detail = None;
+                    self.clear_omega_work_detail();
                 }
                 if let Some(panel) = files_panel.as_ref()
                     && let Err(error) = self.detach_workspace_files_panel(panel, window, cx)
@@ -16368,31 +16401,19 @@ impl AgentPanel {
             OmegaRoute::Work(work) => self
                 .work_index
                 .item(work.work_ref.as_str())
-                .map(|item| match item.source_entity {
-                    WorkSourceEntity::ForensicsCase { .. }
-                    | WorkSourceEntity::ForensicsRun { .. }
-                        if self.workbench_shell.projection().connection
-                            != omega_workbench_state::ConnectionPhase::Online =>
-                    {
-                        RouteAvailability::Unavailable(RouteUnavailableReason::Stale)
-                    }
-                    WorkSourceEntity::ForensicsCase { .. }
-                    | WorkSourceEntity::ForensicsRun { .. }
-                        if !self
-                            .workbench_shell
-                            .capability(omega_workbench_state::WorkSurface::Forensics)
-                            .is_some_and(|capability| capability.availability.is_available()) =>
-                    {
-                        RouteAvailability::Unavailable(RouteUnavailableReason::Unknown)
-                    }
-                    _ => RouteAvailability::Available,
-                })
+                .map(|_| RouteAvailability::Available)
+                .unwrap_or(RouteAvailability::Unavailable(
+                    RouteUnavailableReason::Unknown,
+                )),
+            OmegaRoute::IssueProjection { work_ref } => self
+                .work_index
+                .item(work_ref.as_str())
+                .map(|_| RouteAvailability::Available)
                 .unwrap_or(RouteAvailability::Unavailable(
                     RouteUnavailableReason::Unknown,
                 )),
             OmegaRoute::Settings => RouteAvailability::Available,
-            OmegaRoute::IssueProjection { .. }
-            | OmegaRoute::Project(_)
+            OmegaRoute::Project(_)
             | OmegaRoute::Document(_)
             | OmegaRoute::Decision(_)
             | OmegaRoute::AgentSession(_) => {
@@ -16405,6 +16426,12 @@ impl AgentPanel {
         }
     }
 
+    fn clear_omega_work_detail(&mut self) {
+        self.omega_work_detail = None;
+        self._omega_work_detail_subscription = None;
+        self._omega_work_detail_load = None;
+    }
+
     fn show_omega_unavailable_route(
         &mut self,
         state: EntityRouteState,
@@ -16412,7 +16439,7 @@ impl AgentPanel {
         cx: &mut Context<Self>,
     ) {
         self.omega_settings = None;
-        self.omega_work_detail = None;
+        self.clear_omega_work_detail();
         if let Err(error) = self.workbench_shell.collapse_dock() {
             log::warn!("failed to collapse a prior work surface: {error:#}");
         }
@@ -16454,16 +16481,9 @@ impl AgentPanel {
                 self.omega_settings = None;
                 self.omega_unavailable_route = None;
                 let item = self.work_index.item(work.work_ref.as_str());
-                let opens_forensics = is_omega_forensics_route(&OmegaRoute::Work(work))
-                    || item.as_ref().is_some_and(|item| {
-                        matches!(
-                            item.source_entity,
-                            WorkSourceEntity::ForensicsCase { .. }
-                                | WorkSourceEntity::ForensicsRun { .. }
-                        )
-                    });
+                let opens_forensics = is_omega_forensics_route(&OmegaRoute::Work(work));
                 if opens_forensics {
-                    self.omega_work_detail = None;
+                    self.clear_omega_work_detail();
                     self.select_work_surface_with_history(
                         omega_workbench_state::WorkSurface::Forensics,
                         false,
@@ -16476,10 +16496,7 @@ impl AgentPanel {
                             "failed to collapse a work surface before Work detail: {error:#}"
                         );
                     }
-                    self.omega_work_detail = Some(item);
-                    self.focus_handle.focus(window, cx);
-                    cx.notify();
-                    true
+                    self.open_omega_work_detail(item, WorkPresentation::Work, window, cx)
                 } else {
                     false
                 }
@@ -16489,8 +16506,12 @@ impl AgentPanel {
                 self.open_omega_settings(false, window, cx);
                 true
             }
-            OmegaRoute::IssueProjection { .. }
-            | OmegaRoute::Project(_)
+            OmegaRoute::IssueProjection { work_ref } => {
+                self.work_index.item(work_ref.as_str()).is_some_and(|item| {
+                    self.open_omega_work_detail(item, WorkPresentation::Issue, window, cx)
+                })
+            }
+            OmegaRoute::Project(_)
             | OmegaRoute::Document(_)
             | OmegaRoute::Decision(_)
             | OmegaRoute::AgentSession(_) => false,
@@ -16617,7 +16638,7 @@ impl AgentPanel {
     fn show_active_omega_thread_transcript(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         self.omega_settings = None;
         self.omega_unavailable_route = None;
-        self.omega_work_detail = None;
+        self.clear_omega_work_detail();
         if let Err(error) = self.workbench_shell.collapse_dock() {
             log::warn!("failed to close the Omega work surface for a thread tab: {error:#}");
         }
@@ -16641,7 +16662,7 @@ impl AgentPanel {
         }
         self.omega_settings = None;
         self.omega_unavailable_route = None;
-        self.omega_work_detail = None;
+        self.clear_omega_work_detail();
         if let Err(error) = self.workbench_shell.collapse_dock() {
             log::warn!(
                 "failed to collapse a work surface before opening the Work Index: {error:#}"
@@ -16658,6 +16679,9 @@ impl AgentPanel {
                 |this, _surface, event, window, cx| match event.clone() {
                     WorkIndexSurfaceEvent::Open(item) => {
                         this.open_work_index_item(item, window, cx);
+                    }
+                    WorkIndexSurfaceEvent::Inspect(item) => {
+                        this.inspect_work_index_item(item, window, cx);
                     }
                     WorkIndexSurfaceEvent::Refresh => {
                         this.refresh_native_work_index(cx);
@@ -16719,6 +16743,377 @@ impl AgentPanel {
         self.open_omega_history_route(route, window, cx);
     }
 
+    fn inspect_work_index_item(
+        &mut self,
+        item: WorkIndexItem,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if self.work_index.select(Some(item.work_ref().to_string())) {
+            self.publish_work_index(true, cx);
+        }
+        let Ok(route) = OmegaRoute::work(item.work_ref(), None) else {
+            log::warn!("could not construct a Work detail route");
+            return;
+        };
+        if self.omega_navigation_history.push(route.clone()) {
+            self.serialize(cx);
+        }
+        self.open_omega_history_route(route, window, cx);
+    }
+
+    fn open_omega_work_detail(
+        &mut self,
+        item: WorkIndexItem,
+        presentation: WorkPresentation,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> bool {
+        let mut links = SnapshotLinks {
+            issue_identifier: work_issue_identifier(item.work_ref()),
+            ..SnapshotLinks::default()
+        };
+        match &item.source_entity {
+            WorkSourceEntity::Thread { thread_ref } => {
+                match omega_effectd::all_work_contract::ThreadRef::try_from(thread_ref.clone()) {
+                    Ok(thread_ref) => links.thread_refs.push(thread_ref),
+                    Err(error) => {
+                        log::warn!("could not project the Work Thread reference: {error}")
+                    }
+                }
+            }
+            WorkSourceEntity::ForensicsRun { run_ref, .. } => {
+                match omega_effectd::all_work_contract::RunRef::try_from(run_ref.clone()) {
+                    Ok(run_ref) => links.run_refs.push(run_ref),
+                    Err(error) => log::warn!("could not project the Work Run reference: {error}"),
+                }
+            }
+            WorkSourceEntity::ForensicsCase { .. } | WorkSourceEntity::EffectWork { .. } => {}
+        }
+        let snapshot = match snapshot_from_index_item(&item, links) {
+            Ok(snapshot) => snapshot,
+            Err(error) => {
+                log::error!("could not construct Work detail: {error}");
+                return false;
+            }
+        };
+        let blocks = match default_blocks(&item) {
+            Ok(blocks) => blocks,
+            Err(error) => {
+                log::error!("could not construct Work Blocks: {error}");
+                return false;
+            }
+        };
+        let capability = matches!(item.source_entity, WorkSourceEntity::Thread { .. }).then(|| {
+            WorkMutationCapability {
+                adapter_version: item.summary.source_authority.adapter_version.clone(),
+                source_ref: item.summary.source_authority.source_ref.clone(),
+                generation: omega_effectd::all_work_contract::SafeInteger(1),
+                operations: std::collections::BTreeSet::from([WorkMutationKind::Title]),
+            }
+        });
+        let journal = match read_journal(
+            paths::data_dir(),
+            &snapshot.summary.work_ref,
+            &snapshot.summary.source_authority.source_ref,
+        ) {
+            Ok(journal) => journal,
+            Err(error) => {
+                log::warn!("ignored an invalid Work detail journal: {error}");
+                None
+            }
+        };
+        let mut detail = match WorkDetail::new(
+            snapshot.clone(),
+            blocks.clone(),
+            capability.clone(),
+            journal,
+        ) {
+            Ok(detail) => detail,
+            Err(error) => {
+                log::warn!("could not reconcile the Work detail journal: {error}");
+                match WorkDetail::new(snapshot, blocks, capability, None) {
+                    Ok(detail) => detail,
+                    Err(error) => {
+                        log::error!("could not construct Work detail: {error}");
+                        return false;
+                    }
+                }
+            }
+        };
+        detail.set_presentation(presentation);
+
+        self.omega_settings = None;
+        self.omega_unavailable_route = None;
+        self.clear_omega_work_detail();
+        let surface_item = item.clone();
+        let surface = cx.new(|cx| WorkDetailSurface::new(surface_item, detail, window, cx));
+        self._omega_work_detail_subscription = Some(cx.subscribe_in(
+            &surface,
+            window,
+            |this, _surface, event, window, cx| match event.clone() {
+                WorkDetailSurfaceEvent::SubmitIntent(intent) => {
+                    this.submit_omega_work_intent(intent, window, cx);
+                }
+                WorkDetailSurfaceEvent::OpenSource(item) => {
+                    this.open_work_index_item(item, window, cx);
+                }
+                WorkDetailSurfaceEvent::PresentationChanged(presentation) => {
+                    let work_ref = this
+                        .omega_work_detail
+                        .as_ref()
+                        .map(|surface| surface.read(cx).work_ref().to_string());
+                    let route = work_ref.and_then(|work_ref| match presentation {
+                        WorkPresentation::Work => OmegaRoute::work(work_ref, None).ok(),
+                        WorkPresentation::Issue => OmegaRoute::issue_projection(work_ref).ok(),
+                    });
+                    if route.is_some_and(|route| this.omega_navigation_history.push(route)) {
+                        this.serialize(cx);
+                    }
+                    this.persist_omega_work_detail(cx);
+                }
+                WorkDetailSurfaceEvent::JournalChanged => {
+                    this.persist_omega_work_detail(cx);
+                }
+            },
+        ));
+        self.omega_work_detail = Some(surface.clone());
+
+        if matches!(item.source_entity, WorkSourceEntity::EffectWork { .. }) {
+            surface.update(cx, |surface, cx| {
+                surface.set_source_state(WorkDetailSourceState::Loading, cx)
+            });
+            self.load_effect_work_snapshot(surface.clone(), window, cx);
+        }
+        surface.read(cx).focus_handle(cx).focus(window, cx);
+        self.persist_omega_work_detail(cx);
+        cx.notify();
+        true
+    }
+
+    fn load_effect_work_snapshot(
+        &mut self,
+        surface: Entity<WorkDetailSurface>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let work_ref = surface.read(cx).snapshot().summary.work_ref.clone();
+        let supervisor = omega_effectd::shared_supervisor(cx).ok();
+        let current_surface = surface;
+        self._omega_work_detail_load = Some(cx.spawn_in(window, async move |this, cx| {
+            let result = async {
+                let Some(supervisor) = supervisor else {
+                    return Err("omega-effectd is unavailable".to_string());
+                };
+                let mut guard = supervisor.lock().await;
+                guard
+                    .ensure_started()
+                    .await
+                    .map_err(|error| error.to_string())?;
+                guard
+                    .read_work_snapshot(omega_effectd::all_work_contract::WorkSnapshotReadRequest {
+                        work_ref,
+                    })
+                    .await
+                    .map(|result| result.snapshot)
+                    .map_err(|error| error.to_string())
+            }
+            .await;
+            this.update_in(cx, |this, window, cx| {
+                if !this
+                    .omega_work_detail
+                    .as_ref()
+                    .is_some_and(|surface| surface.entity_id() == current_surface.entity_id())
+                {
+                    return;
+                }
+                current_surface.update(cx, |surface, cx| match result {
+                    Ok(snapshot) => {
+                        if let Err(error) = surface.reconcile_snapshot(snapshot, window, cx) {
+                            surface.set_source_state(
+                                WorkDetailSourceState::Conflict(error.to_string()),
+                                cx,
+                            );
+                        }
+                    }
+                    Err(error) => {
+                        surface.set_source_state(WorkDetailSourceState::Error(error), cx);
+                    }
+                });
+                this.persist_omega_work_detail(cx);
+            })
+            .log_err();
+        }));
+    }
+
+    fn submit_omega_work_intent(
+        &mut self,
+        intent: WorkIntent,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(surface) = self.omega_work_detail.as_ref().cloned() else {
+            return;
+        };
+        let item = surface.read(cx).item().clone();
+        let WorkSourceEntity::Thread { thread_ref } = item.source_entity else {
+            surface.update(cx, |surface, cx| {
+                if let Err(error) = surface.reject_intent(
+                    &intent.intent_ref,
+                    "The source does not admit this Work operation.".into(),
+                    cx,
+                ) {
+                    log::warn!("could not reject a Work Intent: {error}");
+                }
+            });
+            self.persist_omega_work_detail(cx);
+            return;
+        };
+        let Ok(thread_id) = ThreadId::from_key_string(&thread_ref) else {
+            surface.update(cx, |surface, cx| {
+                if let Err(error) = surface.reject_intent(
+                    &intent.intent_ref,
+                    "The Thread source reference is invalid.".into(),
+                    cx,
+                ) {
+                    log::warn!("could not reject a Work Intent: {error}");
+                }
+            });
+            self.persist_omega_work_detail(cx);
+            return;
+        };
+        let metadata = ThreadMetadataStore::try_global(cx)
+            .and_then(|store| store.read(cx).entry(thread_id).cloned());
+        let Some(mut metadata) = metadata else {
+            surface.update(cx, |surface, cx| {
+                if let Err(error) = surface.reject_intent(
+                    &intent.intent_ref,
+                    "The Thread source is unavailable.".into(),
+                    cx,
+                ) {
+                    log::warn!("could not reject a Work Intent: {error}");
+                }
+            });
+            self.persist_omega_work_detail(cx);
+            return;
+        };
+        let current_revision = metadata.updated_at.timestamp_millis().max(0) as u64;
+        if current_revision != intent.expected_revision.0 {
+            surface.update(cx, |surface, cx| {
+                if let Err(error) = surface.resolve_intent(
+                    &intent.intent_ref,
+                    WorkIntentOutcome::Conflict {
+                        current_revision: omega_effectd::all_work_contract::SafeInteger(
+                            current_revision,
+                        ),
+                    },
+                    cx,
+                ) {
+                    log::warn!("could not reconcile a conflicting Work Intent: {error}");
+                }
+            });
+            self.persist_omega_work_detail(cx);
+            return;
+        }
+        let WorkMutationOperation::SetTitle { title } = intent.operation.clone() else {
+            surface.update(cx, |surface, cx| {
+                if let Err(error) = surface.reject_intent(
+                    &intent.intent_ref,
+                    "The Thread source currently admits title changes only.".into(),
+                    cx,
+                ) {
+                    log::warn!("could not reject a Work Intent: {error}");
+                }
+            });
+            self.persist_omega_work_detail(cx);
+            return;
+        };
+        let revision = current_revision.saturating_add(1);
+        let Some(updated_at) = i64::try_from(revision)
+            .ok()
+            .and_then(DateTime::<Utc>::from_timestamp_millis)
+        else {
+            surface.update(cx, |surface, cx| {
+                if let Err(error) = surface.reject_intent(
+                    &intent.intent_ref,
+                    "The source revision cannot be represented as a timestamp.".into(),
+                    cx,
+                ) {
+                    log::warn!("could not reject a Work Intent: {error}");
+                }
+            });
+            self.persist_omega_work_detail(cx);
+            return;
+        };
+        metadata.title_override = Some(title.0.clone().into());
+        metadata.updated_at = updated_at;
+        let Some(store) = ThreadMetadataStore::try_global(cx) else {
+            return;
+        };
+        store.update(cx, |store, cx| store.save(metadata, cx));
+        let admitted_at = match omega_effectd::all_work_contract::IsoTimestamp::try_from(
+            updated_at.to_rfc3339_opts(chrono::SecondsFormat::Millis, true),
+        ) {
+            Ok(admitted_at) => admitted_at,
+            Err(error) => {
+                log::error!("could not timestamp an admitted Work Event: {error}");
+                return;
+            }
+        };
+        let event_ref = work_event_ref(&intent.work_ref.0, revision);
+        let Some(event_ref) = event_ref else {
+            log::error!("could not construct the canonical Work Event reference");
+            return;
+        };
+        let event = WorkCanonicalEvent {
+            event_ref,
+            intent_ref: intent.intent_ref,
+            work_ref: intent.work_ref,
+            source_ref: intent.source_ref,
+            previous_revision: omega_effectd::all_work_contract::SafeInteger(current_revision),
+            revision: omega_effectd::all_work_contract::SafeInteger(revision),
+            admitted_at,
+            operation: WorkMutationOperation::SetTitle { title },
+        };
+        surface.update(cx, |surface, cx| {
+            if let Err(error) = surface.admit_event(event, window, cx) {
+                surface.set_source_state(WorkDetailSourceState::Conflict(error.to_string()), cx);
+            }
+        });
+        self.refresh_native_work_index(cx);
+        self.persist_omega_work_detail(cx);
+    }
+
+    fn persist_omega_work_detail(&mut self, cx: &mut Context<Self>) {
+        let Some(journal) = self
+            .omega_work_detail
+            .as_ref()
+            .map(|surface| surface.read(cx).journal())
+        else {
+            return;
+        };
+        let data_dir = paths::data_dir().clone();
+        let persist_order = self
+            .omega_work_detail_persist_order
+            .fetch_add(1, Ordering::SeqCst)
+            .saturating_add(1);
+        let latest_persist_order = self.omega_work_detail_persist_order.clone();
+        let persist_lock = self.omega_work_detail_persist_lock.clone();
+        cx.background_spawn(async move {
+            let Ok(_guard) = persist_lock.lock() else {
+                log::warn!("could not lock Work detail journal persistence");
+                return;
+            };
+            if latest_persist_order.load(Ordering::SeqCst) != persist_order {
+                return;
+            }
+            if let Err(error) = write_journal_value(&data_dir, &journal) {
+                log::warn!("could not persist the Work detail journal: {error}");
+            }
+        })
+        .detach();
+    }
+
     fn close_active_omega_route_tab(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         if self.omega_settings.is_some() {
             self.close_omega_settings(window, cx);
@@ -16738,7 +17133,8 @@ impl AgentPanel {
             self.show_active_omega_thread_transcript(window, cx);
             return;
         }
-        if self.omega_work_detail.take().is_some() {
+        if self.omega_work_detail.is_some() {
+            self.clear_omega_work_detail();
             self.show_active_omega_thread_transcript(window, cx);
             return;
         }
@@ -16844,174 +17240,6 @@ impl AgentPanel {
                     .text_size(px(12.))
                     .text_color(cx.theme().colors().text_muted)
                     .child(reason),
-            )
-            .into_any_element()
-    }
-
-    fn render_omega_work_detail(item: &WorkIndexItem, cx: &App) -> AnyElement {
-        let summary = &item.summary;
-        let colors = cx.theme().colors();
-        let accountability = if item.accountability.is_empty() {
-            "No local accountability recorded".to_string()
-        } else {
-            item.accountability
-                .iter()
-                .map(work_contract_label)
-                .join(", ")
-        };
-        let cursor = summary
-            .completeness
-            .cursor
-            .as_ref()
-            .and_then(|cursor| cursor.as_ref())
-            .map_or("None", |cursor| cursor.0.as_str());
-        let source_type = match &item.source_entity {
-            WorkSourceEntity::Thread { .. } => "Thread",
-            WorkSourceEntity::ForensicsCase { .. } => "Forensics case",
-            WorkSourceEntity::ForensicsRun { .. } => "Forensics run",
-            WorkSourceEntity::EffectWork { .. } => "Effect Work",
-        };
-        let gap_refs = if summary.completeness.gap_refs.is_empty() {
-            "None".to_string()
-        } else {
-            summary
-                .completeness
-                .gap_refs
-                .iter()
-                .map(|gap| gap.0.as_str())
-                .join(", ")
-        };
-        let detail_rows = [
-            ("Attention", work_contract_label(&item.attention)),
-            ("State", work_contract_label(&summary.state)),
-            ("Domain", work_contract_label(&summary.domain)),
-            ("Class", work_contract_label(&summary.work_class)),
-            ("Priority", work_contract_label(&summary.priority)),
-            ("Accountability", accountability),
-            (
-                "Source authority",
-                work_contract_label(&summary.source_authority.kind),
-            ),
-            ("Source type", source_type.to_string()),
-            (
-                "Source reference",
-                summary.source_authority.source_ref.0.clone(),
-            ),
-            (
-                "Source access",
-                if summary.source_authority.writable {
-                    "Writable only at the source"
-                } else {
-                    "Read-only source"
-                }
-                .to_string(),
-            ),
-            (
-                "Adapter version",
-                summary.source_authority.adapter_version.0.clone(),
-            ),
-            ("Revision", summary.revision.0.to_string()),
-            ("Source updated", summary.updated_at.0.clone()),
-            ("Freshness", work_contract_label(&summary.freshness.state)),
-            ("Observed", summary.freshness.observed_at.0.clone()),
-            (
-                "Completeness",
-                work_contract_label(&summary.completeness.state),
-            ),
-            ("Resume cursor", cursor.to_string()),
-            ("Reported gaps", gap_refs),
-            (
-                "Visibility",
-                work_contract_label(&summary.redaction.privacy_class),
-            ),
-            (
-                "Redacted fields",
-                summary.redaction.redacted_field_count.0.to_string(),
-            ),
-            ("Visibility policy", summary.redaction.policy_ref.0.clone()),
-        ];
-
-        v_flex()
-            .id("omega-work-detail")
-            .debug_selector(|| "omega.omega.work-detail".into())
-            .size_full()
-            .overflow_y_scroll()
-            .p(px(28.))
-            .gap(px(20.))
-            .role(gpui::Role::Main)
-            .aria_label(format!("Work detail for {}", summary.title.0))
-            .child(
-                v_flex()
-                    .gap(px(6.))
-                    .child(
-                        div()
-                            .id("omega-work-detail-title")
-                            .role(gpui::Role::Heading)
-                            .aria_level(1)
-                            .text_size(px(22.))
-                            .font_weight(gpui::FontWeight::SEMIBOLD)
-                            .text_color(colors.text)
-                            .child(summary.title.0.clone()),
-                    )
-                    .child(
-                        div()
-                            .text_size(px(12.))
-                            .text_color(colors.text_muted)
-                            .child(summary.work_ref.0.clone()),
-                    )
-                    .when_some(summary.description.as_ref(), |header, description| {
-                        header.child(
-                            div()
-                                .max_w(px(760.))
-                                .text_size(px(13.))
-                                .text_color(colors.text_muted)
-                                .child(description.0.clone()),
-                        )
-                    }),
-            )
-            .child(
-                v_flex()
-                    .max_w(px(760.))
-                    .rounded(px(10.))
-                    .border_1()
-                    .border_color(colors.border_variant)
-                    .children(detail_rows.into_iter().enumerate().map(
-                        |(index, (label, value))| {
-                            h_flex()
-                                .min_h(px(38.))
-                                .px(px(12.))
-                                .gap(px(16.))
-                                .when(index > 0, |row| {
-                                    row.border_t_1().border_color(colors.border_variant)
-                                })
-                                .child(
-                                    div()
-                                        .w(px(140.))
-                                        .flex_none()
-                                        .text_size(px(11.))
-                                        .text_color(colors.text_placeholder)
-                                        .child(label),
-                                )
-                                .child(
-                                    div()
-                                        .min_w_0()
-                                        .flex_1()
-                                        .text_size(px(12.))
-                                        .text_color(colors.text)
-                                        .child(value),
-                                )
-                        },
-                    )),
-            )
-            .child(
-                div()
-                    .max_w(px(760.))
-                    .rounded(px(8.))
-                    .bg(colors.element_background)
-                    .p(px(12.))
-                    .text_size(px(11.))
-                    .text_color(colors.text_muted)
-                    .child("Read-only projection. Changes remain with the named source authority."),
             )
             .into_any_element()
     }
@@ -17136,7 +17364,7 @@ impl AgentPanel {
             .or_else(|| {
                 active_work_detail
                     .as_ref()
-                    .map(|item| Self::render_omega_work_detail(item, cx))
+                    .map(|surface| surface.clone().into_any_element())
             })
             .or_else(|| omega_forensics_host.map(|host| host.into_any_element()))
             .or(missing_forensics_content)
@@ -17283,7 +17511,7 @@ impl AgentPanel {
                     .child(div().min_w_0().flex_1().truncate().child(view.title()))
                     .into_any_element(),
             )
-        } else if let Some(item) = active_work_detail.as_ref() {
+        } else if let Some(surface) = active_work_detail.as_ref() {
             Some(
                 div()
                     .id("omega-work-tab")
@@ -17312,7 +17540,7 @@ impl AgentPanel {
                             .min_w_0()
                             .flex_1()
                             .truncate()
-                            .child(item.summary.title.0.clone()),
+                            .child(surface.read(cx).title().to_string()),
                     )
                     .into_any_element(),
             )
@@ -26985,6 +27213,173 @@ mod tests {
         cx.dispatch_action(menu::Cancel);
         cx.run_until_parked();
         assert!(cx.debug_bounds("omega.omega.route.unavailable").is_none());
+        assert!(cx.debug_bounds("omega.omega.thread-tab.active").is_some());
+    }
+
+    #[gpui::test]
+    async fn omega_work_and_issue_detail_admit_thread_title_intents_as_canonical_events(
+        cx: &mut TestAppContext,
+    ) {
+        let (panel, mut cx) = setup_visible_panel(cx).await;
+        panel.update_in(&mut cx, |panel, window, cx| {
+            panel.force_omega_primary_interface_for_tests = true;
+            panel.new_thread(&NewThread, window, cx);
+        });
+        cx.run_until_parked();
+
+        let (thread_id, work_ref, original_revision) = panel.update(&mut cx, |panel, cx| {
+            let thread_id = panel.active_thread_id(cx).expect("active Thread source");
+            let metadata = ThreadMetadataStore::try_global(cx)
+                .and_then(|store| store.read(cx).entry(thread_id).cloned())
+                .expect("real Thread metadata source");
+            panel.refresh_native_work_index(cx);
+            let observed_at = "2026-08-02T12:00:00.000Z".to_string();
+            let forensics = adapt_forensics(NativeForensicsRecord {
+                case_ref: "repository:work-detail-test".into(),
+                repository_name: "work-detail-test".into(),
+                updated_at: observed_at.clone(),
+                observed_at: observed_at.clone(),
+                revision: 1,
+                phase: NativeForensicsPhase::Running,
+                run_ref: Some("forensics:run:work-detail-test".into()),
+            })
+            .expect("valid second source lane");
+            panel
+                .work_index
+                .apply_native_items(
+                    FORENSICS_ADAPTER_ID,
+                    FORENSICS_ADAPTER_ID,
+                    forensics,
+                    observed_at,
+                    1,
+                )
+                .expect("Forensics lane qualifies Work navigation");
+            let work_ref = format!("work:omega:thread:{}", thread_id.to_key_string());
+            assert!(panel.work_index.select(Some(work_ref.clone())));
+            panel.publish_work_index(false, cx);
+            (
+                thread_id,
+                work_ref,
+                metadata.updated_at.timestamp_millis().max(0) as u64,
+            )
+        });
+        cx.run_until_parked();
+
+        panel.update_in(&mut cx, |panel, window, cx| {
+            assert!(panel.open_work_index(WorkIndexView::MyWork, true, window, cx));
+        });
+        cx.run_until_parked();
+        assert!(cx.debug_bounds("omega.omega.work-index.my-work").is_some());
+
+        cx.simulate_keystrokes("space");
+        cx.run_until_parked();
+        assert!(
+            cx.debug_bounds(&format!("omega.omega.work-detail.{work_ref}"))
+                .is_some()
+        );
+        assert!(
+            cx.debug_bounds("omega.omega.work-detail.inspector")
+                .is_some()
+        );
+
+        cx.simulate_keystrokes("c");
+        cx.run_until_parked();
+        assert!(
+            cx.debug_bounds("omega.omega.work-detail.command-menu")
+                .is_some()
+        );
+        cx.simulate_keystrokes("c");
+        cx.run_until_parked();
+        assert!(
+            cx.debug_bounds("omega.omega.work-detail.command-menu")
+                .is_none()
+        );
+
+        cx.simulate_keystrokes("i");
+        cx.run_until_parked();
+        panel.read_with(&cx, |panel, cx| {
+            assert!(matches!(
+                panel.omega_navigation_history.current(),
+                Some(OmegaRoute::IssueProjection { work_ref: route_ref })
+                    if route_ref.as_str() == work_ref
+            ));
+            let surface = panel
+                .omega_work_detail
+                .as_ref()
+                .expect("Work detail surface");
+            let surface = surface.read(cx);
+            assert_eq!(surface.presentation(), WorkPresentation::Issue);
+            let snapshot = surface.snapshot();
+            let issue = snapshot
+                .issue
+                .as_ref()
+                .and_then(Option::as_ref)
+                .expect("same-identity Issue projection");
+            assert_eq!(issue.work_ref, snapshot.summary.work_ref);
+            assert_eq!(issue.revision, snapshot.summary.revision);
+            assert_eq!(issue.state, snapshot.summary.state);
+        });
+
+        cx.simulate_keystrokes("e");
+        cx.run_until_parked();
+        panel.update_in(&mut cx, |panel, window, cx| {
+            panel
+                .omega_work_detail
+                .as_ref()
+                .expect("editable Work detail")
+                .update(cx, |surface, cx| {
+                    surface.replace_title_text_for_tests(
+                        "Canonical Work title from Intent",
+                        window,
+                        cx,
+                    );
+                });
+        });
+        cx.simulate_keystrokes("enter");
+        cx.run_until_parked();
+
+        panel.read_with(&cx, |panel, cx| {
+            let surface = panel
+                .omega_work_detail
+                .as_ref()
+                .expect("detail remains open after admission")
+                .read(cx);
+            assert_eq!(surface.title(), "Canonical Work title from Intent");
+            let snapshot = surface.snapshot();
+            assert_eq!(snapshot.summary.revision.0, original_revision + 1);
+            let issue = snapshot
+                .issue
+                .as_ref()
+                .and_then(Option::as_ref)
+                .expect("Issue projection remains attached");
+            assert_eq!(issue.revision, snapshot.summary.revision);
+            assert_eq!(issue.state, snapshot.summary.state);
+            assert!(matches!(
+                surface.journal().records.last().map(|record| &record.outcome),
+                Some(WorkIntentOutcome::Accepted { revision, .. })
+                    if revision.0 == original_revision + 1
+            ));
+            let metadata = ThreadMetadataStore::try_global(cx)
+                .and_then(|store| store.read(cx).entry(thread_id).cloned())
+                .expect("Thread source remains available");
+            assert_eq!(
+                metadata.title_override.as_deref(),
+                Some("Canonical Work title from Intent")
+            );
+            let projected = panel.work_index.item(&work_ref).expect("updated Work row");
+            assert_eq!(
+                projected.summary.title.0,
+                "Canonical Work title from Intent"
+            );
+            assert_eq!(projected.summary.revision.0, original_revision + 1);
+        });
+
+        cx.simulate_keystrokes("o");
+        cx.run_until_parked();
+        assert!(
+            cx.debug_bounds(&format!("omega.omega.work-detail.{work_ref}"))
+                .is_none()
+        );
         assert!(cx.debug_bounds("omega.omega.thread-tab.active").is_some());
     }
 
