@@ -436,6 +436,8 @@ Target\n\
 Source handling\n\
 - Work only inside the selected path above. It is the working directory attached to this session.\n\
 - Verify the repository and exact HEAD before analysis.\n\
+- Before analyzing files, run `git submodule sync --recursive` and `git submodule update --init --recursive` from the selected path. The top-level checkout alone is not complete analysis source.\n\
+- If a recursive submodule cannot be materialized, name its exact path and Git error as a limitation, then continue with every source tree that is available.\n\
 - Analyze the selected pinned checkout in place and do not modify repository source.\n\
 - Do not substitute the workspace that launched Forensics or another open working folder.\n\n\
 Analysis prompt\n\
@@ -457,9 +459,16 @@ Execution and result\n\
     ))
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum EntropySubmoduleMaterialization {
+    AgentTask,
+    BeforeAnalysis,
+}
+
 async fn materialize_entropy_campaign_project(
     campaign_ref: &str,
     project: &omega_forensics::EntropyProjectRecord,
+    submodules: EntropySubmoduleMaterialization,
 ) -> Result<PathBuf> {
     let repository_url = project
         .repository_url
@@ -474,62 +483,74 @@ async fn materialize_entropy_campaign_project(
         &project.product_ref,
     );
     smol::fs::create_dir_all(&root).await?;
-    let commands = [
-        vec!["init".to_string(), "--quiet".to_string()],
-        vec![
-            "remote".to_string(),
-            "add".to_string(),
-            "origin".to_string(),
-            repository_url.to_string(),
-        ],
-        vec![
-            "-c".to_string(),
-            "protocol.file.allow=never".to_string(),
-            "-c".to_string(),
-            "protocol.ext.allow=never".to_string(),
-            "fetch".to_string(),
-            "--depth=1".to_string(),
-            "--no-tags".to_string(),
-            "origin".to_string(),
-            revision.to_string(),
-        ],
-        vec![
-            "checkout".to_string(),
-            "--quiet".to_string(),
-            "--detach".to_string(),
-            "FETCH_HEAD".to_string(),
-        ],
-        vec![
-            "-c".to_string(),
-            "protocol.file.allow=never".to_string(),
-            "-c".to_string(),
-            "protocol.ext.allow=never".to_string(),
-            "submodule".to_string(),
-            "update".to_string(),
-            "--init".to_string(),
-            "--recursive".to_string(),
-            "--depth=1".to_string(),
-        ],
+    let mut commands = vec![
+        (
+            "initialize the checkout",
+            vec!["init".to_string(), "--quiet".to_string()],
+        ),
+        (
+            "attach the catalog repository",
+            vec![
+                "remote".to_string(),
+                "add".to_string(),
+                "origin".to_string(),
+                repository_url.to_string(),
+            ],
+        ),
+        (
+            "fetch the pinned revision",
+            vec![
+                "-c".to_string(),
+                "protocol.file.allow=never".to_string(),
+                "-c".to_string(),
+                "protocol.ext.allow=never".to_string(),
+                "fetch".to_string(),
+                "--depth=1".to_string(),
+                "--no-tags".to_string(),
+                "origin".to_string(),
+                revision.to_string(),
+            ],
+        ),
+        (
+            "check out the pinned revision",
+            vec![
+                "checkout".to_string(),
+                "--quiet".to_string(),
+                "--detach".to_string(),
+                "FETCH_HEAD".to_string(),
+            ],
+        ),
     ];
-    for args in commands {
-        let output = smol::process::Command::new("git")
-            .arg("-C")
-            .arg(&root)
-            .args(args)
-            .output()
-            .await?;
+    if submodules == EntropySubmoduleMaterialization::BeforeAnalysis {
+        commands.push((
+            "materialize recursive submodules",
+            vec![
+                "-c".to_string(),
+                "protocol.file.allow=never".to_string(),
+                "-c".to_string(),
+                "protocol.ext.allow=never".to_string(),
+                "submodule".to_string(),
+                "update".to_string(),
+                "--init".to_string(),
+                "--recursive".to_string(),
+                "--depth=1".to_string(),
+            ],
+        ));
+    }
+    for (operation, args) in commands {
+        let output = run_entropy_git(&root, operation, &args).await?;
         anyhow::ensure!(
             output.status.success(),
-            "git source materialization failed: {}",
+            "could not {operation}: {}",
             String::from_utf8_lossy(&output.stderr).trim()
         );
     }
-    let output = smol::process::Command::new("git")
-        .arg("-C")
-        .arg(&root)
-        .args(["rev-parse", "HEAD"])
-        .output()
-        .await?;
+    let output = run_entropy_git(
+        &root,
+        "verify the pinned revision",
+        &["rev-parse".to_string(), "HEAD".to_string()],
+    )
+    .await?;
     anyhow::ensure!(
         output.status.success(),
         "cannot verify campaign source revision"
@@ -539,6 +560,29 @@ async fn materialize_entropy_campaign_project(
         "materialized campaign source does not match the catalog revision"
     );
     Ok(root)
+}
+
+async fn run_entropy_git(
+    root: &Path,
+    operation: &str,
+    args: &[String],
+) -> Result<std::process::Output> {
+    const TIMEOUT: Duration = Duration::from_secs(120);
+    let mut command = smol::process::Command::new("git");
+    command
+        .arg("-C")
+        .arg(root)
+        .args(args)
+        .env("GIT_TERMINAL_PROMPT", "0")
+        .env("GIT_ASKPASS", "/usr/bin/false")
+        .env("SSH_ASKPASS", "/usr/bin/false")
+        .env("GCM_INTERACTIVE", "Never")
+        .stdin(std::process::Stdio::null())
+        .kill_on_drop(true);
+    async_std::future::timeout(TIMEOUT, command.output())
+        .await
+        .with_context(|| format!("timed out while trying to {operation}"))?
+        .with_context(|| format!("could not start Git to {operation}"))
 }
 
 async fn materialize_entropy_repository_checkout(
@@ -621,7 +665,13 @@ fn spawn_entropy_campaign(
                     .context("the entropy campaign is unavailable")
             })??;
             let campaign_ref = campaign.binding.campaign_ref.clone();
-            let root = match materialize_entropy_campaign_project(&campaign_ref, &project).await {
+            let root = match materialize_entropy_campaign_project(
+                &campaign_ref,
+                &project,
+                EntropySubmoduleMaterialization::BeforeAnalysis,
+            )
+            .await
+            {
                 Ok(root) => root,
                 Err(error) => {
                     surface.update(cx, |surface, cx| {
@@ -14094,8 +14144,12 @@ impl AgentPanel {
                         cx,
                     )
                 })?;
-                if let Err(error) =
-                    materialize_entropy_campaign_project(&source_ref, &project).await
+                if let Err(error) = materialize_entropy_campaign_project(
+                    &source_ref,
+                    &project,
+                    EntropySubmoduleMaterialization::AgentTask,
+                )
+                .await
                 {
                     surface.update(cx, |surface, cx| {
                         surface.set_entropy_error(
@@ -20452,6 +20506,9 @@ mod tests {
         assert!(prompt.contains("/tmp/omega-entropy-campaigns/bitkey-selected"));
         assert!(prompt.contains("cf16705543d0c66ff982635733d380944cc2677d"));
         assert!(prompt.contains("working directory attached to this session"));
+        assert!(prompt.contains("git submodule sync --recursive"));
+        assert!(prompt.contains("git submodule update --init --recursive"));
+        assert!(prompt.contains("name its exact path and Git error as a limitation"));
         assert!(prompt.contains("Do not substitute the workspace that launched Forensics"));
         assert!(!prompt.contains("/work/openagents"));
     }

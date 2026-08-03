@@ -114,6 +114,14 @@ public SDK is not complete product source. The contract also supports
 Repository materialization failure, incomplete dependencies, provider failure,
 invalid model output, and cancellation remain separate limitations.
 
+For a selected one-project scan, Omega opens the agent task after the pinned
+top-level checkout is ready. The task prompt requires the agent to synchronize
+and initialize every recursive submodule before analysis. Submodule fetching is
+visible task work instead of a UI-opening gate. A submodule failure must
+identify the missing path and Git error as a limitation, but it does not prevent
+the task from opening. The automated 15-project campaign still materializes
+recursive submodules before it builds each source manifest.
+
 Up to four recent campaign projections are stored with the prompt workspace.
 If Omega restarts during a campaign, it restores the partial results as a
 cancelled campaign instead of silently resuming with new process state.

@@ -27538,6 +27538,38 @@ mod tests {
             "OMEGA-DELTA-0223: Forensics can substitute the launch workspace \
              for the selected catalog project's pinned working folder"
         );
+        let materialize = body_of(&panel, "materialize_entropy_campaign_project");
+        let run_git = body_of(&panel, "run_entropy_git");
+        assert!(
+            materialize.contains("EntropySubmoduleMaterialization::BeforeAnalysis")
+                && run_git.contains("async_std::future::timeout")
+                && run_git.contains("GIT_TERMINAL_PROMPT")
+                && run_git.contains("kill_on_drop(true)"),
+            "OMEGA-DELTA-0223: catalog source materialization lost its bounded, noninteractive Git contract"
+        );
+        assert!(
+            handle_forensics.contains("EntropySubmoduleMaterialization::AgentTask"),
+            "OMEGA-DELTA-0223: a single catalog scan blocks task creation on recursive submodule materialization"
+        );
+        for (keymap, first_chord, last_chord) in [
+            ("assets/keymaps/default-macos.json", "cmd-1", "cmd-0"),
+            ("assets/keymaps/default-linux.json", "ctrl-1", "ctrl-0"),
+            ("assets/keymaps/default-windows.json", "ctrl-1", "ctrl-0"),
+        ] {
+            let raw = read_repository_file(keymap);
+            let forensics_context = raw
+                .split("\"context\": \"WorkbenchForensics\"")
+                .nth(1)
+                .and_then(|tail| tail.split("\"context\":").next())
+                .unwrap_or_default();
+            for chord in [first_chord, last_chord] {
+                assert!(
+                    forensics_context.contains(chord)
+                        && forensics_context.contains("agent::ActivateOmegaThreadTab"),
+                    "OMEGA-DELTA-0223: {keymap} cannot switch numbered thread tabs from Forensics with {chord}"
+                );
+            }
+        }
 
         let selection = body_of(&panel, "select_thread_identity");
         assert!(
