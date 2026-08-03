@@ -27655,7 +27655,8 @@ mod tests {
 
     /// OMEGA-DELTA-0224. Omega's settings navigation is an in-shell route
     /// around Omega's focused settings pages, never a second settings window
-    /// or authority.
+    /// or authority. The footer entry is the source-backed effective principal,
+    /// which opens the same embedded Settings route.
     #[test]
     fn omega_settings_sidebar_routes_to_omega_settings() {
         let settings = without_comments(&read_repository_file(
@@ -27699,7 +27700,7 @@ mod tests {
         let panel = without_comments(&read_repository_file("crates/agent_ui/src/agent_panel.rs"));
         let shell = body_of(&panel, "render_omega_shell");
         for required in [
-            "omega-open-settings",
+            "omega.omega.effective-principal",
             "open_omega_settings(true, window, cx)",
         ] {
             assert!(
