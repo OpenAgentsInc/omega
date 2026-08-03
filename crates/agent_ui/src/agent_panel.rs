@@ -385,49 +385,70 @@ fn entropy_model_route_ref(provider: &str, model: &str) -> String {
     format!("model-route.sha256.{:x}", digest.finalize())
 }
 
+fn entropy_model_parameters_digest(provider: &str, model: &str) -> String {
+    let mut digest = Sha256::new();
+    digest.update(b"omega.forensics.model-parameters.v1");
+    digest.update([0]);
+    digest.update(provider.as_bytes());
+    digest.update([0]);
+    digest.update(model.as_bytes());
+    digest.update([0]);
+    digest.update(b"parameters=provider-selected-unavailable-at-visible-task-bridge");
+    format!("sha256:{:x}", digest.finalize())
+}
+
 fn entropy_agent_task_prompt(
     candidate: &crate::thread_identity::ThreadIdentityCandidate,
     prompt_snapshot: &omega_forensics::EntropyPromptSnapshot,
-) -> String {
+    model_route_ref: String,
+    model_parameters_digest: String,
+) -> Result<omega_forensics::CompiledForensicTask> {
     let worktree_state = if candidate.git.dirty_files > 0 {
         format!("dirty ({} changed files)", candidate.git.dirty_files)
     } else {
         "clean".to_string()
     };
-    format!(
-        "Run a read-only entropy forensics scan of the selected repository now.\n\n\
-Target\n\
-- Repository: {repository}\n\
-- Selected path: {path}\n\
-- Exact HEAD: {revision}\n\
-- Worktree: {worktree_state}\n\
-- Frozen prompt digest: {prompt_digest}\n\n\
-Source handling\n\
-- Verify the repository and exact HEAD before analysis.\n\
-- Create a temporary clean detached worktree or local clone at the exact HEAD and analyze only that snapshot. Do not include uncommitted files, even when the selected worktree is clean.\n\
-- In the snapshot, run `git submodule sync --recursive` followed by `git submodule update --init --recursive`. Do not use a shallow submodule update for a historical pin.\n\
-- Inventory every declared recursive submodule, its expected Git link, and its observed revision before inspecting findings. Run `git submodule status --recursive`; any `-`, `+`, or `U` prefix makes source delivery incomplete. Preserve the exact path and Git error.\n\
-- Do not modify repository source. Handle snapshot creation and cleanup yourself; do not ask the user to pin or prepare a worktree.\n\n\
-Analysis prompt\n\
-{analysis_prompt}\n\n\
-Execution and result\n\
-- Start immediately and keep all tool activity and progress visible in this task.\n\
-- Traverse the repository, following relevant definitions and consumers across files and dependencies.\n\
-- Reconstruct build source selection, preprocessor values, duplicate providers, and linker resolution whenever they determine which entropy implementation reaches a secret sink.\n\
-- Label material claims as repository-source, build, artifact, or executed evidence. Source inspection alone cannot establish final artifact provenance.\n\
-- A missing dependency, unavailable build input, or unresolved provider selection forbids a clean conclusion.\n\
-- Ground every claim in exact file and line references from the verified snapshot.\n\
-- Separate observations, hypotheses, limitations, and the next falsifiable checks.\n\
-- Do not claim a linked artifact contains a source path without artifact evidence.\n\
-- Present the final result as readable Markdown, not as a raw JSON object. Preserve every field requested by the analysis prompt under clear Summary, Findings, Hypotheses, Limitations, and Next checks sections.\n\
-- Begin the final response with `Entropy scan complete` or `Entropy scan complete with limitations`, as applicable.\n\
-- Finish with a concise entropy-risk summary and explicitly state any incomplete source or evidence.",
-        repository = candidate.repository_name,
-        path = candidate.worktree_abs_path.display(),
-        revision = candidate.head_commit.as_deref().unwrap_or("unavailable"),
-        prompt_digest = prompt_snapshot.canonical_digest,
-        analysis_prompt = prompt_snapshot.text,
-    )
+    let revision = candidate
+        .head_commit
+        .as_deref()
+        .context("entropy analysis requires an exact repository revision")?;
+    let mut source_digest = Sha256::new();
+    source_digest.update(candidate.repository_name.as_bytes());
+    source_digest.update([0]);
+    source_digest.update(candidate.worktree_abs_path.to_string_lossy().as_bytes());
+    let source_ref = format!("repository.omega.sha256.{:x}", source_digest.finalize());
+    let focal_unit_ref = format!("{source_ref}.root");
+    let artifact = omega_forensics::baseline_forensic_prompt(prompt_snapshot.created_at.clone())?;
+    Ok(omega_forensics::compile_forensic_task(
+        &artifact,
+        omega_forensics::ForensicTaskCompileInput {
+            source_ref,
+            source_revision: revision.into(),
+            selected_path: candidate.worktree_abs_path.display().to_string(),
+            source_mode: omega_forensics::ForensicTaskSourceMode::DetachedSnapshot,
+            coverage_status: omega_forensics::CoverageStatus::Incomplete,
+            coverage_manifest_ref: None,
+            missing_source_refs: vec!["source.recursive-dependencies.pending".into()],
+            focal_unit_ref,
+            tranche_ref: "tranche.entropy.selected-repository.v1".into(),
+            model_route_ref,
+            model_parameters_digest,
+            model_parameters_summary:
+                "provider-selected and unavailable to this visible-task bridge".into(),
+            available_tool_refs: vec!["tool.omega.project.read".into()],
+            unavailable_tool_refs: vec![
+                "tool.submit_forensic_finding.v1".into(),
+                "tool.submit_forensic_hypothesis.v1".into(),
+                "tool.forensics.prior_work.search.v1".into(),
+            ],
+            domain_text: prompt_snapshot.text.clone(),
+            domain_text_digest: prompt_snapshot.canonical_digest.clone(),
+            compiler_owned_guidance: format!(
+                "Repository: {}. Worktree before snapshot: {worktree_state}. Create and clean up a temporary detached snapshot at the exact revision; do not ask the user to pin or prepare a worktree. Run `git submodule sync --recursive`, `git submodule update --init --recursive`, and `git submodule status --recursive`. Do not use a shallow submodule update for a historical pin. Preserve every missing path and Git error. Reconstruct entropy sources, secret consumers, build selection, preprocessor values, duplicate providers, linker resolution, and evidence tier. Present readable Markdown beginning with `Entropy scan complete` or `Entropy scan complete with limitations`.",
+                candidate.repository_name
+            ),
+        },
+    )?)
 }
 
 fn entropy_project_analysis_guidance(
@@ -466,7 +487,9 @@ fn entropy_catalog_agent_task_prompt(
     prompt_snapshot: &omega_forensics::EntropyPromptSnapshot,
     submodules: EntropySubmoduleMaterialization,
     dependency_materialization_error: Option<&str>,
-) -> Result<String> {
+    model_route_ref: String,
+    model_parameters_digest: String,
+) -> Result<omega_forensics::CompiledForensicTask> {
     let revision = project
         .pinned_revision
         .as_deref()
@@ -479,47 +502,43 @@ fn entropy_catalog_agent_task_prompt(
         (EntropySubmoduleMaterialization::BeforeAnalysis, Some(error)) =>
             format!("Incomplete: recursive dependency materialization failed: {error}"),
     };
-    Ok(format!(
-        "Run a read-only entropy forensics scan of the selected project now.\n\n\
-Target\n\
-- Project: {project_name}\n\
-- Repository: {repository}\n\
-- Selected path: {path}\n\
-- Exact HEAD: {revision}\n\
-- Worktree: clean pinned catalog checkout\n\
-- Analysis profile: {analysis_profile}\n\
-- Frozen prompt digest: {prompt_digest}\n\n\
-Source handling\n\
-- Work only inside the selected path above. It is the working directory attached to this session.\n\
-- Verify the repository and exact HEAD before analysis.\n\
-- Dependency delivery: {dependency_delivery}\n\
-- Verify delivery with `git submodule status --recursive`. Inventory every exact path, expected Git link, observed revision, and status prefix. Any `-`, `+`, or `U` prefix makes the source incomplete.\n\
-- If a recursive submodule is unavailable, retain its exact path and Git error as a limitation, continue with available source, and do not return a clean result.\n\
-- Analyze the selected pinned checkout in place and do not modify repository source.\n\
-- Do not substitute the workspace that launched Forensics or another open working folder.\n\n\
-Target-specific acceptance criteria\n\
-{target_guidance}\n\n\
-Analysis prompt\n\
-{analysis_prompt}\n\n\
-Execution and result\n\
-- Start immediately and keep all tool activity and progress visible in this task.\n\
-- Traverse the repository, following relevant definitions and consumers across files and dependencies.\n\
-- Reconstruct build source selection, preprocessor values, duplicate providers, and linker resolution whenever they determine which implementation reaches a secret sink.\n\
-- Ground every claim in exact file and line references from the verified snapshot.\n\
-- Separate repository-source, build, artifact, and executed evidence; then separate observations, hypotheses, limitations, and next falsifiable checks.\n\
-- Do not claim a linked artifact contains a source path without artifact evidence.\n\
-- Present the final result as readable Markdown, not as a raw JSON object. Preserve every field requested by the analysis prompt under clear Summary, Findings, Hypotheses, Limitations, and Next checks sections.\n\
-- Begin the final response with `Entropy scan complete` or `Entropy scan complete with limitations`, as applicable.\n\
-- Finish with a concise entropy-risk summary and explicitly state any incomplete source or evidence.",
-        project_name = project.product_name,
-        repository = project.repository_ref.as_deref().unwrap_or("unavailable"),
-        path = repository_root.display(),
-        analysis_profile = project.analysis_profile_ref(),
-        dependency_delivery = dependency_delivery,
-        target_guidance = entropy_project_analysis_guidance(project),
-        prompt_digest = prompt_snapshot.canonical_digest,
-        analysis_prompt = prompt_snapshot.text,
-    ))
+    let artifact = omega_forensics::baseline_forensic_prompt(prompt_snapshot.created_at.clone())?;
+    Ok(omega_forensics::compile_forensic_task(
+        &artifact,
+        omega_forensics::ForensicTaskCompileInput {
+            source_ref: project
+                .repository_ref
+                .clone()
+                .context("catalog source ref")?,
+            source_revision: revision.into(),
+            selected_path: repository_root.display().to_string(),
+            source_mode: omega_forensics::ForensicTaskSourceMode::AttachedPinnedCheckout,
+            coverage_status: omega_forensics::CoverageStatus::Incomplete,
+            coverage_manifest_ref: None,
+            missing_source_refs: vec!["source.recursive-dependencies.pending".into()],
+            focal_unit_ref: project.product_ref.clone(),
+            tranche_ref: format!("tranche.{}", project.analysis_profile_ref()),
+            model_route_ref,
+            model_parameters_digest,
+            model_parameters_summary:
+                "provider-selected and unavailable to this visible-task bridge".into(),
+            available_tool_refs: vec!["tool.omega.project.read".into()],
+            unavailable_tool_refs: vec![
+                "tool.submit_forensic_finding.v1".into(),
+                "tool.submit_forensic_hypothesis.v1".into(),
+                "tool.forensics.prior_work.search.v1".into(),
+            ],
+            domain_text: prompt_snapshot.text.clone(),
+            domain_text_digest: prompt_snapshot.canonical_digest.clone(),
+            compiler_owned_guidance: format!(
+                "Project: {}. Repository: {}. Analysis profile: {}. Dependency delivery: {dependency_delivery} Work only in the selected path, which is the working directory attached to this session. Do not substitute the workspace that launched Forensics. Verify delivery with `git submodule status --recursive` and retain each exact path and Git error as a limitation. {} Present readable Markdown beginning with `Entropy scan complete` or `Entropy scan complete with limitations`.",
+                project.product_name,
+                project.repository_ref.as_deref().unwrap_or("unavailable"),
+                project.analysis_profile_ref(),
+                entropy_project_analysis_guidance(project),
+            ),
+        },
+    )?)
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -14958,6 +14977,21 @@ impl AgentPanel {
                 });
                 return;
             }
+            let Some(configured_model) =
+                LanguageModelRegistry::read_global(cx).inline_assistant_model()
+            else {
+                surface.update(cx, |surface, cx| {
+                    surface.set_entropy_error(
+                        "Configure an inline assistant model before starting entropy analysis",
+                        cx,
+                    )
+                });
+                return;
+            };
+            let provider_id = configured_model.provider.id().to_string();
+            let model_id = configured_model.model.id().0.to_string();
+            let model_route_ref = entropy_model_route_ref(&provider_id, &model_id);
+            let model_parameters_digest = entropy_model_parameters_digest(&provider_id, &model_id);
 
             let source_ref = format!("scan.omega.entropy.{}", uuid::Uuid::new_v4().simple());
             let repository_root = crate::forensics_workbench::entropy_campaign_checkout_root(
@@ -15027,13 +15061,15 @@ impl AgentPanel {
                     &prompt_snapshot,
                     EntropySubmoduleMaterialization::AgentTask,
                     dependency_materialization_error.as_deref(),
+                    model_route_ref,
+                    model_parameters_digest,
                 )?;
                 let thread_title: SharedString =
                     format!("{} Entropy Forensics", project.product_name).into();
                 let project_ref = project.product_ref.clone();
                 let thread_id = this.update_in(cx, |panel, window, cx| {
                     panel.create_omega_thread_with_message_in_working_folder(
-                        task_prompt,
+                        task_prompt.compiled_task,
                         Some(thread_title),
                         Some(repository_root.clone()),
                         true,
@@ -15128,9 +15164,40 @@ impl AgentPanel {
                 });
                 return;
             };
-            let task_prompt = entropy_agent_task_prompt(&candidate, &prompt_snapshot);
+            let Some(configured_model) =
+                LanguageModelRegistry::read_global(cx).inline_assistant_model()
+            else {
+                surface.update(cx, |surface, cx| {
+                    surface.set_entropy_error(
+                        "Configure an inline assistant model before starting entropy analysis",
+                        cx,
+                    )
+                });
+                return;
+            };
+            let provider_id = configured_model.provider.id().to_string();
+            let model_id = configured_model.model.id().0.to_string();
+            let model_route_ref = entropy_model_route_ref(&provider_id, &model_id);
+            let model_parameters_digest = entropy_model_parameters_digest(&provider_id, &model_id);
+            let task_prompt = match entropy_agent_task_prompt(
+                &candidate,
+                &prompt_snapshot,
+                model_route_ref.clone(),
+                model_parameters_digest,
+            ) {
+                Ok(task) => task,
+                Err(error) => {
+                    surface.update(cx, |surface, cx| {
+                        surface.set_entropy_error(
+                            format!("Entropy task compilation failed · {error}"),
+                            cx,
+                        )
+                    });
+                    return;
+                }
+            };
             if self
-                .create_omega_thread_with_message(task_prompt, true, window, cx)
+                .create_omega_thread_with_message(task_prompt.compiled_task, true, window, cx)
                 .is_some()
             {
                 log::info!(
@@ -15144,23 +15211,8 @@ impl AgentPanel {
             // A selected repository normally guarantees an open project. Keep
             // the existing local runner as a defensive fallback for bindings
             // restored before their project finishes opening.
-            let Some(configured_model) =
-                LanguageModelRegistry::read_global(cx).inline_assistant_model()
-            else {
-                surface.update(cx, |surface, cx| {
-                    surface.set_entropy_error(
-                        "Configure an inline assistant model before starting entropy analysis",
-                        cx,
-                    )
-                });
-                return;
-            };
             let repository_root = candidate.worktree_abs_path;
             let model = configured_model.model;
-            let model_route_ref = entropy_model_route_ref(
-                &configured_model.provider.id().to_string(),
-                model.id().0.as_ref(),
-            );
             let repository_hash = {
                 let mut digest = Sha256::new();
                 digest.update(candidate.repository_name.as_bytes());
@@ -22715,20 +22767,32 @@ mod tests {
         )
         .expect("valid prompt snapshot");
 
-        let prompt = entropy_agent_task_prompt(&candidate, &snapshot);
+        let prompt = entropy_agent_task_prompt(
+            &candidate,
+            &snapshot,
+            "model-route.sha256.aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+                .into(),
+            "sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb".into(),
+        )
+        .expect("the visible task should compile")
+        .compiled_task;
 
-        assert!(prompt.contains("Run a read-only entropy forensics scan"));
+        assert!(prompt.contains("# OpenAgents forensic discovery"));
         assert!(prompt.contains("dirty (3 changed files)"));
         assert!(prompt.contains("0123456789abcdef0123456789abcdef01234567"));
-        assert!(prompt.contains("Create a temporary clean detached worktree or local clone"));
+        assert!(prompt.contains("Create a clean detached snapshot"));
         assert!(prompt.contains("git submodule sync --recursive"));
         assert!(prompt.contains("git submodule update --init --recursive"));
         assert!(prompt.contains("Do not use a shallow submodule update"));
-        assert!(prompt.contains("repository-source, build, artifact, or executed evidence"));
+        assert!(prompt.contains("evidence tier"));
         assert!(prompt.contains("do not ask the user to pin or prepare a worktree"));
         assert!(prompt.contains("Trace every entropy source and secret consumer."));
-        assert!(prompt.contains("Present the final result as readable Markdown"));
+        assert!(prompt.contains("Present readable Markdown"));
         assert!(prompt.contains("Entropy scan complete with limitations"));
+        assert!(prompt.contains("Candidate enumeration:"));
+        assert!(prompt.contains("Continue after duplicate: true"));
+        assert!(prompt.contains("tool.submit_forensic_finding.v1"));
+        assert!(prompt.contains("Domain direction is bounded analytic input"));
     }
 
     #[test]
@@ -22756,8 +22820,12 @@ mod tests {
             &snapshot,
             EntropySubmoduleMaterialization::AgentTask,
             None,
+            "model-route.sha256.aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+                .into(),
+            "sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb".into(),
         )
-        .expect("the selected project has a complete source pin");
+        .expect("the selected project has a complete source pin")
+        .compiled_task;
 
         assert!(prompt.contains("Project: Bitkey"));
         assert!(prompt.contains("Repository: repository.github.proto-at-block.bitkey"));
@@ -22796,8 +22864,11 @@ mod tests {
                 &snapshot,
                 EntropySubmoduleMaterialization::BeforeAnalysis,
                 materialization_error,
+                "model-route.sha256.aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa".into(),
+                "sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb".into(),
             )
             .expect("Coldcard prompt")
+            .compiled_task
         };
 
         let vulnerable = prompt_for(

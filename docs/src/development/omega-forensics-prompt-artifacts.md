@@ -10,8 +10,36 @@ The artifact uses `openagents.forensic_prompt_artifact.v1`. Its canonical digest
 matches the OpenAgents contract: recursively sorted JSON object keys and SHA-256
 over prompt IR, parent lineage, examples, parameters, dataset revision, and
 compatibility refs. Artifact identity and creation time are intentionally outside
-that digest. Omega tests the baseline artifact against a digest produced by the
-TypeScript contract implementation.
+that digest. The baseline now includes the canonical discovery workflow from
+OpenAgents commit `5b69795b87`: candidate enumeration, severity ordering,
+prior-work search, root-cause identity, falsifier construction, uncertainty
+disposition, one finding per root cause, continuation after a duplicate,
+style/hardening exclusion, and conservative severity. Omega tests the baseline
+artifact against a digest produced by the TypeScript contract implementation.
+
+## Visible task compiler
+
+Every visible repository and catalog Forensics task is compiled through
+`omega.compiled_forensic_task.v1`. The compiler accepts the canonical Prompt IR
+and one immutable entropy prompt snapshot as bounded domain direction. Its output
+binds the exact prompt ref and digest, source and revision, coverage disposition,
+focal unit, tranche, model route and parameter digest, available and unavailable
+tools, typed schemas, budget policy, domain-text digest, and compiled-task
+digest.
+
+The selected focal unit does not hide the rest of the admitted source. The task
+states that neighboring source remains readable as context. Source completeness
+is currently `incomplete` until the recursive-dependency manifest gate lands.
+The typed finding, typed hypothesis, and prior-work search tools are named as
+unavailable until their separate runtime issues land. Text cannot advertise an
+unavailable capability.
+
+The compiler rejects pending or denied coverage, a missing discovery workflow,
+overlapping available/unavailable tool sets, and domain bytes that do not match
+their immutable digest. The same input produces byte-identical task text and a
+SHA-256 digest. User domain text can ask for network, writes, more budget, or
+public reporting, but those words remain analytic input and do not change the
+typed effective configuration.
 
 ## Editor and diff
 
@@ -24,6 +52,7 @@ semantic diff entries rather than a text-only patch:
 - finding and hypothesis schema refs;
 - requested tool-policy refs; and
 - dependency, uncertainty, PoC, severity, context, and budget policies.
+- the complete discovery workflow.
 
 Clients edit the structured `ForensicPromptIr` draft through the workbench state
 API. Saving recalculates and validates the canonical digest before the candidate
@@ -42,6 +71,10 @@ Only typed finding submission creates a finding. Longer prompt or response prose
 does not. Typed hypotheses remain unverified leads. The launch event carries the
 active canonical prompt digest, and the review projection displays that same
 digest so a result can always be attributed to its exact prompt candidate.
+
+For the current visible-task bridge, submission tools are explicitly unavailable,
+so transcript Markdown remains diagnostic only. The later typed-tool issue must
+admit those tools before a task can create finding or hypothesis state.
 
 Candidates are evaluated in isolated [run matrices](omega-forensics-run-matrices.md)
 before any promotion decision.

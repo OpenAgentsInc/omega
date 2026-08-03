@@ -9,16 +9,20 @@ adapter creates a second writable store.
 
 | Field                 | Value                                                              |
 | --------------------- | ------------------------------------------------------------------ |
-| OpenAgents commit     | `2630b1d38393df7b5cd9a10cd12584b604b49351`                         |
+| OpenAgents commit     | `b4c7d8c45fbd7b2b5183234a3a50485e85b875b0`                         |
 | Contract              | `openagents.all_work_boundary.v1`                                  |
 | Definition SHA-256    | `012a5962bc2bea70792014f5b375d78b7afef2bee15408489a729278c641508b` |
-| Rust artifact SHA-256 | `717ba307518d7cacfdb8867658d89880b1f602bc83a151474f77e266380d1243` |
+| Rust artifact SHA-256 | `7a8e88104a1f452de1d18028def0d4d8a24ab517ee3848e035307fa17f638e43` |
 | Omega receipt         | `crates/omega_effectd/all-work-contract/SOURCE.json`               |
 
 The generated Rust file, compatibility manifest, and shared fixtures are
 vendored together. `script/sync-all-work-contract` refuses a source checkout
 that is not at the pinned commit, then verifies the Rust digest before it
 copies any file.
+
+The current pin includes the generated Rust empty-struct-variant repair. This
+keeps `Unassign {}` validation compilable without changing the All Work schema
+or its definition digest.
 
 ## Protocol
 
