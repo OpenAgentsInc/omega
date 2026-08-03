@@ -9,7 +9,7 @@ adapter creates a second writable store.
 
 | Field                 | Value                                                              |
 | --------------------- | ------------------------------------------------------------------ |
-| OpenAgents commit     | `430a432e526dc37901d04c1e7fdf89bcb3556d2f`                         |
+| OpenAgents commit     | `07e79366bbdf0ea3133ba799175c72e4d925cb17`                         |
 | Contract              | `openagents.all_work_boundary.v1`                                  |
 | Definition SHA-256    | `2f3119cf7822fe9bd770d2c97f913d609dd49e8918fb3ea4c7df9662d20492c4` |
 | Rust artifact SHA-256 | `87fe5a88e669276672027464635f484a2a01de218424a2c063e8502602abe985` |
@@ -121,12 +121,19 @@ remain separate facts. Revocation fences late generation effects. Verification
 does not imply Owner Disposition.
 
 The Work inspector recovers the durable command snapshot and uses its exact
-revision for generated assign and unassign requests. It enables those controls
-only when the displayed account supplies both an enrolled Effective Principal
-and verified Organization membership. The current account registry does not
-own Organization membership, so the controls fail closed and explain that
-dependency. Fixture controls remain simulated. Delegation, execution, and the
-installed owner journey are not complete.
+revision for generated assign, unassign, delegate, and revoke requests. A
+delegate candidate must be the exact owner of the active local Thread; a legacy
+ambiguous owner or remote Thread without an admitted Host reference is not a
+candidate. The grant names that Direct Agent, local Host, private scope,
+bounded Thread capabilities, one-hour expiry, positive budget ceiling, and an
+evidence requirement. It does not invent a Repository Work Claim or Lease.
+
+The inspector enables command controls only when the displayed account supplies
+both an enrolled Effective Principal and verified Organization membership. The
+current account registry does not own Organization membership, so the controls
+fail closed and explain that dependency. Fixture controls remain simulated.
+Starting and controlling a real Agent Session, recording portable activity,
+and the installed owner journey remain incomplete.
 
 ## Verify
 

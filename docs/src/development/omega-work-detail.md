@@ -93,6 +93,15 @@ For writable Omega-native Thread Work, the Inspector also provides explicit
 changes** actions. A legacy ambiguous Thread owner does not become a delegation
 candidate.
 
+The development dogfood Inspector separately sends generated All Work commands
+to the OpenAgents command authority. It can assign, unassign, delegate to the
+exact active local Direct Agent, and revoke the active grant. Those controls
+require an enrolled Effective Principal, verified Organization membership, a
+fresh canonical Work revision, and, for delegation, an exact local Host. The
+grant is private, expires after one hour, requires evidence, and carries only
+the bounded Thread message and stop capabilities. A fixture, remote Thread
+without admitted Host identity, or ambiguous legacy owner remains read only.
+
 The same actions are available to pointer users. Focus returns to the detail
 surface after edit submission or cancellation.
 

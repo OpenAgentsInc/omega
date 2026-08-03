@@ -43,8 +43,8 @@ use crate::agent_connection_store::AgentConnectionStore;
 use crate::completion_provider::{AgentContextSelection, AgentContextSource};
 use crate::forensics_work_projection::{ForensicsWorkProjection, project_forensics_work};
 use crate::omega_dogfood_surface::{
-    DogfoodClaimAction, DogfoodSurface, DogfoodSurfaceEvent, DogfoodWorkCommandAction,
-    DogfoodWorkCommandContext,
+    DogfoodClaimAction, DogfoodDelegationCandidate, DogfoodSurface, DogfoodSurfaceEvent,
+    DogfoodWorkCommandAction, DogfoodWorkCommandContext,
 };
 use crate::omega_work_detail_surface::{
     WorkDelegationCandidate, WorkDetailSurface, WorkDetailSurfaceEvent,
@@ -2857,6 +2857,8 @@ fn dogfood_work_command_action_label(action: DogfoodWorkCommandAction) -> &'stat
         DogfoodWorkCommandAction::Refresh => "refresh",
         DogfoodWorkCommandAction::AssignToMe => "assign",
         DogfoodWorkCommandAction::Unassign => "unassign",
+        DogfoodWorkCommandAction::Delegate => "delegate",
+        DogfoodWorkCommandAction::RevokeDelegate => "revoke-delegate",
     }
 }
 
@@ -4620,7 +4622,41 @@ impl AgentPanel {
         }));
     }
 
-    fn dogfood_work_command_context(&self) -> Result<DogfoodWorkCommandContext, String> {
+    fn dogfood_delegation_candidate(&self, cx: &App) -> Option<DogfoodDelegationCandidate> {
+        let thread_id = self.active_thread_id(cx)?;
+        let metadata = ThreadMetadataStore::try_global(cx)?
+            .read(cx)
+            .entry(thread_id)?
+            .clone();
+        if metadata.remote_connection.is_some() {
+            return None;
+        }
+        let (agent_id, label) = match metadata.conversation_owner() {
+            ConversationOwner::Exact(agent_id) => {
+                let label = crate::omega_composer_executor_menu::named_direct_agent_label(
+                    agent_id.as_ref(),
+                )
+                .unwrap_or(agent_id.as_ref())
+                .to_string();
+                (agent_id.as_ref().to_string(), label)
+            }
+            ConversationOwner::LegacyOmega => ("omega".to_string(), "Omega".to_string()),
+            ConversationOwner::LegacyAmbiguous(_) => return None,
+        };
+        Some(DogfoodDelegationCandidate {
+            agent_ref: omega_effectd::all_work_contract::AgentRef::try_from(format!(
+                "agent:omega:{agent_id}"
+            ))
+            .ok()?,
+            host_ref: omega_effectd::all_work_contract::HostRef::try_from(
+                "host:omega:local".to_string(),
+            )
+            .ok()?,
+            label,
+        })
+    }
+
+    fn dogfood_work_command_context(&self, cx: &App) -> Result<DogfoodWorkCommandContext, String> {
         if self.effective_principal.state
             != crate::effective_principal::EffectivePrincipalState::Enrolled
         {
@@ -4647,11 +4683,12 @@ impl AgentPanel {
                 organization_ref.clone(),
             )
             .map_err(|error| error.to_string())?,
+            delegation_candidate: self.dogfood_delegation_candidate(cx),
         })
     }
 
     fn update_dogfood_work_command_context(&mut self, cx: &mut Context<Self>) {
-        let context = self.dogfood_work_command_context();
+        let context = self.dogfood_work_command_context(cx);
         if let Some(surface) = &self.dogfood_surface {
             surface.update(cx, |surface, cx| match context {
                 Ok(context) => surface.set_work_command_context(Some(context), None, cx),
@@ -18058,7 +18095,7 @@ impl AgentPanel {
         let Some(surface) = self.dogfood_surface.clone() else {
             return;
         };
-        let context = match self.dogfood_work_command_context() {
+        let context = match self.dogfood_work_command_context(cx) {
             Ok(context) => context,
             Err(error) => {
                 surface.update(cx, |surface, cx| {
@@ -18083,20 +18120,84 @@ impl AgentPanel {
         let work_digest = format!("{:x}", Sha256::digest(work_ref.0.as_bytes()));
         let work_key = work_digest[..16].to_string();
         let action_label = dogfood_work_command_action_label(action);
-        let occurred_at = Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Millis, true);
-        let command = match action {
-            DogfoodWorkCommandAction::AssignToMe => {
-                omega_effectd::all_work_contract::WorkCommand::Assign {
-                    assignee: omega_effectd::all_work_contract::HumanAssignee {
-                        kind: omega_effectd::all_work_contract::AssigneeKind::Human,
-                        principal_ref: context.principal_ref.clone(),
-                    },
+        let now = Utc::now();
+        let occurred_at = now.to_rfc3339_opts(chrono::SecondsFormat::Millis, true);
+        let command: Result<omega_effectd::all_work_contract::WorkCommand> = (|| {
+            Ok(match action {
+                DogfoodWorkCommandAction::AssignToMe => {
+                    omega_effectd::all_work_contract::WorkCommand::Assign {
+                        assignee: omega_effectd::all_work_contract::HumanAssignee {
+                            kind: omega_effectd::all_work_contract::AssigneeKind::Human,
+                            principal_ref: context.principal_ref.clone(),
+                        },
+                    }
                 }
+                DogfoodWorkCommandAction::Unassign => {
+                    omega_effectd::all_work_contract::WorkCommand::Unassign {}
+                }
+                DogfoodWorkCommandAction::Delegate => {
+                    let candidate = context
+                        .delegation_candidate
+                        .clone()
+                        .context("No verified local Direct Agent is available for delegation.")?;
+                    let generation = revision.saturating_add(1);
+                    omega_effectd::all_work_contract::WorkCommand::Delegate {
+                        grant: omega_effectd::all_work_contract::DelegationGrant {
+                            grant_ref:
+                                omega_effectd::all_work_contract::DelegationGrantRef::try_from(
+                                    format!("delegation-grant:omega-ui:{work_key}:{generation}"),
+                                )?,
+                            agent_ref: candidate.agent_ref,
+                            issued_by: context.principal_ref.clone(),
+                            generation: omega_effectd::all_work_contract::SafeInteger(generation),
+                            capability_refs: vec![
+                                omega_effectd::all_work_contract::CapabilityRef::try_from(
+                                    "capability:omega:thread-message".to_string(),
+                                )?,
+                                omega_effectd::all_work_contract::CapabilityRef::try_from(
+                                    "capability:omega:thread-stop".to_string(),
+                                )?,
+                            ],
+                            tool_refs: Vec::new(),
+                            host_ref: candidate.host_ref,
+                            budget_limit: omega_effectd::all_work_contract::SafeInteger(100_000),
+                            expires_at: omega_effectd::all_work_contract::IsoTimestamp::try_from(
+                                (now + chrono::Duration::hours(1))
+                                    .to_rfc3339_opts(chrono::SecondsFormat::Millis, true),
+                            )?,
+                            privacy_class: omega_effectd::all_work_contract::PrivacyClass::Private,
+                            evidence_required: true,
+                            claim_ref: omega_effectd::all_work_contract::Nullable(None),
+                            lease_ref: omega_effectd::all_work_contract::Nullable(None),
+                        },
+                    }
+                }
+                DogfoodWorkCommandAction::RevokeDelegate => {
+                    let delegate = snapshot
+                        .summary
+                        .agent_delegate
+                        .as_ref()
+                        .and_then(|delegate| delegate.as_ref())
+                        .context("The canonical Work has no active Agent Delegate.")?;
+                    omega_effectd::all_work_contract::WorkCommand::Revoke {
+                        grant_ref: delegate.delegation_grant_ref.clone(),
+                        expected_generation: delegate.generation.clone(),
+                        reason: omega_effectd::all_work_contract::ShortText::try_from(
+                            "The accountable human revoked the Omega delegation.".to_string(),
+                        )?,
+                    }
+                }
+                DogfoodWorkCommandAction::Refresh => unreachable!(),
+            })
+        })();
+        let command = match command {
+            Ok(command) => command,
+            Err(error) => {
+                surface.update(cx, |surface, cx| {
+                    surface.set_work_command_state(None, Some(error.to_string()), false, cx)
+                });
+                return;
             }
-            DogfoodWorkCommandAction::Unassign => {
-                omega_effectd::all_work_contract::WorkCommand::Unassign {}
-            }
-            DogfoodWorkCommandAction::Refresh => unreachable!(),
         };
         surface.update(cx, |surface, cx| {
             surface.set_work_command_state(None, None, true, cx)

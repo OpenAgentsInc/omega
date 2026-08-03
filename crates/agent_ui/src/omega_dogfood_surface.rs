@@ -3,7 +3,7 @@ use gpui::{
     Window, prelude::*,
 };
 use omega_effectd::all_work_contract::{
-    OrganizationRef, PrincipalRef, RepositoryClaimLedger, RepositoryWorkClaim,
+    AgentRef, HostRef, OrganizationRef, PrincipalRef, RepositoryClaimLedger, RepositoryWorkClaim,
     RepositoryWorkClaimState, SignedWorkroomLedger, WorkSnapshot, WorkroomAudience,
 };
 #[cfg(all(test, feature = "test-support"))]
@@ -94,12 +94,22 @@ pub enum DogfoodWorkCommandAction {
     Refresh,
     AssignToMe,
     Unassign,
+    Delegate,
+    RevokeDelegate,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct DogfoodDelegationCandidate {
+    pub agent_ref: AgentRef,
+    pub host_ref: HostRef,
+    pub label: String,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct DogfoodWorkCommandContext {
     pub principal_ref: PrincipalRef,
     pub organization_ref: OrganizationRef,
+    pub delegation_candidate: Option<DogfoodDelegationCandidate>,
 }
 
 pub struct DogfoodSurface {
@@ -1232,9 +1242,29 @@ impl DogfoodSurface {
             .and_then(|snapshot| snapshot.summary.agent_delegate.as_ref())
             .and_then(|delegate| delegate.as_ref())
             .map_or("None".into(), |delegate| delegate.agent_ref.0.clone());
+        let has_active_delegate = command_snapshot.is_some_and(|snapshot| {
+            snapshot
+                .summary
+                .agent_delegate
+                .as_ref()
+                .is_some_and(|delegate| delegate.is_some())
+        });
         let session = command_snapshot
             .and_then(|snapshot| snapshot.session_refs.last())
             .map_or("None".into(), |session| session.0.clone());
+        let thread = command_snapshot
+            .and_then(|snapshot| snapshot.thread_refs.last())
+            .map_or("None".into(), |thread| thread.0.clone());
+        let agent_session = command_snapshot
+            .and_then(|snapshot| snapshot.agent_session_refs.last())
+            .map_or("None".into(), |session| session.0.clone());
+        let run = command_snapshot
+            .and_then(|snapshot| snapshot.run_refs.last())
+            .map_or("None".into(), |run| run.0.clone());
+        let delegation_candidate = self
+            .work_command_context
+            .as_ref()
+            .and_then(|context| context.delegation_candidate.as_ref());
         let command_revision = command_snapshot
             .map(|snapshot| snapshot.summary.revision.0)
             .or(issue.work_revision);
@@ -1360,7 +1390,17 @@ impl DogfoodSurface {
                     ))
                     .child(inspector_row("Assignee", assignee, cx))
                     .child(inspector_row("Agent delegate", delegate, cx))
+                    .child(inspector_row("Thread", thread, cx))
                     .child(inspector_row("Session", session, cx))
+                    .child(inspector_row("Agent Session", agent_session, cx))
+                    .child(inspector_row("Run", run, cx))
+                    .child(inspector_row(
+                        "Eligible delegate",
+                        delegation_candidate.map_or("None".into(), |candidate| {
+                            format!("{} · {}", candidate.label, candidate.host_ref.0)
+                        }),
+                        cx,
+                    ))
                     .child(inspector_row(
                         "Authority",
                         if self.fixture.origin == DogfoodPlanningOrigin::Fixture {
@@ -1416,7 +1456,7 @@ impl DogfoodSurface {
                                 )
                             })
                             .when(command_snapshot.is_some_and(|snapshot| {
-                                snapshot.summary.assignee.0.is_some()
+                                snapshot.summary.assignee.0.is_some() && !has_active_delegate
                             }), |controls| {
                                 controls.child(
                                     claim_button(
@@ -1427,6 +1467,42 @@ impl DogfoodSurface {
                                     .on_click(cx.listener(|this, _, _, cx| {
                                         this.request_work_command(
                                             DogfoodWorkCommandAction::Unassign,
+                                            cx,
+                                        )
+                                    })),
+                                )
+                            })
+                            .when(
+                                command_snapshot.is_some_and(|snapshot| {
+                                    snapshot.summary.assignee.0.is_some()
+                                        && !has_active_delegate
+                                }) && delegation_candidate.is_some(),
+                                |controls| {
+                                    controls.child(
+                                        claim_button(
+                                            "work-command-delegate",
+                                            "Delegate",
+                                            self.work_command_busy || !command_mutation_ready,
+                                        )
+                                        .on_click(cx.listener(|this, _, _, cx| {
+                                            this.request_work_command(
+                                                DogfoodWorkCommandAction::Delegate,
+                                                cx,
+                                            )
+                                        })),
+                                    )
+                                },
+                            )
+                            .when(has_active_delegate, |controls| {
+                                controls.child(
+                                    claim_button(
+                                        "work-command-revoke-delegate",
+                                        "Revoke delegate",
+                                        self.work_command_busy || !command_mutation_ready,
+                                    )
+                                    .on_click(cx.listener(|this, _, _, cx| {
+                                        this.request_work_command(
+                                            DogfoodWorkCommandAction::RevokeDelegate,
                                             cx,
                                         )
                                     })),
