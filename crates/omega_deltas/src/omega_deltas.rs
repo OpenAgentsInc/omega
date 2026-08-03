@@ -27541,6 +27541,10 @@ mod tests {
 
     /// OMEGA-DELTA-0223. Omega exposes real working folders rather than a
     /// decorative space, and refuses to launch agent work until one exists.
+    /// A single catalog scan opens its task without waiting on submodule
+    /// network delivery; the agent owns that work. Automated campaigns can
+    /// materialize before analysis. Both Git paths share one bounded,
+    /// noninteractive timeout helper.
     #[test]
     fn omega_working_folders_own_the_agent_working_directory() {
         let main = without_comments(&read_repository_file("crates/omega/src/main.rs"));
@@ -27591,11 +27595,13 @@ mod tests {
         );
         let materialize = body_of(&panel, "materialize_entropy_campaign_project");
         let run_git = body_of(&panel, "run_entropy_git");
+        let run_git_with_timeout = body_of(&panel, "run_entropy_git_with_timeout");
         assert!(
             materialize.contains("EntropySubmoduleMaterialization::BeforeAnalysis")
-                && run_git.contains("async_std::future::timeout")
-                && run_git.contains("GIT_TERMINAL_PROMPT")
-                && run_git.contains("kill_on_drop(true)"),
+                && run_git.contains("run_entropy_git_with_timeout")
+                && run_git_with_timeout.contains("async_std::future::timeout")
+                && run_git_with_timeout.contains("GIT_TERMINAL_PROMPT")
+                && run_git_with_timeout.contains("kill_on_drop(true)"),
             "OMEGA-DELTA-0223: catalog source materialization lost its bounded, noninteractive Git contract"
         );
         assert!(

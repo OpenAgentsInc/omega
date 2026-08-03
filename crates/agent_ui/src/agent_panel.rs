@@ -456,16 +456,21 @@ fn entropy_catalog_agent_task_prompt(
     project: &omega_forensics::EntropyProjectRecord,
     repository_root: &Path,
     prompt_snapshot: &omega_forensics::EntropyPromptSnapshot,
+    submodules: EntropySubmoduleMaterialization,
     dependency_materialization_error: Option<&str>,
 ) -> Result<String> {
     let revision = project
         .pinned_revision
         .as_deref()
         .context("the selected catalog project has no pinned revision")?;
-    let dependency_delivery = dependency_materialization_error.map_or_else(
-        || "Complete: the workbench synchronized and materialized recursive submodules before opening this task.".to_string(),
-        |error| format!("Incomplete: recursive dependency materialization failed: {error}"),
-    );
+    let dependency_delivery = match (submodules, dependency_materialization_error) {
+        (EntropySubmoduleMaterialization::AgentTask, _) =>
+            "Agent task: synchronize and materialize recursive submodules now; task creation did not wait on network delivery.".to_string(),
+        (EntropySubmoduleMaterialization::BeforeAnalysis, None) =>
+            "Complete: the workbench synchronized and materialized recursive submodules before analysis.".to_string(),
+        (EntropySubmoduleMaterialization::BeforeAnalysis, Some(error)) =>
+            format!("Incomplete: recursive dependency materialization failed: {error}"),
+    };
     Ok(format!(
         "Run a read-only entropy forensics scan of the selected project now.\n\n\
 Target\n\
@@ -509,6 +514,12 @@ Execution and result\n\
     ))
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum EntropySubmoduleMaterialization {
+    AgentTask,
+    BeforeAnalysis,
+}
+
 struct EntropyMaterializedCheckout {
     root: PathBuf,
     dependency_materialization_error: Option<String>,
@@ -517,6 +528,7 @@ struct EntropyMaterializedCheckout {
 async fn materialize_entropy_campaign_project(
     campaign_ref: &str,
     project: &omega_forensics::EntropyProjectRecord,
+    submodules: EntropySubmoduleMaterialization,
 ) -> Result<EntropyMaterializedCheckout> {
     let repository_url = project
         .repository_url
@@ -591,7 +603,12 @@ async fn materialize_entropy_campaign_project(
         "materialized campaign source does not match the catalog revision"
     );
 
-    let dependency_materialization_error = materialize_entropy_submodules(&root).await?;
+    let dependency_materialization_error = match submodules {
+        EntropySubmoduleMaterialization::AgentTask => None,
+        EntropySubmoduleMaterialization::BeforeAnalysis => {
+            materialize_entropy_submodules(&root).await?
+        }
+    };
     Ok(EntropyMaterializedCheckout {
         root,
         dependency_materialization_error,
@@ -786,21 +803,26 @@ fn spawn_entropy_campaign(
                     .context("the entropy campaign is unavailable")
             })??;
             let campaign_ref = campaign.binding.campaign_ref.clone();
-            let materialized =
-                match materialize_entropy_campaign_project(&campaign_ref, &project).await {
-                    Ok(materialized) => materialized,
-                    Err(error) => {
-                        surface.update(cx, |surface, cx| {
-                            surface.fail_entropy_campaign_source(
-                                &project.product_ref,
-                                error.to_string(),
-                                Some(started.elapsed().as_millis() as u64),
-                                cx,
-                            )
-                        })??;
-                        continue;
-                    }
-                };
+            let materialized = match materialize_entropy_campaign_project(
+                &campaign_ref,
+                &project,
+                EntropySubmoduleMaterialization::BeforeAnalysis,
+            )
+            .await
+            {
+                Ok(materialized) => materialized,
+                Err(error) => {
+                    surface.update(cx, |surface, cx| {
+                        surface.fail_entropy_campaign_source(
+                            &project.product_ref,
+                            error.to_string(),
+                            Some(started.elapsed().as_millis() as u64),
+                            cx,
+                        )
+                    })??;
+                    continue;
+                }
+            };
             let root = materialized.root;
             let dependency_materialization_error = materialized.dependency_materialization_error;
             surface.update(cx, |surface, cx| {
@@ -14543,19 +14565,24 @@ impl AgentPanel {
                         cx,
                     )
                 })?;
-                let materialized =
-                    match materialize_entropy_campaign_project(&source_ref, &project).await {
-                        Ok(materialized) => materialized,
-                        Err(error) => {
-                            surface.update(cx, |surface, cx| {
-                                surface.set_entropy_error(
-                                    format!("Selected project materialization failed · {error}"),
-                                    cx,
-                                )
-                            })?;
-                            return anyhow::Ok(());
-                        }
-                    };
+                let materialized = match materialize_entropy_campaign_project(
+                    &source_ref,
+                    &project,
+                    EntropySubmoduleMaterialization::AgentTask,
+                )
+                .await
+                {
+                    Ok(materialized) => materialized,
+                    Err(error) => {
+                        surface.update(cx, |surface, cx| {
+                            surface.set_entropy_error(
+                                format!("Selected project materialization failed · {error}"),
+                                cx,
+                            )
+                        })?;
+                        return anyhow::Ok(());
+                    }
+                };
                 let dependency_materialization_error =
                     materialized.dependency_materialization_error;
                 let dependencies_are_incomplete = dependency_materialization_error.is_some();
@@ -14587,6 +14614,7 @@ impl AgentPanel {
                     &project,
                     &repository_root,
                     &prompt_snapshot,
+                    EntropySubmoduleMaterialization::AgentTask,
                     dependency_materialization_error.as_deref(),
                 )?;
                 let thread_title: SharedString =
@@ -21612,15 +21640,22 @@ mod tests {
         .expect("valid prompt snapshot");
         let selected_root = Path::new("/tmp/omega-entropy-campaigns/bitkey-selected");
 
-        let prompt = entropy_catalog_agent_task_prompt(bitkey, selected_root, &snapshot, None)
-            .expect("the selected project has a complete source pin");
+        let prompt = entropy_catalog_agent_task_prompt(
+            bitkey,
+            selected_root,
+            &snapshot,
+            EntropySubmoduleMaterialization::AgentTask,
+            None,
+        )
+        .expect("the selected project has a complete source pin");
 
         assert!(prompt.contains("Project: Bitkey"));
         assert!(prompt.contains("Repository: repository.github.proto-at-block.bitkey"));
         assert!(prompt.contains("/tmp/omega-entropy-campaigns/bitkey-selected"));
         assert!(prompt.contains("cf16705543d0c66ff982635733d380944cc2677d"));
         assert!(prompt.contains("working directory attached to this session"));
-        assert!(prompt.contains("workbench synchronized and materialized recursive submodules"));
+        assert!(prompt.contains("Agent task: synchronize and materialize recursive submodules"));
+        assert!(prompt.contains("task creation did not wait on network delivery"));
         assert!(prompt.contains("git submodule status --recursive"));
         assert!(prompt.contains("exact path and Git error as a limitation"));
         assert!(prompt.contains("Do not substitute the workspace that launched Forensics"));
@@ -21649,6 +21684,7 @@ mod tests {
                 project,
                 Path::new("/tmp/coldcard"),
                 &snapshot,
+                EntropySubmoduleMaterialization::BeforeAnalysis,
                 materialization_error,
             )
             .expect("Coldcard prompt")
