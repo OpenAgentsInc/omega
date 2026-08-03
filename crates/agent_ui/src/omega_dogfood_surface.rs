@@ -4,10 +4,11 @@ use gpui::{
     Styled, TextStyle, Window, prelude::*,
 };
 use omega_effectd::all_work_contract::{
-    AgentRef, AgentSessionRef, HostRef, OrganizationRef, PrincipalRef, RepositoryClaimLedger,
-    RepositoryWorkClaim, RepositoryWorkClaimState, ShortText, SignedWorkroomDeliveryOutcome,
-    SignedWorkroomLedger, SignedWorkroomOutboxState, SourceRef, ThreadRef, WorkCommandActivityKind,
-    WorkSnapshot, WorkroomAudience,
+    AgentRef, AgentSessionRef, DelegationGrantRef, HostRef, OrganizationRef, PrincipalRef,
+    RepositoryClaimLedger, RepositoryWorkClaim, RepositoryWorkClaimState, SafeInteger, ShortText,
+    SignedWorkroomDeliveryOutcome, SignedWorkroomLedger, SignedWorkroomOutboxState,
+    SignedWorkroomProjectionProfile, SourceRef, ThreadRef, WorkCommandActivityKind, WorkSnapshot,
+    WorkroomAudience,
 };
 #[cfg(all(test, feature = "test-support"))]
 use omega_work_index::DogfoodFixtureAdapter;
@@ -2391,6 +2392,12 @@ impl DogfoodSurface {
                 )
             })
             .children(activities.into_iter().map(|activity| {
+                let projection_profile =
+                    signed_workroom_projection_profile_label(activity.projection_profile.as_ref());
+                let actor_grant = signed_workroom_actor_grant_label(
+                    activity.actor_grant_ref.as_ref(),
+                    activity.actor_grant_generation.as_ref(),
+                );
                 let delivery = self.signed_workroom_ledger.as_ref().and_then(|ledger| {
                     ledger
                         .outbox
@@ -2408,7 +2415,7 @@ impl DogfoodSurface {
                     .border_color(colors.border_variant)
                     .role(gpui::Role::ListItem)
                     .aria_label(format!(
-                        "Signed Workroom {:?} by {}, audience {}, delivery {delivery_state}",
+                        "Signed Workroom {:?} by {}, audience {}, profile {projection_profile}, {actor_grant}, delivery {delivery_state}",
                         activity.kind,
                         activity.actor_ref.0,
                         workroom_audience_label(&activity.audience)
@@ -2432,6 +2439,13 @@ impl DogfoodSurface {
                             &activity.signer_pubkey.0[..12]
                         ))
                         .size(LabelSize::XSmall),
+                    )
+                    .child(
+                        Label::new(format!(
+                            "Profile {projection_profile} · {actor_grant}"
+                        ))
+                        .size(LabelSize::XSmall)
+                        .color(Color::Muted),
                     )
                     .child(
                         Label::new(format!(
@@ -2666,6 +2680,31 @@ fn workroom_audience_label(audience: &WorkroomAudience) -> &'static str {
         WorkroomAudience::Workroom => "Workroom",
         WorkroomAudience::Private => "Private",
         WorkroomAudience::OwnerOnly => "Owner only",
+    }
+}
+
+fn signed_workroom_projection_profile_label(
+    profile: Option<&SignedWorkroomProjectionProfile>,
+) -> &'static str {
+    match profile {
+        None | Some(SignedWorkroomProjectionProfile::OpenagentsSignedWorkroomV1) => "v1 legacy",
+        Some(SignedWorkroomProjectionProfile::OpenagentsSignedWorkroomV2) => "v2 current",
+    }
+}
+
+fn signed_workroom_actor_grant_label(
+    grant_ref: Option<&Option<DelegationGrantRef>>,
+    generation: Option<&Option<SafeInteger>>,
+) -> String {
+    let grant_ref = grant_ref.and_then(|grant_ref| grant_ref.as_ref());
+    let generation = generation.and_then(|generation| generation.as_ref());
+    match (grant_ref, generation) {
+        (Some(grant_ref), Some(generation)) => format!(
+            "Purpose-bound actor grant {} · generation {}",
+            grant_ref.0, generation.0
+        ),
+        (None, None) => "Direct signer · no actor grant".into(),
+        _ => "Incomplete actor grant binding".into(),
     }
 }
 
@@ -3121,6 +3160,35 @@ mod tests {
 
     #[test]
     fn signed_workroom_delivery_labels_stay_transport_specific() {
+        assert_eq!(signed_workroom_projection_profile_label(None), "v1 legacy");
+        assert_eq!(
+            signed_workroom_projection_profile_label(Some(
+                &SignedWorkroomProjectionProfile::OpenagentsSignedWorkroomV2
+            )),
+            "v2 current"
+        );
+        assert_eq!(
+            signed_workroom_actor_grant_label(None, None),
+            "Direct signer · no actor grant"
+        );
+        assert_eq!(
+            signed_workroom_actor_grant_label(
+                Some(&Some(DelegationGrantRef(
+                    "delegation-grant:omega-216:3".into()
+                ))),
+                Some(&Some(SafeInteger(3)))
+            ),
+            "Purpose-bound actor grant delegation-grant:omega-216:3 · generation 3"
+        );
+        assert_eq!(
+            signed_workroom_actor_grant_label(
+                Some(&Some(DelegationGrantRef(
+                    "delegation-grant:omega-216:3".into()
+                ))),
+                Some(&None)
+            ),
+            "Incomplete actor grant binding"
+        );
         assert_eq!(
             signed_workroom_outbox_state_label(&SignedWorkroomOutboxState::Publishing),
             "Partial"

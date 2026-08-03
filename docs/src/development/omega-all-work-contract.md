@@ -9,10 +9,10 @@ adapter creates a second writable store.
 
 | Field                 | Value                                                              |
 | --------------------- | ------------------------------------------------------------------ |
-| OpenAgents commit     | `38dcd750d249b5af4705becaefb12212696a1416`                         |
+| OpenAgents commit     | `f84fc2ea958169db59109c71c43d4c526aae4d1b`                         |
 | Contract              | `openagents.all_work_boundary.v1`                                  |
-| Definition SHA-256    | `04426ecce7bfd8d1eae3b9e134fd50fe0051f3c27957039a4ca51e68227dcea2` |
-| Rust artifact SHA-256 | `f364cd0e9918ea94027373066888995a3bc7614a978d427d898d951f6eb95051` |
+| Definition SHA-256    | `818f7960246a0811d8193523afd83197183f9defccf507e31991624f65f7d1e8` |
+| Rust artifact SHA-256 | `b3da995bbe8301ab4a5401759f67627ead83d377ee477a27f4a050aab9c5b8bb` |
 | Omega receipt         | `crates/omega_effectd/all-work-contract/SOURCE.json`               |
 
 The generated Rust file, compatibility manifest, and shared fixtures are
