@@ -1606,6 +1606,24 @@ pub fn init(cx: &mut App) {
                         panel.update(cx, |panel, cx| panel.toggle_threads_sidebar(cx));
                     }
                 })
+                .register_action(
+                    |workspace, _: &workbench_shell::CloseActiveThreadTab, window, cx| {
+                        let Some(panel) = workspace.panel::<AgentPanel>(cx) else {
+                            cx.propagate();
+                            return;
+                        };
+                        let handled = panel.update(cx, |panel, cx| {
+                            if !panel.renders_omega_primary_interface() {
+                                return false;
+                            }
+                            panel.close_active_omega_route_tab(window, cx);
+                            true
+                        });
+                        if !handled {
+                            cx.propagate();
+                        }
+                    },
+                )
                 .register_action(|workspace, _: &workbench_shell::SelectFiles, window, cx| {
                     select_workbench_surface_from_workspace(
                         workspace,
@@ -16478,9 +16496,7 @@ impl AgentPanel {
         let active_thread_id = self.active_thread_id(cx);
         self.reconcile_omega_thread_tabs(cx);
         let omega_settings_open = self.omega_settings.is_some();
-        let omega_unavailable_open = self.omega_unavailable_route.is_some();
-        let omega_thread_open =
-            !omega_settings_open && !omega_forensics_selected && !omega_unavailable_open;
+        let omega_thread_open = !self.omega_non_thread_route_open();
         let active_title = self
             .active_conversation_view()
             .map(|view| view.read(cx).title(cx))
@@ -25997,6 +26013,10 @@ mod tests {
 
         assert!(cx.debug_bounds("omega.omega.work-tab.active").is_some());
         assert!(cx.debug_bounds("omega.omega.thread-tab.active").is_none());
+        assert!(
+            cx.debug_bounds("omega.omega.sidebar-thread.active")
+                .is_none()
+        );
         panel.read_with(&cx, |panel, _cx| {
             assert_eq!(
                 panel.omega_navigation_history.current(),
@@ -26051,6 +26071,60 @@ mod tests {
         cx.run_until_parked();
         assert!(cx.debug_bounds("omega.omega.route.unavailable").is_none());
         assert!(cx.debug_bounds("omega.omega.thread-tab.active").is_some());
+    }
+
+    #[gpui::test]
+    async fn opening_forensics_selects_only_the_forensics_route(cx: &mut TestAppContext) {
+        let (panel, mut cx) = setup_visible_panel(cx).await;
+        panel.update_in(&mut cx, |panel, window, cx| {
+            panel.force_omega_primary_interface_for_tests = true;
+            panel.new_thread(&NewThread, window, cx);
+        });
+        cx.run_until_parked();
+
+        let candidate = crate::thread_identity::ThreadIdentityCandidate {
+            binding: omega_workbench_state::RepositoryBinding::new("repo", "worktree")
+                .expect("valid binding"),
+            git_repository_id: Some(1),
+            project_name: "Omega".into(),
+            repository_name: "omega".into(),
+            worktree_name: "omega".into(),
+            worktree_abs_path: PathBuf::from("/project"),
+            worktree_path: "/project".into(),
+            remote_url: Some("https://github.com/OpenAgentsInc/omega.git".into()),
+            head_commit: Some("0123456789abcdef0123456789abcdef01234567".into()),
+            branch: crate::thread_identity::BranchIdentity::Branch("main".into()),
+            git: crate::thread_identity::GitIdentitySummary::default(),
+            source_revision: 1,
+        };
+        panel.update_in(&mut cx, |panel, window, cx| {
+            panel.set_workbench_identity_observation_for_tests(
+                Some(ThreadIdentityObservation {
+                    revision: 1,
+                    phase: IdentityPhase::Ready,
+                    candidates: vec![candidate],
+                }),
+                window,
+                cx,
+            );
+            panel.select_work_surface(omega_workbench_state::WorkSurface::Forensics, window, cx);
+        });
+        cx.run_until_parked();
+
+        assert!(cx.debug_bounds("omega.omega.work-tab.active").is_some());
+        assert!(cx.debug_bounds("omega.omega.thread-tab.active").is_none());
+        assert!(
+            cx.debug_bounds("omega.omega.sidebar-thread.active")
+                .is_none()
+        );
+        panel.read_with(&cx, |panel, _cx| {
+            assert!(
+                panel
+                    .omega_navigation_history
+                    .current()
+                    .is_some_and(is_omega_forensics_route)
+            );
+        });
     }
 
     #[gpui::test]

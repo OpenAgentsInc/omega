@@ -1349,6 +1349,12 @@
     }
   },
   {
+    "context": "WorkbenchForensics",
+    "bindings": {
+      "ctrl-w": "omega_workbench::CloseActiveThreadTab"
+    }
+  },
+  {
     "context": "AgentPanel && OmegaInterface",
     "bindings": {
       "ctrl-1": ["agent::ActivateOmegaThreadTab", 0],

@@ -2112,6 +2112,9 @@ impl Render for WorkSurfaceHost {
         v_flex()
             .id(surface.surface_element_id())
             .debug_selector(move || surface.surface_selector())
+            .when(surface == WorkSurface::Forensics, |host| {
+                host.key_context("WorkbenchForensics")
+            })
             .track_focus(&self.focus_handle)
             .tab_index(0)
             .role(gpui::Role::Group)

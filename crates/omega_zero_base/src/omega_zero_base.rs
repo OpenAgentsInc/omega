@@ -735,6 +735,7 @@ mod tests {
     #[test]
     fn omega_thread_tab_keymaps_win_over_workspace_pane_bindings() {
         const OMEGA_CONTEXT: &str = "\"context\": \"AgentPanel && OmegaInterface\"";
+        const FORENSICS_CONTEXT: &str = "\"context\": \"WorkbenchForensics\"";
 
         for (platform, keymap, first_shortcut) in [
             (
@@ -756,6 +757,9 @@ mod tests {
             let omega_offset = keymap
                 .rfind(OMEGA_CONTEXT)
                 .unwrap_or_else(|| panic!("{platform} keymap must contain the Omega context"));
+            let forensics_offset = keymap
+                .rfind(FORENSICS_CONTEXT)
+                .unwrap_or_else(|| panic!("{platform} keymap must contain the Forensics context"));
             let pane_offset = keymap.rfind("workspace::ActivatePane").unwrap_or_else(|| {
                 panic!("{platform} keymap must contain workspace pane bindings")
             });
@@ -763,6 +767,18 @@ mod tests {
             assert!(
                 omega_offset > pane_offset,
                 "{platform} must place Omega tab bindings after workspace pane bindings so the scoped action wins"
+            );
+            assert!(
+                forensics_offset > pane_offset,
+                "{platform} must place Forensics bindings after workspace pane bindings so closing the route wins"
+            );
+            let forensics_section = keymap[forensics_offset..]
+                .split("\n  },")
+                .next()
+                .unwrap_or(&keymap[forensics_offset..]);
+            assert!(
+                forensics_section.contains("omega_workbench::CloseActiveThreadTab"),
+                "{platform} Forensics context must close the active Omega route"
             );
             assert!(
                 keymap[omega_offset..].contains(first_shortcut),

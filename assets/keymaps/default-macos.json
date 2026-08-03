@@ -1432,6 +1432,13 @@
     }
   },
   {
+    "context": "WorkbenchForensics",
+    "use_key_equivalents": true,
+    "bindings": {
+      "cmd-w": "omega_workbench::CloseActiveThreadTab"
+    }
+  },
+  {
     "context": "AgentPanel && OmegaInterface",
     "use_key_equivalents": true,
     "bindings": {
