@@ -619,7 +619,7 @@ fn source_label(item: &WorkIndexItem) -> &'static str {
     match &item.source_entity {
         omega_work_index::WorkSourceEntity::Thread { .. } => "Thread",
         omega_work_index::WorkSourceEntity::ForensicsCase { .. }
-        | omega_work_index::WorkSourceEntity::ForensicsRun { .. } => "Forensics",
+        | omega_work_index::WorkSourceEntity::ForensicsRun { .. } => "Security",
         omega_work_index::WorkSourceEntity::EffectWork { .. } => "OpenAgents",
     }
 }

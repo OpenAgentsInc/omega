@@ -884,6 +884,7 @@ pub struct NativeForensicsRecord {
     pub revision: u64,
     pub phase: NativeForensicsPhase,
     pub run_ref: Option<String>,
+    pub child_run_refs: Vec<String>,
 }
 
 pub fn adapt_forensics(
@@ -905,7 +906,7 @@ pub fn adapt_forensics(
     };
     let case_summary = make_summary(SummaryInput {
         work_ref: format!("work:omega:forensics:{}", record.case_ref),
-        title: format!("Forensics · {}", record.repository_name),
+        title: format!("Security case · {}", record.repository_name),
         domain: WorkDomain::Security,
         work_class: WorkClass::Case,
         state: state.clone(),
@@ -930,28 +931,34 @@ pub fn adapt_forensics(
     };
     case.validate()?;
     let mut items = vec![case];
-    if let Some(run_ref) = record.run_ref {
+    let mut run_refs = record.child_run_refs;
+    if let Some(run_ref) = record.run_ref
+        && !run_refs.contains(&run_ref)
+    {
+        run_refs.push(run_ref);
+    }
+    for run_ref in run_refs {
         let run_summary = make_summary(SummaryInput {
             work_ref: format!("work:omega:forensics-run:{run_ref}"),
-            title: format!("Forensics run · {}", record.repository_name),
+            title: format!("Security run · {}", record.repository_name),
             domain: WorkDomain::Security,
             work_class: WorkClass::Run,
-            state,
+            state: state.clone(),
             priority: WorkPriority::High,
             source_ref: run_ref.clone(),
             source_kind: SourceAuthorityKind::OmegaNative,
             adapter_version: FORENSICS_ADAPTER_ID.into(),
             source_writable: false,
             revision: record.revision,
-            updated_at: record.updated_at,
-            observed_at: record.observed_at,
+            updated_at: record.updated_at.clone(),
+            observed_at: record.observed_at.clone(),
         })?;
         let run = WorkIndexItem {
             attention: attention_for(&run_summary, hint)?,
             summary: run_summary,
-            accountability,
+            accountability: accountability.clone(),
             source_entity: WorkSourceEntity::ForensicsRun {
-                case_ref: record.case_ref,
+                case_ref: record.case_ref.clone(),
                 run_ref,
             },
         };
@@ -1207,8 +1214,78 @@ mod tests {
             revision: 7,
             phase,
             run_ref: Some("run:forensics:omega:7".into()),
+            child_run_refs: Vec::new(),
         })
         .expect("valid Forensics")
+    }
+
+    #[test]
+    fn multiple_security_cases_and_child_runs_keep_separate_source_identity() {
+        let first = adapt_forensics(NativeForensicsRecord {
+            case_ref: "repository:one".into(),
+            repository_name: "One".into(),
+            updated_at: "2026-08-02T12:00:00Z".into(),
+            observed_at: "2026-08-02T12:00:01Z".into(),
+            revision: 3,
+            phase: NativeForensicsPhase::Running,
+            run_ref: Some("run:security:one:primary".into()),
+            child_run_refs: vec![
+                "run:security:one:entropy".into(),
+                "run:security:one:matrix".into(),
+            ],
+        })
+        .expect("first Security Work");
+        let second = adapt_forensics(NativeForensicsRecord {
+            case_ref: "repository:two".into(),
+            repository_name: "Two".into(),
+            updated_at: "2026-08-02T12:00:02Z".into(),
+            observed_at: "2026-08-02T12:00:03Z".into(),
+            revision: 8,
+            phase: NativeForensicsPhase::Prepared,
+            run_ref: None,
+            child_run_refs: Vec::new(),
+        })
+        .expect("second Security Work");
+        assert_eq!(first.len(), 4);
+        assert_eq!(second.len(), 1);
+        assert_ne!(first[0].work_ref(), second[0].work_ref());
+        assert!(first.iter().all(|row| match &row.source_entity {
+            WorkSourceEntity::ForensicsCase { case_ref }
+            | WorkSourceEntity::ForensicsRun { case_ref, .. } => case_ref == "repository:one",
+            _ => false,
+        }));
+        assert!(second[0].summary.title.0.starts_with("Security case"));
+    }
+
+    proptest! {
+        #[test]
+        fn child_run_projection_round_trips_every_unique_ref(
+            suffixes in prop::collection::btree_set(1_u16..10_000, 1..33)
+        ) {
+            let child_run_refs = suffixes
+                .iter()
+                .map(|suffix| format!("run:security:property:{suffix}"))
+                .collect::<Vec<_>>();
+            let rows = adapt_forensics(NativeForensicsRecord {
+                case_ref: "repository:property".into(),
+                repository_name: "Property".into(),
+                updated_at: "2026-08-02T12:00:00Z".into(),
+                observed_at: "2026-08-02T12:00:01Z".into(),
+                revision: 1,
+                phase: NativeForensicsPhase::Running,
+                run_ref: None,
+                child_run_refs: child_run_refs.clone(),
+            })
+            .expect("property Security Work");
+            let observed = rows
+                .iter()
+                .filter_map(|row| match &row.source_entity {
+                    WorkSourceEntity::ForensicsRun { run_ref, .. } => Some(run_ref.clone()),
+                    _ => None,
+                })
+                .collect::<BTreeSet<_>>();
+            prop_assert_eq!(observed, child_run_refs.into_iter().collect());
+        }
     }
 
     fn apply_native(

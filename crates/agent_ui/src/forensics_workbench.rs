@@ -2977,6 +2977,36 @@ impl ForensicsWorkbenchSurface {
     }
 
     fn render_publication_gate_workspace(&self, cx: &mut Context<Self>) -> AnyElement {
+        if !self.fixture_views_enabled {
+            return v_flex()
+                .id("omega.forensics.publication.source-required")
+                .w_full()
+                .gap_3()
+                .p_4()
+                .rounded(px(6.))
+                .border_1()
+                .border_color(cx.theme().colors().border_variant)
+                .child(Label::new("Publication authority").size(LabelSize::Large))
+                .child(
+                    Label::new("PRIVATE · PUBLICATION BLOCKED")
+                        .size(LabelSize::XSmall)
+                        .color(Color::Error),
+                )
+                .child(
+                    Label::new(
+                        "No source-owned publication gate projection is attached. A completed run, clean worker, relay state, or model agreement cannot authorize a claim.",
+                    )
+                    .size(LabelSize::Small),
+                )
+                .child(
+                    Label::new(
+                        "Synthetic publication scenes are available only in explicit development and mock builds.",
+                    )
+                    .size(LabelSize::XSmall)
+                    .color(Color::Muted),
+                )
+                .into_any_element();
+        }
         let projection = bundled_publication_gate(self.publication_scene).ok();
         let scenes = v_flex()
             .id("omega.forensics.publication.scenes")

@@ -41,6 +41,7 @@ use crate::ExpandMessageEditor;
 use crate::ManageProfiles;
 use crate::agent_connection_store::AgentConnectionStore;
 use crate::completion_provider::{AgentContextSelection, AgentContextSource};
+use crate::forensics_work_projection::{ForensicsWorkProjection, project_forensics_work};
 use crate::omega_work_detail_surface::{WorkDetailSurface, WorkDetailSurfaceEvent};
 use crate::omega_work_index_surface::{WorkIndexSurface, WorkIndexSurfaceEvent};
 use crate::terminal_thread_metadata_store::{
@@ -2473,8 +2474,7 @@ enum BaseView {
     },
 }
 
-const OMEGA_FORENSICS_WORK_REF: &str = "work:omega:forensics";
-const OMEGA_FORENSICS_BLOCK_REF: &str = "block:omega:forensics";
+const OMEGA_SECURITY_WORK_BLOCK_PREFIX: &str = "block:omega:security-work:";
 
 fn omega_thread_route(thread_id: ThreadId) -> Option<OmegaRoute> {
     OmegaRoute::thread(thread_id.to_key_string())
@@ -2482,11 +2482,14 @@ fn omega_thread_route(thread_id: ThreadId) -> Option<OmegaRoute> {
         .ok()
 }
 
-fn omega_forensics_route() -> Option<OmegaRoute> {
-    DomainBlockRoute::new(OMEGA_FORENSICS_BLOCK_REF, "forensics")
-        .and_then(|block| OmegaRoute::work(OMEGA_FORENSICS_WORK_REF, Some(block)))
-        .map_err(|error| log::error!("could not construct the Forensics work route: {error}"))
-        .ok()
+fn omega_forensics_route(work_ref: &str) -> Option<OmegaRoute> {
+    DomainBlockRoute::new(
+        format!("{OMEGA_SECURITY_WORK_BLOCK_PREFIX}{work_ref}"),
+        "forensics",
+    )
+    .and_then(|block| OmegaRoute::work(work_ref, Some(block)))
+    .map_err(|error| log::error!("could not construct the Forensics work route: {error}"))
+    .ok()
 }
 
 fn is_omega_forensics_route(route: &OmegaRoute) -> bool {
@@ -2494,7 +2497,7 @@ fn is_omega_forensics_route(route: &OmegaRoute) -> bool {
         route,
         OmegaRoute::Work(work)
             if work.block.as_ref().is_some_and(|block| {
-                    block.block_ref.as_str() == OMEGA_FORENSICS_BLOCK_REF
+                    block.block_ref.as_str().starts_with(OMEGA_SECURITY_WORK_BLOCK_PREFIX)
                         && block.domain.as_str() == "forensics"
                 })
     )
@@ -4380,57 +4383,120 @@ impl AgentPanel {
             }
         }
 
-        let forensics_result = self
-            .workbench_shell
-            .identity()
+        let identity = self.workbench_shell.identity().cloned();
+        let selected_binding = identity
+            .as_ref()
             .and_then(|identity| identity.selected.as_ref())
-            .filter(|candidate| candidate.git_repository_id.is_some())
-            .map(|candidate| {
-                let snapshot = self
-                    .workbench_shell
-                    .forensics_surface_for_active_binding(cx)
-                    .map(|surface| surface.read(cx).snapshot());
-                let run = snapshot.as_ref().and_then(|snapshot| snapshot.run.as_ref());
-                let phase = run.map_or(NativeForensicsPhase::Prepared, |run| match run.phase {
-                    omega_forensics::ForensicsRunPhase::Prepared => NativeForensicsPhase::Prepared,
-                    omega_forensics::ForensicsRunPhase::Admitting => {
-                        NativeForensicsPhase::Admitting
-                    }
-                    omega_forensics::ForensicsRunPhase::WorkerReady => {
-                        NativeForensicsPhase::WorkerReady
-                    }
-                    omega_forensics::ForensicsRunPhase::Running => NativeForensicsPhase::Running,
-                    omega_forensics::ForensicsRunPhase::CancelRequested
-                    | omega_forensics::ForensicsRunPhase::Interrupting
-                    | omega_forensics::ForensicsRunPhase::Deleting => NativeForensicsPhase::Waiting,
-                    omega_forensics::ForensicsRunPhase::Settled => NativeForensicsPhase::Settled,
-                    omega_forensics::ForensicsRunPhase::Cleaned => NativeForensicsPhase::Cleaned,
-                    omega_forensics::ForensicsRunPhase::Refused => NativeForensicsPhase::Refused,
-                    omega_forensics::ForensicsRunPhase::Failed => NativeForensicsPhase::Failed,
-                    omega_forensics::ForensicsRunPhase::RecoveryRequired => {
-                        NativeForensicsPhase::RecoveryRequired
-                    }
-                });
-                let revision = run
-                    .map(|run| run.event_cursor)
-                    .unwrap_or(candidate.source_revision);
-                let updated_at = run
-                    .and_then(|run| run.events.last())
-                    .map(|event| event.observed_at.clone())
-                    .unwrap_or_else(|| observed_at.clone());
-                let case_ref = match candidate.git_repository_id {
-                    Some(repository_id) => format!("repository:{repository_id}"),
-                    None => return Ok(Vec::new()),
-                };
-                adapt_forensics(NativeForensicsRecord {
-                    case_ref,
-                    repository_name: candidate.repository_name.to_string(),
-                    updated_at,
-                    observed_at: observed_at.clone(),
-                    revision,
-                    phase,
-                    run_ref: run.map(|run| run.run_ref.clone()),
-                })
+            .map(|candidate| candidate.binding.clone());
+        let active_snapshot = self
+            .workbench_shell
+            .forensics_surface_for_active_binding(cx)
+            .map(|surface| surface.read(cx).snapshot());
+        let forensics_result = identity
+            .map(|identity| {
+                let mut repository_candidates = std::collections::BTreeMap::new();
+                for candidate in &identity.candidates {
+                    let Some(repository_id) = candidate.git_repository_id else {
+                        continue;
+                    };
+                    let selected = selected_binding.as_ref() == Some(&candidate.binding);
+                    repository_candidates
+                        .entry(repository_id)
+                        .and_modify(|current: &mut &ThreadIdentityCandidate| {
+                            if selected {
+                                *current = candidate;
+                            }
+                        })
+                        .or_insert(candidate);
+                }
+                repository_candidates
+                    .into_iter()
+                    .map(|(repository_id, candidate)| {
+                        let snapshot = (selected_binding.as_ref() == Some(&candidate.binding))
+                            .then_some(active_snapshot.as_ref())
+                            .flatten();
+                        let run = snapshot.and_then(|snapshot| snapshot.run.as_ref());
+                        let phase =
+                            run.map_or(NativeForensicsPhase::Prepared, |run| match run.phase {
+                                omega_forensics::ForensicsRunPhase::Prepared => {
+                                    NativeForensicsPhase::Prepared
+                                }
+                                omega_forensics::ForensicsRunPhase::Admitting => {
+                                    NativeForensicsPhase::Admitting
+                                }
+                                omega_forensics::ForensicsRunPhase::WorkerReady => {
+                                    NativeForensicsPhase::WorkerReady
+                                }
+                                omega_forensics::ForensicsRunPhase::Running => {
+                                    NativeForensicsPhase::Running
+                                }
+                                omega_forensics::ForensicsRunPhase::CancelRequested
+                                | omega_forensics::ForensicsRunPhase::Interrupting
+                                | omega_forensics::ForensicsRunPhase::Deleting => {
+                                    NativeForensicsPhase::Waiting
+                                }
+                                omega_forensics::ForensicsRunPhase::Settled => {
+                                    NativeForensicsPhase::Settled
+                                }
+                                omega_forensics::ForensicsRunPhase::Cleaned => {
+                                    NativeForensicsPhase::Cleaned
+                                }
+                                omega_forensics::ForensicsRunPhase::Refused => {
+                                    NativeForensicsPhase::Refused
+                                }
+                                omega_forensics::ForensicsRunPhase::Failed => {
+                                    NativeForensicsPhase::Failed
+                                }
+                                omega_forensics::ForensicsRunPhase::RecoveryRequired => {
+                                    NativeForensicsPhase::RecoveryRequired
+                                }
+                            });
+                        let revision = run
+                            .map(|run| run.event_cursor)
+                            .unwrap_or(candidate.source_revision);
+                        let updated_at = run
+                            .and_then(|run| run.events.last())
+                            .map(|event| event.observed_at.clone())
+                            .unwrap_or_else(|| observed_at.clone());
+                        let mut child_run_refs = Vec::new();
+                        if let Some(snapshot) = snapshot {
+                            child_run_refs.extend(
+                                snapshot
+                                    .entropy_run
+                                    .iter()
+                                    .map(|run| run.binding.run_ref.clone()),
+                            );
+                            child_run_refs.extend(
+                                snapshot
+                                    .entropy_campaign
+                                    .iter()
+                                    .flat_map(|campaign| &campaign.projects)
+                                    .filter_map(|project| project.run.as_ref())
+                                    .map(|run| run.binding.run_ref.clone()),
+                            );
+                            child_run_refs.extend(
+                                snapshot
+                                    .matrix
+                                    .iter()
+                                    .flat_map(|matrix| &matrix.runs)
+                                    .map(|run| run.run_ref.clone()),
+                            );
+                            child_run_refs.sort();
+                            child_run_refs.dedup();
+                        }
+                        adapt_forensics(NativeForensicsRecord {
+                            case_ref: format!("repository:{repository_id}"),
+                            repository_name: candidate.repository_name.to_string(),
+                            updated_at,
+                            observed_at: observed_at.clone(),
+                            revision,
+                            phase,
+                            run_ref: run.map(|run| run.run_ref.clone()),
+                            child_run_refs,
+                        })
+                    })
+                    .collect::<Result<Vec<_>, _>>()
+                    .map(|pages| pages.into_iter().flatten().collect::<Vec<_>>())
             })
             .unwrap_or_else(|| Ok(Vec::new()));
         match forensics_result {
@@ -4457,6 +4523,16 @@ impl AgentPanel {
             }
         }
         self.publish_work_index(true, cx);
+    }
+
+    fn active_forensics_route(&self) -> Option<OmegaRoute> {
+        let repository_id = self
+            .workbench_shell
+            .identity()?
+            .selected
+            .as_ref()?
+            .git_repository_id?;
+        omega_forensics_route(&format!("work:omega:forensics:repository:{repository_id}"))
     }
 
     fn refresh_effect_work_index(&mut self, cx: &mut Context<Self>) {
@@ -15549,7 +15625,7 @@ impl AgentPanel {
                 self.omega_unavailable_route = None;
                 if record_history
                     && surface == omega_workbench_state::WorkSurface::Forensics
-                    && let Some(route) = omega_forensics_route()
+                    && let Some(route) = self.active_forensics_route()
                 {
                     self.omega_navigation_history.push(route);
                     self.serialize(cx);
@@ -16377,14 +16453,10 @@ impl AgentPanel {
                     RouteAvailability::Unavailable(RouteUnavailableReason::Unknown)
                 }
             }
-            OmegaRoute::Work(work)
-                if work.work_ref.as_str() == OMEGA_FORENSICS_WORK_REF
-                    && work.block.as_ref().is_some_and(|block| {
-                        block.block_ref.as_str() == OMEGA_FORENSICS_BLOCK_REF
-                            && block.domain.as_str() == "forensics"
-                    }) =>
-            {
-                if self.workbench_shell.projection().connection
+            OmegaRoute::Work(work) if is_omega_forensics_route(&OmegaRoute::Work(work.clone())) => {
+                if self.work_index.item(work.work_ref.as_str()).is_none() {
+                    RouteAvailability::Unavailable(RouteUnavailableReason::Unknown)
+                } else if self.workbench_shell.projection().connection
                     != omega_workbench_state::ConnectionPhase::Online
                 {
                     RouteAvailability::Unavailable(RouteUnavailableReason::Stale)
@@ -16483,6 +16555,15 @@ impl AgentPanel {
                 let item = self.work_index.item(work.work_ref.as_str());
                 let opens_forensics = is_omega_forensics_route(&OmegaRoute::Work(work));
                 if opens_forensics {
+                    if let Some(WorkIndexItem {
+                        source_entity:
+                            WorkSourceEntity::ForensicsCase { case_ref }
+                            | WorkSourceEntity::ForensicsRun { case_ref, .. },
+                        ..
+                    }) = item.as_ref()
+                    {
+                        self.select_security_work_identity(case_ref, cx);
+                    }
                     self.clear_omega_work_detail();
                     self.select_work_surface_with_history(
                         omega_workbench_state::WorkSurface::Forensics,
@@ -16727,11 +16808,9 @@ impl AgentPanel {
         }
         let route = match &item.source_entity {
             WorkSourceEntity::Thread { thread_ref } => OmegaRoute::thread(thread_ref.clone()),
-            WorkSourceEntity::ForensicsCase { .. } | WorkSourceEntity::ForensicsRun { .. } => {
-                DomainBlockRoute::new(OMEGA_FORENSICS_BLOCK_REF, "forensics")
-                    .and_then(|block| OmegaRoute::work(item.work_ref(), Some(block)))
-            }
-            WorkSourceEntity::EffectWork { .. } => OmegaRoute::work(item.work_ref(), None),
+            WorkSourceEntity::ForensicsCase { .. }
+            | WorkSourceEntity::ForensicsRun { .. }
+            | WorkSourceEntity::EffectWork { .. } => OmegaRoute::work(item.work_ref(), None),
         };
         let Ok(route) = route else {
             log::warn!("could not construct a Work Index item route");
@@ -16741,6 +16820,79 @@ impl AgentPanel {
             self.serialize(cx);
         }
         self.open_omega_history_route(route, window, cx);
+    }
+
+    fn open_work_index_source(
+        &mut self,
+        item: WorkIndexItem,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        match &item.source_entity {
+            WorkSourceEntity::Thread { thread_ref } => {
+                let Ok(route) = OmegaRoute::thread(thread_ref.clone()) else {
+                    return;
+                };
+                if self.omega_navigation_history.push(route.clone()) {
+                    self.serialize(cx);
+                }
+                self.open_omega_history_route(route, window, cx);
+            }
+            WorkSourceEntity::ForensicsCase { case_ref }
+            | WorkSourceEntity::ForensicsRun { case_ref, .. } => {
+                self.select_security_work_identity(case_ref, cx);
+                let Ok(block) = DomainBlockRoute::new(
+                    format!("block:omega:security-work:{case_ref}"),
+                    "forensics",
+                ) else {
+                    return;
+                };
+                let Ok(route) = OmegaRoute::work(item.work_ref(), Some(block)) else {
+                    return;
+                };
+                if self.omega_navigation_history.push(route) {
+                    self.serialize(cx);
+                }
+                self.clear_omega_work_detail();
+                self.select_work_surface_with_history(
+                    omega_workbench_state::WorkSurface::Forensics,
+                    false,
+                    window,
+                    cx,
+                );
+            }
+            WorkSourceEntity::EffectWork { .. } => {}
+        }
+    }
+
+    fn select_security_work_identity(&mut self, case_ref: &str, cx: &mut Context<Self>) {
+        let repository_id = case_ref
+            .strip_prefix("repository:")
+            .and_then(|value| value.parse::<u64>().ok());
+        let identity = self.workbench_shell.identity().cloned();
+        if let (Some(repository_id), Some(identity), Some(thread_id)) =
+            (repository_id, identity, self.active_thread_id(cx))
+            && let Some(candidate) = identity
+                .candidates
+                .iter()
+                .find(|candidate| candidate.git_repository_id == Some(repository_id))
+                .cloned()
+            && identity.selected.as_ref().map(|selected| &selected.binding)
+                != Some(&candidate.binding)
+        {
+            self.select_thread_identity(
+                &thread_id.to_key_string(),
+                identity.selected.as_ref().map(|selected| &selected.binding),
+                self.workbench_shell
+                    .projection()
+                    .threads
+                    .get(&thread_id.to_key_string())
+                    .map_or(0, |thread| thread.generation),
+                candidate.binding,
+                cx,
+            );
+            self.refresh_native_work_index(cx);
+        }
     }
 
     fn inspect_work_index_item(
@@ -16773,6 +16925,7 @@ impl AgentPanel {
             issue_identifier: work_issue_identifier(item.work_ref()),
             ..SnapshotLinks::default()
         };
+        let mut projected_blocks = None;
         match &item.source_entity {
             WorkSourceEntity::Thread { thread_ref } => {
                 match omega_effectd::all_work_contract::ThreadRef::try_from(thread_ref.clone()) {
@@ -16782,13 +16935,82 @@ impl AgentPanel {
                     }
                 }
             }
-            WorkSourceEntity::ForensicsRun { run_ref, .. } => {
-                match omega_effectd::all_work_contract::RunRef::try_from(run_ref.clone()) {
-                    Ok(run_ref) => links.run_refs.push(run_ref),
-                    Err(error) => log::warn!("could not project the Work Run reference: {error}"),
+            WorkSourceEntity::ForensicsCase { case_ref }
+            | WorkSourceEntity::ForensicsRun { case_ref, .. } => {
+                let related_run_refs = self
+                    .work_index
+                    .projection()
+                    .rows
+                    .iter()
+                    .filter_map(|row| match &row.source_entity {
+                        WorkSourceEntity::ForensicsRun {
+                            case_ref: row_case_ref,
+                            run_ref,
+                        } if row_case_ref == case_ref => Some(run_ref.clone()),
+                        _ => None,
+                    })
+                    .collect::<Vec<_>>();
+                let active_case_ref = self
+                    .workbench_shell
+                    .identity()
+                    .and_then(|identity| identity.selected.as_ref())
+                    .and_then(|candidate| candidate.git_repository_id)
+                    .map(|repository_id| format!("repository:{repository_id}"));
+                let forensics = (active_case_ref.as_deref() == Some(case_ref.as_str()))
+                    .then(|| {
+                        self.workbench_shell
+                            .forensics_surface_for_active_binding(cx)
+                            .map(|surface| surface.read(cx).snapshot())
+                    })
+                    .flatten();
+                let projection = project_forensics_work(ForensicsWorkProjection {
+                    item: &item,
+                    related_run_refs: &related_run_refs,
+                    run: forensics
+                        .as_ref()
+                        .and_then(|snapshot| snapshot.run.as_ref()),
+                    review: forensics
+                        .as_ref()
+                        .and_then(|snapshot| snapshot.review.as_ref()),
+                    matrix: forensics
+                        .as_ref()
+                        .and_then(|snapshot| snapshot.matrix.as_ref()),
+                    entropy_run: forensics
+                        .as_ref()
+                        .and_then(|snapshot| snapshot.entropy_run.as_ref()),
+                    entropy_campaign: forensics
+                        .as_ref()
+                        .and_then(|snapshot| snapshot.entropy_campaign.as_ref()),
+                    publication: None,
+                    readiness: forensics.as_ref().and_then(|snapshot| snapshot.readiness),
+                    launch_intent: forensics
+                        .as_ref()
+                        .and_then(|snapshot| snapshot.prepared_intent.as_ref()),
+                    prompt: forensics
+                        .as_ref()
+                        .map(|snapshot| snapshot.prompt_workspace.active()),
+                    coldcard_fixture: forensics.as_ref().and_then(|snapshot| {
+                        snapshot
+                            .fixture_views_enabled
+                            .then_some(snapshot.coldcard_evidence.as_ref())
+                            .flatten()
+                    }),
+                    source_loaded: forensics.is_some(),
+                });
+                match projection {
+                    Ok(projection) => {
+                        let issue_identifier = links.issue_identifier.take();
+                        links = projection.links;
+                        links.issue_identifier = issue_identifier;
+                        projected_blocks = Some(projection.blocks);
+                    }
+                    Err(error) => {
+                        log::error!("could not project Security Work: {error}");
+                        return false;
+                    }
                 }
             }
-            WorkSourceEntity::ForensicsCase { .. } | WorkSourceEntity::EffectWork { .. } => {}
+            WorkSourceEntity::EffectWork { .. } => {}
         }
         let snapshot = match snapshot_from_index_item(&item, links) {
             Ok(snapshot) => snapshot,
@@ -16797,7 +17019,11 @@ impl AgentPanel {
                 return false;
             }
         };
-        let blocks = match default_blocks(&item) {
+        let blocks_result = match projected_blocks {
+            Some(blocks) => Ok(blocks),
+            None => default_blocks(&item),
+        };
+        let blocks = match blocks_result {
             Ok(blocks) => blocks,
             Err(error) => {
                 log::error!("could not construct Work Blocks: {error}");
@@ -16856,7 +17082,7 @@ impl AgentPanel {
                     this.submit_omega_work_intent(intent, window, cx);
                 }
                 WorkDetailSurfaceEvent::OpenSource(item) => {
-                    this.open_work_index_item(item, window, cx);
+                    this.open_work_index_source(item, window, cx);
                 }
                 WorkDetailSurfaceEvent::PresentationChanged(presentation) => {
                     let work_ref = this
@@ -17348,7 +17574,7 @@ impl AgentPanel {
         let missing_forensics_content = (omega_forensics_selected
             && omega_forensics_host.is_none())
         .then(|| {
-            omega_forensics_route().map(|route| {
+            self.active_forensics_route().map(|route| {
                 Self::render_omega_unavailable_route(
                     &EntityRouteState {
                         route,
@@ -27076,6 +27302,7 @@ mod tests {
                 revision: 1,
                 phase: NativeForensicsPhase::Running,
                 run_ref: Some("forensics:run:fixture".into()),
+                child_run_refs: Vec::new(),
             })
             .expect("valid native Forensics fixture");
             panel
@@ -27143,7 +27370,8 @@ mod tests {
         );
         assert!(cx.debug_bounds("omega.omega.thread-tab.active").is_some());
 
-        let forensics_route = omega_forensics_route().expect("valid Forensics Work route");
+        let forensics_route = omega_forensics_route("work:omega:forensics:repository:1")
+            .expect("valid Forensics Work route");
         panel.update(&mut cx, |panel, cx| {
             panel
                 .workbench_shell
@@ -27242,6 +27470,7 @@ mod tests {
                 revision: 1,
                 phase: NativeForensicsPhase::Running,
                 run_ref: Some("forensics:run:work-detail-test".into()),
+                child_run_refs: Vec::new(),
             })
             .expect("valid second source lane");
             panel

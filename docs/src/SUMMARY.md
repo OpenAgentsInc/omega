@@ -235,6 +235,7 @@
   - [Omega All Work contract](./development/omega-all-work-contract.md)
   - [Omega Work Index](./development/omega-work-index.md)
   - [Omega Work and Issue detail](./development/omega-work-detail.md)
+  - [Omega Security Work](./development/omega-security-work.md)
   - [Omega Full Auto GPUI launcher](./development/omega-full-auto-gpui-launcher.md)
   - [Omega Full Auto routing and liveness](./development/omega-full-auto-routing-liveness.md)
   - [Omega Full Auto reports, Sync, and mobile](./development/omega-full-auto-reports-sync-mobile.md)

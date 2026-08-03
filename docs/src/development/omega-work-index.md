@@ -12,8 +12,8 @@ fixture do not satisfy this gate.
 The first native adapters are:
 
 - `omega.thread-metadata.v1` for durable Threads;
-- `omega.forensics-workbench.v1` for repository-bound Forensics cases and
-  runs.
+- `omega.forensics-workbench.v1` for repository-bound Security cases and
+  source-owned runs.
 
 `openagents.omega-effectd.v2` adds generated All Work summaries when the
 Effect service is available. The index stays read-only. The Work detail surface
@@ -28,7 +28,10 @@ cursor, freshness, completeness, gap references, and visibility metadata.
 The index rejects invalid generated values and quarantines conflicting Work
 identities.
 
-The native adapters map only observed source state. They do not invent a
+The Security adapter emits one separate case for each Git repository candidate,
+not only the selected repository. Current managed runs, entropy runs, campaign
+project runs, and model-matrix runs become child Work rows with their exact run
+refs. The native adapters map only observed source state. They do not invent a
 completed item, assignment, delegation, or priority. Inbox groups questions,
 recoverable work, blockers, failures, and stale work. My Work distinguishes
 local ownership, assignment, participation, and bounded agent delegation.
@@ -55,17 +58,20 @@ and rejects gaps, non-advancing cursors, and conflicting identities.
 ## Interface {#interface}
 
 Inbox and My Work have search, attention and lifecycle filters, grouped rows,
-stable selection, keyboard navigation, and accessible row labels. Press Enter
-to open the source. Press Space or I, or select **Details**, to inspect the Work
-without changing source identity. The surface shows loading, partial, offline,
+stable selection, keyboard navigation, and accessible row labels. Press Enter,
+Space, or I, or select **Details**, to inspect the Work without changing source
+identity. The detail surface provides the explicit source-opening action. The
+surface shows loading, partial, offline,
 error, conflict, and empty states explicitly. A source failure is never
 rendered as successful emptiness.
 
-Opening a Thread row returns to its durable Thread route. Opening a Forensics
-row selects its repository-bound Forensics Work route. The detail surface
+Opening a Thread row returns to its durable Thread route. Opening a Security
+case or run row selects its same-identity shared Work route. The detail surface
 shows the exact authority, source reference, revision, cursor, freshness,
 completeness, visibility, and accountability. See [Omega Work and Issue
 detail](./omega-work-detail.md) for its mutation boundary.
+See [Omega Security Work](./omega-security-work.md) for its typed Blocks,
+parent/child relations, and fail-closed publication boundary.
 
 ## Verification {#verification}
 

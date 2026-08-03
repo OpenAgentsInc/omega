@@ -10,7 +10,7 @@ use omega_effectd::all_work_contract::{
     AgentActivityRef, AgentSessionRef, ContractValidate, EventRef, EvidenceRef, FreshnessState,
     IntentRef, IsoTimestamp, IssueProjection, LongText, OwnerDispositionRef, ReceiptRef, RunRef,
     SafeInteger, SessionRef, ShortText, SourceRef, ThreadRef, VerificationRef, WorkPriority,
-    WorkRef, WorkSnapshot, WorkState,
+    WorkRef, WorkRelation, WorkSnapshot, WorkState,
 };
 use omega_work_index::{WorkIndexItem, WorkSourceEntity};
 use serde::{Deserialize, Serialize};
@@ -19,6 +19,7 @@ use thiserror::Error;
 
 pub const WORK_DETAIL_JOURNAL_SCHEMA_V1: &str = "openagents.omega.work-detail-journal.v1";
 pub const MAX_WORK_BLOCKS: usize = 64;
+pub const MAX_WORK_BLOCK_FACTS: usize = 1_024;
 pub const MAX_WORK_HISTORY_ROWS: usize = 10_000;
 pub const MAX_WORK_INTENT_RECORDS: usize = 4_096;
 const JOURNAL_DIR: &str = "work-detail-v1";
@@ -38,6 +39,10 @@ pub enum WorkDetailError {
     TooManyIntents,
     #[error("Work detail Block does not belong to this Work")]
     BlockIdentityMismatch,
+    #[error("Work detail has more than {MAX_WORK_BLOCK_FACTS} Block facts")]
+    TooManyBlockFacts,
+    #[error("Work detail Block facts require bounded references, labels, and values")]
+    InvalidBlockFact,
     #[error("Work detail journal does not belong to this Work and source")]
     JournalIdentityMismatch,
     #[error("unsupported Work detail journal schema {0:?}")]
@@ -79,6 +84,11 @@ pub enum WorkBlockKind {
     Guide,
     Artifact,
     Receipt,
+    Case,
+    Lifecycle,
+    Evidence,
+    Models,
+    Publication,
 }
 
 impl WorkBlockKind {
@@ -96,8 +106,62 @@ impl WorkBlockKind {
             Self::Guide => "Guide",
             Self::Artifact => "Artifact",
             Self::Receipt => "Receipt",
+            Self::Case => "Case",
+            Self::Lifecycle => "Lifecycle",
+            Self::Evidence => "Evidence",
+            Self::Models => "Models",
+            Self::Publication => "Publication",
         }
     }
+}
+
+#[derive(Clone, Copy, Debug, Eq, Hash, Ord, PartialEq, PartialOrd, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum WorkBlockFactKind {
+    Source,
+    Lifecycle,
+    Finding,
+    Hypothesis,
+    Limitation,
+    Dispute,
+    Reconciliation,
+    Evidence,
+    Model,
+    Usage,
+    Exactness,
+    Receipt,
+    Verification,
+    PublicationAuthority,
+    Privacy,
+    Cleanup,
+    MissingInput,
+}
+
+#[derive(Clone, Copy, Debug, Eq, Hash, Ord, PartialEq, PartialOrd, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum WorkBlockFactState {
+    Observed,
+    Active,
+    Completed,
+    Provisional,
+    Unavailable,
+    Missing,
+    Blocked,
+    Failed,
+    Canceled,
+    Accepted,
+    Rejected,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct WorkBlockFact {
+    pub fact_ref: String,
+    pub kind: WorkBlockFactKind,
+    pub state: WorkBlockFactState,
+    pub label: String,
+    pub value: String,
+    pub source_refs: Vec<String>,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
@@ -109,6 +173,7 @@ pub struct WorkBlock {
     pub title: ShortText,
     pub source_ref: SourceRef,
     pub available: bool,
+    pub facts: Vec<WorkBlockFact>,
 }
 
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq, Serialize, Deserialize)]
@@ -293,6 +358,7 @@ pub struct SnapshotLinks {
     pub evidence_refs: Vec<EvidenceRef>,
     pub verification_refs: Vec<VerificationRef>,
     pub owner_disposition_refs: Vec<OwnerDispositionRef>,
+    pub relations: Vec<WorkRelation>,
 }
 
 pub fn snapshot_from_index_item(
@@ -311,7 +377,7 @@ pub fn snapshot_from_index_item(
     let snapshot = WorkSnapshot {
         summary,
         issue,
-        relations: Vec::new(),
+        relations: links.relations,
         thread_refs: links.thread_refs,
         session_refs: links.session_refs,
         agent_session_refs: links.agent_session_refs,
@@ -368,6 +434,7 @@ pub fn default_blocks(item: &WorkIndexItem) -> Result<Vec<WorkBlock>, WorkDetail
                 title: ShortText::try_from(kind.label().to_string())?,
                 source_ref: source_ref.clone(),
                 available: true,
+                facts: Vec::new(),
             })
         })
         .collect()
@@ -387,6 +454,11 @@ fn block_kind_key(kind: WorkBlockKind) -> &'static str {
         WorkBlockKind::Guide => "guide",
         WorkBlockKind::Artifact => "artifact",
         WorkBlockKind::Receipt => "receipt",
+        WorkBlockKind::Case => "case",
+        WorkBlockKind::Lifecycle => "lifecycle",
+        WorkBlockKind::Evidence => "evidence",
+        WorkBlockKind::Models => "models",
+        WorkBlockKind::Publication => "publication",
     }
 }
 
@@ -429,6 +501,25 @@ impl WorkDetail {
             .any(|block| block.work_ref != snapshot.summary.work_ref)
         {
             return Err(WorkDetailError::BlockIdentityMismatch);
+        }
+        let fact_count = blocks.iter().map(|block| block.facts.len()).sum::<usize>();
+        if fact_count > MAX_WORK_BLOCK_FACTS {
+            return Err(WorkDetailError::TooManyBlockFacts);
+        }
+        if blocks.iter().flat_map(|block| &block.facts).any(|fact| {
+            fact.fact_ref.trim().is_empty()
+                || fact.fact_ref.len() > 1_024
+                || fact.label.trim().is_empty()
+                || fact.label.len() > 256
+                || fact.value.trim().is_empty()
+                || fact.value.len() > 8_000
+                || fact.source_refs.len() > 256
+                || fact
+                    .source_refs
+                    .iter()
+                    .any(|source_ref| source_ref.trim().is_empty() || source_ref.len() > 2_048)
+        }) {
+            return Err(WorkDetailError::InvalidBlockFact);
         }
         if let Some(capability) = capability.as_ref()
             && (!snapshot.summary.source_authority.writable
@@ -1264,6 +1355,31 @@ mod tests {
         assert_eq!(issue.revision, detail.snapshot().summary.revision);
         assert_eq!(issue.state, detail.snapshot().summary.state);
         assert_eq!(detail.history(MAX_WORK_HISTORY_ROWS).rows.len(), 1);
+    }
+
+    #[test]
+    fn typed_block_facts_are_bounded_and_cannot_hide_missing_identity() {
+        let item = item(false);
+        let snapshot =
+            snapshot_from_index_item(&item, SnapshotLinks::default()).expect("valid snapshot");
+        let mut blocks = default_blocks(&item).expect("default Blocks");
+        blocks[0].facts.push(WorkBlockFact {
+            fact_ref: "fact:security:missing".into(),
+            kind: WorkBlockFactKind::MissingInput,
+            state: WorkBlockFactState::Missing,
+            label: "Missing input".into(),
+            value: "The exact source input is unavailable.".into(),
+            source_refs: vec!["source:security:missing".into()],
+        });
+        let detail = WorkDetail::new(snapshot.clone(), blocks.clone(), None, None)
+            .expect("bounded typed fact");
+        assert_eq!(detail.blocks()[0].facts, blocks[0].facts);
+
+        blocks[0].facts[0].fact_ref.clear();
+        assert!(matches!(
+            WorkDetail::new(snapshot, blocks, None, None),
+            Err(WorkDetailError::InvalidBlockFact)
+        ));
     }
 
     #[test]

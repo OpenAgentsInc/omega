@@ -27974,4 +27974,87 @@ mod tests {
             );
         }
     }
+
+    /// OMEGA-DELTA-0232. Repository-bound security analysis is addressable as
+    /// separate case and child-run Work. Shared Blocks preserve source truth,
+    /// uncertainty, and publication authority without a singleton case or a
+    /// production synthetic fixture.
+    #[test]
+    fn omega_security_work_preserves_forensic_semantics_and_fails_closed() {
+        let index = without_comments(&read_repository_file(
+            "crates/omega_work_index/src/omega_work_index.rs",
+        ));
+        for required in [
+            "child_run_refs",
+            "Security case",
+            "Security run",
+            "WorkClass::Case",
+            "WorkClass::Run",
+            "source_writable: false",
+        ] {
+            assert!(
+                index.contains(required),
+                "OMEGA-DELTA-0232: Security Work indexing lost `{required}`"
+            );
+        }
+
+        let projection = without_comments(&read_repository_file(
+            "crates/agent_ui/src/forensics_work_projection.rs",
+        ));
+        for required in [
+            "ForensicsRunProjection",
+            "ForensicsReviewProjection",
+            "EntropyRunProjection",
+            "EntropyCampaignProjection",
+            "ForensicsMatrixProjection",
+            "ForensicPublicationGateProjection",
+            "WorkRelationKind::Child",
+            "WorkRelationKind::Parent",
+            "WorkBlockKind::Case",
+            "WorkBlockKind::Lifecycle",
+            "WorkBlockKind::Evidence",
+            "WorkBlockKind::Models",
+            "WorkBlockKind::Publication",
+            "WorkBlockFactState::Provisional",
+            "WorkBlockFactState::Unavailable",
+            "WorkBlockFactState::Blocked",
+            "No source-owned publication gate projection is attached",
+            "completed processes, and clean results do not authorize a claim",
+        ] {
+            assert!(
+                projection.contains(required),
+                "OMEGA-DELTA-0232: Security Work projection lost `{required}`"
+            );
+        }
+
+        let panel = without_comments(&read_repository_file("crates/agent_ui/src/agent_panel.rs"));
+        for required in [
+            ".candidates",
+            "repository_candidates",
+            "fn open_work_index_source",
+            "project_forensics_work",
+            "fn active_forensics_route",
+            "OMEGA_SECURITY_WORK_BLOCK_PREFIX",
+        ] {
+            assert!(
+                panel.contains(required),
+                "OMEGA-DELTA-0232: multi-case Work routing lost `{required}`"
+            );
+        }
+
+        let source_surface = without_comments(&read_repository_file(
+            "crates/agent_ui/src/forensics_workbench.rs",
+        ));
+        for required in [
+            "if !self.fixture_views_enabled",
+            "omega.forensics.publication.source-required",
+            "PRIVATE · PUBLICATION BLOCKED",
+            "Synthetic publication scenes are available only in explicit development and mock builds.",
+        ] {
+            assert!(
+                source_surface.contains(required),
+                "OMEGA-DELTA-0232: production fixture gate lost `{required}`"
+            );
+        }
+    }
 }

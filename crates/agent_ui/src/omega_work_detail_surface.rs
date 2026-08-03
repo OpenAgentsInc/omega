@@ -11,9 +11,9 @@ use omega_effectd::all_work_contract::{
     IntentRef, IsoTimestamp, SafeInteger, ShortText, SourceRef, WorkSnapshot,
 };
 use omega_work_detail::{
-    BoundedWorkHistory, SubmitIntentDisposition, WorkBlock, WorkCanonicalEvent, WorkDetail,
-    WorkDetailJournal, WorkDetailSourceState, WorkIntent, WorkIntentOutcome, WorkMutationKind,
-    WorkMutationOperation, WorkPresentation,
+    BoundedWorkHistory, SubmitIntentDisposition, WorkBlock, WorkBlockFactState, WorkCanonicalEvent,
+    WorkDetail, WorkDetailJournal, WorkDetailSourceState, WorkIntent, WorkIntentOutcome,
+    WorkMutationKind, WorkMutationOperation, WorkPresentation,
 };
 use omega_work_index::WorkIndexItem;
 use settings::Settings as _;
@@ -1196,6 +1196,7 @@ impl EventEmitter<WorkDetailSurfaceEvent> for WorkDetailSurface {}
 
 fn render_block_card(block: &WorkBlock, cx: &App) -> AnyElement {
     let colors = cx.theme().colors();
+    let visible_fact_count = block.facts.len().min(96);
     v_flex()
         .id(format!("omega-work-block-content-{}", block.block_ref.0))
         .min_h(px(112.))
@@ -1237,7 +1238,83 @@ fn render_block_card(block: &WorkBlock, cx: &App) -> AnyElement {
                 .text_color(colors.text_placeholder)
                 .child("This Block is a view over the named source. Visibility does not grant authority."),
         )
+        .when(!block.facts.is_empty(), |card| {
+            card.child(
+                v_flex()
+                    .mt_2()
+                    .gap_1()
+                    .children(block.facts.iter().take(visible_fact_count).map(|fact| {
+                        v_flex()
+                            .px_3()
+                            .py_2()
+                            .gap_1()
+                            .rounded_md()
+                            .bg(colors.element_background)
+                            .child(
+                                h_flex()
+                                    .justify_between()
+                                    .gap_2()
+                                    .child(
+                                        Label::new(fact.label.clone())
+                                            .size(LabelSize::XSmall)
+                                            .weight(gpui::FontWeight::SEMIBOLD),
+                                    )
+                                    .child(
+                                        Label::new(work_block_fact_state_label(fact.state))
+                                            .size(LabelSize::XSmall)
+                                            .color(Color::Muted),
+                                    ),
+                            )
+                            .child(
+                                div()
+                                    .text_size(px(11.))
+                                    .text_color(colors.text_muted)
+                                    .child(fact.value.clone()),
+                            )
+                            .child(
+                                div()
+                                    .text_size(px(10.))
+                                    .text_color(colors.text_placeholder)
+                                    .child(if fact.source_refs.is_empty() {
+                                        fact.fact_ref.clone()
+                                    } else {
+                                        format!(
+                                            "{} · {}",
+                                            fact.fact_ref,
+                                            fact.source_refs.join(" · ")
+                                        )
+                                    }),
+                            )
+                    }))
+                    .when(block.facts.len() > visible_fact_count, |facts| {
+                        facts.child(
+                            Label::new(format!(
+                                "{} additional source facts omitted from this bounded view",
+                                block.facts.len() - visible_fact_count
+                            ))
+                            .size(LabelSize::XSmall)
+                            .color(Color::Muted),
+                        )
+                    }),
+            )
+        })
         .into_any_element()
+}
+
+fn work_block_fact_state_label(state: WorkBlockFactState) -> &'static str {
+    match state {
+        WorkBlockFactState::Observed => "Observed",
+        WorkBlockFactState::Active => "Active",
+        WorkBlockFactState::Completed => "Completed",
+        WorkBlockFactState::Provisional => "Provisional",
+        WorkBlockFactState::Unavailable => "Unavailable",
+        WorkBlockFactState::Missing => "Missing",
+        WorkBlockFactState::Blocked => "Blocked",
+        WorkBlockFactState::Failed => "Failed",
+        WorkBlockFactState::Canceled => "Canceled",
+        WorkBlockFactState::Accepted => "Accepted",
+        WorkBlockFactState::Rejected => "Rejected",
+    }
 }
 
 fn field_chip(label: &str, value: String, cx: &App) -> AnyElement {

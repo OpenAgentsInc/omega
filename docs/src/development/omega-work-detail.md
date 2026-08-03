@@ -22,9 +22,13 @@ infer them.
 ## Blocks and activity {#blocks-and-activity}
 
 The central surface supports Conversation, Editor, Diff, Plan, Terminal,
-Review, Preview, Log, Metric, Guide, Artifact, and Receipt Block kinds. A Block
-keeps the Work and source references that supplied it. Selecting a Block does
-not grant permission to change the Work.
+Review, Preview, Log, Metric, Guide, Artifact, Receipt, Case, Lifecycle,
+Evidence, Models, and Publication Block kinds. A Block keeps the Work and
+source references that supplied it. Domain Blocks can also contain bounded,
+typed facts with explicit observed, provisional, unavailable, missing,
+blocked, failed, accepted, or rejected state. Selecting a Block does not grant
+permission to change the Work. See [Omega Security
+Work](./omega-security-work.md) for the first domain projection.
 
 Activity composes exact Thread, Session, Agent Session, Agent Activity, Run,
 Intent, Event, Receipt, Evidence, Verification, Owner Disposition, and gap
@@ -56,8 +60,9 @@ Work summary.
 
 ## Interface and navigation {#interface-and-navigation}
 
-From Inbox or My Work, press Space or I, or select **Details**, to open the
-detail surface. Enter still opens the source. In detail:
+From Inbox or My Work, press Enter, Space, or I, or select **Details**, to open
+the detail surface. Source opening is an explicit action from detail. In
+detail:
 
 - press E to edit when the source supplies title authority;
 - press Enter to submit or Escape to cancel the edit;
