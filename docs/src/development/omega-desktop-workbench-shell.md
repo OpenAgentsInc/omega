@@ -1024,3 +1024,35 @@ working-folder focus and switching regressions passed. Clippy for `agent_ui`,
 `ui`, and `omega_deltas`, Rust formatting, the documentation build, and diff
 checks also passed. The app was not launched, and no GUI automation was used
 for this receipt.
+
+## Command-N Forensics release-fast receipt {#command-n-forensics-release-fast-receipt}
+
+On 2026-08-03, the New Thread navigation fix was built directly from source
+commit `e578d9e8a93e86a407308ea302dc35907ed962e4` with:
+
+```sh
+OMEGA_PRIMARY_INTERFACE_BUILD=1 \
+  CARGO_TARGET_DIR=/Users/christopherdavid/work/omega/target \
+  cargo build -p omega --profile release-fast
+```
+
+- Executable: `/Users/christopherdavid/work/omega/target/release-fast/omega`
+- Architecture: `arm64`
+- Executable SHA-256:
+  `69e907d07221c631d0f88ccd8c7346d20b554c2e65d62087851ca2961e942a66`
+- Embedded source commit:
+  `e578d9e8a93e86a407308ea302dc35907ed962e4`
+- Embedded interface contract: `Omega embedded primary-interface build is active`
+- Signature: link-produced ad hoc signature; strict verification passed.
+- Previous release-fast executable backup:
+  `/private/tmp/omega-release-fast-before-command-n-20260803`
+- Previous executable SHA-256:
+  `c1bac8585f3cf58529f9c15b01cea867d5fac9966069e9a7d8f2d98a36455c4b`
+
+The deferred-Forensics-restore regression and the window-global primary New
+Thread keymap regression passed. All 317 `omega_deltas` tests and clippy for
+`agent_ui` and `omega_deltas` passed. The complete `agent_ui` suite recorded
+898 passes, one ignored test, and nine unrelated existing failures in executor
+naming, routed-model copy, legacy front-door selectors, and WSL migration. The
+release-fast executable was not launched, and no app bundle or installed
+application was replaced.
