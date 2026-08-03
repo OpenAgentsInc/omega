@@ -1152,6 +1152,7 @@ impl DogfoodSurface {
                     } else {
                         "Open Work view"
                     })
+                    .debug_selector(move || scene_debug_selector(scene))
                     .on_click(cx.listener(move |this, _, _, cx| this.set_scene(scene, cx)))
             })))
             .child(
@@ -1463,6 +1464,10 @@ impl DogfoodSurface {
                         let blockers = self.blocked_by(issue).len();
                         h_flex()
                             .id(issue.id.clone())
+                            .debug_selector({
+                                let issue_id = issue.id.clone();
+                                move || work_row_debug_selector("list", &issue_id)
+                            })
                             .min_h(px(42.))
                             .px_3()
                             .gap_3()
@@ -1481,7 +1486,12 @@ impl DogfoodSurface {
                             ))
                             .aria_selected(selected)
                             .when(selected, |row| row.bg(colors.element_selected))
-                            .on_click(cx.listener(move |this, _, _, cx| {
+                            .on_click(cx.listener(move |this, _, window, cx| {
+                                // A pointer activation must leave the planning
+                                // surface holding the keyboard. Without this the
+                                // window drops focus entirely and Up/Down, J/K,
+                                // Enter, and the scene digits stop arriving.
+                                window.focus(&this.focus_handle, cx);
                                 this.select_issue(issue_id.clone(), true, cx)
                             }))
                             .child(work_status_cue(
@@ -1563,6 +1573,10 @@ impl DogfoodSurface {
                         let selected = issue.id == self.selected_issue_id;
                         v_flex()
                             .id(format!("board-{}", issue.id))
+                            .debug_selector({
+                                let issue_id = issue.id.clone();
+                                move || work_row_debug_selector("board", &issue_id)
+                            })
                             .gap_2()
                             .p_3()
                             .rounded_lg()
@@ -1584,7 +1598,12 @@ impl DogfoodSurface {
                                 issue.completed,
                             ))
                             .aria_selected(selected)
-                            .on_click(cx.listener(move |this, _, _, cx| {
+                            .on_click(cx.listener(move |this, _, window, cx| {
+                                // A pointer activation must leave the planning
+                                // surface holding the keyboard. Without this the
+                                // window drops focus entirely and Up/Down, J/K,
+                                // Enter, and the scene digits stop arriving.
+                                window.focus(&this.focus_handle, cx);
                                 this.select_issue(issue_id.clone(), true, cx)
                             }))
                             .child(
@@ -1635,6 +1654,10 @@ impl DogfoodSurface {
                 let selected = row.issue_id == self.selected_issue_id;
                 h_flex()
                     .id(format!("table-{}", row.issue_id))
+                    .debug_selector({
+                        let issue_id = row.issue_id.clone();
+                        move || work_row_debug_selector("table", &issue_id)
+                    })
                     .min_h(px(38.))
                     .px_3()
                     .gap_3()
@@ -1652,7 +1675,8 @@ impl DogfoodSurface {
                         row.completed,
                     ))
                     .aria_selected(selected)
-                    .on_click(cx.listener(move |this, _, _, cx| {
+                    .on_click(cx.listener(move |this, _, window, cx| {
+                        window.focus(&this.focus_handle, cx);
                         this.select_issue(issue_id.clone(), true, cx)
                     }))
                     .child(
@@ -1729,6 +1753,10 @@ impl DogfoodSurface {
                         let selected = row.issue_id == self.selected_issue_id;
                         h_flex()
                             .id(format!("timeline-{}", row.issue_id))
+                            .debug_selector({
+                                let issue_id = row.issue_id.clone();
+                                move || work_row_debug_selector("timeline", &issue_id)
+                            })
                             .gap_3()
                             .cursor_pointer()
                             .role(gpui::Role::Button)
@@ -1748,7 +1776,12 @@ impl DogfoodSurface {
                                 row.completed,
                                 row.blocked_by_count > 0,
                             ))
-                            .on_click(cx.listener(move |this, _, _, cx| {
+                            .on_click(cx.listener(move |this, _, window, cx| {
+                                // A pointer activation must leave the planning
+                                // surface holding the keyboard. Without this the
+                                // window drops focus entirely and Up/Down, J/K,
+                                // Enter, and the scene digits stop arriving.
+                                window.focus(&this.focus_handle, cx);
                                 this.select_issue(issue_id.clone(), true, cx)
                             }))
                             .child(
@@ -1831,6 +1864,10 @@ impl DogfoodSurface {
                         let selected = row.issue_id == self.selected_issue_id;
                         h_flex()
                             .id(format!("roadmap-{}", row.issue_id))
+                            .debug_selector({
+                                let issue_id = row.issue_id.clone();
+                                move || work_row_debug_selector("roadmap", &issue_id)
+                            })
                             .gap_2()
                             .cursor_pointer()
                             .role(gpui::Role::Button)
@@ -1844,7 +1881,12 @@ impl DogfoodSurface {
                                 row.completed,
                             ))
                             .aria_selected(selected)
-                            .on_click(cx.listener(move |this, _, _, cx| {
+                            .on_click(cx.listener(move |this, _, window, cx| {
+                                // A pointer activation must leave the planning
+                                // surface holding the keyboard. Without this the
+                                // window drops focus entirely and Up/Down, J/K,
+                                // Enter, and the scene digits stop arriving.
+                                window.focus(&this.focus_handle, cx);
                                 this.select_issue(issue_id.clone(), true, cx)
                             }))
                             .child(work_status_cue(
@@ -3180,6 +3222,16 @@ fn repository_claim_state_label(state: &RepositoryWorkClaimState) -> &'static st
     }
 }
 
+/// Test-only stable selectors so a simulated pointer click can reach exactly the
+/// element a keyboard user reaches, without depending on rendered geometry.
+fn work_row_debug_selector(renderer: &str, issue_id: &str) -> String {
+    format!("omega.dogfood.row.{renderer}.{issue_id}")
+}
+
+fn scene_debug_selector(scene: DogfoodScene) -> String {
+    format!("omega.dogfood.scene.{}", scene.label())
+}
+
 fn claim_button(id: &'static str, label: &'static str, disabled: bool) -> Button {
     Button::new(id, label)
         .style(ButtonStyle::Subtle)
@@ -3447,6 +3499,7 @@ fn planning_sort_label(sort: PlanningSort) -> &'static str {
 mod tests {
     use super::*;
     use gpui::{TestAppContext, VisualTestContext};
+    use omega_work_index::{DogfoodPlanningRefreshError, DogfoodPlanningSourceState};
 
     struct DogfoodTestWindow(Entity<DogfoodSurface>);
 
@@ -3765,6 +3818,724 @@ mod tests {
                 );
             }
         }
+    }
+
+    const RENDERER_SCENES: [(DogfoodScene, &str); 5] = [
+        (DogfoodScene::List, "list"),
+        (DogfoodScene::Board, "board"),
+        (DogfoodScene::Table, "table"),
+        (DogfoodScene::Timeline, "timeline"),
+        (DogfoodScene::Roadmap, "roadmap"),
+    ];
+
+    const SCENE_DIGIT_BINDINGS: [(&str, DogfoodScene); 8] = [
+        ("1", DogfoodScene::Overview),
+        ("2", DogfoodScene::List),
+        ("3", DogfoodScene::Board),
+        ("4", DogfoodScene::Table),
+        ("5", DogfoodScene::Timeline),
+        ("6", DogfoodScene::Roadmap),
+        ("7", DogfoodScene::Session),
+        ("8", DogfoodScene::Review),
+    ];
+
+    #[derive(Clone, Debug, Eq, PartialEq)]
+    struct SurfaceOutcome {
+        project_id: String,
+        selected_issue_id: String,
+        scene: DogfoodScene,
+    }
+
+    fn load_dogfood_fixture() -> DogfoodPlanningViewModel {
+        DogfoodPlanningViewModel::from_fixture(
+            DogfoodFixtureAdapter::load_for_tests().expect("valid dogfood fixture"),
+        )
+    }
+
+    fn open_dogfood_surface(
+        cx: &mut TestAppContext,
+        fixture: DogfoodPlanningViewModel,
+    ) -> (Entity<DogfoodSurface>, VisualTestContext) {
+        let window = cx.add_window(|window, cx| {
+            DogfoodTestWindow(cx.new(|cx| DogfoodSurface::new(fixture, window, cx)))
+        });
+        let surface = window
+            .read_with(cx, |window, _cx| window.0.clone())
+            .expect("dogfood test window");
+        let mut visual = VisualTestContext::from_window(window.into(), cx);
+        surface.update_in(&mut visual, |surface, window, cx| {
+            window.focus(&surface.focus_handle, cx);
+            cx.notify();
+        });
+        visual.run_until_parked();
+        (surface, visual)
+    }
+
+    fn surface_outcome(
+        surface: &Entity<DogfoodSurface>,
+        cx: &mut VisualTestContext,
+    ) -> SurfaceOutcome {
+        surface.update(cx, |surface, _cx| SurfaceOutcome {
+            project_id: surface.project_id.clone(),
+            selected_issue_id: surface.selected_issue_id.clone(),
+            scene: surface.scene,
+        })
+    }
+
+    fn project_issue_ids(
+        surface: &Entity<DogfoodSurface>,
+        cx: &mut VisualTestContext,
+    ) -> Vec<String> {
+        surface.update(cx, |surface, _cx| {
+            surface
+                .project_issues()
+                .into_iter()
+                .map(|issue| issue.id.clone())
+                .collect()
+        })
+    }
+
+    fn reset_surface(
+        surface: &Entity<DogfoodSurface>,
+        cx: &mut VisualTestContext,
+        scene: DogfoodScene,
+        issue_id: &str,
+    ) {
+        surface.update(cx, |surface, cx| {
+            surface.scene = scene;
+            surface.selected_issue_id = issue_id.to_string();
+            cx.notify();
+        });
+        cx.run_until_parked();
+    }
+
+    /// The last Work row that a pointer can actually reach in the rendered
+    /// frame, paired with its keyboard distance from the first Work row. Rows
+    /// past the fold are excluded so a pointer failure means a wiring defect,
+    /// not a scrolled-out target.
+    fn reachable_row_target(
+        cx: &mut VisualTestContext,
+        renderer: &str,
+        ordered_issue_ids: &[String],
+    ) -> Option<(usize, String)> {
+        let rendered = cx.debug_render_snapshot();
+        ordered_issue_ids
+            .iter()
+            .enumerate()
+            .skip(1)
+            .filter(|(_, issue_id)| {
+                let occurrences =
+                    rendered.occurrences(&work_row_debug_selector(renderer, issue_id));
+                occurrences.len() == 1
+                    && occurrences[0].hit_testable
+                    && matches!(
+                        occurrences[0].visibility,
+                        gpui::DebugVisibility::Visible | gpui::DebugVisibility::PartiallyClipped
+                    )
+            })
+            .map(|(index, issue_id)| (index, issue_id.clone()))
+            .last()
+    }
+
+    #[gpui::test]
+    async fn keyboard_and_pointer_reach_the_same_planning_work_in_every_renderer(
+        cx: &mut TestAppContext,
+    ) {
+        crate::test_support::init_test(cx);
+        let (surface, mut cx) = open_dogfood_surface(cx, load_dogfood_fixture());
+
+        let ordered_issue_ids = project_issue_ids(&surface, &mut cx);
+        assert!(
+            ordered_issue_ids.len() > 2,
+            "the development Project must carry enough Work to navigate"
+        );
+        let first_issue_id = ordered_issue_ids[0].clone();
+
+        for (scene, renderer) in RENDERER_SCENES {
+            reset_surface(&surface, &mut cx, scene, &first_issue_id);
+            let (target_index, target_issue_id) =
+                reachable_row_target(&mut cx, renderer, &ordered_issue_ids).unwrap_or_else(|| {
+                    panic!("{scene:?} rendered no pointer-reachable Work row after the first")
+                });
+
+            reset_surface(&surface, &mut cx, scene, &first_issue_id);
+            cx.simulate_click_selector(&work_row_debug_selector(renderer, &target_issue_id))
+                .unwrap_or_else(|error| panic!("{scene:?} Work row was not clickable: {error}"));
+            cx.run_until_parked();
+            let pointer = surface_outcome(&surface, &mut cx);
+
+            reset_surface(&surface, &mut cx, scene, &first_issue_id);
+            for _ in 0..target_index {
+                cx.simulate_keystrokes("down");
+            }
+            cx.simulate_keystrokes("enter");
+            cx.run_until_parked();
+            let keyboard = surface_outcome(&surface, &mut cx);
+
+            assert_eq!(
+                keyboard, pointer,
+                "{scene:?}: the keyboard and the pointer reached different Work"
+            );
+            assert_eq!(
+                keyboard,
+                SurfaceOutcome {
+                    project_id: DOGFOOD_PROJECT_ID.into(),
+                    selected_issue_id: target_issue_id.clone(),
+                    scene: DogfoodScene::Issue,
+                },
+                "{scene:?}: neither input opened the intended Work detail"
+            );
+
+            reset_surface(&surface, &mut cx, scene, &first_issue_id);
+            for _ in 0..target_index {
+                cx.simulate_keystrokes("j");
+            }
+            cx.simulate_keystrokes("enter");
+            cx.run_until_parked();
+            assert_eq!(
+                surface_outcome(&surface, &mut cx),
+                keyboard,
+                "{scene:?}: j did not reach the same Work as down"
+            );
+
+            for _ in 0..target_index {
+                cx.simulate_keystrokes("k");
+            }
+            cx.run_until_parked();
+            assert_eq!(
+                surface_outcome(&surface, &mut cx).selected_issue_id,
+                first_issue_id,
+                "{scene:?}: k did not walk the selection back"
+            );
+
+            reset_surface(&surface, &mut cx, scene, &first_issue_id);
+            for _ in 0..target_index {
+                cx.simulate_keystrokes("down");
+            }
+            for _ in 0..target_index {
+                cx.simulate_keystrokes("up");
+            }
+            cx.run_until_parked();
+            assert_eq!(
+                surface_outcome(&surface, &mut cx).selected_issue_id,
+                first_issue_id,
+                "{scene:?}: up did not walk the selection back"
+            );
+        }
+    }
+
+    #[gpui::test]
+    async fn planning_scene_digits_and_scene_tabs_reach_the_same_scene(cx: &mut TestAppContext) {
+        crate::test_support::init_test(cx);
+        let (surface, mut cx) = open_dogfood_surface(cx, load_dogfood_fixture());
+        let selected_issue_id =
+            surface.update(&mut cx, |surface, _cx| surface.selected_issue_id.clone());
+
+        for (key, scene) in SCENE_DIGIT_BINDINGS {
+            reset_surface(&surface, &mut cx, DogfoodScene::Issue, &selected_issue_id);
+            cx.simulate_keystrokes(key);
+            cx.run_until_parked();
+            let keyboard = surface.update(&mut cx, |surface, _cx| surface.scene);
+            assert_eq!(keyboard, scene, "{key:?} did not open the {scene:?} scene");
+
+            reset_surface(&surface, &mut cx, DogfoodScene::Issue, &selected_issue_id);
+            cx.simulate_click_selector(&scene_debug_selector(scene))
+                .unwrap_or_else(|error| panic!("{scene:?} tab was not clickable: {error}"));
+            cx.run_until_parked();
+            let pointer = surface.update(&mut cx, |surface, _cx| surface.scene);
+            assert_eq!(
+                pointer, keyboard,
+                "{scene:?}: the scene tab and {key:?} disagreed"
+            );
+        }
+
+        reset_surface(&surface, &mut cx, DogfoodScene::Issue, &selected_issue_id);
+        cx.simulate_keystrokes("cmd-3");
+        cx.run_until_parked();
+        assert_eq!(
+            surface.update(&mut cx, |surface, _cx| surface.scene),
+            DogfoodScene::Issue,
+            "a modified keystroke must stay with the application, not switch the planning scene"
+        );
+    }
+
+    #[gpui::test]
+    async fn every_degraded_planning_state_stays_operable_by_keyboard_and_pointer(
+        cx: &mut TestAppContext,
+    ) {
+        crate::test_support::init_test(cx);
+        let baseline = load_dogfood_fixture();
+        let mut without_work = baseline.clone();
+        without_work.graph.issues.clear();
+        without_work.graph.issue_relations.clear();
+
+        let conflict_error = DogfoodPlanningRefreshError::RevisionRegression {
+            previous: 9,
+            incoming: 8,
+        }
+        .to_string();
+        let cases: Vec<(
+            &str,
+            DogfoodPlanningViewModel,
+            DogfoodPlanningSourceState,
+            bool,
+            bool,
+        )> = vec![
+            (
+                "loading",
+                baseline.clone(),
+                DogfoodPlanningSourceState::Fixture,
+                true,
+                true,
+            ),
+            (
+                "offline",
+                baseline.clone().restored_offline(),
+                DogfoodPlanningSourceState::Offline,
+                false,
+                true,
+            ),
+            (
+                "stale",
+                baseline.retain_after_failure(DogfoodPlanningSourceState::Stale, "source is stale"),
+                DogfoodPlanningSourceState::Stale,
+                false,
+                true,
+            ),
+            (
+                "partial",
+                baseline.retain_after_incomplete(
+                    DogfoodPlanningSourceState::Partial,
+                    Vec::new(),
+                    "a refresh page did not arrive",
+                ),
+                DogfoodPlanningSourceState::Partial,
+                false,
+                true,
+            ),
+            (
+                "gap",
+                baseline.retain_after_failure(DogfoodPlanningSourceState::Gap, "cursor gap"),
+                DogfoodPlanningSourceState::Gap,
+                false,
+                true,
+            ),
+            (
+                "error",
+                baseline.retain_after_failure(DogfoodPlanningSourceState::Error, "refresh failed"),
+                DogfoodPlanningSourceState::Error,
+                false,
+                true,
+            ),
+            (
+                "conflict",
+                baseline.retain_after_failure(
+                    DogfoodPlanningSourceState::Error,
+                    conflict_error.clone(),
+                ),
+                DogfoodPlanningSourceState::Error,
+                false,
+                true,
+            ),
+            (
+                "empty",
+                without_work,
+                DogfoodPlanningSourceState::Fixture,
+                false,
+                false,
+            ),
+        ];
+
+        let (surface, mut cx) = open_dogfood_surface(cx, baseline.clone());
+
+        for (label, model, expected_state, busy, expects_work) in cases {
+            let expected_error = model.last_error.clone();
+            surface.update(&mut cx, |surface, cx| {
+                surface.set_planning_view(model, cx);
+                surface.set_repository_claim_state(
+                    None,
+                    busy.then(|| "claim refresh in flight".to_string()),
+                    busy,
+                    cx,
+                );
+                surface.set_work_command_state(
+                    None,
+                    busy.then(|| "command in flight".to_string()),
+                    busy,
+                    cx,
+                );
+            });
+            cx.run_until_parked();
+
+            surface.update(&mut cx, |surface, _cx| {
+                assert_eq!(
+                    surface.fixture.source_state, expected_state,
+                    "{label}: the surface did not adopt the degraded planning state"
+                );
+                assert_eq!(
+                    surface.fixture.last_error, expected_error,
+                    "{label}: the surface dropped the degraded planning loss fact"
+                );
+                assert_eq!(
+                    surface.repository_claim_busy, busy,
+                    "{label}: the surface did not adopt the in-flight claim state"
+                );
+            });
+
+            for (key, scene) in [("2", DogfoodScene::List), ("6", DogfoodScene::Roadmap)] {
+                surface.update(&mut cx, |surface, cx| {
+                    surface.scene = DogfoodScene::Issue;
+                    cx.notify();
+                });
+                cx.run_until_parked();
+                cx.simulate_keystrokes(key);
+                cx.run_until_parked();
+                assert_eq!(
+                    surface.update(&mut cx, |surface, _cx| surface.scene),
+                    scene,
+                    "{label}: {key:?} stopped opening the {scene:?} scene"
+                );
+            }
+
+            surface.update(&mut cx, |surface, cx| {
+                surface.scene = DogfoodScene::Issue;
+                cx.notify();
+            });
+            cx.run_until_parked();
+            cx.simulate_click_selector(&scene_debug_selector(DogfoodScene::Table))
+                .unwrap_or_else(|error| {
+                    panic!("{label}: the Table tab was not clickable: {error}")
+                });
+            cx.run_until_parked();
+            assert_eq!(
+                surface.update(&mut cx, |surface, _cx| surface.scene),
+                DogfoodScene::Table,
+                "{label}: the scene tab stopped switching scenes"
+            );
+
+            let ordered_issue_ids = project_issue_ids(&surface, &mut cx);
+            assert_eq!(
+                !ordered_issue_ids.is_empty(),
+                expects_work,
+                "{label}: the degraded case did not carry the Work it declares"
+            );
+            if !expects_work {
+                reset_surface(&surface, &mut cx, DogfoodScene::List, "");
+                let rendered = cx.debug_render_snapshot();
+                assert!(
+                    rendered
+                        .selectors()
+                        .all(|(selector, _)| !selector.starts_with("omega.dogfood.row.")),
+                    "{label}: a Work row rendered from a graph that carries no Work"
+                );
+                continue;
+            }
+
+            let first_issue_id = ordered_issue_ids[0].clone();
+            reset_surface(&surface, &mut cx, DogfoodScene::List, &first_issue_id);
+            let (target_index, target_issue_id) =
+                reachable_row_target(&mut cx, "list", &ordered_issue_ids).unwrap_or_else(|| {
+                    panic!("{label}: the Work list rendered no pointer-reachable row")
+                });
+
+            reset_surface(&surface, &mut cx, DogfoodScene::List, &first_issue_id);
+            cx.simulate_click_selector(&work_row_debug_selector("list", &target_issue_id))
+                .unwrap_or_else(|error| panic!("{label}: the Work row was not clickable: {error}"));
+            cx.run_until_parked();
+            let pointer = surface_outcome(&surface, &mut cx);
+
+            reset_surface(&surface, &mut cx, DogfoodScene::List, &first_issue_id);
+            for _ in 0..target_index {
+                cx.simulate_keystrokes("down");
+            }
+            cx.simulate_keystrokes("enter");
+            cx.run_until_parked();
+            let keyboard = surface_outcome(&surface, &mut cx);
+
+            assert_eq!(
+                keyboard, pointer,
+                "{label}: the keyboard and the pointer reached different Work"
+            );
+            assert_eq!(
+                keyboard,
+                SurfaceOutcome {
+                    project_id: DOGFOOD_PROJECT_ID.into(),
+                    selected_issue_id: target_issue_id,
+                    scene: DogfoodScene::Issue,
+                },
+                "{label}: a degraded planning state blocked Work selection"
+            );
+        }
+    }
+
+    #[derive(Debug, Eq, PartialEq)]
+    struct RestorablePlanningState {
+        project_id: String,
+        selected_issue_id: String,
+        scene: DogfoodScene,
+        saved_view: PlanningSavedView,
+        filter: PlanningFilter,
+        group: PlanningGroup,
+        sort: PlanningSort,
+        user_saved_views: Vec<NamedSavedPlanningView>,
+        active_user_saved_view: bool,
+        selected_user_saved_view_id: Option<String>,
+        query: PlanningViewQuery,
+        rows_by_renderer: Vec<(String, Vec<String>)>,
+        rendered_rows_by_renderer: Vec<(String, Vec<String>)>,
+        searched_rows: Vec<(String, Vec<String>)>,
+        source_revision: u64,
+        event_cursor: String,
+    }
+
+    fn capture_restorable_state(
+        surface: &Entity<DogfoodSurface>,
+        cx: &mut VisualTestContext,
+    ) -> RestorablePlanningState {
+        let restored_scene = surface.update(cx, |surface, _cx| surface.scene);
+        let mut rendered_rows_by_renderer = Vec::new();
+        for (scene, renderer) in RENDERER_SCENES {
+            surface.update(cx, |surface, cx| {
+                surface.scene = scene;
+                cx.notify();
+            });
+            cx.run_until_parked();
+            let rendered = cx.debug_render_snapshot();
+            let prefix = format!("omega.dogfood.row.{renderer}.");
+            rendered_rows_by_renderer.push((
+                renderer.to_string(),
+                rendered
+                    .selectors()
+                    .filter_map(|(selector, _)| {
+                        selector.strip_prefix(prefix.as_str()).map(str::to_owned)
+                    })
+                    .collect(),
+            ));
+        }
+
+        surface.update(cx, |surface, cx| {
+            surface.scene = restored_scene;
+            cx.notify();
+            let projection = surface.planning_projection(PlanningViewKind::List);
+            let mut rows_by_renderer = Vec::new();
+            let mut searched_rows = Vec::new();
+            for (_, renderer) in RENDERER_SCENES {
+                let kind = match renderer {
+                    "list" => PlanningViewKind::List,
+                    "board" => PlanningViewKind::Board,
+                    "table" => PlanningViewKind::Table,
+                    "timeline" => PlanningViewKind::Timeline,
+                    _ => PlanningViewKind::Roadmap,
+                };
+                rows_by_renderer.push((
+                    renderer.to_string(),
+                    surface
+                        .visible_issues(kind)
+                        .into_iter()
+                        .map(|issue| issue.id.clone())
+                        .collect(),
+                ));
+            }
+            // The development surface exposes no search input, so the persisted
+            // query always restores an empty `search`. Applying a term to the
+            // restored query is the only search state this surface can own.
+            for term in ["dogfood", "release", "omega"] {
+                let mut query = surface.planning_query();
+                query.search = term.into();
+                searched_rows.push((
+                    term.to_string(),
+                    omega_work_index::project_planning_view(
+                        &surface.fixture,
+                        PlanningViewKind::List,
+                        &query,
+                    )
+                    .rows
+                    .into_iter()
+                    .map(|row| row.issue_id)
+                    .collect(),
+                ));
+            }
+            RestorablePlanningState {
+                project_id: surface.project_id.clone(),
+                selected_issue_id: surface.selected_issue_id.clone(),
+                scene: restored_scene,
+                saved_view: surface.saved_view,
+                filter: surface.filter,
+                group: surface.group,
+                sort: surface.sort,
+                user_saved_views: surface.user_saved_views.views.clone(),
+                active_user_saved_view: surface.user_saved_views.active,
+                selected_user_saved_view_id: surface.user_saved_views.selected_id.clone(),
+                query: surface.planning_query(),
+                rows_by_renderer,
+                rendered_rows_by_renderer,
+                searched_rows,
+                source_revision: projection.source_revision,
+                event_cursor: projection.event_cursor,
+            }
+        })
+    }
+
+    #[gpui::test]
+    async fn planning_filter_group_sort_and_saved_views_restore_identically_across_restart(
+        cx: &mut TestAppContext,
+    ) {
+        crate::test_support::init_test(cx);
+        let (surface, mut first_run) = open_dogfood_surface(cx, load_dogfood_fixture());
+
+        surface.update(&mut first_run, |surface, cx| {
+            surface.set_saved_view(PlanningSavedView::Blocked, cx);
+            surface.set_filter(PlanningFilter::Open, cx);
+            surface.cycle_group(cx);
+            surface.cycle_group(cx);
+            surface.cycle_sort(cx);
+        });
+        first_run.run_until_parked();
+        surface.update_in(&mut first_run, |surface, window, cx| {
+            surface.view_name_editor.update(cx, |editor, cx| {
+                editor.set_text("Blocked triage", window, cx)
+            });
+            surface.create_user_view(cx);
+        });
+        first_run.run_until_parked();
+        surface.update_in(&mut first_run, |surface, window, cx| {
+            surface.view_name_editor.update(cx, |editor, cx| {
+                editor.set_text("Release watch", window, cx)
+            });
+            surface.create_user_view(cx);
+        });
+        first_run.run_until_parked();
+
+        let second_issue_id = project_issue_ids(&surface, &mut first_run)
+            .get(1)
+            .cloned()
+            .expect("the development Project must carry more than one Work item");
+        surface.update(&mut first_run, |surface, cx| {
+            surface.select_issue(second_issue_id.clone(), true, cx);
+        });
+        first_run.run_until_parked();
+
+        let before = capture_restorable_state(&surface, &mut first_run);
+        // Exact values, not merely "different from the default": a surface that
+        // restores something is not the same as a surface that restores what was
+        // saved.
+        assert_eq!(before.saved_view, PlanningSavedView::Blocked);
+        assert_eq!(before.filter, PlanningFilter::Open);
+        assert_eq!(before.group, PlanningGroup::Project);
+        assert_eq!(before.sort, PlanningSort::Priority);
+        // The query the renderers actually consume must mirror that state. A
+        // query that ignores it stays deterministic across a restart while
+        // showing the wrong Work in both runs.
+        assert_eq!(before.query.saved_view, before.saved_view);
+        assert_eq!(before.query.filter, before.filter);
+        assert_eq!(before.query.group, before.group);
+        assert_eq!(before.query.sort, before.sort);
+        assert_eq!(before.query.project_id, before.project_id);
+        assert_eq!(
+            before.user_saved_views.len(),
+            2,
+            "both local Views must exist before the restart"
+        );
+        assert!(
+            before
+                .rows_by_renderer
+                .iter()
+                .all(|(_, rows)| !rows.is_empty()),
+            "the pre-restart query must still project Work in every renderer"
+        );
+        drop(first_run);
+
+        let (restored, mut second_run) = open_dogfood_surface(cx, load_dogfood_fixture());
+        let after = capture_restorable_state(&restored, &mut second_run);
+
+        assert_eq!(
+            after, before,
+            "the planning query, saved Views, and projected Work did not survive the restart"
+        );
+        assert_eq!(after.query.sort, PlanningSort::Priority);
+        assert_eq!(after.query.group, PlanningGroup::Project);
+        assert_eq!(after.query.saved_view, PlanningSavedView::Blocked);
+        assert_eq!(after.query.filter, PlanningFilter::Open);
+    }
+
+    #[gpui::test]
+    async fn pointer_activation_keeps_the_planning_surface_operable_by_keyboard(
+        cx: &mut TestAppContext,
+    ) {
+        crate::test_support::init_test(cx);
+        let (surface, mut cx) = open_dogfood_surface(cx, load_dogfood_fixture());
+        let ordered_issue_ids = project_issue_ids(&surface, &mut cx);
+        let first_issue_id = ordered_issue_ids[0].clone();
+
+        reset_surface(&surface, &mut cx, DogfoodScene::List, &first_issue_id);
+        let (target_index, target_issue_id) =
+            reachable_row_target(&mut cx, "list", &ordered_issue_ids)
+                .expect("the Work list rendered no pointer-reachable row");
+
+        for _ in 0..target_index {
+            cx.simulate_keystrokes("down");
+        }
+        cx.simulate_keystrokes("enter");
+        cx.run_until_parked();
+        let keyboard_only = surface_outcome(&surface, &mut cx);
+        assert_eq!(keyboard_only.selected_issue_id, target_issue_id);
+        assert_eq!(keyboard_only.scene, DogfoodScene::Issue);
+
+        // Activate the same Work with the pointer, then keep driving the surface
+        // from the keyboard without restoring focus by hand. A window that drops
+        // focus on click silently disables Up/Down, J/K, Enter, and the scene
+        // digits for every later keystroke.
+        reset_surface(&surface, &mut cx, DogfoodScene::List, &first_issue_id);
+        cx.simulate_click_selector(&work_row_debug_selector("list", &target_issue_id))
+            .expect("the Work row must be clickable");
+        cx.run_until_parked();
+        surface.update_in(&mut cx, |surface, window, _cx| {
+            assert!(
+                surface.focus_handle.is_focused(window),
+                "a Work row click released keyboard control of the planning surface"
+            );
+        });
+
+        cx.simulate_keystrokes("2");
+        cx.run_until_parked();
+        assert_eq!(
+            surface.update(&mut cx, |surface, _cx| surface.scene),
+            DogfoodScene::List,
+            "the scene digits stopped working after a Work row click"
+        );
+        surface.update(&mut cx, |surface, cx| {
+            surface.selected_issue_id = first_issue_id.clone();
+            cx.notify();
+        });
+        cx.run_until_parked();
+        for _ in 0..target_index {
+            cx.simulate_keystrokes("down");
+        }
+        cx.simulate_keystrokes("enter");
+        cx.run_until_parked();
+        assert_eq!(
+            surface_outcome(&surface, &mut cx),
+            keyboard_only,
+            "the keyboard reached different Work after a pointer activation"
+        );
+
+        reset_surface(&surface, &mut cx, DogfoodScene::List, &first_issue_id);
+        cx.simulate_click_selector(&scene_debug_selector(DogfoodScene::Board))
+            .expect("the Board tab must be clickable");
+        cx.run_until_parked();
+        surface.update_in(&mut cx, |surface, window, _cx| {
+            assert!(
+                surface.focus_handle.is_focused(window),
+                "a scene tab click released keyboard control of the planning surface"
+            );
+        });
+        cx.simulate_keystrokes("5");
+        cx.run_until_parked();
+        assert_eq!(
+            surface.update(&mut cx, |surface, _cx| surface.scene),
+            DogfoodScene::Timeline,
+            "the scene digits stopped working after a scene tab click"
+        );
     }
 }
 use db::kvp::KeyValueStore;
