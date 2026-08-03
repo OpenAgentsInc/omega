@@ -127,6 +127,14 @@ impl DogfoodFixtureAdapter {
         projection.validate()?;
         Ok(Some(projection))
     }
+
+    #[cfg(any(test, feature = "test-support"))]
+    pub fn load_for_tests() -> Result<DogfoodFixtureProjection, DogfoodFixtureError> {
+        let projection: DogfoodFixtureProjection = serde_json::from_slice(FIXTURE_BYTES)
+            .map_err(|error| DogfoodFixtureError::InvalidJson(error.to_string()))?;
+        projection.validate()?;
+        Ok(projection)
+    }
 }
 
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]

@@ -22,6 +22,7 @@ test-support = [
     "language/test-support",
     "language_model/test-support",
     "dep:omega_workbench_harness",
+    "omega_work_index/test-support",
     "project_panel/test-support",
     "reqwest_client",
     "remote_connection/test-support",

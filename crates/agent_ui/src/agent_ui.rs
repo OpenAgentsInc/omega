@@ -34,6 +34,7 @@ pub mod omega_audience_control;
 pub mod omega_community_control;
 pub mod omega_composer_executor_menu;
 pub mod omega_device_enrollment_controller;
+pub mod omega_dogfood_surface;
 pub mod omega_executor_disclosure;
 pub mod omega_executor_selector;
 pub mod omega_executor_warmth;

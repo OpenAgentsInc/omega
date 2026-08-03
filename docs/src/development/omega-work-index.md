@@ -46,6 +46,35 @@ OpenAgents extension envelope marks the complete graph as simulated, lists the
 lost authority, and grants no commands. Screen composition over this one graph
 is owned by OAW-016; the fixture module itself does not add navigation.
 
+When the development fixture gate is active, Omega opens the `Omega v0.2.0`
+Project with omega#214 selected. A **DEV MOCKS** section in the sidebar contains
+the dogfood Project and the adjacent Security Work Project. The section, its
+routes, counts, tab, and selection do not exist when the gate is inactive.
+Restoring either fixture Project route without the gate normalizes to My Work
+when production Work is admitted, or to the normal Thread destination when it
+is not.
+
+One retained surface reads the fixture graph for Overview, List, Board, Issue,
+Session, and Review scenes. It does not make screen-specific copies. Project
+switching, Issue selection, typed blockers, milestones, progress, release-stage
+planning, source coordinates, and Inspector identity all derive from that same
+graph. Session and Review show explicit empty projections because the accepted
+snapshot has no public delegate, session, diff, pull request, or review. The
+screen repeats the development-mock boundary and fixture provenance instead of
+creating a plausible live state.
+
+The development surface stores only its Project, Issue, and scene selection.
+It validates those IDs against the checked fixture before restoration and
+defaults to omega#214 when no valid state exists. A build without the fixture
+gate does not read or render that development-only selection.
+
+Use Up/Down or J/K to change the selected Issue and Enter to open its Issue
+scene. Keys 1, 2, and 3 open Overview, List, and Board. Keys 4 and 5 open the
+empty Session and Review scenes. The same controls are available as standard
+focusable pointer buttons with accessible labels. Blocked rows use an icon and
+text; completed rows use a check icon and progress dots, so color is not the
+only cue.
+
 ## Preserved source facts {#preserved-source-facts}
 
 Every row uses the generated `WorkSummary` type. Omega preserves the exact

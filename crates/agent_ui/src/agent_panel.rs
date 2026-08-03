@@ -42,6 +42,7 @@ use crate::ManageProfiles;
 use crate::agent_connection_store::AgentConnectionStore;
 use crate::completion_provider::{AgentContextSelection, AgentContextSource};
 use crate::forensics_work_projection::{ForensicsWorkProjection, project_forensics_work};
+use crate::omega_dogfood_surface::{DogfoodSurface, DogfoodSurfaceEvent};
 use crate::omega_work_detail_surface::{
     WorkDelegationCandidate, WorkDetailSurface, WorkDetailSurfaceEvent,
 };
@@ -118,9 +119,10 @@ use omega_work_detail::{
     snapshot_from_index_item, write_journal_value, write_participation_journal,
 };
 use omega_work_index::{
+    DOGFOOD_PROJECT_ID, DogfoodFixtureAdapter, DogfoodFixtureGate, DogfoodFixtureProjection,
     EFFECT_ADAPTER_ID, FORENSICS_ADAPTER_ID, NativeForensicsPhase, NativeForensicsRecord,
-    NativeThreadLifecycle, NativeThreadRecord, THREAD_ADAPTER_ID, WorkIndex, WorkIndexItem,
-    WorkIndexView, WorkSourceEntity, adapt_forensics, adapt_thread,
+    NativeThreadLifecycle, NativeThreadRecord, SECURITY_PROJECT_ID, THREAD_ADAPTER_ID, WorkIndex,
+    WorkIndexItem, WorkIndexView, WorkSourceEntity, adapt_forensics, adapt_thread,
 };
 use omega_workbench_state::{
     DomainBlockRoute, EntityNavigationHistory as OmegaNavigationHistory, EntityRoute as OmegaRoute,
@@ -3376,6 +3378,9 @@ pub struct AgentPanel {
     _work_index_thread_observation: Subscription,
     _work_index_effect_refresh: Option<Task<()>>,
     _work_index_persist: Option<Task<()>>,
+    dogfood_fixture: Option<DogfoodFixtureProjection>,
+    dogfood_surface: Option<Entity<DogfoodSurface>>,
+    _dogfood_surface_subscription: Option<Subscription>,
     omega_work_detail: Option<Entity<WorkDetailSurface>>,
     _omega_work_detail_subscription: Option<Subscription>,
     _omega_work_detail_load: Option<Task<()>>,
@@ -3778,6 +3783,30 @@ impl AgentPanel {
                         panel.restore_new_draft(new_draft_thread_id, window, cx);
                     }
                     panel.omega_navigation_history = restored_navigation;
+                    let restored_fixture_project = panel
+                        .omega_navigation_history
+                        .current()
+                        .is_some_and(|route| {
+                            matches!(
+                                route,
+                                OmegaRoute::Project(project_ref)
+                                    if project_ref.as_str() == DOGFOOD_PROJECT_ID
+                                        || project_ref.as_str() == SECURITY_PROJECT_ID
+                            )
+                        });
+                    if panel.dogfood_fixture.is_none() && restored_fixture_project {
+                        panel.omega_navigation_history = OmegaNavigationHistory::default();
+                        if panel.work_index.admitted() {
+                            panel.omega_navigation_history.push(OmegaRoute::work_index(
+                                WorkIndexRoute::MyWork,
+                            ));
+                        }
+                    } else if panel.dogfood_fixture.is_some()
+                        && panel.omega_navigation_history.current().is_none()
+                        && let Ok(route) = OmegaRoute::project(DOGFOOD_PROJECT_ID)
+                    {
+                        panel.omega_navigation_history.push(route);
+                    }
                     if omega_zero_base::is_primary_interface() {
                         panel.serialize(cx);
                     }
@@ -3985,6 +4014,14 @@ impl AgentPanel {
                 WorkIndex::default()
             }
         };
+        let dogfood_fixture =
+            match DogfoodFixtureAdapter::load(DogfoodFixtureGate::from_process_environment()) {
+                Ok(fixture) => fixture,
+                Err(error) => {
+                    log::warn!("could not load the v0.2.0 development fixture: {error}");
+                    None
+                }
+            };
 
         cx.on_release(|this, cx| {
             this.dismiss_all_terminal_notifications(cx);
@@ -4085,6 +4122,9 @@ impl AgentPanel {
             _work_index_thread_observation,
             _work_index_effect_refresh: None,
             _work_index_persist: None,
+            dogfood_fixture,
+            dogfood_surface: None,
+            _dogfood_surface_subscription: None,
             omega_work_detail: None,
             _omega_work_detail_subscription: None,
             _omega_work_detail_load: None,
@@ -16803,6 +16843,17 @@ impl AgentPanel {
                     RouteUnavailableReason::Unknown,
                 )),
             OmegaRoute::Settings => RouteAvailability::Available,
+            OmegaRoute::Project(project_ref)
+                if self.dogfood_fixture.as_ref().is_some_and(|fixture| {
+                    fixture
+                        .graph
+                        .projects
+                        .iter()
+                        .any(|project| project.id == project_ref.as_str())
+                }) =>
+            {
+                RouteAvailability::Available
+            }
             OmegaRoute::Project(_)
             | OmegaRoute::Document(_)
             | OmegaRoute::Decision(_)
@@ -16910,10 +16961,12 @@ impl AgentPanel {
                     self.open_omega_work_detail(item, WorkPresentation::Issue, window, cx)
                 })
             }
-            OmegaRoute::Project(_)
-            | OmegaRoute::Document(_)
-            | OmegaRoute::Decision(_)
-            | OmegaRoute::AgentSession(_) => false,
+            OmegaRoute::Project(project_ref) => {
+                self.open_dogfood_project(project_ref.as_str(), false, window, cx)
+            }
+            OmegaRoute::Document(_) | OmegaRoute::Decision(_) | OmegaRoute::AgentSession(_) => {
+                false
+            }
         }
     }
 
@@ -17127,6 +17180,69 @@ impl AgentPanel {
             }
         }
         surface.focus_handle(cx).focus(window, cx);
+        cx.notify();
+        true
+    }
+
+    fn open_dogfood_project(
+        &mut self,
+        project_id: &str,
+        push_history: bool,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> bool {
+        let Some(fixture) = self.dogfood_fixture.clone() else {
+            return false;
+        };
+        if !fixture
+            .graph
+            .projects
+            .iter()
+            .any(|project| project.id == project_id)
+        {
+            return false;
+        }
+        let route = match OmegaRoute::project(project_id.to_string()) {
+            Ok(route) => route,
+            Err(error) => {
+                log::warn!("could not construct the development Project route: {error}");
+                return false;
+            }
+        };
+        if push_history && self.omega_navigation_history.push(route) {
+            self.serialize(cx);
+        }
+        self.omega_settings = None;
+        self.omega_unavailable_route = None;
+        self.clear_omega_work_detail();
+        if let Err(error) = self.workbench_shell.collapse_dock() {
+            log::warn!(
+                "failed to collapse a work surface before the development Project: {error:#}"
+            );
+        }
+        let surface = if let Some(surface) = self.dogfood_surface.as_ref() {
+            surface.clone()
+        } else {
+            let surface = cx.new(|cx| DogfoodSurface::new(fixture, cx));
+            self._dogfood_surface_subscription = Some(cx.subscribe_in(
+                &surface,
+                window,
+                |this, _surface, event, _window, cx| match event.clone() {
+                    DogfoodSurfaceEvent::SelectionChanged { project_id, .. } => {
+                        if let Ok(route) = OmegaRoute::project(project_id)
+                            && this.omega_navigation_history.push(route)
+                        {
+                            this.serialize(cx);
+                        }
+                        cx.notify();
+                    }
+                },
+            ));
+            self.dogfood_surface = Some(surface.clone());
+            surface
+        };
+        surface.update(cx, |surface, cx| surface.select_project(project_id, cx));
+        surface.read(cx).focus_handle(cx).focus(window, cx);
         cx.notify();
         true
     }
@@ -18000,6 +18116,25 @@ impl AgentPanel {
             .omega_work_detail
             .clone()
             .filter(|_| self.omega_settings.is_none() && self.omega_unavailable_route.is_none());
+        let active_dogfood_project = self
+            .omega_navigation_history
+            .current()
+            .and_then(|route| match route {
+                OmegaRoute::Project(project_ref) => Some(project_ref.as_str().to_string()),
+                _ => None,
+            })
+            .filter(|project_id| {
+                self.dogfood_fixture.as_ref().is_some_and(|fixture| {
+                    fixture
+                        .graph
+                        .projects
+                        .iter()
+                        .any(|project| project.id == *project_id)
+                })
+            });
+        let active_dogfood_surface = active_dogfood_project
+            .as_ref()
+            .and_then(|_| self.dogfood_surface.as_ref().cloned());
         let workbench_forensics_selected = self
             .workbench_shell
             .projection()
@@ -18038,6 +18173,7 @@ impl AgentPanel {
         })
         .flatten();
         let main_content = unavailable_content
+            .or_else(|| active_dogfood_surface.map(|surface| surface.into_any_element()))
             .or_else(|| active_work_index_surface.map(|surface| surface.into_any_element()))
             .or_else(|| {
                 active_work_detail
@@ -18220,6 +18356,44 @@ impl AgentPanel {
                             .truncate()
                             .child(surface.read(cx).title().to_string()),
                     )
+                    .into_any_element(),
+            )
+        } else if let Some(project_id) = active_dogfood_project.as_ref() {
+            let title = self
+                .dogfood_fixture
+                .as_ref()
+                .and_then(|fixture| {
+                    fixture
+                        .graph
+                        .projects
+                        .iter()
+                        .find(|project| project.id == *project_id)
+                })
+                .map_or("Development Project", |project| project.name.as_str());
+            Some(
+                div()
+                    .id("omega-dogfood-project-tab")
+                    .debug_selector(|| "omega.omega.dogfood-project-tab.active".into())
+                    .w(px(TAB_WIDTH))
+                    .h(px(28.))
+                    .flex_none()
+                    .flex()
+                    .items_center()
+                    .gap(px(6.))
+                    .px(px(8.))
+                    .rounded(px(8.))
+                    .bg(selected_background)
+                    .border_1()
+                    .border_color(colors.border_selected)
+                    .text_size(px(12.))
+                    .text_color(text)
+                    .occlude()
+                    .child(
+                        Icon::new(IconName::Folder)
+                            .size(IconSize::Small)
+                            .color(Color::Warning),
+                    )
+                    .child(div().min_w_0().flex_1().truncate().child(title.to_string()))
                     .into_any_element(),
             )
         } else if omega_forensics_selected {
@@ -18725,6 +18899,58 @@ impl AgentPanel {
         } else {
             Vec::new()
         };
+        let dogfood_project_rows = self
+            .dogfood_fixture
+            .as_ref()
+            .map(|fixture| {
+                fixture
+                    .graph
+                    .projects
+                    .iter()
+                    .map(|project| {
+                        let project_id = project.id.clone();
+                        let selected =
+                            active_dogfood_project.as_deref() == Some(project.id.as_str());
+                        let (padding_x, padding_y) = omega_sidebar_row_padding(selected);
+                        h_flex()
+                            .id(project.id.clone())
+                            .w_full()
+                            .px(px(padding_x))
+                            .py(px(padding_y))
+                            .gap(px(8.))
+                            .rounded(px(8.))
+                            .cursor_pointer()
+                            .role(gpui::Role::Button)
+                            .tab_index(0isize)
+                            .aria_label(format!("Open development mock Project {}", project.name))
+                            .when(selected, |row| {
+                                row.bg(selected_background)
+                                    .border_1()
+                                    .border_color(colors.border_selected)
+                            })
+                            .when(!selected, |row| {
+                                row.hover(move |style| style.bg(hover_background))
+                            })
+                            .on_click(cx.listener(move |this, _, window, cx| {
+                                this.open_dogfood_project(&project_id, true, window, cx);
+                            }))
+                            .child(
+                                Icon::new(IconName::Folder)
+                                    .size(IconSize::Small)
+                                    .color(Color::Warning),
+                            )
+                            .child(
+                                div()
+                                    .min_w_0()
+                                    .flex_1()
+                                    .truncate()
+                                    .child(project.name.clone()),
+                            )
+                            .into_any_element()
+                    })
+                    .collect::<Vec<_>>()
+            })
+            .unwrap_or_default();
 
         let sidebar = div()
             .id("omega-sidebar")
@@ -18782,6 +19008,30 @@ impl AgentPanel {
                         .child(Icon::new(IconName::Folder).size(IconSize::Small))
                         .child("Open Folder"),
                 )
+            })
+            .when(!dogfood_project_rows.is_empty(), |sidebar| {
+                sidebar
+                    .child(
+                        h_flex()
+                            .mt(px(10.))
+                            .h(px(28.))
+                            .px(px(8.))
+                            .items_center()
+                            .gap_2()
+                            .child(
+                                div()
+                                    .text_size(px(11.))
+                                    .font_weight(gpui::FontWeight::MEDIUM)
+                                    .text_color(text_placeholder)
+                                    .child("DEV MOCKS"),
+                            )
+                            .child(
+                                Icon::new(IconName::Warning)
+                                    .size(IconSize::XSmall)
+                                    .color(Color::Warning),
+                            ),
+                    )
+                    .children(dogfood_project_rows)
             })
             .when(work_index_admitted, |sidebar| {
                 sidebar
