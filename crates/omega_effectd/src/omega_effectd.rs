@@ -517,6 +517,219 @@ mod tests {
         PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("fixtures/fake_effectd.mjs")
     }
 
+    fn pre_all_work_fixture_path() -> PathBuf {
+        PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("fixtures/pre_all_work_effectd.mjs")
+    }
+
+    fn work_command_request() -> all_work_contract::WorkCommandExecuteRequest {
+        all_work_contract::WorkCommandExecuteRequest {
+            intent_ref: all_work_contract::IntentRef::try_from("intent:fixture:assign".to_string())
+                .expect("intent ref"),
+            idempotency_key: all_work_contract::IdempotencyKey::try_from(
+                "fixture-work-command-assign".to_string(),
+            )
+            .expect("idempotency key"),
+            expected_revision: all_work_contract::SafeInteger(1),
+            effective_principal_ref: all_work_contract::PrincipalRef::try_from(
+                "principal:omega:owner".to_string(),
+            )
+            .expect("principal ref"),
+            organization_ref: all_work_contract::OrganizationRef::try_from(
+                "organization:openagents".to_string(),
+            )
+            .expect("organization ref"),
+            capability_ref: all_work_contract::CapabilityRef::try_from(
+                "capability:work-command:execute".to_string(),
+            )
+            .expect("capability ref"),
+            work_ref: all_work_contract::WorkRef::try_from("work:fixture:1".to_string())
+                .expect("Work ref"),
+            occurred_at: all_work_contract::IsoTimestamp::try_from(
+                "2026-08-03T11:00:00.000Z".to_string(),
+            )
+            .expect("timestamp"),
+            command: all_work_contract::WorkCommand::Assign {
+                assignee: all_work_contract::HumanAssignee {
+                    kind: all_work_contract::AssigneeKind::Human,
+                    principal_ref: all_work_contract::PrincipalRef::try_from(
+                        "principal:omega:owner".to_string(),
+                    )
+                    .expect("assignee ref"),
+                },
+            },
+        }
+    }
+
+    /// omega#223. A component that predates the All Work boundary must be
+    /// diagnosed once, at the seam, and named for what it is.
+    ///
+    /// This is the exact behaviour of the packaged component in the shipped
+    /// release candidate: `initialize` succeeds, the `allWork` negotiation is
+    /// silently dropped, and every All Work method is unknown. Before this
+    /// gate each feature independently surfaced a generic `unknown_method`,
+    /// which reads as a defect in the calling feature rather than as a
+    /// component build with no All Work surface at all.
+    #[test]
+    fn a_component_without_the_all_work_boundary_is_refused_by_name() {
+        smol::block_on(async {
+            let root = tempdir().expect("tempdir");
+            let mut supervisor = OmegaEffectdSupervisor::new(OmegaEffectdSupervisorOptions {
+                data_root: root.path().to_path_buf(),
+                command: fixture_command(&pre_all_work_fixture_path()),
+                initial_generation: 1,
+                request_timeout: Duration::from_secs(5),
+            });
+
+            let initialized = supervisor.start().await.expect("start");
+            assert!(
+                initialized.all_work.is_none(),
+                "the fixture must reproduce a component that drops the All Work negotiation"
+            );
+            assert!(
+                supervisor.negotiated_all_work_capabilities().is_none(),
+                "a component with no All Work negotiation must expose no capabilities"
+            );
+            assert!(
+                supervisor.health().await.is_ok(),
+                "the component itself is healthy; only the All Work surface is absent"
+            );
+
+            let error = supervisor
+                .read_planning_graph(all_work_contract::PlanningGraphReadRequest {
+                    after_revision: None,
+                })
+                .await
+                .expect_err("planning.graph.read cannot be served by this component");
+            assert!(
+                matches!(
+                    error,
+                    crate::SupervisorError::AllWorkBoundaryAbsent {
+                        method: "planning.graph.read"
+                    }
+                ),
+                "expected a named absent-boundary refusal, got {error:?}"
+            );
+            let message = error.to_string();
+            assert!(
+                message.contains("does not implement the All Work boundary")
+                    && message.contains("planning.graph.read"),
+                "the refusal must name both the absent boundary and the method: {message}"
+            );
+            assert!(
+                !message.contains("Unknown method"),
+                "a generic unknown-method error is the defect this gate replaces: {message}"
+            );
+
+            let command_error = supervisor
+                .execute_work_command(work_command_request())
+                .await
+                .expect_err("work.command.execute cannot be served by this component");
+            assert!(
+                matches!(
+                    command_error,
+                    crate::SupervisorError::AllWorkBoundaryAbsent {
+                        method: "work.command.execute"
+                    }
+                ),
+                "expected a named absent-boundary refusal, got {command_error:?}"
+            );
+
+            supervisor.stop().await.expect("stop");
+        });
+    }
+
+    /// omega#223. Restarting must not let a previous generation's negotiation
+    /// authorize the next one.
+    #[test]
+    fn a_stopped_supervisor_forgets_the_previous_all_work_negotiation() {
+        smol::block_on(async {
+            let root = tempdir().expect("tempdir");
+            let mut supervisor = OmegaEffectdSupervisor::new(OmegaEffectdSupervisorOptions {
+                data_root: root.path().to_path_buf(),
+                command: fixture_command(&fixture_path()),
+                initial_generation: 1,
+                request_timeout: Duration::from_secs(5),
+            });
+            supervisor.start().await.expect("start");
+            assert!(
+                supervisor
+                    .negotiated_all_work_capabilities()
+                    .expect("a negotiated All Work capability set")
+                    .contains(&all_work_contract::ProtocolCapability::PlanningGraphRead),
+                "the fake component grants planning.graph.read"
+            );
+            supervisor.stop().await.expect("stop");
+            assert!(
+                supervisor.negotiated_all_work_capabilities().is_none(),
+                "a stopped component must not leave its capabilities behind"
+            );
+        });
+    }
+
+    /// omega#223. A component that negotiates All Work but withholds one
+    /// capability must be refused by the withheld capability's own name, not
+    /// reported as a missing boundary.
+    #[test]
+    fn a_withheld_capability_is_refused_by_that_capabilitys_name() {
+        smol::block_on(async {
+            let root = tempdir().expect("tempdir");
+            let mut supervisor = OmegaEffectdSupervisor::new(OmegaEffectdSupervisorOptions {
+                data_root: root.path().to_path_buf(),
+                command: fixture_command(&fixture_path()),
+                initial_generation: 1,
+                request_timeout: Duration::from_secs(5),
+            });
+            supervisor.start().await.expect("start");
+            let negotiated = supervisor
+                .negotiated_all_work_capabilities()
+                .expect("a negotiated All Work capability set")
+                .to_vec();
+            assert!(
+                !negotiated
+                    .contains(&all_work_contract::ProtocolCapability::WorkroomActivityPublish),
+                "the fake component does not implement workroom.activity.publish"
+            );
+            assert!(
+                negotiated
+                    .contains(&all_work_contract::ProtocolCapability::WorkroomActivityDeliver),
+                "the fake component does implement workroom.activity.deliver"
+            );
+
+            let error = supervisor
+                .publish_signed_workroom(all_work_contract::SignedWorkroomPublishRequest {
+                    idempotency_key: all_work_contract::IdempotencyKey::try_from(
+                        "fixture-workroom-publish-probe".to_string(),
+                    )
+                    .expect("idempotency key"),
+                    effective_principal_ref: all_work_contract::PrincipalRef::try_from(
+                        "principal:omega:owner".to_string(),
+                    )
+                    .expect("principal ref"),
+                    capability_ref: all_work_contract::CapabilityRef::try_from(
+                        "capability:workroom-activity:publish".to_string(),
+                    )
+                    .expect("capability ref"),
+                    event_ref: all_work_contract::SignedProjectionEventRef::try_from(
+                        "signed-projection-event:omega:probe".to_string(),
+                    )
+                    .expect("event ref"),
+                })
+                .await
+                .expect_err("workroom.activity.publish was not negotiated");
+            assert!(
+                matches!(
+                    &error,
+                    crate::SupervisorError::AllWorkCapabilityWithheld {
+                        method: "workroom.activity.publish",
+                        capability,
+                    } if capability == "workroom.activity.publish"
+                ),
+                "expected a named withheld-capability refusal, got {error:?}"
+            );
+            supervisor.stop().await.expect("stop");
+        });
+    }
+
     #[test]
     fn missing_packaged_component_fails_closed_without_fixture_fallback() {
         let root = tempdir().expect("tempdir");

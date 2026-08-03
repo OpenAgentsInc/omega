@@ -1,0 +1,193 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+# omega#223. Prove that a *packaged* omega-effectd component actually serves
+# the All Work boundary that Omega's client seam requests.
+#
+# Why this exists: the client seam and the packaged service are pinned
+# independently. `crates/omega_effectd` asks `initialize` for eighteen All Work
+# capabilities; `script/bundle-omega-rc` pins whichever omega-effectd release
+# asset was current when the release candidate was cut. Nothing reconciled the
+# two. In the shipped release candidate the packaged component predated the
+# whole All Work boundary: `initialize` succeeded, the `allWork` negotiation
+# Omega sent was silently discarded, and every All Work method answered
+# `unknown_method`. Every installed All Work journey was therefore unreachable
+# for a reason that no test and no build gate could see.
+#
+# This script talks the real framed protocol to the real packaged component and
+# fails when the component cannot serve the boundary.
+#
+# Usage:
+#   script/prove-packaged-all-work-surface [component-or-app-path]
+#
+# Default target is the installed application at /Applications/Omega.app.
+# A path to an .app bundle, to the component root, or to the component's
+# `bin/omega-effectd` wrapper are all accepted.
+
+cd "$(dirname "$0")/.."
+
+target="${1:-/Applications/Omega.app}"
+
+if [[ -d "${target}/Contents/Resources/omega-effectd" ]]; then
+  component_root="${target}/Contents/Resources/omega-effectd"
+elif [[ -f "${target}/component-manifest.json" ]]; then
+  component_root="${target}"
+elif [[ -f "${target}" && "$(basename "${target}")" == "omega-effectd" ]]; then
+  component_root="$(cd "$(dirname "${target}")/.." && pwd)"
+else
+  echo "FAIL: no packaged omega-effectd component at ${target}" >&2
+  exit 1
+fi
+
+wrapper="${component_root}/bin/omega-effectd"
+manifest="${component_root}/component-manifest.json"
+
+if [[ ! -x "${wrapper}" ]]; then
+  echo "FAIL: packaged component has no executable at ${wrapper}" >&2
+  exit 1
+fi
+
+echo "component: ${component_root}"
+if [[ -f "${manifest}" ]]; then
+  python3 - "${manifest}" <<'PY'
+import json, sys
+manifest = json.load(open(sys.argv[1]))
+source = manifest.get("source", {})
+print(f"  package        {manifest.get('package')}")
+print(f"  serviceVersion {manifest.get('serviceVersion')}")
+print(f"  source commit  {source.get('commit')}")
+PY
+fi
+
+work_root="$(mktemp -d)"
+trap 'rm -rf "${work_root}"' EXIT
+
+OPENAGENTS_OMEGA_EFFECTD_DATA_ROOT="${work_root}/data" \
+  python3 - "${wrapper}" <<'PY'
+import json, os, subprocess, sys, time
+
+wrapper = sys.argv[1]
+data_root = os.environ["OPENAGENTS_OMEGA_EFFECTD_DATA_ROOT"]
+os.makedirs(data_root, exist_ok=True)
+
+# Exactly the set `OmegaEffectdSupervisor::start` requests. Keep these in step
+# with `crates/omega_effectd/src/supervisor.rs`.
+REQUESTED = [
+    "work.index.read",
+    "work.index.subscribe",
+    "work.snapshot.read",
+    "planning.graph.read",
+    "repository.claim.read",
+    "repository.claim.execute",
+    "workroom.activity.read",
+    "workroom.activity.prepare",
+    "workroom.activity.commit",
+    "workroom.activity.enqueue",
+    "workroom.activity.deliver",
+    "workroom.activity.publish",
+    "work.command.execute",
+    "work.cutover.read",
+    "work.cutover.execute",
+    "organization.membership.read",
+    "strict_bug.candidate.read",
+    "strict_bug.candidate.execute",
+]
+
+child = subprocess.Popen(
+    [wrapper],
+    stdin=subprocess.PIPE,
+    stdout=subprocess.PIPE,
+    stderr=subprocess.PIPE,
+    text=True,
+)
+
+
+def send(frame):
+    child.stdin.write(json.dumps(frame) + "\n")
+    child.stdin.flush()
+
+
+send(
+    {
+        "schema": "openagents.omega.effectd.v1",
+        "kind": "request",
+        "id": "initialize",
+        "generation": 1,
+        "method": "initialize",
+        "params": {
+            "generation": 1,
+            "allWork": {
+                "supportedVersions": ["omega-effectd.v2", "omega-effectd.v1"],
+                "requestedCapabilities": REQUESTED,
+            },
+        },
+    }
+)
+# One probe method, so an absent boundary is visible on the wire and not only
+# in the negotiation.
+send(
+    {
+        "schema": "openagents.omega.effectd.v1",
+        "kind": "request",
+        "id": "probe",
+        "generation": 1,
+        "method": "planning.graph.read",
+        "params": {"afterRevision": None},
+    }
+)
+child.stdin.close()
+
+frames = {}
+deadline = time.time() + 30
+while time.time() < deadline and len(frames) < 2:
+    line = child.stdout.readline()
+    if not line:
+        break
+    try:
+        frame = json.loads(line)
+    except json.JSONDecodeError:
+        continue
+    if frame.get("kind") == "response":
+        frames[frame.get("id")] = frame
+
+child.kill()
+
+initialize = frames.get("initialize")
+if initialize is None or not initialize.get("ok"):
+    print("FAIL: the packaged component did not answer initialize")
+    raise SystemExit(1)
+
+negotiated = (initialize.get("result") or {}).get("allWork")
+probe = frames.get("probe") or {}
+probe_error = (probe.get("error") or {}).get("code")
+
+if negotiated is None:
+    print()
+    print("FAIL: the packaged component negotiated no All Work boundary at all.")
+    print("      `initialize` succeeded and discarded the allWork request block.")
+    print(f"      planning.graph.read answered: {probe_error!r}")
+    print("      Every All Work journey is unreachable against this component.")
+    print("      Repin script/bundle-omega-rc to a component release built from")
+    print("      an OpenAgents commit that carries the All Work boundary.")
+    raise SystemExit(1)
+
+granted = negotiated.get("capabilities") or []
+print(f"  selectedVersion {negotiated.get('selectedVersion')}")
+print(f"  contractRef     {negotiated.get('contractRef')}")
+missing = [capability for capability in REQUESTED if capability not in granted]
+for capability in REQUESTED:
+    print(f"  {'grant  ' if capability in granted else 'WITHHELD'} {capability}")
+
+if probe.get("ok") is not True and probe_error == "unknown_method":
+    print()
+    print("FAIL: planning.graph.read was negotiated but answered unknown_method.")
+    raise SystemExit(1)
+
+if missing:
+    print()
+    print(f"FAIL: {len(missing)} requested capability(ies) were withheld: {missing}")
+    raise SystemExit(1)
+
+print()
+print("PASS: the packaged component serves every requested All Work capability.")
+PY

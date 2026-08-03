@@ -20,13 +20,42 @@ GPUI is not run authority.
 | Version | `0.1.0` |
 | Pack SHA-256 | `4cc1cb2e5d71ff8af6f730248871ee779488a991f21a848880e885331ef31831` |
 | Protocol | `openagents.omega.effectd.v1` |
-| All Work profile | generated `omega-effectd.v2` Work Index, snapshot, and planning graph reads |
+| All Work profile requested by the client | generated `omega-effectd.v2` Work Index, snapshot, planning graph, claim, Workroom, command, cutover, membership, and strict-bug capabilities |
+| All Work profile served by the pinned runtime | none — see the packaging pin below |
 | Omega crate | `crates/omega_effectd` |
-| Runtime release | `omega-effectd-v0.1.0-rc.8` |
-| macOS arm64 archive SHA-256 | `01d11597b054d009296d0381b6cd6ed3d31c83b93e75a58845f2ae47bf33226a` |
-| Runtime manifest asset SHA-256 | `74f7eb1043de6662f490351d6587a4e85fb50d65e95aac792b4b32c315081f94` |
-| Runtime source commit | `509ae747f00f6f7ebb413809ff5bd6ea123e1c1c` |
-| Runtime source tree | `063f456be4e196b5eb6eff18f9a14453a52599fc` |
+| Runtime release | `omega-effectd-v0.1.0-rc.10` |
+| macOS arm64 archive SHA-256 | `e3ab92ffe0baa0cb3082ea4bc83720d1677b633f3f0725b7c7571930ae19f7ac` |
+| Runtime manifest asset SHA-256 | `d797f749f57d2ab88cdad74f5ff81e882bc6052951a026c028a84fb7b022b5eb` |
+| Runtime source commit | `e3280b4795efe189474e12b4c6cd06123cfda359` |
+| Runtime source tree | `af28ecd0a57523640a96b6f3ed7411f07a7da228` |
+
+The pin row is `script/bundle-omega-rc`, which is the only thing that decides
+what an installed Omega actually runs.
+
+## The client seam and the packaged runtime are pinned separately
+
+`OmegaEffectdSupervisor::start` requests eighteen All Work capabilities. The
+packaged component decides which of them exist. Nothing reconciles the two, and
+in `omega-effectd-v0.1.0-rc.10` (OpenAgents `e3280b4795`) the answer is *none*:
+`initialize` succeeds, the `allWork` request block is discarded, no `allWork`
+appears in the result, and every All Work method answers `unknown_method`. That
+release predates the All Work boundary in OpenAgents.
+
+Consequences, recorded because they are easy to misdiagnose:
+
+- No installed All Work journey — planning graph refresh (omega#223), typed Work
+  commands and delegation (omega#214), signed Workroom relay delivery
+  (omega#216) — can run against a component built before the boundary,
+  regardless of what the Omega client does.
+- Because the negotiation is advisory, the failure used to appear once per call
+  site as a generic `unknown_method`, which reads as a defect in the calling
+  feature. The supervisor now refuses at the seam with
+  `SupervisorError::AllWorkBoundaryAbsent` or `AllWorkCapabilityWithheld`,
+  naming the method and the withheld capability.
+- `script/prove-packaged-all-work-surface [app-or-component-path]` runs the real
+  framed protocol against a packaged component and reports exactly which of the
+  eighteen capabilities it grants. Run it against a release candidate before
+  claiming any installed All Work evidence.
 
 ## Supervisor laws
 

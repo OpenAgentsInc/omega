@@ -33,6 +33,7 @@ use crate::all_work::generated::{
     PlanningGraphReadRequest, PlanningGraphReadResult,
     ProtocolCapability as AllWorkProtocolCapability,
     ProtocolInitializeRequest as AllWorkProtocolInitializeRequest,
+    ProtocolInitializeResult as AllWorkProtocolInitializeResult,
     ProtocolVersion as AllWorkProtocolVersion, RepositoryClaimExecuteRequest,
     RepositoryClaimExecuteResult, RepositoryClaimReadRequest, RepositoryClaimReadResult,
     SignedWorkroomCommitRequest, SignedWorkroomDeliveryRequest, SignedWorkroomDeliveryResult,
@@ -140,6 +141,39 @@ pub enum SupervisorError {
         code: ProtocolErrorCode,
         message: String,
     },
+    /// The running omega-effectd component answered `initialize` without an
+    /// All Work negotiation at all. Every All Work resource is absent from
+    /// that build, so a caller must not read this as a transient failure.
+    ///
+    /// omega#223: a packaged component older than the All Work boundary
+    /// otherwise reports one generic `unknown_method` per call site, which
+    /// reads as a bug in the calling feature rather than as a component that
+    /// predates the whole surface.
+    #[error(
+        "the running omega-effectd component does not implement the All Work \
+         boundary, so {method} is unavailable in this build"
+    )]
+    AllWorkBoundaryAbsent { method: &'static str },
+    /// The component negotiated All Work but withheld this capability.
+    #[error(
+        "the running omega-effectd component did not negotiate {capability}, \
+         so {method} is unavailable in this build"
+    )]
+    AllWorkCapabilityWithheld {
+        method: &'static str,
+        capability: String,
+    },
+}
+
+/// The exact wire name of a negotiated All Work capability.
+///
+/// Derived from the generated contract's own serialization so a regenerated
+/// capability set cannot drift away from the diagnosis text.
+fn all_work_capability_label(capability: &AllWorkProtocolCapability) -> String {
+    serde_json::to_value(capability)
+        .ok()
+        .and_then(|value| value.as_str().map(str::to_owned))
+        .unwrap_or_else(|| format!("{capability:?}"))
 }
 
 pub struct OmegaEffectdSupervisor {
@@ -151,6 +185,10 @@ pub struct OmegaEffectdSupervisor {
     stdout: Option<BufReader<smol::process::ChildStdout>>,
     host_handler: Option<OmegaEffectdHostHandler>,
     host_request_timeout: Duration,
+    /// What the *running* child negotiated, not what this build asked for.
+    /// `None` while stopped, and also when the child answered `initialize`
+    /// with no All Work block at all.
+    negotiated_all_work: Option<AllWorkProtocolInitializeResult>,
 }
 
 impl OmegaEffectdSupervisor {
@@ -165,6 +203,7 @@ impl OmegaEffectdSupervisor {
             stdout: None,
             host_handler: None,
             host_request_timeout: DEFAULT_HOST_REQUEST_TIMEOUT,
+            negotiated_all_work: None,
         }
     }
 
@@ -226,7 +265,16 @@ impl OmegaEffectdSupervisor {
                 generation,
             )
             .await?;
-        serde_json::from_value(result).context("decode initialize result")
+        let result: InitializeResult =
+            serde_json::from_value(result).context("decode initialize result")?;
+        self.negotiated_all_work = result.all_work.clone();
+        if self.negotiated_all_work.is_none() {
+            log::warn!(
+                "omega-effectd answered initialize without an All Work negotiation; \
+                 every All Work resource is absent from this component build"
+            );
+        }
+        Ok(result)
     }
 
     pub async fn ensure_started(&mut self) -> Result<()> {
@@ -234,6 +282,33 @@ impl OmegaEffectdSupervisor {
             self.start().await?;
         }
         Ok(())
+    }
+
+    /// The All Work capabilities the *running* component granted, or `None`
+    /// when it negotiated no All Work boundary at all.
+    pub fn negotiated_all_work_capabilities(&self) -> Option<&[AllWorkProtocolCapability]> {
+        self.negotiated_all_work
+            .as_ref()
+            .map(|negotiated| negotiated.capabilities.as_slice())
+    }
+
+    /// Refuse an All Work request the running component cannot serve, before
+    /// the request reaches the wire.
+    fn require_all_work_capability(
+        &self,
+        method: &'static str,
+        capability: AllWorkProtocolCapability,
+    ) -> Result<(), SupervisorError> {
+        let Some(negotiated) = self.negotiated_all_work.as_ref() else {
+            return Err(SupervisorError::AllWorkBoundaryAbsent { method });
+        };
+        if negotiated.capabilities.contains(&capability) {
+            return Ok(());
+        }
+        Err(SupervisorError::AllWorkCapabilityWithheld {
+            method,
+            capability: all_work_capability_label(&capability),
+        })
     }
 
     pub async fn health(&mut self) -> Result<HealthResult, SupervisorError> {
@@ -248,6 +323,10 @@ impl OmegaEffectdSupervisor {
         params
             .validate()
             .map_err(|error| SupervisorError::Anyhow(error.into()))?;
+        self.require_all_work_capability(
+            "work.index.read",
+            AllWorkProtocolCapability::WorkIndexRead,
+        )?;
         let result = self
             .request(
                 "work.index.read",
@@ -270,6 +349,10 @@ impl OmegaEffectdSupervisor {
         params
             .validate()
             .map_err(|error| SupervisorError::Anyhow(error.into()))?;
+        self.require_all_work_capability(
+            "work.snapshot.read",
+            AllWorkProtocolCapability::WorkSnapshotRead,
+        )?;
         let result = self
             .request(
                 "work.snapshot.read",
@@ -293,6 +376,10 @@ impl OmegaEffectdSupervisor {
         params
             .validate()
             .map_err(|error| SupervisorError::Anyhow(error.into()))?;
+        self.require_all_work_capability(
+            "planning.graph.read",
+            AllWorkProtocolCapability::PlanningGraphRead,
+        )?;
         let result = self
             .request(
                 "planning.graph.read",
@@ -315,6 +402,10 @@ impl OmegaEffectdSupervisor {
         params
             .validate()
             .map_err(|error| SupervisorError::Anyhow(error.into()))?;
+        self.require_all_work_capability(
+            "repository.claim.read",
+            AllWorkProtocolCapability::RepositoryClaimRead,
+        )?;
         let result = self
             .request(
                 "repository.claim.read",
@@ -337,6 +428,10 @@ impl OmegaEffectdSupervisor {
         params
             .validate()
             .map_err(|error| SupervisorError::Anyhow(error.into()))?;
+        self.require_all_work_capability(
+            "repository.claim.execute",
+            AllWorkProtocolCapability::RepositoryClaimExecute,
+        )?;
         let result = self
             .request(
                 "repository.claim.execute",
@@ -359,6 +454,10 @@ impl OmegaEffectdSupervisor {
         params
             .validate()
             .map_err(|error| SupervisorError::Anyhow(error.into()))?;
+        self.require_all_work_capability(
+            "workroom.activity.read",
+            AllWorkProtocolCapability::WorkroomActivityRead,
+        )?;
         let result = self
             .request(
                 "workroom.activity.read",
@@ -381,6 +480,10 @@ impl OmegaEffectdSupervisor {
         params
             .validate()
             .map_err(|error| SupervisorError::Anyhow(error.into()))?;
+        self.require_all_work_capability(
+            "workroom.activity.enqueue",
+            AllWorkProtocolCapability::WorkroomActivityEnqueue,
+        )?;
         let result = self
             .request(
                 "workroom.activity.enqueue",
@@ -403,6 +506,10 @@ impl OmegaEffectdSupervisor {
         params
             .validate()
             .map_err(|error| SupervisorError::Anyhow(error.into()))?;
+        self.require_all_work_capability(
+            "workroom.activity.prepare",
+            AllWorkProtocolCapability::WorkroomActivityPrepare,
+        )?;
         let result = self
             .request(
                 "workroom.activity.prepare",
@@ -425,6 +532,10 @@ impl OmegaEffectdSupervisor {
         params
             .validate()
             .map_err(|error| SupervisorError::Anyhow(error.into()))?;
+        self.require_all_work_capability(
+            "workroom.activity.commit",
+            AllWorkProtocolCapability::WorkroomActivityCommit,
+        )?;
         let result = self
             .request(
                 "workroom.activity.commit",
@@ -447,6 +558,10 @@ impl OmegaEffectdSupervisor {
         params
             .validate()
             .map_err(|error| SupervisorError::Anyhow(error.into()))?;
+        self.require_all_work_capability(
+            "workroom.activity.deliver",
+            AllWorkProtocolCapability::WorkroomActivityDeliver,
+        )?;
         let result = self
             .request(
                 "workroom.activity.deliver",
@@ -469,6 +584,10 @@ impl OmegaEffectdSupervisor {
         params
             .validate()
             .map_err(|error| SupervisorError::Anyhow(error.into()))?;
+        self.require_all_work_capability(
+            "workroom.activity.publish",
+            AllWorkProtocolCapability::WorkroomActivityPublish,
+        )?;
         let result = self
             .request(
                 "workroom.activity.publish",
@@ -491,6 +610,10 @@ impl OmegaEffectdSupervisor {
         params
             .validate()
             .map_err(|error| SupervisorError::Anyhow(error.into()))?;
+        self.require_all_work_capability(
+            "work.command.execute",
+            AllWorkProtocolCapability::WorkCommandExecute,
+        )?;
         let result = self
             .request(
                 "work.command.execute",
@@ -519,6 +642,10 @@ impl OmegaEffectdSupervisor {
         params
             .validate()
             .map_err(|error| SupervisorError::Anyhow(error.into()))?;
+        self.require_all_work_capability(
+            "work.cutover.read",
+            AllWorkProtocolCapability::WorkCutoverRead,
+        )?;
         let result = self
             .request(
                 "work.cutover.read",
@@ -541,6 +668,10 @@ impl OmegaEffectdSupervisor {
         params
             .validate()
             .map_err(|error| SupervisorError::Anyhow(error.into()))?;
+        self.require_all_work_capability(
+            "work.cutover.execute",
+            AllWorkProtocolCapability::WorkCutoverExecute,
+        )?;
         let result = self
             .request(
                 "work.cutover.execute",
@@ -568,6 +699,10 @@ impl OmegaEffectdSupervisor {
         params
             .validate()
             .map_err(|error| SupervisorError::Anyhow(error.into()))?;
+        self.require_all_work_capability(
+            "organization.membership.read",
+            AllWorkProtocolCapability::OrganizationMembershipRead,
+        )?;
         let result = self
             .request(
                 "organization.membership.read",
@@ -590,6 +725,10 @@ impl OmegaEffectdSupervisor {
         params
             .validate()
             .map_err(|error| SupervisorError::Anyhow(error.into()))?;
+        self.require_all_work_capability(
+            "strict_bug.candidate.read",
+            AllWorkProtocolCapability::StrictBugCandidateRead,
+        )?;
         let result = self
             .request(
                 "strict_bug.candidate.read",
@@ -612,6 +751,10 @@ impl OmegaEffectdSupervisor {
         params
             .validate()
             .map_err(|error| SupervisorError::Anyhow(error.into()))?;
+        self.require_all_work_capability(
+            "strict_bug.candidate.execute",
+            AllWorkProtocolCapability::StrictBugCandidateExecute,
+        )?;
         let result = self
             .request(
                 "strict_bug.candidate.execute",
@@ -1123,6 +1266,7 @@ impl OmegaEffectdSupervisor {
     }
 
     pub async fn stop(&mut self) -> Result<()> {
+        self.negotiated_all_work = None;
         if let Some(mut child) = self.child.take() {
             self.stdin.take();
             self.stdout.take();
