@@ -2039,8 +2039,8 @@ def main() -> int:
                     tester_facts = dict(launch_facts)
 
                 # Menu capture is evidence-only; the judgment stays with the
-                # owner row. GPUI publishes no accessibility tree, so a
-                # failure here is expected on hosts without the permission.
+                # owner row. A failure here is expected on hosts without macOS
+                # Accessibility permission, but never counts as product proof.
                 menu_dump = run(
                     [
                         "osascript",

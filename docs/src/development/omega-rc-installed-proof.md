@@ -717,24 +717,20 @@ it cannot perform on the host records `blocked` and the run exits nonzero,
 because an observation nobody made is worse than a missing one. It looks like
 evidence.
 
-Run the upstream parity probe first, then capture the Zed data digest, then
-install and exercise the candidate, then collect:
+Capture the Zed data digest, then install and exercise the candidate, then
+collect:
 
 ```sh
-script/observe-upstream-accessibility-parity \
-  --output target/omega-identity-proof/upstream-parity.json
-
 script/collect-omega-installed-observations \
   --app /Applications/Omega.app \
   --candidate-evidence target/omega-identity-evidence/candidate-evidence.json \
   --evidence-root target/omega-identity-proof \
-  --upstream-parity target/omega-identity-proof/upstream-parity.json \
-  --zed-before "<digest captured after the parity probe>" \
+  --zed-before "<digest captured before installing Omega>" \
   --output target/omega-identity-proof/installed-observations.json
 ```
 
-The parity probe is a separate command because it starts upstream Zed, and
-Zed's own writes must fall outside the window the isolation check measures.
+The historical upstream parity probe is diagnostic only. It cannot waive an
+absent Omega accessibility tree and is not part of candidate admission.
 
 `light-theme` and `dark-theme` take their facts from the captures, not from the
 host. The host appearance is their precondition, exactly as the increased-
@@ -760,10 +756,12 @@ keystroke lands in whatever window happens to be in front. In an earlier pass
 this opened a Page Setup sheet in the operator's terminal, and that sheet was
 very nearly recorded as the candidate responding to the keyboard.
 
-### Waivers
+### Historical waivers
 
-A check the owner has directed us not to build for may record `waived`. A
-waiver is not a pass. It is a record that an observation _did not happen_.
+Older alpha evidence can record `waived`. A waiver is not a pass. It is a
+record that an observation _did not happen_. OAW-012 supersedes the alpha
+accessibility exception for v0.2.0 candidates: `WAIVABLE_CHECKS` is now empty,
+and every installed accessibility observation must be performed.
 
 A `waived` entry carries no `facts`. It carries a `waiver` with the owner's
 own words, the date of the direction, the basis, the issue, and the upstream
@@ -779,19 +777,15 @@ Three further rules keep a waiver visible:
 - The top-level `waivers` list and the waived entries must agree in both
   directions. A waiver cannot be dropped from the summary, and a summary
   cannot name a waiver that no entry records.
-- `WAIVABLE_CHECKS` holds only `screen-reader-output`. A 360-pixel viewport
-  and a larger UI font are ordinary rendering conditions that a GPUI
-  application can be observed under, so they are performed, not waived. The
-  validator refuses a waiver of any other check.
+- `WAIVABLE_CHECKS` is empty. The validator refuses a waiver of every current
+  installed check, including `screen-reader-output`.
 
 `script/test-omega-installed-observation-waivers` asserts all of this, so the
 waiver cannot quietly become a green claim later.
 
-The screen-reader waiver rests on the owner direction of 2026-07-25, which
-permits omitting assistive technology **only where upstream Zed omits it too**.
-That is a condition, not a blanket exemption, so the parity probe observes it
-against the installed upstream build rather than assuming it. No parity record
-means no waiver.
+The 2026-07-25 screen-reader waiver remains historical evidence for candidates
+created under that decision. It does not apply to a v0.2.0 candidate after
+omega#208 admitted OAW-012. Upstream parity is diagnostic context only.
 
 ## Pass rule
 

@@ -28184,4 +28184,46 @@ mod tests {
             );
         }
     }
+
+    /// OMEGA-DELTA-0233. Installed Omega always enables GPUI's platform
+    /// accessibility integration. Accessibility is release evidence, not an
+    /// experimental launch mode, and an absent tree cannot be waived.
+    #[test]
+    fn omega_installed_accessibility_is_default_and_non_waivable() {
+        let main = without_comments(&read_repository_file("crates/omega/src/main.rs"));
+        assert!(
+            main.contains("Application::with_platform(platform)"),
+            "OMEGA-DELTA-0233: Omega no longer enables the platform accessibility adapter"
+        );
+        for forbidden in ["new_inaccessible", "ZED_EXPERIMENTAL_A11Y"] {
+            assert!(
+                !main.contains(forbidden),
+                "OMEGA-DELTA-0233: installed accessibility became conditional on `{forbidden}`"
+            );
+        }
+
+        let evidence = without_comments(&read_repository_file(
+            "script/omega_identity_evidence.py",
+        ));
+        assert!(
+            evidence.contains("WAIVABLE_CHECKS: set[str] = set()"),
+            "OMEGA-DELTA-0233: an installed accessibility observation became waivable"
+        );
+
+        let collector = without_comments(&read_repository_file(
+            "script/collect-omega-installed-observations",
+        ));
+        for required in [
+            "no application accessibility tree",
+            "retired alpha waiver cannot replace this observation",
+            "GENERIC_ACCESSIBILITY_NAMES",
+            "name of e",
+            "secret_value_exposed",
+        ] {
+            assert!(
+                collector.contains(required),
+                "OMEGA-DELTA-0233: installed AX release gate lost `{required}`"
+            );
+        }
+    }
 }

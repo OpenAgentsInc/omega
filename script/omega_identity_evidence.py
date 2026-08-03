@@ -71,11 +71,10 @@ ACCESSIBILITY_CHECKS = {
     "high-contrast",
     "reduced-motion",
 }
-#: The only checks an owner waiver may cover. A waiver is a record that an
-#: observation *did not happen*, so the set has to stay as small as the thing
-#: that is genuinely unobservable. Every other check is performable on a GPUI
-#: application under ordinary rendering conditions and must be performed.
-WAIVABLE_CHECKS = {"screen-reader-output"}
+#: Installed accessibility is a release requirement. The former exception for
+#: `screen-reader-output` ended when omega#208 admitted OAW-012, so no check can
+#: be replaced by a waiver.
+WAIVABLE_CHECKS: set[str] = set()
 ROLLBACK_EVIDENCE_REFS = {
     "candidate_before",
     "downgrade_removal",

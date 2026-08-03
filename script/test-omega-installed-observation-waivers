@@ -1,12 +1,9 @@
 #!/usr/bin/env python3
-"""Assert that a waived installed observation can never become a pass.
+"""Assert that no installed observation can be waived.
 
-A waiver records that an observation was *not* made. The failure this guards
-against is quiet and late: somebody edits `waived` to `passed`, or rolls a
-report with waivers up into a green status, and a proof record then claims an
-observation nobody performed. That is the exact class of claim the falsifier on
-omega#16 exists to prevent, so it is checked mechanically rather than by
-review.
+A waiver records that an observation was *not* made. OAW-012 removed the final
+waiver from the current release contract, so this fixture proves that a fully
+performed set passes and every attempted shortcut fails.
 
 Run: `script/test-omega-installed-observation-waivers`
 """
@@ -26,7 +23,6 @@ from omega_identity_evidence import (  # noqa: E402
     INSTALLED_OBSERVATIONS_SCHEMA,
     IdentityEvidenceError,
     MANUAL_JOURNEY_CHECKS,
-    WAIVABLE_CHECKS,
     canonical_digest,
     sha256_file,
     validate_installed_observations,
@@ -163,70 +159,16 @@ def main() -> int:
         accepts(root, "clean", clean, "a fully performed observation set")
 
         waived = build_report(reference, waive=True)
-        accepts(root, "waived", waived, "a correctly recorded waiver")
+        refuses(root, "waived", waived, "the retired screen-reader waiver")
 
-        # The whole point. A waived entry relabelled `passed` has no facts, so
-        # the shape check refuses it.
-        promoted = deepcopy(waived)
-        promoted["accessibility"] = [
-            {**entry, "status": "passed"} if entry["check"] == WAIVED_CHECK else entry
-            for entry in promoted["accessibility"]  # type: ignore[union-attr]
-        ]
-        refuses(root, "promoted", promoted, "a waived entry relabelled as passed")
-
-        # And relabelled *with* invented facts, which is the same lie told more
-        # carefully. The top-level waiver list still names the check.
-        fabricated = deepcopy(waived)
-        fabricated["accessibility"] = [
-            {
-                "check": WAIVED_CHECK,
-                "status": "passed",
-                "observed_at": entry["observed_at"],
-                "facts": deepcopy(FACTS[WAIVED_CHECK]),
-                "evidence_refs": entry["evidence_refs"],
-            }
-            if entry["check"] == WAIVED_CHECK
-            else entry
-            for entry in fabricated["accessibility"]  # type: ignore[union-attr]
-        ]
-        refuses(
-            root,
-            "fabricated",
-            fabricated,
-            "a waived entry rewritten as a pass with invented facts",
-        )
-
-        # A waiver may never roll up into a green status.
-        green = deepcopy(waived)
-        green["status"] = "passed"
-        refuses(root, "green", green, "a report with a waiver claiming `passed`")
-
-        # A waiver hidden from the summary is worse than a visible one.
-        hidden = deepcopy(waived)
-        hidden["waivers"] = []
-        refuses(root, "hidden", hidden, "a waiver missing from the summary list")
-
-        # A declared waiver with no waived entry would let a reader think a
-        # check was skipped when it was silently passed.
+        # A declared waiver with no waived entry is also invalid.
         phantom = deepcopy(clean)
         phantom["waivers"] = [WAIVED_CHECK]
         phantom["status"] = "passed_with_waivers"
         refuses(root, "phantom", phantom, "a declared waiver with no waived entry")
 
-        # A waived entry that also carries facts is neither shape.
-        both = deepcopy(waived)
-        both["accessibility"] = [
-            {**entry, "facts": deepcopy(FACTS[WAIVED_CHECK])}
-            if entry["check"] == WAIVED_CHECK
-            else entry
-            for entry in both["accessibility"]  # type: ignore[union-attr]
-        ]
-        refuses(root, "both", both, "a waived entry that also carries facts")
-
-        # Only checks that are genuinely unobservable may be waived. A
-        # 360-pixel viewport and a larger UI font are ordinary rendering
-        # conditions, so the waiver must not become a shortcut for them.
-        for check_name in sorted(ACCESSIBILITY_CHECKS - WAIVABLE_CHECKS):
+        # Every accessibility check is non-waivable.
+        for check_name in sorted(ACCESSIBILITY_CHECKS):
             shortcut = deepcopy(clean)
             shortcut["accessibility"] = [
                 {
@@ -244,26 +186,12 @@ def main() -> int:
             shortcut["status"] = "passed_with_waivers"
             refuses(root, f"shortcut-{check_name}", shortcut, f"a waiver of {check_name}")
 
-        # An incomplete run must never validate, waiver or not.
-        incomplete = deepcopy(waived)
+        # An incomplete run must never validate.
+        incomplete = deepcopy(clean)
         incomplete["status"] = "incomplete"
         refuses(root, "incomplete", incomplete, "an incomplete observation set")
 
-        # A waiver with no upstream parity record cannot support the owner
-        # direction it cites, because the direction is conditioned on parity.
-        unbased = deepcopy(waived)
-        unbased["accessibility"] = [
-            {
-                **entry,
-                "waiver": {k: v for k, v in WAIVER.items() if k != "upstream_parity"},
-            }
-            if entry["check"] == WAIVED_CHECK
-            else entry
-            for entry in unbased["accessibility"]  # type: ignore[union-attr]
-        ]
-        refuses(root, "unbased", unbased, "a waiver with no upstream parity record")
-
-    print("ok: a waived installed observation cannot be promoted to passed")
+    print("ok: installed observations require performed evidence; waivers are refused")
     return 0
 
 

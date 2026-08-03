@@ -423,7 +423,9 @@ before duplicating) · OPEN (nobody holds it).
 
 ## Landed earlier in this review cycle (context, do not redo)
 - omega#165 composer executor dropdown replacing the full-screen chooser (`10637aa422`); title flush-left (`8371806042`); manifest version 0.2.0 (`a954971025`); workbench revision-spam reconcile (`7dcc27e1e8`); Sarah voice barge-in drop fix (`bc968334ac`); adapter-death honest failure (`fd9f21ff48`); #166 keyboard trap + #168 Sarah no-op (`04e629a77f`); #167/#169/#170 (`04df6e7674`); #161 mode-split removal (`5823eb686b`); #164 background identity (`562319fb4f`); rc28 notarized + published + on openagents.com/download (Cloud Run `00303-44b`).
-- omega#171 (accessibility tree): CLOSED not-planned by owner; revisit before beta launch.
+- omega#217 / OAW-012 supersedes the earlier omega#71 and omega#171 alpha
+  deferrals. Omega now enables GPUI's macOS AccessKit bridge by default, and a
+  v0.2.0 candidate cannot waive the installed accessibility-tree observation.
 
 ## Open issues map (verify live before acting)
 - Sarah LiveKit cutover: master

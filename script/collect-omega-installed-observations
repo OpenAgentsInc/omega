@@ -6,16 +6,11 @@ checks. Each one is *performed* here, not asserted. A check that cannot be
 performed on this host records `blocked` and the run refuses, because an
 observation nobody made is worse than a missing one — it looks like evidence.
 
-There is exactly one alternative to performing a check, and it is not a pass.
-A check the owner has directed us not to build for may record `waived`, which
-carries the owner's own words, the date of the direction, and the upstream
-parity the direction is conditioned on. `waived` never counts as `passed`, it
-never rolls up into a green status, and the report status says
-`passed_with_waivers` so nobody can read the summary and believe the
-observation happened. `WAIVABLE_CHECKS` in `omega_identity_evidence` keeps that
-door as narrow as the thing that is genuinely unobservable: a 360-pixel
-viewport and a larger UI font are ordinary rendering conditions and are
-performed here, not waived.
+There is no alternative to performing an accessibility check. OAW-012 made the
+macOS accessibility tree part of the v0.2.0 release contract, so an absent or
+unreadable tree blocks the candidate. Historical waiver records remain
+evidence of what was not observed on an older candidate, but cannot admit a
+current release.
 
 Two checks depend on a system flag only the owner can set: increased contrast
 and reduced motion live in a domain `defaults write` is refused on. The flag is
@@ -94,10 +89,9 @@ WINDOW_ID: int | None = None
 #: Path to the compiled `script/omega-window-ocr.swift`, set from `--ocr`.
 #:
 #: This reads the text a person actually sees, with the position of each line.
-#: It is how the two journey checks below are performed on an application that
-#: publishes no accessibility tree, and it is a stronger observation than the
-#: tree read it replaces: a label present in a tree but clipped off the screen
-#: passes an accessibility-tree read and fails this one.
+#: It proves rendered placement alongside the accessibility-tree check: a label
+#: present in a tree but clipped off the screen passes a tree read and fails
+#: this one.
 OCR_TOOL: Path | None = None
 
 #: Path to the compiled `script/omega-window-list.swift`, set from
@@ -175,7 +169,27 @@ OWNER_FLAG_OFF = (
 #: Anything matching these in an accessibility value would be a secret reaching
 #: assistive technology, which is the failure the screen-reader check exists to
 #: detect.
-SECRET_SHAPES = [re.compile(p) for p in (r"nsec1", r"ncryptsec1", r"\b[0-9a-f]{64}\b")]
+SECRET_SHAPES = [
+    re.compile(p, re.IGNORECASE)
+    for p in (r"nsec1", r"ncryptsec1", r"\b[0-9a-f]{64}\b")
+]
+
+#: Role descriptions and empty placeholders are not usable control names. A
+#: tree populated only with these is the generic-name falsifier from omega#217.
+GENERIC_ACCESSIBILITY_NAMES = {
+    "",
+    "button",
+    "checkbox",
+    "group",
+    "image",
+    "link",
+    "list",
+    "list item",
+    "radio button",
+    "scroll area",
+    "text field",
+    "unknown",
+}
 
 #: Owner direction of 2026-07-25, quoted exactly as given. It is recorded
 #: verbatim, capitals and typing errors included, because a paraphrase of an
@@ -475,9 +489,9 @@ def attach_screenshot(
 def window_frame() -> tuple[int, int, int, int] | None:
     """Position and size of the candidate's front window, in points.
 
-    The accessibility tree is asked first. A GPUI application publishes none,
-    and on such an application `window 1` does not exist even though the window
-    is on the screen, so the window server is asked second.
+    The accessibility tree is asked first. The window-server fallback keeps
+    diagnostics useful when the tree is missing, but a candidate that needs
+    this fallback cannot pass the screen-reader observation.
     """
     ok, output = osascript(
         f"tell application \"System Events\" to tell {target()} "
@@ -739,12 +753,16 @@ def ax_dump(timeout: int = 90) -> tuple[bool, list[str]]:
                 repeat with w in windows
                     repeat with e in (entire contents of w)
                         try
+                            set n to name of e
+                            if n is not missing value then set out to out & "name=" & n & linefeed
+                        end try
+                        try
                             set d to description of e
-                            if d is not missing value then set out to out & d & linefeed
+                            if d is not missing value then set out to out & "description=" & d & linefeed
                         end try
                         try
                             set v to value of e
-                            if v is not missing value then set out to out & (v as text) & linefeed
+                            if v is not missing value then set out to out & "value=" & (v as text) & linefeed
                         end try
                     end repeat
                 end repeat
@@ -990,8 +1008,8 @@ def main() -> int:
         type=Path,
         default=None,
         help=(
-            "record from observe-upstream-accessibility-parity. Without it the "
-            "screen-reader waiver has no observed condition and the run blocks."
+            "deprecated compatibility input; upstream parity no longer waives "
+            "the installed accessibility requirement"
         ),
     )
     parser.add_argument(
@@ -1626,13 +1644,21 @@ def main() -> int:
             )
 
     # ---- screen reader ------------------------------------------------------
-    # Performed if the candidate publishes an accessibility tree. Waived only
-    # if it publishes none *and* upstream Zed publishes none either, because
-    # the owner direction is conditioned on that parity. The parity is observed
-    # here rather than asserted, and a parity that cannot be observed blocks.
+    # The candidate must publish an application accessibility tree. Upstream
+    # parity and the retired alpha waiver cannot replace this observation.
     reachable, contents, children = ax_children(PROCESS)
-    named = [line for line in labels if line.strip()] if ok else []
-    leaked = [line for line in named if any(p.search(line) for p in SECRET_SHAPES)]
+    named = (
+        [
+            line.removeprefix("name=").strip()
+            for line in labels
+            if line.startswith("name=")
+            and line.removeprefix("name=").strip().lower()
+            not in GENERIC_ACCESSIBILITY_NAMES
+        ]
+        if ok
+        else []
+    )
+    leaked = [line for line in labels if any(p.search(line) for p in SECRET_SHAPES)]
     if publishes_accessibility_tree(reachable, contents, children):
         if identity_ready and named and not leaked:
             record(
@@ -1662,47 +1688,13 @@ def main() -> int:
     elif not reachable:
         blocked.append("screen-reader-output: the candidate window is not reachable")
     else:
-        parity, why = load_upstream_parity(args.upstream_parity)
-        if parity is None:
-            blocked.append(f"screen-reader-output: {why}; no waiver applies")
-        else:
-            record_waived(
-                "accessibility",
-                "screen-reader-output",
-                basis=(
-                    "The candidate publishes no application accessibility tree: "
-                    + (
-                        "the tree carries no window for the running process at all, "
-                        "while the window server is showing that window"
-                        if contents == NO_WINDOW_IN_TREE
-                        else f"its front window reports `entire contents` = {contents} "
-                        "and only the macOS window frame buttons as direct children"
-                    )
-                    + ". Upstream Zed, read through "
-                    "the same interface, publishes none either. Under the owner direction "
-                    "of 2026-07-25 the parity condition holds, so assistive technology is "
-                    "not built for this release and this observation was NOT made. It is "
-                    "not a pass."
-                ),
-                parity=parity,
-                detail={
-                    "candidate_entire_contents": contents,
-                    "candidate_direct_children": children,
-                    "candidate_window_server_windows": [
-                        {"id": window.get("id"), "name": window.get("name")}
-                        for window in candidate_windows()
-                    ],
-                    "upstream_parity": parity,
-                    "method": (
-                        "System Events AXUIElement read of the front window of the "
-                        "candidate and of the installed upstream build"
-                    ),
-                    "not_observed": (
-                        "No assistive technology consumed this candidate. No speech, "
-                        "braille, or announcement was produced or recorded."
-                    ),
-                },
-            )
+        detail = (
+            "the tree carries no window for the running process while the "
+            "window server shows one"
+            if contents == NO_WINDOW_IN_TREE
+            else f"entire contents={contents}; direct children={children}"
+        )
+        blocked.append(f"screen-reader-output: no application accessibility tree ({detail})")
 
     # ---- keyboard focus traversal -------------------------------------------
     # Performed without the accessibility tree, because keyboard operation and
