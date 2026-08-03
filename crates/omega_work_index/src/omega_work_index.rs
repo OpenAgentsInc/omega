@@ -8,10 +8,12 @@
 mod dogfood_fixture;
 mod planning_refresh;
 mod planning_views;
+mod work_domain_profile;
 
 pub use dogfood_fixture::*;
 pub use planning_refresh::*;
 pub use planning_views::*;
+pub use work_domain_profile::*;
 
 use std::{
     collections::{BTreeMap, BTreeSet},
@@ -22,7 +24,7 @@ use std::{
 
 use omega_effectd::all_work_contract::{
     AgentDelegate, Completeness, CompletenessState, ContractValidate, ContractVersion, Freshness,
-    FreshnessState, HumanAssignee, IsoTimestamp, Nullable, PrincipalRef, PrivacyClass,
+    FreshnessState, HumanAssignee, IsoTimestamp, LongText, Nullable, PrincipalRef, PrivacyClass,
     RedactionMetadata, SafeInteger, ShortText, SourceAuthority, SourceAuthorityKind, SourceRef,
     WorkClass, WorkCursor, WorkDomain, WorkIndexReadResult, WorkPriority, WorkRef, WorkState,
     WorkSummary,
@@ -33,6 +35,7 @@ use thiserror::Error;
 pub const WORK_INDEX_SCHEMA_V1: &str = "openagents.omega.work-index.v1";
 pub const THREAD_ADAPTER_ID: &str = "omega.thread-metadata.v1";
 pub const FORENSICS_ADAPTER_ID: &str = "omega.forensics-workbench.v1";
+pub const RUNTIME_SERVICE_ADAPTER_ID: &str = "omega.runtime-services.v1";
 pub const EFFECT_ADAPTER_ID: &str = "openagents.omega-effectd.v2";
 pub const LOCAL_OWNER_REF: &str = "principal:omega:local-owner";
 pub const MAX_INDEX_ITEMS: usize = 10_000;
@@ -181,6 +184,7 @@ pub enum WorkSourceEntity {
     Thread { thread_ref: String },
     ForensicsCase { case_ref: String },
     ForensicsRun { case_ref: String, run_ref: String },
+    RuntimeService { service_ref: String },
     EffectWork { work_ref: String },
 }
 
@@ -201,7 +205,8 @@ impl WorkIndexItem {
             (
                 WorkSourceEntity::Thread { .. }
                     | WorkSourceEntity::ForensicsCase { .. }
-                    | WorkSourceEntity::ForensicsRun { .. },
+                    | WorkSourceEntity::ForensicsRun { .. }
+                    | WorkSourceEntity::RuntimeService { .. },
                 SourceAuthorityKind::OmegaNative,
             ) | (
                 WorkSourceEntity::EffectWork { .. },
@@ -226,6 +231,10 @@ impl WorkIndexItem {
                 self.work_ref() == format!("work:omega:forensics-run:{run_ref}")
                     && self.source_ref() == run_ref
             }
+            WorkSourceEntity::RuntimeService { service_ref } => {
+                self.work_ref() == format!("work:omega:runtime-service:{service_ref}")
+                    && self.source_ref() == format!("service:omega:{service_ref}")
+            }
             WorkSourceEntity::EffectWork { work_ref } => self.work_ref() == work_ref,
         };
         if identity_matches {
@@ -245,6 +254,14 @@ impl WorkIndexItem {
         &self.summary.source_authority.source_ref.0
     }
 
+    /// The declarative profile for this row's Work Domain.
+    ///
+    /// Surfaces read domain vocabulary and field admission from here instead
+    /// of branching on the domain, so a new domain does not need a new branch.
+    pub fn profile(&self) -> &'static WorkDomainProfile {
+        work_domain_profile(&self.summary.domain)
+    }
+
     fn validate_for_lane(
         &self,
         adapter_id: &str,
@@ -261,6 +278,11 @@ impl WorkIndexItem {
             WorkSourceEntity::ForensicsCase { .. } | WorkSourceEntity::ForensicsRun { .. } => {
                 adapter_id == FORENSICS_ADAPTER_ID
                     && adapter_version == FORENSICS_ADAPTER_ID
+                    && origin == AdapterOrigin::OmegaNative
+            }
+            WorkSourceEntity::RuntimeService { .. } => {
+                adapter_id == RUNTIME_SERVICE_ADAPTER_ID
+                    && adapter_version == RUNTIME_SERVICE_ADAPTER_ID
                     && origin == AdapterOrigin::OmegaNative
             }
             WorkSourceEntity::EffectWork { .. } => {
@@ -991,6 +1013,136 @@ pub fn adapt_forensics(
     Ok(items)
 }
 
+/// The exact operational state of one locally operated runtime service.
+///
+/// These are observations, not a plan. Nothing here is proposed, assigned,
+/// estimated, reviewed, or merged, which is why the Operations profile refuses
+/// a declared priority: the only urgency an operated service has is what it was
+/// last observed doing.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum NativeRuntimeServiceState {
+    /// The service is being provisioned: checking, downloading, or starting.
+    Provisioning,
+    /// The service is running and nothing has reported degradation.
+    Serving,
+    /// The service is running and has observable work in flight.
+    Working { detail: String },
+    /// The service reported degradation and still serves.
+    Degraded { detail: String },
+    /// The service reported an error, or its binary failed. Recoverable.
+    Unavailable { detail: String },
+    /// The service is deliberately not running.
+    Stopped,
+}
+
+impl NativeRuntimeServiceState {
+    fn detail(&self) -> Option<&str> {
+        match self {
+            Self::Working { detail } | Self::Degraded { detail } | Self::Unavailable { detail } => {
+                Some(detail.as_str())
+            }
+            Self::Provisioning | Self::Serving | Self::Stopped => None,
+        }
+    }
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct NativeRuntimeServiceRecord {
+    /// Stable within this Omega installation, for example
+    /// `language:rust-analyzer`. It is the only identity component; a restart
+    /// or a new process id must not mint a second Work identity.
+    pub service_ref: String,
+    pub display_name: String,
+    /// What the service serves, for example a working folder name.
+    pub scope: Option<String>,
+    pub state: NativeRuntimeServiceState,
+    pub process_id: Option<u32>,
+    pub version: Option<String>,
+    pub updated_at: String,
+    pub observed_at: String,
+    pub revision: u64,
+}
+
+/// Project one locally operated runtime service as Operations Work.
+pub fn adapt_runtime_service(
+    record: NativeRuntimeServiceRecord,
+) -> Result<WorkIndexItem, WorkIndexError> {
+    // An empty service reference still produces a syntactically valid
+    // canonical reference (`work:omega:runtime-service:`), so the contract
+    // cannot catch it. It would collapse every unnamed service onto one Work
+    // identity, which is worse than refusing the row.
+    if record.service_ref.trim().is_empty() {
+        return Err(WorkIndexError::InvalidContract(
+            "a runtime service must carry a stable service reference".into(),
+        ));
+    }
+    let (state, hint) = match &record.state {
+        NativeRuntimeServiceState::Provisioning
+        | NativeRuntimeServiceState::Serving
+        | NativeRuntimeServiceState::Working { .. } => (WorkState::Active, AttentionHint::None),
+        // The canonical Work vocabulary is task-shaped and has no "degraded".
+        // `Waiting` is the closest admitted state for a service that still
+        // serves while reporting a warning; the exact operational detail stays
+        // in the row's description and in the domain's Blocks rather than
+        // being lost in the mapping.
+        NativeRuntimeServiceState::Degraded { .. } => (WorkState::Waiting, AttentionHint::None),
+        NativeRuntimeServiceState::Unavailable { .. } => {
+            (WorkState::Failed, AttentionHint::Recoverable)
+        }
+        NativeRuntimeServiceState::Stopped => (WorkState::Completed, AttentionHint::None),
+    };
+    let title = match record.scope.as_deref() {
+        Some(scope) if !scope.trim().is_empty() => {
+            format!("{} · {scope}", record.display_name)
+        }
+        _ => record.display_name.clone(),
+    };
+    let mut summary = make_summary(SummaryInput {
+        work_ref: format!("work:omega:runtime-service:{}", record.service_ref),
+        title,
+        domain: WorkDomain::Operations,
+        work_class: WorkClass::Job,
+        state,
+        // Operations urgency is observed, never declared. The profile refuses
+        // anything else.
+        priority: WorkPriority::None,
+        source_ref: format!("service:omega:{}", record.service_ref),
+        source_kind: SourceAuthorityKind::OmegaNative,
+        adapter_version: RUNTIME_SERVICE_ADAPTER_ID.into(),
+        source_writable: false,
+        revision: record.revision,
+        updated_at: record.updated_at,
+        observed_at: record.observed_at,
+        assignee: None,
+        agent_delegate: None,
+    })?;
+    let mut description = Vec::new();
+    if let Some(detail) = record.state.detail() {
+        description.push(detail.to_string());
+    }
+    if let Some(version) = &record.version {
+        description.push(format!("version {version}"));
+    }
+    if let Some(process_id) = record.process_id {
+        description.push(format!("process {process_id}"));
+    }
+    if !description.is_empty() {
+        summary.description = Some(LongText::try_from(description.join(" · "))?);
+    }
+    let item = WorkIndexItem {
+        attention: attention_for(&summary, hint)?,
+        summary,
+        // Nobody is assigned an operated service. The local owner operates it,
+        // which is exactly one accountability, not a work queue.
+        accountability: BTreeSet::from([AccountabilityKind::Owner]),
+        source_entity: WorkSourceEntity::RuntimeService {
+            service_ref: record.service_ref,
+        },
+    };
+    item.validate()?;
+    Ok(item)
+}
+
 fn effect_item(summary: WorkSummary) -> Result<WorkIndexItem, WorkIndexError> {
     summary.validate()?;
     let mut accountability = BTreeSet::new();
@@ -1083,6 +1235,9 @@ fn make_summary(input: SummaryInput) -> Result<WorkSummary, WorkIndexError> {
         },
     };
     summary.validate()?;
+    // Every native adapter builds its summary here, so the Work Domain profile
+    // is an enforced gate rather than a convention an adapter can forget.
+    work_domain_profile(&summary.domain).admit(&summary)?;
     Ok(summary)
 }
 
@@ -1313,6 +1468,275 @@ mod tests {
                 .collect::<BTreeSet<_>>();
             prop_assert_eq!(observed, child_run_refs.into_iter().collect());
         }
+    }
+
+    fn runtime_service(service_ref: &str, state: NativeRuntimeServiceState) -> WorkIndexItem {
+        adapt_runtime_service(NativeRuntimeServiceRecord {
+            service_ref: service_ref.into(),
+            display_name: "Language service".into(),
+            scope: Some("omega".into()),
+            state,
+            process_id: Some(4321),
+            version: Some("1.2.3".into()),
+            updated_at: "2026-08-02T12:00:00Z".into(),
+            observed_at: "2026-08-02T12:00:01Z".into(),
+            revision: 4,
+        })
+        .expect("Operations Work")
+    }
+
+    #[test]
+    fn an_operated_service_derives_urgency_from_observation_not_a_declared_priority() {
+        let unavailable = runtime_service(
+            "language:rust-analyzer",
+            NativeRuntimeServiceState::Unavailable {
+                detail: "server exited".into(),
+            },
+        );
+        assert_eq!(unavailable.summary.domain, WorkDomain::Operations);
+        assert_eq!(unavailable.summary.work_class, WorkClass::Job);
+        assert_eq!(unavailable.summary.state, WorkState::Failed);
+        assert_eq!(unavailable.summary.priority, WorkPriority::None);
+        assert_eq!(unavailable.attention, AttentionGroup::Recoverable);
+        assert!(unavailable.attention.requires_inbox_attention());
+        assert_eq!(
+            unavailable.profile().state_label(&WorkState::Failed),
+            "Unavailable"
+        );
+        assert!(
+            unavailable
+                .summary
+                .description
+                .as_ref()
+                .is_some_and(|detail| detail.0.contains("server exited")),
+            "the exact observation must survive the coarse state mapping"
+        );
+
+        let serving = runtime_service("language:tsgo", NativeRuntimeServiceState::Serving);
+        assert_eq!(serving.summary.state, WorkState::Active);
+        assert_eq!(serving.attention, AttentionGroup::Active);
+        assert!(!serving.attention.requires_inbox_attention());
+
+        // A service that still serves while reporting a warning is degraded,
+        // not failed, and must not be promoted into the Inbox.
+        let degraded = runtime_service(
+            "language:json",
+            NativeRuntimeServiceState::Degraded {
+                detail: "schema cache is stale".into(),
+            },
+        );
+        assert_eq!(degraded.summary.state, WorkState::Waiting);
+        assert_eq!(degraded.attention, AttentionGroup::Waiting);
+        assert!(!degraded.attention.requires_inbox_attention());
+        assert_eq!(
+            degraded.profile().state_label(&WorkState::Waiting),
+            "Degraded"
+        );
+
+        let stopped = runtime_service("language:stopped", NativeRuntimeServiceState::Stopped);
+        assert_eq!(stopped.summary.state, WorkState::Completed);
+        assert_eq!(
+            stopped.profile().state_label(&WorkState::Completed),
+            "Stopped"
+        );
+    }
+
+    #[test]
+    fn a_restarted_service_keeps_one_canonical_work_identity() {
+        let before = runtime_service("language:rust-analyzer", NativeRuntimeServiceState::Serving);
+        let after = adapt_runtime_service(NativeRuntimeServiceRecord {
+            service_ref: "language:rust-analyzer".into(),
+            display_name: "Language service".into(),
+            scope: Some("omega".into()),
+            state: NativeRuntimeServiceState::Serving,
+            // A restart mints a new operating-system process, a new version,
+            // and a later revision. None of that may mint a second Work.
+            process_id: Some(9999),
+            version: Some("1.2.4".into()),
+            updated_at: "2026-08-02T13:00:00Z".into(),
+            observed_at: "2026-08-02T13:00:01Z".into(),
+            revision: 9,
+        })
+        .expect("restarted Operations Work");
+        assert_eq!(before.work_ref(), after.work_ref());
+        assert_eq!(before.source_ref(), after.source_ref());
+        assert!(after.summary.revision.0 > before.summary.revision.0);
+    }
+
+    #[test]
+    fn a_service_reference_that_cannot_carry_identity_is_refused_not_rewritten() {
+        // The caller owns naming. If a service reference cannot be a canonical
+        // reference, the adapter must refuse it rather than quietly rewriting
+        // it into a different identity than the caller believes it published.
+        for service_ref in ["  ", "language rust analyzer", ""] {
+            assert!(
+                adapt_runtime_service(NativeRuntimeServiceRecord {
+                    service_ref: service_ref.into(),
+                    display_name: "Language service".into(),
+                    scope: None,
+                    state: NativeRuntimeServiceState::Serving,
+                    process_id: None,
+                    version: None,
+                    updated_at: "2026-08-02T12:00:00Z".into(),
+                    observed_at: "2026-08-02T12:00:01Z".into(),
+                    revision: 1,
+                })
+                .is_err(),
+                "{service_ref:?} cannot carry Work identity"
+            );
+        }
+    }
+
+    #[test]
+    fn the_shared_summary_constructor_enforces_the_domain_profile() {
+        // Adapters cannot opt out of their profile: the gate lives in the one
+        // constructor every native adapter uses.
+        let refusal = make_summary(SummaryInput {
+            work_ref: "work:omega:runtime-service:language:probe".into(),
+            title: "Profiled by construction".into(),
+            domain: WorkDomain::Operations,
+            work_class: WorkClass::Task,
+            state: WorkState::Active,
+            priority: WorkPriority::None,
+            source_ref: "service:omega:language:probe".into(),
+            source_kind: SourceAuthorityKind::OmegaNative,
+            adapter_version: RUNTIME_SERVICE_ADAPTER_ID.into(),
+            source_writable: false,
+            revision: 1,
+            updated_at: "2026-08-02T12:00:00Z".into(),
+            observed_at: "2026-08-02T12:00:01Z".into(),
+            assignee: None,
+            agent_delegate: None,
+        })
+        .expect_err("the constructor must refuse a class the domain does not admit");
+        assert!(
+            refusal.to_string().contains("does not admit Work class"),
+            "unexpected refusal: {refusal}"
+        );
+    }
+
+    #[test]
+    fn three_domains_share_one_index_identity_query_and_ordering() {
+        let mut index = WorkIndex::default();
+        apply_native(
+            &mut index,
+            THREAD_ADAPTER_ID,
+            vec![thread(1, NativeThreadLifecycle::Running)],
+            2,
+        );
+        apply_native(
+            &mut index,
+            FORENSICS_ADAPTER_ID,
+            forensics(NativeForensicsPhase::Running),
+            7,
+        );
+        apply_native(
+            &mut index,
+            RUNTIME_SERVICE_ADAPTER_ID,
+            vec![
+                runtime_service("language:rust-analyzer", NativeRuntimeServiceState::Serving),
+                runtime_service(
+                    "language:tsgo",
+                    NativeRuntimeServiceState::Unavailable {
+                        detail: "binary download failed".into(),
+                    },
+                ),
+            ],
+            4,
+        );
+
+        let projection = index.projection();
+        assert!(projection.admitted);
+        assert_eq!(projection.health, WorkIndexHealth::Ready);
+        for domain in [
+            WorkDomain::General,
+            WorkDomain::Security,
+            WorkDomain::Operations,
+        ] {
+            assert!(
+                projection
+                    .rows
+                    .iter()
+                    .any(|row| row.summary.domain == domain),
+                "{domain:?} must be visible in the one shared projection"
+            );
+        }
+        // One canonical identity per row across every domain.
+        let refs = projection
+            .rows
+            .iter()
+            .map(|row| row.work_ref().to_string())
+            .collect::<BTreeSet<_>>();
+        assert_eq!(refs.len(), projection.rows.len());
+
+        // Observed urgency outranks every declared priority in the shared
+        // ordering, without the Operations domain declaring one.
+        assert_eq!(
+            projection.rows[0].summary.domain,
+            WorkDomain::Operations,
+            "the unavailable service must sort first: {:?}",
+            projection
+                .rows
+                .iter()
+                .map(|row| (row.summary.domain.clone(), row.attention))
+                .collect::<Vec<_>>()
+        );
+        assert_eq!(projection.rows[0].summary.priority, WorkPriority::None);
+
+        // The same query plane reaches every domain.
+        let operations_only = index.query(&WorkIndexQuery {
+            view: WorkIndexView::MyWork,
+            domains: vec![WorkDomain::Operations],
+            ..WorkIndexQuery::default()
+        });
+        assert_eq!(operations_only.len(), 2);
+        assert!(
+            operations_only
+                .iter()
+                .all(|item| item.summary.domain == WorkDomain::Operations)
+        );
+        let inbox = index.query(&WorkIndexQuery {
+            view: WorkIndexView::Inbox,
+            ..WorkIndexQuery::default()
+        });
+        assert!(
+            inbox
+                .iter()
+                .any(|item| matches!(item.source_entity, WorkSourceEntity::RuntimeService { .. })),
+            "an unavailable operated service belongs in the shared Inbox"
+        );
+        assert!(
+            !inbox.iter().any(|item| {
+                matches!(&item.source_entity, WorkSourceEntity::RuntimeService { service_ref }
+                    if service_ref == "language:rust-analyzer")
+            }),
+            "a healthy operated service must not be promoted into the Inbox"
+        );
+    }
+
+    #[test]
+    fn a_runtime_service_row_is_refused_by_another_adapter_lane() {
+        let mut index = WorkIndex::default();
+        index.begin_refresh(
+            THREAD_ADAPTER_ID,
+            THREAD_ADAPTER_ID,
+            AdapterOrigin::OmegaNative,
+        );
+        assert!(
+            index
+                .apply_native_items(
+                    THREAD_ADAPTER_ID,
+                    THREAD_ADAPTER_ID,
+                    vec![runtime_service(
+                        "language:rust-analyzer",
+                        NativeRuntimeServiceState::Serving
+                    )],
+                    "2026-08-02T12:00:00Z".into(),
+                    1,
+                )
+                .is_err(),
+            "an Operations row must not be admitted through the thread lane"
+        );
     }
 
     fn apply_native(
