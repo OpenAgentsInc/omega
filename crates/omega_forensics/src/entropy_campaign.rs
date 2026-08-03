@@ -495,17 +495,25 @@ pub struct EntropyCampaignProject {
 impl EntropyCampaignProject {
     pub fn files_analyzed(&self) -> u32 {
         self.run.as_ref().map_or(0, |run| {
-            let counts = run.counts();
-            counts.analyzed + counts.candidate
+            run.summary
+                .sessions
+                .settled
+                .saturating_sub(run.summary.sessions.failed)
+                .saturating_sub(run.summary.sessions.timed_out)
+                .saturating_sub(run.summary.sessions.refused)
+                .saturating_sub(run.summary.sessions.cancelled)
         })
     }
 
     pub fn candidate_count(&self) -> usize {
         self.run.as_ref().map_or(0, |run| {
-            run.files
-                .iter()
-                .map(|file| file.observations.len() + file.hypotheses.len())
-                .sum()
+            usize::try_from(
+                run.summary
+                    .outputs
+                    .findings
+                    .saturating_add(run.summary.outputs.hypotheses),
+            )
+            .unwrap_or(usize::MAX)
         })
     }
 }
@@ -721,9 +729,14 @@ impl EntropyCampaignProjection {
             EntropyRunPhase::Completed | EntropyRunPhase::CompletedWithLimitations => {
                 EntropyCampaignProjectPhase::CompletedWithLimitations
             }
+            EntropyRunPhase::Failed => EntropyCampaignProjectPhase::ProviderFailed,
+            EntropyRunPhase::FailedWithPartialOutput => {
+                EntropyCampaignProjectPhase::CompletedWithLimitations
+            }
             EntropyRunPhase::Cancelled => EntropyCampaignProjectPhase::Cancelled,
             EntropyRunPhase::Ready
             | EntropyRunPhase::Running
+            | EntropyRunPhase::AwaitingCleanup
             | EntropyRunPhase::CancelRequested => EntropyCampaignProjectPhase::Running,
         };
         project.limitation_refs.extend(
@@ -1167,6 +1180,7 @@ mod tests {
             manifest,
         )
         .expect("run");
+        run.observe_all_tools_available().expect("tool inventory");
         let task = run
             .start_next_file("2026-08-02T08:15:02Z".into())
             .expect("start file")
@@ -1209,6 +1223,11 @@ mod tests {
                 .expect("finish")
                 .is_none()
         );
+        run.observe_cleanup(
+            format!("receipt.{}.cleanup", run.binding.run_ref),
+            "2026-08-02T08:15:05Z".into(),
+        )
+        .expect("cleanup truth");
         run
     }
 

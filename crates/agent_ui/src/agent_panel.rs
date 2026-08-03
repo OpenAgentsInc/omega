@@ -901,7 +901,7 @@ fn spawn_entropy_campaign(
             };
             let run_ref = format!("run.omega.entropy.{}", uuid::Uuid::new_v4().simple());
             let binding = omega_forensics::EntropyRunBinding {
-                run_ref,
+                run_ref: run_ref.clone(),
                 repository,
                 manifest_ref: manifest.manifest_ref.clone(),
                 manifest_digest: manifest.canonical_digest.clone(),
@@ -912,7 +912,7 @@ fn spawn_entropy_campaign(
                 tool_surface_refs: campaign.binding.tool_surface_refs.clone(),
                 started_at: forensics_timestamp(),
             };
-            let run = match omega_forensics::EntropyRunProjection::new(binding, manifest) {
+            let mut run = match omega_forensics::EntropyRunProjection::new(binding, manifest) {
                 Ok(run) => run,
                 Err(error) => {
                     surface.update(cx, |surface, cx| {
@@ -926,6 +926,7 @@ fn spawn_entropy_campaign(
                     continue;
                 }
             };
+            run.observe_all_tools_available()?;
             let source_manifest = run.manifest.clone();
             surface.update(cx, |surface, cx| {
                 surface.install_entropy_run(run.clone(), cx);
@@ -1101,6 +1102,10 @@ fn spawn_entropy_campaign(
                 })??;
                 sync_active_campaign_run(&surface, &project.product_ref, started, cx)?;
             }
+            let cleanup_receipt_ref = format!("receipt.{}.cleanup.local", run_ref);
+            surface.update(cx, |surface, cx| {
+                surface.observe_entropy_cleanup(cleanup_receipt_ref, forensics_timestamp(), cx)
+            })??;
             sync_active_campaign_run(&surface, &project.product_ref, started, cx)?;
         }
         anyhow::Ok(())
@@ -15458,7 +15463,7 @@ impl AgentPanel {
                     tool_surface_refs: vec!["tool.omega.project.read".into()],
                     started_at: forensics_timestamp(),
                 };
-                let run = match omega_forensics::EntropyRunProjection::new(binding, manifest) {
+                let mut run = match omega_forensics::EntropyRunProjection::new(binding, manifest) {
                     Ok(run) => run,
                     Err(error) => {
                         surface.update(cx, |surface, cx| {
@@ -15470,6 +15475,7 @@ impl AgentPanel {
                         return anyhow::Ok(());
                     }
                 };
+                run.observe_all_tools_available()?;
                 let source_manifest = run.manifest.clone();
                 surface.update(cx, |surface, cx| surface.install_entropy_run(run, cx))?;
 
@@ -15640,6 +15646,13 @@ impl AgentPanel {
                         })??;
                     }
                 }
+                surface.update(cx, |surface, cx| {
+                    surface.observe_entropy_cleanup(
+                        format!("receipt.{}.cleanup.local", run_ref),
+                        forensics_timestamp(),
+                        cx,
+                    )
+                })??;
                 anyhow::Ok(())
             })
             .detach_and_log_err(cx);

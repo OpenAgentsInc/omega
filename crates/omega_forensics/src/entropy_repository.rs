@@ -10,6 +10,7 @@ use walkdir::WalkDir;
 
 pub const ENTROPY_MANIFEST_SCHEMA_V1: &str = "openagents.omega.entropy-manifest.v1";
 pub const ENTROPY_RUN_SCHEMA_V1: &str = "openagents.omega.entropy-run.v1";
+pub const ENTROPY_RUN_SUMMARY_SCHEMA_V1: &str = "openagents.omega.entropy-run-summary.v1";
 pub const ENTROPY_FILE_OUTPUT_SCHEMA_V1: &str = "openagents.omega.entropy-file-output.v1";
 pub const ENTROPY_PROMPT_SNAPSHOT_SCHEMA_V1: &str = "openagents.omega.entropy-prompt-snapshot.v1";
 pub const ENTROPY_SOURCE_INSPECTION_SCHEMA_V1: &str =
@@ -882,8 +883,11 @@ pub enum EntropyRunPhase {
     Ready,
     Running,
     CancelRequested,
+    AwaitingCleanup,
     Completed,
     CompletedWithLimitations,
+    Failed,
+    FailedWithPartialOutput,
     Cancelled,
 }
 
@@ -896,6 +900,8 @@ pub enum EntropyFileState {
     Candidate,
     Skipped,
     Failed,
+    TimedOut,
+    Refused,
     Cancelled,
 }
 
@@ -908,6 +914,11 @@ pub enum EntropyLimitationClass {
     Oversized,
     Symlink,
     ToolFailure,
+    ToolUnavailable,
+    ToolDenied,
+    ToolTimedOut,
+    SessionRefused,
+    SessionTimedOut,
     RequestSchemaFailure,
     ModelFailure,
     InvalidOutput,
@@ -1098,7 +1109,300 @@ pub struct EntropyRunCounts {
     pub candidate: u32,
     pub skipped: u32,
     pub failed: u32,
+    pub timed_out: u32,
+    pub refused: u32,
     pub cancelled: u32,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum EntropyToolState {
+    Requested,
+    Available,
+    Unavailable,
+    Denied,
+    TimedOut,
+    Failed,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct EntropyToolFact {
+    pub tool_ref: String,
+    pub state: EntropyToolState,
+    pub reason_ref: Option<String>,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum EntropyAccountingOutcome {
+    Active,
+    Completed,
+    CompletedIncomplete,
+    Failed,
+    FailedWithPartialOutput,
+    Cancelled,
+    RecoveryRequired,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum EntropyRunUsageExactness {
+    Exact,
+    Estimated,
+    Unavailable,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct EntropyUsageValue {
+    pub value: Option<u64>,
+    pub exactness: EntropyRunUsageExactness,
+}
+
+impl EntropyUsageValue {
+    pub const fn unavailable() -> Self {
+        Self {
+            value: None,
+            exactness: EntropyRunUsageExactness::Unavailable,
+        }
+    }
+
+    fn validate(&self) -> Result<(), ForensicsError> {
+        if self.value.is_some() == (self.exactness == EntropyRunUsageExactness::Unavailable) {
+            return Err(ForensicsError::InvalidEntropyRun(
+                "usage values and exactness must agree; unavailable is never numeric zero".into(),
+            ));
+        }
+        Ok(())
+    }
+}
+
+impl Default for EntropyUsageValue {
+    fn default() -> Self {
+        Self::unavailable()
+    }
+}
+
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct EntropySessionCounts {
+    pub queued: u32,
+    pub attempted: u32,
+    pub settled: u32,
+    pub timed_out: u32,
+    pub cancelled: u32,
+    pub refused: u32,
+    pub failed: u32,
+}
+
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct EntropyToolCounts {
+    pub requested: u32,
+    pub available: u32,
+    pub unavailable: u32,
+    pub denied: u32,
+    pub timed_out: u32,
+    pub failed: u32,
+}
+
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct EntropyOutputCounts {
+    pub findings: u32,
+    pub hypotheses: u32,
+    pub duplicates: u32,
+    pub limitations: u32,
+    pub rejected_malformed: u32,
+}
+
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct EntropySourceCounts {
+    pub eligible_focal_units: u32,
+    pub focal_used: u32,
+    pub contextual_read: u32,
+    pub reached: u32,
+    pub excluded: u32,
+    pub skipped: u32,
+    pub oversized: u32,
+    pub never_reached: u32,
+    pub dependency_trees_total: u32,
+    pub dependency_trees_reached: u32,
+    pub manifest_generation: u64,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum EntropyCleanupState {
+    Pending,
+    Observed,
+    Failed,
+    RecoveryRequired,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct EntropyCleanupTruth {
+    pub state: EntropyCleanupState,
+    pub receipt_ref: Option<String>,
+    #[serde(default)]
+    pub reason_ref: Option<String>,
+    pub observed_at: Option<String>,
+}
+
+impl Default for EntropyCleanupTruth {
+    fn default() -> Self {
+        Self {
+            state: EntropyCleanupState::Pending,
+            receipt_ref: None,
+            reason_ref: None,
+            observed_at: None,
+        }
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct EntropyRunSummary {
+    pub schema: String,
+    pub run_ref: String,
+    pub outcome: EntropyAccountingOutcome,
+    pub source: EntropySourceCounts,
+    pub sessions: EntropySessionCounts,
+    pub tools: EntropyToolCounts,
+    pub outputs: EntropyOutputCounts,
+    pub elapsed_milliseconds: EntropyUsageValue,
+    pub total_tokens: EntropyUsageValue,
+    pub cost_micros: EntropyUsageValue,
+    pub network_bytes: EntropyUsageValue,
+    pub cleanup: EntropyCleanupTruth,
+    pub output_refs: Vec<String>,
+    pub failure_refs: Vec<String>,
+    pub canonical_digest: String,
+}
+
+impl Default for EntropyRunSummary {
+    fn default() -> Self {
+        Self {
+            schema: String::new(),
+            run_ref: String::new(),
+            outcome: EntropyAccountingOutcome::Active,
+            source: EntropySourceCounts::default(),
+            sessions: EntropySessionCounts::default(),
+            tools: EntropyToolCounts::default(),
+            outputs: EntropyOutputCounts::default(),
+            elapsed_milliseconds: EntropyUsageValue::unavailable(),
+            total_tokens: EntropyUsageValue::unavailable(),
+            cost_micros: EntropyUsageValue::unavailable(),
+            network_bytes: EntropyUsageValue::unavailable(),
+            cleanup: EntropyCleanupTruth::default(),
+            output_refs: Vec::new(),
+            failure_refs: Vec::new(),
+            canonical_digest: String::new(),
+        }
+    }
+}
+
+impl EntropyRunSummary {
+    fn computed_digest(&self) -> Result<String, ForensicsError> {
+        let mut value = self.clone();
+        value.canonical_digest.clear();
+        sha256_json(&value)
+    }
+
+    pub fn validate(&self) -> Result<(), ForensicsError> {
+        if self.schema != ENTROPY_RUN_SUMMARY_SCHEMA_V1 {
+            return Err(ForensicsError::InvalidSchema);
+        }
+        validate_public_ref("entropy run", &self.run_ref)?;
+        validate_sha256("entropy run summary", &self.canonical_digest)?;
+        for usage in [
+            &self.elapsed_milliseconds,
+            &self.total_tokens,
+            &self.cost_micros,
+            &self.network_bytes,
+        ] {
+            usage.validate()?;
+        }
+        if self.canonical_digest != self.computed_digest()? {
+            return Err(ForensicsError::InvalidEntropyRun(
+                "entropy run summary digest is invalid".into(),
+            ));
+        }
+        if self.sessions.settled > self.source.eligible_focal_units
+            || self.sessions.attempted > self.source.eligible_focal_units
+            || self.tools.available
+                + self.tools.unavailable
+                + self.tools.denied
+                + self.tools.timed_out
+                + self.tools.failed
+                > self.tools.requested
+        {
+            return Err(ForensicsError::InvalidEntropyRun(
+                "entropy run summary denominators are inconsistent".into(),
+            ));
+        }
+        let clean = self.source.eligible_focal_units > 0
+            && self.sessions.attempted == self.source.eligible_focal_units
+            && self.sessions.settled == self.sessions.attempted
+            && self.sessions.failed == 0
+            && self.sessions.timed_out == 0
+            && self.sessions.refused == 0
+            && self.sessions.cancelled == 0
+            && self.tools.available == self.tools.requested
+            && self.outputs.rejected_malformed == 0
+            && self.failure_refs.is_empty()
+            && self.cleanup.state == EntropyCleanupState::Observed
+            && self.cleanup.receipt_ref.is_some();
+        if self.outcome == EntropyAccountingOutcome::Completed && !clean {
+            return Err(ForensicsError::InvalidEntropyRun(
+                "ordinary completion requires complete session, tool, source, and cleanup truth"
+                    .into(),
+            ));
+        }
+        if (self.cleanup.state == EntropyCleanupState::Observed)
+            != self.cleanup.receipt_ref.is_some()
+        {
+            return Err(ForensicsError::InvalidEntropyRun(
+                "cleanup state and receipt disagree".into(),
+            ));
+        }
+        if matches!(
+            self.cleanup.state,
+            EntropyCleanupState::Observed
+                | EntropyCleanupState::Failed
+                | EntropyCleanupState::RecoveryRequired
+        ) != self.cleanup.observed_at.is_some()
+        {
+            return Err(ForensicsError::InvalidEntropyRun(
+                "cleanup state and observation time disagree".into(),
+            ));
+        }
+        if (self.cleanup.state == EntropyCleanupState::Observed
+            && self.cleanup.reason_ref.is_some())
+            || (matches!(
+                self.cleanup.state,
+                EntropyCleanupState::Failed | EntropyCleanupState::RecoveryRequired
+            ) != self.cleanup.reason_ref.is_some())
+        {
+            return Err(ForensicsError::InvalidEntropyRun(
+                "cleanup failure state and exact reason disagree".into(),
+            ));
+        }
+        for value in self.output_refs.iter().chain(&self.failure_refs) {
+            validate_public_ref("entropy accounting ref", value)?;
+        }
+        Ok(())
+    }
+
+    pub fn qualified_miss_eligible(&self) -> bool {
+        self.outcome == EntropyAccountingOutcome::Completed
+            && self.outputs.findings == 0
+            && self.outputs.hypotheses == 0
+            && self.outputs.rejected_malformed == 0
+    }
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -1111,9 +1415,53 @@ pub struct EntropyRunProjection {
     pub files: Vec<EntropyFileProgress>,
     pub limitations: Vec<EntropyLimitation>,
     pub events: Vec<EntropyRunEvent>,
+    #[serde(default)]
+    pub tool_facts: Vec<EntropyToolFact>,
+    #[serde(default)]
+    pub cleanup: EntropyCleanupTruth,
+    #[serde(default)]
+    pub summary: EntropyRunSummary,
+    #[serde(default)]
+    pub duplicate_terminal_events: u32,
 }
 
 impl EntropyRunProjection {
+    pub fn migrate_legacy_accounting(&mut self) -> Result<bool, ForensicsError> {
+        if self.summary.schema == ENTROPY_RUN_SUMMARY_SCHEMA_V1 {
+            return Ok(false);
+        }
+        if !self.summary.schema.is_empty() || !self.tool_facts.is_empty() {
+            return Err(ForensicsError::InvalidEntropyRun(
+                "unknown entropy accounting schema cannot be migrated".into(),
+            ));
+        }
+        self.tool_facts = self
+            .binding
+            .tool_surface_refs
+            .iter()
+            .cloned()
+            .map(|tool_ref| EntropyToolFact {
+                tool_ref,
+                state: EntropyToolState::Requested,
+                reason_ref: None,
+            })
+            .collect();
+        self.cleanup = EntropyCleanupTruth::default();
+        self.summary = EntropyRunSummary {
+            run_ref: self.binding.run_ref.clone(),
+            ..EntropyRunSummary::default()
+        };
+        if matches!(
+            self.phase,
+            EntropyRunPhase::Completed | EntropyRunPhase::CompletedWithLimitations
+        ) {
+            self.phase = EntropyRunPhase::AwaitingCleanup;
+        }
+        self.refresh_summary()?;
+        self.apply_summary_phase();
+        Ok(true)
+    }
+
     pub fn new(
         binding: EntropyRunBinding,
         manifest: EntropyManifest,
@@ -1175,7 +1523,40 @@ impl EntropyRunProjection {
         for file in &files {
             limitations.extend(file.limitations.clone());
         }
-        Ok(Self {
+        let tool_facts = binding
+            .tool_surface_refs
+            .iter()
+            .cloned()
+            .map(|tool_ref| EntropyToolFact {
+                tool_ref,
+                state: EntropyToolState::Requested,
+                reason_ref: None,
+            })
+            .collect();
+        let cleanup = EntropyCleanupTruth {
+            state: EntropyCleanupState::Pending,
+            receipt_ref: None,
+            reason_ref: None,
+            observed_at: None,
+        };
+        let summary = EntropyRunSummary {
+            schema: ENTROPY_RUN_SUMMARY_SCHEMA_V1.into(),
+            run_ref: binding.run_ref.clone(),
+            outcome: EntropyAccountingOutcome::Active,
+            source: EntropySourceCounts::default(),
+            sessions: EntropySessionCounts::default(),
+            tools: EntropyToolCounts::default(),
+            outputs: EntropyOutputCounts::default(),
+            elapsed_milliseconds: EntropyUsageValue::unavailable(),
+            total_tokens: EntropyUsageValue::unavailable(),
+            cost_micros: EntropyUsageValue::unavailable(),
+            network_bytes: EntropyUsageValue::unavailable(),
+            cleanup: cleanup.clone(),
+            output_refs: Vec::new(),
+            failure_refs: Vec::new(),
+            canonical_digest: String::new(),
+        };
+        let mut run = Self {
             schema: ENTROPY_RUN_SCHEMA_V1.into(),
             binding,
             manifest,
@@ -1183,7 +1564,13 @@ impl EntropyRunProjection {
             files,
             limitations,
             events: Vec::new(),
-        })
+            tool_facts,
+            cleanup,
+            summary,
+            duplicate_terminal_events: 0,
+        };
+        run.refresh_summary()?;
+        Ok(run)
     }
 
     pub fn validate(&self) -> Result<(), ForensicsError> {
@@ -1236,6 +1623,63 @@ impl EntropyRunProjection {
         for limitation in &self.limitations {
             limitation.validate()?;
         }
+        if self.tool_facts.len() != self.binding.tool_surface_refs.len() {
+            return Err(ForensicsError::InvalidEntropyRun(
+                "tool accounting must preserve every requested tool".into(),
+            ));
+        }
+        for (fact, requested_ref) in self.tool_facts.iter().zip(&self.binding.tool_surface_refs) {
+            validate_public_ref("tool", &fact.tool_ref)?;
+            if fact.tool_ref != *requested_ref
+                || fact
+                    .reason_ref
+                    .as_ref()
+                    .is_some_and(|reason| validate_public_ref("tool reason", reason).is_err())
+                || (fact.state == EntropyToolState::Available && fact.reason_ref.is_some())
+                || (matches!(
+                    fact.state,
+                    EntropyToolState::Unavailable
+                        | EntropyToolState::Denied
+                        | EntropyToolState::TimedOut
+                        | EntropyToolState::Failed
+                ) && fact.reason_ref.is_none())
+            {
+                return Err(ForensicsError::InvalidEntropyRun(
+                    "tool accounting fact is invalid or out of request order".into(),
+                ));
+            }
+        }
+        self.summary.validate()?;
+        if self.summary != self.rebuilt_summary()? {
+            return Err(ForensicsError::InvalidEntropyRun(
+                "persisted entropy accounting drifted from the canonical run facts".into(),
+            ));
+        }
+        let phase_matches_summary = match self.summary.outcome {
+            EntropyAccountingOutcome::Active => matches!(
+                self.phase,
+                EntropyRunPhase::Ready
+                    | EntropyRunPhase::Running
+                    | EntropyRunPhase::CancelRequested
+            ),
+            EntropyAccountingOutcome::RecoveryRequired => {
+                self.phase == EntropyRunPhase::AwaitingCleanup
+            }
+            EntropyAccountingOutcome::Completed => self.phase == EntropyRunPhase::Completed,
+            EntropyAccountingOutcome::CompletedIncomplete => {
+                self.phase == EntropyRunPhase::CompletedWithLimitations
+            }
+            EntropyAccountingOutcome::Failed => self.phase == EntropyRunPhase::Failed,
+            EntropyAccountingOutcome::FailedWithPartialOutput => {
+                self.phase == EntropyRunPhase::FailedWithPartialOutput
+            }
+            EntropyAccountingOutcome::Cancelled => self.phase == EntropyRunPhase::Cancelled,
+        };
+        if !phase_matches_summary {
+            return Err(ForensicsError::InvalidEntropyRun(
+                "run phase and canonical accounting outcome disagree".into(),
+            ));
+        }
         for (index, event) in self.events.iter().enumerate() {
             if event.sequence as usize != index + 1
                 || event.observed_at.trim().is_empty()
@@ -1252,6 +1696,154 @@ impl EntropyRunProjection {
         Ok(())
     }
 
+    pub fn observe_tool(
+        &mut self,
+        tool_ref: &str,
+        state: EntropyToolState,
+        reason_ref: Option<String>,
+    ) -> Result<(), ForensicsError> {
+        if let Some(reason) = &reason_ref {
+            validate_public_ref("tool reason", reason)?;
+        }
+        if (state == EntropyToolState::Available && reason_ref.is_some())
+            || (matches!(
+                state,
+                EntropyToolState::Unavailable
+                    | EntropyToolState::Denied
+                    | EntropyToolState::TimedOut
+                    | EntropyToolState::Failed
+            ) && reason_ref.is_none())
+        {
+            return Err(ForensicsError::InvalidEntropyRun(
+                "tool outcome and exact reason must agree".into(),
+            ));
+        }
+        let fact = self
+            .tool_facts
+            .iter_mut()
+            .find(|fact| fact.tool_ref == tool_ref)
+            .ok_or_else(|| ForensicsError::InvalidEntropyRun("tool was not requested".into()))?;
+        if fact.state != EntropyToolState::Requested {
+            if fact.state == state && fact.reason_ref == reason_ref {
+                return Ok(());
+            }
+            return Err(ForensicsError::InvalidEntropyRun(
+                "settled tool facts are immutable".into(),
+            ));
+        }
+        if state == EntropyToolState::Requested {
+            return Ok(());
+        }
+        fact.state = state;
+        fact.reason_ref = reason_ref;
+        self.refresh_summary()?;
+        Ok(())
+    }
+
+    pub fn observe_all_tools_available(&mut self) -> Result<(), ForensicsError> {
+        let refs = self
+            .tool_facts
+            .iter()
+            .map(|fact| fact.tool_ref.clone())
+            .collect::<Vec<_>>();
+        for tool_ref in refs {
+            self.observe_tool(&tool_ref, EntropyToolState::Available, None)?;
+        }
+        Ok(())
+    }
+
+    pub fn record_usage(
+        &mut self,
+        elapsed_milliseconds: EntropyUsageValue,
+        total_tokens: EntropyUsageValue,
+        cost_micros: EntropyUsageValue,
+        network_bytes: EntropyUsageValue,
+    ) -> Result<(), ForensicsError> {
+        for value in [
+            &elapsed_milliseconds,
+            &total_tokens,
+            &cost_micros,
+            &network_bytes,
+        ] {
+            value.validate()?;
+        }
+        self.summary.elapsed_milliseconds = elapsed_milliseconds;
+        self.summary.total_tokens = total_tokens;
+        self.summary.cost_micros = cost_micros;
+        self.summary.network_bytes = network_bytes;
+        self.refresh_summary()?;
+        Ok(())
+    }
+
+    pub fn observe_cleanup(
+        &mut self,
+        receipt_ref: String,
+        observed_at: String,
+    ) -> Result<(), ForensicsError> {
+        validate_public_ref("cleanup receipt", &receipt_ref)?;
+        if observed_at.trim().is_empty() || observed_at.len() > 64 {
+            return Err(ForensicsError::InvalidEntropyRun(
+                "cleanup observation time must be present and bounded".into(),
+            ));
+        }
+        if self.files.iter().any(|file| {
+            matches!(
+                file.state,
+                EntropyFileState::Queued | EntropyFileState::Reading
+            )
+        }) {
+            return Err(ForensicsError::InvalidEntropyRun(
+                "cleanup cannot settle while file sessions remain active".into(),
+            ));
+        }
+        if self.cleanup.state == EntropyCleanupState::Observed {
+            if self.cleanup.receipt_ref.as_deref() == Some(&receipt_ref)
+                && self.cleanup.observed_at.as_deref() == Some(&observed_at)
+            {
+                return Ok(());
+            }
+            return Err(ForensicsError::InvalidEntropyRun(
+                "cleanup settlement is immutable".into(),
+            ));
+        }
+        self.cleanup = EntropyCleanupTruth {
+            state: EntropyCleanupState::Observed,
+            receipt_ref: Some(receipt_ref),
+            reason_ref: None,
+            observed_at: Some(observed_at),
+        };
+        self.refresh_summary()?;
+        self.apply_summary_phase();
+        Ok(())
+    }
+
+    pub fn fail_cleanup(
+        &mut self,
+        reason_ref: String,
+        observed_at: String,
+    ) -> Result<(), ForensicsError> {
+        validate_public_ref("cleanup failure", &reason_ref)?;
+        if observed_at.trim().is_empty() || observed_at.len() > 64 {
+            return Err(ForensicsError::InvalidEntropyRun(
+                "cleanup failure time must be present and bounded".into(),
+            ));
+        }
+        if self.cleanup.state == EntropyCleanupState::Observed {
+            return Err(ForensicsError::InvalidEntropyRun(
+                "observed cleanup cannot regress to failure".into(),
+            ));
+        }
+        self.cleanup = EntropyCleanupTruth {
+            state: EntropyCleanupState::Failed,
+            receipt_ref: None,
+            reason_ref: Some(reason_ref),
+            observed_at: Some(observed_at),
+        };
+        self.phase = EntropyRunPhase::AwaitingCleanup;
+        self.refresh_summary()?;
+        Ok(())
+    }
+
     pub fn start_next_file(
         &mut self,
         observed_at: String,
@@ -1259,9 +1851,12 @@ impl EntropyRunProjection {
         if matches!(
             self.phase,
             EntropyRunPhase::CancelRequested
+                | EntropyRunPhase::AwaitingCleanup
                 | EntropyRunPhase::Cancelled
                 | EntropyRunPhase::Completed
                 | EntropyRunPhase::CompletedWithLimitations
+                | EntropyRunPhase::Failed
+                | EntropyRunPhase::FailedWithPartialOutput
         ) {
             return Ok(None);
         }
@@ -1297,6 +1892,7 @@ impl EntropyRunProjection {
             EntropyFileState::Reading,
             observed_at,
         )?;
+        self.refresh_summary()?;
         Ok(Some(EntropyFileTask {
             run_ref: self.binding.run_ref.clone(),
             file_path,
@@ -1313,6 +1909,24 @@ impl EntropyRunProjection {
         observed_at: String,
     ) -> Result<(), ForensicsError> {
         output.validate(&self.binding)?;
+        if let Some(file) = self.files.iter().find(|file| file.path == output.file_path)
+            && matches!(
+                file.state,
+                EntropyFileState::Analyzed | EntropyFileState::Candidate
+            )
+        {
+            if file.observations == output.observations
+                && file.hypotheses == output.hypotheses
+                && file.limitations == output.limitations
+            {
+                self.duplicate_terminal_events = self.duplicate_terminal_events.saturating_add(1);
+                self.refresh_summary()?;
+                return Ok(());
+            }
+            return Err(ForensicsError::InvalidEntropyRun(
+                "settled file output is immutable".into(),
+            ));
+        }
         let file = self
             .files
             .iter_mut()
@@ -1341,6 +1955,7 @@ impl EntropyRunProjection {
         let state = file.state;
         let path = file.path.clone();
         self.push_event(Some(path), state, observed_at)?;
+        self.refresh_summary()?;
         self.finish_if_exhausted();
         Ok(())
     }
@@ -1361,15 +1976,34 @@ impl EntropyRunProjection {
             .ok_or_else(|| {
                 ForensicsError::InvalidEntropyRun("failed file is absent from manifest".into())
             })?;
+        if matches!(
+            file.state,
+            EntropyFileState::Failed | EntropyFileState::TimedOut | EntropyFileState::Refused
+        ) && file.limitations.contains(&limitation)
+        {
+            self.duplicate_terminal_events = self.duplicate_terminal_events.saturating_add(1);
+            self.refresh_summary()?;
+            return Ok(());
+        }
         if file.state != EntropyFileState::Reading {
             return Err(ForensicsError::InvalidEntropyRun(
                 "only a reading file can fail".into(),
             ));
         }
-        file.state = EntropyFileState::Failed;
+        file.state = match limitation.class {
+            EntropyLimitationClass::SessionTimedOut | EntropyLimitationClass::ToolTimedOut => {
+                EntropyFileState::TimedOut
+            }
+            EntropyLimitationClass::SessionRefused | EntropyLimitationClass::ToolDenied => {
+                EntropyFileState::Refused
+            }
+            _ => EntropyFileState::Failed,
+        };
         file.limitations.push(limitation.clone());
         self.limitations.push(limitation);
-        self.push_event(Some(path), EntropyFileState::Failed, observed_at)?;
+        let state = file.state;
+        self.push_event(Some(path), state, observed_at)?;
+        self.refresh_summary()?;
         self.finish_if_exhausted();
         Ok(())
     }
@@ -1379,6 +2013,8 @@ impl EntropyRunProjection {
             self.phase,
             EntropyRunPhase::Completed
                 | EntropyRunPhase::CompletedWithLimitations
+                | EntropyRunPhase::Failed
+                | EntropyRunPhase::FailedWithPartialOutput
                 | EntropyRunPhase::Cancelled
         ) {
             return Ok(());
@@ -1406,6 +2042,8 @@ impl EntropyRunProjection {
             self.push_event(Some(path), EntropyFileState::Cancelled, observed_at.clone())?;
         }
         self.phase = EntropyRunPhase::Cancelled;
+        self.refresh_summary()?;
+        self.apply_summary_phase();
         Ok(())
     }
 
@@ -1419,6 +2057,8 @@ impl EntropyRunProjection {
                 EntropyFileState::Candidate => counts.candidate += 1,
                 EntropyFileState::Skipped => counts.skipped += 1,
                 EntropyFileState::Failed => counts.failed += 1,
+                EntropyFileState::TimedOut => counts.timed_out += 1,
+                EntropyFileState::Refused => counts.refused += 1,
                 EntropyFileState::Cancelled => counts.cancelled += 1,
             }
         }
@@ -1431,6 +2071,7 @@ impl EntropyRunProjection {
             && self.binding.manifest_ref == inspection.manifest_ref
             && self.binding.manifest_digest == inspection.manifest_digest
             && inspection.qualified_miss_eligible()
+            && self.summary.qualified_miss_eligible()
             && self
                 .files
                 .iter()
@@ -1453,11 +2094,262 @@ impl EntropyRunProjection {
     }
 
     fn finish(&mut self) {
-        self.phase = if self.limitations.is_empty() {
-            EntropyRunPhase::Completed
-        } else {
-            EntropyRunPhase::CompletedWithLimitations
+        self.phase = EntropyRunPhase::AwaitingCleanup;
+        let _ = self.refresh_summary();
+    }
+
+    fn apply_summary_phase(&mut self) {
+        self.phase = match self.summary.outcome {
+            EntropyAccountingOutcome::Active => self.phase,
+            EntropyAccountingOutcome::Completed => EntropyRunPhase::Completed,
+            EntropyAccountingOutcome::CompletedIncomplete => {
+                EntropyRunPhase::CompletedWithLimitations
+            }
+            EntropyAccountingOutcome::Failed => EntropyRunPhase::Failed,
+            EntropyAccountingOutcome::FailedWithPartialOutput => {
+                EntropyRunPhase::FailedWithPartialOutput
+            }
+            EntropyAccountingOutcome::Cancelled => EntropyRunPhase::Cancelled,
+            EntropyAccountingOutcome::RecoveryRequired => EntropyRunPhase::AwaitingCleanup,
         };
+    }
+
+    fn refresh_summary(&mut self) -> Result<(), ForensicsError> {
+        self.summary = self.rebuilt_summary()?;
+        Ok(())
+    }
+
+    fn rebuilt_summary(&self) -> Result<EntropyRunSummary, ForensicsError> {
+        let mut sessions = EntropySessionCounts::default();
+        let mut outputs = EntropyOutputCounts::default();
+        let mut output_refs = Vec::new();
+        let mut reached_paths = BTreeSet::new();
+        let mut contextual_paths = BTreeSet::new();
+        for file in &self.files {
+            match file.state {
+                EntropyFileState::Queued => sessions.queued += 1,
+                EntropyFileState::Reading => sessions.attempted += 1,
+                EntropyFileState::Analyzed | EntropyFileState::Candidate => {
+                    sessions.attempted += 1;
+                    sessions.settled += 1;
+                }
+                EntropyFileState::Failed => {
+                    sessions.attempted += 1;
+                    sessions.settled += 1;
+                    sessions.failed += 1;
+                }
+                EntropyFileState::TimedOut => {
+                    sessions.attempted += 1;
+                    sessions.settled += 1;
+                    sessions.timed_out += 1;
+                }
+                EntropyFileState::Refused => {
+                    sessions.attempted += 1;
+                    sessions.settled += 1;
+                    sessions.refused += 1;
+                }
+                EntropyFileState::Cancelled => {
+                    sessions.settled += 1;
+                    sessions.cancelled += 1;
+                    if self.events.iter().any(|event| {
+                        event.file_path.as_deref() == Some(file.path.as_str())
+                            && event.state == EntropyFileState::Reading
+                    }) {
+                        sessions.attempted += 1;
+                    }
+                }
+                EntropyFileState::Skipped => {}
+            }
+            if matches!(
+                file.state,
+                EntropyFileState::Reading
+                    | EntropyFileState::Analyzed
+                    | EntropyFileState::Candidate
+                    | EntropyFileState::Failed
+                    | EntropyFileState::TimedOut
+                    | EntropyFileState::Refused
+            ) || (file.state == EntropyFileState::Cancelled
+                && self.events.iter().any(|event| {
+                    event.file_path.as_deref() == Some(file.path.as_str())
+                        && event.state == EntropyFileState::Reading
+                }))
+            {
+                reached_paths.insert(file.path.clone());
+            }
+            outputs.findings = outputs
+                .findings
+                .saturating_add(u32::try_from(file.observations.len()).unwrap_or(u32::MAX));
+            outputs.hypotheses = outputs
+                .hypotheses
+                .saturating_add(u32::try_from(file.hypotheses.len()).unwrap_or(u32::MAX));
+            output_refs.extend(
+                file.observations
+                    .iter()
+                    .map(|observation| observation.observation_ref.clone()),
+            );
+            for source in file
+                .observations
+                .iter()
+                .flat_map(|observation| observation.source_refs.iter())
+                .chain(
+                    file.hypotheses
+                        .iter()
+                        .flat_map(|hypothesis| hypothesis.causal_links.iter())
+                        .flat_map(|link| link.source_refs.iter()),
+                )
+            {
+                reached_paths.insert(source.path.clone());
+                if source.path != file.path {
+                    contextual_paths.insert(source.path.clone());
+                }
+            }
+            output_refs.extend(
+                file.hypotheses
+                    .iter()
+                    .map(|hypothesis| hypothesis.hypothesis_ref.clone()),
+            );
+        }
+        outputs.limitations = u32::try_from(self.limitations.len()).unwrap_or(u32::MAX);
+        outputs.duplicates = self.duplicate_terminal_events;
+        outputs.rejected_malformed = u32::try_from(
+            self.limitations
+                .iter()
+                .filter(|limitation| {
+                    matches!(
+                        limitation.class,
+                        EntropyLimitationClass::RequestSchemaFailure
+                            | EntropyLimitationClass::InvalidOutput
+                    )
+                })
+                .count(),
+        )
+        .unwrap_or(u32::MAX);
+        output_refs.sort();
+        output_refs.dedup();
+        let mut failure_refs = self
+            .limitations
+            .iter()
+            .map(|limitation| limitation.reason_ref.clone())
+            .collect::<Vec<_>>();
+        failure_refs.extend(
+            self.tool_facts
+                .iter()
+                .filter_map(|fact| fact.reason_ref.clone()),
+        );
+        failure_refs.extend(self.cleanup.reason_ref.iter().cloned());
+        failure_refs.sort();
+        failure_refs.dedup();
+
+        let mut tools = EntropyToolCounts {
+            requested: u32::try_from(self.tool_facts.len()).unwrap_or(u32::MAX),
+            ..EntropyToolCounts::default()
+        };
+        for fact in &self.tool_facts {
+            match fact.state {
+                EntropyToolState::Requested => {}
+                EntropyToolState::Available => tools.available += 1,
+                EntropyToolState::Unavailable => tools.unavailable += 1,
+                EntropyToolState::Denied => tools.denied += 1,
+                EntropyToolState::TimedOut => tools.timed_out += 1,
+                EntropyToolState::Failed => tools.failed += 1,
+            }
+        }
+        let eligible_focal_units = u32::try_from(
+            self.manifest
+                .files
+                .iter()
+                .filter(|file| file.eligibility == EntropyFileEligibility::Eligible)
+                .count(),
+        )
+        .unwrap_or(u32::MAX);
+        let reached = u32::try_from(reached_paths.len()).unwrap_or(u32::MAX);
+        let dependency_trees_reached = u32::try_from(
+            self.manifest
+                .dependencies
+                .iter()
+                .filter(|dependency| {
+                    reached_paths.iter().any(|path| {
+                        path == &dependency.path
+                            || path
+                                .strip_prefix(&dependency.path)
+                                .is_some_and(|suffix| suffix.starts_with('/'))
+                    })
+                })
+                .count(),
+        )
+        .unwrap_or(u32::MAX);
+        let source = EntropySourceCounts {
+            eligible_focal_units,
+            focal_used: sessions.attempted,
+            contextual_read: u32::try_from(contextual_paths.len()).unwrap_or(u32::MAX),
+            reached,
+            excluded: u32::try_from(self.manifest.files.len())
+                .unwrap_or(u32::MAX)
+                .saturating_sub(eligible_focal_units),
+            skipped: self.counts().skipped,
+            oversized: u32::try_from(
+                self.manifest
+                    .files
+                    .iter()
+                    .filter(|file| file.eligibility == EntropyFileEligibility::Oversized)
+                    .count(),
+            )
+            .unwrap_or(u32::MAX),
+            never_reached: eligible_focal_units.saturating_sub(sessions.attempted),
+            dependency_trees_total: u32::try_from(self.manifest.dependencies.len())
+                .unwrap_or(u32::MAX),
+            dependency_trees_reached,
+            manifest_generation: 1,
+        };
+        let all_settled = sessions.queued == 0
+            && self
+                .files
+                .iter()
+                .all(|file| file.state != EntropyFileState::Reading);
+        let unsuccessful = sessions.failed + sessions.timed_out + sessions.refused;
+        let outcome = if !all_settled || self.phase == EntropyRunPhase::Ready {
+            EntropyAccountingOutcome::Active
+        } else if sessions.cancelled > 0 {
+            EntropyAccountingOutcome::Cancelled
+        } else if self.cleanup.state != EntropyCleanupState::Observed {
+            EntropyAccountingOutcome::RecoveryRequired
+        } else if sessions.attempted > 0 && unsuccessful == sessions.attempted {
+            if output_refs.is_empty() {
+                EntropyAccountingOutcome::Failed
+            } else {
+                EntropyAccountingOutcome::FailedWithPartialOutput
+            }
+        } else if unsuccessful > 0 && !output_refs.is_empty() {
+            EntropyAccountingOutcome::FailedWithPartialOutput
+        } else if unsuccessful > 0
+            || !failure_refs.is_empty()
+            || tools.available != tools.requested
+            || sessions.attempted != eligible_focal_units
+        {
+            EntropyAccountingOutcome::CompletedIncomplete
+        } else {
+            EntropyAccountingOutcome::Completed
+        };
+        let mut summary = EntropyRunSummary {
+            schema: ENTROPY_RUN_SUMMARY_SCHEMA_V1.into(),
+            run_ref: self.binding.run_ref.clone(),
+            outcome,
+            source,
+            sessions,
+            tools,
+            outputs,
+            elapsed_milliseconds: self.summary.elapsed_milliseconds.clone(),
+            total_tokens: self.summary.total_tokens.clone(),
+            cost_micros: self.summary.cost_micros.clone(),
+            network_bytes: self.summary.network_bytes.clone(),
+            cleanup: self.cleanup.clone(),
+            output_refs,
+            failure_refs,
+            canonical_digest: String::new(),
+        };
+        summary.canonical_digest = summary.computed_digest()?;
+        summary.validate()?;
+        Ok(summary)
     }
 
     fn push_event(
@@ -2011,6 +2903,7 @@ mod tests {
         );
         let mut run = EntropyRunProjection::new(run_binding(&manifest), manifest)
             .expect("run should preserve incomplete input");
+        run.observe_all_tools_available().expect("tool inventory");
         let task = run
             .start_next_file("2026-08-02T18:20:01Z".into())
             .expect("start should succeed")
@@ -2025,8 +2918,14 @@ mod tests {
             "2026-08-02T18:20:02Z".into(),
         )
         .expect("failure should remain explicit");
+        run.observe_cleanup(
+            "receipt.entropy.failed.cleanup".into(),
+            "2026-08-02T18:20:03Z".into(),
+        )
+        .expect("cleanup truth");
 
-        assert_eq!(run.phase, EntropyRunPhase::CompletedWithLimitations);
+        assert_eq!(run.phase, EntropyRunPhase::Failed);
+        assert_eq!(run.summary.outcome, EntropyAccountingOutcome::Failed);
         assert_eq!(run.counts().failed, 1);
         assert!(
             run.limitations
@@ -2052,6 +2951,7 @@ mod tests {
         let dirty_inspection = source_inspection(&manifest, vec!["rng.c".into()]);
         let mut run = EntropyRunProjection::new(run_binding(&manifest), manifest)
             .expect("complete source run");
+        run.observe_all_tools_available().expect("tool inventory");
         let task = run
             .start_next_file("2026-08-02T18:20:01Z".into())
             .expect("start file")
@@ -2068,10 +2968,294 @@ mod tests {
             "2026-08-02T18:20:02Z".into(),
         )
         .expect("clean file result");
+        assert_eq!(run.phase, EntropyRunPhase::AwaitingCleanup);
+        assert!(!run.qualified_miss_eligible(&complete_inspection));
+        run.observe_cleanup(
+            "receipt.entropy.clean.cleanup".into(),
+            "2026-08-02T18:20:03Z".into(),
+        )
+        .expect("cleanup truth");
 
         assert_eq!(run.phase, EntropyRunPhase::Completed);
         assert!(run.qualified_miss_eligible(&complete_inspection));
         assert!(!run.qualified_miss_eligible(&dirty_inspection));
+    }
+
+    #[test]
+    fn total_session_failure_cannot_become_success_and_replay_does_not_double_count() {
+        let root = tempfile::tempdir().expect("temporary repository");
+        fs::write(root.path().join("a.c"), "int a;\n").expect("first source");
+        fs::write(root.path().join("b.c"), "int b;\n").expect("second source");
+        let manifest = build_manifest(root.path(), Vec::new());
+        let mut run = EntropyRunProjection::new(run_binding(&manifest), manifest).expect("run");
+        run.observe_all_tools_available().expect("tool inventory");
+
+        for sequence in 1..=2 {
+            let task = run
+                .start_next_file(format!("2026-08-02T18:21:0{sequence}Z"))
+                .expect("start")
+                .expect("file task");
+            let limitation = EntropyLimitation {
+                class: EntropyLimitationClass::ModelFailure,
+                reason_ref: format!("limitation.entropy.session.{sequence}.failed"),
+                message: "model session failed".into(),
+                file_path: Some(task.file_path),
+            };
+            run.fail_reading_file(limitation.clone(), format!("2026-08-02T18:21:1{sequence}Z"))
+                .expect("failure");
+            let event_count = run.events.len();
+            run.fail_reading_file(limitation, format!("2026-08-02T18:21:2{sequence}Z"))
+                .expect("exact replay is idempotent");
+            assert_eq!(run.events.len(), event_count);
+        }
+        assert_eq!(run.phase, EntropyRunPhase::AwaitingCleanup);
+        assert_eq!(
+            run.summary.outcome,
+            EntropyAccountingOutcome::RecoveryRequired
+        );
+        run.observe_cleanup(
+            "receipt.entropy.total-failure.cleanup".into(),
+            "2026-08-02T18:21:30Z".into(),
+        )
+        .expect("cleanup");
+        assert_eq!(run.phase, EntropyRunPhase::Failed);
+        assert_eq!(run.summary.sessions.attempted, 2);
+        assert_eq!(run.summary.sessions.settled, 2);
+        assert_eq!(run.summary.sessions.failed, 2);
+        assert_eq!(run.summary.outputs.duplicates, 2);
+        assert_eq!(run.summary.outputs.findings, 0);
+        assert!(!run.summary.qualified_miss_eligible());
+        run.validate().expect("canonical terminal accounting");
+    }
+
+    #[test]
+    fn partial_session_failure_retains_output_and_exact_denominators() {
+        let root = tempfile::tempdir().expect("temporary repository");
+        fs::write(root.path().join("a.c"), "int a;\n").expect("first source");
+        fs::write(root.path().join("b.c"), "int b;\n").expect("second source");
+        let manifest = build_manifest(root.path(), Vec::new());
+        let mut run = EntropyRunProjection::new(run_binding(&manifest), manifest).expect("run");
+        run.observe_all_tools_available().expect("tool inventory");
+        let first = run
+            .start_next_file("2026-08-02T18:22:01Z".into())
+            .expect("start")
+            .expect("first task");
+        let output = EntropyFileAnalysisOutput {
+            schema: ENTROPY_FILE_OUTPUT_SCHEMA_V1.into(),
+            run_ref: first.run_ref,
+            file_path: first.file_path.clone(),
+            observations: vec![EntropyObservation {
+                observation_ref: "observation.entropy.partial.retained".into(),
+                title: "Retained source observation".into(),
+                analyzed_file: first.file_path.clone(),
+                symbols: vec!["a".into()],
+                suspected_mechanism: "A source fact remains inspectable".into(),
+                secret_consumers: vec!["fixture".into()],
+                source_refs: vec![ForensicSourceCitation {
+                    source_ref: "source.entropy.partial.retained".into(),
+                    commit: REVISION.into(),
+                    path: first.file_path,
+                    start_line: 1,
+                    end_line: 1,
+                    symbol: Some("a".into()),
+                }],
+                confidence_boundary: "Source observation only".into(),
+            }],
+            hypotheses: Vec::new(),
+            limitations: Vec::new(),
+        };
+        run.apply_output(output.clone(), "2026-08-02T18:22:02Z".into())
+            .expect("successful output");
+        let events_after_output = run.events.len();
+        run.apply_output(output, "2026-08-02T18:22:03Z".into())
+            .expect("output replay");
+        assert_eq!(run.events.len(), events_after_output);
+        assert_eq!(run.summary.outputs.duplicates, 1);
+        let before_reordered = run.summary.clone();
+        assert!(
+            run.apply_output(
+                EntropyFileAnalysisOutput {
+                    schema: ENTROPY_FILE_OUTPUT_SCHEMA_V1.into(),
+                    run_ref: run.binding.run_ref.clone(),
+                    file_path: "b.c".into(),
+                    observations: Vec::new(),
+                    hypotheses: Vec::new(),
+                    limitations: Vec::new(),
+                },
+                "2026-08-02T18:22:03Z".into(),
+            )
+            .is_err()
+        );
+        assert_eq!(run.summary, before_reordered);
+        let second = run
+            .start_next_file("2026-08-02T18:22:04Z".into())
+            .expect("start")
+            .expect("second task");
+        run.fail_reading_file(
+            EntropyLimitation {
+                class: EntropyLimitationClass::SessionTimedOut,
+                reason_ref: "limitation.entropy.session.timeout".into(),
+                message: "second session timed out".into(),
+                file_path: Some(second.file_path),
+            },
+            "2026-08-02T18:22:05Z".into(),
+        )
+        .expect("timeout");
+        run.observe_cleanup(
+            "receipt.entropy.partial.cleanup".into(),
+            "2026-08-02T18:22:06Z".into(),
+        )
+        .expect("cleanup");
+        assert_eq!(run.phase, EntropyRunPhase::FailedWithPartialOutput);
+        assert_eq!(run.summary.sessions.attempted, 2);
+        assert_eq!(run.summary.sessions.settled, 2);
+        assert_eq!(run.summary.sessions.timed_out, 1);
+        assert_eq!(run.summary.outputs.findings, 1);
+        assert_eq!(
+            run.summary.output_refs,
+            vec!["observation.entropy.partial.retained"]
+        );
+        run.validate().expect("partial output remains canonical");
+    }
+
+    #[test]
+    fn tool_outcomes_remain_distinct_and_restore_before_cleanup_is_recoverable() {
+        let root = tempfile::tempdir().expect("temporary repository");
+        fs::write(root.path().join("rng.c"), "int rng(void);\n").expect("source");
+        let manifest = build_manifest(root.path(), Vec::new());
+        let mut binding = run_binding(&manifest);
+        binding.tool_surface_refs = vec![
+            "tool.entropy.unavailable".into(),
+            "tool.entropy.denied".into(),
+            "tool.entropy.timeout".into(),
+        ];
+        let mut run = EntropyRunProjection::new(binding, manifest).expect("run");
+        run.observe_tool(
+            "tool.entropy.unavailable",
+            EntropyToolState::Unavailable,
+            Some("tool.entropy.reason.unavailable".into()),
+        )
+        .expect("unavailable");
+        run.observe_tool(
+            "tool.entropy.denied",
+            EntropyToolState::Denied,
+            Some("tool.entropy.reason.denied".into()),
+        )
+        .expect("denied");
+        run.observe_tool(
+            "tool.entropy.timeout",
+            EntropyToolState::TimedOut,
+            Some("tool.entropy.reason.timeout".into()),
+        )
+        .expect("timed out");
+        let task = run
+            .start_next_file("2026-08-02T18:23:01Z".into())
+            .expect("start")
+            .expect("task");
+        run.apply_output(
+            EntropyFileAnalysisOutput {
+                schema: ENTROPY_FILE_OUTPUT_SCHEMA_V1.into(),
+                run_ref: task.run_ref,
+                file_path: task.file_path,
+                observations: Vec::new(),
+                hypotheses: Vec::new(),
+                limitations: Vec::new(),
+            },
+            "2026-08-02T18:23:02Z".into(),
+        )
+        .expect("file output");
+        run.record_usage(
+            EntropyUsageValue {
+                value: Some(1_234),
+                exactness: EntropyRunUsageExactness::Exact,
+            },
+            EntropyUsageValue::unavailable(),
+            EntropyUsageValue::unavailable(),
+            EntropyUsageValue::unavailable(),
+        )
+        .expect("mixed exact and unavailable usage truth");
+        let encoded = serde_json::to_string(&run).expect("persist recoverable run");
+        let mut restored: EntropyRunProjection =
+            serde_json::from_str(&encoded).expect("restore recoverable run");
+        restored.validate().expect("recoverable projection");
+        assert_eq!(restored.phase, EntropyRunPhase::AwaitingCleanup);
+        assert_eq!(
+            restored.summary.outcome,
+            EntropyAccountingOutcome::RecoveryRequired
+        );
+        assert_eq!(restored.summary.tools.unavailable, 1);
+        assert_eq!(restored.summary.tools.denied, 1);
+        assert_eq!(restored.summary.tools.timed_out, 1);
+        assert_eq!(restored.summary.total_tokens.value, None);
+        assert_eq!(restored.summary.elapsed_milliseconds.value, Some(1_234));
+        restored
+            .fail_cleanup(
+                "cleanup.entropy.fixture.failed".into(),
+                "2026-08-02T18:23:03Z".into(),
+            )
+            .expect("cleanup failure remains recoverable");
+        assert_eq!(restored.cleanup.state, EntropyCleanupState::Failed);
+        assert!(
+            restored
+                .summary
+                .failure_refs
+                .contains(&"cleanup.entropy.fixture.failed".into())
+        );
+        restored
+            .observe_cleanup(
+                "receipt.entropy.tool-matrix.cleanup".into(),
+                "2026-08-02T18:23:04Z".into(),
+            )
+            .expect("cleanup");
+        assert_eq!(
+            restored.summary.outcome,
+            EntropyAccountingOutcome::CompletedIncomplete
+        );
+        assert!(!restored.summary.qualified_miss_eligible());
+    }
+
+    #[test]
+    fn legacy_terminal_restore_migrates_to_recovery_instead_of_false_success() {
+        let root = tempfile::tempdir().expect("temporary repository");
+        fs::write(root.path().join("rng.c"), "int rng(void);\n").expect("source");
+        let manifest = build_manifest(root.path(), Vec::new());
+        let mut run = EntropyRunProjection::new(run_binding(&manifest), manifest).expect("run");
+        let task = run
+            .start_next_file("2026-08-02T18:24:01Z".into())
+            .expect("start")
+            .expect("task");
+        run.apply_output(
+            EntropyFileAnalysisOutput {
+                schema: ENTROPY_FILE_OUTPUT_SCHEMA_V1.into(),
+                run_ref: task.run_ref,
+                file_path: task.file_path,
+                observations: Vec::new(),
+                hypotheses: Vec::new(),
+                limitations: Vec::new(),
+            },
+            "2026-08-02T18:24:02Z".into(),
+        )
+        .expect("output");
+        let mut legacy = serde_json::to_value(&run).expect("encode");
+        let object = legacy.as_object_mut().expect("run object");
+        object.insert(
+            "phase".into(),
+            serde_json::Value::String("completed".into()),
+        );
+        object.remove("toolFacts");
+        object.remove("cleanup");
+        object.remove("summary");
+        object.remove("duplicateTerminalEvents");
+        let mut restored: EntropyRunProjection =
+            serde_json::from_value(legacy).expect("decode legacy run");
+        assert!(restored.migrate_legacy_accounting().expect("migration"));
+        assert_eq!(restored.phase, EntropyRunPhase::AwaitingCleanup);
+        assert_eq!(
+            restored.summary.outcome,
+            EntropyAccountingOutcome::RecoveryRequired
+        );
+        assert_eq!(restored.tool_facts[0].state, EntropyToolState::Requested);
+        restored.validate().expect("honest migrated restore");
     }
 
     #[test]

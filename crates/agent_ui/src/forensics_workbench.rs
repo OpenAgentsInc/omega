@@ -1392,6 +1392,23 @@ impl ForensicsWorkbenchSurface {
         Ok(())
     }
 
+    pub fn observe_entropy_cleanup(
+        &mut self,
+        receipt_ref: String,
+        observed_at: String,
+        cx: &mut Context<Self>,
+    ) -> anyhow::Result<()> {
+        let run = self
+            .entropy_run
+            .as_mut()
+            .ok_or_else(|| anyhow::anyhow!("the entropy repository run is unavailable"))?;
+        run.observe_cleanup(receipt_ref, observed_at)?;
+        self.status = entropy_run_status(run).into();
+        self.persist_entropy_state(cx);
+        cx.notify();
+        Ok(())
+    }
+
     pub fn cancel_entropy_run(&mut self, cx: &mut Context<Self>) -> anyhow::Result<()> {
         let run = self
             .entropy_run
@@ -4589,7 +4606,14 @@ impl Render for ForensicsWorkbenchSurface {
             })
             .when_some(entropy_run_workbench, |this, run| {
                 let counts = run.counts();
-                let completed = counts.analyzed + counts.candidate + counts.skipped + counts.failed + counts.cancelled;
+                let completed = counts.analyzed
+                    + counts.candidate
+                    + counts.skipped
+                    + counts.failed
+                    + counts.timed_out
+                    + counts.refused
+                    + counts.cancelled;
+                let summary = run.summary.clone();
                 let elapsed = entropy_elapsed_label(&run);
                 let dependencies = run.manifest.dependencies.clone();
                 let incomplete_dependencies = dependencies
@@ -4626,6 +4650,76 @@ impl Render for ForensicsWorkbenchSurface {
                                     run.files.len(),
                                     counts.candidate,
                                     run.limitations.len()
+                                ),
+                            ))
+                            .child(Self::render_fact(
+                                "Canonical outcome",
+                                format!(
+                                    "{:?} · summary {}",
+                                    summary.outcome, summary.canonical_digest
+                                ),
+                            ))
+                            .child(Self::render_fact(
+                                "Session denominator",
+                                format!(
+                                    "{} eligible · {} attempted · {} settled · {} failed · {} timed out · {} refused · {} cancelled",
+                                    summary.source.eligible_focal_units,
+                                    summary.sessions.attempted,
+                                    summary.sessions.settled,
+                                    summary.sessions.failed,
+                                    summary.sessions.timed_out,
+                                    summary.sessions.refused,
+                                    summary.sessions.cancelled,
+                                ),
+                            ))
+                            .child(Self::render_fact(
+                                "Tool denominator",
+                                format!(
+                                    "{} requested · {} available · {} unavailable · {} denied · {} timed out · {} failed",
+                                    summary.tools.requested,
+                                    summary.tools.available,
+                                    summary.tools.unavailable,
+                                    summary.tools.denied,
+                                    summary.tools.timed_out,
+                                    summary.tools.failed,
+                                ),
+                            ))
+                            .child(Self::render_fact(
+                                "Output accounting",
+                                format!(
+                                    "{} findings · {} hypotheses · {} duplicates · {} limitations · {} malformed rejected",
+                                    summary.outputs.findings,
+                                    summary.outputs.hypotheses,
+                                    summary.outputs.duplicates,
+                                    summary.outputs.limitations,
+                                    summary.outputs.rejected_malformed,
+                                ),
+                            ))
+                            .child(Self::render_fact(
+                                "Source accounting",
+                                format!(
+                                    "{} focal used · {} contextual · {} reached · {} excluded · {} oversized · {} never reached · {}/{} dependency trees reached",
+                                    summary.source.focal_used,
+                                    summary.source.contextual_read,
+                                    summary.source.reached,
+                                    summary.source.excluded,
+                                    summary.source.oversized,
+                                    summary.source.never_reached,
+                                    summary.source.dependency_trees_reached,
+                                    summary.source.dependency_trees_total,
+                                ),
+                            ))
+                            .child(Self::render_fact(
+                                "Cleanup",
+                                format!(
+                                    "{:?} · {}",
+                                    summary.cleanup.state,
+                                    summary
+                                        .cleanup
+                                        .receipt_ref
+                                        .as_deref()
+                                        .or(summary.cleanup.reason_ref.as_deref())
+                                        .unwrap_or("receipt unavailable")
                                 ),
                             ))
                             .child(Self::render_fact("Elapsed", elapsed))
@@ -4704,8 +4798,14 @@ impl Render for ForensicsWorkbenchSurface {
                                 )
                             })
                             .child(Self::render_fact(
-                                "Usage exactness",
-                                "Unavailable · selected model route did not report exact usage",
+                                "Usage truth",
+                                format!(
+                                    "time {} · tokens {} · cost {} · network {}",
+                                    entropy_usage_label(&summary.elapsed_milliseconds),
+                                    entropy_usage_label(&summary.total_tokens),
+                                    entropy_usage_label(&summary.cost_micros),
+                                    entropy_usage_label(&summary.network_bytes),
+                                ),
                             ))
                             .when_some(entropy_comparison, |this, comparison| {
                                 this.child(Self::render_fact(
@@ -5760,6 +5860,17 @@ fn entropy_run_status(run: &EntropyRunProjection) -> String {
             "Entropy analysis complete with limitations · {} candidates · {} skipped · {} failed",
             counts.candidate, counts.skipped, counts.failed
         ),
+        EntropyRunPhase::AwaitingCleanup => {
+            "Entropy outputs persisted · cleanup or recovery remains required".into()
+        }
+        EntropyRunPhase::Failed => format!(
+            "Entropy analysis failed · {}/{} sessions failed",
+            run.summary.sessions.failed, run.summary.sessions.attempted
+        ),
+        EntropyRunPhase::FailedWithPartialOutput => format!(
+            "Entropy analysis failed with retained partial output · {} findings · {} hypotheses",
+            run.summary.outputs.findings, run.summary.outputs.hypotheses
+        ),
     }
 }
 
@@ -5768,9 +5879,19 @@ fn entropy_run_phase_label(phase: EntropyRunPhase) -> &'static str {
         EntropyRunPhase::Ready => "Ready",
         EntropyRunPhase::Running => "Running",
         EntropyRunPhase::CancelRequested => "Cancellation requested",
+        EntropyRunPhase::AwaitingCleanup => "Awaiting cleanup · recoverable",
         EntropyRunPhase::Completed => "Completed",
         EntropyRunPhase::CompletedWithLimitations => "Completed with limitations",
+        EntropyRunPhase::Failed => "Failed",
+        EntropyRunPhase::FailedWithPartialOutput => "Failed with partial output",
         EntropyRunPhase::Cancelled => "Cancelled",
+    }
+}
+
+fn entropy_usage_label(value: &omega_forensics::EntropyUsageValue) -> String {
+    match value.value {
+        Some(amount) => format!("{amount} ({:?})", value.exactness),
+        None => "Unavailable".into(),
     }
 }
 
@@ -5820,6 +5941,8 @@ fn entropy_file_state_label(state: EntropyFileState) -> &'static str {
         EntropyFileState::Candidate => "Candidate",
         EntropyFileState::Skipped => "Skipped",
         EntropyFileState::Failed => "Failed",
+        EntropyFileState::TimedOut => "Timed out",
+        EntropyFileState::Refused => "Refused",
         EntropyFileState::Cancelled => "Cancelled",
     }
 }
@@ -5827,8 +5950,10 @@ fn entropy_file_state_label(state: EntropyFileState) -> &'static str {
 fn entropy_file_state_color(state: EntropyFileState) -> Color {
     match state {
         EntropyFileState::Candidate => Color::Accent,
-        EntropyFileState::Failed => Color::Error,
-        EntropyFileState::Skipped | EntropyFileState::Cancelled => Color::Warning,
+        EntropyFileState::Failed | EntropyFileState::Refused => Color::Error,
+        EntropyFileState::Skipped | EntropyFileState::TimedOut | EntropyFileState::Cancelled => {
+            Color::Warning
+        }
         EntropyFileState::Reading => Color::Success,
         EntropyFileState::Queued | EntropyFileState::Analyzed => Color::Muted,
     }

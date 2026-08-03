@@ -549,6 +549,24 @@ fn push_entropy_run(
         format!("{:?} · {} files", run.phase, run.files.len()),
         [&run.binding.run_ref],
     ));
+    lifecycle.push(fact(
+        format!("fact:security-work:entropy-summary:{}", run.binding.run_ref),
+        WorkBlockFactKind::Lifecycle,
+        entropy_accounting_state(run.summary.outcome),
+        "Canonical entropy accounting",
+        format!(
+            "{:?} · {}/{} sessions settled · {}/{} tools available · {} findings · {} hypotheses · cleanup {:?}",
+            run.summary.outcome,
+            run.summary.sessions.settled,
+            run.summary.source.eligible_focal_units,
+            run.summary.tools.available,
+            run.summary.tools.requested,
+            run.summary.outputs.findings,
+            run.summary.outputs.hypotheses,
+            run.summary.cleanup.state,
+        ),
+        [&run.binding.run_ref, &run.summary.canonical_digest],
+    ));
     models.push(fact(
         format!("fact:security-work:entropy-model:{}", run.binding.run_ref),
         WorkBlockFactKind::Model,
@@ -1017,12 +1035,33 @@ fn entropy_phase_state(phase: omega_forensics::EntropyRunPhase) -> WorkBlockFact
     match phase {
         omega_forensics::EntropyRunPhase::Ready
         | omega_forensics::EntropyRunPhase::Running
-        | omega_forensics::EntropyRunPhase::CancelRequested => WorkBlockFactState::Active,
+        | omega_forensics::EntropyRunPhase::CancelRequested
+        | omega_forensics::EntropyRunPhase::AwaitingCleanup => WorkBlockFactState::Active,
         omega_forensics::EntropyRunPhase::Completed
         | omega_forensics::EntropyRunPhase::CompletedWithLimitations => {
             WorkBlockFactState::Completed
         }
+        omega_forensics::EntropyRunPhase::Failed
+        | omega_forensics::EntropyRunPhase::FailedWithPartialOutput => WorkBlockFactState::Failed,
         omega_forensics::EntropyRunPhase::Cancelled => WorkBlockFactState::Canceled,
+    }
+}
+
+fn entropy_accounting_state(
+    outcome: omega_forensics::EntropyAccountingOutcome,
+) -> WorkBlockFactState {
+    match outcome {
+        omega_forensics::EntropyAccountingOutcome::Active
+        | omega_forensics::EntropyAccountingOutcome::RecoveryRequired => WorkBlockFactState::Active,
+        omega_forensics::EntropyAccountingOutcome::Completed
+        | omega_forensics::EntropyAccountingOutcome::CompletedIncomplete => {
+            WorkBlockFactState::Completed
+        }
+        omega_forensics::EntropyAccountingOutcome::Failed
+        | omega_forensics::EntropyAccountingOutcome::FailedWithPartialOutput => {
+            WorkBlockFactState::Failed
+        }
+        omega_forensics::EntropyAccountingOutcome::Cancelled => WorkBlockFactState::Canceled,
     }
 }
 

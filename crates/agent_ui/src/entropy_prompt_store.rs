@@ -63,6 +63,41 @@ impl Default for EntropyForensicsRestoreState {
 }
 
 impl EntropyForensicsRestoreState {
+    fn migrate_legacy_accounting(&mut self) -> Result<()> {
+        for run in &mut self.runs {
+            run.migrate_legacy_accounting()?;
+        }
+        for campaign in &mut self.campaigns {
+            let mut campaign_migrated = false;
+            for project in &mut campaign.projects {
+                let Some(run) = project.run.as_mut() else {
+                    continue;
+                };
+                if run.migrate_legacy_accounting()? {
+                    campaign_migrated = true;
+                    project.phase = match run.phase {
+                        omega_forensics::EntropyRunPhase::Cancelled => {
+                            omega_forensics::EntropyCampaignProjectPhase::Cancelled
+                        }
+                        omega_forensics::EntropyRunPhase::Failed => {
+                            omega_forensics::EntropyCampaignProjectPhase::ProviderFailed
+                        }
+                        omega_forensics::EntropyRunPhase::Completed => {
+                            omega_forensics::EntropyCampaignProjectPhase::Completed
+                        }
+                        _ => omega_forensics::EntropyCampaignProjectPhase::CompletedWithLimitations,
+                    };
+                }
+            }
+            if campaign_migrated
+                && campaign.phase == omega_forensics::EntropyCampaignPhase::Completed
+            {
+                campaign.phase = omega_forensics::EntropyCampaignPhase::CompletedWithLimitations;
+            }
+        }
+        Ok(())
+    }
+
     pub fn validate(&self) -> Result<()> {
         omega_forensics::entropy_prompt_digest(&self.draft_prompt)?;
         if self.prompt_snapshots.len() > MAX_PROMPT_SNAPSHOTS {
@@ -193,7 +228,8 @@ pub fn read(binding: &RepositoryBinding, cx: &App) -> Option<EntropyForensicsRes
         .read(&scope.profile_key(&binding_key(binding)))
         .log_err()
         .flatten()?;
-    let state: EntropyForensicsRestoreState = serde_json::from_str(&raw).log_err()?;
+    let mut state: EntropyForensicsRestoreState = serde_json::from_str(&raw).log_err()?;
+    state.migrate_legacy_accounting().log_err()?;
     state.validate().log_err()?;
     Some(state)
 }

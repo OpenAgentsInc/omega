@@ -60,3 +60,8 @@ cargo test -p agent_ui forensics_workbench --lib
 The contract fixtures cover complete and missing dependencies, path-class
 separation, dirty exclusions, missing generated inputs, required exclusions,
 stale generations, and qualified-miss refusal.
+
+A qualified miss also requires the canonical run-accounting summary to prove
+that every focal session and requested tool settled successfully and that
+cleanup has an exact receipt. See
+[Omega Forensics run accounting](./omega-forensics-run-accounting.md).
