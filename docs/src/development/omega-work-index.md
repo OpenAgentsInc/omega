@@ -57,6 +57,11 @@ and rejects gaps, non-advancing cursors, and conflicting identities.
 
 ## Interface {#interface}
 
+The sidebar shows the Work section only after production admission succeeds.
+It places that conditional section above Threads. An Experimental section
+follows the thread list and contains the source Forensics workbench; the
+shared Security cases and runs remain addressable through Work.
+
 Inbox and My Work have search, attention and lifecycle filters, grouped rows,
 stable selection, keyboard navigation, and accessible row labels. Press Enter,
 Space, or I, or select **Details**, to inspect the Work without changing source

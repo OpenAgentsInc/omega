@@ -23,6 +23,11 @@ case or run goes to the normal Work and Issue detail surface. **Open source**
 is an explicit action. For a different repository, that action selects the
 exact Thread repository identity before it opens the source workbench.
 
+The source Forensics workbench appears in the sidebar under **Experimental**,
+beneath Threads. This placement distinguishes the specialized source
+workbench from the shared Security Work rows without changing its production
+source and fixture gates.
+
 ## Typed Blocks {#typed-blocks}
 
 Security Work uses five domain Blocks:

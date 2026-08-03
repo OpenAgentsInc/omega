@@ -18327,39 +18327,6 @@ impl AgentPanel {
                         .child("Open folder"),
                 )
             })
-            .child(
-                div().h(px(40.)).flex_none().pt(px(10.)).child(
-                    h_flex()
-                        .id("omega-open-forensics")
-                        .debug_selector(|| "omega.omega.sidebar.forensics".into())
-                        .w_full()
-                        .h(px(30.))
-                        .px(px(forensics_padding_x))
-                        .py(px(forensics_padding_y))
-                        .gap(px(8.))
-                        .rounded(px(8.))
-                        .cursor_pointer()
-                        .role(gpui::Role::Button)
-                        .aria_label("Open Forensics")
-                        .when(omega_forensics_selected, |row| {
-                            row.bg(selected_background)
-                                .border_1()
-                                .border_color(colors.border_selected)
-                        })
-                        .when(!omega_forensics_selected, |row| {
-                            row.hover(move |style| style.bg(hover_background))
-                        })
-                        .on_click(cx.listener(|this, _, window, cx| {
-                            this.select_work_surface(
-                                omega_workbench_state::WorkSurface::Forensics,
-                                window,
-                                cx,
-                            );
-                        }))
-                        .child(Icon::new(IconName::Crosshair).size(IconSize::Small))
-                        .child("Forensics"),
-                ),
-            )
             .when(work_index_admitted, |sidebar| {
                 sidebar
                     .child(
@@ -18402,6 +18369,52 @@ impl AgentPanel {
                         |rows| rows.child(active_draft_sidebar_row),
                     )
                     .children(sidebar_rows),
+            )
+            .child(
+                div()
+                    .debug_selector(|| "omega.omega.sidebar.experimental".into())
+                    .mt(px(10.))
+                    .h(px(28.))
+                    .px(px(8.))
+                    .flex_none()
+                    .flex()
+                    .items_center()
+                    .text_size(px(11.))
+                    .font_weight(gpui::FontWeight::MEDIUM)
+                    .text_color(text_placeholder)
+                    .child("Experimental"),
+            )
+            .child(
+                h_flex()
+                    .id("omega-open-forensics")
+                    .debug_selector(|| "omega.omega.sidebar.forensics".into())
+                    .w_full()
+                    .h(px(30.))
+                    .flex_none()
+                    .px(px(forensics_padding_x))
+                    .py(px(forensics_padding_y))
+                    .gap(px(8.))
+                    .rounded(px(8.))
+                    .cursor_pointer()
+                    .role(gpui::Role::Button)
+                    .aria_label("Open Forensics")
+                    .when(omega_forensics_selected, |row| {
+                        row.bg(selected_background)
+                            .border_1()
+                            .border_color(colors.border_selected)
+                    })
+                    .when(!omega_forensics_selected, |row| {
+                        row.hover(move |style| style.bg(hover_background))
+                    })
+                    .on_click(cx.listener(|this, _, window, cx| {
+                        this.select_work_surface(
+                            omega_workbench_state::WorkSurface::Forensics,
+                            window,
+                            cx,
+                        );
+                    }))
+                    .child(Icon::new(IconName::Crosshair).size(IconSize::Small))
+                    .child("Forensics"),
             )
             .child(
                 h_flex()
@@ -27271,8 +27284,28 @@ mod tests {
                 .is_some(),
             "rendered Omega selectors: {omega_selectors:?}"
         );
-        assert!(cx.debug_bounds("omega.omega.sidebar.threads").is_some());
+        let threads_bounds = cx
+            .debug_bounds("omega.omega.sidebar.threads")
+            .expect("Threads section renders");
+        let experimental_bounds = cx
+            .debug_bounds("omega.omega.sidebar.experimental")
+            .expect("Experimental section renders");
+        let forensics_bounds = cx
+            .debug_bounds("omega.omega.sidebar.forensics")
+            .expect("Forensics renders in Experimental");
+        assert!(
+            experimental_bounds.origin.y > threads_bounds.origin.y,
+            "Experimental must render beneath Threads"
+        );
+        assert!(
+            forensics_bounds.origin.y >= experimental_bounds.origin.y,
+            "Forensics must render inside the Experimental section"
+        );
         assert!(cx.debug_bounds("omega.omega.thread-tab.active").is_some());
+        assert!(
+            cx.debug_bounds("omega.omega.sidebar.work").is_none(),
+            "Work section stays hidden until two native authorities have real rows"
+        );
         assert!(
             cx.debug_bounds("omega.omega.sidebar.inbox").is_none(),
             "Work navigation stays hidden until two native authorities have real rows"
@@ -27328,6 +27361,7 @@ mod tests {
             panel.publish_work_index(false, cx);
         });
         cx.run_until_parked();
+        assert!(cx.debug_bounds("omega.omega.sidebar.work").is_some());
         assert!(cx.debug_bounds("omega.omega.sidebar.inbox").is_some());
         assert!(cx.debug_bounds("omega.omega.sidebar.my-work").is_some());
 
