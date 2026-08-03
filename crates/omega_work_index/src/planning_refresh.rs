@@ -167,10 +167,10 @@ impl DogfoodPlanningViewModel {
             origin: DogfoodPlanningOrigin::Live,
             source_state: source_state(&graph),
             revision: graph.revision.0,
+            projection_version: graph.contract_version_label(),
             event_cursor: graph.event_cursor.0,
             adapter_generation,
             adapter_version: DOGFOOD_PLANNING_ADAPTER_VERSION.into(),
-            projection_version: graph.contract_version_label(),
             text_records,
             refresh_gap_refs: graph
                 .completeness
