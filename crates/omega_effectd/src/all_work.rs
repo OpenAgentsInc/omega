@@ -53,7 +53,7 @@ mod tests {
         );
         assert_eq!(
             source["sourceCommit"].as_str(),
-            Some("ffee612faa7a4b330a0cbb30de959114874bfb57")
+            Some("e3607ca8893f0205bbf5e2d67edde510c21818af")
         );
         assert!(
             compatibility["protocol"]["methods"]
