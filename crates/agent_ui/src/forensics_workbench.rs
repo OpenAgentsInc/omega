@@ -12,16 +12,17 @@ use omega_forensics::{
     EntropyRunProjection, EntropySourceInspection, EntropySourceInspectionState,
     ExplicitOperatorAction, FORENSIC_FINDING_SCHEMA_V1, FORENSIC_HYPOTHESIS_SCHEMA_V1,
     ForensicBudgetState, ForensicEvidenceTier, ForensicExactness, ForensicLifecycleState,
-    ForensicPriorWorkQuery, ForensicPriorWorkQueryMode, ForensicPriorWorkQueryResult,
-    ForensicPromptIr, ForensicPromptWorkspace, ForensicPublicationGate,
-    ForensicPublicationGateKind, ForensicPublicationGateProjection, ForensicPublicationGateState,
-    ForensicReviewDecisionKind, ForensicReviewOutcome, ForensicSourceCatalog,
-    ForensicSourceCitation, ForensicStatistic, ForensicToolEvent, ForensicToolEventStatus,
-    ForensicToolJournal, ForensicWorkDisposition, ForensicWorkerObservation,
-    ForensicWorkerPlacement, ForensicsFailureProjection, ForensicsLaunchIntent,
-    ForensicsMatrixProjection, ForensicsPreflightProjection, ForensicsReviewProjection,
-    ForensicsRunPhase, ForensicsRunProjection, PUBLICATION_GATE_SCHEMA_V1, PreflightReadiness,
-    PromptChangeKind, PromptCompatibilityProfile, RepositoryTargetProjection, SourceState,
+    ForensicModelProvenance, ForensicPocIdentity, ForensicPriorWorkQuery,
+    ForensicPriorWorkQueryMode, ForensicPriorWorkQueryResult, ForensicPromptIr,
+    ForensicPromptWorkspace, ForensicPublicationGate, ForensicPublicationGateKind,
+    ForensicPublicationGateProjection, ForensicPublicationGateState, ForensicReviewDecisionKind,
+    ForensicReviewOutcome, ForensicSourceCatalog, ForensicSourceCitation, ForensicStatistic,
+    ForensicToolEvent, ForensicToolEventStatus, ForensicToolJournal, ForensicWorkDisposition,
+    ForensicWorkerObservation, ForensicWorkerPlacement, ForensicsFailureProjection,
+    ForensicsLaunchIntent, ForensicsMatrixProjection, ForensicsPreflightProjection,
+    ForensicsReviewProjection, ForensicsRunPhase, ForensicsRunProjection,
+    IndependentVerifierEnvelope, PUBLICATION_GATE_SCHEMA_V1, PreflightReadiness, PromptChangeKind,
+    PromptCompatibilityProfile, RepositoryTargetProjection, SourceState,
 };
 use omega_workbench_state::RepositoryBinding;
 use sha2::{Digest, Sha256};
@@ -1903,6 +1904,86 @@ impl ForensicsWorkbenchSurface {
             chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Millis, true),
         )?;
         self.status = format!("Review decision appended · {decision_label}").into();
+        cx.notify();
+        Ok(())
+    }
+
+    pub fn request_fixture_independent_verification(
+        &mut self,
+        finding_ref: &str,
+        cx: &mut Context<Self>,
+    ) -> anyhow::Result<()> {
+        anyhow::ensure!(
+            self.fixture_views_enabled,
+            "live verification requires the complete provider envelope"
+        );
+        let review = self
+            .review
+            .as_mut()
+            .ok_or_else(|| anyhow::anyhow!("the forensic review is unavailable"))?;
+        let finding = review
+            .findings
+            .iter()
+            .find(|finding| finding.finding_ref == finding_ref)
+            .cloned()
+            .ok_or_else(|| anyhow::anyhow!("the immutable finding is unavailable"))?;
+        let poc_ref = finding
+            .poc_ref
+            .clone()
+            .ok_or_else(|| anyhow::anyhow!("verification requires the original candidate PoC"))?;
+        let evidence_refs = finding
+            .source_refs
+            .iter()
+            .map(|source| source.source_ref.clone())
+            .chain(
+                finding
+                    .evidence_receipts
+                    .iter()
+                    .map(|receipt| receipt.receipt_ref.clone()),
+            )
+            .collect::<Vec<_>>();
+        let envelope = IndependentVerifierEnvelope {
+            request_ref: format!("verification-request.{finding_ref}"),
+            finding: finding.clone(),
+            finding_digest: String::new(),
+            assumptions: vec![
+                "The fixture source and dependency receipts bind the displayed immutable finding."
+                    .into(),
+            ],
+            occurrence_refs: vec![format!("occurrence.{finding_ref}.1")],
+            root_cause_ref: finding.claim_ref.clone(),
+            source_bundle_ref: format!("source-bundle.{}", review.run_ref),
+            source_bundle_digest: fixture_digest('a'),
+            coverage_manifest_ref: format!("coverage.{}", review.run_ref),
+            coverage_manifest_digest: fixture_digest('b'),
+            original_poc: ForensicPocIdentity {
+                poc_ref,
+                content_digest: fixture_digest('c'),
+                supersedes_poc_ref: None,
+            },
+            discovery_actor_ref: format!("actor.discovery.{}", review.run_ref),
+            prompt_digest: review.prompt_digest.clone(),
+            prompt_lineage_refs: vec![format!("prompt-lineage.{}", review.run_ref)],
+            model_provenance: ForensicModelProvenance {
+                provider_ref: "provider.fixture".into(),
+                model_ref: "model.fixture".into(),
+                route_ref: "model-route.fixture".into(),
+                configuration_digest: fixture_digest('d'),
+            },
+            tool_surface_refs: vec!["tool-surface.omega.forensics.discovery.v1".into()],
+            evidence_refs,
+            verifier_actor_ref: format!("actor.verifier.{}", review.run_ref),
+            verifier_capability_refs: vec![
+                "capability.omega.forensics.independent-verifier.v1".into(),
+            ],
+            vulnerable_revision_digest: fixture_digest('e'),
+            fixed_revision_digest: fixture_digest('f'),
+            requested_at: chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Millis, true),
+            canonical_digest: String::new(),
+        }
+        .seal()?;
+        review.request_independent_verification(envelope)?;
+        self.status = "Independent verification requested · patch work remains locked".into();
         cx.notify();
         Ok(())
     }
@@ -4150,6 +4231,7 @@ impl Render for ForensicsWorkbenchSurface {
                 )
             });
         let review = self.review.clone();
+        let fixture_views_enabled = self.fixture_views_enabled;
         let source_resolutions = self.source_resolutions.clone();
         let prompt_workspace = self.prompt_workspace.clone();
         let active_prompt = prompt_workspace.active().clone();
@@ -5740,6 +5822,9 @@ impl Render for ForensicsWorkbenchSurface {
                                     let accept_ref = finding_ref.clone();
                                     let correct_ref = finding_ref.clone();
                                     let reject_ref = finding_ref.clone();
+                                    let verification_ref = finding_ref.clone();
+                                    let verification_case = review.verification_cases.iter().find(|case| case.envelope.finding.finding_ref == finding_ref).cloned();
+                                    let can_request_verification = fixture_views_enabled && verification_case.is_none() && finding.poc_ref.is_some();
                                     v_flex()
                                         .id(("omega.forensics.finding", finding_index))
                                         .gap_2()
@@ -5811,6 +5896,24 @@ impl Render for ForensicsWorkbenchSurface {
                                                     } else {
                                                         Color::Warning
                                                     })
+                                                })),
+                                        )
+                                        .child(Self::render_fact(
+                                            "Independent verification",
+                                            verification_case.as_ref().map_or_else(
+                                                || "Not requested · remediation locked".to_string(),
+                                                |case| format!("{:?} · {} receipts · remediation {}", case.state, case.evidence.len(), if case.remediation_enabled { "enabled" } else { "locked" }),
+                                            ),
+                                        ))
+                                        .child(
+                                            Button::new(("omega.forensics.request-verification", finding_index), "Request independent verification")
+                                                .size(ButtonSize::Compact)
+                                                .style(ButtonStyle::Subtle)
+                                                .disabled(!can_request_verification)
+                                                .on_click(cx.listener(move |this, _, _, cx| {
+                                                    if let Err(error) = this.request_fixture_independent_verification(&verification_ref, cx) {
+                                                        this.status = error.to_string().into(); cx.notify();
+                                                    }
                                                 })),
                                         )
                                         .child(
@@ -6933,6 +7036,7 @@ mod tests {
             cleanup_state: "observed_zero_residue".into(),
             cleanup_receipt_ref: Some("receipt.cleanup-observed".into()),
             decisions: Vec::new(),
+            verification_cases: Vec::new(),
         }
     }
 
@@ -7350,6 +7454,56 @@ mod tests {
                 snapshot.source_resolutions.get("source.coldcard.shared.utils.42"),
                 Some(ForensicSourceResolution::Failed(reason)) if reason == "pinned file is absent"
             ));
+        });
+    }
+
+    #[gpui::test]
+    fn fixture_verification_request_preserves_the_finding_and_keeps_remediation_locked(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        cx.update(|cx| {
+            let binding = RepositoryBinding::new("repo", "worktree").expect("valid binding");
+            let surface =
+                cx.new(|cx| ForensicsWorkbenchSurface::new(&candidate(binding.clone()), cx));
+            surface.update(cx, |surface, _| surface.fixture_views_enabled = true);
+            surface
+                .update(cx, |surface, cx| {
+                    surface.set_managed_preflight(&binding, complete_preflight(), cx)
+                })
+                .expect("managed preflight");
+            surface
+                .update(cx, |surface, cx| {
+                    surface.set_review_projection(review_projection(), cx)
+                })
+                .expect("review projection");
+
+            let original_finding = surface
+                .read(cx)
+                .review
+                .as_ref()
+                .and_then(|review| review.findings.first())
+                .cloned()
+                .expect("fixture finding");
+            surface
+                .update(cx, |surface, cx| {
+                    surface
+                        .request_fixture_independent_verification(&original_finding.finding_ref, cx)
+                })
+                .expect("independent verification request");
+
+            let snapshot = surface.read(cx).snapshot();
+            let review = snapshot.review.expect("review");
+            assert_eq!(review.findings[0], original_finding);
+            assert_eq!(review.verification_cases.len(), 1);
+            assert_eq!(
+                review.verification_cases[0].envelope.finding,
+                original_finding
+            );
+            assert!(!review.verification_cases[0].remediation_enabled);
+            assert_eq!(
+                snapshot.status.as_ref(),
+                "Independent verification requested · patch work remains locked"
+            );
         });
     }
 

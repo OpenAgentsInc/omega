@@ -9,12 +9,14 @@ mod entropy_repository;
 mod prior_work;
 mod ranked_tranches;
 mod tool_ingestion;
+mod verdict_workflow;
 
 pub use entropy_campaign::*;
 pub use entropy_repository::*;
 pub use prior_work::*;
 pub use ranked_tranches::*;
 pub use tool_ingestion::*;
+pub use verdict_workflow::*;
 
 pub const PREFLIGHT_SCHEMA_V1: &str = "openagents.omega.forensics-preflight.v1";
 pub const LAUNCH_INTENT_SCHEMA_V1: &str = "openagents.omega.forensics-launch-intent.v1";
@@ -2024,6 +2026,8 @@ pub struct ForensicsReviewProjection {
     pub cleanup_state: String,
     pub cleanup_receipt_ref: Option<String>,
     pub decisions: Vec<ForensicReviewDecision>,
+    #[serde(default)]
+    pub verification_cases: Vec<IndependentVerificationCase>,
 }
 
 impl ForensicsReviewProjection {
@@ -2105,7 +2109,68 @@ impl ForensicsReviewProjection {
         }
         validate_lifecycle(&self.lifecycle)?;
         validate_decisions(&self.decisions, &self.findings)?;
+        let finding_refs = self
+            .findings
+            .iter()
+            .map(|finding| finding.finding_ref.as_str())
+            .collect::<BTreeSet<_>>();
+        let mut request_refs = BTreeSet::new();
+        let mut verification_finding_refs = BTreeSet::new();
+        for case in &self.verification_cases {
+            case.validate()?;
+            if !finding_refs.contains(case.envelope.finding.finding_ref.as_str())
+                || !request_refs.insert(case.envelope.request_ref.as_str())
+                || !verification_finding_refs.insert(case.envelope.finding.finding_ref.as_str())
+            {
+                return Err(ForensicsError::InvalidReview(
+                    "verification cases must target unique findings in this review".into(),
+                ));
+            }
+        }
         Ok(())
+    }
+
+    pub fn request_independent_verification(
+        &mut self,
+        envelope: IndependentVerifierEnvelope,
+    ) -> Result<(), ForensicsError> {
+        if !self
+            .findings
+            .iter()
+            .any(|finding| finding == &envelope.finding)
+        {
+            return Err(ForensicsError::InvalidReview(
+                "verification request must preserve the exact immutable finding".into(),
+            ));
+        }
+        if self
+            .verification_cases
+            .iter()
+            .any(|case| case.envelope.finding.finding_ref == envelope.finding.finding_ref)
+        {
+            return Err(ForensicsError::InvalidReview(
+                "a finding can have only one initial verification case".into(),
+            ));
+        }
+        self.verification_cases
+            .push(IndependentVerificationCase::request(envelope)?);
+        self.validate()
+    }
+
+    pub fn settle_independent_verification(
+        &mut self,
+        finding_ref: &str,
+        settlement: VerificationSettlement,
+    ) -> Result<(), ForensicsError> {
+        let case = self
+            .verification_cases
+            .iter_mut()
+            .find(|case| case.envelope.finding.finding_ref == finding_ref)
+            .ok_or_else(|| {
+                ForensicsError::InvalidReview("verification case is unavailable".into())
+            })?;
+        case.settle(settlement)?;
+        self.validate()
     }
 
     pub fn append_decision(
@@ -3864,6 +3929,7 @@ mod tests {
             cleanup_state: "observed_zero_residue".into(),
             cleanup_receipt_ref: Some("receipt.cleanup-observed".into()),
             decisions: Vec::new(),
+            verification_cases: Vec::new(),
         }
     }
 
