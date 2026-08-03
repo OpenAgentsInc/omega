@@ -9,7 +9,7 @@ adapter creates a second writable store.
 
 | Field                 | Value                                                              |
 | --------------------- | ------------------------------------------------------------------ |
-| OpenAgents commit     | `07f7fde0ae711cb037afe9a1c2c43780ca5aa934`                         |
+| OpenAgents commit     | `430a432e526dc37901d04c1e7fdf89bcb3556d2f`                         |
 | Contract              | `openagents.all_work_boundary.v1`                                  |
 | Definition SHA-256    | `2f3119cf7822fe9bd770d2c97f913d609dd49e8918fb3ea4c7df9662d20492c4` |
 | Rust artifact SHA-256 | `87fe5a88e669276672027464635f484a2a01de218424a2c063e8502602abe985` |

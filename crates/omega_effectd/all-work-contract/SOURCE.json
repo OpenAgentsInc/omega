@@ -1,7 +1,7 @@
 {
   "schema": "openagents.omega.all_work_contract_consumer.v1",
   "sourceRepository": "https://github.com/OpenAgentsInc/openagents",
-  "sourceCommit": "07f7fde0ae711cb037afe9a1c2c43780ca5aa934",
+  "sourceCommit": "430a432e526dc37901d04c1e7fdf89bcb3556d2f",
   "contractRef": "openagents.all_work_boundary.v1",
   "definitionSha256": "2f3119cf7822fe9bd770d2c97f913d609dd49e8918fb3ea4c7df9662d20492c4",
   "rustSha256": "87fe5a88e669276672027464635f484a2a01de218424a2c063e8502602abe985",
