@@ -982,17 +982,24 @@ fn spawn_entropy_campaign(
                         dependency_materialization_error.as_deref(),
                     )
                     .await;
-                    omega_forensics::EntropyManifest::build(
+                    let manifest = omega_forensics::EntropyManifest::build(
                         &manifest_root,
                         manifest_ref,
                         manifest_repository,
                         dependencies,
                         512 * 1_024,
-                    )
+                    )?;
+                    let schedule = omega_forensics::EvidenceRankedSchedule::inspect(
+                        &manifest_root,
+                        &manifest,
+                        "threat-model://omega/entropy-and-secret-randomness-v1".into(),
+                        8,
+                    )?;
+                    Ok::<_, omega_forensics::ForensicsError>((manifest, schedule))
                 })
                 .await;
-            let manifest = match manifest {
-                Ok(manifest) => manifest,
+            let (manifest, schedule) = match manifest {
+                Ok(result) => result,
                 Err(error) => {
                     surface.update(cx, |surface, cx| {
                         surface.fail_entropy_campaign_source(
@@ -1032,6 +1039,7 @@ fn spawn_entropy_campaign(
                     continue;
                 }
             };
+            run.install_ranked_schedule(schedule)?;
             run.observe_all_tools_available()?;
             let source_manifest = run.manifest.clone();
             surface.update(cx, |surface, cx| {
@@ -1649,6 +1657,13 @@ Run binding:
 - filePath: {file_path}
 - fileDigest: {file_digest}
 - promptDigest: {prompt_digest}
+- evidenceRank: {evidence_rank}
+- tranche: {tranche}
+- boundaryClasses: {boundary_classes}
+- rankingRationale: {ranking_rationale}
+
+The rank is deterministic triage evidence, not vulnerability truth. This session has one focal
+unit. You may read any admitted source as context, but must cite it exactly.
 
 Return one JSON object with schema "openagents.omega.entropy-file-output.v1", the exact runRef and filePath, and arrays named observations, hypotheses, and limitations. Observations require observationRef, title, analyzedFile, symbols, suspectedMechanism, secretConsumers, sourceRefs, and confidenceBoundary. Hypotheses require hypothesisRef, title, analyzedFile, symbols, suspectedMechanism, secretConsumers, dense causalLinks, missingEvidence, nextCheck, and confidenceBoundary. Every source ref requires sourceRef, path, symbol or null, startLine, endLine, and the exact revision. A limitation requires class, reasonRef, message, and filePath. Valid limitation classes are source_unavailable, unsupported_language, incomplete_dependency, oversized, symlink, tool_failure, request_schema_failure, model_failure, invalid_output, and cancelled. Use empty candidate arrays for a completed file with no candidate. Do not wrap the JSON in prose.
 
@@ -1660,6 +1675,11 @@ sourceText: {source_json}"#,
         file_path = task.file_path,
         file_digest = task.file_digest,
         prompt_digest = task.prompt_digest,
+        evidence_rank = task.evidence_rank,
+        tranche = task.tranche,
+        boundary_classes = serde_json::to_string(&task.boundary_classes)
+            .context("cannot encode boundary classes")?,
+        ranking_rationale = task.ranking_rationale,
     );
     Ok(LanguageModelRequest {
         thread_id: None,
@@ -15746,17 +15766,24 @@ impl AgentPanel {
                             dependency_materialization_error.as_deref(),
                         )
                         .await;
-                        omega_forensics::EntropyManifest::build(
+                        let manifest = omega_forensics::EntropyManifest::build(
                             &manifest_build_root,
                             manifest_ref,
                             manifest_repository,
                             dependencies,
                             512 * 1_024,
-                        )
+                        )?;
+                        let schedule = omega_forensics::EvidenceRankedSchedule::inspect(
+                            &manifest_build_root,
+                            &manifest,
+                            "threat-model://omega/entropy-and-secret-randomness-v1".into(),
+                            8,
+                        )?;
+                        Ok::<_, omega_forensics::ForensicsError>((manifest, schedule))
                     })
                     .await;
-                let manifest = match manifest {
-                    Ok(manifest) => manifest,
+                let (manifest, schedule) = match manifest {
+                    Ok(result) => result,
                     Err(error) => {
                         surface.update(cx, |surface, cx| {
                             surface
@@ -15794,6 +15821,7 @@ impl AgentPanel {
                         return anyhow::Ok(());
                     }
                 };
+                run.install_ranked_schedule(schedule)?;
                 run.observe_all_tools_available()?;
                 let source_manifest = run.manifest.clone();
                 surface.update(cx, |surface, cx| surface.install_entropy_run(run, cx))?;

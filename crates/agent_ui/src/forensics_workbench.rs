@@ -4981,6 +4981,16 @@ impl Render for ForensicsWorkbenchSurface {
                                 ),
                             ))
                             .child(Self::render_fact(
+                                "Evidence-ranked schedule",
+                                format!(
+                                    "{} · {} scanner · {} tranches of up to {} · rank is triage evidence, not vulnerability truth",
+                                    run.ranked_schedule.ranking_version,
+                                    run.ranked_schedule.scanner_version,
+                                    run.ranked_schedule.units.iter().map(|unit| unit.tranche).max().unwrap_or(0),
+                                    run.ranked_schedule.tranche_size,
+                                ),
+                            ))
+                            .child(Self::render_fact(
                                 "Session denominator",
                                 format!(
                                     "{} eligible · {} attempted · {} settled · {} failed · {} timed out · {} refused · {} cancelled",

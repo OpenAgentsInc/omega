@@ -1,4 +1,7 @@
-use super::{ForensicSourceCitation, ForensicsError};
+use super::{
+    EvidenceRankedSchedule, ForensicBoundaryClass, ForensicCoverageDisposition,
+    ForensicSourceCitation, ForensicsError,
+};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use std::{
@@ -1098,6 +1101,10 @@ pub struct EntropyFileTask {
     pub prompt_digest: String,
     pub model_route_ref: String,
     pub tool_surface_refs: Vec<String>,
+    pub evidence_rank: u32,
+    pub tranche: u32,
+    pub boundary_classes: Vec<ForensicBoundaryClass>,
+    pub ranking_rationale: String,
 }
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -1411,6 +1418,8 @@ pub struct EntropyRunProjection {
     pub schema: String,
     pub binding: EntropyRunBinding,
     pub manifest: EntropyManifest,
+    #[serde(default)]
+    pub ranked_schedule: EvidenceRankedSchedule,
     pub phase: EntropyRunPhase,
     pub files: Vec<EntropyFileProgress>,
     pub limitations: Vec<EntropyLimitation>,
@@ -1427,8 +1436,22 @@ pub struct EntropyRunProjection {
 
 impl EntropyRunProjection {
     pub fn migrate_legacy_accounting(&mut self) -> Result<bool, ForensicsError> {
-        if self.summary.schema == ENTROPY_RUN_SUMMARY_SCHEMA_V1 {
+        if self.summary.schema == ENTROPY_RUN_SUMMARY_SCHEMA_V1
+            && !self.ranked_schedule.schema.is_empty()
+        {
             return Ok(false);
+        }
+        let schedule_migrated = self.ranked_schedule.schema.is_empty();
+        if schedule_migrated {
+            self.ranked_schedule = EvidenceRankedSchedule::from_manifest(
+                &self.manifest,
+                "threat-model://omega/entropy-and-secret-randomness-v1".into(),
+                8,
+            )?;
+        }
+        if self.summary.schema == ENTROPY_RUN_SUMMARY_SCHEMA_V1 {
+            self.validate()?;
+            return Ok(true);
         }
         if !self.summary.schema.is_empty() || !self.tool_facts.is_empty() {
             return Err(ForensicsError::InvalidEntropyRun(
@@ -1560,6 +1583,7 @@ impl EntropyRunProjection {
             schema: ENTROPY_RUN_SCHEMA_V1.into(),
             binding,
             manifest,
+            ranked_schedule: EvidenceRankedSchedule::default(),
             phase: EntropyRunPhase::Ready,
             files,
             limitations,
@@ -1569,8 +1593,27 @@ impl EntropyRunProjection {
             summary,
             duplicate_terminal_events: 0,
         };
+        run.ranked_schedule = EvidenceRankedSchedule::from_manifest(
+            &run.manifest,
+            "threat-model://omega/entropy-and-secret-randomness-v1".into(),
+            8,
+        )?;
         run.refresh_summary()?;
         Ok(run)
+    }
+
+    pub fn install_ranked_schedule(
+        &mut self,
+        schedule: EvidenceRankedSchedule,
+    ) -> Result<(), ForensicsError> {
+        if self.phase != EntropyRunPhase::Ready || self.events.len() != 0 {
+            return Err(ForensicsError::InvalidEntropyRun(
+                "deterministic scanners must settle the schedule before model sessions".into(),
+            ));
+        }
+        schedule.validate(&self.manifest)?;
+        self.ranked_schedule = schedule;
+        self.validate()
     }
 
     pub fn validate(&self) -> Result<(), ForensicsError> {
@@ -1579,6 +1622,7 @@ impl EntropyRunProjection {
         }
         self.binding.validate()?;
         self.manifest.validate()?;
+        self.ranked_schedule.validate(&self.manifest)?;
         if self.binding.repository != self.manifest.repository
             || self.binding.manifest_ref != self.manifest.manifest_ref
             || self.binding.manifest_digest != self.manifest.canonical_digest
@@ -1869,11 +1913,12 @@ impl EntropyRunProjection {
                 "the sequential entropy runner already has a reading file".into(),
             ));
         }
-        let Some(index) = self
-            .files
-            .iter()
-            .position(|file| file.state == EntropyFileState::Queued)
-        else {
+        let next_path = self.ranked_schedule.next_queued_path().map(str::to_owned);
+        let Some(index) = next_path.as_ref().and_then(|path| {
+            self.files
+                .iter()
+                .position(|file| file.path == *path && file.state == EntropyFileState::Queued)
+        }) else {
             self.finish();
             return Ok(None);
         };
@@ -1887,6 +1932,17 @@ impl EntropyRunProjection {
         self.phase = EntropyRunPhase::Running;
         self.files[index].state = EntropyFileState::Reading;
         let file_path = self.files[index].path.clone();
+        self.ranked_schedule
+            .mark(&file_path, ForensicCoverageDisposition::Focal)?;
+        let ranked = self
+            .ranked_schedule
+            .units
+            .iter()
+            .find(|unit| unit.path == file_path)
+            .cloned()
+            .ok_or_else(|| {
+                ForensicsError::InvalidEntropyRun("ranked focal unit disappeared".into())
+            })?;
         self.push_event(
             Some(file_path.clone()),
             EntropyFileState::Reading,
@@ -1900,6 +1956,10 @@ impl EntropyRunProjection {
             prompt_digest: self.binding.prompt_digest.clone(),
             model_route_ref: self.binding.model_route_ref.clone(),
             tool_surface_refs: self.binding.tool_surface_refs.clone(),
+            evidence_rank: ranked.rank,
+            tranche: ranked.tranche,
+            boundary_classes: ranked.boundary_classes.clone(),
+            ranking_rationale: ranked.rationale,
         }))
     }
 
@@ -1909,6 +1969,19 @@ impl EntropyRunProjection {
         observed_at: String,
     ) -> Result<(), ForensicsError> {
         output.validate(&self.binding)?;
+        let contextual_paths = output
+            .observations
+            .iter()
+            .flat_map(|observation| &observation.source_refs)
+            .chain(output.hypotheses.iter().flat_map(|hypothesis| {
+                hypothesis
+                    .causal_links
+                    .iter()
+                    .flat_map(|link| &link.source_refs)
+            }))
+            .map(|source| source.path.clone())
+            .filter(|path| path != &output.file_path)
+            .collect::<BTreeSet<_>>();
         if let Some(file) = self.files.iter().find(|file| file.path == output.file_path)
             && matches!(
                 file.state,
@@ -1954,6 +2027,12 @@ impl EntropyRunProjection {
         self.limitations.extend(file.limitations.clone());
         let state = file.state;
         let path = file.path.clone();
+        for contextual_path in contextual_paths {
+            self.ranked_schedule
+                .mark_contextual_read(&contextual_path)?;
+        }
+        self.ranked_schedule
+            .mark(&path, ForensicCoverageDisposition::Completed)?;
         self.push_event(Some(path), state, observed_at)?;
         self.refresh_summary()?;
         self.finish_if_exhausted();
@@ -2002,6 +2081,8 @@ impl EntropyRunProjection {
         file.limitations.push(limitation.clone());
         self.limitations.push(limitation);
         let state = file.state;
+        self.ranked_schedule
+            .mark(&path, ForensicCoverageDisposition::Unreachable)?;
         self.push_event(Some(path), state, observed_at)?;
         self.refresh_summary()?;
         self.finish_if_exhausted();
@@ -2039,6 +2120,8 @@ impl EntropyRunProjection {
             }
         }
         for path in cancelled_paths {
+            self.ranked_schedule
+                .mark(&path, ForensicCoverageDisposition::NeverReached)?;
             self.push_event(Some(path), EntropyFileState::Cancelled, observed_at.clone())?;
         }
         self.phase = EntropyRunPhase::Cancelled;

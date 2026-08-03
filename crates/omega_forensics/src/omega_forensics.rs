@@ -7,11 +7,13 @@ use url::Url;
 mod entropy_campaign;
 mod entropy_repository;
 mod prior_work;
+mod ranked_tranches;
 mod tool_ingestion;
 
 pub use entropy_campaign::*;
 pub use entropy_repository::*;
 pub use prior_work::*;
+pub use ranked_tranches::*;
 pub use tool_ingestion::*;
 
 pub const PREFLIGHT_SCHEMA_V1: &str = "openagents.omega.forensics-preflight.v1";
