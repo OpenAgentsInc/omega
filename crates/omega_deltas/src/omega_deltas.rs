@@ -28389,4 +28389,61 @@ mod tests {
             "OMEGA-DELTA-0236: Work cutover gained an implicit default activation state"
         );
     }
+
+    /// OMEGA-DELTA-0237. Packet C Agent Session scenes are deterministic,
+    /// explicitly simulated, ephemeral, and authority-empty.
+    #[test]
+    fn dogfood_agent_session_scenes_keep_every_identity_and_authority_distinct() {
+        let simulation = without_comments(&read_repository_file(
+            "crates/agent_ui/src/omega_agent_session_simulation.rs",
+        ));
+        for required in [
+            "Pending",
+            "Active",
+            "AwaitingInput",
+            "Error",
+            "Stale",
+            "Complete",
+            "Diff",
+            "Review",
+            "assignee_ref",
+            "agent_delegate_ref",
+            "delegation_grant_ref",
+            "repository_claim_ref",
+            "lease_ref",
+            "thread_ref",
+            "session_ref",
+            "agent_session_ref",
+            "run_ref",
+            "host_ref",
+            "generation",
+            "effect_ref",
+            "question",
+            "result",
+            "artifact_ref",
+            "work_review",
+            "receipt_ref: None",
+            "owner_disposition_ref: None",
+        ] {
+            assert!(
+                simulation.contains(required),
+                "OMEGA-DELTA-0237: Agent Session simulation lost `{required}`"
+            );
+        }
+
+        let surface = without_comments(&read_repository_file(
+            "crates/agent_ui/src/omega_dogfood_surface.rs",
+        ));
+        for required in [
+            "omega.dogfood.agent-session-simulation",
+            "SIMULATED · EPHEMERAL",
+            "AgentSessionSimulationScene::ALL",
+            "No live command, claim, lease, evidence, verification, receipt, release, or owner authority.",
+        ] {
+            assert!(
+                surface.contains(required),
+                "OMEGA-DELTA-0237: gated Agent Session UI lost `{required}`"
+            );
+        }
+    }
 }

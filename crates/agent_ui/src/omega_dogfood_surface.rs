@@ -16,6 +16,8 @@ use omega_work_index::{
 use serde::{Deserialize, Serialize};
 use ui::{Button, ButtonSize, ButtonStyle, Color, Icon, IconName, Label, LabelSize, prelude::*};
 
+use crate::omega_agent_session_simulation::{AgentSessionSimulation, AgentSessionSimulationScene};
+
 const DOGFOOD_SURFACE_STATE_KEY: &str = "omega_dogfood_surface_state_v1";
 
 #[derive(Clone, Copy, Debug, Default, Deserialize, Eq, PartialEq, Serialize)]
@@ -93,6 +95,7 @@ pub struct DogfoodSurface {
     repository_claim_busy: bool,
     signed_workroom_ledger: Option<SignedWorkroomLedger>,
     signed_workroom_error: Option<String>,
+    agent_session_simulation_scene: AgentSessionSimulationScene,
     filter: PlanningFilter,
     group: PlanningGroup,
     sort: PlanningSort,
@@ -132,6 +135,7 @@ impl DogfoodSurface {
             repository_claim_busy: false,
             signed_workroom_ledger: None,
             signed_workroom_error: None,
+            agent_session_simulation_scene: AgentSessionSimulationScene::Pending,
             filter: state.filter,
             group: state.group,
             sort: state.sort,
@@ -205,6 +209,15 @@ impl DogfoodSurface {
             self.signed_workroom_ledger = Some(ledger);
         }
         self.signed_workroom_error = error;
+        cx.notify();
+    }
+
+    fn set_agent_session_simulation_scene(
+        &mut self,
+        scene: AgentSessionSimulationScene,
+        cx: &mut Context<Self>,
+    ) {
+        self.agent_session_simulation_scene = scene;
         cx.notify();
     }
 
@@ -1421,6 +1434,130 @@ impl DogfoodSurface {
                     .child(Label::new(format!("{} · generation {} · {} parent(s)", activity.occurred_at.0, activity.generation.0, activity.causal_parent_refs.len())).size(LabelSize::XSmall).color(Color::Muted))
             }))
     }
+
+    fn render_agent_session(&self, cx: &mut Context<Self>) -> impl IntoElement {
+        let work_ref = self
+            .selected_work_ref()
+            .unwrap_or_else(|| "work:simulation:unselected".into());
+        let projection =
+            AgentSessionSimulation::for_work(&work_ref, self.agent_session_simulation_scene);
+        debug_assert!(projection.validate());
+        v_flex()
+            .gap_4()
+            .child(
+                v_flex()
+                    .id("omega.dogfood.agent-session-simulation")
+                    .gap_3()
+                    .p_4()
+                    .rounded_lg()
+                    .border_1()
+                    .border_color(cx.theme().colors().border_variant)
+                    .role(gpui::Role::Group)
+                    .aria_label(format!(
+                        "Simulated Agent Session: {}",
+                        self.agent_session_simulation_scene.label()
+                    ))
+                    .child(
+                        h_flex()
+                            .justify_between()
+                            .child(Label::new("Agent Session simulation").size(LabelSize::Large))
+                            .child(
+                                Label::new("SIMULATED · EPHEMERAL")
+                                    .size(LabelSize::XSmall)
+                                    .color(Color::Warning),
+                            ),
+                    )
+                    .child(
+                        h_flex().gap_1().flex_wrap().children(
+                            AgentSessionSimulationScene::ALL
+                                .into_iter()
+                                .enumerate()
+                                .map(|(index, scene)| {
+                                    Button::new(("agent-session-scene", index), scene.label())
+                                        .size(ButtonSize::Compact)
+                                        .style(
+                                            if scene == self.agent_session_simulation_scene {
+                                                ButtonStyle::Filled
+                                            } else {
+                                                ButtonStyle::Subtle
+                                            },
+                                        )
+                                        .on_click(cx.listener(move |this, _, _, cx| {
+                                            this.set_agent_session_simulation_scene(scene, cx)
+                                        }))
+                                }),
+                        ),
+                    )
+                    .child(inspector_row("Activity", projection.activity.into(), cx))
+                    .child(inspector_row("Assignee", projection.assignee_ref, cx))
+                    .child(inspector_row(
+                        "Agent Delegate",
+                        projection.agent_delegate_ref,
+                        cx,
+                    ))
+                    .child(inspector_row(
+                        "Delegation Grant",
+                        projection.delegation_grant_ref,
+                        cx,
+                    ))
+                    .child(inspector_row(
+                        "Repository Claim",
+                        projection.repository_claim_ref,
+                        cx,
+                    ))
+                    .child(inspector_row("Lease", projection.lease_ref, cx))
+                    .child(inspector_row("Thread", projection.thread_ref, cx))
+                    .child(inspector_row("Session", projection.session_ref, cx))
+                    .child(inspector_row(
+                        "Agent Session",
+                        projection.agent_session_ref,
+                        cx,
+                    ))
+                    .child(inspector_row("Run", projection.run_ref, cx))
+                    .child(inspector_row("Host", projection.host_ref, cx))
+                    .child(inspector_row(
+                        "Generation",
+                        projection.generation.to_string(),
+                        cx,
+                    ))
+                    .child(inspector_row("Plan", projection.plan_ref, cx))
+                    .child(inspector_row(
+                        "Question",
+                        projection.question.unwrap_or("None").into(),
+                        cx,
+                    ))
+                    .child(inspector_row(
+                        "Result",
+                        projection.result.unwrap_or("None").into(),
+                        cx,
+                    ))
+                    .child(inspector_row(
+                        "Artifact",
+                        projection.artifact_ref.unwrap_or_else(|| "None".into()),
+                        cx,
+                    ))
+                    .child(inspector_row(
+                        "Work Review",
+                        projection.work_review.unwrap_or("None").into(),
+                        cx,
+                    ))
+                    .child(inspector_row(
+                        "Effect",
+                        projection.effect_ref.unwrap_or_else(|| "None".into()),
+                        cx,
+                    ))
+                    .child(inspector_row("Receipt", "None".into(), cx))
+                    .child(inspector_row("Owner Disposition", "None".into(), cx))
+                    .child(
+                        Label::new(
+                            "No live command, claim, lease, evidence, verification, receipt, release, or owner authority.",
+                        )
+                        .size(LabelSize::XSmall)
+                        .color(Color::Muted),
+                    ),
+            )
+            .child(self.render_signed_workroom(cx))
+    }
 }
 
 fn workroom_audience_label(audience: &WorkroomAudience) -> &'static str {
@@ -1494,7 +1631,7 @@ impl Render for DogfoodSurface {
                 DogfoodScene::Timeline => self.render_timeline(cx).into_any_element(),
                 DogfoodScene::Roadmap => self.render_roadmap(cx).into_any_element(),
                 DogfoodScene::Issue => self.render_issue(cx).into_any_element(),
-                DogfoodScene::Session => self.render_signed_workroom(cx).into_any_element(),
+                DogfoodScene::Session => self.render_agent_session(cx).into_any_element(),
                 DogfoodScene::Review => self.render_empty_execution(true, cx).into_any_element(),
             })
     }

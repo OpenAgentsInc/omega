@@ -30,6 +30,7 @@ mod mode_selector;
 mod model_selector;
 mod model_selector_popover;
 pub mod omega_agent_attach;
+pub mod omega_agent_session_simulation;
 pub mod omega_agent_supervision;
 pub mod omega_audience_control;
 pub mod omega_community_control;
