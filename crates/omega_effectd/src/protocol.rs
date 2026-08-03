@@ -102,6 +102,8 @@ pub enum HostResponseErrorCode {
     InvalidRequest,
     Unsupported,
     Unavailable,
+    Forbidden,
+    Conflict,
     Internal,
 }
 

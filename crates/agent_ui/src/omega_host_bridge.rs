@@ -1845,6 +1845,8 @@ fn host_response_error_code(code: omega_effectd::ProtocolErrorCode) -> HostRespo
         | omega_effectd::ProtocolErrorCode::NotFound
         | omega_effectd::ProtocolErrorCode::Unavailable
         | omega_effectd::ProtocolErrorCode::Gap => HostResponseErrorCode::Unavailable,
+        omega_effectd::ProtocolErrorCode::Forbidden => HostResponseErrorCode::Forbidden,
+        omega_effectd::ProtocolErrorCode::Conflict => HostResponseErrorCode::Conflict,
         omega_effectd::ProtocolErrorCode::Internal => HostResponseErrorCode::Internal,
     }
 }
@@ -3099,6 +3101,11 @@ mod tests {
                 HostResponseErrorCode::Unavailable,
             ),
             (ProtocolErrorCode::Gap, HostResponseErrorCode::Unavailable),
+            (
+                ProtocolErrorCode::Forbidden,
+                HostResponseErrorCode::Forbidden,
+            ),
+            (ProtocolErrorCode::Conflict, HostResponseErrorCode::Conflict),
             (ProtocolErrorCode::Internal, HostResponseErrorCode::Internal),
         ];
 
