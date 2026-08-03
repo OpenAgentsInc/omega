@@ -1251,6 +1251,47 @@ mod tests {
                 .expect("typed planning graph read from OpenAgents process");
             assert_eq!(planning.graph.work.len(), 34);
             assert_eq!(planning.graph.source_coordinates.len(), 34);
+
+            // omega#223 close criterion: "the reference-process reconnect
+            // journey preserves identity and last-known-good state". Reading
+            // once from a healthy process does not show that. Drop the process
+            // and read again: the reconnect must land a new generation and the
+            // same planning identity, not an empty or forked graph.
+            let reconnected_generation = supervisor
+                .restart()
+                .await
+                .expect("restart the OpenAgents process")
+                .generation;
+            assert!(
+                reconnected_generation > initialized.generation,
+                "a reconnect must fence the previous generation"
+            );
+            let after_reconnect = supervisor
+                .read_planning_graph(all_work_contract::PlanningGraphReadRequest {
+                    after_revision: None,
+                })
+                .await
+                .expect("typed planning graph read after reconnect");
+            assert_eq!(after_reconnect.graph.revision, planning.graph.revision);
+            assert_eq!(
+                after_reconnect.graph.event_cursor,
+                planning.graph.event_cursor
+            );
+            assert_eq!(
+                after_reconnect
+                    .graph
+                    .work
+                    .iter()
+                    .map(|work| work.summary.work_ref.0.clone())
+                    .collect::<std::collections::BTreeSet<_>>(),
+                planning
+                    .graph
+                    .work
+                    .iter()
+                    .map(|work| work.summary.work_ref.0.clone())
+                    .collect::<std::collections::BTreeSet<_>>(),
+            );
+
             let memberships = supervisor
                 .read_organization_memberships(
                     all_work_contract::OrganizationMembershipReadRequest {

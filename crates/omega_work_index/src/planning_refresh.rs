@@ -1193,6 +1193,66 @@ mod tests {
         }
     }
 
+    // omega#223 close criterion: "the reference-process reconnect journey
+    // preserves identity and last-known-good state". The staged-refresh tests
+    // above prove an incomplete revision is refused; none of them walk the
+    // journey a service outage actually produces — fresh live, then failure,
+    // then a reconnect at a NEW adapter generation. Each step is checked for
+    // the two things that could quietly go wrong: losing the last complete
+    // projection, and labelling retained data as current.
+    #[test]
+    fn an_outage_retains_last_known_good_and_a_reconnect_restores_the_same_identity() {
+        let fixture = DogfoodFixtureAdapter::load_for_tests().expect("valid fixture");
+        let issue = fixture.graph.issues.first().expect("fixture issue").clone();
+        let live = DogfoodPlanningViewModel::from_live(representative_live_graph(&issue), 4)
+            .expect("complete live graph");
+        assert!(live.is_fresh_live());
+        let identity = live.graph.issues.first().expect("live issue").id.clone();
+
+        let offline = live.retain_after_failure(
+            DogfoodPlanningSourceState::Offline,
+            "planning refresh failed after three bounded attempts",
+        );
+        assert_eq!(
+            offline.graph, live.graph,
+            "the outage dropped the last complete projection"
+        );
+        assert_eq!(offline.revision, live.revision);
+        assert_eq!(offline.event_cursor, live.event_cursor);
+        assert_eq!(offline.adapter_generation, live.adapter_generation);
+        assert_eq!(offline.source_state, DogfoodPlanningSourceState::Offline);
+        assert_eq!(
+            offline.origin,
+            DogfoodPlanningOrigin::OfflineCache,
+            "a retained live projection must stop calling itself a live origin"
+        );
+        assert!(
+            !offline.is_fresh_live(),
+            "retained data must never present itself as a current live read"
+        );
+        assert!(offline.last_error.is_some());
+
+        // The reference process came back as a new generation. A reconnect must
+        // land the same Work identity and clear the offline label, not fork the
+        // graph or keep serving the cache.
+        let reconnected = offline
+            .stage_live(representative_live_graph(&issue), 5)
+            .expect("reconnected complete revision");
+        assert_eq!(reconnected.adapter_generation, 5);
+        assert!(reconnected.is_fresh_live());
+        assert_eq!(reconnected.last_error, None);
+        assert_eq!(
+            reconnected
+                .graph
+                .issues
+                .iter()
+                .filter(|candidate| candidate.id == identity)
+                .count(),
+            1,
+            "the reconnect must not fork the retained Work identity"
+        );
+    }
+
     #[test]
     fn persisted_live_projection_restores_as_visible_offline_cache() {
         let directory = std::env::temp_dir().join(format!(
