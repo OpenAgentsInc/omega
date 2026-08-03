@@ -197,6 +197,15 @@ cross-ref, or activity-to-session mismatches before displaying the result.
 This makes restart and revocation state inspectable without treating a provider
 event or Effect reference as a Receipt, verification, or owner acceptance.
 
+**Revoke delegate** uses that durable state as the authority fence. When the
+latest active or paused Session names the exact retained local Thread, grant,
+and generation, Omega first asks the existing ACP path to cancel that Thread if
+it is still generating. A missing, closed, stale, or unparsable local runtime
+does not block the canonical revoke command: the Session becomes revoked and
+late commands at its generation remain fenced. Process cancellation and
+durable revocation are not one atomic Effect, and Omega does not claim an
+Effect Receipt for either operation.
+
 When the exact retained Thread is generating, **Stop agent** first calls
 Omega's existing local ACP cancel path and only then records the generated
 Session `stop` transition at the active grant generation. If the Thread is not

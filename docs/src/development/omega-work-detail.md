@@ -124,6 +124,13 @@ the portable activity kind/summary, provider event, explicit projection loss,
 and nullable Effect. Cross-reference or generation mismatches fail the read;
 an Effect ref still is not a Receipt, verification, or Owner Disposition.
 
+**Revoke delegate** always sends the canonical generation fence. If the latest
+active or paused Session matches the exact retained local Thread, grant, and
+generation, Omega first invokes the existing ACP cancel path when that Thread
+is still generating. An unavailable, closed, stale, or invalid local Thread is
+not authority and cannot prevent revocation. The process cancellation and
+durable Session transition are not atomic and do not imply an Effect Receipt.
+
 For a generating retained Thread, **Stop agent** invokes the exact local ACP
 cancel path before it records the bounded Session as stopped. Omega refuses the
 command when the Thread is not open or is not generating. Cancellation and the

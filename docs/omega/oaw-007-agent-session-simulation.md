@@ -46,6 +46,13 @@ refs, and nullable Effect ref. Those rows survive restart from the Effect-owned
 command state. Omega validates their cross-references and does not turn any of
 them into a Receipt, verification, or human disposition.
 
+The live **Revoke delegate** control now attempts to cancel a generating local
+ACP Thread only when the latest active or paused Session matches its exact
+Thread, grant, and generation. It then submits the canonical revocation even
+when that runtime is missing, closed, stale, or cannot be parsed, because the
+durable generation fence is the authority boundary. Local cancellation and
+canonical revocation are not atomic, and neither supplies an Effect Receipt.
+
 This packet is deterministic UI/model coverage. It cannot close omega#214.
 The shared command/admission processor now exists, but the real close journey
 still requires an explicitly provisioned Organization membership, live bounded

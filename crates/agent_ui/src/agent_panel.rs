@@ -2870,6 +2870,24 @@ fn dogfood_work_command_action_label(action: DogfoodWorkCommandAction) -> &'stat
     }
 }
 
+fn dogfood_session_matches_revocation_runtime(
+    state: &omega_effectd::all_work_contract::WorkSessionState,
+    session_thread_ref: &str,
+    session_grant_ref: &str,
+    session_generation: u64,
+    candidate_thread_ref: &str,
+    active_grant_ref: &str,
+    active_generation: u64,
+) -> bool {
+    matches!(
+        state,
+        omega_effectd::all_work_contract::WorkSessionState::Active
+            | omega_effectd::all_work_contract::WorkSessionState::Paused
+    ) && session_thread_ref == candidate_thread_ref
+        && session_grant_ref == active_grant_ref
+        && session_generation == active_generation
+}
+
 fn dogfood_provider_event_projection(
     projection: &ThreadProjectionSnapshot,
 ) -> Option<DogfoodProviderEventProjection> {
@@ -3008,6 +3026,55 @@ mod dogfood_claim_tests {
         assert_eq!(hot_files, vec!["script/sync-all-work-contract"]);
         assert!(hot_contracts.contains(&"All Work generated Effect/Rust boundary"));
         assert!(hot_contracts.contains(&"Repository Work Claim writer cutover"));
+    }
+}
+
+#[cfg(test)]
+mod dogfood_revocation_tests {
+    use super::dogfood_session_matches_revocation_runtime;
+    use omega_effectd::all_work_contract::WorkSessionState;
+
+    #[test]
+    fn only_the_exact_active_or_paused_generation_matches_a_revocation_runtime() {
+        for state in [WorkSessionState::Active, WorkSessionState::Paused] {
+            assert!(dogfood_session_matches_revocation_runtime(
+                &state,
+                "thread:exact",
+                "grant:exact",
+                7,
+                "thread:exact",
+                "grant:exact",
+                7,
+            ));
+        }
+
+        assert!(!dogfood_session_matches_revocation_runtime(
+            &WorkSessionState::Revoked,
+            "thread:exact",
+            "grant:exact",
+            7,
+            "thread:exact",
+            "grant:exact",
+            7,
+        ));
+        assert!(!dogfood_session_matches_revocation_runtime(
+            &WorkSessionState::Active,
+            "thread:other",
+            "grant:exact",
+            7,
+            "thread:exact",
+            "grant:exact",
+            7,
+        ));
+        assert!(!dogfood_session_matches_revocation_runtime(
+            &WorkSessionState::Active,
+            "thread:exact",
+            "grant:exact",
+            6,
+            "thread:exact",
+            "grant:exact",
+            7,
+        ));
     }
 }
 
@@ -18386,6 +18453,47 @@ impl AgentPanel {
                     surface.set_work_command_state(None, Some(error.to_string()), false, cx)
                 });
                 return;
+            }
+        }
+        if action == DogfoodWorkCommandAction::RevokeDelegate {
+            let runtime_thread_key = context.delegation_candidate.as_ref().and_then(|candidate| {
+                let delegate = snapshot
+                    .summary
+                    .agent_delegate
+                    .as_ref()
+                    .and_then(|delegate| delegate.as_ref())?;
+                snapshot
+                    .session_projections
+                    .as_ref()?
+                    .iter()
+                    .rev()
+                    .find(|session| {
+                        dogfood_session_matches_revocation_runtime(
+                            &session.state,
+                            &session.thread_ref.0,
+                            &session.delegation_grant_ref.0,
+                            session.generation.0,
+                            &candidate.thread_ref.0,
+                            &delegate.delegation_grant_ref.0,
+                            delegate.generation.0,
+                        )
+                    })
+                    .map(|_| candidate.thread_key.clone())
+            });
+            if let Some(runtime_thread_key) = runtime_thread_key {
+                match ThreadId::from_key_string(&runtime_thread_key) {
+                    Ok(thread_id) if self.is_thread_generating(&thread_id, cx) => {
+                        if !self.cancel_thread(&thread_id, cx) {
+                            log::warn!(
+                                "could not cancel the exact linked local Thread before canonical delegate revocation; the authority fence will still proceed"
+                            );
+                        }
+                    }
+                    Ok(_) => {}
+                    Err(error) => log::warn!(
+                        "could not parse the exact linked local Thread before canonical delegate revocation: {error}; the authority fence will still proceed"
+                    ),
+                }
             }
         }
         let revision = snapshot.summary.revision.0;
