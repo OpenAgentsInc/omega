@@ -806,7 +806,7 @@ pub enum NativeThreadLifecycle {
     Canceled,
 }
 
-#[derive(Clone, Debug, Eq, PartialEq)]
+#[derive(Clone, Debug, PartialEq)]
 pub struct NativeThreadRecord {
     pub thread_ref: String,
     pub title: String,
