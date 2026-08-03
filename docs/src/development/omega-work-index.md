@@ -122,3 +122,35 @@ reconnect, conditional navigation, keyboard operation, and route identity.
 Installed-artifact verification used hashes, metadata, CLI output, embedded
 source provenance, and code-sign checks only. It did not launch or control the
 installed UI. `/Applications/Omega.app` was not changed.
+
+## Experimental sidebar installed receipt {#experimental-sidebar-installed-receipt}
+
+The installed development build was produced from source commit
+`57a74da3fc8e48e34f98131c9539f8c4b61bb684`, whose parent is
+`39f5c2c4442323c3f247b71c896824aa2513877b`. The release-fast build embeds the
+same source commit in its `omega` executable.
+
+- Application: `/Applications/Omega Dev.app`
+- Bundle identifier: `com.openagents.omega.dev`
+- Bundle version: `20260803.034541`
+- Short version: `0.2.0`
+- Architecture: arm64
+- Installed and bundled `omega` SHA-256:
+  `c3584ab69df882c7e1cbee297d39e53dca39b417a179a008c32dbc96c618f125`
+- DMG SHA-256:
+  `4d42b48f5aca1594f72b44c1252bf506724db4887398617bf1b6594244e09c65`
+- CLI receipt: `Omega 0.2.0 – /Applications/Omega Dev.app`
+- Signature receipt: ad hoc arm64 signature; `codesign --verify --deep
+--strict` passed before and after installation.
+- Recoverable pre-build development app:
+  `/private/tmp/Omega-Dev-before-experimental-sidebar-20260802.app`
+- Recoverable replaced development app:
+  `/private/tmp/Omega-Dev-replaced-experimental-sidebar-20260803.app`
+
+The exact source passed the focused GPUI sidebar and route test, all 11 Work
+Index model tests, release all-target lint for `agent_ui`, formatting, and the
+documentation build. Installed-artifact verification used hashes, metadata,
+CLI output, embedded source provenance, and code-sign checks only. It did not
+launch or control the installed UI. The production app binary remained at
+SHA-256
+`0475b4f52bd0c79b53e761f8b720e4e18d6533eee223c60f0fd81b1ca77de2c`.
