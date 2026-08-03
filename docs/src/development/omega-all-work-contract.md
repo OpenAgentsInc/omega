@@ -172,10 +172,16 @@ After delegation, **Link session** admits the exact active local Omega Thread
 only when it has a real ACP session and its Direct Agent is the admitted Agent
 Delegate. The command creates separate OpenAgents Thread, Session, Agent
 Session, and Run references at the active grant generation; it does not start a
-provider process. **Record handoff** then records only the exact link fact as
-portable progress. It supplies no provider event or Effect and retains an
-explicit `loss:omega:provider-event-not-supplied` fact. Provider event ingestion,
-real execution effects, and the installed owner journey remain incomplete.
+provider process. **Record handoff** records only the exact link fact as
+portable progress when no admissible provider event is available. If the exact
+retained ACP session has an agent/tool projection, the control becomes **Record
+provider event** and attaches its stable session-digested entry/revision ref.
+The portable kind and summary contain only generic event/status facts; reasoning
+and user/system events are excluded. Omega does not copy the provider-native
+payload into Work and records
+`loss:omega:provider-native-payload-not-projected` explicitly. Neither path
+supplies an Effect. Real execution-effect receipts and the installed owner
+journey remain incomplete.
 
 When the exact retained Thread is generating, **Stop agent** first calls
 Omega's existing local ACP cancel path and only then records the generated

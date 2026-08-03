@@ -106,9 +106,15 @@ Once the active local Thread has a real ACP session and its owner matches the
 admitted Agent Delegate, **Link session** registers distinct Thread, Session,
 Agent Session, and Run identities at the grant generation. This is a link to an
 already active Omega conversation, not a request to launch an agent. **Record
-handoff** records that exact link as audience-safe progress with no Effect and
-an explicit missing-provider-event loss fact. Omega does not translate that
-activity into completion, verification, or owner acceptance.
+handoff** records that exact link as audience-safe progress when the retained
+ACP Thread has no admissible agent/tool event. When one exists, the control
+becomes **Record provider event** and binds the portable activity to the latest
+typed event from that exact ACP session. Reasoning and user/system entries are
+excluded. Work stores the stable provider event reference and a generic
+kind/status summary, not message or tool payload; an explicit
+`provider-native-payload-not-projected` loss ref records that boundary. Neither
+path supplies an Effect or translates activity into completion, verification,
+or owner acceptance.
 
 For a generating retained Thread, **Stop agent** invokes the exact local ACP
 cancel path before it records the bounded Session as stopped. Omega refuses the

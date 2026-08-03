@@ -10,7 +10,10 @@ use std::{
     time::{Duration, Instant},
 };
 
-use acp_thread::{AcpThread, AcpThreadEvent, MentionUri, ThreadStatus, line_range_suffix};
+use acp_thread::{
+    AcpThread, AcpThreadEvent, MentionUri, ThreadEventKind, ThreadEventOwner, ThreadEventStatus,
+    ThreadProjectionSnapshot, ThreadStatus, line_range_suffix,
+};
 use agent::{ContextServerRegistry, SharedThread, ThreadStore};
 use agent_client_protocol::schema::v1 as acp;
 use agent_servers::AgentServer;
@@ -43,8 +46,8 @@ use crate::agent_connection_store::AgentConnectionStore;
 use crate::completion_provider::{AgentContextSelection, AgentContextSource};
 use crate::forensics_work_projection::{ForensicsWorkProjection, project_forensics_work};
 use crate::omega_dogfood_surface::{
-    DogfoodClaimAction, DogfoodDelegationCandidate, DogfoodSurface, DogfoodSurfaceEvent,
-    DogfoodWorkCommandAction, DogfoodWorkCommandContext,
+    DogfoodClaimAction, DogfoodDelegationCandidate, DogfoodProviderEventProjection, DogfoodSurface,
+    DogfoodSurfaceEvent, DogfoodWorkCommandAction, DogfoodWorkCommandContext,
 };
 use crate::omega_work_detail_surface::{
     WorkDelegationCandidate, WorkDetailSurface, WorkDetailSurfaceEvent,
@@ -2866,6 +2869,102 @@ fn dogfood_work_command_action_label(action: DogfoodWorkCommandAction) -> &'stat
     }
 }
 
+fn dogfood_provider_event_projection(
+    projection: &ThreadProjectionSnapshot,
+) -> Option<DogfoodProviderEventProjection> {
+    let event = projection.entries.iter().rev().find(|event| {
+        matches!(
+            event.owner,
+            ThreadEventOwner::Agent | ThreadEventOwner::Tool
+        ) && !matches!(
+            event.kind,
+            ThreadEventKind::UserMessage
+                | ThreadEventKind::ContextCompaction
+                | ThreadEventKind::SystemNote
+                | ThreadEventKind::Reasoning
+                | ThreadEventKind::Approval
+                | ThreadEventKind::ReplayBoundary
+                | ThreadEventKind::Unknown
+        )
+    })?;
+    let (kind, event_label) = match event.kind {
+        ThreadEventKind::CompletedPlan | ThreadEventKind::PlanUpdate => (
+            omega_effectd::all_work_contract::WorkCommandActivityKind::Plan,
+            "plan update",
+        ),
+        ThreadEventKind::Elicitation => (
+            omega_effectd::all_work_contract::WorkCommandActivityKind::Question,
+            "question",
+        ),
+        ThreadEventKind::ToolCall | ThreadEventKind::ToolResult if !event.artifacts.is_empty() => (
+            omega_effectd::all_work_contract::WorkCommandActivityKind::Artifact,
+            "tool artifact",
+        ),
+        ThreadEventKind::ToolCall | ThreadEventKind::ToolResult => (
+            omega_effectd::all_work_contract::WorkCommandActivityKind::Action,
+            "tool action",
+        ),
+        ThreadEventKind::Error => (
+            omega_effectd::all_work_contract::WorkCommandActivityKind::Error,
+            "error",
+        ),
+        ThreadEventKind::Cancellation | ThreadEventKind::Refusal => (
+            omega_effectd::all_work_contract::WorkCommandActivityKind::Interruption,
+            "interruption",
+        ),
+        ThreadEventKind::Completion => (
+            omega_effectd::all_work_contract::WorkCommandActivityKind::Result,
+            "turn result",
+        ),
+        ThreadEventKind::AssistantMessage
+        | ThreadEventKind::Checkpoint
+        | ThreadEventKind::Retry => (
+            omega_effectd::all_work_contract::WorkCommandActivityKind::Progress,
+            "agent progress",
+        ),
+        ThreadEventKind::UserMessage
+        | ThreadEventKind::ContextCompaction
+        | ThreadEventKind::SystemNote
+        | ThreadEventKind::Reasoning
+        | ThreadEventKind::Approval
+        | ThreadEventKind::ReplayBoundary
+        | ThreadEventKind::Unknown => return None,
+    };
+    let status_label = match event.status {
+        ThreadEventStatus::Pending => "pending",
+        ThreadEventStatus::WaitingForConfirmation => "waiting for confirmation",
+        ThreadEventStatus::InProgress => "in progress",
+        ThreadEventStatus::Completed => "completed",
+        ThreadEventStatus::Failed => "failed",
+        ThreadEventStatus::Rejected => "rejected",
+        ThreadEventStatus::Canceled => "canceled",
+        ThreadEventStatus::Unknown => "status unknown",
+    };
+    let session_digest = format!("{:x}", Sha256::digest(projection.thread_id.as_bytes()));
+    Some(DogfoodProviderEventProjection {
+        provider_event_ref: omega_effectd::all_work_contract::SourceRef::try_from(format!(
+            "provider-event:acp:{}:entry:{}:r{}",
+            &session_digest[..24],
+            event.id.0,
+            event.revision,
+        ))
+        .ok()?,
+        event_id: event.id.0,
+        event_revision: event.revision,
+        kind,
+        summary: omega_effectd::all_work_contract::ShortText::try_from(format!(
+            "ACP provider {event_label} is {status_label}."
+        ))
+        .ok()?,
+        loss_refs: vec![
+            omega_effectd::all_work_contract::SourceRef::try_from(
+                "loss:omega:provider-native-payload-not-projected".to_string(),
+            )
+            .ok()?,
+        ],
+    })
+}
+
 fn dogfood_claim_collision_scope(
     repository: &str,
     number: u64,
@@ -2908,6 +3007,95 @@ mod dogfood_claim_tests {
         assert_eq!(hot_files, vec!["script/sync-all-work-contract"]);
         assert!(hot_contracts.contains(&"All Work generated Effect/Rust boundary"));
         assert!(hot_contracts.contains(&"Repository Work Claim writer cutover"));
+    }
+}
+
+#[cfg(test)]
+mod dogfood_provider_event_tests {
+    use std::sync::Arc;
+
+    use acp_thread::{
+        ThreadEntryId, ThreadEventProjection, ThreadEventSource, ThreadProjectionBinding,
+    };
+
+    use super::*;
+
+    fn event(
+        binding: &ThreadProjectionBinding,
+        id: u64,
+        kind: ThreadEventKind,
+        owner: ThreadEventOwner,
+        status: ThreadEventStatus,
+    ) -> ThreadEventProjection {
+        ThreadEventProjection {
+            binding: binding.clone(),
+            id: ThreadEntryId(id),
+            parent_id: None,
+            revision: id,
+            entry_index: Some(id as usize),
+            kind,
+            owner,
+            source: ThreadEventSource::Session,
+            status,
+            related_kinds: Vec::new(),
+            artifacts: Vec::new(),
+            action_targets: Vec::new(),
+        }
+    }
+
+    #[test]
+    fn latest_admissible_acp_event_projects_without_reasoning_or_effect_authority() {
+        let binding = ThreadProjectionBinding {
+            thread_id: Arc::from("session-fixture"),
+            work_dirs: Arc::from(Vec::<std::path::PathBuf>::new()),
+        };
+        let projection = ThreadProjectionSnapshot {
+            binding: binding.clone(),
+            thread_id: binding.thread_id.clone(),
+            work_dirs: binding.work_dirs.clone(),
+            revision: 4,
+            entries: vec![
+                event(
+                    &binding,
+                    1,
+                    ThreadEventKind::AssistantMessage,
+                    ThreadEventOwner::Agent,
+                    ThreadEventStatus::Completed,
+                ),
+                event(
+                    &binding,
+                    2,
+                    ThreadEventKind::ToolCall,
+                    ThreadEventOwner::Tool,
+                    ThreadEventStatus::InProgress,
+                ),
+                event(
+                    &binding,
+                    4,
+                    ThreadEventKind::Reasoning,
+                    ThreadEventOwner::Agent,
+                    ThreadEventStatus::Completed,
+                ),
+            ],
+            artifacts: Vec::new(),
+        };
+
+        let event = dogfood_provider_event_projection(&projection).expect("provider event");
+        assert_eq!(event.event_id, 2);
+        assert_eq!(
+            event.kind,
+            omega_effectd::all_work_contract::WorkCommandActivityKind::Action
+        );
+        assert!(
+            event
+                .provider_event_ref
+                .0
+                .starts_with("provider-event:acp:")
+        );
+        assert_eq!(
+            event.loss_refs[0].0,
+            "loss:omega:provider-native-payload-not-projected"
+        );
     }
 }
 
@@ -4633,9 +4821,15 @@ impl AgentPanel {
                 };
                 let alive = this
                     .update(cx, |panel, cx| {
-                        if panel.effective_principal != projection {
+                        let principal_changed = panel.effective_principal != projection;
+                        if principal_changed {
                             panel.effective_principal = projection;
-                            panel.update_dogfood_work_command_context(cx);
+                        }
+                        // The same bounded poll also refreshes the exact active
+                        // ACP provider projection. Provider events can advance
+                        // while identity and Organization membership stay fixed.
+                        panel.update_dogfood_work_command_context(cx);
+                        if principal_changed {
                             cx.notify();
                         }
                     })
@@ -4669,6 +4863,20 @@ impl AgentPanel {
             ConversationOwner::LegacyOmega => ("omega".to_string(), "Omega".to_string()),
             ConversationOwner::LegacyAmbiguous(_) => return None,
         };
+        let provider_event = self
+            .conversation_view_for_id(&thread_id, cx)
+            .and_then(|view| view.read(cx).root_thread(cx))
+            .and_then(|thread| {
+                let projection = thread.read(cx).projection(cx);
+                metadata
+                    .session_id
+                    .as_ref()
+                    .is_some_and(|session_id| {
+                        projection.thread_id.as_ref() == session_id.0.as_ref()
+                    })
+                    .then(|| dogfood_provider_event_projection(&projection))
+                    .flatten()
+            });
         Some(DogfoodDelegationCandidate {
             agent_ref: omega_effectd::all_work_contract::AgentRef::try_from(format!(
                 "agent:omega:{agent_id}"
@@ -4693,6 +4901,7 @@ impl AgentPanel {
                 ))
                 .ok()
             }),
+            provider_event,
         })
     }
 
@@ -18304,21 +18513,50 @@ impl AgentPanel {
                         .cloned()
                         .context("No bounded Run is linked to this Work.")?;
                     let generation = delegate.generation.0;
+                    let provider_event = context
+                        .delegation_candidate
+                        .as_ref()
+                        .and_then(|candidate| candidate.provider_event.clone());
+                    let (activity_ref, kind, summary, provider_event_ref, loss_refs) =
+                        if let Some(provider_event) = provider_event {
+                            (
+                                format!(
+                                    "agent-activity:omega-ui:{work_key}:provider:{}:r{}:g{generation}",
+                                    provider_event.event_id, provider_event.event_revision,
+                                ),
+                                provider_event.kind,
+                                provider_event.summary,
+                                omega_effectd::all_work_contract::Nullable(Some(
+                                    provider_event.provider_event_ref,
+                                )),
+                                provider_event.loss_refs,
+                            )
+                        } else {
+                            (
+                                format!(
+                                    "agent-activity:omega-ui:{work_key}:handoff:g{generation}"
+                                ),
+                                omega_effectd::all_work_contract::WorkCommandActivityKind::Progress,
+                                omega_effectd::all_work_contract::ShortText::try_from(
+                                    "Active Omega Thread linked to delegated Work.".to_string(),
+                                )?,
+                                omega_effectd::all_work_contract::Nullable(None),
+                                vec![omega_effectd::all_work_contract::SourceRef::try_from(
+                                    "loss:omega:provider-event-not-supplied".to_string(),
+                                )?],
+                            )
+                        };
                     omega_effectd::all_work_contract::WorkCommand::RecordActivity {
                         activity_ref: omega_effectd::all_work_contract::AgentActivityRef::try_from(
-                            format!("agent-activity:omega-ui:{work_key}:handoff:g{generation}"),
+                            activity_ref,
                         )?,
                         session_ref,
                         run_ref,
                         expected_generation: delegate.generation.clone(),
-                        kind: omega_effectd::all_work_contract::WorkCommandActivityKind::Progress,
-                        summary: omega_effectd::all_work_contract::ShortText::try_from(
-                            "Active Omega Thread linked to delegated Work.".to_string(),
-                        )?,
-                        provider_event_ref: omega_effectd::all_work_contract::Nullable(None),
-                        loss_refs: vec![omega_effectd::all_work_contract::SourceRef::try_from(
-                            "loss:omega:provider-event-not-supplied".to_string(),
-                        )?],
+                        kind,
+                        summary,
+                        provider_event_ref,
+                        loss_refs,
                         effect_ref: omega_effectd::all_work_contract::Nullable(None),
                     }
                 }

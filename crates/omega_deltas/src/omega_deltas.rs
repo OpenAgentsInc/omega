@@ -28543,4 +28543,39 @@ mod tests {
             );
         }
     }
+
+    /// OAW-007. Canonical Work activity may reference the exact retained ACP
+    /// provider projection, but it never copies hidden reasoning or promotes
+    /// that reference into Effect, verification, or disposition authority.
+    #[test]
+    fn work_activity_keeps_provider_event_identity_and_payload_loss_explicit() {
+        let panel = without_comments(&read_repository_file("crates/agent_ui/src/agent_panel.rs"));
+        for required in [
+            "dogfood_provider_event_projection",
+            "ThreadEventKind::Reasoning",
+            "provider-event:acp:",
+            "loss:omega:provider-native-payload-not-projected",
+            "provider_event_ref",
+            "effect_ref: omega_effectd::all_work_contract::Nullable(None)",
+        ] {
+            assert!(
+                panel.contains(required),
+                "OAW-007: provider activity boundary lost `{required}`"
+            );
+        }
+
+        let surface = without_comments(&read_repository_file(
+            "crates/agent_ui/src/omega_dogfood_surface.rs",
+        ));
+        for required in [
+            "DogfoodProviderEventProjection",
+            "Provider event",
+            "Record provider event",
+        ] {
+            assert!(
+                surface.contains(required),
+                "OAW-007: provider activity surface lost `{required}`"
+            );
+        }
+    }
 }

@@ -24,12 +24,23 @@ The separate Issue inspector now reads the durable canonical command snapshot
 through `work.snapshot.read`. It uses the returned Work revision for generated
 assign and unassign requests. Live buttons require the displayed enrolled
 Effective Principal and a verified Organization reference. The account registry
-does not currently own Organization membership, so Omega leaves those buttons
-disabled with an explicit explanation. It does not substitute the bootstrap
-organization principal or turn a fixture selection into authority.
+does not own Organization membership. The production poll reads the separate
+Effect-owned membership ledger for the exact account generation and principal;
+the empty-by-default authority leaves these buttons disabled until an explicit
+verified row exists. Omega does not substitute the bootstrap organization
+principal or turn a fixture selection into authority.
+
+For a linked real ACP session, the Issue inspector can project the latest
+admissible agent/tool event into canonical Agent Activity. The event reference
+is bound to the exact session digest, stable entry identity, and projection
+revision. Reasoning, user, and system entries never become Work activity. Only
+generic kind/status facts cross the boundary, with an explicit loss ref for the
+provider-native payload that Work does not copy. This projection grants no
+Effect, Receipt, verification, completion, or Owner Disposition authority.
 
 This packet is deterministic UI/model coverage. It cannot close omega#214.
 The shared command/admission processor now exists, but the real close journey
-still requires verified Organization membership, live bounded delegation and
-revocation, independently inspectable Session, Agent Session, Activity, and
-Run, and a separate human Owner Disposition in an installed Omega candidate.
+still requires an explicitly provisioned Organization membership, live bounded
+delegation and revocation, independently inspectable Session, Agent Session,
+Activity, and Run, real Effect evidence, and a separate human Owner Disposition
+in an installed Omega candidate.

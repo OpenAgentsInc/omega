@@ -4,8 +4,9 @@ use gpui::{
 };
 use omega_effectd::all_work_contract::{
     AgentRef, AgentSessionRef, HostRef, OrganizationRef, PrincipalRef, RepositoryClaimLedger,
-    RepositoryWorkClaim, RepositoryWorkClaimState, SignedWorkroomDeliveryOutcome,
-    SignedWorkroomLedger, SignedWorkroomOutboxState, ThreadRef, WorkSnapshot, WorkroomAudience,
+    RepositoryWorkClaim, RepositoryWorkClaimState, ShortText, SignedWorkroomDeliveryOutcome,
+    SignedWorkroomLedger, SignedWorkroomOutboxState, SourceRef, ThreadRef, WorkCommandActivityKind,
+    WorkSnapshot, WorkroomAudience,
 };
 #[cfg(all(test, feature = "test-support"))]
 use omega_work_index::DogfoodFixtureAdapter;
@@ -112,6 +113,17 @@ pub struct DogfoodDelegationCandidate {
     pub thread_ref: ThreadRef,
     pub thread_key: String,
     pub agent_session_ref: Option<AgentSessionRef>,
+    pub provider_event: Option<DogfoodProviderEventProjection>,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct DogfoodProviderEventProjection {
+    pub provider_event_ref: SourceRef,
+    pub event_id: u64,
+    pub event_revision: u64,
+    pub kind: WorkCommandActivityKind,
+    pub summary: ShortText,
+    pub loss_refs: Vec<SourceRef>,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -1526,6 +1538,8 @@ impl DogfoodSurface {
                         .is_some_and(|delegate| delegate.agent_ref == candidate.agent_ref)
                 })
         });
+        let provider_event =
+            execution_candidate.and_then(|candidate| candidate.provider_event.as_ref());
         let command_revision = command_snapshot
             .map(|snapshot| snapshot.summary.revision.0)
             .or(issue.work_revision);
@@ -1689,6 +1703,13 @@ impl DogfoodSurface {
                         cx,
                     ))
                     .child(inspector_row(
+                        "Provider event",
+                        provider_event.map_or("Not observed".into(), |event| {
+                            event.provider_event_ref.0.clone()
+                        }),
+                        cx,
+                    ))
+                    .child(inspector_row(
                         "Authority",
                         if self.fixture.origin == DogfoodPlanningOrigin::Fixture {
                             "Simulation · read only".into()
@@ -1826,7 +1847,11 @@ impl DogfoodSurface {
                                     controls.child(
                                         claim_button(
                                             "work-command-record-handoff",
-                                            "Record handoff",
+                                            if provider_event.is_some() {
+                                                "Record provider event"
+                                            } else {
+                                                "Record handoff"
+                                            },
                                             self.work_command_busy || !command_mutation_ready,
                                         )
                                         .on_click(cx.listener(|this, _, _, cx| {
