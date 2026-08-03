@@ -17,6 +17,10 @@ use std::time::Duration;
 use anyhow::{Context as _, Result, anyhow, bail};
 use futures::io::{AsyncBufReadExt as _, BufReader};
 use futures::{AsyncWriteExt as _, StreamExt as _};
+use omega_forensics::{
+    ForensicDispositionCommand, ForensicPriorWorkQuery, ForensicPriorWorkQueryResult,
+    ForensicPriorWorkRecord, ForensicPriorWorkSubmission, ForensicRelationCommand,
+};
 use serde::Deserialize;
 use serde_json::{Value, json};
 use smol::process::ChildStdin;
@@ -628,6 +632,88 @@ impl OmegaEffectdSupervisor {
         Ok(result)
     }
 
+    pub async fn query_forensic_prior_work(
+        &mut self,
+        params: ForensicPriorWorkQuery,
+    ) -> Result<ForensicPriorWorkQueryResult, SupervisorError> {
+        params
+            .validate()
+            .map_err(|error| SupervisorError::Anyhow(error.into()))?;
+        let result = self
+            .request(
+                "forensics.prior_work.query",
+                Some(serde_json::to_value(params).context("encode forensic prior-work query")?),
+                self.generation(),
+            )
+            .await?;
+        let result: ForensicPriorWorkQueryResult =
+            serde_json::from_value(result).context("decode forensic prior-work query result")?;
+        result
+            .validate()
+            .map_err(|error| SupervisorError::Anyhow(error.into()))?;
+        Ok(result)
+    }
+
+    pub async fn submit_forensic_prior_work(
+        &mut self,
+        params: ForensicPriorWorkSubmission,
+    ) -> Result<ForensicPriorWorkRecord, SupervisorError> {
+        let result = self
+            .request(
+                "forensics.prior_work.submit",
+                Some(
+                    serde_json::to_value(params)
+                        .context("encode forensic prior-work submission")?,
+                ),
+                self.generation(),
+            )
+            .await?;
+        let result: ForensicPriorWorkRecord =
+            serde_json::from_value(result).context("decode forensic prior-work record")?;
+        result
+            .validate()
+            .map_err(|error| SupervisorError::Anyhow(error.into()))?;
+        Ok(result)
+    }
+
+    pub async fn relate_forensic_prior_work(
+        &mut self,
+        params: ForensicRelationCommand,
+    ) -> Result<ForensicPriorWorkRecord, SupervisorError> {
+        let result = self
+            .request(
+                "forensics.prior_work.relate",
+                Some(serde_json::to_value(params).context("encode forensic prior-work relation")?),
+                self.generation(),
+            )
+            .await?;
+        let result: ForensicPriorWorkRecord =
+            serde_json::from_value(result).context("decode related forensic prior-work record")?;
+        result
+            .validate()
+            .map_err(|error| SupervisorError::Anyhow(error.into()))?;
+        Ok(result)
+    }
+
+    pub async fn dispose_forensic_prior_work(
+        &mut self,
+        params: ForensicDispositionCommand,
+    ) -> Result<ForensicPriorWorkRecord, SupervisorError> {
+        let result = self
+            .request(
+                "forensics.prior_work.dispose",
+                Some(serde_json::to_value(params).context("encode forensic disposition")?),
+                self.generation(),
+            )
+            .await?;
+        let result: ForensicPriorWorkRecord =
+            serde_json::from_value(result).context("decode disposed forensic prior-work record")?;
+        result
+            .validate()
+            .map_err(|error| SupervisorError::Anyhow(error.into()))?;
+        Ok(result)
+    }
+
     pub async fn list_runs(&mut self) -> Result<Vec<RunSnapshot>, SupervisorError> {
         let result = self.request("list_runs", None, self.generation()).await?;
         let runs = result
@@ -1181,6 +1267,10 @@ impl OmegaEffectdSupervisor {
                             | "organization.membership.read"
                             | "strict_bug.candidate.read"
                             | "strict_bug.candidate.execute"
+                            | "forensics.prior_work.query"
+                            | "forensics.prior_work.submit"
+                            | "forensics.prior_work.relate"
+                            | "forensics.prior_work.dispose"
                     ) {
                         MAX_ALL_WORK_GRAPH_RESPONSE_BYTES
                     } else {

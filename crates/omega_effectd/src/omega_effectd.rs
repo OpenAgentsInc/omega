@@ -1268,6 +1268,57 @@ mod tests {
                 .await
                 .expect("typed Organization membership read from OpenAgents process");
             assert!(memberships.ledger.memberships.is_empty());
+            let submitted = supervisor
+                .submit_forensic_prior_work(omega_forensics::ForensicPriorWorkSubmission {
+                    work_ref: "work:forensic:omega:interop".into(),
+                    repository_ref: "repository:openagentsinc:omega".into(),
+                    revision: "414b285466000000000000000000000000000000".into(),
+                    path: "crates/omega_forensics/src/prior_work.rs".into(),
+                    symbol: Some("continue_ranked_forensic_discovery".into()),
+                    start_line: 1,
+                    end_line: 20,
+                    source_window_digest: format!("sha256:{}", "a".repeat(64)),
+                    mechanism_class: "mechanism:discovery:duplicate-stop".into(),
+                    causal_mechanism: "A known first candidate stops lower-ranked discovery".into(),
+                    affected_behavior: "A new lower-ranked defect remains undiscovered".into(),
+                    security_boundary: "forensic discovery loop to canonical Work".into(),
+                    causal_chain_summary: "rank -> duplicate -> premature stop".into(),
+                    prompt_refs: vec!["prompt:omega:forensics:v1".into()],
+                    source_refs: vec!["source:omega:prior-work".into()],
+                    evidence_refs: vec!["evidence:omega:interop".into()],
+                    audience: omega_forensics::ForensicWorkAudience {
+                        visibility: omega_forensics::ForensicAudienceVisibility::Organization,
+                        organization_ref: Some("organization:openagents".into()),
+                        principal_ref: None,
+                    },
+                    disposition: omega_forensics::ForensicWorkDisposition::Confirmed,
+                    actor_ref: "principal:omega:local-owner".into(),
+                    submitted_at: "2026-08-03T21:00:00Z".into(),
+                    idempotency_ref: "idempotency:omega:interop:submit".into(),
+                })
+                .await
+                .expect("typed forensic prior-work submission");
+            let prior_work = supervisor
+                .query_forensic_prior_work(omega_forensics::ForensicPriorWorkQuery {
+                    query_ref: "query:omega:interop".into(),
+                    principal_ref: "principal:omega:local-owner".into(),
+                    organization_refs: vec!["organization:openagents".into()],
+                    include_public: true,
+                    mode: omega_forensics::ForensicPriorWorkQueryMode::Exact,
+                    exact_ref: Some(submitted.primary_work_ref.clone()),
+                    text: None,
+                    disposition_filter: omega_forensics::ForensicWorkDisposition::ALL.into(),
+                    cursor: None,
+                    limit: 10,
+                })
+                .await
+                .expect("typed forensic prior-work query from OpenAgents process");
+            assert_eq!(prior_work.matches.len(), 1);
+            assert_eq!(
+                prior_work.matches[0].record.record_ref,
+                submitted.record_ref
+            );
+            assert!(prior_work.receipt.authorized_population_complete);
             assert_eq!(
                 planning
                     .graph

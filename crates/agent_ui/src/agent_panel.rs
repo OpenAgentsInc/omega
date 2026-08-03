@@ -15670,6 +15670,38 @@ impl AgentPanel {
             }
             return;
         }
+        if let crate::forensics_workbench::ForensicsWorkbenchCommand::RefreshPriorWork { query } =
+            command
+        {
+            let supervisor = omega_effectd::shared_supervisor(cx).ok();
+            let surface = surface.downgrade();
+            cx.spawn(async move |_, cx| {
+                let result = async {
+                    let supervisor =
+                        supervisor.ok_or_else(|| "omega-effectd is unavailable".to_string())?;
+                    let mut guard = supervisor.lock().await;
+                    guard
+                        .ensure_started()
+                        .await
+                        .map_err(|error| error.to_string())?;
+                    guard
+                        .query_forensic_prior_work(query)
+                        .await
+                        .map_err(|error| error.to_string())
+                }
+                .await;
+                surface.update(cx, |surface, cx| match result {
+                    Ok(result) => surface.install_prior_work(result, cx),
+                    Err(error) => {
+                        surface.set_prior_work_error(error, cx);
+                        Ok(())
+                    }
+                })??;
+                anyhow::Ok(())
+            })
+            .detach_and_log_err(cx);
+            return;
+        }
         let session = omega_effectd::openagents_session_if_initialized(cx);
         let http_client = cx.http_client();
         let surface = surface.downgrade();
@@ -15953,6 +15985,7 @@ impl AgentPanel {
                     }
                 }
                 crate::forensics_workbench::ForensicsWorkbenchCommand::OpenSource { .. } => {}
+                crate::forensics_workbench::ForensicsWorkbenchCommand::RefreshPriorWork { .. } => {}
                 crate::forensics_workbench::ForensicsWorkbenchCommand::StartEntropy { .. }
                 | crate::forensics_workbench::ForensicsWorkbenchCommand::StartCatalogEntropy {
                     ..
@@ -19637,6 +19670,9 @@ impl AgentPanel {
                             .then_some(snapshot.coldcard_evidence.as_ref())
                             .flatten()
                     }),
+                    prior_work: forensics
+                        .as_ref()
+                        .and_then(|snapshot| snapshot.prior_work.as_ref()),
                     source_loaded: forensics.is_some(),
                 });
                 match projection {

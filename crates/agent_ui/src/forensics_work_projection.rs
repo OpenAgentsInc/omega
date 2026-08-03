@@ -9,9 +9,9 @@ use omega_effectd::all_work_contract::{
 };
 use omega_forensics::{
     ColdcardEvidenceWorkspaceProjection, EntropyCampaignProjection, EntropyRunProjection,
-    ForensicExactness, ForensicLifecycleState, ForensicPromptArtifact,
-    ForensicPublicationGateProjection, ForensicPublicationGateState, ForensicsLaunchIntent,
-    ForensicsMatrixProjection, ForensicsReviewProjection, ForensicsRunPhase,
+    ForensicExactness, ForensicLifecycleState, ForensicPriorWorkQueryResult,
+    ForensicPromptArtifact, ForensicPublicationGateProjection, ForensicPublicationGateState,
+    ForensicsLaunchIntent, ForensicsMatrixProjection, ForensicsReviewProjection, ForensicsRunPhase,
     ForensicsRunProjection, PreflightReadiness,
 };
 use omega_work_detail::{
@@ -32,6 +32,7 @@ pub struct ForensicsWorkProjection<'a> {
     pub launch_intent: Option<&'a ForensicsLaunchIntent>,
     pub prompt: Option<&'a ForensicPromptArtifact>,
     pub coldcard_fixture: Option<&'a ColdcardEvidenceWorkspaceProjection>,
+    pub prior_work: Option<&'a ForensicPriorWorkQueryResult>,
     pub source_loaded: bool,
 }
 
@@ -159,6 +160,9 @@ pub fn project_forensics_work(
     if let Some(coldcard) = source.coldcard_fixture {
         push_coldcard_fixture(coldcard, &mut case_facts, &mut evidence_facts, &mut links);
     }
+    if let Some(prior_work) = source.prior_work {
+        push_prior_work(prior_work, &mut case_facts, &mut evidence_facts, &mut links)?;
+    }
     push_publication(source.publication, &mut publication_facts, &mut links);
 
     if lifecycle_facts.is_empty() {
@@ -200,6 +204,74 @@ pub fn project_forensics_work(
         block(&source, WorkBlockKind::Publication, publication_facts)?,
     ];
     Ok(ProjectedForensicsWork { links, blocks })
+}
+
+fn push_prior_work(
+    result: &ForensicPriorWorkQueryResult,
+    case_facts: &mut Vec<WorkBlockFact>,
+    evidence_facts: &mut Vec<WorkBlockFact>,
+    links: &mut SnapshotLinks,
+) -> Result<(), omega_effectd::all_work_contract::ContractValidationError> {
+    push_receipt_ref(links, &result.receipt.receipt_ref);
+    case_facts.push(fact(
+        format!("fact:security-work:prior-work:{}", result.receipt.query_ref),
+        WorkBlockFactKind::Source,
+        if result.receipt.authorized_population_complete {
+            WorkBlockFactState::Observed
+        } else {
+            WorkBlockFactState::Missing
+        },
+        "Prior forensic Work",
+        format!(
+            "{} authorized records searched · {} returned · completeness {} · {} loss refs",
+            result.receipt.searched_authorized_count,
+            result.receipt.returned_count,
+            if result.receipt.authorized_population_complete {
+                "complete"
+            } else {
+                "partial"
+            },
+            result.receipt.loss_refs.len()
+        ),
+        [&result.receipt.receipt_ref],
+    ));
+    for matched in &result.matches {
+        links.relations.push(WorkRelation {
+            kind: WorkRelationKind::Related,
+            target_work_ref: WorkRef::try_from(matched.record.primary_work_ref.clone())?,
+        });
+        for evidence_ref in &matched.record.evidence_refs {
+            push_evidence_ref(links, evidence_ref);
+        }
+        let latest_disposition = matched
+            .record
+            .dispositions
+            .last()
+            .map_or("retained".to_string(), |event| {
+                format!("{:?}", event.disposition).to_ascii_lowercase()
+            });
+        evidence_facts.push(fact_vec(
+            format!(
+                "fact:security-work:prior-root:{}",
+                matched.record.record_ref
+            ),
+            WorkBlockFactKind::Evidence,
+            WorkBlockFactState::Observed,
+            "Prior root cause",
+            format!(
+                "{} · {} occurrences · disposition {} · match {} bp",
+                matched.record.root_cause.causal_mechanism,
+                matched.record.occurrences.len(),
+                latest_disposition,
+                matched.score_basis_points
+            ),
+            std::iter::once(result.receipt.receipt_ref.clone())
+                .chain(matched.record.source_refs.iter().cloned())
+                .chain(matched.record.evidence_refs.iter().cloned())
+                .collect(),
+        ));
+    }
+    Ok(())
 }
 
 fn project_relations(
@@ -1122,6 +1194,7 @@ mod tests {
         ForensicPublicationGateState, ForensicsRunProjection, PUBLICATION_GATE_SCHEMA_V1,
     };
     use omega_work_index::{NativeForensicsPhase, NativeForensicsRecord, adapt_forensics};
+    use serde_json::json;
 
     use super::*;
 
@@ -1156,6 +1229,7 @@ mod tests {
             launch_intent: None,
             prompt: None,
             coldcard_fixture: None,
+            prior_work: None,
             source_loaded: false,
         })
         .expect("project case");
@@ -1183,6 +1257,7 @@ mod tests {
             launch_intent: None,
             prompt: None,
             coldcard_fixture: None,
+            prior_work: None,
             source_loaded: false,
         })
         .expect("project run");
@@ -1244,6 +1319,7 @@ mod tests {
             launch_intent: None,
             prompt: None,
             coldcard_fixture: None,
+            prior_work: None,
             source_loaded: true,
         })
         .expect("project source data");
@@ -1278,6 +1354,112 @@ mod tests {
                     fact.fact_ref == "fact:security-work:run-phase:run:security:7"
                         && fact.state == WorkBlockFactState::Completed
                 })
+        }));
+    }
+
+    #[test]
+    fn prior_work_query_projects_completeness_root_cause_and_stable_relation() {
+        let rows = case_and_run();
+        let related = vec![];
+        let prior_work: ForensicPriorWorkQueryResult = serde_json::from_value(json!({
+            "matches": [{
+                "record": {
+                    "recordRef": "forensic-record:entropy-fallback",
+                    "rootCause": {
+                        "schema": "openagents.forensic_root_cause_identity.v1",
+                        "algorithmVersion": "forensic-root-cause-semantic-v1",
+                        "rootCauseRef": "root-cause:entropy-fallback",
+                        "mechanismClass": "mechanism:entropy:unseeded-fallback",
+                        "causalMechanism": "an unseeded fallback reaches key generation",
+                        "affectedBehavior": "keys can use insufficient entropy",
+                        "securityBoundary": "entropy provider to key generator",
+                        "normalizedMechanismDigest": format!("sha256:{}", "c".repeat(64))
+                    },
+                    "primaryWorkRef": "work:forensic:coldcard:known",
+                    "workRefs": ["work:forensic:coldcard:known"],
+                    "occurrences": [{
+                        "schema": "openagents.forensic_occurrence_identity.v1",
+                        "algorithmVersion": "forensic-occurrence-sha256-v1",
+                        "occurrenceRef": "occurrence:coldcard:hmac",
+                        "repositoryRef": "repository:coldcard:firmware",
+                        "revision": "bcc2c382a324690a2fcf972c0bac3b79bf923f7b",
+                        "path": "shared/hmac.c",
+                        "symbol": "rng_get_bytes",
+                        "startLine": 10,
+                        "endLine": 24,
+                        "sourceWindowDigest": format!("sha256:{}", "a".repeat(64))
+                    }],
+                    "audience": {"visibility": "organization", "organizationRef": "organization:openagents", "principalRef": null},
+                    "causalChainSummary": "provider -> fallback -> key",
+                    "promptRefs": ["prompt:entropy:v1"],
+                    "sourceRefs": ["source:coldcard:hmac"],
+                    "evidenceRefs": ["evidence:coldcard:trace"],
+                    "dispositions": [{
+                        "eventRef": "event:forensic:confirmed",
+                        "workRef": "work:forensic:coldcard:known",
+                        "disposition": "confirmed",
+                        "reason": "fixture",
+                        "actorRef": "principal:reviewer",
+                        "occurredAt": "2026-08-03T20:00:00Z",
+                        "idempotencyRef": "idempotency:forensic:confirmed"
+                    }],
+                    "relations": [],
+                    "firstIdentifiedAt": "2026-08-03T20:00:00Z",
+                    "updatedAt": "2026-08-03T20:00:00Z"
+                },
+                "matchedWorkRefs": ["work:forensic:coldcard:known"],
+                "matchedOccurrenceRefs": [],
+                "scoreBasisPoints": 10000
+            }],
+            "nextCursor": null,
+            "receipt": {
+                "schema": "openagents.forensic_prior_work_query_receipt.v1",
+                "receiptRef": "receipt:forensic-query:coldcard",
+                "queryRef": "query:forensic:coldcard",
+                "stateRevision": 4,
+                "queryDigest": format!("sha256:{}", "d".repeat(64)),
+                "resultDigest": format!("sha256:{}", "e".repeat(64)),
+                "authorizedPopulationComplete": true,
+                "lossRefs": [],
+                "searchedAuthorizedCount": 3,
+                "returnedCount": 1,
+                "observedAt": "2026-08-03T20:00:01Z"
+            }
+        }))
+        .expect("typed prior Work fixture");
+        prior_work.validate().expect("valid prior Work fixture");
+        let projected = project_forensics_work(ForensicsWorkProjection {
+            item: &rows[0],
+            related_run_refs: &related,
+            run: None,
+            review: None,
+            matrix: None,
+            entropy_run: None,
+            entropy_campaign: None,
+            publication: None,
+            readiness: None,
+            launch_intent: None,
+            prompt: None,
+            coldcard_fixture: None,
+            prior_work: Some(&prior_work),
+            source_loaded: true,
+        })
+        .expect("project prior Work");
+        assert!(
+            projected
+                .links
+                .receipt_refs
+                .iter()
+                .any(|receipt| { receipt.0 == "receipt:forensic-query:coldcard" })
+        );
+        assert!(projected.links.relations.iter().any(|relation| {
+            relation.kind == WorkRelationKind::Related
+                && relation.target_work_ref.0 == "work:forensic:coldcard:known"
+        }));
+        assert!(projected.blocks.iter().any(|block| {
+            block.facts.iter().any(|fact| {
+                fact.label == "Prior forensic Work" && fact.value.contains("completeness complete")
+            })
         }));
     }
 }

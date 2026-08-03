@@ -12,14 +12,15 @@ use omega_forensics::{
     EntropyRunProjection, EntropySourceInspection, EntropySourceInspectionState,
     ExplicitOperatorAction, FORENSIC_FINDING_SCHEMA_V1, FORENSIC_HYPOTHESIS_SCHEMA_V1,
     ForensicBudgetState, ForensicEvidenceTier, ForensicExactness, ForensicLifecycleState,
+    ForensicPriorWorkQuery, ForensicPriorWorkQueryMode, ForensicPriorWorkQueryResult,
     ForensicPromptIr, ForensicPromptWorkspace, ForensicPublicationGate,
     ForensicPublicationGateKind, ForensicPublicationGateProjection, ForensicPublicationGateState,
     ForensicReviewDecisionKind, ForensicReviewOutcome, ForensicSourceCitation, ForensicStatistic,
-    ForensicWorkerObservation, ForensicWorkerPlacement, ForensicsFailureProjection,
-    ForensicsLaunchIntent, ForensicsMatrixProjection, ForensicsPreflightProjection,
-    ForensicsReviewProjection, ForensicsRunPhase, ForensicsRunProjection,
-    PUBLICATION_GATE_SCHEMA_V1, PreflightReadiness, PromptChangeKind, PromptCompatibilityProfile,
-    RepositoryTargetProjection, SourceState,
+    ForensicWorkDisposition, ForensicWorkerObservation, ForensicWorkerPlacement,
+    ForensicsFailureProjection, ForensicsLaunchIntent, ForensicsMatrixProjection,
+    ForensicsPreflightProjection, ForensicsReviewProjection, ForensicsRunPhase,
+    ForensicsRunProjection, PUBLICATION_GATE_SCHEMA_V1, PreflightReadiness, PromptChangeKind,
+    PromptCompatibilityProfile, RepositoryTargetProjection, SourceState,
 };
 use omega_workbench_state::RepositoryBinding;
 use sha2::{Digest, Sha256};
@@ -723,6 +724,7 @@ pub struct ForensicsWorkbenchSnapshot {
     pub coldcard_evidence: Option<ColdcardEvidenceWorkspaceProjection>,
     pub coldcard_case_selection: ColdcardCaseSelection,
     pub coldcard_case_reader_state: ColdcardCaseReaderState,
+    pub prior_work: Option<ForensicPriorWorkQueryResult>,
     pub entropy_run: Option<EntropyRunProjection>,
     pub entropy_run_history: Vec<EntropyRunProjection>,
     pub entropy_source_inspection: Option<EntropySourceInspection>,
@@ -768,6 +770,9 @@ pub enum ForensicsWorkbenchCommand {
         prompt_digest: String,
     },
     Refresh,
+    RefreshPriorWork {
+        query: ForensicPriorWorkQuery,
+    },
     Cancel,
     Cleanup,
     OpenSource {
@@ -795,6 +800,7 @@ pub struct ForensicsWorkbenchSurface {
     coldcard_evidence: Option<ColdcardEvidenceWorkspaceProjection>,
     coldcard_case_selection: ColdcardCaseSelection,
     coldcard_case_reader_state: ColdcardCaseReaderState,
+    prior_work: Option<ForensicPriorWorkQueryResult>,
     entropy_run: Option<EntropyRunProjection>,
     entropy_run_history: Vec<EntropyRunProjection>,
     entropy_source_inspection: Option<EntropySourceInspection>,
@@ -869,6 +875,7 @@ impl ForensicsWorkbenchSurface {
             coldcard_evidence,
             coldcard_case_selection: ColdcardCaseSelection::Overview,
             coldcard_case_reader_state,
+            prior_work: None,
             entropy_run: None,
             entropy_run_history: Vec::new(),
             entropy_source_inspection: None,
@@ -1891,6 +1898,27 @@ impl ForensicsWorkbenchSurface {
         Ok(())
     }
 
+    pub fn install_prior_work(
+        &mut self,
+        result: ForensicPriorWorkQueryResult,
+        cx: &mut Context<Self>,
+    ) -> anyhow::Result<()> {
+        result.validate()?;
+        self.status = format!(
+            "Prior Work refreshed · {} authorized matches",
+            result.matches.len()
+        )
+        .into();
+        self.prior_work = Some(result);
+        cx.notify();
+        Ok(())
+    }
+
+    pub fn set_prior_work_error(&mut self, error: String, cx: &mut Context<Self>) {
+        self.status = format!("Prior Work search failed · {error}").into();
+        cx.notify();
+    }
+
     pub fn snapshot(&self) -> ForensicsWorkbenchSnapshot {
         ForensicsWorkbenchSnapshot {
             binding: self.binding.clone(),
@@ -1912,6 +1940,7 @@ impl ForensicsWorkbenchSurface {
             coldcard_evidence: self.coldcard_evidence.clone(),
             coldcard_case_selection: self.coldcard_case_selection,
             coldcard_case_reader_state: self.coldcard_case_reader_state.clone(),
+            prior_work: self.prior_work.clone(),
             entropy_run: self.entropy_run.clone(),
             entropy_run_history: self.entropy_run_history.clone(),
             entropy_source_inspection: self.entropy_source_inspection.clone(),
@@ -3751,6 +3780,118 @@ impl ForensicsWorkbenchSurface {
             )
             .into_any_element()
     }
+
+    fn render_prior_work_reader(&self, cx: &mut Context<Self>) -> AnyElement {
+        let query = ForensicPriorWorkQuery {
+            query_ref: "query:omega:forensics-workbench:prior-work".into(),
+            principal_ref: "principal:omega:local-owner".into(),
+            organization_refs: vec!["organization:openagents".into()],
+            include_public: true,
+            mode: ForensicPriorWorkQueryMode::Semantic,
+            exact_ref: None,
+            text: Some(format!(
+                "{} entropy security root cause",
+                self.repository.display_name
+            )),
+            disposition_filter: ForensicWorkDisposition::ALL.into(),
+            cursor: None,
+            limit: 25,
+        };
+        let result = self.prior_work.clone();
+        let result_is_none = result.is_none();
+        v_flex()
+            .id("omega.forensics.prior-work")
+            .debug_selector(|| "omega.forensics.prior-work".into())
+            .w_full()
+            .gap_3()
+            .p_4()
+            .rounded(px(10.))
+            .border_1()
+            .border_color(cx.theme().colors().border_variant)
+            .bg(cx.theme().colors().surface_background)
+            .role(gpui::Role::Region)
+            .aria_label("Prior forensic Work")
+            .child(
+                h_flex()
+                    .w_full()
+                    .justify_between()
+                    .gap_3()
+                    .child(
+                        v_flex()
+                            .gap_1()
+                            .child(Label::new("Prior forensic Work").size(LabelSize::Small))
+                            .child(
+                                Label::new(
+                                    "Exact occurrences and causal root causes across retained dispositions",
+                                )
+                                .size(LabelSize::XSmall)
+                                .color(Color::Muted),
+                            ),
+                    )
+                    .child(
+                        Button::new("omega.forensics.prior-work.refresh", "Search prior Work")
+                            .size(ButtonSize::Compact)
+                            .style(ButtonStyle::Subtle)
+                            .on_click(cx.listener(move |_, _, _, cx| {
+                                cx.emit(ForensicsWorkbenchCommand::RefreshPriorWork {
+                                    query: query.clone(),
+                                });
+                            })),
+                    ),
+            )
+            .when(result_is_none, |this| {
+                this.child(
+                    Label::new("No prior-work query receipt is loaded.")
+                        .size(LabelSize::XSmall)
+                        .color(Color::Muted),
+                )
+            })
+            .when_some(result, |this, result| {
+                this.child(Self::render_fact(
+                    "Completeness",
+                    if result.receipt.authorized_population_complete {
+                        "Complete"
+                    } else {
+                        "Partial"
+                    },
+                ))
+                .child(Self::render_fact(
+                    "Authorized population",
+                    format!(
+                        "{} searched · {} returned · {} losses",
+                        result.receipt.searched_authorized_count,
+                        result.receipt.returned_count,
+                        result.receipt.loss_refs.len()
+                    ),
+                ))
+                .child(Self::render_fact(
+                    "Receipt",
+                    result.receipt.receipt_ref.clone(),
+                ))
+                .children(result.matches.into_iter().map(|matched| {
+                    v_flex()
+                        .gap_1()
+                        .p_3()
+                        .rounded(px(8.))
+                        .bg(cx.theme().colors().element_background)
+                        .child(
+                            Label::new(matched.record.root_cause.causal_mechanism)
+                                .size(LabelSize::Small),
+                        )
+                        .child(
+                            Label::new(format!(
+                                "{} occurrences · {} Work refs · match {} bp",
+                                matched.record.occurrences.len(),
+                                matched.record.work_refs.len(),
+                                matched.score_basis_points
+                            ))
+                            .size(LabelSize::XSmall)
+                            .color(Color::Muted),
+                        )
+                }))
+            })
+            .into_any_element()
+    }
 }
 
 impl EventEmitter<ForensicsWorkbenchCommand> for ForensicsWorkbenchSurface {}
@@ -3902,6 +4043,7 @@ impl Render for ForensicsWorkbenchSurface {
         let navigation = self.render_bench_navigation(cx);
 
         if self.bench_view == ForensicsBenchView::Case {
+            let prior_work = self.render_prior_work_reader(cx);
             return v_flex()
                 .id("omega.forensics.workbench")
                 .track_focus(&self.focus_handle)
@@ -3914,6 +4056,7 @@ impl Render for ForensicsWorkbenchSurface {
                 .gap_4()
                 .child(header)
                 .child(navigation)
+                .child(prior_work)
                 .child(coldcard_case_reader)
                 .into_any_element();
         }
