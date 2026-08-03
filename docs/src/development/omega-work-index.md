@@ -85,9 +85,15 @@ Inspector states that claim state is separate from assignment, delegation,
 lease, verification, merge, and release authority. See
 [Omega repository work claims](./omega-repository-work-claims.md).
 
+List, Board, Table, Timeline, and Roadmap now share one organization-scoped
+planning reducer. They preserve the same Work references, source revision, and
+event cursor while applying one filter/group/sort query. The three additional
+scenes remain development-only with the dogfood route; they do not admit
+production portfolio navigation. See [Omega planning views](./omega-planning-views.md).
+
 Use Up/Down or J/K to change the selected Issue and Enter to open its Issue
-scene. Keys 1, 2, and 3 open Overview, List, and Board. Keys 4 and 5 open the
-empty Session and Review scenes. The same controls are available as standard
+scene. Keys 1 through 6 open Overview, List, Board, Table, Timeline, and
+Roadmap. Keys 7 and 8 open the empty Session and Review scenes. The same controls are available as standard
 focusable pointer buttons with accessible labels. Blocked rows use an icon and
 text; completed rows use a check icon and progress dots, so color is not the
 only cue.

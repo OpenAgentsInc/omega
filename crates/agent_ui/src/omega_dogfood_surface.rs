@@ -9,7 +9,8 @@ use omega_effectd::all_work_contract::{
 use omega_work_index::DogfoodFixtureAdapter;
 use omega_work_index::{
     DOGFOOD_PROJECT_ID, DogfoodPlanningOrigin, DogfoodPlanningViewModel, FixtureIssue,
-    FixtureIssueRelationKind, FixtureLifecycleType, FixturePriority, SECURITY_PROJECT_ID,
+    FixtureIssueRelationKind, FixtureLifecycleType, FixturePriority, PlanningFilter, PlanningGroup,
+    PlanningSort, PlanningViewKind, PlanningViewQuery, SECURITY_PROJECT_ID, project_planning_view,
 };
 use serde::{Deserialize, Serialize};
 use ui::{Button, ButtonSize, ButtonStyle, Color, Icon, IconName, Label, LabelSize, prelude::*};
@@ -22,16 +23,22 @@ pub enum DogfoodScene {
     Overview,
     List,
     Board,
+    Table,
+    Timeline,
+    Roadmap,
     Issue,
     Session,
     Review,
 }
 
 impl DogfoodScene {
-    const ALL: [Self; 6] = [
+    const ALL: [Self; 9] = [
         Self::Overview,
         Self::List,
         Self::Board,
+        Self::Table,
+        Self::Timeline,
+        Self::Roadmap,
         Self::Issue,
         Self::Session,
         Self::Review,
@@ -42,6 +49,9 @@ impl DogfoodScene {
             Self::Overview => "Overview",
             Self::List => "List",
             Self::Board => "Board",
+            Self::Table => "Table",
+            Self::Timeline => "Timeline",
+            Self::Roadmap => "Roadmap",
             Self::Issue => "Issue",
             Self::Session => "Session",
             Self::Review => "Review",
@@ -80,6 +90,9 @@ pub struct DogfoodSurface {
     repository_claim_ledger: Option<RepositoryClaimLedger>,
     repository_claim_error: Option<String>,
     repository_claim_busy: bool,
+    filter: PlanningFilter,
+    group: PlanningGroup,
+    sort: PlanningSort,
 }
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
@@ -88,6 +101,12 @@ struct PersistedDogfoodSurfaceState {
     project_id: String,
     selected_issue_id: String,
     scene: DogfoodScene,
+    #[serde(default)]
+    filter: PlanningFilter,
+    #[serde(default)]
+    group: PlanningGroup,
+    #[serde(default)]
+    sort: PlanningSort,
 }
 
 impl DogfoodSurface {
@@ -108,6 +127,9 @@ impl DogfoodSurface {
             repository_claim_ledger: None,
             repository_claim_error: None,
             repository_claim_busy: false,
+            filter: state.filter,
+            group: state.group,
+            sort: state.sort,
         }
     }
 
@@ -216,6 +238,59 @@ impl DogfoodSurface {
             .collect()
     }
 
+    fn planning_query(&self) -> PlanningViewQuery {
+        PlanningViewQuery {
+            organization_id: self.fixture.graph.organization.id.clone(),
+            project_id: self.project_id.clone(),
+            filter: self.filter,
+            group: self.group,
+            sort: self.sort,
+            search: String::new(),
+        }
+    }
+
+    fn visible_issues(&self, kind: PlanningViewKind) -> Vec<&FixtureIssue> {
+        let projection = project_planning_view(&self.fixture, kind, &self.planning_query());
+        projection
+            .rows
+            .iter()
+            .filter_map(|row| {
+                self.fixture
+                    .graph
+                    .issues
+                    .iter()
+                    .find(|issue| issue.id == row.issue_id)
+            })
+            .collect()
+    }
+
+    fn set_filter(&mut self, filter: PlanningFilter, cx: &mut Context<Self>) {
+        self.filter = filter;
+        self.save_state(cx);
+        cx.notify();
+    }
+
+    fn cycle_group(&mut self, cx: &mut Context<Self>) {
+        self.group = match self.group {
+            PlanningGroup::Lifecycle => PlanningGroup::Milestone,
+            PlanningGroup::Milestone => PlanningGroup::Project,
+            PlanningGroup::Project => PlanningGroup::Priority,
+            PlanningGroup::Priority => PlanningGroup::Lifecycle,
+        };
+        self.save_state(cx);
+        cx.notify();
+    }
+
+    fn cycle_sort(&mut self, cx: &mut Context<Self>) {
+        self.sort = match self.sort {
+            PlanningSort::SourceOrder => PlanningSort::Priority,
+            PlanningSort::Priority => PlanningSort::Title,
+            PlanningSort::Title => PlanningSort::SourceOrder,
+        };
+        self.save_state(cx);
+        cx.notify();
+    }
+
     fn selected_issue(&self) -> Option<&FixtureIssue> {
         self.fixture
             .graph
@@ -283,6 +358,9 @@ impl DogfoodSurface {
             project_id: self.project_id.clone(),
             selected_issue_id: self.selected_issue_id.clone(),
             scene: self.scene,
+            filter: self.filter,
+            group: self.group,
+            sort: self.sort,
         };
         let Ok(json) = serde_json::to_string(&state) else {
             return;
@@ -444,6 +522,55 @@ impl DogfoodSurface {
                     .size(ButtonSize::Compact)
                     .on_click(cx.listener(move |this, _, _, cx| this.set_scene(scene, cx)))
             })))
+            .child(
+                h_flex()
+                    .gap_1()
+                    .flex_wrap()
+                    .child(
+                        Label::new("Shared query")
+                            .size(LabelSize::XSmall)
+                            .color(Color::Muted),
+                    )
+                    .children([
+                        ("planning-filter-all", "All", PlanningFilter::All),
+                        ("planning-filter-open", "Open", PlanningFilter::Open),
+                        ("planning-filter-blocked", "Blocked", PlanningFilter::Blocked),
+                        (
+                            "planning-filter-completed",
+                            "Completed",
+                            PlanningFilter::Completed,
+                        ),
+                    ].map(|(id, label, filter)| {
+                        Button::new(id, label)
+                            .style(if self.filter == filter {
+                                ButtonStyle::Filled
+                            } else {
+                                ButtonStyle::Subtle
+                            })
+                            .size(ButtonSize::Compact)
+                            .on_click(cx.listener(move |this, _, _, cx| {
+                                this.set_filter(filter, cx)
+                            }))
+                    }))
+                    .child(
+                        Button::new(
+                            "planning-group",
+                            format!("Group · {}", planning_group_label(self.group)),
+                        )
+                        .style(ButtonStyle::Subtle)
+                        .size(ButtonSize::Compact)
+                        .on_click(cx.listener(|this, _, _, cx| this.cycle_group(cx))),
+                    )
+                    .child(
+                        Button::new(
+                            "planning-sort",
+                            format!("Sort · {}", planning_sort_label(self.sort)),
+                        )
+                        .style(ButtonStyle::Subtle)
+                        .size(ButtonSize::Compact)
+                        .on_click(cx.listener(|this, _, _, cx| this.cycle_sort(cx))),
+                    ),
+            )
     }
 
     fn render_overview(&self, cx: &mut Context<Self>) -> impl IntoElement {
@@ -580,56 +707,60 @@ impl DogfoodSurface {
             .rounded_lg()
             .border_1()
             .border_color(colors.border_variant)
-            .children(self.project_issues().into_iter().map(|issue| {
-                let issue_id = issue.id.clone();
-                let selected = issue.id == self.selected_issue_id;
-                let blockers = self.blocked_by(issue).len();
-                h_flex()
-                    .id(issue.id.clone())
-                    .min_h(px(42.))
-                    .px_3()
-                    .gap_3()
-                    .border_b_1()
-                    .border_color(colors.border_variant)
-                    .cursor_pointer()
-                    .role(gpui::Role::Button)
-                    .tab_index(0isize)
-                    .aria_label(format!("{} {}", issue.identifier, issue.title))
-                    .when(selected, |row| row.bg(colors.element_selected))
-                    .on_click(cx.listener(move |this, _, _, cx| {
-                        this.select_issue(issue_id.clone(), true, cx)
-                    }))
-                    .child(status_icon(issue.completed, blockers > 0))
-                    .child(
-                        Label::new(issue.identifier.clone())
-                            .size(LabelSize::XSmall)
-                            .color(Color::Muted),
-                    )
-                    .child(
-                        div()
-                            .min_w_0()
-                            .flex_1()
-                            .truncate()
-                            .child(issue.title.clone()),
-                    )
-                    .when(blockers > 0, |row| {
-                        row.child(
-                            Label::new(format!("Blocked · {blockers}"))
+            .children(
+                self.visible_issues(PlanningViewKind::List)
+                    .into_iter()
+                    .map(|issue| {
+                        let issue_id = issue.id.clone();
+                        let selected = issue.id == self.selected_issue_id;
+                        let blockers = self.blocked_by(issue).len();
+                        h_flex()
+                            .id(issue.id.clone())
+                            .min_h(px(42.))
+                            .px_3()
+                            .gap_3()
+                            .border_b_1()
+                            .border_color(colors.border_variant)
+                            .cursor_pointer()
+                            .role(gpui::Role::Button)
+                            .tab_index(0isize)
+                            .aria_label(format!("{} {}", issue.identifier, issue.title))
+                            .when(selected, |row| row.bg(colors.element_selected))
+                            .on_click(cx.listener(move |this, _, _, cx| {
+                                this.select_issue(issue_id.clone(), true, cx)
+                            }))
+                            .child(status_icon(issue.completed, blockers > 0))
+                            .child(
+                                Label::new(issue.identifier.clone())
+                                    .size(LabelSize::XSmall)
+                                    .color(Color::Muted),
+                            )
+                            .child(
+                                div()
+                                    .min_w_0()
+                                    .flex_1()
+                                    .truncate()
+                                    .child(issue.title.clone()),
+                            )
+                            .when(blockers > 0, |row| {
+                                row.child(
+                                    Label::new(format!("Blocked · {blockers}"))
+                                        .size(LabelSize::XSmall)
+                                        .color(Color::Warning),
+                                )
+                            })
+                            .child(
+                                Label::new(
+                                    issue
+                                        .workflow_state_id
+                                        .trim_start_matches("workflow:")
+                                        .to_string(),
+                                )
                                 .size(LabelSize::XSmall)
-                                .color(Color::Warning),
-                        )
-                    })
-                    .child(
-                        Label::new(
-                            issue
-                                .workflow_state_id
-                                .trim_start_matches("workflow:")
-                                .to_string(),
-                        )
-                        .size(LabelSize::XSmall)
-                        .color(Color::Muted),
-                    )
-            }))
+                                .color(Color::Muted),
+                            )
+                    }),
+            )
     }
 
     fn render_board(&self, cx: &mut Context<Self>) -> impl IntoElement {
@@ -643,14 +774,17 @@ impl DogfoodSurface {
             .items_start()
             .gap_3()
             .children(columns.map(|(label, lifecycle)| {
-                let cards = self.project_issues().into_iter().filter(|issue| {
-                    self.fixture
-                        .graph
-                        .workflow_states
-                        .iter()
-                        .find(|state| state.id == issue.workflow_state_id)
-                        .is_some_and(|state| state.lifecycle_type == lifecycle)
-                });
+                let cards = self
+                    .visible_issues(PlanningViewKind::Board)
+                    .into_iter()
+                    .filter(|issue| {
+                        self.fixture
+                            .graph
+                            .workflow_states
+                            .iter()
+                            .find(|state| state.id == issue.workflow_state_id)
+                            .is_some_and(|state| state.lifecycle_type == lifecycle)
+                    });
                 v_flex()
                     .min_w(px(210.))
                     .flex_1()
@@ -687,6 +821,211 @@ impl DogfoodSurface {
                                     ),
                             )
                             .child(Label::new(issue.title.clone()).size(LabelSize::Small))
+                    }))
+            }))
+    }
+
+    fn render_table(&self, cx: &mut Context<Self>) -> impl IntoElement {
+        let colors = cx.theme().colors();
+        let projection = project_planning_view(
+            &self.fixture,
+            PlanningViewKind::Table,
+            &self.planning_query(),
+        );
+        let rows = projection.rows;
+        v_flex()
+            .rounded_lg()
+            .border_1()
+            .border_color(colors.border_variant)
+            .child(
+                h_flex()
+                    .min_h(px(34.))
+                    .px_3()
+                    .gap_3()
+                    .bg(colors.surface_background)
+                    .child(div().w(px(84.)).child("Work"))
+                    .child(div().flex_1().child("Title"))
+                    .child(div().w(px(90.)).child("State"))
+                    .child(div().w(px(90.)).child("Priority"))
+                    .child(div().w(px(110.)).child("Repository")),
+            )
+            .children(rows.into_iter().map(|row| {
+                let issue_id = row.issue_id.clone();
+                h_flex()
+                    .id(format!("table-{}", row.issue_id))
+                    .min_h(px(38.))
+                    .px_3()
+                    .gap_3()
+                    .border_t_1()
+                    .border_color(colors.border_variant)
+                    .cursor_pointer()
+                    .role(gpui::Role::Button)
+                    .tab_index(0isize)
+                    .on_click(cx.listener(move |this, _, _, cx| {
+                        this.select_issue(issue_id.clone(), true, cx)
+                    }))
+                    .child(
+                        div()
+                            .w(px(84.))
+                            .text_size(px(11.))
+                            .text_color(colors.text_muted)
+                            .child(row.identifier),
+                    )
+                    .child(div().min_w_0().flex_1().truncate().child(row.title))
+                    .child(
+                        div()
+                            .w(px(90.))
+                            .text_size(px(11.))
+                            .child(lifecycle_label(row.lifecycle)),
+                    )
+                    .child(
+                        div()
+                            .w(px(90.))
+                            .text_size(px(11.))
+                            .child(priority_label(row.priority)),
+                    )
+                    .child(
+                        div()
+                            .w(px(110.))
+                            .truncate()
+                            .text_size(px(11.))
+                            .text_color(colors.text_muted)
+                            .child(row.repository_id),
+                    )
+            }))
+    }
+
+    fn render_timeline(&self, cx: &mut Context<Self>) -> impl IntoElement {
+        let colors = cx.theme().colors();
+        let projection = project_planning_view(
+            &self.fixture,
+            PlanningViewKind::Timeline,
+            &self.planning_query(),
+        );
+        let source_revision = projection.source_revision;
+        let event_cursor = projection.event_cursor;
+        let rows = projection.rows;
+        let groups = projection.groups;
+        v_flex()
+            .gap_3()
+            .child(
+                Label::new(format!(
+                    "Shared Work chronology · r{} · {}",
+                    source_revision, event_cursor
+                ))
+                .size(LabelSize::XSmall)
+                .color(Color::Muted),
+            )
+            .children(groups.into_iter().map(|(group, work_refs)| {
+                let group_rows = rows.iter().filter(|row| work_refs.contains(&row.work_ref));
+                v_flex()
+                    .gap_2()
+                    .child(section_heading(&group, cx))
+                    .children(group_rows.map(|row| {
+                        let issue_id = row.issue_id.clone();
+                        h_flex()
+                            .id(format!("timeline-{}", row.issue_id))
+                            .gap_3()
+                            .cursor_pointer()
+                            .role(gpui::Role::Button)
+                            .tab_index(0isize)
+                            .on_click(cx.listener(move |this, _, _, cx| {
+                                this.select_issue(issue_id.clone(), true, cx)
+                            }))
+                            .child(
+                                div()
+                                    .w(px(150.))
+                                    .truncate()
+                                    .text_size(px(12.))
+                                    .child(format!("{} · {}", row.identifier, row.title)),
+                            )
+                            .child(
+                                div()
+                                    .h(px(8.))
+                                    .flex_1()
+                                    .rounded_full()
+                                    .bg(if row.completed {
+                                        Color::Success.color(cx)
+                                    } else if row.blocked_by_count > 0 {
+                                        Color::Warning.color(cx)
+                                    } else {
+                                        colors.element_active
+                                    }),
+                            )
+                            .child(
+                                Label::new(if row.blocked_by_count > 0 {
+                                    format!("Blocked · {} blocker(s)", row.blocked_by_count)
+                                } else {
+                                    lifecycle_label(row.lifecycle).into()
+                                })
+                                .size(LabelSize::XSmall)
+                                .color(
+                                    if row.blocked_by_count > 0 {
+                                        Color::Warning
+                                    } else {
+                                        Color::Muted
+                                    },
+                                ),
+                            )
+                    }))
+            }))
+    }
+
+    fn render_roadmap(&self, cx: &mut Context<Self>) -> impl IntoElement {
+        let colors = cx.theme().colors();
+        let projection = project_planning_view(
+            &self.fixture,
+            PlanningViewKind::Roadmap,
+            &self.planning_query(),
+        );
+        let rows = projection.rows;
+        let groups = projection.groups;
+        h_flex()
+            .items_start()
+            .gap_3()
+            .flex_wrap()
+            .children(groups.into_iter().map(|(group, work_refs)| {
+                let group_rows = rows
+                    .iter()
+                    .filter(|row| work_refs.contains(&row.work_ref))
+                    .collect::<Vec<_>>();
+                let completed = group_rows.iter().filter(|row| row.completed).count();
+                v_flex()
+                    .min_w(px(220.))
+                    .flex_1()
+                    .gap_2()
+                    .p_3()
+                    .rounded_lg()
+                    .border_1()
+                    .border_color(colors.border_variant)
+                    .child(section_heading(&group, cx))
+                    .child(
+                        Label::new(format!("{completed}/{} complete", group_rows.len()))
+                            .size(LabelSize::XSmall)
+                            .color(Color::Muted),
+                    )
+                    .child(progress_dots(completed, group_rows.len(), cx))
+                    .children(group_rows.into_iter().take(6).map(|row| {
+                        let issue_id = row.issue_id.clone();
+                        div()
+                            .id(format!("roadmap-{}", row.issue_id))
+                            .cursor_pointer()
+                            .role(gpui::Role::Button)
+                            .tab_index(0isize)
+                            .text_size(px(11.))
+                            .text_color(if row.blocked_by_count > 0 {
+                                Color::Warning.color(cx)
+                            } else {
+                                Color::Muted.color(cx)
+                            })
+                            .on_click(cx.listener(move |this, _, _, cx| {
+                                this.select_issue(issue_id.clone(), true, cx)
+                            }))
+                            .child(if row.blocked_by_count > 0 {
+                                format!("Blocked · {} · {}", row.identifier, row.title)
+                            } else {
+                                format!("{} · {}", row.identifier, row.title)
+                            })
                     }))
             }))
     }
@@ -1060,8 +1399,11 @@ impl Render for DogfoodSurface {
                     "1" => this.set_scene(DogfoodScene::Overview, cx),
                     "2" => this.set_scene(DogfoodScene::List, cx),
                     "3" => this.set_scene(DogfoodScene::Board, cx),
-                    "4" => this.set_scene(DogfoodScene::Session, cx),
-                    "5" => this.set_scene(DogfoodScene::Review, cx),
+                    "4" => this.set_scene(DogfoodScene::Table, cx),
+                    "5" => this.set_scene(DogfoodScene::Timeline, cx),
+                    "6" => this.set_scene(DogfoodScene::Roadmap, cx),
+                    "7" => this.set_scene(DogfoodScene::Session, cx),
+                    "8" => this.set_scene(DogfoodScene::Review, cx),
                     _ => return,
                 }
                 cx.stop_propagation();
@@ -1071,6 +1413,9 @@ impl Render for DogfoodSurface {
                 DogfoodScene::Overview => self.render_overview(cx).into_any_element(),
                 DogfoodScene::List => self.render_list(cx).into_any_element(),
                 DogfoodScene::Board => self.render_board(cx).into_any_element(),
+                DogfoodScene::Table => self.render_table(cx).into_any_element(),
+                DogfoodScene::Timeline => self.render_timeline(cx).into_any_element(),
+                DogfoodScene::Roadmap => self.render_roadmap(cx).into_any_element(),
                 DogfoodScene::Issue => self.render_issue(cx).into_any_element(),
                 DogfoodScene::Session => self.render_empty_execution(false, cx).into_any_element(),
                 DogfoodScene::Review => self.render_empty_execution(true, cx).into_any_element(),
@@ -1091,6 +1436,9 @@ fn default_fixture_state() -> PersistedDogfoodSurfaceState {
         project_id: DOGFOOD_PROJECT_ID.into(),
         selected_issue_id: "issue:omega:214".into(),
         scene: DogfoodScene::Overview,
+        filter: PlanningFilter::All,
+        group: PlanningGroup::Lifecycle,
+        sort: PlanningSort::SourceOrder,
     }
 }
 
@@ -1210,6 +1558,34 @@ fn priority_label(priority: FixturePriority) -> &'static str {
     }
 }
 
+fn lifecycle_label(lifecycle: FixtureLifecycleType) -> &'static str {
+    match lifecycle {
+        FixtureLifecycleType::Backlog => "Backlog",
+        FixtureLifecycleType::Unstarted => "Ready",
+        FixtureLifecycleType::Started => "Active",
+        FixtureLifecycleType::Completed => "Done",
+        FixtureLifecycleType::Canceled => "Canceled",
+        FixtureLifecycleType::Planned => "Planned",
+    }
+}
+
+fn planning_group_label(group: PlanningGroup) -> &'static str {
+    match group {
+        PlanningGroup::Lifecycle => "Lifecycle",
+        PlanningGroup::Milestone => "Milestone",
+        PlanningGroup::Project => "Project",
+        PlanningGroup::Priority => "Priority",
+    }
+}
+
+fn planning_sort_label(sort: PlanningSort) -> &'static str {
+    match sort {
+        PlanningSort::SourceOrder => "Planning",
+        PlanningSort::Priority => "Priority",
+        PlanningSort::Title => "Title",
+    }
+}
+
 #[cfg(all(test, feature = "test-support"))]
 mod tests {
     use super::*;
@@ -1232,6 +1608,9 @@ mod tests {
                 project_id: DOGFOOD_PROJECT_ID.into(),
                 selected_issue_id: "issue:omega:214".into(),
                 scene,
+                filter: PlanningFilter::Open,
+                group: PlanningGroup::Milestone,
+                sort: PlanningSort::Priority,
             };
             assert!(fixture_state_is_valid(&fixture, &state));
         }
@@ -1239,6 +1618,9 @@ mod tests {
             project_id: SECURITY_PROJECT_ID.into(),
             selected_issue_id: "issue:omega:214".into(),
             scene: DogfoodScene::Issue,
+            filter: PlanningFilter::All,
+            group: PlanningGroup::Lifecycle,
+            sort: PlanningSort::SourceOrder,
         };
         assert!(!fixture_state_is_valid(&fixture, &invalid));
     }

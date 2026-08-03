@@ -7,9 +7,11 @@
 
 mod dogfood_fixture;
 mod planning_refresh;
+mod planning_views;
 
 pub use dogfood_fixture::*;
 pub use planning_refresh::*;
+pub use planning_views::*;
 
 use std::{
     collections::{BTreeMap, BTreeSet},
