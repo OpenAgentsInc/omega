@@ -28264,6 +28264,9 @@ mod tests {
             "CompletenessState::Complete",
             "FreshnessState::Fresh",
             "EffectivePrincipalState",
+            "EffectivePrincipalState::ALL",
+            "const fn cue(",
+            "AccountLifecycleState::RepairRequired",
             "Identity conflict",
             "Local scope",
             "Signer offline",
@@ -28291,6 +28294,7 @@ mod tests {
             "principal_accessibility_label",
             "principal.signer_label",
             "principal.scope_label",
+            "principal.state.cue()",
         ] {
             assert!(
                 panel.contains(required),

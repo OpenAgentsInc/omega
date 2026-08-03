@@ -20,9 +20,16 @@ private value in the compact label.
 
 Lifecycle and signer availability remain separate. The visible status can be
 Local, Enrolled, Offline, Signer unavailable, Revoked, or Unverified. Its icon,
-color, text, and accessibility label carry the same state. Conflicting active
-rows, a switching lifecycle, and registry read failures fail closed as
-Unverified and do not display either candidate identity.
+color, text, and accessibility label carry the same state, and each of the six
+states has its own icon shape, so color is never the only visual cue.
+Conflicting active rows, a conflicted, repair-required, or switching lifecycle,
+and registry read failures fail closed as Unverified and do not display either
+candidate identity, its principal reference, or its signer facts.
+
+A degraded principal is never an Organization principal. Offline, locked,
+signed-out, revoked, candidate, and unsettled accounts cannot activate an
+Organization scope even when a structurally exact verified membership row is
+present for them.
 
 ## Organization boundary
 
@@ -69,8 +76,18 @@ evidence that switching has occurred.
 ## Evidence boundary
 
 Unit and deterministic UI coverage can prove projection, generated transport,
-and transaction semantics. omega#218 stays open until an explicit real
-membership is provisioned, all real scope consumers execute the clear
-transaction, an installed enrolled identity and Organization render correctly,
-local/offline/degraded states pass, and a multi-Organization switch demonstrates
-complete isolation across windows and restart.
+and transaction semantics. The executed coverage in `agent_ui` now includes
+every lifecycle and signer degradation, the unsettled-account refusal, the
+distinct per-state cue shape, the empty/incomplete/stale/duplicate/cross-account
+and cross-generation membership reads, and a leakage check that no secret-shaped
+Organization name, `npub`, `nsec`, `ncryptsec`, or public key hex reaches the
+visible or accessible identity. `organization_scope` covers the fenced switch
+transaction, the per-consumer clear receipts, and the stale, duplicate, and
+revoked refusals.
+
+Three acceptance criteria remain unproven and are not claimed. No real
+Organization membership has been provisioned, so no enrolled Organization has
+rendered in installed Omega. No production consumer yet emits a
+`OrganizationScopeClearReceipt`, so the switch transaction is exercised only by
+its own tests. There is no installed multi-Organization, multi-window, or
+restart isolation evidence. omega#218 stays open until those three exist.

@@ -20653,26 +20653,7 @@ impl AgentPanel {
             effective_principal.scope_label,
             effective_principal.status_label()
         );
-        let (principal_icon, principal_color) = match effective_principal.state {
-            crate::effective_principal::EffectivePrincipalState::LocalOnly => {
-                (IconName::Lock, Color::Muted)
-            }
-            crate::effective_principal::EffectivePrincipalState::Enrolled => {
-                (IconName::UserCheck, Color::Success)
-            }
-            crate::effective_principal::EffectivePrincipalState::Offline => {
-                (IconName::Disconnected, Color::Warning)
-            }
-            crate::effective_principal::EffectivePrincipalState::SignerUnavailable => {
-                (IconName::LockOff, Color::Warning)
-            }
-            crate::effective_principal::EffectivePrincipalState::Revoked => {
-                (IconName::XCircle, Color::Error)
-            }
-            crate::effective_principal::EffectivePrincipalState::Conflict => {
-                (IconName::Warning, Color::Error)
-            }
-        };
+        let (principal_icon, principal_color) = effective_principal.state.cue();
         let tab_shortcuts_visible = omega_tab_shortcuts_visible(window);
         let active_work_index_view = self
             .omega_navigation_history
