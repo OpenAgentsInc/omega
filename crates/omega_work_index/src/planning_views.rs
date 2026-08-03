@@ -4,7 +4,7 @@
 //! mutation path. The current v0.2.0 surface is development-gated, but the
 //! input can be either the checked fixture or the generated owned read.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 
 use serde::{Deserialize, Serialize};
 
@@ -145,6 +145,7 @@ pub struct PlanningViewRow {
     pub completed: bool,
     pub blocked_by_count: usize,
     pub source_revision: String,
+    pub attention: BTreeSet<PlanningAttentionKind>,
 }
 
 impl PlanningViewRow {
@@ -180,12 +181,39 @@ pub struct PlanningViewProjection {
     pub groups: BTreeMap<String, Vec<String>>,
     pub source_revision: u64,
     pub event_cursor: String,
+    pub attention_complete: bool,
+}
+
+#[derive(Clone, Copy, Debug, Eq, Ord, PartialEq, PartialOrd)]
+pub enum PlanningAttentionKind {
+    AgentActive,
+    NeedsOwner,
+}
+
+#[derive(Clone, Debug, Default, Eq, PartialEq)]
+pub struct PlanningAttentionProjection {
+    pub by_work_ref: BTreeMap<String, BTreeSet<PlanningAttentionKind>>,
+    pub complete: bool,
 }
 
 pub fn project_planning_view(
     model: &DogfoodPlanningViewModel,
     kind: PlanningViewKind,
     query: &PlanningViewQuery,
+) -> PlanningViewProjection {
+    project_planning_view_with_attention(
+        model,
+        kind,
+        query,
+        &PlanningAttentionProjection::default(),
+    )
+}
+
+pub fn project_planning_view_with_attention(
+    model: &DogfoodPlanningViewModel,
+    kind: PlanningViewKind,
+    query: &PlanningViewQuery,
+    attention: &PlanningAttentionProjection,
 ) -> PlanningViewProjection {
     if query.organization_id != model.graph.organization.id {
         return PlanningViewProjection {
@@ -194,6 +222,7 @@ pub fn project_planning_view(
             groups: BTreeMap::new(),
             source_revision: model.revision,
             event_cursor: model.event_cursor.clone(),
+            attention_complete: attention.complete,
         };
     }
     let search = query.search.trim().to_ascii_lowercase();
@@ -203,7 +232,7 @@ pub fn project_planning_view(
         .iter()
         .enumerate()
         .filter(|(_, issue)| issue.project_id == query.project_id)
-        .filter(|(_, issue)| saved_view_matches(model, issue, query.saved_view))
+        .filter(|(_, issue)| saved_view_matches(model, issue, query.saved_view, attention))
         .filter(|(_, issue)| filter_matches(model, issue, query.filter))
         .filter(|(_, issue)| {
             search.is_empty()
@@ -211,7 +240,7 @@ pub fn project_planning_view(
                 || issue.title.to_ascii_lowercase().contains(&search)
         })
         .filter_map(|(source_order, issue)| {
-            planning_row(model, issue).map(|row| (source_order, row))
+            planning_row(model, issue, attention).map(|row| (source_order, row))
         })
         .collect::<Vec<_>>();
     rows.sort_by(
@@ -241,6 +270,7 @@ pub fn project_planning_view(
         groups,
         source_revision: model.revision,
         event_cursor: model.event_cursor.clone(),
+        attention_complete: attention.complete,
     }
 }
 
@@ -248,6 +278,7 @@ fn saved_view_matches(
     model: &DogfoodPlanningViewModel,
     issue: &FixtureIssue,
     saved_view: PlanningSavedView,
+    attention: &PlanningAttentionProjection,
 ) -> bool {
     match saved_view {
         PlanningSavedView::All => true,
@@ -263,15 +294,35 @@ fn saved_view_matches(
             relation.related_issue_id == issue.id
                 && relation.kind == crate::FixtureIssueRelationKind::Blocks
         }),
-        // An Agent Session reference alone does not prove an active state, and
-        // an Owner Disposition reference alone does not prove needs-owner.
-        PlanningSavedView::AgentActive | PlanningSavedView::NeedsOwner => false,
+        PlanningSavedView::AgentActive => attention
+            .by_work_ref
+            .get(&work_ref(model, issue))
+            .is_some_and(|facts| facts.contains(&PlanningAttentionKind::AgentActive)),
+        PlanningSavedView::NeedsOwner => attention
+            .by_work_ref
+            .get(&work_ref(model, issue))
+            .is_some_and(|facts| facts.contains(&PlanningAttentionKind::NeedsOwner)),
         PlanningSavedView::InReview => issue.workflow_state_id == "workflow:in-review",
         PlanningSavedView::Verification => issue.workflow_state_id == "workflow:verification",
     }
 }
 
-fn planning_row(model: &DogfoodPlanningViewModel, issue: &FixtureIssue) -> Option<PlanningViewRow> {
+fn work_ref(model: &DogfoodPlanningViewModel, issue: &FixtureIssue) -> String {
+    model
+        .graph
+        .source_repositories
+        .iter()
+        .find(|value| value.id == issue.repository_id)
+        .map_or_else(String::new, |repository| {
+            github_work_ref(&repository.owner, &repository.name, issue.number)
+        })
+}
+
+fn planning_row(
+    model: &DogfoodPlanningViewModel,
+    issue: &FixtureIssue,
+    attention: &PlanningAttentionProjection,
+) -> Option<PlanningViewRow> {
     let repository = model
         .graph
         .source_repositories
@@ -288,8 +339,14 @@ fn planning_row(model: &DogfoodPlanningViewModel, issue: &FixtureIssue) -> Optio
         .iter()
         .filter(|relation| relation.related_issue_id == issue.id)
         .count();
+    let work_ref = github_work_ref(&repository.owner, &repository.name, issue.number);
     Some(PlanningViewRow {
-        work_ref: github_work_ref(&repository.owner, &repository.name, issue.number),
+        attention: attention
+            .by_work_ref
+            .get(&work_ref)
+            .cloned()
+            .unwrap_or_default(),
+        work_ref,
         issue_id: issue.id.clone(),
         identifier: issue.identifier.clone(),
         title: issue.title.clone(),
@@ -524,6 +581,53 @@ mod tests {
                 .map(|row| (row.work_ref, row.source_revision))
                 .collect::<BTreeSet<_>>();
             assert_eq!(actual, expected);
+        }
+    }
+
+    #[test]
+    fn exact_partial_attention_filters_every_renderer_without_claiming_completeness() {
+        let model = model();
+        let mut query = query(&model);
+        query.filter = PlanningFilter::All;
+        query.saved_view = PlanningSavedView::AgentActive;
+        let attention = PlanningAttentionProjection {
+            by_work_ref: BTreeMap::from([
+                (
+                    github_work_ref("OpenAgentsInc", "omega", 214),
+                    BTreeSet::from([PlanningAttentionKind::AgentActive]),
+                ),
+                (
+                    github_work_ref("OpenAgentsInc", "omega", 215),
+                    BTreeSet::from([PlanningAttentionKind::NeedsOwner]),
+                ),
+            ]),
+            complete: false,
+        };
+
+        for kind in [
+            PlanningViewKind::List,
+            PlanningViewKind::Board,
+            PlanningViewKind::Table,
+            PlanningViewKind::Timeline,
+            PlanningViewKind::Roadmap,
+        ] {
+            let active = project_planning_view_with_attention(&model, kind, &query, &attention);
+            assert_eq!(active.rows.len(), 1);
+            assert_eq!(active.rows[0].identifier, "omega#214");
+            assert!(
+                active.rows[0]
+                    .attention
+                    .contains(&PlanningAttentionKind::AgentActive)
+            );
+            assert!(!active.attention_complete);
+
+            query.saved_view = PlanningSavedView::NeedsOwner;
+            let needs_owner =
+                project_planning_view_with_attention(&model, kind, &query, &attention);
+            assert_eq!(needs_owner.rows.len(), 1);
+            assert_eq!(needs_owner.rows[0].identifier, "omega#215");
+            assert!(!needs_owner.attention_complete);
+            query.saved_view = PlanningSavedView::AgentActive;
         }
     }
 }

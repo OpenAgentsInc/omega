@@ -31,8 +31,14 @@ Critical path uses Release Planning Record scope or an exact outgoing Blocks
 relation. Unassigned, blocked, in-review, and verification use their exact
 projection facts. An Agent Session reference alone does not prove active, and
 an Owner Disposition reference alone does not prove needs-owner. Those Views
-therefore return no rows until the owned read supplies the required state; the
-reducer does not infer attention from a nearby reference or label.
+therefore do not infer attention from a nearby reference or label. The current
+detail reader can contribute exact attention for its selected Work: an active
+canonical Session supplies **Agent active**, and a latest canonical Question on
+an active or paused Session supplies **Needs owner**. Every renderer consumes
+that same attention overlay through the shared reducer. Because Omega has only
+one selected Work snapshot, the result is visibly marked partial and never
+claims portfolio-wide completeness. A missing snapshot returns no inferred
+attention row.
 
 ## Development surface
 
@@ -63,7 +69,7 @@ the planning views remain read-only.
 
 This is a substantive OAW-008 slice, not its close proof. Production portfolio
 navigation remains absent. Native Organization switching, Organization-shared
-Views, real attention-state inputs, Inbox/triage interaction, bulk actions,
+Views, complete portfolio attention reads, Inbox/triage interaction, bulk actions,
 inline mutations, drag/drop Intent admission, large-dataset performance,
 installed accessibility, and complete two-domain workflows remain required
 before omega#215 can close. Test execution is deferred to the single final

@@ -14,9 +14,10 @@ use omega_effectd::all_work_contract::{
 use omega_work_index::DogfoodFixtureAdapter;
 use omega_work_index::{
     DOGFOOD_PROJECT_ID, DogfoodPlanningOrigin, DogfoodPlanningViewModel, FixtureIssue,
-    FixtureIssueRelationKind, FixtureLifecycleType, FixturePriority, PlanningFilter, PlanningGroup,
-    PlanningSavedView, PlanningSort, PlanningViewKind, PlanningViewQuery, SECURITY_PROJECT_ID,
-    github_work_ref, project_planning_view,
+    FixtureIssueRelationKind, FixtureLifecycleType, FixturePriority, PlanningAttentionKind,
+    PlanningAttentionProjection, PlanningFilter, PlanningGroup, PlanningSavedView, PlanningSort,
+    PlanningViewKind, PlanningViewProjection, PlanningViewQuery, SECURITY_PROJECT_ID,
+    github_work_ref, project_planning_view_with_attention,
 };
 use serde::{Deserialize, Serialize};
 use settings::Settings as _;
@@ -705,8 +706,51 @@ impl DogfoodSurface {
         }
     }
 
+    fn planning_attention_projection(&self) -> PlanningAttentionProjection {
+        let Some(selected_work_ref) = self.selected_work_ref() else {
+            return PlanningAttentionProjection::default();
+        };
+        let Some(snapshot) = self
+            .work_command_snapshot
+            .as_ref()
+            .filter(|snapshot| snapshot.summary.work_ref.0 == selected_work_ref)
+        else {
+            return PlanningAttentionProjection::default();
+        };
+        let latest_session = snapshot
+            .session_projections
+            .as_ref()
+            .and_then(|sessions| sessions.last());
+        let latest_activity = snapshot
+            .agent_activity_projections
+            .as_ref()
+            .and_then(|activities| activities.last());
+        let facts = planning_attention_facts(
+            latest_session.map(|session| &session.state),
+            latest_activity.map(|activity| &activity.kind),
+        );
+        PlanningAttentionProjection {
+            by_work_ref: (!facts.is_empty())
+                .then_some((selected_work_ref, facts))
+                .into_iter()
+                .collect(),
+            // The detail reader currently holds one selected Work snapshot. It
+            // must not claim complete portfolio attention coverage.
+            complete: false,
+        }
+    }
+
+    fn planning_projection(&self, kind: PlanningViewKind) -> PlanningViewProjection {
+        project_planning_view_with_attention(
+            &self.fixture,
+            kind,
+            &self.planning_query(),
+            &self.planning_attention_projection(),
+        )
+    }
+
     fn visible_issues(&self, kind: PlanningViewKind) -> Vec<&FixtureIssue> {
-        let projection = project_planning_view(&self.fixture, kind, &self.planning_query());
+        let projection = self.planning_projection(kind);
         projection
             .rows
             .iter()
@@ -993,6 +1037,12 @@ impl DogfoodSurface {
 
     fn render_header(&self, cx: &mut Context<Self>) -> impl IntoElement {
         let colors = cx.theme().colors();
+        let selected_attention_snapshot_available =
+            self.selected_work_ref().is_some_and(|work_ref| {
+                self.work_command_snapshot
+                    .as_ref()
+                    .is_some_and(|snapshot| snapshot.summary.work_ref.0 == work_ref)
+            });
         let open = self
             .project_issues()
             .into_iter()
@@ -1178,6 +1228,23 @@ impl DogfoodSurface {
                     .when_some(self.user_saved_view_error.as_ref(), |row, error| {
                         row.child(Label::new(error.clone()).size(LabelSize::XSmall).color(Color::Error))
                     }),
+            )
+            .when(
+                matches!(
+                    self.saved_view,
+                    PlanningSavedView::AgentActive | PlanningSavedView::NeedsOwner
+                ),
+                |header| {
+                    header.child(
+                        Label::new(if selected_attention_snapshot_available {
+                            "Partial attention · exact selected Work snapshot only"
+                        } else {
+                            "Attention unavailable · refresh the selected Work snapshot"
+                        })
+                        .size(LabelSize::XSmall)
+                        .color(Color::Warning),
+                    )
+                },
             )
             .child(
                 h_flex()
@@ -1529,11 +1596,7 @@ impl DogfoodSurface {
 
     fn render_table(&self, cx: &mut Context<Self>) -> impl IntoElement {
         let colors = cx.theme().colors();
-        let projection = project_planning_view(
-            &self.fixture,
-            PlanningViewKind::Table,
-            &self.planning_query(),
-        );
+        let projection = self.planning_projection(PlanningViewKind::Table);
         let rows = projection.rows;
         v_flex()
             .rounded_lg()
@@ -1621,11 +1684,7 @@ impl DogfoodSurface {
 
     fn render_timeline(&self, cx: &mut Context<Self>) -> impl IntoElement {
         let colors = cx.theme().colors();
-        let projection = project_planning_view(
-            &self.fixture,
-            PlanningViewKind::Timeline,
-            &self.planning_query(),
-        );
+        let projection = self.planning_projection(PlanningViewKind::Timeline);
         let source_revision = projection.source_revision;
         let event_cursor = projection.event_cursor;
         let rows = projection.rows;
@@ -1717,11 +1776,7 @@ impl DogfoodSurface {
 
     fn render_roadmap(&self, cx: &mut Context<Self>) -> impl IntoElement {
         let colors = cx.theme().colors();
-        let projection = project_planning_view(
-            &self.fixture,
-            PlanningViewKind::Roadmap,
-            &self.planning_query(),
-        );
+        let projection = self.planning_projection(PlanningViewKind::Roadmap);
         let rows = projection.rows;
         let groups = projection.groups;
         h_flex()
@@ -2929,6 +2984,66 @@ fn work_session_state_label(state: &WorkSessionState) -> &'static str {
         WorkSessionState::Paused => "Paused",
         WorkSessionState::Stopped => "Stopped",
         WorkSessionState::Revoked => "Revoked",
+    }
+}
+
+fn planning_attention_facts(
+    session_state: Option<&WorkSessionState>,
+    activity_kind: Option<&WorkCommandActivityKind>,
+) -> std::collections::BTreeSet<PlanningAttentionKind> {
+    let mut facts = std::collections::BTreeSet::new();
+    if session_state == Some(&WorkSessionState::Active) {
+        facts.insert(PlanningAttentionKind::AgentActive);
+    }
+    if session_state
+        .is_some_and(|state| matches!(state, WorkSessionState::Active | WorkSessionState::Paused))
+        && activity_kind == Some(&WorkCommandActivityKind::Question)
+    {
+        facts.insert(PlanningAttentionKind::NeedsOwner);
+    }
+    facts
+}
+
+#[cfg(test)]
+mod planning_attention_tests {
+    use super::*;
+
+    #[test]
+    fn exact_session_and_activity_states_supply_only_supported_attention() {
+        let active_question = planning_attention_facts(
+            Some(&WorkSessionState::Active),
+            Some(&WorkCommandActivityKind::Question),
+        );
+        assert_eq!(
+            active_question,
+            std::collections::BTreeSet::from([
+                PlanningAttentionKind::AgentActive,
+                PlanningAttentionKind::NeedsOwner,
+            ])
+        );
+
+        let paused_question = planning_attention_facts(
+            Some(&WorkSessionState::Paused),
+            Some(&WorkCommandActivityKind::Question),
+        );
+        assert_eq!(
+            paused_question,
+            std::collections::BTreeSet::from([PlanningAttentionKind::NeedsOwner])
+        );
+        assert!(
+            planning_attention_facts(
+                Some(&WorkSessionState::Revoked),
+                Some(&WorkCommandActivityKind::Question),
+            )
+            .is_empty()
+        );
+        assert!(
+            planning_attention_facts(
+                Some(&WorkSessionState::Active),
+                Some(&WorkCommandActivityKind::Progress),
+            )
+            .contains(&PlanningAttentionKind::AgentActive)
+        );
     }
 }
 
