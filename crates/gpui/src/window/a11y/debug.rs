@@ -263,6 +263,12 @@ fn node_to_json(
     if let Some(v) = node.is_selected() {
         aria.insert("selected".into(), json!(v));
     }
+    // The live-region politeness that makes the platform adapter announce this
+    // node's value when it changes. Without it a status node is only readable
+    // by a user who navigates to it, never spoken on its own.
+    if let Some(v) = node.live() {
+        aria.insert("live".into(), json!(format!("{v:?}")));
+    }
     if let Some(v) = node.is_expanded() {
         aria.insert("expanded".into(), json!(v));
     }

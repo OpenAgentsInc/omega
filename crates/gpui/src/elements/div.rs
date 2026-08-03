@@ -1303,6 +1303,32 @@ pub trait StatefulInteractiveElement: InteractiveElement {
         self
     }
 
+    /// Mark this element as a live region: assistive technology announces its
+    /// [`value`][Self::aria_value] whenever that value changes, without the
+    /// user having to navigate to it.
+    ///
+    /// The announced text is the element's **value**, not its label. A live
+    /// region with no value announces nothing, which is the shape a silent
+    /// status area usually has. The label names the region for a user who
+    /// navigates to it deliberately; the value is what gets spoken.
+    ///
+    /// [`Live::Polite`] waits for the current utterance to finish;
+    /// [`Live::Assertive`] interrupts it and should be reserved for state a
+    /// person must hear immediately. [`Live::Off`] disables announcements for
+    /// this element and its descendants.
+    ///
+    /// This is inherited: descendants of a live region are live too unless
+    /// they set their own value. Prefer setting it on the exact node that
+    /// carries the announcement rather than on a container.
+    ///
+    /// [`Live::Polite`]: accesskit::Live::Polite
+    /// [`Live::Assertive`]: accesskit::Live::Assertive
+    /// [`Live::Off`]: accesskit::Live::Off
+    fn aria_live(mut self, live: accesskit::Live) -> Self {
+        self.interactivity().aria.live = Some(live);
+        self
+    }
+
     /// Set the expanded state for this element.
     fn aria_expanded(mut self, expanded: bool) -> Self {
         self.interactivity().aria.expanded = Some(expanded);
@@ -1936,6 +1962,7 @@ pub(crate) struct AriaProperties {
     pub(crate) keyshortcuts: Option<SharedString>,
     pub(crate) disabled: Option<bool>,
     pub(crate) selected: Option<bool>,
+    pub(crate) live: Option<accesskit::Live>,
     pub(crate) expanded: Option<bool>,
     pub(crate) toggled: Option<accesskit::Toggled>,
     pub(crate) numeric_value: Option<f64>,
@@ -3329,6 +3356,9 @@ impl Interactivity {
         }
         if let Some(selected) = self.aria.selected {
             node.set_selected(selected);
+        }
+        if let Some(live) = self.aria.live {
+            node.set_live(live);
         }
         if let Some(expanded) = self.aria.expanded {
             node.set_expanded(expanded);
