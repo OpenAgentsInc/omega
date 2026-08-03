@@ -9,9 +9,10 @@ use omega_forensics::{
     EntropyCampaignComparison, EntropyCampaignPhase, EntropyCampaignProjection,
     EntropyDependencyAvailability, EntropyFileAnalysisOutput, EntropyFileState, EntropyFileTask,
     EntropyLimitation, EntropyProjectCatalog, EntropyPromptSnapshot, EntropyRunPhase,
-    EntropyRunProjection, ExplicitOperatorAction, FORENSIC_FINDING_SCHEMA_V1,
-    FORENSIC_HYPOTHESIS_SCHEMA_V1, ForensicBudgetState, ForensicEvidenceTier, ForensicExactness,
-    ForensicLifecycleState, ForensicPromptIr, ForensicPromptWorkspace, ForensicPublicationGate,
+    EntropyRunProjection, EntropySourceInspection, EntropySourceInspectionState,
+    ExplicitOperatorAction, FORENSIC_FINDING_SCHEMA_V1, FORENSIC_HYPOTHESIS_SCHEMA_V1,
+    ForensicBudgetState, ForensicEvidenceTier, ForensicExactness, ForensicLifecycleState,
+    ForensicPromptIr, ForensicPromptWorkspace, ForensicPublicationGate,
     ForensicPublicationGateKind, ForensicPublicationGateProjection, ForensicPublicationGateState,
     ForensicReviewDecisionKind, ForensicReviewOutcome, ForensicSourceCitation, ForensicStatistic,
     ForensicWorkerObservation, ForensicWorkerPlacement, ForensicsFailureProjection,
@@ -724,6 +725,7 @@ pub struct ForensicsWorkbenchSnapshot {
     pub coldcard_case_reader_state: ColdcardCaseReaderState,
     pub entropy_run: Option<EntropyRunProjection>,
     pub entropy_run_history: Vec<EntropyRunProjection>,
+    pub entropy_source_inspection: Option<EntropySourceInspection>,
     pub entropy_prompt_draft: String,
     pub entropy_parent_prompt_ref: Option<String>,
     pub entropy_source_run_ref: Option<String>,
@@ -795,6 +797,7 @@ pub struct ForensicsWorkbenchSurface {
     coldcard_case_reader_state: ColdcardCaseReaderState,
     entropy_run: Option<EntropyRunProjection>,
     entropy_run_history: Vec<EntropyRunProjection>,
+    entropy_source_inspection: Option<EntropySourceInspection>,
     entropy_prompt_editor: Option<Entity<Editor>>,
     entropy_prompt_draft: String,
     entropy_parent_prompt_ref: Option<String>,
@@ -868,6 +871,7 @@ impl ForensicsWorkbenchSurface {
             coldcard_case_reader_state,
             entropy_run: None,
             entropy_run_history: Vec::new(),
+            entropy_source_inspection: None,
             entropy_prompt_editor: None,
             entropy_prompt_draft: DEFAULT_ENTROPY_ANALYSIS_PROMPT.into(),
             entropy_parent_prompt_ref: None,
@@ -960,6 +964,14 @@ impl ForensicsWorkbenchSurface {
             this.entropy_run = Some(active);
         }
         this.entropy_run_history = runs;
+        this.entropy_source_inspection = restored.source_inspection.and_then(|inspection| {
+            inspection
+                .mark_stale(
+                    inspection.generation.saturating_add(1),
+                    chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Millis, true),
+                )
+                .ok()
+        });
         let editor = cx.new(|cx| {
             let mut editor = Editor::auto_height(5, 12, window, cx);
             editor.set_text(this.entropy_prompt_draft.clone(), window, cx);
@@ -1025,6 +1037,7 @@ impl ForensicsWorkbenchSurface {
         if let Some(previous) = self.entropy_run.take() {
             self.entropy_run_history.push(previous);
         }
+        self.entropy_source_inspection = None;
         self.status = "Preparing an entropy file manifest…".into();
         cx.emit(ForensicsWorkbenchCommand::StartCatalogEntropy {
             prompt_snapshot: snapshot,
@@ -1056,6 +1069,7 @@ impl ForensicsWorkbenchSurface {
         )?;
         self.entropy_prompt_snapshots.push(snapshot.clone());
         self.entropy_repository_source = None;
+        self.entropy_source_inspection = None;
         self.status = format!(
             "Preparing the {}-target entropy campaign…",
             self.entropy_catalog.projects.len()
@@ -1259,6 +1273,7 @@ impl ForensicsWorkbenchSurface {
                 }
                 campaigns
             },
+            source_inspection: self.entropy_source_inspection.clone(),
             coldcard_case_rung: self
                 .coldcard_case_selection
                 .persisted_rung()
@@ -1410,6 +1425,48 @@ impl ForensicsWorkbenchSurface {
     ) {
         self.entropy_repository_source = Some(source);
         cx.notify();
+    }
+
+    pub(crate) fn install_entropy_source_inspection(
+        &mut self,
+        inspection: EntropySourceInspection,
+        cx: &mut Context<Self>,
+    ) -> anyhow::Result<()> {
+        inspection.validate()?;
+        if let Some(current) = &self.entropy_source_inspection {
+            if inspection.generation <= current.generation {
+                anyhow::ensure!(
+                    inspection == *current,
+                    "source inspection generations must advance monotonically"
+                );
+                return Ok(());
+            }
+            if inspection.repository != current.repository
+                || inspection.top_level_tree != current.top_level_tree
+                || (current.state == EntropySourceInspectionState::Complete
+                    && inspection.manifest_digest != current.manifest_digest)
+            {
+                let stale = current.mark_stale(inspection.generation, inspection.observed_at)?;
+                self.status = "Source changed · prior inspection is stale".into();
+                self.entropy_source_inspection = Some(stale);
+                self.persist_entropy_state(cx);
+                cx.notify();
+                return Ok(());
+            }
+        }
+        self.status = match inspection.state {
+            EntropySourceInspectionState::Complete => "Source inspection complete".into(),
+            EntropySourceInspectionState::Incomplete => {
+                "Source inspection incomplete · partial analysis remains available".into()
+            }
+            EntropySourceInspectionState::Pending => "Source inspection pending".into(),
+            EntropySourceInspectionState::Denied => "Source inspection denied".into(),
+            EntropySourceInspectionState::Stale => "Source inspection stale".into(),
+        };
+        self.entropy_source_inspection = Some(inspection);
+        self.persist_entropy_state(cx);
+        cx.notify();
+        Ok(())
     }
 
     pub fn select_entropy_filter(&mut self, filter: EntropyFileFilter, cx: &mut Context<Self>) {
@@ -1840,6 +1897,7 @@ impl ForensicsWorkbenchSurface {
             coldcard_case_reader_state: self.coldcard_case_reader_state.clone(),
             entropy_run: self.entropy_run.clone(),
             entropy_run_history: self.entropy_run_history.clone(),
+            entropy_source_inspection: self.entropy_source_inspection.clone(),
             entropy_prompt_draft: self.entropy_prompt_draft.clone(),
             entropy_parent_prompt_ref: self.entropy_parent_prompt_ref.clone(),
             entropy_source_run_ref: self.entropy_source_run_ref.clone(),
@@ -3763,6 +3821,7 @@ impl Render for ForensicsWorkbenchSurface {
         let prompt_candidates = prompt_workspace.candidates().cloned().collect::<Vec<_>>();
         let matrix = self.matrix.clone();
         let entropy_run = self.entropy_run.clone();
+        let entropy_source_inspection = self.entropy_source_inspection.clone();
         let entropy_catalog = self.entropy_catalog.clone();
         let entropy_campaign = self.entropy_campaign.clone();
         let selected_entropy_project = self.selected_entropy_project.clone();
@@ -4432,6 +4491,102 @@ impl Render for ForensicsWorkbenchSurface {
                         },
                     ),
             )
+            .when_some(entropy_source_inspection, |this, inspection| {
+                let qualified_miss = inspection.qualified_miss_eligible();
+                this.child(div().h_px().bg(cx.theme().colors().border)).child(
+                    v_flex()
+                        .gap_1()
+                        .child(Label::new("Mechanical source inspection").size(LabelSize::Small))
+                        .child(Self::render_fact(
+                            "State",
+                            match inspection.state {
+                                EntropySourceInspectionState::Pending => "Pending",
+                                EntropySourceInspectionState::Complete => "Complete",
+                                EntropySourceInspectionState::Incomplete => "Incomplete",
+                                EntropySourceInspectionState::Denied => "Denied",
+                                EntropySourceInspectionState::Stale => "Changed · stale",
+                            },
+                        ))
+                        .child(Self::render_fact("Generation", inspection.generation.to_string()))
+                        .child(Self::render_fact(
+                            "Expected commit",
+                            inspection.repository.revision,
+                        ))
+                        .child(Self::render_fact(
+                            "Observed commit",
+                            inspection.observed_revision,
+                        ))
+                        .child(Self::render_fact("Top-level tree", inspection.top_level_tree))
+                        .child(Self::render_fact("Manifest", inspection.manifest_ref))
+                        .child(Self::render_fact("Manifest digest", inspection.manifest_digest))
+                        .child(Self::render_fact(
+                            "Path coverage",
+                            format!(
+                                "{} focal · {} contextual · {} reached · {} not reached",
+                                inspection.focal_paths.len(),
+                                inspection.contextual_paths.len(),
+                                inspection.reached_paths.len(),
+                                inspection.not_reached_paths.len()
+                            ),
+                        ))
+                        .child(Self::render_fact(
+                            "Dependency coverage",
+                            format!("{} declared recursive paths", inspection.dependency_paths.len()),
+                        ))
+                        .when(!inspection.dependency_facts.is_empty(), |this| {
+                            this.child(
+                                v_flex()
+                                    .gap_1()
+                                    .children(inspection.dependency_facts.into_iter().enumerate().map(
+                                        |(index, dependency)| {
+                                            Self::render_fact(
+                                                format!("Dependency {}", index + 1),
+                                                format!(
+                                                    "{} · {:?} · expected {} · observed {}{}",
+                                                    dependency.path,
+                                                    dependency.availability,
+                                                    dependency.expected_revision.as_deref().unwrap_or("unavailable"),
+                                                    dependency.observed_revision.as_deref().unwrap_or("unavailable"),
+                                                    dependency.materialization_error.as_ref().map_or_else(
+                                                        String::new,
+                                                        |error| format!(" · {error}"),
+                                                    ),
+                                                ),
+                                            )
+                                        },
+                                    )),
+                            )
+                        })
+                        .child(Self::render_fact(
+                            "Generated inputs",
+                            format!(
+                                "{} required · {} missing",
+                                inspection.required_generated_input_paths.len(),
+                                inspection.missing_generated_input_paths.len()
+                            ),
+                        ))
+                        .child(Self::render_fact(
+                            "Excluded source",
+                            format!(
+                                "{} excluded · {} required exclusions · {} oversized · {} dirty bytes excluded",
+                                inspection.excluded_paths.len(),
+                                inspection.required_excluded_paths.len(),
+                                inspection.oversized_paths.len(),
+                                inspection.dirty_excluded_paths.len()
+                            ),
+                        ))
+                        .child(Self::render_fact(
+                            "Qualified miss",
+                            if qualified_miss { "Eligible" } else { "Blocked" },
+                        ))
+                        .when(!inspection.reason_refs.is_empty(), |this| {
+                            this.child(Self::render_fact(
+                                "Incomplete reasons",
+                                inspection.reason_refs.join(" · "),
+                            ))
+                        }),
+                )
+            })
             .when_some(entropy_run_workbench, |this, run| {
                 let counts = run.counts();
                 let completed = counts.analyzed + counts.candidate + counts.skipped + counts.failed + counts.cancelled;
@@ -7025,6 +7180,84 @@ mod tests {
                 assert!(snapshot.run.is_none());
                 assert!(snapshot.review.is_none());
             }
+        });
+    }
+
+    #[gpui::test]
+    fn source_inspection_generations_project_complete_incomplete_and_stale_truth(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        let root = tempfile::tempdir().expect("temporary repository");
+        std::fs::write(root.path().join("rng.c"), "int rng_get(void);\n").expect("source fixture");
+        let repository = omega_forensics::EntropyRepositoryBinding {
+            repository_ref: "repository.omega.fixture".into(),
+            display_name: "Omega fixture".into(),
+            revision: "0123456789abcdef0123456789abcdef01234567".into(),
+        };
+        let manifest = omega_forensics::EntropyManifest::build(
+            root.path(),
+            "manifest.omega.source-inspection.fixture".into(),
+            repository,
+            Vec::new(),
+            1_024,
+        )
+        .expect("source manifest");
+        let inspection = |generation, tree: &str| {
+            omega_forensics::EntropySourceInspection::from_manifest(
+                &manifest,
+                omega_forensics::EntropySourceInspectionInput {
+                    inspection_ref: "inspection.omega.fixture".into(),
+                    generation,
+                    observed_revision: "0123456789abcdef0123456789abcdef01234567".into(),
+                    top_level_tree: tree.into(),
+                    focal_paths: vec!["rng.c".into()],
+                    reached_paths: Vec::new(),
+                    required_generated_input_paths: Vec::new(),
+                    missing_generated_input_paths: Vec::new(),
+                    required_excluded_paths: Vec::new(),
+                    dirty_excluded_paths: Vec::new(),
+                    observed_at: format!("2026-08-03T20:00:0{generation}Z"),
+                },
+            )
+            .expect("source inspection")
+        };
+
+        cx.update(|cx| {
+            let binding = RepositoryBinding::new("repo", "worktree").expect("valid binding");
+            let surface = cx.new(|cx| ForensicsWorkbenchSurface::new(&candidate(binding), cx));
+            surface
+                .update(cx, |surface, cx| {
+                    surface.install_entropy_source_inspection(
+                        inspection(1, "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"),
+                        cx,
+                    )
+                })
+                .expect("complete inspection");
+            assert_eq!(
+                surface
+                    .read(cx)
+                    .snapshot()
+                    .entropy_source_inspection
+                    .as_ref()
+                    .map(|inspection| inspection.state),
+                Some(EntropySourceInspectionState::Complete)
+            );
+
+            surface
+                .update(cx, |surface, cx| {
+                    surface.install_entropy_source_inspection(
+                        inspection(2, "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"),
+                        cx,
+                    )
+                })
+                .expect("changed tree becomes stale");
+            let stale = surface
+                .read(cx)
+                .snapshot()
+                .entropy_source_inspection
+                .expect("stale inspection");
+            assert_eq!(stale.state, EntropySourceInspectionState::Stale);
+            assert!(!stale.qualified_miss_eligible());
         });
     }
 

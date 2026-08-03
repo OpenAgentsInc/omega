@@ -3,7 +3,7 @@ use db::kvp::KeyValueStore;
 use gpui::{App, AppContext as _, Task};
 use omega_forensics::{
     DEFAULT_ENTROPY_ANALYSIS_PROMPT, EntropyCampaignProjection, EntropyPromptSnapshot,
-    EntropyRunProjection,
+    EntropyRunProjection, EntropySourceInspection,
 };
 use omega_workbench_state::RepositoryBinding;
 use serde::{Deserialize, Serialize};
@@ -27,6 +27,8 @@ pub struct EntropyForensicsRestoreState {
     #[serde(default)]
     pub campaigns: Vec<EntropyCampaignProjection>,
     #[serde(default)]
+    pub source_inspection: Option<EntropySourceInspection>,
+    #[serde(default)]
     pub coldcard_case_rung: Option<String>,
     #[serde(default)]
     pub bench_view: Option<String>,
@@ -49,6 +51,7 @@ impl Default for EntropyForensicsRestoreState {
             prompt_snapshots: Vec::new(),
             runs: Vec::new(),
             campaigns: Vec::new(),
+            source_inspection: None,
             coldcard_case_rung: None,
             bench_view: None,
             lifecycle_selection: None,
@@ -79,6 +82,9 @@ impl EntropyForensicsRestoreState {
         }
         for campaign in &self.campaigns {
             campaign.validate()?;
+        }
+        if let Some(inspection) = &self.source_inspection {
+            inspection.validate()?;
         }
         if self.coldcard_case_rung.as_deref().is_some_and(|rung| {
             !matches!(
@@ -242,6 +248,7 @@ mod tests {
             prompt_snapshots: vec![parent],
             runs: Vec::new(),
             campaigns: Vec::new(),
+            source_inspection: None,
             coldcard_case_rung: Some("entity".into()),
             bench_view: Some("lifecycle".into()),
             lifecycle_selection: Some("cleanup".into()),

@@ -29,7 +29,10 @@ digest.
 
 The selected focal unit does not hide the rest of the admitted source. The task
 states that neighboring source remains readable as context. Source completeness
-is currently `incomplete` until the recursive-dependency manifest gate lands.
+starts as `incomplete` so task creation stays immediate. The separate
+[mechanical source inspector](omega-forensics-source-inspection.md) can then
+advance the live workbench projection when recursive dependencies and required
+source are mechanically accounted for.
 The typed finding, typed hypothesis, and prior-work search tools are named as
 unavailable until their separate runtime issues land. Text cannot advertise an
 unavailable capability.

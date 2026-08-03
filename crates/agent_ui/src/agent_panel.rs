@@ -1160,32 +1160,18 @@ async fn inspect_entropy_dependencies(
         .output()
         .await;
     let Ok(output) = output else {
-        return vec![omega_forensics::EntropyDependencyBinding {
-            path: ".gitmodules".into(),
-            expected_revision: None,
-            observed_revision: None,
-            availability: omega_forensics::EntropyDependencyAvailability::SourceUnavailable,
-            materialization_error: Some(
-                materialization_error
-                    .unwrap_or("could not start git submodule status --recursive")
-                    .chars()
-                    .take(4_096)
-                    .collect(),
-            ),
-        }];
+        let error = materialization_error
+            .unwrap_or("could not start git submodule status --recursive")
+            .chars()
+            .take(4_096)
+            .collect::<String>();
+        return unavailable_declared_dependencies(root, declared_paths, error).await;
     };
     if !output.status.success() {
-        return vec![omega_forensics::EntropyDependencyBinding {
-            path: ".gitmodules".into(),
-            expected_revision: None,
-            observed_revision: None,
-            availability: omega_forensics::EntropyDependencyAvailability::SourceUnavailable,
-            materialization_error: Some(
-                materialization_error
-                    .map(str::to_string)
-                    .unwrap_or_else(|| git_failure_message(&output)),
-            ),
-        }];
+        let error = materialization_error
+            .map(str::to_string)
+            .unwrap_or_else(|| git_failure_message(&output));
+        return unavailable_declared_dependencies(root, declared_paths, error).await;
     }
     let output = String::from_utf8_lossy(&output.stdout);
     let mut dependencies = Vec::new();
@@ -1271,6 +1257,135 @@ async fn inspect_entropy_dependencies(
             observed_revision: None,
             availability: omega_forensics::EntropyDependencyAvailability::SourceUnavailable,
             materialization_error: Some(error.chars().take(4_096).collect()),
+        });
+    }
+    dependencies
+}
+
+async fn inspect_visible_entropy_source(
+    root: PathBuf,
+    repository: omega_forensics::EntropyRepositoryBinding,
+    inspection_ref: String,
+    generation: u64,
+) -> Result<omega_forensics::EntropySourceInspection> {
+    let identity_output = smol::process::Command::new("git")
+        .arg("-C")
+        .arg(&root)
+        .args(["rev-parse", "HEAD", "HEAD^{tree}"])
+        .output()
+        .await
+        .context("cannot inspect the top-level Git tree")?;
+    anyhow::ensure!(
+        identity_output.status.success(),
+        "cannot inspect the top-level Git identity: {}",
+        git_failure_message(&identity_output)
+    );
+    let identity = String::from_utf8_lossy(&identity_output.stdout)
+        .lines()
+        .map(str::trim)
+        .filter(|line| !line.is_empty())
+        .map(str::to_string)
+        .collect::<Vec<_>>();
+    anyhow::ensure!(
+        identity.len() == 2,
+        "Git returned an incomplete source identity"
+    );
+    let observed_revision = identity[0].clone();
+    let top_level_tree = identity[1].clone();
+    let dirty_excluded_paths = inspect_dirty_entropy_paths(&root).await?;
+    let dependencies = inspect_entropy_dependencies(&root, None).await;
+    let manifest_ref = format!("{inspection_ref}.manifest.{generation}");
+    let manifest_root = root.clone();
+    let manifest_repository = repository.clone();
+    let manifest = smol::unblock(move || {
+        omega_forensics::EntropyManifest::build(
+            &manifest_root,
+            manifest_ref,
+            manifest_repository,
+            dependencies,
+            512 * 1_024,
+        )
+    })
+    .await?;
+    omega_forensics::EntropySourceInspection::from_manifest(
+        &manifest,
+        omega_forensics::EntropySourceInspectionInput {
+            inspection_ref,
+            generation,
+            observed_revision,
+            top_level_tree,
+            focal_paths: Vec::new(),
+            reached_paths: Vec::new(),
+            required_generated_input_paths: Vec::new(),
+            missing_generated_input_paths: Vec::new(),
+            required_excluded_paths: Vec::new(),
+            dirty_excluded_paths,
+            observed_at: forensics_timestamp(),
+        },
+    )
+    .map_err(Into::into)
+}
+
+async fn inspect_dirty_entropy_paths(root: &Path) -> Result<Vec<String>> {
+    let tracked = smol::process::Command::new("git")
+        .arg("-C")
+        .arg(root)
+        .args(["diff", "--name-only", "-z", "HEAD", "--"])
+        .output()
+        .await
+        .context("cannot inspect changed source paths")?;
+    anyhow::ensure!(
+        tracked.status.success(),
+        "cannot inspect changed source paths: {}",
+        git_failure_message(&tracked)
+    );
+    let untracked = smol::process::Command::new("git")
+        .arg("-C")
+        .arg(root)
+        .args(["ls-files", "--others", "--exclude-standard", "-z"])
+        .output()
+        .await
+        .context("cannot inspect untracked source paths")?;
+    anyhow::ensure!(
+        untracked.status.success(),
+        "cannot inspect untracked source paths: {}",
+        git_failure_message(&untracked)
+    );
+    let mut paths = tracked
+        .stdout
+        .split(|byte| *byte == 0)
+        .chain(untracked.stdout.split(|byte| *byte == 0))
+        .filter(|path| !path.is_empty())
+        .map(|path| String::from_utf8(path.to_vec()).context("Git returned a non-UTF-8 path"))
+        .collect::<Result<Vec<_>>>()?;
+    paths.sort();
+    paths.dedup();
+    Ok(paths)
+}
+
+async fn unavailable_declared_dependencies(
+    root: &Path,
+    declared_paths: Vec<String>,
+    error: String,
+) -> Vec<omega_forensics::EntropyDependencyBinding> {
+    let paths = if declared_paths.is_empty() {
+        vec![".gitmodules".into()]
+    } else {
+        declared_paths
+    };
+    let mut dependencies = Vec::with_capacity(paths.len());
+    for path in paths {
+        let expected_revision = if path == ".gitmodules" {
+            None
+        } else {
+            git_submodule_revision(root, &path).await
+        };
+        dependencies.push(omega_forensics::EntropyDependencyBinding {
+            expected_revision,
+            observed_revision: None,
+            availability: omega_forensics::EntropyDependencyAvailability::SourceUnavailable,
+            materialization_error: Some(error.chars().take(4_096).collect()),
+            path,
         });
     }
     dependencies
@@ -15105,6 +15220,51 @@ impl AgentPanel {
                         cx,
                     );
                 })?;
+                let repository = omega_forensics::EntropyRepositoryBinding {
+                    repository_ref: project
+                        .repository_ref
+                        .clone()
+                        .context("the catalog row has no repository ref")?,
+                    display_name: project.product_name.clone(),
+                    revision: project
+                        .pinned_revision
+                        .clone()
+                        .context("the catalog row has no pinned revision")?,
+                };
+                let inspection_ref = format!("inspection.{}", source_ref);
+                for generation in 1..=60 {
+                    let inspection = inspect_visible_entropy_source(
+                        repository_root.clone(),
+                        repository.clone(),
+                        inspection_ref.clone(),
+                        generation,
+                    )
+                    .await;
+                    let inspection = match inspection {
+                        Ok(inspection) => inspection,
+                        Err(error) => {
+                            surface.update(cx, |surface, cx| {
+                                surface.set_entropy_error(
+                                    format!("Mechanical source inspection failed · {error}"),
+                                    cx,
+                                )
+                            })?;
+                            break;
+                        }
+                    };
+                    let dependencies_terminal = !inspection
+                        .reason_refs
+                        .iter()
+                        .any(|reason| reason.starts_with("source.dependency."));
+                    let is_complete = inspection.qualified_miss_eligible();
+                    surface.update(cx, |surface, cx| {
+                        surface.install_entropy_source_inspection(inspection, cx)
+                    })??;
+                    if is_complete || dependencies_terminal {
+                        break;
+                    }
+                    smol::Timer::after(Duration::from_secs(2)).await;
+                }
                 log::info!(
                     "Forensics entropy scan opened as a visible Omega task for {} at {}",
                     project.product_name,
@@ -22913,7 +23073,7 @@ mod tests {
         let repository = tempfile::tempdir().expect("temporary Git repository");
         std::fs::write(
             repository.path().join(".gitmodules"),
-            "[submodule \"libngu\"]\n\tpath = external/libngu\n\turl = https://example.invalid/libngu.git\n",
+            "[submodule \"libngu\"]\n\tpath = external/libngu\n\turl = https://example.invalid/libngu.git\n[submodule \"micropython\"]\n\tpath = external/micropython\n\turl = https://example.invalid/micropython.git\n",
         )
         .expect("write submodule declaration");
         let output = smol::block_on(
@@ -22931,14 +23091,19 @@ mod tests {
             Some("git transport timed out"),
         ));
 
-        assert_eq!(dependencies.len(), 1);
+        assert_eq!(dependencies.len(), 2);
         assert_eq!(dependencies[0].path, "external/libngu");
         assert_eq!(
             dependencies[0].availability,
-            omega_forensics::EntropyDependencyAvailability::Missing
+            omega_forensics::EntropyDependencyAvailability::SourceUnavailable
         );
         assert_eq!(
             dependencies[0].materialization_error.as_deref(),
+            Some("git transport timed out")
+        );
+        assert_eq!(dependencies[1].path, "external/micropython");
+        assert_eq!(
+            dependencies[1].materialization_error.as_deref(),
             Some("git transport timed out")
         );
     }

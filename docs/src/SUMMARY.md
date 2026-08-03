@@ -253,6 +253,7 @@
   - [Omega Forensics cloud control](./development/omega-forensics-cloud-control.md)
   - [Omega Forensics review](./development/omega-forensics-review.md)
   - [Omega Forensics prompt artifacts](./development/omega-forensics-prompt-artifacts.md)
+  - [Omega Forensics source inspection](./development/omega-forensics-source-inspection.md)
   - [Omega Forensics run matrices](./development/omega-forensics-run-matrices.md)
   - [Omega entropy repository runs](./development/omega-entropy-repository-runs.md)
   - [Omega Coldcard evidence views](./development/omega-coldcard-evidence-views.md)

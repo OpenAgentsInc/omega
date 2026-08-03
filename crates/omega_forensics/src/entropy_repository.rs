@@ -12,6 +12,8 @@ pub const ENTROPY_MANIFEST_SCHEMA_V1: &str = "openagents.omega.entropy-manifest.
 pub const ENTROPY_RUN_SCHEMA_V1: &str = "openagents.omega.entropy-run.v1";
 pub const ENTROPY_FILE_OUTPUT_SCHEMA_V1: &str = "openagents.omega.entropy-file-output.v1";
 pub const ENTROPY_PROMPT_SNAPSHOT_SCHEMA_V1: &str = "openagents.omega.entropy-prompt-snapshot.v1";
+pub const ENTROPY_SOURCE_INSPECTION_SCHEMA_V1: &str =
+    "openagents.omega.entropy-source-inspection.v1";
 
 pub const DEFAULT_ENTROPY_ANALYSIS_PROMPT: &str = r#"Inspect the supplied source file in the context of its pinned repository for entropy and secret-randomness risks only. Trace operating-system, hardware, secure-element, and library entropy sources; seeding and reseeding; provider-selection guards; deterministic fallbacks; dependency crossings; and secret consumers. Do not claim that a final artifact contains a source path unless artifact evidence is supplied. Return only the requested typed JSON. If required source, configuration, or a tool is unavailable, preserve that limitation instead of returning a clean result."#;
 
@@ -345,6 +347,393 @@ impl EntropyManifest {
                         | EntropyFileEligibility::Symlink
                 )
             })
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum EntropySourceInspectionState {
+    Pending,
+    Complete,
+    Incomplete,
+    Denied,
+    Stale,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct EntropySourceInspectionInput {
+    pub inspection_ref: String,
+    pub generation: u64,
+    pub observed_revision: String,
+    pub top_level_tree: String,
+    pub focal_paths: Vec<String>,
+    pub reached_paths: Vec<String>,
+    pub required_generated_input_paths: Vec<String>,
+    pub missing_generated_input_paths: Vec<String>,
+    pub required_excluded_paths: Vec<String>,
+    pub dirty_excluded_paths: Vec<String>,
+    pub observed_at: String,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct EntropySourceInspection {
+    pub schema: String,
+    pub inspection_ref: String,
+    pub generation: u64,
+    pub state: EntropySourceInspectionState,
+    pub repository: EntropyRepositoryBinding,
+    pub observed_revision: String,
+    pub top_level_tree: String,
+    pub manifest_ref: String,
+    pub manifest_digest: String,
+    pub focal_paths: Vec<String>,
+    pub contextual_paths: Vec<String>,
+    pub reached_paths: Vec<String>,
+    pub not_reached_paths: Vec<String>,
+    pub dependency_paths: Vec<String>,
+    pub dependency_facts: Vec<EntropyDependencyBinding>,
+    pub required_generated_input_paths: Vec<String>,
+    pub missing_generated_input_paths: Vec<String>,
+    pub excluded_paths: Vec<String>,
+    pub required_excluded_paths: Vec<String>,
+    pub oversized_paths: Vec<String>,
+    pub dirty_excluded_paths: Vec<String>,
+    pub reason_refs: Vec<String>,
+    pub observed_at: String,
+    pub canonical_digest: String,
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct EntropySourceInspectionDigestInput<'a> {
+    schema: &'a str,
+    inspection_ref: &'a str,
+    generation: u64,
+    state: EntropySourceInspectionState,
+    repository: &'a EntropyRepositoryBinding,
+    observed_revision: &'a str,
+    top_level_tree: &'a str,
+    manifest_ref: &'a str,
+    manifest_digest: &'a str,
+    focal_paths: &'a [String],
+    contextual_paths: &'a [String],
+    reached_paths: &'a [String],
+    not_reached_paths: &'a [String],
+    dependency_paths: &'a [String],
+    dependency_facts: &'a [EntropyDependencyBinding],
+    required_generated_input_paths: &'a [String],
+    missing_generated_input_paths: &'a [String],
+    excluded_paths: &'a [String],
+    required_excluded_paths: &'a [String],
+    oversized_paths: &'a [String],
+    dirty_excluded_paths: &'a [String],
+    reason_refs: &'a [String],
+    observed_at: &'a str,
+}
+
+impl EntropySourceInspection {
+    pub fn from_manifest(
+        manifest: &EntropyManifest,
+        mut input: EntropySourceInspectionInput,
+    ) -> Result<Self, ForensicsError> {
+        manifest.validate()?;
+        validate_public_ref("source inspection", &input.inspection_ref)?;
+        if input.generation == 0 {
+            return Err(ForensicsError::InvalidEntropyRun(
+                "source inspection generation must be positive".into(),
+            ));
+        }
+        validate_revision(&input.top_level_tree)?;
+        validate_revision(&input.observed_revision)?;
+        for paths in [
+            &mut input.focal_paths,
+            &mut input.reached_paths,
+            &mut input.required_generated_input_paths,
+            &mut input.missing_generated_input_paths,
+            &mut input.required_excluded_paths,
+            &mut input.dirty_excluded_paths,
+        ] {
+            paths.sort();
+            paths.dedup();
+            for path in paths.iter() {
+                validate_relative_path(path)?;
+            }
+        }
+        if input.observed_at.trim().is_empty() || input.observed_at.len() > 64 {
+            return Err(ForensicsError::InvalidEntropyRun(
+                "source inspection time must be present and bounded".into(),
+            ));
+        }
+
+        let all_paths = manifest
+            .files
+            .iter()
+            .map(|file| file.path.clone())
+            .collect::<BTreeSet<_>>();
+        if input
+            .focal_paths
+            .iter()
+            .chain(input.reached_paths.iter())
+            .any(|path| !all_paths.contains(path))
+        {
+            return Err(ForensicsError::InvalidEntropyRun(
+                "focal and reached paths must belong to the immutable manifest".into(),
+            ));
+        }
+        if input
+            .missing_generated_input_paths
+            .iter()
+            .any(|path| !input.required_generated_input_paths.contains(path))
+        {
+            return Err(ForensicsError::InvalidEntropyRun(
+                "missing generated inputs must be declared as required".into(),
+            ));
+        }
+
+        let contextual_paths = all_paths
+            .iter()
+            .filter(|path| !input.focal_paths.contains(path))
+            .cloned()
+            .collect::<Vec<_>>();
+        let not_reached_paths = all_paths
+            .iter()
+            .filter(|path| !input.reached_paths.contains(path))
+            .cloned()
+            .collect::<Vec<_>>();
+        let dependency_paths = manifest
+            .dependencies
+            .iter()
+            .map(|dependency| dependency.path.clone())
+            .collect::<Vec<_>>();
+        let excluded_paths = manifest
+            .files
+            .iter()
+            .filter(|file| file.eligibility != EntropyFileEligibility::Eligible)
+            .map(|file| file.path.clone())
+            .collect::<Vec<_>>();
+        let oversized_paths = manifest
+            .files
+            .iter()
+            .filter(|file| file.eligibility == EntropyFileEligibility::Oversized)
+            .map(|file| file.path.clone())
+            .collect::<Vec<_>>();
+        if input
+            .required_excluded_paths
+            .iter()
+            .any(|path| !excluded_paths.contains(path))
+        {
+            return Err(ForensicsError::InvalidEntropyRun(
+                "required excluded paths must name an ineligible manifest row".into(),
+            ));
+        }
+        let mut reason_refs = manifest
+            .dependencies
+            .iter()
+            .filter(|dependency| {
+                dependency.availability != EntropyDependencyAvailability::Available
+            })
+            .map(|dependency| match dependency.availability {
+                EntropyDependencyAvailability::Missing => "source.dependency.missing",
+                EntropyDependencyAvailability::WrongRevision => "source.dependency.wrong_revision",
+                EntropyDependencyAvailability::SourceUnavailable => "source.dependency.unavailable",
+                EntropyDependencyAvailability::Available => unreachable!(),
+            })
+            .map(str::to_string)
+            .collect::<Vec<_>>();
+        if input.observed_revision != manifest.repository.revision {
+            reason_refs.push("source.top_level.wrong_revision".into());
+        }
+        if !input.required_excluded_paths.is_empty() {
+            reason_refs.push("source.required_path.excluded".into());
+        }
+        if manifest
+            .files
+            .iter()
+            .any(|file| file.eligibility == EntropyFileEligibility::Oversized)
+        {
+            reason_refs.push("source.path.oversized".into());
+        }
+        if manifest
+            .files
+            .iter()
+            .any(|file| file.eligibility == EntropyFileEligibility::SourceUnavailable)
+        {
+            reason_refs.push("source.path.unavailable".into());
+        }
+        if manifest
+            .files
+            .iter()
+            .any(|file| file.eligibility == EntropyFileEligibility::Symlink)
+        {
+            reason_refs.push("source.path.symlink".into());
+        }
+        if !input.missing_generated_input_paths.is_empty() {
+            reason_refs.push("source.generated_input.missing".into());
+        }
+        if !input.dirty_excluded_paths.is_empty() {
+            reason_refs.push("source.dirty_bytes.excluded".into());
+        }
+        reason_refs.sort();
+        reason_refs.dedup();
+        let state = if reason_refs.is_empty() {
+            EntropySourceInspectionState::Complete
+        } else {
+            EntropySourceInspectionState::Incomplete
+        };
+        let mut inspection = Self {
+            schema: ENTROPY_SOURCE_INSPECTION_SCHEMA_V1.into(),
+            inspection_ref: input.inspection_ref,
+            generation: input.generation,
+            state,
+            repository: manifest.repository.clone(),
+            observed_revision: input.observed_revision,
+            top_level_tree: input.top_level_tree,
+            manifest_ref: manifest.manifest_ref.clone(),
+            manifest_digest: manifest.canonical_digest.clone(),
+            focal_paths: input.focal_paths,
+            contextual_paths,
+            reached_paths: input.reached_paths,
+            not_reached_paths,
+            dependency_paths,
+            dependency_facts: manifest.dependencies.clone(),
+            required_generated_input_paths: input.required_generated_input_paths,
+            missing_generated_input_paths: input.missing_generated_input_paths,
+            excluded_paths,
+            required_excluded_paths: input.required_excluded_paths,
+            oversized_paths,
+            dirty_excluded_paths: input.dirty_excluded_paths,
+            reason_refs,
+            observed_at: input.observed_at,
+            canonical_digest: String::new(),
+        };
+        inspection.canonical_digest = inspection.computed_digest()?;
+        inspection.validate()?;
+        Ok(inspection)
+    }
+
+    pub fn mark_stale(&self, generation: u64, observed_at: String) -> Result<Self, ForensicsError> {
+        if generation <= self.generation {
+            return Err(ForensicsError::InvalidEntropyRun(
+                "stale source generations must advance monotonically".into(),
+            ));
+        }
+        let mut stale = self.clone();
+        stale.generation = generation;
+        stale.state = EntropySourceInspectionState::Stale;
+        stale.observed_at = observed_at;
+        stale.reason_refs.push("source.generation.changed".into());
+        stale.reason_refs.sort();
+        stale.reason_refs.dedup();
+        stale.canonical_digest = stale.computed_digest()?;
+        stale.validate()?;
+        Ok(stale)
+    }
+
+    pub fn qualified_miss_eligible(&self) -> bool {
+        self.state == EntropySourceInspectionState::Complete && self.reason_refs.is_empty()
+    }
+
+    pub fn validate(&self) -> Result<(), ForensicsError> {
+        if self.schema != ENTROPY_SOURCE_INSPECTION_SCHEMA_V1 {
+            return Err(ForensicsError::InvalidSchema);
+        }
+        validate_public_ref("source inspection", &self.inspection_ref)?;
+        self.repository.validate()?;
+        validate_revision(&self.top_level_tree)?;
+        validate_revision(&self.observed_revision)?;
+        validate_sha256("source manifest", &self.manifest_digest)?;
+        validate_sha256("source inspection", &self.canonical_digest)?;
+        if self.generation == 0
+            || self.observed_at.trim().is_empty()
+            || self.observed_at.len() > 64
+            || self.canonical_digest != self.computed_digest()?
+        {
+            return Err(ForensicsError::InvalidEntropyRun(
+                "source inspection identity, time, or digest is invalid".into(),
+            ));
+        }
+        for paths in [
+            &self.focal_paths,
+            &self.contextual_paths,
+            &self.reached_paths,
+            &self.not_reached_paths,
+            &self.dependency_paths,
+            &self.required_generated_input_paths,
+            &self.missing_generated_input_paths,
+            &self.excluded_paths,
+            &self.required_excluded_paths,
+            &self.oversized_paths,
+            &self.dirty_excluded_paths,
+        ] {
+            let mut prior: Option<&str> = None;
+            for path in paths {
+                validate_relative_path(path)?;
+                if prior.is_some_and(|prior| prior >= path.as_str()) {
+                    return Err(ForensicsError::InvalidEntropyRun(
+                        "source inspection paths must be sorted and unique".into(),
+                    ));
+                }
+                prior = Some(path);
+            }
+        }
+        if self.dependency_facts.len() != self.dependency_paths.len()
+            || self
+                .dependency_facts
+                .iter()
+                .zip(self.dependency_paths.iter())
+                .any(|(fact, path)| fact.path != *path || fact.validate().is_err())
+        {
+            return Err(ForensicsError::InvalidEntropyRun(
+                "source dependency facts must account for every declared path in order".into(),
+            ));
+        }
+        if self.state == EntropySourceInspectionState::Complete && !self.reason_refs.is_empty() {
+            return Err(ForensicsError::InvalidEntropyRun(
+                "complete source inspection cannot retain incomplete reasons".into(),
+            ));
+        }
+        if matches!(
+            self.state,
+            EntropySourceInspectionState::Incomplete | EntropySourceInspectionState::Stale
+        ) && self.reason_refs.is_empty()
+        {
+            return Err(ForensicsError::InvalidEntropyRun(
+                "incomplete or stale source inspection requires an exact reason".into(),
+            ));
+        }
+        for reason_ref in &self.reason_refs {
+            validate_public_ref("source inspection reason", reason_ref)?;
+        }
+        Ok(())
+    }
+
+    fn computed_digest(&self) -> Result<String, ForensicsError> {
+        sha256_json(&EntropySourceInspectionDigestInput {
+            schema: &self.schema,
+            inspection_ref: &self.inspection_ref,
+            generation: self.generation,
+            state: self.state,
+            repository: &self.repository,
+            observed_revision: &self.observed_revision,
+            top_level_tree: &self.top_level_tree,
+            manifest_ref: &self.manifest_ref,
+            manifest_digest: &self.manifest_digest,
+            focal_paths: &self.focal_paths,
+            contextual_paths: &self.contextual_paths,
+            reached_paths: &self.reached_paths,
+            not_reached_paths: &self.not_reached_paths,
+            dependency_paths: &self.dependency_paths,
+            dependency_facts: &self.dependency_facts,
+            required_generated_input_paths: &self.required_generated_input_paths,
+            missing_generated_input_paths: &self.missing_generated_input_paths,
+            excluded_paths: &self.excluded_paths,
+            required_excluded_paths: &self.required_excluded_paths,
+            oversized_paths: &self.oversized_paths,
+            dirty_excluded_paths: &self.dirty_excluded_paths,
+            reason_refs: &self.reason_refs,
+            observed_at: &self.observed_at,
+        })
     }
 }
 
@@ -1036,6 +1425,22 @@ impl EntropyRunProjection {
         counts
     }
 
+    pub fn qualified_miss_eligible(&self, inspection: &EntropySourceInspection) -> bool {
+        self.phase == EntropyRunPhase::Completed
+            && self.binding.repository == inspection.repository
+            && self.binding.manifest_ref == inspection.manifest_ref
+            && self.binding.manifest_digest == inspection.manifest_digest
+            && inspection.qualified_miss_eligible()
+            && self
+                .files
+                .iter()
+                .all(|file| file.state == EntropyFileState::Analyzed)
+            && self
+                .files
+                .iter()
+                .all(|file| file.observations.is_empty() && file.hypotheses.is_empty())
+    }
+
     fn finish_if_exhausted(&mut self) {
         if !self.files.iter().any(|file| {
             matches!(
@@ -1387,6 +1792,207 @@ mod tests {
             EntropyFileEligibility::UnsupportedLanguage
         );
         assert!(first.files[1].content_digest.is_some());
+        assert!(!first.is_incomplete());
+    }
+
+    fn source_inspection(
+        manifest: &EntropyManifest,
+        dirty_excluded_paths: Vec<String>,
+    ) -> EntropySourceInspection {
+        EntropySourceInspection::from_manifest(
+            manifest,
+            EntropySourceInspectionInput {
+                inspection_ref: "inspection.entropy.coldcard.fixture".into(),
+                generation: 1,
+                observed_revision: REVISION.into(),
+                top_level_tree: "7abc9a4c680b5623fc8a64f70555dd2d3802e488".into(),
+                focal_paths: vec!["rng.c".into()],
+                reached_paths: vec!["rng.c".into()],
+                required_generated_input_paths: Vec::new(),
+                missing_generated_input_paths: Vec::new(),
+                required_excluded_paths: Vec::new(),
+                dirty_excluded_paths,
+                observed_at: "2026-08-03T20:00:00Z".into(),
+            },
+        )
+        .expect("source inspection")
+    }
+
+    #[test]
+    fn mechanical_source_inspection_separates_path_classes_and_gates_qualified_misses() {
+        let root = tempfile::tempdir().expect("temporary repository");
+        fs::write(root.path().join("rng.c"), "int rng_get(void);\n").expect("C source");
+        fs::write(root.path().join("consumer.c"), "void make_seed(void);\n")
+            .expect("neighbor source");
+        let manifest = build_manifest(root.path(), Vec::new());
+        let complete = source_inspection(&manifest, Vec::new());
+
+        assert_eq!(complete.state, EntropySourceInspectionState::Complete);
+        assert_eq!(complete.focal_paths, vec!["rng.c"]);
+        assert_eq!(complete.contextual_paths, vec!["consumer.c"]);
+        assert_eq!(complete.reached_paths, vec!["rng.c"]);
+        assert_eq!(complete.not_reached_paths, vec!["consumer.c"]);
+        assert!(complete.qualified_miss_eligible());
+
+        let dirty = source_inspection(&manifest, vec!["rng.c".into()]);
+        assert_eq!(dirty.state, EntropySourceInspectionState::Incomplete);
+        assert!(!dirty.qualified_miss_eligible());
+        assert!(
+            dirty
+                .reason_refs
+                .contains(&"source.dirty_bytes.excluded".into())
+        );
+
+        let stale = complete
+            .mark_stale(2, "2026-08-03T20:01:00Z".into())
+            .expect("stale generation");
+        assert_eq!(stale.state, EntropySourceInspectionState::Stale);
+        assert!(!stale.qualified_miss_eligible());
+    }
+
+    #[test]
+    fn missing_dependency_exclusion_and_missing_generated_input_forbid_completion() {
+        let root = tempfile::tempdir().expect("temporary repository");
+        fs::write(root.path().join("rng.c"), "int rng_get(void);\n").expect("C source");
+        fs::write(root.path().join("README.md"), "excluded\n").expect("excluded source");
+        let manifest = build_manifest(
+            root.path(),
+            vec![EntropyDependencyBinding {
+                path: "external/libngu".into(),
+                expected_revision: Some("537519a829259622ea6b0334fbafd6cae852852f".into()),
+                observed_revision: None,
+                availability: EntropyDependencyAvailability::Missing,
+                materialization_error: Some("transport unavailable".into()),
+            }],
+        );
+        let mut input = EntropySourceInspectionInput {
+            inspection_ref: "inspection.entropy.coldcard.incomplete".into(),
+            generation: 1,
+            observed_revision: REVISION.into(),
+            top_level_tree: "7abc9a4c680b5623fc8a64f70555dd2d3802e488".into(),
+            focal_paths: vec!["rng.c".into()],
+            reached_paths: Vec::new(),
+            required_generated_input_paths: vec!["build/generated.c".into()],
+            missing_generated_input_paths: vec!["build/generated.c".into()],
+            required_excluded_paths: vec!["README.md".into()],
+            dirty_excluded_paths: Vec::new(),
+            observed_at: "2026-08-03T20:00:00Z".into(),
+        };
+        let inspection =
+            EntropySourceInspection::from_manifest(&manifest, input.clone()).expect("inspection");
+        assert_eq!(inspection.state, EntropySourceInspectionState::Incomplete);
+        assert_eq!(inspection.dependency_paths, vec!["external/libngu"]);
+        assert_eq!(inspection.excluded_paths, vec!["README.md"]);
+        assert!(!inspection.qualified_miss_eligible());
+
+        input.missing_generated_input_paths = vec!["undeclared.c".into()];
+        assert!(EntropySourceInspection::from_manifest(&manifest, input).is_err());
+    }
+
+    #[test]
+    fn coldcard_dependency_ab_and_wrong_revision_preserve_mechanical_truth() {
+        let root = tempfile::tempdir().expect("temporary repository");
+        fs::write(root.path().join("rng.c"), "int rng_get(void);\n").expect("C source");
+        let dependency_revision = "537519a829259622ea6b0334fbafd6cae852852f";
+        let dependency = |availability, observed_revision: Option<&str>| EntropyDependencyBinding {
+            path: "external/libngu".into(),
+            expected_revision: Some(dependency_revision.into()),
+            observed_revision: observed_revision.map(str::to_string),
+            availability,
+            materialization_error: (availability != EntropyDependencyAvailability::Available)
+                .then(|| "dependency delivery is incomplete".into()),
+        };
+
+        let missing = build_manifest(
+            root.path(),
+            vec![dependency(EntropyDependencyAvailability::Missing, None)],
+        );
+        let missing_inspection = source_inspection(&missing, Vec::new());
+        assert_eq!(
+            missing_inspection.state,
+            EntropySourceInspectionState::Incomplete
+        );
+        assert!(!missing_inspection.qualified_miss_eligible());
+
+        let available = build_manifest(
+            root.path(),
+            vec![dependency(
+                EntropyDependencyAvailability::Available,
+                Some(dependency_revision),
+            )],
+        );
+        let available_inspection = source_inspection(&available, Vec::new());
+        assert_eq!(
+            available_inspection.state,
+            EntropySourceInspectionState::Complete
+        );
+        assert!(available_inspection.qualified_miss_eligible());
+        assert_eq!(
+            available_inspection.dependency_facts[0]
+                .observed_revision
+                .as_deref(),
+            Some(dependency_revision)
+        );
+
+        let wrong = build_manifest(
+            root.path(),
+            vec![dependency(
+                EntropyDependencyAvailability::WrongRevision,
+                Some("aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"),
+            )],
+        );
+        let wrong_inspection = source_inspection(&wrong, Vec::new());
+        assert_eq!(
+            wrong_inspection.state,
+            EntropySourceInspectionState::Incomplete
+        );
+        assert!(
+            wrong_inspection
+                .reason_refs
+                .contains(&"source.dependency.wrong_revision".into())
+        );
+    }
+
+    #[test]
+    fn oversized_source_and_wrong_top_level_revision_forbid_qualified_misses() {
+        let root = tempfile::tempdir().expect("temporary repository");
+        fs::write(root.path().join("rng.c"), vec![b'x'; 2_048]).expect("oversized source");
+        let manifest = build_manifest(root.path(), Vec::new());
+        let oversized = source_inspection(&manifest, Vec::new());
+        assert_eq!(oversized.oversized_paths, vec!["rng.c"]);
+        assert_eq!(oversized.state, EntropySourceInspectionState::Incomplete);
+        assert!(!oversized.qualified_miss_eligible());
+
+        let small_root = tempfile::tempdir().expect("temporary repository");
+        fs::write(small_root.path().join("rng.c"), "int rng_get(void);\n").expect("source");
+        let manifest = build_manifest(small_root.path(), Vec::new());
+        let mut input = EntropySourceInspectionInput {
+            inspection_ref: "inspection.entropy.coldcard.wrong-head".into(),
+            generation: 1,
+            observed_revision: "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa".into(),
+            top_level_tree: "7abc9a4c680b5623fc8a64f70555dd2d3802e488".into(),
+            focal_paths: vec!["rng.c".into()],
+            reached_paths: Vec::new(),
+            required_generated_input_paths: Vec::new(),
+            missing_generated_input_paths: Vec::new(),
+            required_excluded_paths: Vec::new(),
+            dirty_excluded_paths: Vec::new(),
+            observed_at: "2026-08-03T20:00:00Z".into(),
+        };
+        let wrong_head =
+            EntropySourceInspection::from_manifest(&manifest, input.clone()).expect("inspection");
+        assert_eq!(wrong_head.state, EntropySourceInspectionState::Incomplete);
+        assert!(
+            wrong_head
+                .reason_refs
+                .contains(&"source.top_level.wrong_revision".into())
+        );
+        input.observed_revision = REVISION.into();
+        assert!(
+            EntropySourceInspection::from_manifest(&manifest, input)
+                .expect("correct head")
+                .qualified_miss_eligible()
+        );
     }
 
     #[test]
@@ -1435,6 +2041,37 @@ mod tests {
                 .iter()
                 .any(|limitation| { limitation.class == EntropyLimitationClass::ToolFailure })
         );
+    }
+
+    #[test]
+    fn ordinary_clean_completion_requires_the_matching_complete_inspection() {
+        let root = tempfile::tempdir().expect("temporary repository");
+        fs::write(root.path().join("rng.c"), "int rng_get(void);\n").expect("C source");
+        let manifest = build_manifest(root.path(), Vec::new());
+        let complete_inspection = source_inspection(&manifest, Vec::new());
+        let dirty_inspection = source_inspection(&manifest, vec!["rng.c".into()]);
+        let mut run = EntropyRunProjection::new(run_binding(&manifest), manifest)
+            .expect("complete source run");
+        let task = run
+            .start_next_file("2026-08-02T18:20:01Z".into())
+            .expect("start file")
+            .expect("file task");
+        run.apply_output(
+            EntropyFileAnalysisOutput {
+                schema: ENTROPY_FILE_OUTPUT_SCHEMA_V1.into(),
+                run_ref: task.run_ref,
+                file_path: task.file_path,
+                observations: Vec::new(),
+                hypotheses: Vec::new(),
+                limitations: Vec::new(),
+            },
+            "2026-08-02T18:20:02Z".into(),
+        )
+        .expect("clean file result");
+
+        assert_eq!(run.phase, EntropyRunPhase::Completed);
+        assert!(run.qualified_miss_eligible(&complete_inspection));
+        assert!(!run.qualified_miss_eligible(&dirty_inspection));
     }
 
     #[test]
