@@ -20,8 +20,16 @@ The Session screen also retains the signed Workroom reader. Signed activity and
 the simulation are separate: a signature authenticates signer and bytes, while
 the simulator grants nothing.
 
+The separate Issue inspector now reads the durable canonical command snapshot
+through `work.snapshot.read`. It uses the returned Work revision for generated
+assign and unassign requests. Live buttons require the displayed enrolled
+Effective Principal and a verified Organization reference. The account registry
+does not currently own Organization membership, so Omega leaves those buttons
+disabled with an explicit explanation. It does not substitute the bootstrap
+organization principal or turn a fixture selection into authority.
+
 This packet is deterministic UI/model coverage. It cannot close omega#214.
-The real close journey still requires the shared command/admission processor,
-live bounded delegation and revocation, independently inspectable Session,
-Agent Session, Activity, and Run, and a separate human Owner Disposition in an
-installed Omega candidate.
+The shared command/admission processor now exists, but the real close journey
+still requires verified Organization membership, live bounded delegation and
+revocation, independently inspectable Session, Agent Session, Activity, and
+Run, and a separate human Owner Disposition in an installed Omega candidate.

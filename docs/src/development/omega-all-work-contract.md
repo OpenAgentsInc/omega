@@ -9,7 +9,7 @@ adapter creates a second writable store.
 
 | Field                 | Value                                                              |
 | --------------------- | ------------------------------------------------------------------ |
-| OpenAgents commit     | `00d19fb9212c518ba4dc1f5e8f53b7a4d1a7e2d7`                         |
+| OpenAgents commit     | `07f7fde0ae711cb037afe9a1c2c43780ca5aa934`                         |
 | Contract              | `openagents.all_work_boundary.v1`                                  |
 | Definition SHA-256    | `2f3119cf7822fe9bd770d2c97f913d609dd49e8918fb3ea4c7df9662d20492c4` |
 | Rust artifact SHA-256 | `87fe5a88e669276672027464635f484a2a01de218424a2c063e8502602abe985` |
@@ -120,10 +120,13 @@ Run, provider event, loss, effect, review, verification, and Owner Disposition
 remain separate facts. Revocation fences late generation effects. Verification
 does not imply Owner Disposition.
 
-The current consumer slice exposes the typed supervised method. Fixture Work UI
-controls remain simulated until the application binds its Effective Principal
-and Organization selection to this method and the installed owner journey is
-complete.
+The Work inspector recovers the durable command snapshot and uses its exact
+revision for generated assign and unassign requests. It enables those controls
+only when the displayed account supplies both an enrolled Effective Principal
+and verified Organization membership. The current account registry does not
+own Organization membership, so the controls fail closed and explain that
+dependency. Fixture controls remain simulated. Delegation, execution, and the
+installed owner journey are not complete.
 
 ## Verify
 

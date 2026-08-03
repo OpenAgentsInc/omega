@@ -25,6 +25,8 @@ pub(crate) struct EffectivePrincipalProjection {
     pub(crate) identity_label: String,
     pub(crate) scope_label: String,
     pub(crate) signer_label: String,
+    pub(crate) principal_ref: Option<String>,
+    pub(crate) organization_ref: Option<String>,
     pub(crate) state: EffectivePrincipalState,
 }
 
@@ -103,6 +105,11 @@ impl EffectivePrincipalProjection {
             identity_label,
             scope_label: "Local scope".into(),
             signer_label: signer_label.into(),
+            principal_ref: Some(format!(
+                "principal:nostr:{}",
+                account.identity.public_key_hex().as_str()
+            )),
+            organization_ref: None,
             state,
         }
     }
@@ -113,6 +120,8 @@ impl EffectivePrincipalProjection {
             identity_label: "No enrolled identity".into(),
             scope_label: "Local scope".into(),
             signer_label: "Signer unavailable".into(),
+            principal_ref: None,
+            organization_ref: None,
             state: EffectivePrincipalState::LocalOnly,
         }
     }
@@ -123,6 +132,8 @@ impl EffectivePrincipalProjection {
             identity_label: "Principal not verified".into(),
             scope_label: "Scope unavailable".into(),
             signer_label: "Signer not trusted".into(),
+            principal_ref: None,
+            organization_ref: None,
             state: EffectivePrincipalState::Conflict,
         }
     }
@@ -241,6 +252,13 @@ mod tests {
         assert_eq!(projection.scope_label, "Local scope");
         assert_eq!(projection.signer_label, "Local signer ready");
         assert_eq!(projection.state, EffectivePrincipalState::Enrolled);
+        assert!(
+            projection
+                .principal_ref
+                .as_deref()
+                .is_some_and(|value| value.starts_with("principal:nostr:"))
+        );
+        assert_eq!(projection.organization_ref, None);
     }
 
     #[test]

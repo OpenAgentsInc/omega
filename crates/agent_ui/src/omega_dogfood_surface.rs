@@ -3,15 +3,16 @@ use gpui::{
     Window, prelude::*,
 };
 use omega_effectd::all_work_contract::{
-    RepositoryClaimLedger, RepositoryWorkClaim, RepositoryWorkClaimState, SignedWorkroomLedger,
-    WorkroomAudience,
+    OrganizationRef, PrincipalRef, RepositoryClaimLedger, RepositoryWorkClaim,
+    RepositoryWorkClaimState, SignedWorkroomLedger, WorkSnapshot, WorkroomAudience,
 };
 #[cfg(all(test, feature = "test-support"))]
 use omega_work_index::DogfoodFixtureAdapter;
 use omega_work_index::{
     DOGFOOD_PROJECT_ID, DogfoodPlanningOrigin, DogfoodPlanningViewModel, FixtureIssue,
     FixtureIssueRelationKind, FixtureLifecycleType, FixturePriority, PlanningFilter, PlanningGroup,
-    PlanningSort, PlanningViewKind, PlanningViewQuery, SECURITY_PROJECT_ID, project_planning_view,
+    PlanningSort, PlanningViewKind, PlanningViewQuery, SECURITY_PROJECT_ID, github_work_ref,
+    project_planning_view,
 };
 use serde::{Deserialize, Serialize};
 use ui::{Button, ButtonSize, ButtonStyle, Color, Icon, IconName, Label, LabelSize, prelude::*};
@@ -72,6 +73,10 @@ pub enum DogfoodSurfaceEvent {
         issue_id: String,
         action: DogfoodClaimAction,
     },
+    WorkCommandRequested {
+        issue_id: String,
+        action: DogfoodWorkCommandAction,
+    },
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -82,6 +87,19 @@ pub enum DogfoodClaimAction {
     Heartbeat,
     Block,
     Release,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum DogfoodWorkCommandAction {
+    Refresh,
+    AssignToMe,
+    Unassign,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct DogfoodWorkCommandContext {
+    pub principal_ref: PrincipalRef,
+    pub organization_ref: OrganizationRef,
 }
 
 pub struct DogfoodSurface {
@@ -95,6 +113,11 @@ pub struct DogfoodSurface {
     repository_claim_busy: bool,
     signed_workroom_ledger: Option<SignedWorkroomLedger>,
     signed_workroom_error: Option<String>,
+    work_command_context: Option<DogfoodWorkCommandContext>,
+    work_command_context_error: Option<String>,
+    work_command_snapshot: Option<WorkSnapshot>,
+    work_command_error: Option<String>,
+    work_command_busy: bool,
     agent_session_simulation_scene: AgentSessionSimulationScene,
     filter: PlanningFilter,
     group: PlanningGroup,
@@ -135,6 +158,13 @@ impl DogfoodSurface {
             repository_claim_busy: false,
             signed_workroom_ledger: None,
             signed_workroom_error: None,
+            work_command_context: None,
+            work_command_context_error: Some(
+                "Live commands need a verified Effective Principal and Organization.".into(),
+            ),
+            work_command_snapshot: None,
+            work_command_error: None,
+            work_command_busy: false,
             agent_session_simulation_scene: AgentSessionSimulationScene::Pending,
             filter: state.filter,
             group: state.group,
@@ -148,6 +178,10 @@ impl DogfoodSurface {
 
     pub fn selected_issue_id(&self) -> &str {
         &self.selected_issue_id
+    }
+
+    pub fn work_command_snapshot(&self) -> Option<&WorkSnapshot> {
+        self.work_command_snapshot.as_ref()
     }
 
     pub fn scene(&self) -> DogfoodScene {
@@ -212,6 +246,32 @@ impl DogfoodSurface {
         cx.notify();
     }
 
+    pub fn set_work_command_context(
+        &mut self,
+        context: Option<DogfoodWorkCommandContext>,
+        error: Option<String>,
+        cx: &mut Context<Self>,
+    ) {
+        self.work_command_context = context;
+        self.work_command_context_error = error;
+        cx.notify();
+    }
+
+    pub fn set_work_command_state(
+        &mut self,
+        snapshot: Option<WorkSnapshot>,
+        error: Option<String>,
+        busy: bool,
+        cx: &mut Context<Self>,
+    ) {
+        if let Some(snapshot) = snapshot {
+            self.work_command_snapshot = Some(snapshot);
+        }
+        self.work_command_error = error;
+        self.work_command_busy = busy;
+        cx.notify();
+    }
+
     fn set_agent_session_simulation_scene(
         &mut self,
         scene: AgentSessionSimulationScene,
@@ -229,11 +289,10 @@ impl DogfoodSurface {
             .source_repositories
             .iter()
             .find(|repository| repository.id == issue.repository_id)?;
-        let number = issue.id.rsplit(':').next()?;
-        Some(format!(
-            "work:github:{}/{}:{number}",
-            repository.owner.to_ascii_lowercase(),
-            repository.name.to_ascii_lowercase()
+        Some(github_work_ref(
+            &repository.owner,
+            &repository.name,
+            issue.number,
         ))
     }
 
@@ -254,6 +313,28 @@ impl DogfoodSurface {
         self.repository_claim_busy = true;
         self.repository_claim_error = None;
         cx.emit(DogfoodSurfaceEvent::RepositoryClaimRequested {
+            issue_id: self.selected_issue_id.clone(),
+            action,
+        });
+        cx.notify();
+    }
+
+    fn request_work_command(&mut self, action: DogfoodWorkCommandAction, cx: &mut Context<Self>) {
+        if self.work_command_busy {
+            return;
+        }
+        if action != DogfoodWorkCommandAction::Refresh && self.work_command_context.is_none() {
+            self.work_command_error = Some(
+                self.work_command_context_error
+                    .clone()
+                    .unwrap_or_else(|| "Live command authority is unavailable.".into()),
+            );
+            cx.notify();
+            return;
+        }
+        self.work_command_busy = true;
+        self.work_command_error = None;
+        cx.emit(DogfoodSurfaceEvent::WorkCommandRequested {
             issue_id: self.selected_issue_id.clone(),
             action,
         });
@@ -343,6 +424,9 @@ impl DogfoodSurface {
             return;
         }
         self.project_id = project_id.to_string();
+        self.work_command_snapshot = None;
+        self.work_command_error = None;
+        self.work_command_busy = false;
         self.selected_issue_id = if project_id == DOGFOOD_PROJECT_ID {
             "issue:omega:214".into()
         } else {
@@ -373,6 +457,9 @@ impl DogfoodSurface {
             return;
         }
         self.selected_issue_id = issue_id;
+        self.work_command_snapshot = None;
+        self.work_command_error = None;
+        self.work_command_busy = false;
         if open {
             self.scene = DogfoodScene::Issue;
         }
@@ -1093,6 +1180,32 @@ impl DogfoodSurface {
             .as_ref()
             .map(|claim| repository_claim_state_label(&claim.state))
             .unwrap_or("Unclaimed");
+        let selected_work_ref = self.selected_work_ref();
+        let command_snapshot = self.work_command_snapshot.as_ref().filter(|snapshot| {
+            selected_work_ref
+                .as_ref()
+                .is_some_and(|work_ref| snapshot.summary.work_ref.0 == *work_ref)
+        });
+        let assignee = command_snapshot
+            .and_then(|snapshot| snapshot.summary.assignee.0.as_ref())
+            .map_or("Unassigned".into(), |assignee| {
+                assignee.principal_ref.0.clone()
+            });
+        let delegate = command_snapshot
+            .and_then(|snapshot| snapshot.summary.agent_delegate.as_ref())
+            .and_then(|delegate| delegate.as_ref())
+            .map_or("None".into(), |delegate| delegate.agent_ref.0.clone());
+        let session = command_snapshot
+            .and_then(|snapshot| snapshot.session_refs.last())
+            .map_or("None".into(), |session| session.0.clone());
+        let command_revision = command_snapshot
+            .map(|snapshot| snapshot.summary.revision.0)
+            .or(issue.work_revision);
+        let command_context_ready = self.work_command_context.is_some()
+            && self.fixture.origin != DogfoodPlanningOrigin::Fixture;
+        let command_mutation_ready = command_context_ready
+            && command_snapshot.is_some()
+            && self.work_command_error.is_none();
         h_flex()
             .items_start()
             .gap_4()
@@ -1167,7 +1280,7 @@ impl DogfoodSurface {
                     )
                     .child(section_heading("Execution", cx))
                     .child(
-                        Label::new("Unassigned · No delegate · No live session")
+                        Label::new(format!("{assignee} · {delegate} · {session}"))
                             .size(LabelSize::Small)
                             .color(Color::Muted),
                     ),
@@ -1208,18 +1321,100 @@ impl DogfoodSurface {
                         priority_label(issue.priority).into(),
                         cx,
                     ))
-                    .child(inspector_row("Assignee", "Unassigned".into(), cx))
-                    .child(inspector_row("Agent delegate", "None".into(), cx))
-                    .child(inspector_row("Session", "None".into(), cx))
+                    .child(inspector_row("Assignee", assignee, cx))
+                    .child(inspector_row("Agent delegate", delegate, cx))
+                    .child(inspector_row("Session", session, cx))
                     .child(inspector_row(
                         "Authority",
                         if self.fixture.origin == DogfoodPlanningOrigin::Fixture {
                             "Simulation · read only".into()
                         } else {
-                            "Canonical read · no command authority".into()
+                            if command_context_ready {
+                                "Canonical command admission".into()
+                            } else {
+                                "Canonical read · command authority unavailable".into()
+                            }
                         },
                         cx,
                     ))
+                    .child(section_heading("Work commands", cx))
+                    .child(inspector_row(
+                        "Command revision",
+                        command_revision.map_or("Unavailable".into(), |value| value.to_string()),
+                        cx,
+                    ))
+                    .child(
+                        h_flex()
+                            .gap_1()
+                            .flex_wrap()
+                            .child(
+                                claim_button(
+                                    "work-command-refresh",
+                                    "Refresh",
+                                    self.work_command_busy
+                                        || self.fixture.origin == DogfoodPlanningOrigin::Fixture,
+                                )
+                                .on_click(cx.listener(|this, _, _, cx| {
+                                    this.request_work_command(
+                                        DogfoodWorkCommandAction::Refresh,
+                                        cx,
+                                    )
+                                })),
+                            )
+                            .when(command_snapshot.is_some_and(|snapshot| {
+                                snapshot.summary.assignee.0.is_none()
+                            }), |controls| {
+                                controls.child(
+                                    claim_button(
+                                        "work-command-assign",
+                                        "Assign to me",
+                                        self.work_command_busy || !command_mutation_ready,
+                                    )
+                                    .on_click(cx.listener(|this, _, _, cx| {
+                                        this.request_work_command(
+                                            DogfoodWorkCommandAction::AssignToMe,
+                                            cx,
+                                        )
+                                    })),
+                                )
+                            })
+                            .when(command_snapshot.is_some_and(|snapshot| {
+                                snapshot.summary.assignee.0.is_some()
+                            }), |controls| {
+                                controls.child(
+                                    claim_button(
+                                        "work-command-unassign",
+                                        "Unassign",
+                                        self.work_command_busy || !command_mutation_ready,
+                                    )
+                                    .on_click(cx.listener(|this, _, _, cx| {
+                                        this.request_work_command(
+                                            DogfoodWorkCommandAction::Unassign,
+                                            cx,
+                                        )
+                                    })),
+                                )
+                            }),
+                    )
+                    .child(
+                        Label::new(
+                            self.work_command_error
+                                .clone()
+                                .or_else(|| self.work_command_context_error.clone())
+                                .unwrap_or_else(|| {
+                                    "Commands use the displayed Effective Principal and Organization."
+                                        .into()
+                                }),
+                        )
+                        .size(LabelSize::XSmall)
+                        .color(if self.work_command_error.is_some() {
+                            Color::Error
+                        } else if command_context_ready {
+                            Color::Muted
+                        } else {
+                            Color::Warning
+                        }),
+                    )
                     .child(section_heading("Repository claim", cx))
                     .child(inspector_row("Claim state", claim_state.into(), cx))
                     .child(inspector_row(
@@ -1810,6 +2005,14 @@ mod tests {
         assert_eq!(state.project_id, DOGFOOD_PROJECT_ID);
         assert_eq!(state.selected_issue_id, "issue:omega:214");
         assert_eq!(state.scene, DogfoodScene::Overview);
+    }
+
+    #[test]
+    fn github_work_identity_matches_the_canonical_all_work_slug() {
+        assert_eq!(
+            github_work_ref("OpenAgentsInc", "omega", 214),
+            "work:github:openagentsinc-omega:214"
+        );
     }
 
     #[test]

@@ -42,7 +42,10 @@ use crate::ManageProfiles;
 use crate::agent_connection_store::AgentConnectionStore;
 use crate::completion_provider::{AgentContextSelection, AgentContextSource};
 use crate::forensics_work_projection::{ForensicsWorkProjection, project_forensics_work};
-use crate::omega_dogfood_surface::{DogfoodClaimAction, DogfoodSurface, DogfoodSurfaceEvent};
+use crate::omega_dogfood_surface::{
+    DogfoodClaimAction, DogfoodSurface, DogfoodSurfaceEvent, DogfoodWorkCommandAction,
+    DogfoodWorkCommandContext,
+};
 use crate::omega_work_detail_surface::{
     WorkDelegationCandidate, WorkDetailSurface, WorkDetailSurfaceEvent,
 };
@@ -119,11 +122,12 @@ use omega_work_detail::{
     snapshot_from_index_item, write_journal_value, write_participation_journal,
 };
 use omega_work_index::{
-    DOGFOOD_PROJECT_ID, DogfoodFixtureAdapter, DogfoodFixtureGate, DogfoodPlanningSourceState,
-    DogfoodPlanningViewModel, EFFECT_ADAPTER_ID, FORENSICS_ADAPTER_ID, NativeForensicsPhase,
-    NativeForensicsRecord, NativeThreadLifecycle, NativeThreadRecord, SECURITY_PROJECT_ID,
-    THREAD_ADAPTER_ID, WorkIndex, WorkIndexItem, WorkIndexView, WorkSourceEntity, adapt_forensics,
-    adapt_thread, read_dogfood_planning_snapshot, write_dogfood_planning_snapshot,
+    DOGFOOD_PROJECT_ID, DogfoodFixtureAdapter, DogfoodFixtureGate, DogfoodPlanningOrigin,
+    DogfoodPlanningSourceState, DogfoodPlanningViewModel, EFFECT_ADAPTER_ID, FORENSICS_ADAPTER_ID,
+    NativeForensicsPhase, NativeForensicsRecord, NativeThreadLifecycle, NativeThreadRecord,
+    SECURITY_PROJECT_ID, THREAD_ADAPTER_ID, WorkIndex, WorkIndexItem, WorkIndexView,
+    WorkSourceEntity, adapt_forensics, adapt_thread, github_work_ref,
+    read_dogfood_planning_snapshot, write_dogfood_planning_snapshot,
 };
 use omega_workbench_state::{
     DomainBlockRoute, EntityNavigationHistory as OmegaNavigationHistory, EntityRoute as OmegaRoute,
@@ -2848,6 +2852,14 @@ fn dogfood_claim_action_label(action: DogfoodClaimAction) -> &'static str {
     }
 }
 
+fn dogfood_work_command_action_label(action: DogfoodWorkCommandAction) -> &'static str {
+    match action {
+        DogfoodWorkCommandAction::Refresh => "refresh",
+        DogfoodWorkCommandAction::AssignToMe => "assign",
+        DogfoodWorkCommandAction::Unassign => "unassign",
+    }
+}
+
 fn dogfood_claim_collision_scope(
     repository: &str,
     number: u64,
@@ -3708,6 +3720,7 @@ pub struct AgentPanel {
     _dogfood_planning_persist: Option<Task<()>>,
     _dogfood_claim_task: Option<Task<()>>,
     _dogfood_workroom_refresh: Option<Task<()>>,
+    _dogfood_work_command_task: Option<Task<()>>,
     omega_work_detail: Option<Entity<WorkDetailSurface>>,
     _omega_work_detail_subscription: Option<Subscription>,
     _omega_work_detail_load: Option<Task<()>>,
@@ -4474,6 +4487,7 @@ impl AgentPanel {
             _dogfood_planning_persist: None,
             _dogfood_claim_task: None,
             _dogfood_workroom_refresh: None,
+            _dogfood_work_command_task: None,
             omega_work_detail: None,
             _omega_work_detail_subscription: None,
             _omega_work_detail_load: None,
@@ -4593,6 +4607,7 @@ impl AgentPanel {
                     .update(cx, |panel, cx| {
                         if panel.effective_principal != projection {
                             panel.effective_principal = projection;
+                            panel.update_dogfood_work_command_context(cx);
                             cx.notify();
                         }
                     })
@@ -4603,6 +4618,46 @@ impl AgentPanel {
                 executor.timer(std::time::Duration::from_secs(5)).await;
             }
         }));
+    }
+
+    fn dogfood_work_command_context(&self) -> Result<DogfoodWorkCommandContext, String> {
+        if self.effective_principal.state
+            != crate::effective_principal::EffectivePrincipalState::Enrolled
+        {
+            return Err("Live commands need an enrolled Effective Principal.".into());
+        }
+        let principal_ref = self
+            .effective_principal
+            .principal_ref
+            .as_ref()
+            .ok_or_else(|| "The Effective Principal reference is unavailable.".to_string())?;
+        let organization_ref = self
+            .effective_principal
+            .organization_ref
+            .as_ref()
+            .ok_or_else(|| {
+                "Live commands are disabled until Organization membership is verified.".to_string()
+            })?;
+        Ok(DogfoodWorkCommandContext {
+            principal_ref: omega_effectd::all_work_contract::PrincipalRef::try_from(
+                principal_ref.clone(),
+            )
+            .map_err(|error| error.to_string())?,
+            organization_ref: omega_effectd::all_work_contract::OrganizationRef::try_from(
+                organization_ref.clone(),
+            )
+            .map_err(|error| error.to_string())?,
+        })
+    }
+
+    fn update_dogfood_work_command_context(&mut self, cx: &mut Context<Self>) {
+        let context = self.dogfood_work_command_context();
+        if let Some(surface) = &self.dogfood_surface {
+            surface.update(cx, |surface, cx| match context {
+                Ok(context) => surface.set_work_command_context(Some(context), None, cx),
+                Err(error) => surface.set_work_command_context(None, Some(error), cx),
+            });
+        }
     }
 
     /// Ask custody to persist the dismissal. Once value has accrued, custody
@@ -17666,6 +17721,15 @@ impl AgentPanel {
                         surface.set_planning_view(view.clone(), cx)
                     });
                 }
+                if view.origin != DogfoodPlanningOrigin::Fixture {
+                    let selected_issue_id = panel
+                        .dogfood_surface
+                        .as_ref()
+                        .map(|surface| surface.read(cx).selected_issue_id().to_string());
+                    if let Some(selected_issue_id) = selected_issue_id {
+                        panel.refresh_dogfood_work_command(&selected_issue_id, cx);
+                    }
+                }
                 if view.origin != omega_work_index::DogfoodPlanningOrigin::Fixture {
                     let data_dir = paths::data_dir().clone();
                     panel._dogfood_planning_persist = Some(cx.background_spawn(async move {
@@ -17736,12 +17800,9 @@ impl AgentPanel {
                     return Ok(ledger);
                 }
 
-                let work_ref = omega_effectd::all_work_contract::WorkRef::try_from(format!(
-                    "work:github:{}/{}:{}",
-                    repository.owner.to_ascii_lowercase(),
-                    repository.name.to_ascii_lowercase(),
-                    issue.number
-                ))?;
+                let work_ref = omega_effectd::all_work_contract::WorkRef::try_from(
+                    github_work_ref(&repository.owner, &repository.name, issue.number),
+                )?;
                 let packet_ref = omega_effectd::all_work_contract::WorkPacketRef::try_from(
                     format!(
                         "work-packet:github:{}/{}:{}",
@@ -17928,6 +17989,171 @@ impl AgentPanel {
         }));
     }
 
+    fn refresh_dogfood_work_command(&mut self, issue_id: &str, cx: &mut Context<Self>) {
+        let Some(fixture) = self.dogfood_fixture.as_ref() else {
+            return;
+        };
+        if fixture.origin == DogfoodPlanningOrigin::Fixture {
+            return;
+        }
+        let Some(issue) = fixture
+            .graph
+            .issues
+            .iter()
+            .find(|value| value.id == issue_id)
+        else {
+            return;
+        };
+        let Some(repository) = fixture
+            .graph
+            .source_repositories
+            .iter()
+            .find(|value| value.id == issue.repository_id)
+        else {
+            return;
+        };
+        let work_ref = github_work_ref(&repository.owner, &repository.name, issue.number);
+        let surface = self.dogfood_surface.clone();
+        if let Some(surface) = &surface {
+            surface.update(cx, |surface, cx| {
+                surface.set_work_command_state(None, None, true, cx)
+            });
+        }
+        let supervisor = omega_effectd::shared_supervisor(cx).ok();
+        self._dogfood_work_command_task = Some(cx.spawn(async move |_this, cx| {
+            let result: Result<omega_effectd::all_work_contract::WorkSnapshot> = async {
+                let supervisor = supervisor.context("omega-effectd is unavailable")?;
+                let mut guard = supervisor.lock().await;
+                guard.ensure_started().await?;
+                guard
+                    .read_work_snapshot(omega_effectd::all_work_contract::WorkSnapshotReadRequest {
+                        work_ref: omega_effectd::all_work_contract::WorkRef::try_from(work_ref)?,
+                    })
+                    .await
+                    .map(|value| value.snapshot)
+                    .map_err(anyhow::Error::from)
+            }
+            .await;
+            if let Some(surface) = surface {
+                let _ = surface.update(cx, |surface, cx| match result {
+                    Ok(snapshot) => surface.set_work_command_state(Some(snapshot), None, false, cx),
+                    Err(error) => {
+                        surface.set_work_command_state(None, Some(error.to_string()), false, cx)
+                    }
+                });
+            }
+        }));
+    }
+
+    fn execute_dogfood_work_command(
+        &mut self,
+        issue_id: &str,
+        action: DogfoodWorkCommandAction,
+        cx: &mut Context<Self>,
+    ) {
+        if action == DogfoodWorkCommandAction::Refresh {
+            self.refresh_dogfood_work_command(issue_id, cx);
+            return;
+        }
+        let Some(surface) = self.dogfood_surface.clone() else {
+            return;
+        };
+        let context = match self.dogfood_work_command_context() {
+            Ok(context) => context,
+            Err(error) => {
+                surface.update(cx, |surface, cx| {
+                    surface.set_work_command_state(None, Some(error), false, cx)
+                });
+                return;
+            }
+        };
+        let Some(snapshot) = surface.read(cx).work_command_snapshot().cloned() else {
+            surface.update(cx, |surface, cx| {
+                surface.set_work_command_state(
+                    None,
+                    Some("Refresh the canonical Work snapshot before issuing a command.".into()),
+                    false,
+                    cx,
+                )
+            });
+            return;
+        };
+        let revision = snapshot.summary.revision.0;
+        let work_ref = snapshot.summary.work_ref.clone();
+        let work_digest = format!("{:x}", Sha256::digest(work_ref.0.as_bytes()));
+        let work_key = work_digest[..16].to_string();
+        let action_label = dogfood_work_command_action_label(action);
+        let occurred_at = Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Millis, true);
+        let command = match action {
+            DogfoodWorkCommandAction::AssignToMe => {
+                omega_effectd::all_work_contract::WorkCommand::Assign {
+                    assignee: omega_effectd::all_work_contract::HumanAssignee {
+                        kind: omega_effectd::all_work_contract::AssigneeKind::Human,
+                        principal_ref: context.principal_ref.clone(),
+                    },
+                }
+            }
+            DogfoodWorkCommandAction::Unassign => {
+                omega_effectd::all_work_contract::WorkCommand::Unassign {}
+            }
+            DogfoodWorkCommandAction::Refresh => unreachable!(),
+        };
+        surface.update(cx, |surface, cx| {
+            surface.set_work_command_state(None, None, true, cx)
+        });
+        let supervisor = omega_effectd::shared_supervisor(cx).ok();
+        self._dogfood_work_command_task = Some(cx.spawn(async move |_this, cx| {
+            let result: Result<omega_effectd::all_work_contract::WorkCommandExecuteResult> =
+                async {
+                    let supervisor = supervisor.context("omega-effectd is unavailable")?;
+                    let mut guard = supervisor.lock().await;
+                    guard.ensure_started().await?;
+                    guard
+                        .execute_work_command(
+                            omega_effectd::all_work_contract::WorkCommandExecuteRequest {
+                                intent_ref: omega_effectd::all_work_contract::IntentRef::try_from(
+                                    format!(
+                                        "intent:omega-ui:{work_key}:{action_label}:r{revision}"
+                                    ),
+                                )?,
+                                idempotency_key:
+                                    omega_effectd::all_work_contract::IdempotencyKey::try_from(
+                                        format!(
+                                            "omega-ui-work-command-{work_key}-{action_label}-r{revision}"
+                                        ),
+                                    )?,
+                                expected_revision: omega_effectd::all_work_contract::SafeInteger(
+                                    revision,
+                                ),
+                                effective_principal_ref: context.principal_ref,
+                                organization_ref: context.organization_ref,
+                                capability_ref:
+                                    omega_effectd::all_work_contract::CapabilityRef::try_from(
+                                        "capability:work-command:execute".to_string(),
+                                    )?,
+                                work_ref,
+                                occurred_at:
+                                    omega_effectd::all_work_contract::IsoTimestamp::try_from(
+                                        occurred_at,
+                                    )?,
+                                command,
+                            },
+                        )
+                        .await
+                        .map_err(anyhow::Error::from)
+                }
+                .await;
+            let _ = surface.update(cx, |surface, cx| match result {
+                Ok(result) => {
+                    surface.set_work_command_state(Some(result.snapshot), None, false, cx)
+                }
+                Err(error) => {
+                    surface.set_work_command_state(None, Some(error.to_string()), false, cx)
+                }
+            });
+        }));
+    }
+
     fn refresh_dogfood_workroom(&mut self, issue_id: &str, cx: &mut Context<Self>) {
         let Some(fixture) = self.dogfood_fixture.as_ref() else {
             return;
@@ -17948,12 +18174,7 @@ impl AgentPanel {
         else {
             return;
         };
-        let work_ref = format!(
-            "work:github:{}/{}:{}",
-            repository.owner.to_ascii_lowercase(),
-            repository.name.to_ascii_lowercase(),
-            issue.number,
-        );
+        let work_ref = github_work_ref(&repository.owner, &repository.name, issue.number);
         let supervisor = omega_effectd::shared_supervisor(cx).ok();
         let surface = self.dogfood_surface.clone();
         self._dogfood_workroom_refresh = Some(cx.spawn(async move |_this, cx| {
@@ -18045,11 +18266,15 @@ impl AgentPanel {
                             DogfoodClaimAction::Refresh,
                             cx,
                         );
+                        this.refresh_dogfood_work_command(&issue_id, cx);
                         this.refresh_dogfood_workroom(&issue_id, cx);
                         cx.notify();
                     }
                     DogfoodSurfaceEvent::RepositoryClaimRequested { issue_id, action } => {
                         this.execute_dogfood_claim_action(&issue_id, action, cx);
+                    }
+                    DogfoodSurfaceEvent::WorkCommandRequested { issue_id, action } => {
+                        this.execute_dogfood_work_command(&issue_id, action, cx);
                     }
                 },
             ));
@@ -18057,9 +18282,11 @@ impl AgentPanel {
             surface
         };
         surface.update(cx, |surface, cx| surface.select_project(project_id, cx));
+        self.update_dogfood_work_command_context(cx);
         self.refresh_dogfood_planning(cx);
         let selected_issue_id = surface.read(cx).selected_issue_id().to_string();
         self.execute_dogfood_claim_action(&selected_issue_id, DogfoodClaimAction::Refresh, cx);
+        self.refresh_dogfood_work_command(&selected_issue_id, cx);
         self.refresh_dogfood_workroom(&selected_issue_id, cx);
         surface.read(cx).focus_handle(cx).focus(window, cx);
         cx.notify();

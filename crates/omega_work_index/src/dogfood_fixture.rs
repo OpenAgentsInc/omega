@@ -558,6 +558,8 @@ pub struct FixtureIssue {
     pub label_ids: Vec<String>,
     pub completed: bool,
     #[serde(skip_serializing_if = "Option::is_none")]
+    pub work_revision: Option<u64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub assignee_user_id: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub delegate_user_id: Option<String>,

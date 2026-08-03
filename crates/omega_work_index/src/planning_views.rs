@@ -10,6 +10,20 @@ use serde::{Deserialize, Serialize};
 
 use crate::{DogfoodPlanningViewModel, FixtureIssue, FixtureLifecycleType, FixturePriority};
 
+/// Match the GitHub bootstrap adapter's canonical repository slug exactly.
+pub fn github_work_ref(owner: &str, repository: &str, number: u64) -> String {
+    let mut slug = String::new();
+    for character in format!("{owner}/{repository}").chars() {
+        if character.is_ascii_alphanumeric() {
+            slug.push(character.to_ascii_lowercase());
+        } else if !slug.is_empty() && !slug.ends_with('-') {
+            slug.push('-');
+        }
+    }
+    let slug = slug.trim_end_matches('-');
+    format!("work:github:{slug}:{number}")
+}
+
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum PlanningViewKind {
@@ -193,12 +207,7 @@ fn planning_row(model: &DogfoodPlanningViewModel, issue: &FixtureIssue) -> Optio
         .filter(|relation| relation.related_issue_id == issue.id)
         .count();
     Some(PlanningViewRow {
-        work_ref: format!(
-            "work:github:{}/{}:{}",
-            repository.owner.to_ascii_lowercase(),
-            repository.name.to_ascii_lowercase(),
-            issue.number
-        ),
+        work_ref: github_work_ref(&repository.owner, &repository.name, issue.number),
         issue_id: issue.id.clone(),
         identifier: issue.identifier.clone(),
         title: issue.title.clone(),
@@ -286,6 +295,18 @@ mod tests {
             sort: PlanningSort::SourceOrder,
             search: String::new(),
         }
+    }
+
+    #[test]
+    fn github_work_identity_matches_the_bootstrap_adapter_slug() {
+        assert_eq!(
+            github_work_ref("OpenAgentsInc", "Omega", 214),
+            "work:github:openagentsinc-omega:214"
+        );
+        assert_eq!(
+            github_work_ref(" OpenAgentsInc ", "omega.desktop", 214),
+            "work:github:openagentsinc-omega-desktop:214"
+        );
     }
 
     #[test]

@@ -628,6 +628,7 @@ fn project_live_graph(
                 .cloned()
                 .unwrap_or_default(),
             completed: work.summary.state == WorkState::Completed,
+            work_revision: Some(work.summary.revision.0),
             assignee_user_id: None,
             delegate_user_id: None,
             execution_refs: FixtureExecutionRefs {
@@ -1074,7 +1075,7 @@ mod tests {
     }
 
     fn representative_live_graph(issue: &FixtureIssue) -> PlanningGraph {
-        let work_ref = format!("work:github:openagentsinc/omega:{}", issue.number);
+        let work_ref = crate::github_work_ref("OpenAgentsInc", "omega", issue.number);
         let resource = |resource_ref: &str,
                         kind: &str,
                         name: &str,
