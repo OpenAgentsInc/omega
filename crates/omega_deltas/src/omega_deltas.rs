@@ -28246,7 +28246,8 @@ mod tests {
     }
 
     /// OMEGA-DELTA-0234. The Omega footer projects the selected public account
-    /// identity and signer state. It fails closed on conflicts and does not
+    /// identity and signer state. Organization selection requires an exact
+    /// membership fence and complete prior-scope clearing; it does not
     /// manufacture Organization or Sync truth from the dogfood fixture.
     #[test]
     fn omega_footer_uses_the_effective_principal_authority() {
@@ -28293,6 +28294,31 @@ mod tests {
             !panel.contains(".child(\"Anonymous\")"),
             "OMEGA-DELTA-0234: hard-coded Anonymous identity returned"
         );
+
+        let organization_scope = without_comments(&read_repository_file(
+            "crates/agent_ui/src/organization_scope.rs",
+        ));
+        for required in [
+            "OrganizationMembershipProjection",
+            "account_generation",
+            "source_revision",
+            "StaleAccountFence",
+            "OrganizationScopeClearReceipt",
+            "Navigation",
+            "Caches",
+            "Counts",
+            "Search",
+            "Recents",
+            "Work",
+            "Threads",
+            "Activity",
+            "ScopeNotCleared",
+        ] {
+            assert!(
+                organization_scope.contains(required),
+                "OMEGA-DELTA-0234: Organization scope fence lost `{required}`"
+            );
+        }
     }
 
     /// OMEGA-DELTA-0235. Omega-owned presentation status uses one shared

@@ -39,10 +39,27 @@ caches, counts, search, recents, Work, Threads, and activity, then publish the
 new scope. No prior-scope row may flash while the new source hydrates. Missing,
 stale, conflicting, or revoked membership keeps the new scope unavailable.
 
+The source-neutral transaction model now lives in
+`crates/agent_ui/src/organization_scope.rs`. A membership projection must name
+its membership, account, account generation, principal, Organization, source
+revision, display name, and verified/stale/revoked state. A switch rejects a
+stale account or membership fence and cannot commit until navigation, caches,
+counts, search, recents, Work, Threads, and activity each return one exact clear
+receipt. Duplicate and previous-generation receipts fail closed.
+
+`EffectivePrincipalProjection` accepts this model as a separate optional input.
+An exact verified membership can supply the Organization label and reference;
+stale, revoked, or conflicting membership remains visible as degraded scope and
+cannot activate Work commands. The production account poll still supplies no
+membership input because no authoritative adapter exists. Omega therefore
+continues to show `Local scope` and keeps Organization-dependent controls
+disabled. The model is not evidence that switching has occurred.
+
 ## Evidence boundary
 
-Unit and deterministic UI coverage can prove projection and fail-closed
-semantics. omega#218 stays open until an installed enrolled identity and real
-Organization render correctly, local/offline/degraded states pass, and a
-multi-Organization switch demonstrates complete isolation across windows and
-restart.
+Unit and deterministic UI coverage can prove projection and transaction
+semantics. omega#218 stays open until an authoritative membership adapter feeds
+the model, all real scope consumers execute the clear transaction, an installed
+enrolled identity and Organization render correctly, local/offline/degraded
+states pass, and a multi-Organization switch demonstrates complete isolation
+across windows and restart.

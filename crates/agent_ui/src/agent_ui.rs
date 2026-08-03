@@ -67,6 +67,7 @@ pub mod omega_thread_worktree;
 pub mod omega_threads_sidebar;
 pub mod omega_work_detail_surface;
 pub mod omega_work_index_surface;
+pub mod organization_scope;
 pub mod plan_presentation;
 mod profile_selector;
 mod terminal_codegen;

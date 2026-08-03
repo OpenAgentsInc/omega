@@ -9,12 +9,23 @@ use omega_identity::{
     AccountRegistryService, SignerAvailability, SignerKind,
 };
 
+use crate::organization_scope::{OrganizationMembershipProjection, OrganizationScopeError};
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum EffectivePrincipalState {
     LocalOnly,
     Enrolled,
     Offline,
     SignerUnavailable,
+    Revoked,
+    Conflict,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum EffectiveOrganizationState {
+    Unavailable,
+    Verified,
+    Stale,
     Revoked,
     Conflict,
 }
@@ -27,6 +38,7 @@ pub(crate) struct EffectivePrincipalProjection {
     pub(crate) signer_label: String,
     pub(crate) principal_ref: Option<String>,
     pub(crate) organization_ref: Option<String>,
+    pub(crate) organization_state: EffectiveOrganizationState,
     pub(crate) state: EffectivePrincipalState,
 }
 
@@ -46,6 +58,13 @@ impl EffectivePrincipalProjection {
     }
 
     pub(crate) fn from_dashboard(dashboard: &AccountDashboardProjection) -> Self {
+        Self::from_dashboard_and_membership(dashboard, None)
+    }
+
+    pub(crate) fn from_dashboard_and_membership(
+        dashboard: &AccountDashboardProjection,
+        membership: Option<&OrganizationMembershipProjection>,
+    ) -> Self {
         let Some(active_ref) = dashboard.active.account_ref.as_ref() else {
             return Self::local_only();
         };
@@ -64,10 +83,14 @@ impl EffectivePrincipalProjection {
         {
             return Self::conflict("Identity conflict");
         }
-        Self::from_account(account)
+        Self::from_account(account, dashboard.active.generation, membership)
     }
 
-    fn from_account(account: &AccountDashboardEntry) -> Self {
+    fn from_account(
+        account: &AccountDashboardEntry,
+        account_generation: u64,
+        membership: Option<&OrganizationMembershipProjection>,
+    ) -> Self {
         let display_name = account
             .profile
             .as_ref()
@@ -100,16 +123,35 @@ impl EffectivePrincipalProjection {
                 }
             },
         };
+        let principal_ref = format!(
+            "principal:nostr:{}",
+            account.identity.public_key_hex().as_str()
+        );
+        let membership = (account.lifecycle == AccountLifecycleState::Active)
+            .then_some(membership)
+            .flatten();
+        let (scope_label, organization_ref, organization_state) =
+            match omega_effectd::all_work_contract::PrincipalRef::try_from(principal_ref.clone()) {
+                Ok(typed_principal_ref) => organization_projection(
+                    membership,
+                    &account.account_ref,
+                    account_generation,
+                    &typed_principal_ref,
+                ),
+                Err(_) => (
+                    "Organization unverified".into(),
+                    None,
+                    EffectiveOrganizationState::Conflict,
+                ),
+            };
         Self {
             display_name,
             identity_label,
-            scope_label: "Local scope".into(),
+            scope_label,
             signer_label: signer_label.into(),
-            principal_ref: Some(format!(
-                "principal:nostr:{}",
-                account.identity.public_key_hex().as_str()
-            )),
-            organization_ref: None,
+            principal_ref: Some(principal_ref),
+            organization_ref,
+            organization_state,
             state,
         }
     }
@@ -122,6 +164,7 @@ impl EffectivePrincipalProjection {
             signer_label: "Signer unavailable".into(),
             principal_ref: None,
             organization_ref: None,
+            organization_state: EffectiveOrganizationState::Unavailable,
             state: EffectivePrincipalState::LocalOnly,
         }
     }
@@ -134,6 +177,7 @@ impl EffectivePrincipalProjection {
             signer_label: "Signer not trusted".into(),
             principal_ref: None,
             organization_ref: None,
+            organization_state: EffectiveOrganizationState::Conflict,
             state: EffectivePrincipalState::Conflict,
         }
     }
@@ -151,13 +195,61 @@ impl EffectivePrincipalProjection {
 
     pub(crate) fn accessibility_label(&self) -> String {
         format!(
-            "Effective principal: {}; {}; {}; {}; {}. Open identity settings",
+            "Effective principal: {}; {}; {}; {}; {}; Organization {}. Open identity settings",
             self.display_name,
             self.identity_label,
             self.scope_label,
             self.signer_label,
-            self.status_label()
+            self.status_label(),
+            self.organization_status_label(),
         )
+    }
+
+    const fn organization_status_label(&self) -> &'static str {
+        match self.organization_state {
+            EffectiveOrganizationState::Unavailable => "unavailable",
+            EffectiveOrganizationState::Verified => "verified",
+            EffectiveOrganizationState::Stale => "stale",
+            EffectiveOrganizationState::Revoked => "revoked",
+            EffectiveOrganizationState::Conflict => "unverified",
+        }
+    }
+}
+
+fn organization_projection(
+    membership: Option<&OrganizationMembershipProjection>,
+    account_ref: &omega_identity::AccountRef,
+    account_generation: u64,
+    principal_ref: &omega_effectd::all_work_contract::PrincipalRef,
+) -> (String, Option<String>, EffectiveOrganizationState) {
+    let Some(membership) = membership else {
+        return (
+            "Local scope".into(),
+            None,
+            EffectiveOrganizationState::Unavailable,
+        );
+    };
+    match membership.validate_for(account_ref, account_generation, principal_ref) {
+        Ok(()) => (
+            membership.display_name.clone(),
+            Some(membership.organization_ref.0.clone()),
+            EffectiveOrganizationState::Verified,
+        ),
+        Err(OrganizationScopeError::StaleMembership) => (
+            "Membership stale".into(),
+            None,
+            EffectiveOrganizationState::Stale,
+        ),
+        Err(OrganizationScopeError::RevokedMembership) => (
+            "Membership revoked".into(),
+            None,
+            EffectiveOrganizationState::Revoked,
+        ),
+        Err(_) => (
+            "Organization unverified".into(),
+            None,
+            EffectiveOrganizationState::Conflict,
+        ),
     }
 }
 
@@ -194,6 +286,9 @@ fn signer_label(kind: SignerKind, availability: SignerAvailability) -> &'static 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::organization_scope::{
+        OrganizationMembershipProjection, OrganizationMembershipState,
+    };
     use nostr::{Keys, SecretKey};
     use omega_identity::{
         AccountDashboardProjection, AccountProfileSummary, AccountRef, AccountRetirementState,
@@ -245,6 +340,30 @@ mod tests {
         }
     }
 
+    fn membership(
+        dashboard: &AccountDashboardProjection,
+        state: OrganizationMembershipState,
+    ) -> OrganizationMembershipProjection {
+        let account = &dashboard.accounts[0];
+        OrganizationMembershipProjection {
+            membership_ref: "membership:openagents:owner".into(),
+            account_ref: account.account_ref.clone(),
+            account_generation: dashboard.active.generation,
+            principal_ref: omega_effectd::all_work_contract::PrincipalRef::try_from(format!(
+                "principal:nostr:{}",
+                account.identity.public_key_hex().as_str()
+            ))
+            .expect("principal ref"),
+            organization_ref: omega_effectd::all_work_contract::OrganizationRef::try_from(
+                "organization:openagents".to_string(),
+            )
+            .expect("organization ref"),
+            display_name: "OpenAgents".into(),
+            source_revision: 4,
+            state,
+        }
+    }
+
     #[test]
     fn exact_active_account_is_projected_without_claiming_an_organization() {
         let projection = EffectivePrincipalProjection::from_dashboard(&dashboard(&["account-a"]));
@@ -259,6 +378,75 @@ mod tests {
                 .is_some_and(|value| value.starts_with("principal:nostr:"))
         );
         assert_eq!(projection.organization_ref, None);
+        assert_eq!(
+            projection.organization_state,
+            EffectiveOrganizationState::Unavailable
+        );
+    }
+
+    #[test]
+    fn exact_verified_membership_projects_organization_without_merging_signer_authority() {
+        let dashboard = dashboard(&["account-a"]);
+        let membership = membership(&dashboard, OrganizationMembershipState::Verified);
+        let projection = EffectivePrincipalProjection::from_dashboard_and_membership(
+            &dashboard,
+            Some(&membership),
+        );
+        assert_eq!(projection.scope_label, "OpenAgents");
+        assert_eq!(
+            projection.organization_ref.as_deref(),
+            Some("organization:openagents")
+        );
+        assert_eq!(
+            projection.organization_state,
+            EffectiveOrganizationState::Verified
+        );
+        assert_eq!(projection.signer_label, "Local signer ready");
+    }
+
+    #[test]
+    fn stale_or_cross_generation_membership_fails_closed() {
+        let dashboard = dashboard(&["account-a"]);
+        let stale = membership(&dashboard, OrganizationMembershipState::Stale);
+        let projection =
+            EffectivePrincipalProjection::from_dashboard_and_membership(&dashboard, Some(&stale));
+        assert_eq!(projection.organization_ref, None);
+        assert_eq!(projection.scope_label, "Membership stale");
+        assert_eq!(
+            projection.organization_state,
+            EffectiveOrganizationState::Stale
+        );
+
+        let mut wrong_generation = membership(&dashboard, OrganizationMembershipState::Verified);
+        wrong_generation.account_generation += 1;
+        let projection = EffectivePrincipalProjection::from_dashboard_and_membership(
+            &dashboard,
+            Some(&wrong_generation),
+        );
+        assert_eq!(projection.organization_ref, None);
+        assert_eq!(projection.scope_label, "Organization unverified");
+        assert_eq!(
+            projection.organization_state,
+            EffectiveOrganizationState::Conflict
+        );
+    }
+
+    #[test]
+    fn local_candidate_cannot_borrow_a_verified_organization_membership() {
+        let mut dashboard = dashboard(&["account-a"]);
+        let membership = membership(&dashboard, OrganizationMembershipState::Verified);
+        dashboard.accounts[0].lifecycle = AccountLifecycleState::CandidateLocal;
+        let projection = EffectivePrincipalProjection::from_dashboard_and_membership(
+            &dashboard,
+            Some(&membership),
+        );
+        assert_eq!(projection.state, EffectivePrincipalState::LocalOnly);
+        assert_eq!(projection.scope_label, "Local scope");
+        assert_eq!(projection.organization_ref, None);
+        assert_eq!(
+            projection.organization_state,
+            EffectiveOrganizationState::Unavailable
+        );
     }
 
     #[test]
