@@ -2,7 +2,7 @@
 # Owned Omega RC macOS package entry point (OMEGA-BRAND-05).
 #
 # Produces (or dry-runs the contract for):
-#   Omega-v0.2.0-rc30-macos-arm64.dmg
+#   Omega-v0.2.0-rc31-macos-arm64.dmg
 #
 # Does not claim notarization success. Notarization runs only when owner
 # notarization secrets are present; otherwise the release record records that
@@ -13,7 +13,7 @@ set -euo pipefail
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$ROOT"
 
-readonly OMEGA_RC_VERSION="0.2.0-rc30"
+readonly OMEGA_RC_VERSION="0.2.0-rc31"
 readonly OMEGA_RC_SEMVER="0.2.0"
 readonly OMEGA_RC_CHANNEL="preview"
 readonly OMEGA_RC_DISPLAY_CHANNEL="rc"
