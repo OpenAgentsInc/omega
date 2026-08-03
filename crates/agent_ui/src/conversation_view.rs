@@ -8896,6 +8896,207 @@ pub(crate) mod tests {
         );
     }
 
+    /// omega#217. The independent VoiceOver pass on `v0.2.0-rc31` found that a
+    /// full accessibility dump taken after a completed turn contained **zero**
+    /// occurrences of either message: a screen-reader user could send a prompt
+    /// and had no way to read the answer. This asserts against the same
+    /// `accesskit::TreeUpdate` GPUI hands the macOS adapter.
+    #[gpui::test]
+    async fn a_completed_turn_publishes_its_transcript(cx: &mut TestAppContext) {
+        init_test(cx);
+
+        let connection = StubAgentConnection::new();
+        connection.set_next_prompt_updates(vec![acp::SessionUpdate::AgentMessageChunk(
+            acp::ContentChunk::new("Hello! I am Omega, glad to meet you.".into()),
+        )]);
+        let (conversation_view, cx) =
+            setup_conversation_view(StubAgentServer::new(connection.clone()), cx).await;
+        add_to_workspace(conversation_view.clone(), cx);
+
+        message_editor(&conversation_view, cx).update_in(cx, |editor, window, cx| {
+            editor.set_text("Say hello in one short sentence.", window, cx);
+        });
+        active_thread(&conversation_view, cx).update_in(cx, |view, window, cx| {
+            view.send(window, cx);
+        });
+        cx.run_until_parked();
+
+        cx.set_debug_accessibility_active(true);
+        let snapshot = cx.debug_render_snapshot();
+        let tree = snapshot
+            .accessibility_tree_json()
+            .expect("forced accessibility should capture the transcript");
+        let nodes = accessibility_nodes(tree);
+
+        assert!(
+            nodes
+                .iter()
+                .any(|node| node.role == "Log" && node.label == "Conversation transcript"),
+            "the transcript needs one named container so assistive technology can \
+             navigate to the conversation: {tree}"
+        );
+        assert!(
+            nodes.iter().any(|node| node.role == "Label"
+                && node.label == "Agent message: Hello! I am Omega, glad to meet you."),
+            "the agent's reply must be readable from the accessibility tree — this is \
+             the whole product for a screen-reader user: {tree}"
+        );
+
+        // The transcript is virtualized: the earlier turn is only in the tree
+        // while it is rendered. Scroll it back into view and read it there, the
+        // way assistive technology reaches back through a conversation.
+        active_thread(&conversation_view, cx).update(cx, |view, cx| {
+            view.list_state.scroll_to(gpui::ListOffset {
+                item_ix: 0,
+                offset_in_item: px(0.0),
+            });
+            cx.notify();
+        });
+        cx.run_until_parked();
+
+        let scrolled = cx.debug_render_snapshot();
+        let scrolled_tree = scrolled
+            .accessibility_tree_json()
+            .expect("forced accessibility should survive a scroll");
+        let scrolled_nodes = accessibility_nodes(scrolled_tree);
+        assert!(
+            scrolled_nodes.iter().any(|node| node.role == "Label"
+                && node.label == "Your message: Say hello in one short sentence."),
+            "the user's own turn must be readable from the accessibility tree: \
+             {scrolled_tree}"
+        );
+    }
+
+    /// omega#217. VoiceOver's Item Chooser reported five controls whose entire
+    /// announced name was their role (`toggle button`, `button`, `button`,
+    /// `button`, `toggle button`). The close rule names generic placeholder
+    /// labels as disqualifying on their own, so this asserts the property
+    /// rather than the five names: no control Omega publishes may be nameless.
+    #[gpui::test]
+    async fn no_transcript_or_composer_control_is_published_without_a_name(
+        cx: &mut TestAppContext,
+    ) {
+        init_test(cx);
+
+        let connection = StubAgentConnection::new();
+        connection.set_next_prompt_updates(vec![acp::SessionUpdate::AgentMessageChunk(
+            acp::ContentChunk::new("Done.".into()),
+        )]);
+        let (conversation_view, cx) =
+            setup_conversation_view(StubAgentServer::new(connection.clone()), cx).await;
+        add_to_workspace(conversation_view.clone(), cx);
+
+        message_editor(&conversation_view, cx).update_in(cx, |editor, window, cx| {
+            editor.set_text("Do the thing.", window, cx);
+        });
+        active_thread(&conversation_view, cx).update_in(cx, |view, window, cx| {
+            view.send(window, cx);
+        });
+        cx.run_until_parked();
+
+        cx.set_debug_accessibility_active(true);
+        let snapshot = cx.debug_render_snapshot();
+        let tree = snapshot
+            .accessibility_tree_json()
+            .expect("forced accessibility should capture the completed turn");
+        let nodes = accessibility_nodes(tree);
+
+        // The retained workspace pane chrome the test harness mounts has its own
+        // unlabelled controls and is a separate crate's defect; the primary
+        // interface does not render it. Everything else in the frame is Omega's
+        // and must be named. Listing the exemptions explicitly keeps this
+        // assertion from quietly becoming vacuous.
+        const RETAINED_WORKSPACE_CHROME: [&str; 6] = [
+            "navigate_backward",
+            "navigate_forward",
+            "close tab",
+            "plus",
+            "split",
+            "toggle_zoom",
+        ];
+        let nameless: Vec<_> = nodes
+            .iter()
+            .filter(|node| {
+                node.element_id
+                    .as_deref()
+                    .is_none_or(|element_id| !RETAINED_WORKSPACE_CHROME.contains(&element_id))
+            })
+            .filter(|node| {
+                matches!(
+                    node.role.as_str(),
+                    "Button" | "CheckBox" | "RadioButton" | "MenuItem" | "Link" | "Tab"
+                )
+            })
+            .filter(|node| node.label.trim().is_empty())
+            .map(|node| {
+                format!(
+                    "{} (element_id {:?})",
+                    node.role,
+                    node.element_id.as_deref().unwrap_or("<none>")
+                )
+            })
+            .collect();
+        assert!(
+            nameless.is_empty(),
+            "every published control needs a real accessible name; these announce \
+             only their role: {nameless:?}\n{tree}"
+        );
+
+        for expected in [
+            "Copy this agent response",
+            "Message info",
+            "Scroll to user message",
+            "Scroll to top",
+            "Add context",
+        ] {
+            assert!(
+                nodes.iter().any(|node| node.label == expected),
+                "the message-action and composer controls must keep their names; \
+                 {expected:?} is missing: {tree}"
+            );
+        }
+    }
+
+    pub(crate) struct AccessibilityNode {
+        pub(crate) element_id: Option<String>,
+        pub(crate) role: String,
+        pub(crate) label: String,
+    }
+
+    /// Flatten the debug serialization of the last `accesskit::TreeUpdate` into
+    /// the three fields these tests reason about. Asserting on parsed nodes
+    /// rather than substrings keeps a test from passing because the text
+    /// happened to appear in an unrelated field.
+    pub(crate) fn accessibility_nodes(tree: &str) -> Vec<AccessibilityNode> {
+        let value: serde_json::Value =
+            serde_json::from_str(tree).expect("the accessibility tree should be valid JSON");
+        value
+            .get("nodes")
+            .and_then(serde_json::Value::as_object)
+            .expect("the accessibility tree should have a nodes object")
+            .values()
+            .map(|node| {
+                let aria = node.get("aria");
+                AccessibilityNode {
+                    element_id: node
+                        .get("element_id")
+                        .and_then(serde_json::Value::as_str)
+                        .map(str::to_owned),
+                    role: aria
+                        .and_then(|aria| aria.get("role"))
+                        .and_then(serde_json::Value::as_str)
+                        .unwrap_or_default()
+                        .to_owned(),
+                    label: aria
+                        .and_then(|aria| aria.get("label"))
+                        .and_then(serde_json::Value::as_str)
+                        .unwrap_or_default()
+                        .to_owned(),
+                }
+            })
+            .collect()
+    }
+
     /// omega#153. Direct Agent is deliberately not a logical router: its
     /// readiness continues to mean that the selected executor made a real
     /// session, preserving the mode contract while Omega changes.

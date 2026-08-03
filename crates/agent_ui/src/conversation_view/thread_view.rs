@@ -552,6 +552,33 @@ fn parse_cat_numbered_line(line: &str) -> Option<(u32, &str)> {
     Some((number.parse().ok()?, text))
 }
 
+/// omega#217. Assistive technology reads the transcript through the label on
+/// each message node, because the rendered message body is markdown and rich
+/// text that publishes no readable node of its own. A screen reader that lands
+/// on a message therefore has to hear who said it before it hears what was
+/// said, so the speaker is part of the name rather than a description — macOS
+/// maps an AccessKit description to `AXHelp`, which VoiceOver does not announce
+/// by default.
+///
+/// The transcript is long-form text, so the label is not truncated: a screen
+/// reader user who cannot see the reply must still be able to read all of it.
+fn user_message_accessible_label(text: &str) -> String {
+    accessible_message_label("Your message", text)
+}
+
+fn agent_message_accessible_label(text: &str) -> String {
+    accessible_message_label("Agent message", text)
+}
+
+fn accessible_message_label(speaker: &str, text: &str) -> String {
+    let text = text.trim();
+    if text.is_empty() {
+        format!("{speaker}, empty")
+    } else {
+        format!("{speaker}: {text}")
+    }
+}
+
 fn render_cat_numbered_code_block(
     parsed: ParsedCatNumberedCode,
     language: Option<Arc<Language>>,
@@ -6498,7 +6525,8 @@ impl ThreadView {
             .trigger_with_tooltip(
                 IconButton::new("add-context", IconName::Paperclip)
                     .icon_size(IconSize::Small)
-                    .icon_color(Color::Muted),
+                    .icon_color(Color::Muted)
+                    .aria_label("Add context"),
                 {
                     move |_window, cx| {
                         Tooltip::for_action_in(
@@ -7193,7 +7221,10 @@ impl ThreadView {
                     self.agent_id.clone()
                 };
 
-                if omega_zero_base::is_primary_interface() && !editing {
+                let user_message_text = message.content.to_markdown(cx).to_string();
+                let user_message_label = user_message_accessible_label(&user_message_text);
+
+                let user_message_body = if omega_zero_base::is_primary_interface() && !editing {
                     h_flex()
                         .id(("omega-user-message", entry_ix))
                         .w_full()
@@ -7209,9 +7240,7 @@ impl ThreadView {
                                 .rounded(px(16.0))
                                 .bg(cx.theme().colors().elevated_surface_background)
                                 .text_size(px(14.0))
-                                .child(SharedString::from(
-                                    message.content.to_markdown(cx).to_string(),
-                                )),
+                                .child(SharedString::from(user_message_text)),
                         )
                         .into_any()
                 } else {
@@ -7364,7 +7393,20 @@ impl ThreadView {
                             }),
                     )
                     .into_any()
-                }
+                };
+
+                // omega#217. Omega draws the user's turn two different ways —
+                // the primary interface's plain bubble and the editable
+                // message editor — and an accessibility node added to only one
+                // of them is a node a real user may never meet. One wrapper
+                // outside the branch is the only shape that cannot drift.
+                div()
+                    .id(("omega-transcript-user-message", entry_ix))
+                    .role(gpui::Role::Label)
+                    .aria_label(user_message_label)
+                    .w_full()
+                    .child(user_message_body)
+                    .into_any()
             }
             AgentThreadEntry::AssistantMessage(AssistantMessage {
                 chunks,
@@ -7373,6 +7415,17 @@ impl ThreadView {
             }) => {
                 let mut is_blank = true;
                 let is_last = entry_ix + 1 == total_entries;
+                let assistant_message_text = chunks
+                    .iter()
+                    .filter_map(|chunk| match chunk {
+                        AssistantMessageChunk::Message { block, .. } => block
+                            .markdown()
+                            .map(|markdown| markdown.read(cx).source().to_string()),
+                        AssistantMessageChunk::Thought { .. } => None,
+                    })
+                    .filter(|text| !text.trim().is_empty())
+                    .collect::<Vec<_>>()
+                    .join("\n\n");
                 let omega_streaming_assistant = omega_zero_base::is_primary_interface()
                     && is_last
                     && matches!(self.thread.read(cx).status(), ThreadStatus::Generating);
@@ -7445,6 +7498,9 @@ impl ThreadView {
                     Empty.into_any()
                 } else {
                     v_flex()
+                        .id(("omega-agent-message", entry_ix))
+                        .role(gpui::Role::Label)
+                        .aria_label(agent_message_accessible_label(&assistant_message_text))
                         .map(|this| {
                             if omega_zero_base::is_primary_interface() {
                                 this.px_0().py(px(7.0))
@@ -7883,6 +7939,7 @@ impl ThreadView {
             IconButton::new(("copy_agent_response", entry_ix), IconName::Copy)
                 .icon_size(IconSize::Small)
                 .icon_color(Color::Muted)
+                .aria_label("Copy this agent response")
                 .tooltip(Tooltip::text("Copy This Agent Response"))
                 .on_click(cx.listener(move |this, _, _, cx| {
                     let entries = this.thread.read(cx).entries();
@@ -7907,7 +7964,8 @@ impl ThreadView {
                 .trigger_with_tooltip(
                     IconButton::new(("assistant-message-info-button", entry_ix), IconName::Info)
                         .icon_size(IconSize::Small)
-                        .icon_color(Color::Muted),
+                        .icon_color(Color::Muted)
+                        .aria_label("Message info"),
                     |window, cx| Tooltip::text("Message info")(window, cx),
                 )
                 .anchor(gpui::Anchor::BottomRight)
@@ -7924,6 +7982,7 @@ impl ThreadView {
         )
         .icon_size(IconSize::Small)
         .icon_color(Color::Muted)
+        .aria_label("Scroll to user message")
         .tooltip(Tooltip::text("Scroll to User Message"))
         .on_click(cx.listener(move |this, _, _, cx| {
             this.scroll_to_user_message_index(user_message_index, cx);
@@ -7933,6 +7992,7 @@ impl ThreadView {
             IconButton::new(("scroll_to_top", entry_ix), IconName::ArrowUp)
                 .icon_size(IconSize::Small)
                 .icon_color(Color::Muted)
+                .aria_label("Scroll to top")
                 .tooltip(Tooltip::text("Scroll to Top"))
                 .on_click(cx.listener(move |this, _, _, cx| {
                     this.scroll_to_top(cx);
@@ -7978,6 +8038,7 @@ impl ThreadView {
                     h_flex()
                         .child(
                             IconButton::new("feedback-thumbs-up", IconName::ThumbsUp)
+                                .aria_label("Helpful response")
                                 .icon_size(IconSize::Small)
                                 .icon_color(match feedback {
                                     Some(ThreadFeedback::Positive) => Color::Accent,
@@ -8000,6 +8061,7 @@ impl ThreadView {
                         )
                         .child(
                             IconButton::new("feedback-thumbs-down", IconName::ThumbsDown)
+                                .aria_label("Not helpful response")
                                 .icon_size(IconSize::Small)
                                 .icon_color(match feedback {
                                     Some(ThreadFeedback::Negative) => Color::Accent,
@@ -15268,7 +15330,23 @@ impl Render for ThreadView {
                 if has_messages {
                     this.flex_1()
                         .size_full()
-                        .child(self.render_entries(cx))
+                        .child(
+                            // omega#217. The transcript is the product. Give it
+                            // one stable landmark so assistive technology can
+                            // jump to the conversation instead of walking the
+                            // whole window, and so the message nodes below have
+                            // a named container to belong to.
+                            div()
+                                .id("omega-transcript")
+                                .role(gpui::Role::Log)
+                                .aria_label("Conversation transcript")
+                                .flex()
+                                .flex_col()
+                                .flex_1()
+                                .min_h_0()
+                                .w_full()
+                                .child(self.render_entries(cx)),
+                        )
                         .vertical_scrollbar_for(&list_state, window, cx)
                         .into_any()
                 } else {

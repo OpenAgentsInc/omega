@@ -20788,6 +20788,9 @@ impl AgentPanel {
             let is_active = omega_thread_open && Some(row.thread_id) == active_thread_id;
             div()
                 .id(("omega-thread-tab", index))
+                .role(gpui::Role::Tab)
+                .aria_label(format!("Thread {title}"))
+                .aria_selected(is_active)
                 .when(is_active, |tab| {
                     tab.debug_selector(|| "omega.omega.thread-tab.active".into())
                         .bg(selected_background)
@@ -20825,6 +20828,9 @@ impl AgentPanel {
         let active_draft_tab = div()
             .id("omega-active-thread-tab")
             .debug_selector(|| "omega.omega.thread-tab.active".into())
+            .role(gpui::Role::Tab)
+            .aria_label(format!("Thread {active_title}"))
+            .aria_selected(true)
             .w(px(TAB_WIDTH))
             .h(px(28.))
             .flex_none()
@@ -20854,6 +20860,9 @@ impl AgentPanel {
                 div()
                     .id("omega-work-index-tab")
                     .debug_selector(|| "omega.omega.work-index-tab.active".into())
+                    .role(gpui::Role::Tab)
+                    .aria_label(view.title())
+                    .aria_selected(true)
                     .w(px(TAB_WIDTH))
                     .h(px(28.))
                     .flex_none()
@@ -21122,6 +21131,9 @@ impl AgentPanel {
             .when(!omega_settings_open, |bar| {
                 bar.child(
                     div()
+                        .id("omega-thread-tab-strip")
+                        .role(gpui::Role::TabList)
+                        .aria_label("Open threads")
                         .absolute()
                         .left(px(tabs_left))
                         .right(px(16.))
@@ -21173,8 +21185,16 @@ impl AgentPanel {
                 let icon = omega_thread_icon(&row);
                 let is_active = omega_thread_open && Some(row.thread_id) == active_thread_id;
                 let (padding_x, padding_y) = omega_sidebar_row_padding(is_active);
+                let accessible_label = if is_active {
+                    format!("Thread {title}, selected")
+                } else {
+                    format!("Open thread {title}, {age}")
+                };
                 div()
                     .id(("omega-sidebar-thread", index))
+                    .role(gpui::Role::Button)
+                    .aria_label(accessible_label)
+                    .aria_selected(is_active)
                     .when(is_active, |row| {
                         row.debug_selector(|| "omega.omega.sidebar-thread.active".into())
                             .bg(selected_background)
@@ -21216,6 +21236,9 @@ impl AgentPanel {
         let active_draft_sidebar_row = h_flex()
             .id("omega-sidebar-active-thread")
             .debug_selector(|| "omega.omega.sidebar-thread.active".into())
+            .role(gpui::Role::ListItem)
+            .aria_label(format!("Thread {active_sidebar_title}, selected"))
+            .aria_selected(true)
             .w_full()
             .px(px(active_sidebar_padding_x))
             .py(px(active_sidebar_padding_y))
@@ -21274,6 +21297,7 @@ impl AgentPanel {
                         h_flex()
                             .id(("omega-active-working-folder", index))
                             .debug_selector(move || debug_selector)
+                            .role(gpui::Role::Button)
                             .w_full()
                             .px(px(padding_x))
                             .py(px(padding_y))
@@ -21341,6 +21365,7 @@ impl AgentPanel {
                 h_flex()
                     .id(("omega-retained-working-folder", index))
                     .debug_selector(move || debug_selector)
+                    .role(gpui::Role::Button)
                     .w_full()
                     .px(px(padding_x))
                     .py(px(padding_y))
@@ -21543,6 +21568,7 @@ impl AgentPanel {
                 sidebar.child(
                     h_flex()
                         .id("omega-open-working-folder-empty")
+                        .role(gpui::Role::Button)
                         .w_full()
                         .px(px(8.))
                         .py(px(7.))
@@ -21591,7 +21617,10 @@ impl AgentPanel {
                 sidebar
                     .child(
                         div()
+                            .id("omega-work-heading")
                             .debug_selector(|| "omega.omega.sidebar.work".into())
+                            .role(gpui::Role::Label)
+                            .aria_label("Work")
                             .mt(px(10.))
                             .h(px(28.))
                             .px(px(8.))
@@ -21606,7 +21635,10 @@ impl AgentPanel {
             })
             .child(
                 div()
+                    .id("omega-threads-heading")
                     .debug_selector(|| "omega.omega.sidebar.threads".into())
+                    .role(gpui::Role::Label)
+                    .aria_label("Threads")
                     .mt(px(12.))
                     .h(px(28.))
                     .px(px(8.))
@@ -21632,7 +21664,10 @@ impl AgentPanel {
             )
             .child(
                 div()
+                    .id("omega-experimental-heading")
                     .debug_selector(|| "omega.omega.sidebar.experimental".into())
+                    .role(gpui::Role::Label)
+                    .aria_label("Experimental")
                     .mt(px(10.))
                     .h(px(28.))
                     .px(px(8.))
@@ -26332,6 +26367,89 @@ mod tests {
                  not the panel's current `selected_agent`"
             );
         });
+    }
+
+    /// omega#217. The independent VoiceOver pass on `v0.2.0-rc31` listed the
+    /// conversation tab and tab strip, the Threads header, every thread row,
+    /// the working-folder row, and the Experimental header as visible,
+    /// interactive, and **absent from the accessibility tree entirely**. Some
+    /// carried an `aria_label` already, but a GPUI element only reaches the
+    /// tree with both an id and a role, so the labels were never published.
+    #[gpui::test]
+    async fn the_omega_sidebar_and_tab_strip_are_reachable(cx: &mut TestAppContext) {
+        let (panel, mut cx) = setup_visible_panel(cx).await;
+        let cx = &mut cx;
+
+        panel.update_in(cx, |panel, window, cx| {
+            panel.force_omega_primary_interface_for_tests = true;
+            panel.new_thread(&NewThread, window, cx);
+        });
+        cx.run_until_parked();
+        cx.set_debug_accessibility_active(true);
+
+        let snapshot = cx.debug_render_snapshot();
+        let tree = snapshot
+            .accessibility_tree_json()
+            .expect("forced accessibility should capture the Omega surface");
+        let nodes = omega_accessibility_nodes(tree);
+
+        for (role, label) in [
+            ("Label", "Threads"),
+            ("Label", "Experimental"),
+            ("TabList", "Open threads"),
+        ] {
+            assert!(
+                nodes.iter().any(|node| node.0 == role && node.1 == label),
+                "the {label:?} {role} must be published to assistive technology: {tree}"
+            );
+        }
+
+        assert!(
+            nodes
+                .iter()
+                .any(|(role, label)| role == "Tab" && label.starts_with("Thread ")),
+            "the open conversation tab must be reachable: {tree}"
+        );
+        assert!(
+            nodes
+                .iter()
+                .any(|(role, label)| (role == "Button" || role == "ListItem")
+                    && label.starts_with("Thread ")),
+            "the selected thread row must be reachable and announceable — selecting a \
+             thread is the main navigation act in this product: {tree}"
+        );
+        assert!(
+            nodes.iter().any(
+                |(role, label)| role == "Button" && label.starts_with("Select working folder ")
+            ),
+            "the working-folder row must be reachable: {tree}"
+        );
+    }
+
+    /// The (role, label) pairs of the last `accesskit::TreeUpdate` GPUI handed
+    /// the platform adapter.
+    fn omega_accessibility_nodes(tree: &str) -> Vec<(String, String)> {
+        let value: serde_json::Value =
+            serde_json::from_str(tree).expect("the accessibility tree should be valid JSON");
+        value
+            .get("nodes")
+            .and_then(serde_json::Value::as_object)
+            .expect("the accessibility tree should have a nodes object")
+            .values()
+            .map(|node| {
+                let aria = node.get("aria");
+                (
+                    aria.and_then(|aria| aria.get("role"))
+                        .and_then(serde_json::Value::as_str)
+                        .unwrap_or_default()
+                        .to_owned(),
+                    aria.and_then(|aria| aria.get("label"))
+                        .and_then(serde_json::Value::as_str)
+                        .unwrap_or_default()
+                        .to_owned(),
+                )
+            })
+            .collect()
     }
 
     #[gpui::test]
