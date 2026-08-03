@@ -28384,10 +28384,13 @@ mod tests {
         for required in [
             "enum OmegaStatus",
             "IconName::Circle",
+            "const fn icon(",
+            "Icon::new(status.icon())",
             "Role::Status",
             "Tooltip::text(word)",
             "aria_label",
             "split_whitespace().count(), 1",
+            "color_is_never_the_only_cue",
         ] {
             assert!(
                 cue.contains(required),
@@ -28423,12 +28426,28 @@ mod tests {
             "lint_status_words",
             "value.split_whitespace().count() != 1",
             "PRIVATE · PUBLICATION BLOCKED",
+            "omega_owned_ui_sources",
+            "scan_presentation_copy",
+            "lint_repository_presentation_copy",
+            "omega_owned_presentation_copy_is_concise",
         ] {
             assert!(
                 crawl.contains(required),
                 "OMEGA-DELTA-0235: status copy lint lost `{required}`"
             );
         }
+
+        let work_detail = without_comments(&read_repository_file(
+            "crates/agent_ui/src/omega_work_detail_surface.rs",
+        ));
+        assert!(
+            !work_detail.contains("Visibility does not grant authority."),
+            "OMEGA-DELTA-0235: Work detail restored narrated Block chrome"
+        );
+        assert!(
+            work_detail.contains("omega_status_cue"),
+            "OMEGA-DELTA-0235: Work detail Block source status left the shared cue"
+        );
     }
 
     /// OMEGA-DELTA-0236. The GitHub-to-Omega Work writer switch is an explicit

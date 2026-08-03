@@ -869,11 +869,7 @@ mod tests {
             ),
             (
                 "duplicate rows",
-                membership_read_result(
-                    serde_json::json!([row.clone(), row.clone()]),
-                    "complete",
-                    "fresh",
-                ),
+                membership_read_result(serde_json::json!([row.clone(), row]), "complete", "fresh"),
             ),
             (
                 "cross-account row",

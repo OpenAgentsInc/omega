@@ -193,6 +193,7 @@ language = { workspace = true, "features" = ["test-support"] }
 languages = { workspace = true, features = ["test-support"] }
 language_model = { workspace = true, "features" = ["test-support"] }
 node_runtime = { workspace = true, features = ["test-support"] }
+omega_control_crawl.workspace = true
 omega_workbench_harness = { workspace = true, features = ["gpui-support"] }
 pretty_assertions.workspace = true
 project = { workspace = true, features = ["test-support"] }

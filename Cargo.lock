@@ -590,6 +590,7 @@ dependencies = [
  "omega_agent_identity",
  "omega_audience",
  "omega_community",
+ "omega_control_crawl",
  "omega_device_enrollment",
  "omega_effectd",
  "omega_exo_lane",

@@ -7,18 +7,54 @@ needed to understand consequential Work.
 
 ## Enforced presentation contract
 
-`omega_status_cue` is the shared Omega-owned status primitive. It renders a
-circle whose semantic color is redundant with:
+`omega_status_cue` is the shared Omega-owned status primitive. It carries the
+same state on four independent channels:
 
-- an admitted one-word tooltip;
-- `Role::Status`; and
+- its own icon shape, one per status, so a person who cannot separate the
+  theme's success, warning, and error hues still reads seven distinct states;
+- a semantic color;
+- an admitted one-word tooltip under `Role::Status`; and
 - an accessible name containing the exact context and status.
 
 The admitted words are Ready, Running, Complete, Blocked, Warning, Failed, and
 Offline. `omega_control_crawl::lint_status_words` rejects multi-word status
-prose and unregistered labels. The existing copy lint continues to reject
-multi-sentence tooltip and chrome strings unless an exact, reasoned allowlist
-entry exists; the checked-in allowlist remains empty.
+prose and unregistered labels, and the cue's own test proves every word it can
+emit is admitted by that lint. `color_is_never_the_only_cue` proves the seven
+shapes are distinct.
+
+## Enforcement, not disposition
+
+This inventory used to be a written disposition that nothing checked. It is now
+mechanical.
+
+`omega_control_crawl::omega_owned_ui_sources` discovers the Omega-owned UI
+sources by location — every `crates/omega_*/src/**/*.rs`, plus the `omega_*`,
+shell, Forensics, Effective Principal, and Organization-scope files in
+`agent_ui` — so a new Omega destination enters the inventory the moment its file
+exists rather than when someone remembers to list it. The shell file
+`crates/agent_ui/src/agent_panel.rs` is included because it renders the Omega
+sidebar, navigation rows, and footer. Only the lint's own source is excluded,
+because it quotes the call markers it searches for and renders no chrome.
+
+`scan_presentation_copy` extracts user-facing string literals from three slots:
+`.aria_label(...)` accessible names, `Tooltip::text(...)`, and `.child("...")`
+visible labels. A trailing `#[cfg(test)]` module is skipped because test
+fixtures are not shipped chrome; an item-level `#[cfg(test)]` gate does not stop
+the scan. `lint_presentation_copy` then refuses any string that narrates more
+than one sentence, or that exceeds its slot's limit: 80 characters for an
+accessible name and 48 for a tooltip or visible label. The accessible name has
+the most generous limit on purpose — conciseness must never truncate assistive
+meaning. The one-word rule is the status channel's, not every tooltip's, and
+`lint_status_words` plus the cue's own tests enforce it there.
+
+`omega_owned_presentation_copy_is_concise` runs the whole scan over the real
+repository and must find nothing. The checked-in allowlist remains empty;
+deleting a string is preferred over allowlisting it.
+
+Two boundaries stay explicit. The scan sees literals, so a `format!` string, a
+source-owned domain record, or a runtime-composed accessible name is out of its
+reach and is governed by its own surface's tests. And a lint can prove a string
+is short; it cannot prove the short string is still true.
 
 ## Current inventory disposition
 
@@ -51,12 +87,19 @@ entry exists; the checked-in allowlist remains empty.
 - Lifecycle-scene names such as `Awaiting profile` are fixture selector labels,
   not the rendered status channel. They remain in development/mock navigation
   and are absent with the fixture gate off.
+- Work detail Block cards use the shared cue for source availability instead of
+  the `Source-backed`/`Unavailable` word pair, and the narrated two-sentence
+  authority note is now the concise `View only — grants no authority`. The exact
+  source reference and the Block's facts remain visible domain records.
+- The Forensics preflight empty state still says which admitted managed profile
+  is missing. That is a precise limitation, not chrome, and the lint leaves
+  single-fragment limitation text alone.
 
 ## Remaining installed gate
 
-Source checks protect the shared primitive and current Forensics and Work
-migrations. Focused mapping tests cover Work and relay-delivery semantic states;
-their execution is deferred to the series-level build and test gate.
-omega#219 remains open until the complete Omega-owned string inventory is fed
-through the automated crawl and an installed light/dark, reduced-motion, and
-accessibility review confirms that concise cues retain the exact domain meaning.
+The automated rule now runs over the current inventory and passes. What it
+cannot do is confirm that the retained meaning is still legible: no installed
+light/dark, reduced-motion, localization-expansion, or assistive-technology pass
+has been run against these surfaces, and no accessibility-tree assertion exists
+for the migrated cues beyond their construction. omega#219 remains open for that
+installed visual and accessibility review.

@@ -8,7 +8,8 @@
 //!
 //! Full GPUI semantic-tree coverage expands scene by scene through the
 //! checked-in registry. This crate owns the protocol, the synthetic proving
-//! scene, the mutation proof, registry load, and the multi-sentence copy lint.
+//! scene, the mutation proof, registry load, the multi-sentence copy lint, and
+//! the source scan that holds Omega-owned chrome to the concise-copy contract.
 
 use serde::Deserialize;
 use std::collections::BTreeMap;
@@ -648,6 +649,285 @@ pub fn lint_status_words<'a>(strings: impl IntoIterator<Item = &'a str>) -> Vec<
 }
 
 // ---------------------------------------------------------------------------
+// Omega-owned presentation copy inventory
+// ---------------------------------------------------------------------------
+
+/// Where a user-facing string literal was written.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
+pub enum PresentationSlot {
+    /// `.aria_label("...")` — the accessible name.
+    AccessibleName,
+    /// `Tooltip::text("...")` — hover/focus text.
+    Tooltip,
+    /// `.child("...")` — a visible label rendered directly as chrome.
+    VisibleLabel,
+}
+
+impl PresentationSlot {
+    const fn marker(self) -> &'static str {
+        match self {
+            Self::AccessibleName => ".aria_label(",
+            Self::Tooltip => "Tooltip::text(",
+            Self::VisibleLabel => ".child(",
+        }
+    }
+
+    /// Longest string this slot may hold before it is exposition rather than a
+    /// label. The accessible name is deliberately the most generous limit:
+    /// conciseness must never truncate assistive meaning. A tooltip may name a
+    /// second gesture for the same control, so it shares the label limit; the
+    /// one-word rule belongs to the status channel and is enforced separately
+    /// by `lint_status_words`.
+    pub const fn max_chars(self) -> usize {
+        match self {
+            Self::AccessibleName => 80,
+            Self::Tooltip | Self::VisibleLabel => 48,
+        }
+    }
+
+    const fn describe(self) -> &'static str {
+        match self {
+            Self::AccessibleName => "accessible name",
+            Self::Tooltip => "tooltip",
+            Self::VisibleLabel => "visible label",
+        }
+    }
+}
+
+/// One user-facing string literal found in Omega-owned source.
+#[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord)]
+pub struct PresentationString {
+    /// Repository-relative source file.
+    pub file: String,
+    /// Where the literal was written.
+    pub slot: PresentationSlot,
+    /// The decoded literal.
+    pub text: String,
+}
+
+/// A copy-contract violation the lint refuses.
+#[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord)]
+pub struct CopyOffense {
+    /// The offending string.
+    pub string: PresentationString,
+    /// Why it is refused.
+    pub detail: String,
+}
+
+/// Extract user-facing string literals from one Rust source file.
+///
+/// Only literal arguments are visible to a source scan; a `format!` or a
+/// source-owned domain record is out of reach and is governed by the surface's
+/// own tests instead. The `#[cfg(test)]` module is excluded because test
+/// fixtures are not shipped chrome.
+#[must_use]
+pub fn scan_presentation_copy(file: &str, source: &str) -> Vec<PresentationString> {
+    let shipped = &source[..shipped_source_length(source)];
+    let mut found = Vec::new();
+    for slot in [
+        PresentationSlot::AccessibleName,
+        PresentationSlot::Tooltip,
+        PresentationSlot::VisibleLabel,
+    ] {
+        let marker = slot.marker();
+        let mut search = 0;
+        while let Some(offset) = shipped[search..].find(marker) {
+            let after = search + offset + marker.len();
+            search = after;
+            let rest = shipped[after..].trim_start();
+            if !rest.starts_with('"') {
+                continue;
+            }
+            let Some(text) = decode_rust_string_literal(&rest[1..]) else {
+                continue;
+            };
+            found.push(PresentationString {
+                file: file.to_string(),
+                slot,
+                text,
+            });
+        }
+    }
+    found.sort();
+    found.dedup();
+    found
+}
+
+/// Length of the shipped prefix of a source file, excluding a trailing
+/// `#[cfg(test)] mod ... { }` module.
+///
+/// A file may also gate individual items on `#[cfg(test)]`, so cutting at the
+/// first occurrence would silently stop scanning most of the file. The cut is
+/// taken at the last top-level attribute that introduces a module, which is the
+/// conventional position of the test module.
+fn shipped_source_length(source: &str) -> usize {
+    const ATTRIBUTE: &str = "\n#[cfg(test)]";
+    let mut cut = source.len();
+    let mut search = 0;
+    while let Some(offset) = source[search..].find(ATTRIBUTE) {
+        let index = search + offset;
+        search = index + ATTRIBUTE.len();
+        let introduces_module = source[search..]
+            .lines()
+            .find(|line| !line.trim().is_empty())
+            .is_some_and(|line| {
+                let line = line.trim_start();
+                line.starts_with("mod ")
+                    || line.starts_with("pub mod ")
+                    || line.starts_with("pub(crate) mod ")
+            });
+        if introduces_module {
+            cut = index;
+        }
+    }
+    cut
+}
+
+/// Decode a Rust string literal body that starts immediately after the opening
+/// quote. Returns `None` when the literal is unterminated.
+fn decode_rust_string_literal(body: &str) -> Option<String> {
+    let mut decoded = String::new();
+    let mut characters = body.chars();
+    while let Some(character) = characters.next() {
+        match character {
+            '"' => return Some(decoded),
+            '\\' => {
+                let escaped = characters.next()?;
+                decoded.push(match escaped {
+                    'n' => '\n',
+                    't' => '\t',
+                    'r' => '\r',
+                    other => other,
+                });
+            }
+            other => decoded.push(other),
+        }
+    }
+    None
+}
+
+/// This lint's own source quotes the call markers it searches for, so scanning
+/// it would report its own definitions. It renders no chrome.
+const LINT_SOURCE: &str = "crates/omega_control_crawl/src/omega_control_crawl.rs";
+
+/// Repository-relative Omega-owned UI source files the copy contract governs.
+///
+/// Discovery is by location, not by an enumerated list, so a new Omega
+/// destination is covered the moment it is added.
+pub fn omega_owned_ui_sources() -> Result<Vec<String>, String> {
+    let mut sources = Vec::new();
+    let crates_root = repository_path("crates");
+    let entries = std::fs::read_dir(&crates_root)
+        .map_err(|error| format!("cannot read {}: {error}", crates_root.display()))?;
+    for entry in entries {
+        let entry = entry.map_err(|error| format!("cannot read a crates entry: {error}"))?;
+        let name = entry.file_name().to_string_lossy().to_string();
+        if !name.starts_with("omega_") {
+            continue;
+        }
+        collect_rust_sources(
+            &entry.path().join("src"),
+            &format!("crates/{name}/src"),
+            &mut sources,
+        )?;
+    }
+    let agent_ui_src = repository_path("crates/agent_ui/src");
+    let mut agent_ui_sources = Vec::new();
+    collect_rust_sources(&agent_ui_src, "crates/agent_ui/src", &mut agent_ui_sources)?;
+    sources.extend(agent_ui_sources.into_iter().filter(|path| {
+        let name = path.rsplit('/').next().unwrap_or_default();
+        name.starts_with("omega_")
+            || matches!(
+                name,
+                "agent_panel.rs"
+                    | "forensics_workbench.rs"
+                    | "effective_principal.rs"
+                    | "organization_scope.rs"
+            )
+    }));
+    sources.retain(|source| source != LINT_SOURCE);
+    sources.sort();
+    sources.dedup();
+    if sources.is_empty() {
+        return Err("no Omega-owned UI sources were discovered".into());
+    }
+    Ok(sources)
+}
+
+fn collect_rust_sources(
+    directory: &Path,
+    relative: &str,
+    sources: &mut Vec<String>,
+) -> Result<(), String> {
+    let Ok(entries) = std::fs::read_dir(directory) else {
+        return Ok(());
+    };
+    for entry in entries {
+        let entry = entry.map_err(|error| format!("cannot read {relative}: {error}"))?;
+        let name = entry.file_name().to_string_lossy().to_string();
+        let path = entry.path();
+        let child_relative = format!("{relative}/{name}");
+        if path.is_dir() {
+            collect_rust_sources(&path, &child_relative, sources)?;
+        } else if name.ends_with(".rs") {
+            sources.push(child_relative);
+        }
+    }
+    Ok(())
+}
+
+/// Refuse multi-sentence chrome and overlong presentation strings.
+///
+/// Deleting a string is preferred over allowlisting it; the allowlist exists
+/// for exact domain records that must survive verbatim.
+pub fn lint_presentation_copy(
+    strings: &[PresentationString],
+    allowlist: &CopyAllowlist,
+) -> Vec<CopyOffense> {
+    let mut offenses = Vec::new();
+    for string in strings {
+        if allowlist.allows(&string.text) {
+            continue;
+        }
+        if is_multi_sentence(&string.text) {
+            offenses.push(CopyOffense {
+                string: string.clone(),
+                detail: format!("{} narrates more than one sentence", string.slot.describe()),
+            });
+            continue;
+        }
+        let length = string.text.chars().count();
+        let limit = string.slot.max_chars();
+        if length > limit {
+            offenses.push(CopyOffense {
+                string: string.clone(),
+                detail: format!(
+                    "{} is {length} characters; the limit is {limit}",
+                    string.slot.describe()
+                ),
+            });
+        }
+    }
+    offenses.sort();
+    offenses.dedup();
+    offenses
+}
+
+/// Scan and lint every Omega-owned UI source in the repository.
+pub fn lint_repository_presentation_copy(
+    allowlist: &CopyAllowlist,
+) -> Result<Vec<CopyOffense>, String> {
+    let mut strings = Vec::new();
+    for file in omega_owned_ui_sources()? {
+        let path = repository_path(&file);
+        let source = std::fs::read_to_string(&path)
+            .map_err(|error| format!("cannot read {}: {error}", path.display()))?;
+        strings.extend(scan_presentation_copy(&file, &source));
+    }
+    Ok(lint_presentation_copy(&strings, allowlist))
+}
+
+// ---------------------------------------------------------------------------
 // Paths
 // ---------------------------------------------------------------------------
 
@@ -942,6 +1222,149 @@ mod tests {
                 "Maybe".to_string(),
                 "PRIVATE · PUBLICATION BLOCKED".to_string(),
             ]
+        );
+    }
+
+    #[test]
+    fn presentation_scan_reads_shipped_chrome_and_ignores_test_fixtures() {
+        let source = r#"
+fn render() {
+    div()
+        .aria_label("Open Forensics")
+        .tooltip(Tooltip::text("Blocked"))
+        .child("Send")
+        .child(some_expression())
+}
+
+#[cfg(test)]
+const FIXTURE: &str = "an item-level test gate must not end the scan";
+
+fn render_more() {
+    div().child("Retry")
+}
+
+#[cfg(test)]
+mod tests {
+    fn scene() {
+        div().aria_label("A fixture label that must not be linted");
+    }
+}
+"#;
+        let found = scan_presentation_copy("crates/omega_example/src/example.rs", source);
+        assert_eq!(
+            found,
+            vec![
+                PresentationString {
+                    file: "crates/omega_example/src/example.rs".into(),
+                    slot: PresentationSlot::AccessibleName,
+                    text: "Open Forensics".into(),
+                },
+                PresentationString {
+                    file: "crates/omega_example/src/example.rs".into(),
+                    slot: PresentationSlot::Tooltip,
+                    text: "Blocked".into(),
+                },
+                PresentationString {
+                    file: "crates/omega_example/src/example.rs".into(),
+                    slot: PresentationSlot::VisibleLabel,
+                    text: "Retry".into(),
+                },
+                PresentationString {
+                    file: "crates/omega_example/src/example.rs".into(),
+                    slot: PresentationSlot::VisibleLabel,
+                    text: "Send".into(),
+                },
+            ]
+        );
+    }
+
+    #[test]
+    fn presentation_lint_refuses_exposition_and_overlong_labels() {
+        let empty = CopyAllowlist {
+            schema: COPY_ALLOWLIST_SCHEMA.into(),
+            entries: Vec::new(),
+        };
+        let essay =
+            "This Block is a view over the named source. Visibility does not grant authority.";
+        let long_tooltip = "Publication is blocked by the named source authority record";
+        let strings = vec![
+            PresentationString {
+                file: "crates/omega_example/src/example.rs".into(),
+                slot: PresentationSlot::VisibleLabel,
+                text: essay.into(),
+            },
+            PresentationString {
+                file: "crates/omega_example/src/example.rs".into(),
+                slot: PresentationSlot::Tooltip,
+                text: long_tooltip.into(),
+            },
+            PresentationString {
+                file: "crates/omega_example/src/example.rs".into(),
+                slot: PresentationSlot::VisibleLabel,
+                text: "Send".into(),
+            },
+        ];
+        let offenses = lint_presentation_copy(&strings, &empty);
+        assert_eq!(offenses.len(), 2, "unexpected offenses: {offenses:?}");
+        assert!(offenses.iter().any(|offense| offense.string.text == essay));
+        assert!(
+            offenses
+                .iter()
+                .any(|offense| offense.string.text == long_tooltip)
+        );
+
+        let allowed = CopyAllowlist {
+            schema: COPY_ALLOWLIST_SCHEMA.into(),
+            entries: vec![
+                CopyAllowlistEntry {
+                    text: essay.into(),
+                    reason: "example".into(),
+                },
+                CopyAllowlistEntry {
+                    text: long_tooltip.into(),
+                    reason: "example".into(),
+                },
+            ],
+        };
+        assert!(lint_presentation_copy(&strings, &allowed).is_empty());
+    }
+
+    #[test]
+    fn omega_owned_sources_are_discovered_by_location() {
+        let sources = omega_owned_ui_sources().expect("Omega-owned UI sources");
+        for required in [
+            "crates/agent_ui/src/omega_status_cue.rs",
+            "crates/agent_ui/src/forensics_workbench.rs",
+            "crates/agent_ui/src/effective_principal.rs",
+            "crates/agent_ui/src/omega_work_detail_surface.rs",
+            "crates/agent_ui/src/agent_panel.rs",
+            "crates/omega_work_index/src/planning_views.rs",
+        ] {
+            assert!(
+                sources.iter().any(|source| source == required),
+                "copy inventory does not cover {required}"
+            );
+        }
+        assert!(
+            !sources
+                .iter()
+                .any(|source| source == "crates/omega_control_crawl/src/omega_control_crawl.rs"),
+            "the lint quotes its own markers and is not a chrome surface"
+        );
+    }
+
+    /// The inventory in `docs/omega/oaw-014-concise-copy-inventory.md` is only
+    /// a disposition until something refuses new exposition. This is that
+    /// refusal: it runs over the real tree, so a new Omega destination is
+    /// covered the moment its file exists.
+    #[test]
+    fn omega_owned_presentation_copy_is_concise() {
+        let allowlist =
+            CopyAllowlist::load_from_repository().expect("checked-in copy allowlist must load");
+        let offenses = lint_repository_presentation_copy(&allowlist).expect("repository copy scan");
+        assert!(
+            offenses.is_empty(),
+            "Omega-owned presentation copy is not concise: {offenses:#?}"
         );
     }
 

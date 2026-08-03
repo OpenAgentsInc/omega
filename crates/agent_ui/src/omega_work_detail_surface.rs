@@ -1507,15 +1507,15 @@ fn render_block_card(block: &WorkBlock, cx: &App) -> AnyElement {
                         .size(LabelSize::Small)
                         .weight(gpui::FontWeight::SEMIBOLD),
                 )
-                .child(
-                    Label::new(if block.available {
-                        "Source-backed"
+                .child(crate::omega_status_cue::omega_status_cue(
+                    SharedString::from(format!("work-detail-block-status-{}", block.source_ref.0)),
+                    if block.available {
+                        crate::omega_status_cue::OmegaStatus::Ready
                     } else {
-                        "Unavailable"
-                    })
-                    .size(LabelSize::XSmall)
-                    .color(Color::Muted),
-                ),
+                        crate::omega_status_cue::OmegaStatus::Blocked
+                    },
+                    &format!("{} Block source", block.kind.label()),
+                )),
         )
         .child(
             div()
@@ -1527,7 +1527,7 @@ fn render_block_card(block: &WorkBlock, cx: &App) -> AnyElement {
             div()
                 .text_size(px(11.))
                 .text_color(colors.text_placeholder)
-                .child("This Block is a view over the named source. Visibility does not grant authority."),
+                .child("View only — grants no authority"),
         )
         .when(!block.facts.is_empty(), |card| {
             card.child(
