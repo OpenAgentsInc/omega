@@ -760,6 +760,11 @@ impl DogfoodSurface {
                         ButtonStyle::Subtle
                     })
                     .size(ButtonSize::Compact)
+                    .aria_description(if self.scene == scene {
+                        "Current Work view"
+                    } else {
+                        "Open Work view"
+                    })
                     .on_click(cx.listener(move |this, _, _, cx| this.set_scene(scene, cx)))
             })))
             .child(
@@ -782,6 +787,11 @@ impl DogfoodSurface {
                             ButtonStyle::Subtle
                         })
                         .size(ButtonSize::Compact)
+                        .aria_description(if self.saved_view == saved_view {
+                            "Current saved Work view"
+                        } else {
+                            "Apply saved Work view"
+                        })
                         .on_click(cx.listener(move |this, _, _, cx| {
                             this.set_saved_view(saved_view, cx)
                         }))
@@ -794,6 +804,11 @@ impl DogfoodSurface {
                                 ButtonStyle::Subtle
                             })
                             .size(ButtonSize::Compact)
+                            .aria_description(if self.user_saved_view.active {
+                                "Current user-saved Work view"
+                            } else {
+                                "Apply user-saved Work view"
+                            })
                             .disabled(self.user_saved_view.query.is_none())
                             .on_click(cx.listener(|this, _, _, cx| this.apply_user_view(cx))),
                     )
@@ -844,6 +859,11 @@ impl DogfoodSurface {
                                 ButtonStyle::Subtle
                             })
                             .size(ButtonSize::Compact)
+                            .aria_description(if self.filter == filter {
+                                "Current Work filter"
+                            } else {
+                                "Apply Work filter"
+                            })
                             .on_click(cx.listener(move |this, _, _, cx| {
                                 this.set_filter(filter, cx)
                             }))
@@ -1003,6 +1023,8 @@ impl DogfoodSurface {
             .rounded_lg()
             .border_1()
             .border_color(colors.border_variant)
+            .role(gpui::Role::List)
+            .aria_label("Work list")
             .children(
                 self.visible_issues(PlanningViewKind::List)
                     .into_iter()
@@ -1020,7 +1042,15 @@ impl DogfoodSurface {
                             .cursor_pointer()
                             .role(gpui::Role::Button)
                             .tab_index(0isize)
-                            .aria_label(format!("{} {}", issue.identifier, issue.title))
+                            .aria_label(work_row_accessibility_label(
+                                &issue.identifier,
+                                &issue.title,
+                                issue.workflow_state_id.trim_start_matches("workflow:"),
+                                issue.priority,
+                                blockers,
+                                issue.completed,
+                            ))
+                            .aria_selected(selected)
                             .when(selected, |row| row.bg(colors.element_selected))
                             .on_click(cx.listener(move |this, _, _, cx| {
                                 this.select_issue(issue_id.clone(), true, cx)
@@ -1085,17 +1115,21 @@ impl DogfoodSurface {
                     .min_w(px(210.))
                     .flex_1()
                     .gap_2()
+                    .role(gpui::Role::List)
+                    .aria_label(format!("{label} Work"))
                     .child(section_heading(label, cx))
                     .children(cards.map(|issue| {
                         let issue_id = issue.id.clone();
-                        let blocked = !self.blocked_by(issue).is_empty();
+                        let blockers = self.blocked_by(issue).len();
+                        let blocked = blockers > 0;
+                        let selected = issue.id == self.selected_issue_id;
                         v_flex()
                             .id(format!("board-{}", issue.id))
                             .gap_2()
                             .p_3()
                             .rounded_lg()
                             .border_1()
-                            .border_color(if issue.id == self.selected_issue_id {
+                            .border_color(if selected {
                                 colors.border_selected
                             } else {
                                 colors.border_variant
@@ -1103,6 +1137,15 @@ impl DogfoodSurface {
                             .cursor_pointer()
                             .role(gpui::Role::Button)
                             .tab_index(0isize)
+                            .aria_label(work_row_accessibility_label(
+                                &issue.identifier,
+                                &issue.title,
+                                label,
+                                issue.priority,
+                                blockers,
+                                issue.completed,
+                            ))
+                            .aria_selected(selected)
                             .on_click(cx.listener(move |this, _, _, cx| {
                                 this.select_issue(issue_id.clone(), true, cx)
                             }))
@@ -1133,6 +1176,8 @@ impl DogfoodSurface {
             .rounded_lg()
             .border_1()
             .border_color(colors.border_variant)
+            .role(gpui::Role::List)
+            .aria_label("Work table")
             .child(
                 h_flex()
                     .min_h(px(34.))
@@ -1147,6 +1192,7 @@ impl DogfoodSurface {
             )
             .children(rows.into_iter().map(|row| {
                 let issue_id = row.issue_id.clone();
+                let selected = row.issue_id == self.selected_issue_id;
                 h_flex()
                     .id(format!("table-{}", row.issue_id))
                     .min_h(px(38.))
@@ -1157,6 +1203,15 @@ impl DogfoodSurface {
                     .cursor_pointer()
                     .role(gpui::Role::Button)
                     .tab_index(0isize)
+                    .aria_label(work_row_accessibility_label(
+                        &row.identifier,
+                        &row.title,
+                        lifecycle_label(row.lifecycle),
+                        row.priority,
+                        row.blocked_by_count,
+                        row.completed,
+                    ))
+                    .aria_selected(selected)
                     .on_click(cx.listener(move |this, _, _, cx| {
                         this.select_issue(issue_id.clone(), true, cx)
                     }))
@@ -1204,6 +1259,8 @@ impl DogfoodSurface {
         let groups = projection.groups;
         v_flex()
             .gap_3()
+            .role(gpui::Role::List)
+            .aria_label("Work timeline")
             .child(
                 Label::new(format!(
                     "Shared Work chronology · r{} · {}",
@@ -1216,15 +1273,27 @@ impl DogfoodSurface {
                 let group_rows = rows.iter().filter(|row| work_refs.contains(&row.work_ref));
                 v_flex()
                     .gap_2()
+                    .role(gpui::Role::List)
+                    .aria_label(format!("{group} timeline group"))
                     .child(section_heading(&group, cx))
                     .children(group_rows.map(|row| {
                         let issue_id = row.issue_id.clone();
+                        let selected = row.issue_id == self.selected_issue_id;
                         h_flex()
                             .id(format!("timeline-{}", row.issue_id))
                             .gap_3()
                             .cursor_pointer()
                             .role(gpui::Role::Button)
                             .tab_index(0isize)
+                            .aria_label(work_row_accessibility_label(
+                                &row.identifier,
+                                &row.title,
+                                lifecycle_label(row.lifecycle),
+                                row.priority,
+                                row.blocked_by_count,
+                                row.completed,
+                            ))
+                            .aria_selected(selected)
                             .on_click(cx.listener(move |this, _, _, cx| {
                                 this.select_issue(issue_id.clone(), true, cx)
                             }))
@@ -1280,6 +1349,8 @@ impl DogfoodSurface {
             .items_start()
             .gap_3()
             .flex_wrap()
+            .role(gpui::Role::List)
+            .aria_label("Work roadmap")
             .children(groups.into_iter().map(|(group, work_refs)| {
                 let group_rows = rows
                     .iter()
@@ -1294,6 +1365,8 @@ impl DogfoodSurface {
                     .rounded_lg()
                     .border_1()
                     .border_color(colors.border_variant)
+                    .role(gpui::Role::List)
+                    .aria_label(format!("{group} roadmap group"))
                     .child(section_heading(&group, cx))
                     .child(
                         Label::new(format!("{completed}/{} complete", group_rows.len()))
@@ -1303,11 +1376,21 @@ impl DogfoodSurface {
                     .child(progress_dots(completed, group_rows.len(), cx))
                     .children(group_rows.into_iter().take(6).map(|row| {
                         let issue_id = row.issue_id.clone();
+                        let selected = row.issue_id == self.selected_issue_id;
                         div()
                             .id(format!("roadmap-{}", row.issue_id))
                             .cursor_pointer()
                             .role(gpui::Role::Button)
                             .tab_index(0isize)
+                            .aria_label(work_row_accessibility_label(
+                                &row.identifier,
+                                &row.title,
+                                lifecycle_label(row.lifecycle),
+                                row.priority,
+                                row.blocked_by_count,
+                                row.completed,
+                            ))
+                            .aria_selected(selected)
                             .text_size(px(11.))
                             .text_color(if row.blocked_by_count > 0 {
                                 Color::Warning.color(cx)
@@ -1423,6 +1506,8 @@ impl DogfoodSurface {
                     .min_w_0()
                     .flex_1()
                     .gap_4()
+                    .role(gpui::Role::Group)
+                    .aria_label(format!("Work detail, {}, {}", issue.identifier, issue.title))
                     .child(
                         Label::new(issue.identifier.clone())
                             .size(LabelSize::XSmall)
@@ -1455,19 +1540,25 @@ impl DogfoodSurface {
                     .child(
                         v_flex()
                             .gap_1()
+                            .role(gpui::Role::List)
+                            .aria_label("Work dependencies")
                             .when(blockers.is_empty(), |list| {
                                 list.child(
-                                    Label::new("No typed blockers in this snapshot.")
-                                        .size(LabelSize::Small)
-                                        .color(Color::Muted),
+                                    div().role(gpui::Role::ListItem).child(
+                                        Label::new("No typed blockers in this snapshot.")
+                                            .size(LabelSize::Small)
+                                            .color(Color::Muted),
+                                    ),
                                 )
                             })
                             .children(blockers.iter().map(|blocker| {
-                                Label::new(format!(
-                                    "Blocked by {} · {}",
-                                    blocker.identifier, blocker.title
-                                ))
-                                .size(LabelSize::Small)
+                                div().role(gpui::Role::ListItem).child(
+                                    Label::new(format!(
+                                        "Blocked by {} · {}",
+                                        blocker.identifier, blocker.title
+                                    ))
+                                    .size(LabelSize::Small),
+                                )
                             })),
                     )
                     .child(section_heading("Source", cx))
@@ -1481,10 +1572,14 @@ impl DogfoodSurface {
                         h_flex()
                             .gap_1()
                             .flex_wrap()
+                            .role(gpui::Role::List)
+                            .aria_label("Work labels")
                             .children(issue.label_ids.iter().map(|label_id| {
-                                Label::new(label_id.trim_start_matches("label:").to_string())
-                                    .size(LabelSize::XSmall)
-                                    .color(Color::Muted)
+                                div().role(gpui::Role::ListItem).child(
+                                    Label::new(label_id.trim_start_matches("label:").to_string())
+                                        .size(LabelSize::XSmall)
+                                        .color(Color::Muted),
+                                )
                             })),
                     )
                     .child(section_heading("Execution", cx))
@@ -1503,6 +1598,8 @@ impl DogfoodSurface {
                     .rounded_lg()
                     .border_1()
                     .border_color(colors.border_variant)
+                    .role(gpui::Role::Group)
+                    .aria_label("Work inspector")
                     .child(section_heading("Inspector", cx))
                     .child(inspector_row(
                         "Work identity",
@@ -1953,6 +2050,8 @@ impl DogfoodSurface {
             .unwrap_or_default();
         v_flex()
             .gap_3()
+            .role(gpui::Role::List)
+            .aria_label("Signed Work history")
             .child(section_heading("Signed Work history", cx))
             .child(
                 Label::new(self.signed_workroom_error.clone().unwrap_or_else(|| {
@@ -1974,7 +2073,17 @@ impl DogfoodSurface {
                         .iter()
                         .find(|record| record.activity.event_ref == activity.event_ref)
                 });
+                let delivery_state = delivery
+                    .map(|record| signed_workroom_outbox_state_label(&record.state))
+                    .unwrap_or("Unavailable");
                 v_flex().gap_1().p_3().rounded_lg().border_1().border_color(colors.border_variant)
+                    .role(gpui::Role::ListItem)
+                    .aria_label(format!(
+                        "Signed Workroom {:?} by {}, audience {}, delivery {delivery_state}",
+                        activity.kind,
+                        activity.actor_ref.0,
+                        workroom_audience_label(&activity.audience)
+                    ))
                     .child(h_flex().justify_between()
                         .child(Label::new(format!("{:?}", activity.kind)).size(LabelSize::Small))
                         .child(Label::new(workroom_audience_label(&activity.audience)).size(LabelSize::XSmall).color(Color::Muted)))
@@ -1982,13 +2091,16 @@ impl DogfoodSurface {
                     .child(Label::new(format!("{} · generation {} · {} parent(s)", activity.occurred_at.0, activity.generation.0, activity.causal_parent_refs.len())).size(LabelSize::XSmall).color(Color::Muted))
                     .when_some(delivery, |card, record| {
                         let attempts = record.delivery_attempts.iter().rev().take(3).map(|attempt| {
-                            let detail = attempt.detail.0.as_ref().map(|value| format!(" · {}", value.0)).unwrap_or_default();
                             h_flex().justify_between()
-                                .child(Label::new(format!("{}{}", signed_workroom_delivery_outcome_label(&attempt.outcome), detail)).size(LabelSize::XSmall).color(signed_workroom_delivery_outcome_color(&attempt.outcome)))
+                                .role(gpui::Role::ListItem)
+                                .aria_label(format!("{} at {} on {}", signed_workroom_delivery_outcome_label(&attempt.outcome), attempt.attempted_at.0, attempt.relay_url.0))
+                                .child(Label::new(signed_workroom_delivery_outcome_label(&attempt.outcome)).size(LabelSize::XSmall).color(signed_workroom_delivery_outcome_color(&attempt.outcome)))
                                 .child(Label::new(format!("{} · {}", attempt.relay_url.0, attempt.attempted_at.0)).size(LabelSize::XSmall).color(Color::Muted))
                         }).collect::<Vec<_>>();
                         card.child(
                             v_flex().gap_1().pt_2().border_t_1().border_color(colors.border_variant)
+                                .role(gpui::Role::List)
+                                .aria_label("Relay delivery attempts")
                                 .child(h_flex().justify_between()
                                     .child(Label::new(format!("Delivery · {}", signed_workroom_outbox_state_label(&record.state))).size(LabelSize::XSmall).color(signed_workroom_outbox_state_color(&record.state)))
                                     .child(Label::new(format!("{}/{} relays · {} attempts", record.accepted_relay_urls.len(), record.relay_urls.len(), record.attempt_count.0)).size(LabelSize::XSmall).color(Color::Muted)))
@@ -2291,6 +2403,11 @@ fn project_button(
             ButtonStyle::Subtle
         })
         .size(ButtonSize::Compact)
+        .aria_description(if selected {
+            "Current Work project"
+        } else {
+            "Open Work project"
+        })
         .on_click(listener)
 }
 
@@ -2389,6 +2506,27 @@ fn lifecycle_label(lifecycle: FixtureLifecycleType) -> &'static str {
         FixtureLifecycleType::Canceled => "Canceled",
         FixtureLifecycleType::Planned => "Planned",
     }
+}
+
+fn work_row_accessibility_label(
+    identifier: &str,
+    title: &str,
+    state: &str,
+    priority: FixturePriority,
+    blocker_count: usize,
+    completed: bool,
+) -> String {
+    let attention = if completed {
+        "completed".to_string()
+    } else if blocker_count > 0 {
+        format!("blocked by {blocker_count}")
+    } else {
+        "not blocked".to_string()
+    };
+    format!(
+        "{identifier}, {title}, state {state}, priority {}, {attention}",
+        priority_label(priority)
+    )
 }
 
 fn planning_group_label(group: PlanningGroup) -> &'static str {
@@ -2522,6 +2660,25 @@ mod tests {
             signed_workroom_delivery_outcome_label(&SignedWorkroomDeliveryOutcome::Unreachable),
             "Unreachable"
         );
+    }
+
+    #[test]
+    fn work_row_accessibility_name_uses_visible_domain_facts_only() {
+        let label = work_row_accessibility_label(
+            "OMEGA-217",
+            "Restore accessibility",
+            "active",
+            FixturePriority::High,
+            2,
+            false,
+        );
+        assert_eq!(
+            label,
+            "OMEGA-217, Restore accessibility, state active, priority High, blocked by 2"
+        );
+        for forbidden in ["https://", "/Users/", "signature", "payload", "token"] {
+            assert!(!label.contains(forbidden), "leaked {forbidden}");
+        }
     }
 }
 use db::kvp::KeyValueStore;

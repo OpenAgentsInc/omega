@@ -17,6 +17,23 @@ The internal tree remains useful for deterministic semantic tests and the
 `dev: dump accessibility tree` diagnostic. It does not replace an installed
 observation of the operating-system tree.
 
+## Work-screen semantics
+
+The v0.2.0 development Work surface publishes named List, Board-column, Table,
+Timeline, Roadmap, dependency, label, signed-history, and delivery-attempt
+collections. Every selectable Work row exposes the same selected state and a
+stable name built only from its visible identifier, title, lifecycle, priority,
+completion, and blocker count. Scene, Project, saved-View, and filter controls
+describe whether they are current or will apply a new selection. Pointer and
+keyboard activation still call the same existing selection handler.
+
+Work detail and inspector regions have distinct group names. Signed delivery
+semantics include actor, audience, transport state, relay target, outcome, and
+time, but omit raw delivery-error detail, signature, payload digest, evidence
+content, prompt, token, credential, and local path. This source contract limits
+what can enter an accessible name; the installed leakage scan remains the
+release authority.
+
 ## Candidate gate
 
 `script/collect-omega-installed-observations` reads the exact installed
