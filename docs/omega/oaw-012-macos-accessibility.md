@@ -151,6 +151,63 @@ because `common_filter` does not exclude `MultilineTextInput` and the same
 adapter already publishes Omega's other roles; a prediction is not the
 observation.
 
+### 2026-08-03 status announcements, live updates, and selection
+
+The independent VoiceOver pass on `v0.2.0-rc31` failed four of the seven
+close-rule areas. The transcript, generic-label, and unreachable-control
+defects were fixed in `47402924dc`. This section records the mechanism behind
+the three that remained, because in each case the missing piece was not a
+missing node.
+
+**A live region announces its value, never its label.** `accesskit_macos`'s
+event generator posts an `NSAccessibilityAnnouncementRequested` only for a
+node whose `live` is not `Off` **and** whose `value` changed, and the text it
+speaks is that value. Omega's only status-shaped node carried the routed model
+as an `aria_label` with no `live` and no `value`, which is silent by
+construction. Its zero-size frame was not the cause: `common_filter` excludes
+a node for focus, hidden, graft, and role, and for a clipped parent — GPUI
+never calls `set_clips_children`, so that branch is dead here — and an
+announcement is posted on the window rather than on the node's frame.
+
+GPUI gained `aria_live` for this, and two regions use it:
+
+- `omega-turn-status` in `ThreadView`, whose value is the turn state — started,
+  finished, or a fixed per-kind failure phrase. The failure phrase is
+  deliberately not the provider's own message, because an announcement is read
+  aloud and captured in caption logs.
+- `omega-live-announcements` in the Omega shell, whose value is derived from
+  render state rather than plumbed through the rename and navigation call
+  sites. A rename and a navigation are the same observation from the shell —
+  the destination's name is different — and are told apart by whether the
+  destination's identity moved. A conversation that has not learned its own
+  name yet is treated as still arriving, so launch is silent and the moment a
+  thread learns its name is not reported as a rename.
+
+**Selection needs an item-like role inside a selection container.** macOS
+answers `isAccessibilitySelected` only for `Node::is_item_like`, exposes
+`AXSelectedRows` only on `is_container_with_selectable_children`, and posts
+`NSAccessibilitySelectedRowsChangedNotification` only when a selected item has
+such a container as an ancestor. The sidebar rows already carried
+`aria_selected`, but they were `Role::Button`, so the state was written and
+never reached the platform. Threads and working folders are now `Role::TreeItem`
+inside a `Role::Tree`, which is the shape the Files outline already uses in this
+window. `Role::Tab` is the documented exception: macOS exposes tabs as radio
+buttons whose value carries the selection, and excludes them from both
+predicates, so a tab needs the flag and no container.
+
+Each sidebar row and conversation tab is drawn twice — an ephemeral draft and
+the persisted rows take different layout paths. Their accessibility semantics
+now come from one function each (`omega_sidebar_thread_row`,
+`omega_working_folder_row`, `omega_thread_tab`), because semantics drifting
+between two halves of the same control is exactly how the composer defect above
+survived three fixes.
+
+What a re-run should now find: a turn that announces when it starts, finishes,
+or fails; a rename and a route change that announce; and thread rows, folder
+rows, and tabs that report selection. What it will still find: the `Right dock`
+landmark defect (omega#234), and no Work surface reachable from a release
+binary.
+
 Source admission is only the first slice of omega#217. Close the issue only
 after one installed v0.2.0 candidate supplies the complete automated
 observation set and an independent VoiceOver pass covers navigation, focus,

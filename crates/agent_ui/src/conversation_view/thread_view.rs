@@ -832,6 +832,13 @@ pub struct ThreadView {
     pub thread_retry_status: Option<RetryStatus>,
     pub(super) thread_error: Option<ThreadError>,
     pub thread_error_markdown: Option<Entity<Markdown>>,
+    /// omega#217. The turn state the accessibility live region last spoke for,
+    /// and the sentence it spoke. Held because an announcement is a
+    /// *transition* — "Omega finished responding" is only true after a turn
+    /// that was running, and the first idle frame of a fresh thread is not a
+    /// completion.
+    omega_last_turn_state: Option<OmegaTurnState>,
+    omega_turn_status_announcement: Option<SharedString>,
     pub token_limit_callout_dismissed: bool,
     pub last_token_limit_telemetry: Option<acp_thread::TokenUsageRatio>,
     thread_feedback: ThreadFeedbackState,
@@ -1391,6 +1398,8 @@ impl ThreadView {
             thread_retry_status: None,
             thread_error: None,
             thread_error_markdown: None,
+            omega_last_turn_state: None,
+            omega_turn_status_announcement: None,
             token_limit_callout_dismissed: false,
             last_token_limit_telemetry: None,
             thread_feedback: Default::default(),
@@ -15301,6 +15310,99 @@ impl ThreadView {
             &self.executor_disclosure(cx),
         ))
     }
+
+    fn omega_turn_state(&self, cx: &App) -> OmegaTurnState {
+        if let Some(error) = self.thread_error.as_ref() {
+            return OmegaTurnState::Failed(omega_turn_failure_phrase(error));
+        }
+        if self.thread.read(cx).status() == ThreadStatus::Idle {
+            OmegaTurnState::Idle
+        } else {
+            OmegaTurnState::Running
+        }
+    }
+
+    /// omega#217. The independent VoiceOver pass sent a message, waited out a
+    /// whole turn sampling captions at t+2s, t+6s, t+12s and t+20s, and heard
+    /// **nothing** — no send confirmation, no progress, no completion, no
+    /// failure. The only status-shaped node in the tree named the model, not
+    /// the turn, and carried its text as a *label*, which a screen reader
+    /// speaks only when someone navigates to it.
+    ///
+    /// AccessKit's macOS adapter announces a live region's **value**, not its
+    /// label: `accesskit_macos`'s event generator posts an
+    /// `NSAccessibilityAnnouncementRequested` for a node whose `live` is not
+    /// `Off` and whose `value` changed. So the announcement has to be the
+    /// value, and the region has to be marked live; a labelled `Role::Status`
+    /// node alone announces nothing, which is exactly what the pass observed.
+    ///
+    /// The node is a child of the thread's root, outside every
+    /// `omega_zero_base::is_primary_interface()` and zero-base branch, so one
+    /// region covers both of Omega's conversation layouts rather than
+    /// announcing on a path only some people are on.
+    fn render_omega_turn_status(&mut self, cx: &mut Context<Self>) -> AnyElement {
+        let state = self.omega_turn_state(cx);
+        if self.omega_last_turn_state.as_ref() != Some(&state) {
+            let announcement = match (self.omega_last_turn_state.as_ref(), &state) {
+                (_, OmegaTurnState::Failed(phrase)) => {
+                    Some(SharedString::from(format!("Omega stopped: {phrase}.")))
+                }
+                (_, OmegaTurnState::Running) => Some(SharedString::from("Omega is responding.")),
+                (Some(OmegaTurnState::Running), OmegaTurnState::Idle) => {
+                    Some(SharedString::from("Omega finished responding."))
+                }
+                (_, OmegaTurnState::Idle) => None,
+            };
+            if let Some(announcement) = announcement {
+                self.omega_turn_status_announcement = Some(announcement);
+            }
+            self.omega_last_turn_state = Some(state);
+        }
+
+        div()
+            .id("omega-turn-status")
+            .role(gpui::Role::Status)
+            .aria_live(gpui::Live::Polite)
+            .aria_label("Turn status")
+            .when_some(
+                self.omega_turn_status_announcement.clone(),
+                |region, announcement| region.aria_value(announcement),
+            )
+            .into_any_element()
+    }
+}
+
+/// omega#217. What the turn-status live region is allowed to say about a
+/// failure. Each arm is a fixed phrase rather than the error's own message:
+/// the callout in the conversation already carries the full text, and an
+/// announcement is a place where a raw provider payload would be read aloud
+/// and copied into a caption log.
+fn omega_turn_failure_phrase(error: &ThreadError) -> &'static str {
+    match error {
+        ThreadError::PaymentRequired => "payment is required",
+        ThreadError::DataRetentionConsentRequired => "data retention consent is required",
+        ThreadError::Refusal => "the request was refused",
+        ThreadError::AuthenticationRequired(_)
+        | ThreadError::AuthenticationFailed { .. }
+        | ThreadError::NoCredentials { .. } => "authentication is required",
+        ThreadError::RateLimitExceeded { .. } => "the rate limit was reached",
+        ThreadError::ServerOverloaded { .. } => "the provider is unavailable",
+        ThreadError::PromptTooLarge => "the message is too large",
+        ThreadError::StreamError { .. } => "the response stream failed",
+        ThreadError::PermissionDenied { .. } => "permission was denied",
+        ThreadError::RequestFailed => "the request failed",
+        ThreadError::MaxOutputTokens => "the response reached its length limit",
+        ThreadError::NoModelSelected => "no model is selected",
+        ThreadError::ApiError { .. } => "the provider reported an error",
+        ThreadError::Other { .. } => "an error was reported",
+    }
+}
+
+#[derive(Clone, PartialEq, Eq)]
+enum OmegaTurnState {
+    Idle,
+    Running,
+    Failed(&'static str),
 }
 
 impl Render for ThreadView {
@@ -15315,6 +15417,7 @@ impl Render for ThreadView {
         self.ensure_omega_run_link_refresh(cx);
         self.ensure_exo_inspection(cx);
 
+        let turn_status = self.render_omega_turn_status(cx);
         let has_messages = self.list_state.item_count() > 0;
         let list_state = self.list_state.clone();
         let exo = self.exo_connection(cx);
@@ -15719,6 +15822,7 @@ impl Render for ThreadView {
                 }
             }))
             .size_full()
+            .child(turn_status)
             .children(self.render_subagent_titlebar(cx))
             .when_some(
                 self.thread_search_visible

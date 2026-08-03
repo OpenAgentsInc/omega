@@ -183,6 +183,62 @@ struct OmegaUnavailableSurface {
     reason: SharedString,
 }
 
+/// omega#217. The one place that decides what a threads-sidebar row, a
+/// working-folder row, and a conversation tab announce and how they report
+/// selection.
+///
+/// Each of these is drawn twice — the ephemeral draft and the persisted rows
+/// take different layout paths — and the accessibility semantics drifting
+/// between the two halves is exactly how the composer defect in this issue
+/// survived three fixes. Routing both halves through one function means a test
+/// that covers either one covers the semantics of both.
+fn omega_sidebar_thread_row(
+    row: gpui::Stateful<Div>,
+    title: &str,
+    age: &str,
+    selected: bool,
+) -> gpui::Stateful<Div> {
+    row.role(gpui::Role::TreeItem)
+        .aria_label(if selected {
+            format!("Thread {title}, selected")
+        } else {
+            format!("Open thread {title}, {age}")
+        })
+        .aria_selected(selected)
+}
+
+fn omega_working_folder_row(
+    row: gpui::Stateful<Div>,
+    label: String,
+    selected: bool,
+) -> gpui::Stateful<Div> {
+    row.role(gpui::Role::TreeItem)
+        .aria_label(label)
+        .aria_selected(selected)
+}
+
+fn omega_thread_tab(tab: gpui::Stateful<Div>, title: &str, selected: bool) -> gpui::Stateful<Div> {
+    tab.role(gpui::Role::Tab)
+        .aria_label(format!("Thread {title}"))
+        .aria_selected(selected)
+}
+
+/// omega#217. What the Omega shell's accessibility live region is currently
+/// describing: the kind of destination on screen, the thread it belongs to
+/// when it is a conversation, and that destination's own name.
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct OmegaAnnouncedDestination {
+    kind: SharedString,
+    is_conversation: bool,
+    /// A destination that carries its own live region and says more about
+    /// itself than "opened" ever could — the two refusal screens. The shell
+    /// still records it, so leaving it announces normally, but does not talk
+    /// over it on the way in.
+    self_announcing: bool,
+    thread_id: Option<ThreadId>,
+    title: SharedString,
+}
+
 #[derive(Clone, Copy, Debug)]
 struct OmegaSidebarTween {
     from: f32,
@@ -4298,6 +4354,12 @@ pub struct AgentPanel {
     /// refusal reached the user as nothing at all.
     omega_unavailable_surface: Option<OmegaUnavailableSurface>,
     omega_settings: Option<Entity<settings_ui::SettingsWindow>>,
+    /// omega#217. The destination the accessibility live region last spoke
+    /// for, and the sentence it spoke. Held because "renamed" and "opened" are
+    /// the same observation — a different title — distinguished only by
+    /// whether the destination itself changed underneath it.
+    omega_announced_destination: Option<OmegaAnnouncedDestination>,
+    omega_live_announcement: Option<SharedString>,
     #[cfg(any(test, feature = "test-support"))]
     force_omega_primary_interface_for_tests: bool,
     /// Thread keys whose durable disk selection was already adopted (or
@@ -5067,6 +5129,8 @@ impl AgentPanel {
             omega_unavailable_route: None,
             omega_unavailable_surface: None,
             omega_settings: None,
+            omega_announced_destination: None,
+            omega_live_announcement: None,
             #[cfg(any(test, feature = "test-support"))]
             force_omega_primary_interface_for_tests: false,
             workbench_selection_restore_attempted: HashSet::default(),
@@ -20639,9 +20703,19 @@ impl AgentPanel {
             }
             RouteAvailability::Available => "This destination is available.",
         };
+        // omega#217. This destination had an id and no role, so it was not
+        // published at all: a whole screen that said nothing to a screen
+        // reader and announced nothing on arrival. macOS speaks a live
+        // region's value, so the sentence is the value; the label names the
+        // region for someone who navigates to it afterwards.
+        let announcement = format!("{} unavailable. {reason}", state.route.default_title());
         v_flex()
             .id("omega-route-unavailable")
             .debug_selector(|| "omega.omega.route.unavailable".into())
+            .role(gpui::Role::Status)
+            .aria_label(announcement.clone())
+            .aria_live(gpui::Live::Assertive)
+            .aria_value(announcement)
             .size_full()
             .items_center()
             .justify_center()
@@ -20673,15 +20747,17 @@ impl AgentPanel {
     fn render_omega_unavailable_surface(state: &OmegaUnavailableSurface, cx: &App) -> AnyElement {
         use workbench_shell::WorkSurfaceExt as _;
 
+        // omega#217. A refusal is the one thing a person must hear without
+        // going looking for it, and `accesskit_macos` announces a live
+        // region's value rather than its label.
+        let announcement = format!("{} unavailable. {}", state.surface.label(), state.reason);
         v_flex()
             .id("omega-surface-unavailable")
             .debug_selector(|| "omega.omega.surface.unavailable".into())
             .role(gpui::Role::Status)
-            .aria_label(format!(
-                "{} unavailable. {}",
-                state.surface.label(),
-                state.reason
-            ))
+            .aria_label(announcement.clone())
+            .aria_live(gpui::Live::Assertive)
+            .aria_value(announcement)
             .size_full()
             .items_center()
             .justify_center()
@@ -20748,6 +20824,62 @@ impl AgentPanel {
             })
             .occlude()
             .child(Icon::new(icon).size(IconSize::Small).color(Color::Muted))
+            .into_any_element()
+    }
+
+    /// omega#217. The independent VoiceOver pass renamed a thread and changed
+    /// route and heard nothing either time: "no live region exists". A screen
+    /// reader only speaks a change it was not asked about when the change
+    /// lands on a node marked live, and `accesskit_macos` announces such a
+    /// node's **value** — not its label — so the sentence has to be the value.
+    ///
+    /// The announcement is derived from render state rather than plumbed
+    /// through the rename and navigation call sites: a rename and a navigation
+    /// are the same observation from here (the destination's name is
+    /// different) and are told apart only by whether the destination's own
+    /// identity moved. That keeps every path that can change either one
+    /// covered, including the ones that change it without going through a
+    /// user action.
+    fn omega_live_region(&mut self, destination: OmegaAnnouncedDestination) -> AnyElement {
+        // A conversation that does not exist yet, or that has not learned its
+        // own name, is still arriving. Recording it would turn the moment it
+        // learns its name into a rename, and announcing it would name the
+        // destination "thread" and nothing else — including at launch, where
+        // there is nothing to announce because nothing changed.
+        let named = !destination.is_conversation
+            || (destination.thread_id.is_some() && !destination.title.is_empty());
+        if named {
+            if let Some(previous) = self.omega_announced_destination.as_ref()
+                && previous != &destination
+                && !destination.self_announcing
+            {
+                let announcement = if previous.kind != destination.kind
+                    || previous.thread_id != destination.thread_id
+                {
+                    if destination.title.is_empty() {
+                        format!("Opened {}", destination.kind)
+                    } else {
+                        format!("Opened {} {}", destination.kind, destination.title)
+                    }
+                } else {
+                    format!("Thread renamed to {}", destination.title)
+                };
+                self.omega_live_announcement = Some(SharedString::from(announcement));
+            }
+            if self.omega_announced_destination.as_ref() != Some(&destination) {
+                self.omega_announced_destination = Some(destination);
+            }
+        }
+
+        div()
+            .id("omega-live-announcements")
+            .role(gpui::Role::Status)
+            .aria_live(gpui::Live::Polite)
+            .aria_label("Omega updates")
+            .when_some(
+                self.omega_live_announcement.clone(),
+                |region, announcement| region.aria_value(announcement),
+            )
             .into_any_element()
     }
 
@@ -20899,6 +21031,52 @@ impl AgentPanel {
             .map(|view| view.read(cx).title(cx))
             .unwrap_or_else(|| "New thread".into());
         let active_sidebar_title = active_title.clone();
+        let omega_live_region = {
+            let kind: SharedString = if omega_settings_open {
+                "settings".into()
+            } else if self.omega_unavailable_route.is_some() {
+                "unavailable destination".into()
+            } else if self.omega_unavailable_surface.is_some() {
+                "unavailable work surface".into()
+            } else if let Some(view) = active_work_index_view {
+                view.title().into()
+            } else if active_work_detail.is_some() {
+                "work item".into()
+            } else if omega_forensics_selected {
+                "Forensics".into()
+            } else if active_dogfood_project.is_some() {
+                "project".into()
+            } else {
+                "thread".into()
+            };
+            let is_thread = !omega_settings_open
+                && self.omega_unavailable_route.is_none()
+                && self.omega_unavailable_surface.is_none()
+                && active_work_index_view.is_none()
+                && active_work_detail.is_none()
+                && !omega_forensics_selected
+                && active_dogfood_project.is_none();
+            // Deliberately not `active_title`: that folds "there is no
+            // conversation here yet" into a placeholder string, which a
+            // rename check cannot tell apart from a name.
+            let title = is_thread
+                .then(|| {
+                    self.active_conversation_view().and_then(|view| {
+                        let view = view.read(cx);
+                        view.active_thread().is_some().then(|| view.title(cx))
+                    })
+                })
+                .flatten()
+                .unwrap_or_default();
+            self.omega_live_region(OmegaAnnouncedDestination {
+                kind,
+                is_conversation: is_thread,
+                self_announcing: self.omega_unavailable_route.is_some()
+                    || self.omega_unavailable_surface.is_some(),
+                thread_id: is_thread.then_some(active_thread_id).flatten(),
+                title,
+            })
+        };
         let active_executor = self
             .active_conversation_view()
             .and_then(|view| view.read(cx).active_thread().cloned())
@@ -20923,11 +21101,7 @@ impl AgentPanel {
             let title = row.title.clone();
             let icon = omega_thread_icon(&row);
             let is_active = omega_thread_open && Some(row.thread_id) == active_thread_id;
-            div()
-                .id(("omega-thread-tab", index))
-                .role(gpui::Role::Tab)
-                .aria_label(format!("Thread {title}"))
-                .aria_selected(is_active)
+            omega_thread_tab(div().id(("omega-thread-tab", index)), &title, is_active)
                 .when(is_active, |tab| {
                     tab.debug_selector(|| "omega.omega.thread-tab.active".into())
                         .bg(selected_background)
@@ -20962,36 +21136,37 @@ impl AgentPanel {
         });
 
         let draft_tab_index = thread_tab_rows.len();
-        let active_draft_tab = div()
-            .id("omega-active-thread-tab")
-            .debug_selector(|| "omega.omega.thread-tab.active".into())
-            .role(gpui::Role::Tab)
-            .aria_label(format!("Thread {active_title}"))
-            .aria_selected(true)
-            .w(px(TAB_WIDTH))
-            .h(px(28.))
-            .flex_none()
-            .flex()
-            .items_center()
-            .gap(px(6.))
-            .pl(px(8.))
-            .pr(px(6.))
-            .rounded(px(8.))
-            .bg(selected_background)
-            .border_1()
-            .border_color(colors.border_selected)
-            .text_size(px(12.))
-            .text_color(text)
-            .occlude()
-            .child(
-                Icon::new(active_icon)
-                    .size(IconSize::Small)
-                    .color(Color::Muted),
-            )
-            .child(div().min_w_0().flex_1().truncate().child(active_title))
-            .when(tab_shortcuts_visible, |tab| {
-                tab.child(omega_tab_shortcut_hint(draft_tab_index, text_placeholder))
-            });
+        let active_draft_tab = omega_thread_tab(
+            div()
+                .id("omega-active-thread-tab")
+                .debug_selector(|| "omega.omega.thread-tab.active".into()),
+            &active_title,
+            true,
+        )
+        .w(px(TAB_WIDTH))
+        .h(px(28.))
+        .flex_none()
+        .flex()
+        .items_center()
+        .gap(px(6.))
+        .pl(px(8.))
+        .pr(px(6.))
+        .rounded(px(8.))
+        .bg(selected_background)
+        .border_1()
+        .border_color(colors.border_selected)
+        .text_size(px(12.))
+        .text_color(text)
+        .occlude()
+        .child(
+            Icon::new(active_icon)
+                .size(IconSize::Small)
+                .color(Color::Muted),
+        )
+        .child(div().min_w_0().flex_1().truncate().child(active_title))
+        .when(tab_shortcuts_visible, |tab| {
+            tab.child(omega_tab_shortcut_hint(draft_tab_index, text_placeholder))
+        });
         let active_entity_tab = if let Some(view) = active_work_index_view {
             Some(
                 div()
@@ -21322,81 +21497,85 @@ impl AgentPanel {
                 let icon = omega_thread_icon(&row);
                 let is_active = omega_thread_open && Some(row.thread_id) == active_thread_id;
                 let (padding_x, padding_y) = omega_sidebar_row_padding(is_active);
-                let accessible_label = if is_active {
-                    format!("Thread {title}, selected")
-                } else {
-                    format!("Open thread {title}, {age}")
-                };
-                div()
-                    .id(("omega-sidebar-thread", index))
-                    .role(gpui::Role::Button)
-                    .aria_label(accessible_label)
-                    .aria_selected(is_active)
-                    .when(is_active, |row| {
-                        row.debug_selector(|| "omega.omega.sidebar-thread.active".into())
-                            .bg(selected_background)
-                            .border_1()
-                            .border_color(colors.border_selected)
-                    })
-                    .when(!is_active, |item| {
-                        item.cursor_pointer()
-                            .hover(move |style| style.bg(hover_background))
-                            .on_click(cx.listener(move |this, _, window, cx| {
-                                this.show_omega_thread_transcript(&row, window, cx);
-                            }))
-                    })
-                    .w_full()
-                    .px(px(padding_x))
-                    .py(px(padding_y))
-                    .rounded(px(8.))
-                    .child(
-                        h_flex()
-                            .w_full()
-                            .gap(px(8.))
-                            .child(Icon::new(icon).size(IconSize::Small).color(Color::Muted))
-                            .child(div().min_w_0().flex_1().truncate().child(title))
-                            .when(is_active, |row| {
-                                row.child(div().size(px(6.)).rounded_full().bg(text_accent))
-                            })
-                            .when(!is_active, |row| {
-                                row.child(
-                                    div()
-                                        .text_size(px(10.))
-                                        .text_color(text_placeholder)
-                                        .child(age),
-                                )
-                            }),
-                    )
+                // omega#217. `Role::Button` is not item-like, so macOS never
+                // exposed `AXSelected` for these rows and the selected state
+                // reached nothing. `Role::TreeItem` inside the `Role::Tree`
+                // list is the shape the Files outline already uses here, and it
+                // publishes selection, `AXPick`, and a selection-changed
+                // notification.
+                omega_sidebar_thread_row(
+                    div().id(("omega-sidebar-thread", index)),
+                    &title,
+                    &age,
+                    is_active,
+                )
+                .when(is_active, |row| {
+                    row.debug_selector(|| "omega.omega.sidebar-thread.active".into())
+                        .bg(selected_background)
+                        .border_1()
+                        .border_color(colors.border_selected)
+                })
+                .when(!is_active, |item| {
+                    item.cursor_pointer()
+                        .hover(move |style| style.bg(hover_background))
+                        .on_click(cx.listener(move |this, _, window, cx| {
+                            this.show_omega_thread_transcript(&row, window, cx);
+                        }))
+                })
+                .w_full()
+                .px(px(padding_x))
+                .py(px(padding_y))
+                .rounded(px(8.))
+                .child(
+                    h_flex()
+                        .w_full()
+                        .gap(px(8.))
+                        .child(Icon::new(icon).size(IconSize::Small).color(Color::Muted))
+                        .child(div().min_w_0().flex_1().truncate().child(title))
+                        .when(is_active, |row| {
+                            row.child(div().size(px(6.)).rounded_full().bg(text_accent))
+                        })
+                        .when(!is_active, |row| {
+                            row.child(
+                                div()
+                                    .text_size(px(10.))
+                                    .text_color(text_placeholder)
+                                    .child(age),
+                            )
+                        }),
+                )
             });
 
         let (active_sidebar_padding_x, active_sidebar_padding_y) = omega_sidebar_row_padding(true);
-        let active_draft_sidebar_row = h_flex()
-            .id("omega-sidebar-active-thread")
-            .debug_selector(|| "omega.omega.sidebar-thread.active".into())
-            .role(gpui::Role::ListItem)
-            .aria_label(format!("Thread {active_sidebar_title}, selected"))
-            .aria_selected(true)
-            .w_full()
-            .px(px(active_sidebar_padding_x))
-            .py(px(active_sidebar_padding_y))
-            .gap(px(8.))
-            .rounded(px(8.))
-            .bg(selected_background)
-            .border_1()
-            .border_color(colors.border_selected)
-            .child(
-                Icon::new(active_icon)
-                    .size(IconSize::Small)
-                    .color(Color::Muted),
-            )
-            .child(
-                div()
-                    .min_w_0()
-                    .flex_1()
-                    .truncate()
-                    .child(active_sidebar_title),
-            )
-            .child(div().size(px(6.)).rounded_full().bg(text_accent));
+        let active_draft_sidebar_row = omega_sidebar_thread_row(
+            h_flex()
+                .id("omega-sidebar-active-thread")
+                .debug_selector(|| "omega.omega.sidebar-thread.active".into()),
+            &active_sidebar_title,
+            "",
+            true,
+        )
+        .w_full()
+        .px(px(active_sidebar_padding_x))
+        .py(px(active_sidebar_padding_y))
+        .gap(px(8.))
+        .rounded(px(8.))
+        .bg(selected_background)
+        .border_1()
+        .border_color(colors.border_selected)
+        .child(
+            Icon::new(active_icon)
+                .size(IconSize::Small)
+                .color(Color::Muted),
+        )
+        .child(
+            div()
+                .min_w_0()
+                .flex_1()
+                .truncate()
+                .child(active_sidebar_title),
+        )
+        .child(div().size(px(6.)).rounded_full().bg(text_accent));
 
         let active_working_folder_key = self.project.read(cx).project_group_key(cx);
         let active_working_folder_rows = self
@@ -21431,45 +21610,47 @@ impl AgentPanel {
                         let accessible_label =
                             format!("Select working folder {folder_name}, branch {branch}");
                         let (padding_x, padding_y) = omega_sidebar_row_padding(selected);
-                        h_flex()
-                            .id(("omega-active-working-folder", index))
-                            .debug_selector(move || debug_selector)
-                            .role(gpui::Role::Button)
-                            .w_full()
-                            .px(px(padding_x))
-                            .py(px(padding_y))
-                            .gap(px(8.))
-                            .rounded(px(8.))
-                            .cursor_pointer()
-                            .aria_label(accessible_label)
-                            .when(selected, |row| {
-                                row.bg(selected_background)
-                                    .border_1()
-                                    .border_color(colors.border_selected)
-                            })
-                            .when(!selected, |row| {
-                                row.hover(move |style| style.bg(hover_background))
-                            })
-                            .on_click(cx.listener(move |this, _, _, cx| {
-                                this.select_thread_identity(
-                                    &source_thread_id,
-                                    source_binding.as_ref(),
-                                    source_generation,
-                                    binding.clone(),
-                                    cx,
-                                );
-                            }))
-                            .child(Icon::new(IconName::Folder).size(IconSize::Small))
-                            .child(div().min_w_0().flex_1().truncate().child(folder_name))
-                            .child(
-                                div()
-                                    .max_w(px(72.))
-                                    .truncate()
-                                    .text_size(px(10.))
-                                    .text_color(text_placeholder)
-                                    .child(branch),
-                            )
-                            .into_any_element()
+                        omega_working_folder_row(
+                            h_flex()
+                                .id(("omega-active-working-folder", index))
+                                .debug_selector(move || debug_selector),
+                            accessible_label,
+                            selected,
+                        )
+                        .w_full()
+                        .px(px(padding_x))
+                        .py(px(padding_y))
+                        .gap(px(8.))
+                        .rounded(px(8.))
+                        .cursor_pointer()
+                        .when(selected, |row| {
+                            row.bg(selected_background)
+                                .border_1()
+                                .border_color(colors.border_selected)
+                        })
+                        .when(!selected, |row| {
+                            row.hover(move |style| style.bg(hover_background))
+                        })
+                        .on_click(cx.listener(move |this, _, _, cx| {
+                            this.select_thread_identity(
+                                &source_thread_id,
+                                source_binding.as_ref(),
+                                source_generation,
+                                binding.clone(),
+                                cx,
+                            );
+                        }))
+                        .child(Icon::new(IconName::Folder).size(IconSize::Small))
+                        .child(div().min_w_0().flex_1().truncate().child(folder_name))
+                        .child(
+                            div()
+                                .max_w(px(72.))
+                                .truncate()
+                                .text_size(px(10.))
+                                .text_color(text_placeholder)
+                                .child(branch),
+                        )
+                        .into_any_element()
                     })
                     .collect::<Vec<_>>()
             })
@@ -21499,41 +21680,43 @@ impl AgentPanel {
                 let accessible_label = format!("Select working folder {folder_name}");
                 let source_workspace = source_workspace.clone();
                 let (padding_x, padding_y) = omega_sidebar_row_padding(selected);
-                h_flex()
-                    .id(("omega-retained-working-folder", index))
-                    .debug_selector(move || debug_selector)
-                    .role(gpui::Role::Button)
-                    .w_full()
-                    .px(px(padding_x))
-                    .py(px(padding_y))
-                    .gap(px(8.))
-                    .rounded(px(8.))
-                    .cursor_pointer()
-                    .aria_label(accessible_label)
-                    .when(selected, |row| {
-                        row.bg(selected_background)
-                            .border_1()
-                            .border_color(colors.border_selected)
-                    })
-                    .when(!selected, |row| {
-                        row.hover(move |style| style.bg(hover_background))
-                    })
-                    .on_click(move |_, window, cx| {
-                        let Some(multi_workspace) = multi_workspace.as_ref() else {
-                            return;
-                        };
-                        multi_workspace.update(cx, |multi_workspace, cx| {
-                            multi_workspace.activate(
-                                target.clone(),
-                                Some(source_workspace.clone()),
-                                window,
-                                cx,
-                            );
-                        });
-                    })
-                    .child(Icon::new(IconName::Folder).size(IconSize::Small))
-                    .child(div().min_w_0().flex_1().truncate().child(folder_name))
-                    .into_any_element()
+                omega_working_folder_row(
+                    h_flex()
+                        .id(("omega-retained-working-folder", index))
+                        .debug_selector(move || debug_selector),
+                    accessible_label,
+                    selected,
+                )
+                .w_full()
+                .px(px(padding_x))
+                .py(px(padding_y))
+                .gap(px(8.))
+                .rounded(px(8.))
+                .cursor_pointer()
+                .when(selected, |row| {
+                    row.bg(selected_background)
+                        .border_1()
+                        .border_color(colors.border_selected)
+                })
+                .when(!selected, |row| {
+                    row.hover(move |style| style.bg(hover_background))
+                })
+                .on_click(move |_, window, cx| {
+                    let Some(multi_workspace) = multi_workspace.as_ref() else {
+                        return;
+                    };
+                    multi_workspace.update(cx, |multi_workspace, cx| {
+                        multi_workspace.activate(
+                            target.clone(),
+                            Some(source_workspace.clone()),
+                            window,
+                            cx,
+                        );
+                    });
+                })
+                .child(Icon::new(IconName::Folder).size(IconSize::Small))
+                .child(div().min_w_0().flex_1().truncate().child(folder_name))
+                .into_any_element()
             })
             .collect::<Vec<_>>();
         let working_folder_rows = active_working_folder_rows
@@ -21671,6 +21854,13 @@ impl AgentPanel {
         let sidebar = div()
             .id("omega-sidebar")
             .debug_selector(|| "omega.omega.sidebar".into())
+            // omega#217/omega#234. Without this the sidebar's headings, rows,
+            // and buttons are published as flat siblings of the window, so a
+            // screen reader has no way to jump to the navigation or to know
+            // when it has left it. `Complementary` is the same landmark role
+            // the workspace docks use.
+            .role(gpui::Role::Complementary)
+            .aria_label("Omega sidebar")
             .w(px(OMEGA_SIDEBAR_WIDTH))
             .h_full()
             .flex_none()
@@ -21699,7 +21889,16 @@ impl AgentPanel {
                     .child(open_working_folder),
             )
             .when(has_working_folders, |sidebar| {
-                sidebar.children(working_folder_rows)
+                sidebar.child(
+                    // omega#217. The selection container for the folder rows,
+                    // for the same reason the thread list needs one.
+                    v_flex()
+                        .id("omega-sidebar-working-folders")
+                        .role(gpui::Role::Tree)
+                        .aria_label("Working folders")
+                        .w_full()
+                        .children(working_folder_rows),
+                )
             })
             .when(!has_working_folders, |sidebar| {
                 sidebar.child(
@@ -21789,6 +21988,12 @@ impl AgentPanel {
             .child(
                 v_flex()
                     .id("omega-sidebar-threads")
+                    // omega#217. The container a selected row needs: AccessKit
+                    // only reports a selection change through the nearest
+                    // ancestor that is a container with selectable children,
+                    // and it only exposes `AXSelectedRows` on one.
+                    .role(gpui::Role::Tree)
+                    .aria_label("Threads")
                     .flex_1()
                     .min_h_0()
                     .overflow_y_scroll()
@@ -21948,6 +22153,7 @@ impl AgentPanel {
             .overflow_hidden()
             .bg(shell_background.opacity(if cfg!(target_os = "macos") { 0.94 } else { 1. }))
             .font_family("Geist")
+            .child(omega_live_region)
             .when(!omega_settings_open, |shell| {
                 shell.child(
                     div()
@@ -26550,17 +26756,314 @@ mod tests {
         assert!(
             nodes
                 .iter()
-                .any(|(role, label)| (role == "Button" || role == "ListItem")
-                    && label.starts_with("Thread ")),
+                .any(|(role, label)| role == "TreeItem" && label.starts_with("Thread ")),
             "the selected thread row must be reachable and announceable — selecting a \
              thread is the main navigation act in this product: {tree}"
         );
         assert!(
-            nodes.iter().any(
-                |(role, label)| role == "Button" && label.starts_with("Select working folder ")
-            ),
+            nodes
+                .iter()
+                .any(|(role, label)| role == "TreeItem"
+                    && label.starts_with("Select working folder ")),
             "the working-folder row must be reachable: {tree}"
         );
+    }
+
+    /// omega#217. The independent VoiceOver pass renamed a thread and changed
+    /// route and heard nothing either time: "no live region exists; thread
+    /// rename and route change are silent".
+    ///
+    /// `accesskit_macos` posts an announcement for a node whose `live` is not
+    /// `Off` and whose **value** changed. A label is not enough — the previous
+    /// status-shaped node in this window carried its text as a label and was
+    /// never spoken — so this asserts the politeness and the value together.
+    #[gpui::test]
+    async fn renaming_a_thread_and_changing_route_are_announced(cx: &mut TestAppContext) {
+        let (panel, mut cx) = setup_visible_panel(cx).await;
+        let cx = &mut cx;
+        open_stub_thread(&panel, cx);
+        cx.set_debug_accessibility_active(true);
+
+        let arrival = omega_live_region(cx);
+        assert_eq!(
+            arrival.live.as_deref(),
+            Some("Polite"),
+            "the shell needs a live region at all — without one no navigation or \
+             rename can ever be spoken"
+        );
+        assert_eq!(
+            arrival.value, None,
+            "arriving somewhere for the first time is not a change and must not announce"
+        );
+
+        let thread = panel
+            .read_with(cx, |panel, cx| {
+                panel
+                    .active_conversation_view()
+                    .and_then(|view| view.read(cx).active_thread().cloned())
+            })
+            .expect("the opened thread should have a thread view");
+        thread.update(cx, |view, cx| {
+            view.thread.update(cx, |thread, cx| {
+                thread
+                    .set_title("Brief Greeting Exchange".into(), cx)
+                    .detach();
+            });
+        });
+        cx.run_until_parked();
+
+        assert_eq!(
+            omega_live_region(cx).value.as_deref(),
+            Some("Thread renamed to Brief Greeting Exchange"),
+            "a rename must be announced; the title is the only name the thread has \
+             and it changes underneath the user"
+        );
+
+        let candidate = crate::thread_identity::ThreadIdentityCandidate {
+            binding: omega_workbench_state::RepositoryBinding::new("repo", "worktree")
+                .expect("valid binding"),
+            git_repository_id: Some(1),
+            project_name: "Omega".into(),
+            repository_name: "omega".into(),
+            worktree_name: "omega".into(),
+            worktree_abs_path: PathBuf::from("/project"),
+            worktree_path: "/project".into(),
+            remote_url: Some("https://github.com/OpenAgentsInc/omega.git".into()),
+            head_commit: Some("0123456789abcdef0123456789abcdef01234567".into()),
+            branch: crate::thread_identity::BranchIdentity::Branch("main".into()),
+            git: crate::thread_identity::GitIdentitySummary::default(),
+            source_revision: 1,
+        };
+        panel.update_in(cx, |panel, window, cx| {
+            panel.set_workbench_identity_observation_for_tests(
+                Some(ThreadIdentityObservation {
+                    revision: 1,
+                    phase: IdentityPhase::Ready,
+                    candidates: vec![candidate],
+                }),
+                window,
+                cx,
+            );
+            panel.select_work_surface(omega_workbench_state::WorkSurface::Forensics, window, cx);
+        });
+        cx.run_until_parked();
+        panel.read_with(cx, |panel, _cx| {
+            assert!(
+                panel
+                    .omega_navigation_history
+                    .current()
+                    .is_some_and(is_omega_forensics_route),
+                "the route change this assertion is about has to have happened"
+            );
+        });
+
+        assert_eq!(
+            omega_live_region(cx).value.as_deref(),
+            Some("Opened Forensics"),
+            "changing route must be announced; otherwise the window silently becomes \
+             a different screen"
+        );
+    }
+
+    /// omega#217. The pass found that no selectable Omega content exposed
+    /// selection state. The sidebar rows carried `aria_selected` already, but
+    /// they were `Role::Button`, and macOS only answers `isAccessibilitySelected`
+    /// for an item-like role inside a container with selectable children — so
+    /// the state was written and never reached the platform. This asserts the
+    /// three things the adapter actually requires: an item-like role, the
+    /// selected flag, and a selection container as the parent.
+    #[gpui::test]
+    async fn selected_threads_folders_and_tabs_publish_their_selection(cx: &mut TestAppContext) {
+        let (panel, mut cx) = setup_visible_panel(cx).await;
+        let cx = &mut cx;
+
+        panel.update_in(cx, |panel, window, cx| {
+            panel.force_omega_primary_interface_for_tests = true;
+            panel.new_thread(&NewThread, window, cx);
+        });
+        cx.run_until_parked();
+        cx.set_debug_accessibility_active(true);
+
+        let snapshot = cx.debug_render_snapshot();
+        let tree = snapshot
+            .accessibility_tree_json()
+            .expect("forced accessibility should capture the Omega surface");
+        let nodes = omega_accessibility_records(tree);
+        let parent_of = |key: &str| {
+            nodes
+                .iter()
+                .find(|node| node.children.iter().any(|child| child == key))
+        };
+
+        // `Role::Tab` is the one item-like role macOS treats specially: it is
+        // exposed as a radio button whose value carries the selection, not
+        // through `AXSelected`. So a tab needs the flag but not a container.
+        let tab = nodes
+            .iter()
+            .find(|node| node.role == "Tab" && node.selected == Some(true))
+            .unwrap_or_else(|| panic!("the open conversation tab must be selected: {tree}"));
+        assert_eq!(
+            parent_of(&tab.key).map(|parent| parent.role.as_str()),
+            Some("TabList"),
+            "the selected tab must sit in the tab strip: {tree}"
+        );
+
+        // Identified by element id, not by label: the tab carries the same
+        // "Thread {title}" text, and matching on it would let a passing tab
+        // stand in for a missing row.
+        for (what, is_row) in [
+            (
+                "thread row",
+                &(|node: &OmegaNode| {
+                    node.element_id.as_deref().is_some_and(|id| {
+                        id == "omega-sidebar-active-thread"
+                            || id.starts_with("omega-sidebar-thread-")
+                    })
+                }) as &dyn Fn(&OmegaNode) -> bool,
+            ),
+            ("working-folder row", &|node: &OmegaNode| {
+                node.element_id.as_deref().is_some_and(|id| {
+                    id.starts_with("omega-active-working-folder")
+                        || id.starts_with("omega-retained-working-folder")
+                })
+            }),
+        ] {
+            let rows: Vec<_> = nodes.iter().filter(|node| is_row(node)).collect();
+            assert!(
+                !rows.is_empty(),
+                "this assertion means nothing without a published {what}: {tree}"
+            );
+            for row in &rows {
+                assert_eq!(
+                    row.role, "TreeItem",
+                    "every {what} needs an item-like role — macOS answers \
+                     `isAccessibilitySelected` for nothing else: {tree}"
+                );
+            }
+            let selected = rows
+                .iter()
+                .find(|row| row.selected == Some(true))
+                .unwrap_or_else(|| {
+                    panic!("the current {what} must report that it is selected: {tree}")
+                });
+            let parent = parent_of(&selected.key)
+                .unwrap_or_else(|| panic!("the {what} must have a published parent: {tree}"));
+            assert_eq!(
+                parent.role, "Tree",
+                "the {what} needs a selection container as its parent, or macOS reports \
+                 no selection change and exposes no selected rows: {tree}"
+            );
+        }
+    }
+
+    /// A conversation that actually has a session, and therefore a name of its
+    /// own. Omega's own router defers its first session until a turn, so a
+    /// bare `new_thread` leaves the shell with a destination that is still
+    /// arriving — which is deliberately not announceable.
+    fn open_stub_thread(panel: &Entity<AgentPanel>, cx: &mut VisualTestContext) {
+        panel.update(cx, |panel, cx| {
+            panel.connection_store.update(cx, |store, cx| {
+                store.restart_connection(
+                    Agent::Stub,
+                    Rc::new(StubAgentServer::new(StubAgentConnection::new())),
+                    cx,
+                );
+            });
+        });
+        cx.run_until_parked();
+
+        panel.update_in(cx, |panel, window, cx| {
+            panel.force_omega_primary_interface_for_tests = true;
+            panel.external_thread(
+                Some(Agent::Stub),
+                None,
+                None,
+                None,
+                None,
+                true,
+                AgentThreadSource::AgentPanel,
+                window,
+                cx,
+            );
+        });
+        cx.run_until_parked();
+    }
+
+    /// The one Omega shell live region in the last `accesskit::TreeUpdate`.
+    fn omega_live_region(cx: &mut VisualTestContext) -> OmegaNode {
+        let snapshot = cx.debug_render_snapshot();
+        let tree = snapshot
+            .accessibility_tree_json()
+            .expect("forced accessibility should capture the Omega shell")
+            .to_owned();
+        let mut regions: Vec<_> = omega_accessibility_records(&tree)
+            .into_iter()
+            .filter(|node| node.element_id.as_deref() == Some("omega-live-announcements"))
+            .collect();
+        assert_eq!(
+            regions.len(),
+            1,
+            "the Omega shell must publish exactly one live region: {tree}"
+        );
+        regions.remove(0)
+    }
+
+    struct OmegaNode {
+        key: String,
+        element_id: Option<String>,
+        role: String,
+        label: String,
+        selected: Option<bool>,
+        value: Option<String>,
+        live: Option<String>,
+        children: Vec<String>,
+    }
+
+    /// The full nodes of the last `accesskit::TreeUpdate` GPUI handed the
+    /// platform adapter, including the parent/child links the macOS adapter
+    /// walks to decide whether a selection is reportable.
+    fn omega_accessibility_records(tree: &str) -> Vec<OmegaNode> {
+        let value: serde_json::Value =
+            serde_json::from_str(tree).expect("the accessibility tree should be valid JSON");
+        value
+            .get("nodes")
+            .and_then(serde_json::Value::as_object)
+            .expect("the accessibility tree should have a nodes object")
+            .iter()
+            .map(|(key, node)| {
+                let aria = node.get("aria");
+                let string = |field: &str| {
+                    aria.and_then(|aria| aria.get(field))
+                        .and_then(serde_json::Value::as_str)
+                        .map(str::to_owned)
+                };
+                OmegaNode {
+                    key: key.clone(),
+                    element_id: node
+                        .get("element_id")
+                        .and_then(serde_json::Value::as_str)
+                        .map(str::to_owned),
+                    role: string("role").unwrap_or_default(),
+                    label: string("label").unwrap_or_default(),
+                    selected: aria
+                        .and_then(|aria| aria.get("selected"))
+                        .and_then(serde_json::Value::as_bool),
+                    value: string("value"),
+                    live: string("live"),
+                    children: node
+                        .get("children")
+                        .and_then(serde_json::Value::as_array)
+                        .map(|children| {
+                            children
+                                .iter()
+                                .filter_map(serde_json::Value::as_str)
+                                .map(str::to_owned)
+                                .collect()
+                        })
+                        .unwrap_or_default(),
+                }
+            })
+            .collect()
     }
 
     /// The (role, label) pairs of the last `accesskit::TreeUpdate` GPUI handed
@@ -33685,6 +34188,108 @@ mod tests {
                 .selector_count("omega.omega.surface.unavailable"),
             0,
             "returning to the transcript must clear the refused destination"
+        );
+    }
+
+    /// omega#217, following omega#237. A refusal is the one thing a person
+    /// must hear without going looking for it. `omega#237` gave the refused
+    /// surface a `Role::Status` node with a label, which is exactly the shape
+    /// the routed-model node had — and that node was never spoken, because
+    /// `accesskit_macos` announces a live region's **value** and nothing else.
+    #[gpui::test]
+    async fn a_refused_destination_announces_itself(cx: &mut TestAppContext) {
+        let (panel, mut cx) = setup_visible_panel(cx).await;
+        let cx = &mut cx;
+        // A named destination first, so the shell has something to announce a
+        // change *from* — otherwise the last assertion here is vacuous.
+        open_stub_thread(&panel, cx);
+        cx.set_debug_accessibility_active(true);
+        cx.run_until_parked();
+
+        let opened = panel.update_in(cx, |panel, window, cx| {
+            panel.select_work_surface_with_history(
+                omega_workbench_state::WorkSurface::Forensics,
+                true,
+                window,
+                cx,
+            )
+        });
+        assert!(
+            !opened,
+            "this assertion is about a refusal, so there has to be one"
+        );
+        cx.run_until_parked();
+
+        let snapshot = cx.debug_render_snapshot();
+        let tree = snapshot
+            .accessibility_tree_json()
+            .expect("forced accessibility should capture the refused destination");
+        let refusal = omega_accessibility_records(tree)
+            .into_iter()
+            .find(|node| node.element_id.as_deref() == Some("omega-surface-unavailable"))
+            .unwrap_or_else(|| panic!("the refused destination must be published: {tree}"));
+        assert_eq!(
+            refusal.live.as_deref(),
+            Some("Assertive"),
+            "a refusal must interrupt rather than wait to be found: {tree}"
+        );
+        assert_eq!(
+            refusal.value.as_deref(),
+            Some("Forensics unavailable. This worktree has no Git repository"),
+            "the announced text is the value; a label alone is silent: {tree}"
+        );
+
+        // The shell's own live region says "Opened ..." for every destination.
+        // It must not talk over a refusal that says more than that.
+        assert_eq!(
+            omega_live_region(cx).value.as_deref(),
+            None,
+            "the destination that announces itself must not also be announced \
+             generically by the shell"
+        );
+
+        // The older refusal destination had an id and no role at all, so it was
+        // not published to assistive technology in any form.
+        let unavailable_route =
+            OmegaRoute::document("document:deleted").expect("valid unavailable document route");
+        panel.update_in(cx, |panel, window, cx| {
+            panel.show_active_omega_thread_transcript(window, cx);
+        });
+        cx.run_until_parked();
+        panel.update_in(cx, |panel, window, cx| {
+            panel
+                .omega_navigation_history
+                .push(unavailable_route.clone());
+            panel.show_omega_unavailable_route(
+                EntityRouteState {
+                    route: unavailable_route.clone(),
+                    availability: RouteAvailability::Unavailable(RouteUnavailableReason::Deleted),
+                },
+                window,
+                cx,
+            );
+        });
+        cx.run_until_parked();
+
+        let snapshot = cx.debug_render_snapshot();
+        let tree = snapshot
+            .accessibility_tree_json()
+            .expect("forced accessibility should capture the unavailable route");
+        let refused_route = omega_accessibility_records(tree)
+            .into_iter()
+            .find(|node| node.element_id.as_deref() == Some("omega-route-unavailable"))
+            .unwrap_or_else(|| {
+                panic!("an unavailable destination must be published at all: {tree}")
+            });
+        assert_eq!(
+            refused_route.live.as_deref(),
+            Some("Assertive"),
+            "an unavailable destination must interrupt: {tree}"
+        );
+        assert_eq!(
+            refused_route.value.as_deref(),
+            Some("Document unavailable. This destination was deleted."),
+            "the announced text is the value: {tree}"
         );
     }
 

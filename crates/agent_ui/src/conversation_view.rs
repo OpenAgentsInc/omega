@@ -9057,10 +9057,174 @@ pub(crate) mod tests {
         }
     }
 
+    /// omega#217. The independent VoiceOver pass sent one message and sampled
+    /// captions at t+2s, t+6s, t+12s and t+20s across the whole turn:
+    /// "VoiceOver announced nothing at any point. No send confirmation, no
+    /// streaming or progress, no completion."
+    ///
+    /// The mechanism is exact. `accesskit_macos`'s event generator posts an
+    /// `NSAccessibilityAnnouncementRequested` only for a node whose `live` is
+    /// not `Off` **and** whose `value` changed, and the announced text is that
+    /// value. Omega had no live node anywhere and no status node with a value,
+    /// so the two assertions below — the region is live, and its value tracks
+    /// the turn — are the two halves of "a screen reader hears the turn".
+    #[gpui::test]
+    async fn a_turn_announces_that_it_started_and_that_it_finished(cx: &mut TestAppContext) {
+        init_test(cx);
+
+        // A permission-gated tool call holds the turn open, so "running" is a
+        // state the test can observe rather than a frame it has to race.
+        let tool_call_id = acp::ToolCallId::new("turn-status-1");
+        let tool_call =
+            acp::ToolCall::new(tool_call_id.clone(), "Run `cargo test`").kind(acp::ToolKind::Edit);
+        let permission_options =
+            ToolPermissionContext::new(TerminalTool::NAME, vec!["cargo test".to_string()])
+                .build_permission_options();
+        let connection =
+            StubAgentConnection::new().with_permission_requests(HashMap::from_iter([(
+                tool_call_id.clone(),
+                permission_options,
+            )]));
+        connection.set_next_prompt_updates(vec![acp::SessionUpdate::ToolCall(tool_call)]);
+
+        let (conversation_view, cx) =
+            setup_conversation_view(StubAgentServer::new(connection), cx).await;
+        add_to_workspace(conversation_view.clone(), cx);
+        cx.update(|_window, cx| {
+            AgentSettings::override_global(
+                AgentSettings {
+                    notify_when_agent_waiting: NotifyWhenAgentWaiting::Never,
+                    ..AgentSettings::get_global(cx).clone()
+                },
+                cx,
+            );
+        });
+        cx.set_debug_accessibility_active(true);
+
+        let idle = turn_status_region(cx);
+        assert_eq!(
+            idle.live.as_deref(),
+            Some("Polite"),
+            "the turn-status region must be a live region, or the platform adapter \
+             never announces it"
+        );
+        assert_eq!(
+            idle.value, None,
+            "a thread that has not run must not announce anything on arrival"
+        );
+
+        message_editor(&conversation_view, cx).update_in(cx, |editor, window, cx| {
+            editor.set_text("Run the tests.", window, cx);
+        });
+        active_thread(&conversation_view, cx)
+            .update_in(cx, |view, window, cx| view.send(window, cx));
+        cx.run_until_parked();
+
+        conversation_view.read_with(cx, |view, cx| {
+            assert!(
+                view.pending_tool_call(cx).is_some(),
+                "this test only means something while the turn is still running"
+            );
+        });
+        assert_eq!(
+            turn_status_region(cx).value.as_deref(),
+            Some("Omega is responding."),
+            "a started turn must be announced; a screen-reader user otherwise has no \
+             signal that the message was sent"
+        );
+
+        conversation_view.update_in(cx, |_, window, cx| {
+            window.dispatch_action(
+                crate::AuthorizeToolCall {
+                    tool_call_id: "turn-status-1".to_string(),
+                    option_id: "allow".to_string(),
+                    option_kind: "AllowOnce".to_string(),
+                }
+                .boxed_clone(),
+                cx,
+            );
+        });
+        cx.run_until_parked();
+
+        conversation_view.read_with(cx, |view, cx| {
+            assert_eq!(
+                view.active_thread()
+                    .expect("the thread should still exist")
+                    .read(cx)
+                    .thread
+                    .read(cx)
+                    .status(),
+                acp_thread::ThreadStatus::Idle,
+                "the turn must have finished for the completion assertion to mean anything"
+            );
+        });
+        assert_eq!(
+            turn_status_region(cx).value.as_deref(),
+            Some("Omega finished responding."),
+            "a finished turn must be announced; without it the user cannot tell a slow \
+             answer from a finished one"
+        );
+    }
+
+    /// omega#217. The same silence covers failure: a turn that dies leaves the
+    /// callout on screen and says nothing. The announced phrase is deliberately
+    /// a fixed sentence per error kind rather than the provider's own message,
+    /// which is where a raw payload would otherwise be read aloud.
+    #[gpui::test]
+    async fn a_failed_turn_announces_that_it_failed(cx: &mut TestAppContext) {
+        init_test(cx);
+
+        let (conversation_view, cx) =
+            setup_conversation_view(StubAgentServer::new(StubAgentConnection::new()), cx).await;
+        add_to_workspace(conversation_view.clone(), cx);
+        cx.set_debug_accessibility_active(true);
+
+        active_thread(&conversation_view, cx).update(cx, |view, cx| {
+            view.handle_thread_error(ThreadError::PaymentRequired, cx);
+        });
+        cx.run_until_parked();
+
+        let failed = turn_status_region(cx);
+        assert_eq!(
+            failed.live.as_deref(),
+            Some("Polite"),
+            "the failure has to land on a live region to be spoken at all"
+        );
+        assert_eq!(
+            failed.value.as_deref(),
+            Some("Omega stopped: payment is required."),
+            "a failed turn must say so"
+        );
+    }
+
+    /// The one turn-status live region in the last `accesskit::TreeUpdate`.
+    fn turn_status_region(cx: &mut VisualTestContext) -> AccessibilityNode {
+        let snapshot = cx.debug_render_snapshot();
+        let tree = snapshot
+            .accessibility_tree_json()
+            .expect("forced accessibility should capture the conversation")
+            .to_owned();
+        let mut regions: Vec<_> = accessibility_nodes(&tree)
+            .into_iter()
+            .filter(|node| node.element_id.as_deref() == Some("omega-turn-status"))
+            .collect();
+        assert_eq!(
+            regions.len(),
+            1,
+            "the conversation must publish exactly one turn-status region: {tree}"
+        );
+        regions.remove(0)
+    }
+
     pub(crate) struct AccessibilityNode {
         pub(crate) element_id: Option<String>,
         pub(crate) role: String,
         pub(crate) label: String,
+        /// What assistive technology speaks for a live region. macOS announces
+        /// a live node's value, never its label, so a status region that only
+        /// has a label is silent.
+        pub(crate) value: Option<String>,
+        pub(crate) live: Option<String>,
     }
 
     /// Flatten the debug serialization of the last `accesskit::TreeUpdate` into
@@ -9092,6 +9256,14 @@ pub(crate) mod tests {
                         .and_then(serde_json::Value::as_str)
                         .unwrap_or_default()
                         .to_owned(),
+                    value: aria
+                        .and_then(|aria| aria.get("value"))
+                        .and_then(serde_json::Value::as_str)
+                        .map(str::to_owned),
+                    live: aria
+                        .and_then(|aria| aria.get("live"))
+                        .and_then(serde_json::Value::as_str)
+                        .map(str::to_owned),
                 }
             })
             .collect()
