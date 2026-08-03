@@ -28256,6 +28256,11 @@ mod tests {
         ));
         for required in [
             "AccountRegistryService",
+            "OrganizationMembershipReadResult",
+            "membership_request",
+            "from_dashboard_and_membership_read",
+            "CompletenessState::Complete",
+            "FreshnessState::Fresh",
             "EffectivePrincipalState",
             "Identity conflict",
             "Local scope",
@@ -28294,6 +28299,31 @@ mod tests {
             !panel.contains(".child(\"Anonymous\")"),
             "OMEGA-DELTA-0234: hard-coded Anonymous identity returned"
         );
+        for required in [
+            "read_organization_memberships",
+            "membership_request",
+            "from_dashboard_and_membership_read",
+        ] {
+            assert!(
+                panel.contains(required),
+                "OMEGA-DELTA-0234: authoritative membership poll lost `{required}`"
+            );
+        }
+
+        let supervisor = without_comments(&read_repository_file(
+            "crates/omega_effectd/src/supervisor.rs",
+        ));
+        for required in [
+            "OrganizationMembershipReadRequest",
+            "OrganizationMembershipReadResult",
+            "OrganizationMembershipRead",
+            "organization.membership.read",
+        ] {
+            assert!(
+                supervisor.contains(required),
+                "OMEGA-DELTA-0234: generated membership client lost `{required}`"
+            );
+        }
 
         let organization_scope = without_comments(&read_repository_file(
             "crates/agent_ui/src/organization_scope.rs",

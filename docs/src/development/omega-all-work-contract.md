@@ -9,10 +9,10 @@ adapter creates a second writable store.
 
 | Field                 | Value                                                              |
 | --------------------- | ------------------------------------------------------------------ |
-| OpenAgents commit     | `1a7d624c5ee87810e2ed6c70249878bad2ddbfa2`                         |
+| OpenAgents commit     | `38dcd750d249b5af4705becaefb12212696a1416`                         |
 | Contract              | `openagents.all_work_boundary.v1`                                  |
-| Definition SHA-256    | `2797ea64aba30c5ccc19cf2f4771d47955b126a3d91576f24409ad2d23f47a03` |
-| Rust artifact SHA-256 | `cf4a42d8e3b1cb5d366841e16e7cab09b5b376f095fdf7054dea0eae90f1f154` |
+| Definition SHA-256    | `04426ecce7bfd8d1eae3b9e134fd50fe0051f3c27957039a4ca51e68227dcea2` |
+| Rust artifact SHA-256 | `f364cd0e9918ea94027373066888995a3bc7614a978d427d898d951f6eb95051` |
 | Omega receipt         | `crates/omega_effectd/all-work-contract/SOURCE.json`               |
 
 The generated Rust file, compatibility manifest, and shared fixtures are
@@ -30,7 +30,8 @@ separate All Work profile:
 - `omega-effectd.v2` enables `work.index.read`, `work.snapshot.read`,
   `planning.graph.read`, `repository.claim.read`, and separately negotiated
   claim execution, signed Workroom read/enqueue/delivery, Work command, and
-  Work cutover and strict bug candidate capabilities;
+  Work cutover, Organization membership read, and strict bug candidate
+  capabilities;
 - a v1 client that calls any All Work read method receives
   `incompatible_version`;
 - request and result domain payloads use generated Rust and Effect types;
@@ -160,8 +161,12 @@ evidence requirement. It does not invent a Repository Work Claim or Lease.
 
 The inspector enables command controls only when the displayed account supplies
 both an enrolled Effective Principal and verified Organization membership. The
-current account registry does not own Organization membership, so the controls
-fail closed and explain that dependency. Fixture controls remain simulated.
+account registry does not own Organization membership. The production account
+poll now queries the separate Effect-owned ledger through
+`organization.membership.read`, fenced by the exact account reference,
+generation, and Effective Principal. The authority starts empty and only an
+explicit owner-local provisioned row can enable Organization-dependent
+controls. Fixture controls remain simulated.
 
 After delegation, **Link session** admits the exact active local Omega Thread
 only when it has a real ACP session and its Direct Agent is the admitted Agent

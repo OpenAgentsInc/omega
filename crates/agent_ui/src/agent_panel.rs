@@ -4601,14 +4601,36 @@ impl AgentPanel {
         if cfg!(any(test, feature = "test-support")) {
             return;
         }
+        let supervisor = omega_effectd::shared_supervisor(cx).ok();
         let executor = cx.background_executor().clone();
         self._effective_principal_poll = Some(cx.spawn(async move |this, cx| {
             loop {
-                let projection = cx
+                let dashboard = cx
                     .background_spawn(async {
-                        crate::effective_principal::EffectivePrincipalProjection::current()
+                        crate::effective_principal::EffectivePrincipalProjection::inspect_dashboard()
                     })
                     .await;
+                let projection = if let Some(dashboard) = dashboard {
+                    let membership = async {
+                        let request = crate::effective_principal::EffectivePrincipalProjection::membership_request(
+                            &dashboard,
+                        )?;
+                        let supervisor = supervisor.as_ref()?;
+                        let mut guard = supervisor.lock().await;
+                        guard.ensure_started().await.ok()?;
+                        guard.read_organization_memberships(request).await.ok()
+                    }
+                    .await;
+                    match membership {
+                        Some(result) => crate::effective_principal::EffectivePrincipalProjection::from_dashboard_and_membership_read(
+                            &dashboard,
+                            &result,
+                        ),
+                        None => crate::effective_principal::EffectivePrincipalProjection::from_dashboard(&dashboard),
+                    }
+                } else {
+                    crate::effective_principal::EffectivePrincipalProjection::current()
+                };
                 let alive = this
                     .update(cx, |panel, cx| {
                         if panel.effective_principal != projection {

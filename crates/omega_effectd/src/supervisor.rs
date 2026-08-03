@@ -25,7 +25,8 @@ use util::process::Child;
 use util::redact::redact_command;
 
 use crate::all_work::generated::{
-    ContractValidate, PlanningGraphReadRequest, PlanningGraphReadResult,
+    ContractValidate, OrganizationMembershipReadRequest, OrganizationMembershipReadResult,
+    PlanningGraphReadRequest, PlanningGraphReadResult,
     ProtocolCapability as AllWorkProtocolCapability,
     ProtocolInitializeRequest as AllWorkProtocolInitializeRequest,
     ProtocolVersion as AllWorkProtocolVersion, RepositoryClaimExecuteRequest,
@@ -158,6 +159,7 @@ impl OmegaEffectdSupervisor {
                 AllWorkProtocolCapability::WorkCommandExecute,
                 AllWorkProtocolCapability::WorkCutoverRead,
                 AllWorkProtocolCapability::WorkCutoverExecute,
+                AllWorkProtocolCapability::OrganizationMembershipRead,
                 AllWorkProtocolCapability::StrictBugCandidateRead,
                 AllWorkProtocolCapability::StrictBugCandidateExecute,
             ],
@@ -436,6 +438,28 @@ impl OmegaEffectdSupervisor {
                 "Work cutover receipt reported a GitHub write"
             )));
         }
+        Ok(result)
+    }
+
+    pub async fn read_organization_memberships(
+        &mut self,
+        params: OrganizationMembershipReadRequest,
+    ) -> Result<OrganizationMembershipReadResult, SupervisorError> {
+        params
+            .validate()
+            .map_err(|error| SupervisorError::Anyhow(error.into()))?;
+        let result = self
+            .request(
+                "organization.membership.read",
+                Some(serde_json::to_value(params).context("encode Organization membership read")?),
+                self.generation(),
+            )
+            .await?;
+        let result: OrganizationMembershipReadResult =
+            serde_json::from_value(result).context("decode Organization membership read")?;
+        result
+            .validate()
+            .map_err(|error| SupervisorError::Anyhow(error.into()))?;
         Ok(result)
     }
 
@@ -1035,6 +1059,7 @@ impl OmegaEffectdSupervisor {
                             | "work.command.execute"
                             | "work.cutover.read"
                             | "work.cutover.execute"
+                            | "organization.membership.read"
                             | "strict_bug.candidate.read"
                             | "strict_bug.candidate.execute"
                     ) {

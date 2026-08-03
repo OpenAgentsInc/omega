@@ -991,6 +991,27 @@ mod tests {
                 all_work_contract::WorkWriter::NativeOmega
             );
             assert_eq!(activated.receipt.github_write_count.0, 0);
+            let memberships = supervisor
+                .read_organization_memberships(
+                    all_work_contract::OrganizationMembershipReadRequest {
+                        account_ref: all_work_contract::SourceRef::try_from(
+                            "account:fixture:owner".to_string(),
+                        )
+                        .expect("account ref"),
+                        account_generation: all_work_contract::SafeInteger(1),
+                        effective_principal_ref: all_work_contract::PrincipalRef::try_from(
+                            "principal:nostr:fixture-owner".to_string(),
+                        )
+                        .expect("principal ref"),
+                    },
+                )
+                .await
+                .expect("typed Organization membership read");
+            assert_eq!(memberships.ledger.memberships.len(), 1);
+            assert_eq!(
+                memberships.ledger.memberships[0].organization_ref.0,
+                "organization:openagents"
+            );
             let candidate = supervisor
                 .execute_strict_bug_candidate(
                     serde_json::from_value(serde_json::json!({
@@ -1230,6 +1251,23 @@ mod tests {
                 .expect("typed planning graph read from OpenAgents process");
             assert_eq!(planning.graph.work.len(), 34);
             assert_eq!(planning.graph.source_coordinates.len(), 34);
+            let memberships = supervisor
+                .read_organization_memberships(
+                    all_work_contract::OrganizationMembershipReadRequest {
+                        account_ref: all_work_contract::SourceRef::try_from(
+                            "account:fixture:unprovisioned".to_string(),
+                        )
+                        .expect("account ref"),
+                        account_generation: all_work_contract::SafeInteger(1),
+                        effective_principal_ref: all_work_contract::PrincipalRef::try_from(
+                            "principal:nostr:fixture-unprovisioned".to_string(),
+                        )
+                        .expect("principal ref"),
+                    },
+                )
+                .await
+                .expect("typed Organization membership read from OpenAgents process");
+            assert!(memberships.ledger.memberships.is_empty());
             assert_eq!(
                 planning
                     .graph

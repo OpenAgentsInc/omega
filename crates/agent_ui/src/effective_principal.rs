@@ -1,15 +1,18 @@
 //! Public-safe Effective Principal projection for Omega chrome.
 //!
 //! Account identity, signer availability, Organization membership, and Sync
-//! freshness are separate facts. This module projects only the facts the local
-//! account registry currently owns and leaves Organization/Sync unclaimed.
+//! freshness are separate facts. The local account registry supplies the
+//! account and signer facts. A generated omega-effectd read supplies explicit
+//! Organization membership for that exact account, generation, and principal.
 
 use omega_identity::{
     AccountDashboardEntry, AccountDashboardProjection, AccountLifecycleState,
     AccountRegistryService, SignerAvailability, SignerKind,
 };
 
-use crate::organization_scope::{OrganizationMembershipProjection, OrganizationScopeError};
+use crate::organization_scope::{
+    OrganizationMembershipProjection, OrganizationMembershipState, OrganizationScopeError,
+};
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum EffectivePrincipalState {
@@ -49,11 +52,55 @@ impl Default for EffectivePrincipalProjection {
 }
 
 impl EffectivePrincipalProjection {
+    pub(crate) fn inspect_dashboard() -> Option<AccountDashboardProjection> {
+        AccountRegistryService::for_channel(*app_identity::CHANNEL)
+            .inspect()
+            .ok()
+    }
+
     pub(crate) fn current() -> Self {
-        let registry = AccountRegistryService::for_channel(*app_identity::CHANNEL);
-        match registry.inspect() {
-            Ok(dashboard) => Self::from_dashboard(&dashboard),
-            Err(_) => Self::conflict("Identity unavailable"),
+        match Self::inspect_dashboard() {
+            Some(dashboard) => Self::from_dashboard(&dashboard),
+            None => Self::conflict("Identity unavailable"),
+        }
+    }
+
+    pub(crate) fn membership_request(
+        dashboard: &AccountDashboardProjection,
+    ) -> Option<omega_effectd::all_work_contract::OrganizationMembershipReadRequest> {
+        let account = selected_account(dashboard)?;
+        let principal_ref = omega_effectd::all_work_contract::PrincipalRef::try_from(format!(
+            "principal:nostr:{}",
+            account.identity.public_key_hex().as_str()
+        ))
+        .ok()?;
+        Some(
+            omega_effectd::all_work_contract::OrganizationMembershipReadRequest {
+                account_ref: omega_effectd::all_work_contract::SourceRef::try_from(
+                    account.account_ref.as_str().to_string(),
+                )
+                .ok()?,
+                account_generation: omega_effectd::all_work_contract::SafeInteger(
+                    dashboard.active.generation,
+                ),
+                effective_principal_ref: principal_ref,
+            },
+        )
+    }
+
+    pub(crate) fn from_dashboard_and_membership_read(
+        dashboard: &AccountDashboardProjection,
+        result: &omega_effectd::all_work_contract::OrganizationMembershipReadResult,
+    ) -> Self {
+        match membership_projection(result) {
+            Ok(membership) => Self::from_dashboard_and_membership(dashboard, membership.as_ref()),
+            Err(()) => {
+                let mut projection = Self::from_dashboard(dashboard);
+                projection.scope_label = "Organization unverified".into();
+                projection.organization_ref = None;
+                projection.organization_state = EffectiveOrganizationState::Conflict;
+                projection
+            }
         }
     }
 
@@ -214,6 +261,58 @@ impl EffectivePrincipalProjection {
             EffectiveOrganizationState::Conflict => "unverified",
         }
     }
+}
+
+fn selected_account(dashboard: &AccountDashboardProjection) -> Option<&AccountDashboardEntry> {
+    let active_ref = dashboard.active.account_ref.as_ref()?;
+    let mut matching = dashboard
+        .accounts
+        .iter()
+        .filter(|account| account.is_active && &account.account_ref == active_ref);
+    let account = matching.next()?;
+    (matching.next().is_none()
+        && !dashboard
+            .accounts
+            .iter()
+            .any(|candidate| candidate.is_active && candidate.account_ref != *active_ref))
+    .then_some(account)
+}
+
+fn membership_projection(
+    result: &omega_effectd::all_work_contract::OrganizationMembershipReadResult,
+) -> Result<Option<OrganizationMembershipProjection>, ()> {
+    use omega_effectd::all_work_contract::{
+        CompletenessState, FreshnessState, OrganizationMembershipState as ContractMembershipState,
+    };
+
+    if result.ledger.completeness.state != CompletenessState::Complete
+        || result.ledger.freshness.state != FreshnessState::Fresh
+    {
+        return Err(());
+    }
+    let mut memberships = result.ledger.memberships.iter();
+    let Some(membership) = memberships.next() else {
+        return Ok(None);
+    };
+    if memberships.next().is_some() {
+        return Err(());
+    }
+    let state = match membership.state {
+        ContractMembershipState::Verified => OrganizationMembershipState::Verified,
+        ContractMembershipState::Stale => OrganizationMembershipState::Stale,
+        ContractMembershipState::Revoked => OrganizationMembershipState::Revoked,
+    };
+    Ok(Some(OrganizationMembershipProjection {
+        membership_ref: membership.membership_ref.0.clone(),
+        account_ref: omega_identity::AccountRef::new(membership.account_ref.0.clone())
+            .map_err(|_| ())?,
+        account_generation: membership.account_generation.0,
+        principal_ref: membership.effective_principal_ref.clone(),
+        organization_ref: membership.organization_ref.clone(),
+        display_name: membership.display_name.0.clone(),
+        source_revision: membership.source_revision.0,
+        state,
+    }))
 }
 
 fn organization_projection(
@@ -402,6 +501,43 @@ mod tests {
             EffectiveOrganizationState::Verified
         );
         assert_eq!(projection.signer_label, "Local signer ready");
+    }
+
+    #[test]
+    fn generated_membership_read_projects_only_the_exact_fresh_authority_row() {
+        let dashboard = dashboard(&["account-a"]);
+        let request = EffectivePrincipalProjection::membership_request(&dashboard)
+            .expect("membership request");
+        let result: omega_effectd::all_work_contract::OrganizationMembershipReadResult =
+            serde_json::from_value(serde_json::json!({
+                "ledger": {
+                    "contractVersion": "openagents.all_work_boundary.v1",
+                    "revision": 4,
+                    "memberships": [{
+                        "contractVersion": "openagents.all_work_boundary.v1",
+                        "membershipRef": "membership:openagents:owner",
+                        "accountRef": request.account_ref.0,
+                        "accountGeneration": request.account_generation.0,
+                        "effectivePrincipalRef": request.effective_principal_ref.0,
+                        "organizationRef": "organization:openagents",
+                        "displayName": "OpenAgents",
+                        "sourceRevision": 4,
+                        "state": "verified",
+                        "observedAt": "2026-08-03T17:30:00Z"
+                    }],
+                    "completeness": { "state": "complete", "cursor": null, "gapRefs": [] },
+                    "freshness": { "state": "fresh", "observedAt": "2026-08-03T17:30:00Z" }
+                }
+            }))
+            .expect("generated result");
+
+        let projection =
+            EffectivePrincipalProjection::from_dashboard_and_membership_read(&dashboard, &result);
+        assert_eq!(projection.scope_label, "OpenAgents");
+        assert_eq!(
+            projection.organization_state,
+            EffectiveOrganizationState::Verified
+        );
     }
 
     #[test]

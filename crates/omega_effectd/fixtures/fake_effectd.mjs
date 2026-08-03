@@ -41,6 +41,7 @@ const supportedAllWorkCapabilities = [
   "work.command.execute",
   "work.cutover.read",
   "work.cutover.execute",
+  "organization.membership.read",
   "strict_bug.candidate.read",
   "strict_bug.candidate.execute",
 ]
@@ -68,6 +69,24 @@ let strictBugCandidateLedger = {
     cursor: "cursor:strict-bug-candidate:0",
     gapRefs: [],
   },
+  freshness: { state: "fresh", observedAt: "2026-08-03T12:00:00Z" },
+}
+const organizationMembershipLedger = {
+  contractVersion: "openagents.all_work_boundary.v1",
+  revision: 1,
+  memberships: [{
+    contractVersion: "openagents.all_work_boundary.v1",
+    membershipRef: "membership:fixture:owner",
+    accountRef: "account:fixture:owner",
+    accountGeneration: 1,
+    effectivePrincipalRef: "principal:nostr:fixture-owner",
+    organizationRef: "organization:openagents",
+    displayName: "OpenAgents",
+    sourceRevision: 1,
+    state: "verified",
+    observedAt: "2026-08-03T12:00:00Z",
+  }],
+  completeness: { state: "complete", cursor: null, gapRefs: [] },
   freshness: { state: "fresh", observedAt: "2026-08-03T12:00:00Z" },
 }
 let claimLedger = {
@@ -869,6 +888,28 @@ for await (const line of rl) {
         effectivePrincipalRef: input.effectivePrincipalRef,
         acceptedAt: input.occurredAt,
         githubWriteCount: 0,
+      },
+    })
+    continue
+  }
+  if (request.method === "organization.membership.read") {
+    if (!allWorkCapabilities.includes("organization.membership.read")) {
+      respond(request.id, generation, false, undefined, {
+        code: "incompatible_version",
+        message: "organization.membership.read was not negotiated.",
+      })
+      continue
+    }
+    const input = request.params
+    respond(request.id, generation, true, {
+      ledger: {
+        ...organizationMembershipLedger,
+        memberships: organizationMembershipLedger.memberships.filter(
+          (membership) =>
+            membership.accountRef === input.accountRef &&
+            membership.accountGeneration === input.accountGeneration &&
+            membership.effectivePrincipalRef === input.effectivePrincipalRef,
+        ),
       },
     })
     continue
