@@ -15,12 +15,13 @@ use omega_forensics::{
     ForensicPriorWorkQuery, ForensicPriorWorkQueryMode, ForensicPriorWorkQueryResult,
     ForensicPromptIr, ForensicPromptWorkspace, ForensicPublicationGate,
     ForensicPublicationGateKind, ForensicPublicationGateProjection, ForensicPublicationGateState,
-    ForensicReviewDecisionKind, ForensicReviewOutcome, ForensicSourceCitation, ForensicStatistic,
-    ForensicWorkDisposition, ForensicWorkerObservation, ForensicWorkerPlacement,
-    ForensicsFailureProjection, ForensicsLaunchIntent, ForensicsMatrixProjection,
-    ForensicsPreflightProjection, ForensicsReviewProjection, ForensicsRunPhase,
-    ForensicsRunProjection, PUBLICATION_GATE_SCHEMA_V1, PreflightReadiness, PromptChangeKind,
-    PromptCompatibilityProfile, RepositoryTargetProjection, SourceState,
+    ForensicReviewDecisionKind, ForensicReviewOutcome, ForensicSourceCatalog,
+    ForensicSourceCitation, ForensicStatistic, ForensicToolEvent, ForensicToolEventStatus,
+    ForensicToolJournal, ForensicWorkDisposition, ForensicWorkerObservation,
+    ForensicWorkerPlacement, ForensicsFailureProjection, ForensicsLaunchIntent,
+    ForensicsMatrixProjection, ForensicsPreflightProjection, ForensicsReviewProjection,
+    ForensicsRunPhase, ForensicsRunProjection, PUBLICATION_GATE_SCHEMA_V1, PreflightReadiness,
+    PromptChangeKind, PromptCompatibilityProfile, RepositoryTargetProjection, SourceState,
 };
 use omega_workbench_state::RepositoryBinding;
 use sha2::{Digest, Sha256};
@@ -29,6 +30,9 @@ use ui::{
     v_flex,
 };
 
+use crate::forensics_tool_bridge::{
+    VisibleForensicToolCallState, ingest_visible_forensic_tool_call,
+};
 use crate::omega_status_cue::{OmegaStatus, omega_status_cue};
 use crate::thread_identity::ThreadIdentityCandidate;
 
@@ -725,6 +729,7 @@ pub struct ForensicsWorkbenchSnapshot {
     pub coldcard_case_selection: ColdcardCaseSelection,
     pub coldcard_case_reader_state: ColdcardCaseReaderState,
     pub prior_work: Option<ForensicPriorWorkQueryResult>,
+    pub tool_journal: Option<ForensicToolJournal>,
     pub entropy_run: Option<EntropyRunProjection>,
     pub entropy_run_history: Vec<EntropyRunProjection>,
     pub entropy_source_inspection: Option<EntropySourceInspection>,
@@ -801,6 +806,7 @@ pub struct ForensicsWorkbenchSurface {
     coldcard_case_selection: ColdcardCaseSelection,
     coldcard_case_reader_state: ColdcardCaseReaderState,
     prior_work: Option<ForensicPriorWorkQueryResult>,
+    tool_journal: Option<ForensicToolJournal>,
     entropy_run: Option<EntropyRunProjection>,
     entropy_run_history: Vec<EntropyRunProjection>,
     entropy_source_inspection: Option<EntropySourceInspection>,
@@ -876,6 +882,7 @@ impl ForensicsWorkbenchSurface {
             coldcard_case_selection: ColdcardCaseSelection::Overview,
             coldcard_case_reader_state,
             prior_work: None,
+            tool_journal: None,
             entropy_run: None,
             entropy_run_history: Vec::new(),
             entropy_source_inspection: None,
@@ -921,6 +928,7 @@ impl ForensicsWorkbenchSurface {
         this.selected_model_run_ref = restored.model_run_ref;
         this.publication_scene =
             PublicationScene::from_persisted(restored.publication_scene.as_deref());
+        this.tool_journal = restored.tool_journal;
         let mut campaigns = restored.campaigns;
         if let Some(mut active_campaign) = campaigns.pop() {
             if matches!(
@@ -1290,6 +1298,7 @@ impl ForensicsWorkbenchSurface {
             evidence_selection: Some(self.evidence_selection.persisted().into()),
             model_run_ref: self.selected_model_run_ref.clone(),
             publication_scene: Some(self.publication_scene.persisted().into()),
+            tool_journal: self.tool_journal.clone(),
         }
     }
 
@@ -1914,6 +1923,57 @@ impl ForensicsWorkbenchSurface {
         Ok(())
     }
 
+    pub fn install_forensic_tool_journal(
+        &mut self,
+        journal: ForensicToolJournal,
+        cx: &mut Context<Self>,
+    ) -> anyhow::Result<()> {
+        journal.validate()?;
+        self.status = format!(
+            "Live forensic tools connected · cursor {}",
+            journal.event_cursor()
+        )
+        .into();
+        self.tool_journal = Some(journal);
+        self.persist_entropy_state(cx);
+        cx.notify();
+        Ok(())
+    }
+
+    pub fn ingest_visible_forensic_tool_call(
+        &mut self,
+        tool_name: &str,
+        raw_input: &serde_json::Value,
+        state: VisibleForensicToolCallState,
+        sources: &ForensicSourceCatalog,
+        cx: &mut Context<Self>,
+    ) -> anyhow::Result<Option<ForensicToolEvent>> {
+        let journal = self
+            .tool_journal
+            .as_mut()
+            .ok_or_else(|| anyhow::anyhow!("forensic tool journal is not installed"))?;
+        let event =
+            ingest_visible_forensic_tool_call(tool_name, raw_input, state, journal, sources)?;
+        if let Some(event) = &event {
+            self.status = match event.status {
+                ForensicToolEventStatus::Accepted => format!(
+                    "Live forensic tool accepted · {} · cursor {}",
+                    event.tool.canonical_name(),
+                    event.sequence
+                ),
+                ForensicToolEventStatus::Rejected => format!(
+                    "Live forensic tool rejected · {} · cursor {}",
+                    event.tool.canonical_name(),
+                    event.sequence
+                ),
+            }
+            .into();
+            cx.notify();
+            self.persist_entropy_state(cx);
+        }
+        Ok(event)
+    }
+
     pub fn set_prior_work_error(&mut self, error: String, cx: &mut Context<Self>) {
         self.status = format!("Prior Work search failed · {error}").into();
         cx.notify();
@@ -1941,6 +2001,7 @@ impl ForensicsWorkbenchSurface {
             coldcard_case_selection: self.coldcard_case_selection,
             coldcard_case_reader_state: self.coldcard_case_reader_state.clone(),
             prior_work: self.prior_work.clone(),
+            tool_journal: self.tool_journal.clone(),
             entropy_run: self.entropy_run.clone(),
             entropy_run_history: self.entropy_run_history.clone(),
             entropy_source_inspection: self.entropy_source_inspection.clone(),
@@ -2445,6 +2506,23 @@ impl ForensicsWorkbenchSurface {
     }
 
     fn evidence_section_count(&self, section: EvidenceSelection) -> usize {
+        if let Some(journal) = self.tool_journal.as_ref()
+            && !journal.events.is_empty()
+        {
+            return match section {
+                EvidenceSelection::Findings => journal.findings.len(),
+                EvidenceSelection::Hypotheses => journal.hypotheses.len(),
+                EvidenceSelection::Limitations => journal.limitations.len(),
+                EvidenceSelection::Disputes => journal
+                    .events
+                    .iter()
+                    .filter(|event| event.status == ForensicToolEventStatus::Rejected)
+                    .count(),
+                EvidenceSelection::Reconciliation => {
+                    journal.diff_applicability.len() + journal.executed_controls.len()
+                }
+            };
+        }
         let Some(workspace) = self.coldcard_evidence.as_ref() else {
             return 0;
         };
@@ -2585,20 +2663,120 @@ impl ForensicsWorkbenchSurface {
                     ),
             );
 
-        let Some(workspace) = self.coldcard_evidence.as_ref() else {
-            let message = match &self.coldcard_case_reader_state {
-                ColdcardCaseReaderState::Loading => "Loading the validated evidence projection…",
-                ColdcardCaseReaderState::Empty => "No evidence projection is available.",
-                ColdcardCaseReaderState::Invalid(error) | ColdcardCaseReaderState::Stale(error) => {
-                    error.as_ref()
-                }
-                ColdcardCaseReaderState::Complete => "The evidence projection is unavailable.",
-            };
+        if let Some(journal) = self.tool_journal.as_ref() {
             detail = detail.child(
-                Label::new(message)
-                    .size(LabelSize::Small)
-                    .color(state_color),
+                Label::new(format!(
+                    "Live typed journal · cursor {} · {} accepted · {} rejected",
+                    journal.event_cursor(),
+                    journal
+                        .events
+                        .iter()
+                        .filter(|event| event.status == ForensicToolEventStatus::Accepted)
+                        .count(),
+                    journal
+                        .events
+                        .iter()
+                        .filter(|event| event.status == ForensicToolEventStatus::Rejected)
+                        .count()
+                ))
+                .size(LabelSize::Small),
             );
+            detail = match selected {
+                EvidenceSelection::Findings => {
+                    detail.children(journal.findings.iter().map(|finding| {
+                        Self::render_fact(
+                            format!("Finding · {}", finding.title),
+                            format!(
+                                "{} · {} · {}",
+                                finding.claim_state,
+                                finding.evidence_tier.label(),
+                                finding.finding_ref
+                            ),
+                        )
+                    }))
+                }
+                EvidenceSelection::Hypotheses => {
+                    detail.children(journal.hypotheses.iter().map(|hypothesis| {
+                        Self::render_fact(
+                            format!("Hypothesis · {}", hypothesis.hypothesis_ref),
+                            format!(
+                                "{} · next {}",
+                                hypothesis.suspected_mechanism, hypothesis.next_check
+                            ),
+                        )
+                    }))
+                }
+                EvidenceSelection::Limitations => {
+                    detail.children(journal.limitations.iter().map(|limitation| {
+                        Self::render_fact(
+                            format!("Limitation · {}", limitation.class_ref),
+                            format!(
+                                "{} · next {}",
+                                limitation.message, limitation.required_next_check
+                            ),
+                        )
+                    }))
+                }
+                EvidenceSelection::Disputes => detail.children(
+                    journal
+                        .events
+                        .iter()
+                        .filter(|event| event.status == ForensicToolEventStatus::Rejected)
+                        .map(|event| {
+                            Self::render_fact(
+                                format!(
+                                    "Rejected {} · event {}",
+                                    event.tool.canonical_name(),
+                                    event.sequence
+                                ),
+                                event
+                                    .refusal_ref
+                                    .as_deref()
+                                    .unwrap_or("typed refusal missing"),
+                            )
+                        }),
+                ),
+                EvidenceSelection::Reconciliation => detail
+                    .children(journal.diff_applicability.iter().map(|applicability| {
+                        Self::render_fact(
+                            format!("Diff applicability · {}", applicability.applicability_ref),
+                            format!(
+                                "applicable {} · artifact only · execution {} · test {}",
+                                applicability.applicable,
+                                applicability.executed,
+                                applicability.test_outcome
+                            ),
+                        )
+                    }))
+                    .children(journal.executed_controls.iter().map(|control| {
+                        Self::render_fact(
+                            format!("Independent executed control · {}", control.control_ref),
+                            format!(
+                                "{} · {}",
+                                control.receipt.outcome, control.receipt.receipt_ref
+                            ),
+                        )
+                    })),
+            };
+        }
+
+        let Some(workspace) = self.coldcard_evidence.as_ref() else {
+            if self.tool_journal.is_none() {
+                let message = match &self.coldcard_case_reader_state {
+                    ColdcardCaseReaderState::Loading => {
+                        "Loading the validated evidence projection…"
+                    }
+                    ColdcardCaseReaderState::Empty => "No evidence projection is available.",
+                    ColdcardCaseReaderState::Invalid(error)
+                    | ColdcardCaseReaderState::Stale(error) => error.as_ref(),
+                    ColdcardCaseReaderState::Complete => "The evidence projection is unavailable.",
+                };
+                detail = detail.child(
+                    Label::new(message)
+                        .size(LabelSize::Small)
+                        .color(state_color),
+                );
+            }
             return v_flex()
                 .id("omega.forensics.evidence.workspace")
                 .w_full()
@@ -6335,13 +6513,14 @@ mod tests {
     use super::*;
     use crate::thread_identity::{BranchIdentity, GitIdentitySummary};
     use omega_forensics::{
-        BROKER_NETWORK_POLICY_REF, CoverageSummaryProjection, ForensicBudgetProjection,
-        ForensicCausalLink, ForensicEvidenceReceiptProjection, ForensicExactness,
-        ForensicFindingProjection, ForensicHypothesisProjection, ForensicLifecycleStage,
-        ForensicMetricTruth, ForensicWorkerPlacement, GCE_ADAPTER_REF, MANAGED_TARGET_REF,
-        ManagedIsolation, ManagedProvider, ManagedTargetClass, ManagedWorkerProjection,
-        PREFLIGHT_SCHEMA_V1, REVIEW_PROJECTION_SCHEMA_V1, RepositoryTargetProjection,
-        WORKER_PLACEMENT_SCHEMA_V1, WorkerPlacementState,
+        BROKER_NETWORK_POLICY_REF, CoverageSummaryProjection, FORENSIC_TOOL_VERSION_V1,
+        ForensicBudgetProjection, ForensicCausalLink, ForensicEvidenceReceiptProjection,
+        ForensicExactness, ForensicFindingProjection, ForensicHypothesisProjection,
+        ForensicLifecycleStage, ForensicMetricTruth, ForensicToolActorRole, ForensicToolCall,
+        ForensicToolCallBinding, ForensicToolPayload, ForensicWorkerPlacement, GCE_ADAPTER_REF,
+        MANAGED_TARGET_REF, ManagedIsolation, ManagedProvider, ManagedTargetClass,
+        ManagedWorkerProjection, PREFLIGHT_SCHEMA_V1, REVIEW_PROJECTION_SCHEMA_V1,
+        RepositoryTargetProjection, WORKER_PLACEMENT_SCHEMA_V1, WorkerPlacementState,
     };
     use std::path::PathBuf;
 
@@ -6363,6 +6542,68 @@ mod tests {
                 "unexpected gate for test_support={test_support}, debug={debug}, value={value:?}"
             );
         }
+    }
+
+    #[gpui::test]
+    fn completed_typed_tool_call_updates_live_workbench_before_turn_completion(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        crate::test_support::init_test(cx);
+        let binding = ForensicToolCallBinding {
+            run_ref: "run:live:1".into(),
+            task_ref: "task:live:1".into(),
+            actor_ref: "actor:discovery:1".into(),
+            actor_role: ForensicToolActorRole::Discovery,
+            audience_ref: "audience:private:owner".into(),
+            source_bundle_ref: "source-bundle:live:1".into(),
+            source_bundle_digest: digest('a'),
+            coverage_generation: 1,
+            prompt_digest: digest('b'),
+            model_route_ref: "model-route:live:1".into(),
+            tool_version: FORENSIC_TOOL_VERSION_V1.into(),
+            budget_ref: "budget:live:1".into(),
+            expected_event_cursor: 0,
+        };
+        let journal =
+            ForensicToolJournal::new(binding.clone(), "actor:verifier:1".into()).expect("journal");
+        let sources = ForensicSourceCatalog {
+            audience_ref: binding.audience_ref.clone(),
+            source_bundle_ref: binding.source_bundle_ref.clone(),
+            source_bundle_digest: binding.source_bundle_digest.clone(),
+            coverage_generation: binding.coverage_generation,
+            missing_dependency_paths: Vec::new(),
+            files: Vec::new(),
+        };
+        let call = ForensicToolCall {
+            call_ref: "call:live:1".into(),
+            idempotency_ref: "idempotency:live:1".into(),
+            binding,
+            payload: ForensicToolPayload::QueryPriorForensicWork {
+                query_ref: "query:live:1".into(),
+            },
+            observed_at: "2026-08-03T23:30:00Z".into(),
+        };
+        let raw_input = serde_json::to_value(call).expect("typed call json");
+        let repository_binding = RepositoryBinding::new("repo", "worktree").expect("binding");
+        let surface =
+            cx.new(|cx| ForensicsWorkbenchSurface::new(&candidate(repository_binding), cx));
+        surface.update(cx, |surface, cx| {
+            surface
+                .install_forensic_tool_journal(journal, cx)
+                .expect("install journal");
+            let event = surface
+                .ingest_visible_forensic_tool_call(
+                    "query_prior_forensic_work",
+                    &raw_input,
+                    VisibleForensicToolCallState::Completed,
+                    &sources,
+                    cx,
+                )
+                .expect("ingest call")
+                .expect("typed event");
+            assert_eq!(event.sequence, 1);
+            assert_eq!(surface.snapshot().tool_journal.unwrap().event_cursor(), 1);
+        });
     }
 
     #[gpui::test]

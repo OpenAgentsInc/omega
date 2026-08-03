@@ -19,6 +19,7 @@ mod entropy_prompt_store;
 mod entry_view_state;
 mod external_source_prompt;
 mod favorite_models;
+pub mod forensics_tool_bridge;
 mod forensics_work_projection;
 pub mod forensics_workbench;
 mod inline_assistant;

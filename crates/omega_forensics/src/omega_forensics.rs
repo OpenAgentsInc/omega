@@ -7,10 +7,12 @@ use url::Url;
 mod entropy_campaign;
 mod entropy_repository;
 mod prior_work;
+mod tool_ingestion;
 
 pub use entropy_campaign::*;
 pub use entropy_repository::*;
 pub use prior_work::*;
+pub use tool_ingestion::*;
 
 pub const PREFLIGHT_SCHEMA_V1: &str = "openagents.omega.forensics-preflight.v1";
 pub const LAUNCH_INTENT_SCHEMA_V1: &str = "openagents.omega.forensics-launch-intent.v1";
@@ -3628,6 +3630,8 @@ pub enum ForensicsError {
     InvalidEntropyRun(String),
     #[error("the forensic prior-work projection is invalid: {0}")]
     InvalidPriorWork(String),
+    #[error("the forensic tool event is invalid: {0}")]
+    InvalidToolEvent(String),
 }
 
 fn validate_ref(label: &str, value: &str) -> Result<(), ForensicsError> {

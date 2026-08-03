@@ -12,6 +12,7 @@ mod evals;
 mod fetch_tool;
 mod find_path_tool;
 mod find_references_tool;
+mod forensic_submission_tool;
 mod get_code_actions_tool;
 mod go_to_definition_tool;
 mod grep_tool;
@@ -85,6 +86,7 @@ pub use edit_file_tool::*;
 pub use fetch_tool::*;
 pub use find_path_tool::*;
 pub use find_references_tool::*;
+pub use forensic_submission_tool::*;
 pub use get_code_actions_tool::*;
 pub use go_to_definition_tool::*;
 pub use grep_tool::*;
@@ -210,6 +212,13 @@ tools! {
     DiagnosticsTool,
     EditFileTool,
     FetchTool,
+    QueryPriorForensicWorkTool,
+    GetForensicWorkByRefTool,
+    SubmitForensicHypothesisTool,
+    SubmitForensicFindingTool,
+    SubmitForensicLimitationTool,
+    ValidateCandidateDiffApplicabilityTool,
+    ExecuteIndependentControlTool,
     FindPathTool,
     FindReferencesTool,
     GetCodeActionsTool,

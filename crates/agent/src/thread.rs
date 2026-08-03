@@ -1,15 +1,18 @@
 use crate::{
     ApplyCodeActionTool, CodeActionStore, ContextServerRegistry, CopyPathTool, CreateDirectoryTool,
     CreateThreadTool, DbLanguageModel, DbThread, DeletePathTool, DiagnosticsTool, EditFileTool,
-    FetchTool, FindPathTool, FindReferencesTool, GetCodeActionsTool, GoToDefinitionTool, GrepTool,
-    ListAgentsAndModelsTool, ListDirectoryTool, MovePathTool, ProjectSnapshot, PromptCacheLayout,
-    ReadFileTool, ReadSubagentTranscriptTool, ReadTool, ReadToolResultArtifactTool, RenameTool,
-    ResumeThreadTool, SandboxedTerminalTool, SkillBodyResolver, SkillsResolver, SpawnAgentTool,
-    SubagentExecutor, SubagentTranscript, SystemPromptTemplate, Template, Templates, TerminalTool,
-    ThreadEventLog, ThreadEventSequence, ThreadForkOrigin, ToolPermissionDecision,
-    ToolResultArtifactRegistry, TranscriptBlock, TranscriptEntry, TranscriptRole,
-    TranscriptWindowRequest, WebSearchTool, WriteFileTool, decide_permission_from_settings,
-    tool_result_artifact_source,
+    ExecuteIndependentControlTool, FetchTool, FindPathTool, FindReferencesTool, GetCodeActionsTool,
+    GetForensicWorkByRefTool, GoToDefinitionTool, GrepTool, ListAgentsAndModelsTool,
+    ListDirectoryTool, MovePathTool, ProjectSnapshot, PromptCacheLayout,
+    QueryPriorForensicWorkTool, ReadFileTool, ReadSubagentTranscriptTool, ReadTool,
+    ReadToolResultArtifactTool, RenameTool, ResumeThreadTool, SandboxedTerminalTool,
+    SkillBodyResolver, SkillsResolver, SpawnAgentTool, SubagentExecutor, SubagentTranscript,
+    SubmitForensicFindingTool, SubmitForensicHypothesisTool, SubmitForensicLimitationTool,
+    SystemPromptTemplate, Template, Templates, TerminalTool, ThreadEventLog, ThreadEventSequence,
+    ThreadForkOrigin, ToolPermissionDecision, ToolResultArtifactRegistry, TranscriptBlock,
+    TranscriptEntry, TranscriptRole, TranscriptWindowRequest,
+    ValidateCandidateDiffApplicabilityTool, WebSearchTool, WriteFileTool,
+    decide_permission_from_settings, tool_result_artifact_source,
 };
 use acp_thread::{ClientUserMessageId, MentionUri, ToolResultArtifactStore};
 use action_log::ActionLog;
@@ -2597,6 +2600,19 @@ impl Thread {
             T::NAME,
         );
         self.tools.insert(T::NAME.into(), tool.erase());
+    }
+
+    pub fn add_forensic_discovery_tools(&mut self) {
+        self.add_tool(QueryPriorForensicWorkTool);
+        self.add_tool(GetForensicWorkByRefTool);
+        self.add_tool(SubmitForensicHypothesisTool);
+        self.add_tool(SubmitForensicFindingTool);
+        self.add_tool(SubmitForensicLimitationTool);
+        self.add_tool(ValidateCandidateDiffApplicabilityTool);
+    }
+
+    pub fn add_independent_forensic_verifier_tool(&mut self) {
+        self.add_tool(ExecuteIndependentControlTool);
     }
 
     #[cfg(any(test, feature = "test-support"))]

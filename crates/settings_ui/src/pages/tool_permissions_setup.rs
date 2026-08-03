@@ -1438,6 +1438,16 @@ mod tests {
             // Resuming is limited to persisted native Omega threads and does
             // not grant authority beyond the resumed thread's existing tools.
             "resume_thread",
+            // Forensic tools are registered only on a bound discovery or
+            // independent-verifier thread. Their live journal performs the
+            // per-call capability and evidence admission.
+            "query_prior_forensic_work",
+            "get_forensic_work_by_ref",
+            "submit_forensic_hypothesis",
+            "submit_forensic_finding",
+            "submit_forensic_limitation",
+            "validate_candidate_diff_applicability",
+            "execute_independent_control",
         ];
 
         let tool_info_ids: Vec<&str> = TOOLS.iter().map(|t| t.id).collect();

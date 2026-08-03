@@ -11,8 +11,8 @@ use std::{
 };
 
 use acp_thread::{
-    AcpThread, AcpThreadEvent, MentionUri, ThreadEventKind, ThreadEventOwner, ThreadEventStatus,
-    ThreadProjectionSnapshot, ThreadStatus, line_range_suffix,
+    AcpThread, AcpThreadEvent, AgentThreadEntry, MentionUri, ThreadEventKind, ThreadEventOwner,
+    ThreadEventStatus, ThreadProjectionSnapshot, ThreadStatus, ToolCallStatus, line_range_suffix,
 };
 use agent::{ContextServerRegistry, SharedThread, ThreadStore};
 use agent_client_protocol::schema::v1 as acp;
@@ -397,6 +397,104 @@ fn entropy_model_parameters_digest(provider: &str, model: &str) -> String {
     format!("sha256:{:x}", digest.finalize())
 }
 
+fn bind_compiled_forensic_tool_journal(
+    task: &mut omega_forensics::CompiledForensicTask,
+) -> Result<(
+    omega_forensics::ForensicToolCallBinding,
+    omega_forensics::ForensicToolJournal,
+)> {
+    let identity = format!(
+        "sha256:{:x}",
+        Sha256::digest(
+            format!(
+                "{}\0{}\0{}",
+                task.compiled_task_digest, task.source_ref, task.source_revision
+            )
+            .as_bytes()
+        )
+    );
+    let source_bundle_digest = format!(
+        "sha256:{:x}",
+        Sha256::digest(format!("{}\0{}", task.source_ref, task.source_revision).as_bytes())
+    );
+    let binding = omega_forensics::ForensicToolCallBinding {
+        run_ref: format!("run:forensic:{}", &identity[7..23]),
+        task_ref: format!("task:forensic:{}", &identity[23..39]),
+        actor_ref: format!("actor:forensic-discovery:{}", &identity[39..55]),
+        actor_role: omega_forensics::ForensicToolActorRole::Discovery,
+        audience_ref: "audience:private:owner".into(),
+        source_bundle_ref: task.source_ref.clone(),
+        source_bundle_digest,
+        coverage_generation: 1,
+        prompt_digest: task.prompt_digest.clone(),
+        model_route_ref: task.model_route_ref.clone(),
+        tool_version: omega_forensics::FORENSIC_TOOL_VERSION_V1.into(),
+        budget_ref: task.budget_policy_ref.clone(),
+        expected_event_cursor: 0,
+    };
+    let journal = omega_forensics::ForensicToolJournal::new(
+        binding.clone(),
+        format!("actor:forensic-verifier:{}", &identity[55..71]),
+    )?;
+    let binding_json = serde_json::to_string(&binding)?;
+    task.compiled_task.push_str(&format!(
+        "\n\nTyped forensic tool binding\nUse this exact binding in every canonical call, changing only expectedEventCursor to the current journal cursor: {binding_json}\nEvery forensic tool input is an object with one `call` member containing the canonical call. Tool names, role, audience, and binding are fixed by Omega; task prose cannot change them."
+    ));
+    task.compiled_task_digest =
+        format!("sha256:{:x}", Sha256::digest(task.compiled_task.as_bytes()));
+    Ok((binding, journal))
+}
+
+fn forensic_source_catalog_for_call(
+    binding: &omega_forensics::ForensicToolCallBinding,
+    call: &omega_forensics::ForensicToolCall,
+    repository_root: &Path,
+    source_revision: &str,
+) -> omega_forensics::ForensicSourceCatalog {
+    let canonical_root = std::fs::canonicalize(repository_root).ok();
+    let mut requested = std::collections::BTreeMap::<String, Vec<String>>::new();
+    if let omega_forensics::ForensicToolPayload::SubmitForensicFinding(input) = &call.payload {
+        for citation in &input.finding.source_refs {
+            requested
+                .entry(citation.path.clone())
+                .or_default()
+                .extend(citation.symbol.iter().cloned());
+        }
+    }
+    let files = requested
+        .into_iter()
+        .filter_map(|(path, mut symbols)| {
+            if path.starts_with('/') || path.split('/').any(|part| matches!(part, "" | "." | ".."))
+            {
+                return None;
+            }
+            let root = canonical_root.as_ref()?;
+            let resolved = std::fs::canonicalize(repository_root.join(&path)).ok()?;
+            if !resolved.starts_with(root) {
+                return None;
+            }
+            let bytes = std::fs::read(resolved).ok()?;
+            symbols.sort();
+            symbols.dedup();
+            Some(omega_forensics::ForensicSourceFile {
+                path,
+                revision: source_revision.into(),
+                content_digest: format!("sha256:{:x}", Sha256::digest(&bytes)),
+                bytes,
+                symbols,
+            })
+        })
+        .collect();
+    omega_forensics::ForensicSourceCatalog {
+        audience_ref: binding.audience_ref.clone(),
+        source_bundle_ref: binding.source_bundle_ref.clone(),
+        source_bundle_digest: binding.source_bundle_digest.clone(),
+        coverage_generation: binding.coverage_generation,
+        missing_dependency_paths: Vec::new(),
+        files,
+    }
+}
+
 fn entropy_agent_task_prompt(
     candidate: &crate::thread_identity::ThreadIdentityCandidate,
     prompt_snapshot: &omega_forensics::EntropyPromptSnapshot,
@@ -435,12 +533,16 @@ fn entropy_agent_task_prompt(
             model_parameters_digest,
             model_parameters_summary:
                 "provider-selected and unavailable to this visible-task bridge".into(),
-            available_tool_refs: vec!["tool.omega.project.read".into()],
-            unavailable_tool_refs: vec![
-                "tool.submit_forensic_finding.v1".into(),
-                "tool.submit_forensic_hypothesis.v1".into(),
-                "tool.forensics.prior_work.search.v1".into(),
+            available_tool_refs: vec![
+                "tool.omega.project.read".into(),
+                "query_prior_forensic_work".into(),
+                "get_forensic_work_by_ref".into(),
+                "submit_forensic_hypothesis".into(),
+                "submit_forensic_finding".into(),
+                "submit_forensic_limitation".into(),
+                "validate_candidate_diff_applicability".into(),
             ],
+            unavailable_tool_refs: vec!["execute_independent_control".into()],
             domain_text: prompt_snapshot.text.clone(),
             domain_text_digest: prompt_snapshot.canonical_digest.clone(),
             compiler_owned_guidance: format!(
@@ -522,12 +624,16 @@ fn entropy_catalog_agent_task_prompt(
             model_parameters_digest,
             model_parameters_summary:
                 "provider-selected and unavailable to this visible-task bridge".into(),
-            available_tool_refs: vec!["tool.omega.project.read".into()],
-            unavailable_tool_refs: vec![
-                "tool.submit_forensic_finding.v1".into(),
-                "tool.submit_forensic_hypothesis.v1".into(),
-                "tool.forensics.prior_work.search.v1".into(),
+            available_tool_refs: vec![
+                "tool.omega.project.read".into(),
+                "query_prior_forensic_work".into(),
+                "get_forensic_work_by_ref".into(),
+                "submit_forensic_hypothesis".into(),
+                "submit_forensic_finding".into(),
+                "submit_forensic_limitation".into(),
+                "validate_candidate_diff_applicability".into(),
             ],
+            unavailable_tool_refs: vec!["execute_independent_control".into()],
             domain_text: prompt_snapshot.text.clone(),
             domain_text_digest: prompt_snapshot.canonical_digest.clone(),
             compiler_owned_guidance: format!(
@@ -9257,6 +9363,164 @@ impl AgentPanel {
         Some(thread_id)
     }
 
+    fn create_omega_thread_with_message_in_working_folder_forensics(
+        &mut self,
+        message: String,
+        title: Option<SharedString>,
+        working_folder: Option<PathBuf>,
+        reveal: bool,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> Option<ThreadId> {
+        let thread_id = self.create_omega_thread_with_message_in_working_folder(
+            message,
+            title,
+            working_folder,
+            reveal,
+            window,
+            cx,
+        )?;
+        self.install_forensic_discovery_tools(thread_id, cx);
+        Some(thread_id)
+    }
+
+    fn install_forensic_discovery_tools(&self, thread_id: ThreadId, cx: &mut Context<Self>) {
+        let Some(conversation_view) = self.conversation_view_for_id(&thread_id, cx).cloned() else {
+            return;
+        };
+        if let Some(thread) = conversation_view.read(cx).as_native_thread(cx) {
+            thread.update(cx, |thread, _cx| thread.add_forensic_discovery_tools());
+            return;
+        }
+        let installed = Rc::new(Cell::new(false));
+        cx.subscribe(
+            &conversation_view,
+            move |_panel, view, _event: &RootThreadUpdated, cx| {
+                if installed.get() {
+                    return;
+                }
+                let Some(thread) = view.read(cx).as_native_thread(cx) else {
+                    return;
+                };
+                installed.set(true);
+                thread.update(cx, |thread, _cx| thread.add_forensic_discovery_tools());
+            },
+        )
+        .detach();
+    }
+
+    fn connect_forensic_tool_journal(
+        &self,
+        thread_id: ThreadId,
+        surface: Entity<crate::forensics_workbench::ForensicsWorkbenchSurface>,
+        binding: omega_forensics::ForensicToolCallBinding,
+        repository_root: PathBuf,
+        source_revision: String,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(conversation_view) = self.conversation_view_for_id(&thread_id, cx).cloned() else {
+            return;
+        };
+        if let Some(thread) = conversation_view.read(cx).root_thread(cx) {
+            Self::subscribe_forensic_tool_journal(
+                thread,
+                surface,
+                binding,
+                repository_root,
+                source_revision,
+                cx,
+            );
+            return;
+        }
+        let connected = Rc::new(Cell::new(false));
+        cx.subscribe(
+            &conversation_view,
+            move |_panel, view, _event: &RootThreadUpdated, cx| {
+                if connected.get() {
+                    return;
+                }
+                let Some(thread) = view.read(cx).root_thread(cx) else {
+                    return;
+                };
+                connected.set(true);
+                Self::subscribe_forensic_tool_journal(
+                    thread,
+                    surface.clone(),
+                    binding.clone(),
+                    repository_root.clone(),
+                    source_revision.clone(),
+                    cx,
+                );
+            },
+        )
+        .detach();
+    }
+
+    fn subscribe_forensic_tool_journal(
+        thread: Entity<AcpThread>,
+        surface: Entity<crate::forensics_workbench::ForensicsWorkbenchSurface>,
+        binding: omega_forensics::ForensicToolCallBinding,
+        repository_root: PathBuf,
+        source_revision: String,
+        cx: &mut Context<Self>,
+    ) {
+        cx.subscribe(
+            &thread,
+            move |_panel, thread, event: &AcpThreadEvent, cx| {
+                if !matches!(
+                    event,
+                    AcpThreadEvent::NewEntry | AcpThreadEvent::EntryUpdated(_)
+                ) {
+                    return;
+                }
+                let calls = thread
+                    .read(cx)
+                    .entries()
+                    .iter()
+                    .filter_map(|entry| {
+                        let AgentThreadEntry::ToolCall(call) = entry else {
+                            return None;
+                        };
+                        if !matches!(call.status, ToolCallStatus::Completed) {
+                            return None;
+                        }
+                        Some((
+                            call.tool_name.as_ref()?.to_string(),
+                            call.raw_input.clone()?,
+                        ))
+                    })
+                    .collect::<Vec<_>>();
+                for (tool_name, raw_input) in calls {
+                    let Ok(Some((_tool, call))) =
+                        omega_forensics::ForensicToolJournal::decode_visible_tool_json(
+                            &tool_name, &raw_input,
+                        )
+                    else {
+                        continue;
+                    };
+                    let sources = forensic_source_catalog_for_call(
+                        &binding,
+                        &call,
+                        &repository_root,
+                        &source_revision,
+                    );
+                    if let Err(error) = surface.update(cx, |surface, cx| {
+                        surface.ingest_visible_forensic_tool_call(
+                            &tool_name,
+                            &raw_input,
+                            crate::forensics_tool_bridge::VisibleForensicToolCallState::Completed,
+                            &sources,
+                            cx,
+                        )
+                    }) {
+                        log::warn!("forensic tool event was not ingested: {error}");
+                    }
+                }
+            },
+        )
+        .detach();
+    }
+
     pub fn activate_retained_thread(
         &mut self,
         id: ThreadId,
@@ -15175,7 +15439,7 @@ impl AgentPanel {
                     scan_complete.await;
                 }
 
-                let task_prompt = entropy_catalog_agent_task_prompt(
+                let mut task_prompt = entropy_catalog_agent_task_prompt(
                     &project,
                     &repository_root,
                     &prompt_snapshot,
@@ -15184,18 +15448,38 @@ impl AgentPanel {
                     model_route_ref,
                     model_parameters_digest,
                 )?;
+                let (tool_binding, tool_journal) =
+                    bind_compiled_forensic_tool_journal(&mut task_prompt)?;
+                surface.update(cx, |surface, cx| {
+                    surface.install_forensic_tool_journal(tool_journal, cx)
+                })??;
                 let thread_title: SharedString =
                     format!("{} Entropy Forensics", project.product_name).into();
                 let project_ref = project.product_ref.clone();
+                let source_revision = project
+                    .pinned_revision
+                    .clone()
+                    .context("the catalog row has no pinned revision")?;
+                let surface_entity = surface.upgrade().context("Forensics surface closed")?;
                 let thread_id = this.update_in(cx, |panel, window, cx| {
-                    panel.create_omega_thread_with_message_in_working_folder(
-                        task_prompt.compiled_task,
-                        Some(thread_title),
-                        Some(repository_root.clone()),
-                        true,
-                        window,
+                    let thread_id = panel
+                        .create_omega_thread_with_message_in_working_folder_forensics(
+                            task_prompt.compiled_task,
+                            Some(thread_title),
+                            Some(repository_root.clone()),
+                            true,
+                            window,
+                            cx,
+                        )?;
+                    panel.connect_forensic_tool_journal(
+                        thread_id,
+                        surface_entity,
+                        tool_binding,
+                        repository_root.clone(),
+                        source_revision,
                         cx,
-                    )
+                    );
+                    Some(thread_id)
                 })?;
                 let Some(thread_id) = thread_id else {
                     surface.update(cx, |surface, cx| {
@@ -15344,7 +15628,7 @@ impl AgentPanel {
             let model_id = configured_model.model.id().0.to_string();
             let model_route_ref = entropy_model_route_ref(&provider_id, &model_id);
             let model_parameters_digest = entropy_model_parameters_digest(&provider_id, &model_id);
-            let task_prompt = match entropy_agent_task_prompt(
+            let mut task_prompt = match entropy_agent_task_prompt(
                 &candidate,
                 &prompt_snapshot,
                 model_route_ref.clone(),
@@ -15361,10 +15645,45 @@ impl AgentPanel {
                     return;
                 }
             };
-            if self
-                .create_omega_thread_with_message(task_prompt.compiled_task, true, window, cx)
-                .is_some()
+            let (tool_binding, tool_journal) =
+                match bind_compiled_forensic_tool_journal(&mut task_prompt) {
+                    Ok(runtime) => runtime,
+                    Err(error) => {
+                        surface.update(cx, |surface, cx| {
+                            surface.set_entropy_error(
+                                format!("Forensic tool binding failed · {error}"),
+                                cx,
+                            )
+                        });
+                        return;
+                    }
+                };
+            if let Err(error) = surface.update(cx, |surface, cx| {
+                surface.install_forensic_tool_journal(tool_journal, cx)
+            }) {
+                surface.update(cx, |surface, cx| {
+                    surface.set_entropy_error(format!("Forensic tool journal failed · {error}"), cx)
+                });
+                return;
+            }
+            if let Some(thread_id) = self
+                .create_omega_thread_with_message_in_working_folder_forensics(
+                    task_prompt.compiled_task,
+                    None,
+                    None,
+                    true,
+                    window,
+                    cx,
+                )
             {
+                self.connect_forensic_tool_journal(
+                    thread_id,
+                    surface.clone(),
+                    tool_binding,
+                    candidate.worktree_abs_path.clone(),
+                    revision.to_string(),
+                    cx,
+                );
                 log::info!(
                     "Forensics entropy scan opened as a visible Omega task for {} at {}",
                     candidate.repository_name,
@@ -19673,6 +19992,9 @@ impl AgentPanel {
                     prior_work: forensics
                         .as_ref()
                         .and_then(|snapshot| snapshot.prior_work.as_ref()),
+                    tool_journal: forensics
+                        .as_ref()
+                        .and_then(|snapshot| snapshot.tool_journal.as_ref()),
                     source_loaded: forensics.is_some(),
                 });
                 match projection {
@@ -23000,8 +23322,56 @@ mod tests {
         assert!(prompt.contains("Entropy scan complete with limitations"));
         assert!(prompt.contains("Candidate enumeration:"));
         assert!(prompt.contains("Continue after duplicate: true"));
-        assert!(prompt.contains("tool.submit_forensic_finding.v1"));
+        assert!(prompt.contains("submit_forensic_finding"));
+        assert!(prompt.contains("query_prior_forensic_work"));
+        assert!(prompt.contains("Unavailable tools: execute_independent_control"));
         assert!(prompt.contains("Domain direction is bounded analytic input"));
+    }
+
+    #[test]
+    fn visible_forensic_task_gets_an_omega_owned_tool_binding() {
+        let candidate = crate::thread_identity::ThreadIdentityCandidate {
+            binding: omega_workbench_state::RepositoryBinding::new("repo", "worktree")
+                .expect("valid binding"),
+            git_repository_id: Some(1),
+            project_name: "Omega".into(),
+            repository_name: "omega".into(),
+            worktree_name: "omega".into(),
+            worktree_abs_path: PathBuf::from("/work/omega"),
+            worktree_path: "/work/omega".into(),
+            remote_url: None,
+            head_commit: Some("0123456789abcdef0123456789abcdef01234567".into()),
+            branch: crate::thread_identity::BranchIdentity::Branch("main".into()),
+            git: crate::thread_identity::GitIdentitySummary::default(),
+            source_revision: 1,
+        };
+        let snapshot = omega_forensics::EntropyPromptSnapshot::new(
+            "prompt.omega.entropy.binding".into(),
+            None,
+            None,
+            "Inspect the selected source.".into(),
+            "2026-08-03T23:45:00.000Z".into(),
+        )
+        .expect("snapshot");
+        let mut task = entropy_agent_task_prompt(
+            &candidate,
+            &snapshot,
+            "model-route.sha256.aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+                .into(),
+            "sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb".into(),
+        )
+        .expect("compiled task");
+        let (binding, journal) =
+            bind_compiled_forensic_tool_journal(&mut task).expect("tool journal");
+        assert_eq!(
+            binding.actor_role,
+            omega_forensics::ForensicToolActorRole::Discovery
+        );
+        assert_ne!(binding.actor_ref, journal.verifier_actor_ref);
+        assert!(task.compiled_task.contains(&binding.prompt_digest));
+        assert!(task.compiled_task.contains("expectedEventCursor"));
+        assert!(task.compiled_task.contains("task prose cannot change them"));
+        journal.validate().expect("valid journal");
     }
 
     #[test]

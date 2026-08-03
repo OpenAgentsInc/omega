@@ -3,7 +3,7 @@ use db::kvp::KeyValueStore;
 use gpui::{App, AppContext as _, Task};
 use omega_forensics::{
     DEFAULT_ENTROPY_ANALYSIS_PROMPT, EntropyCampaignProjection, EntropyPromptSnapshot,
-    EntropyRunProjection, EntropySourceInspection,
+    EntropyRunProjection, EntropySourceInspection, ForensicToolJournal,
 };
 use omega_workbench_state::RepositoryBinding;
 use serde::{Deserialize, Serialize};
@@ -40,6 +40,8 @@ pub struct EntropyForensicsRestoreState {
     pub model_run_ref: Option<String>,
     #[serde(default)]
     pub publication_scene: Option<String>,
+    #[serde(default)]
+    pub tool_journal: Option<ForensicToolJournal>,
 }
 
 impl Default for EntropyForensicsRestoreState {
@@ -58,6 +60,7 @@ impl Default for EntropyForensicsRestoreState {
             evidence_selection: None,
             model_run_ref: None,
             publication_scene: None,
+            tool_journal: None,
         }
     }
 }
@@ -120,6 +123,9 @@ impl EntropyForensicsRestoreState {
         }
         if let Some(inspection) = &self.source_inspection {
             inspection.validate()?;
+        }
+        if let Some(journal) = &self.tool_journal {
+            journal.validate()?;
         }
         if self.coldcard_case_rung.as_deref().is_some_and(|rung| {
             !matches!(
@@ -291,6 +297,7 @@ mod tests {
             evidence_selection: Some("disputes".into()),
             model_run_ref: Some("run.matrix.fixture".into()),
             publication_scene: Some("stale".into()),
+            tool_journal: None,
         };
         state.validate().expect("valid restore state");
         let encoded = serde_json::to_string(&state).expect("encode restore state");

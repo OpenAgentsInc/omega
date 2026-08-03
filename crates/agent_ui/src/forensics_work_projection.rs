@@ -11,8 +11,8 @@ use omega_forensics::{
     ColdcardEvidenceWorkspaceProjection, EntropyCampaignProjection, EntropyRunProjection,
     ForensicExactness, ForensicLifecycleState, ForensicPriorWorkQueryResult,
     ForensicPromptArtifact, ForensicPublicationGateProjection, ForensicPublicationGateState,
-    ForensicsLaunchIntent, ForensicsMatrixProjection, ForensicsReviewProjection, ForensicsRunPhase,
-    ForensicsRunProjection, PreflightReadiness,
+    ForensicToolEventStatus, ForensicToolJournal, ForensicsLaunchIntent, ForensicsMatrixProjection,
+    ForensicsReviewProjection, ForensicsRunPhase, ForensicsRunProjection, PreflightReadiness,
 };
 use omega_work_detail::{
     SnapshotLinks, WorkBlock, WorkBlockFact, WorkBlockFactKind, WorkBlockFactState, WorkBlockKind,
@@ -33,6 +33,7 @@ pub struct ForensicsWorkProjection<'a> {
     pub prompt: Option<&'a ForensicPromptArtifact>,
     pub coldcard_fixture: Option<&'a ColdcardEvidenceWorkspaceProjection>,
     pub prior_work: Option<&'a ForensicPriorWorkQueryResult>,
+    pub tool_journal: Option<&'a ForensicToolJournal>,
     pub source_loaded: bool,
 }
 
@@ -163,6 +164,9 @@ pub fn project_forensics_work(
     if let Some(prior_work) = source.prior_work {
         push_prior_work(prior_work, &mut case_facts, &mut evidence_facts, &mut links)?;
     }
+    if let Some(journal) = source.tool_journal {
+        push_tool_journal(journal, &mut lifecycle_facts, &mut evidence_facts);
+    }
     push_publication(source.publication, &mut publication_facts, &mut links);
 
     if lifecycle_facts.is_empty() {
@@ -204,6 +208,116 @@ pub fn project_forensics_work(
         block(&source, WorkBlockKind::Publication, publication_facts)?,
     ];
     Ok(ProjectedForensicsWork { links, blocks })
+}
+
+fn push_tool_journal(
+    journal: &ForensicToolJournal,
+    lifecycle_facts: &mut Vec<WorkBlockFact>,
+    evidence_facts: &mut Vec<WorkBlockFact>,
+) {
+    let accepted = journal
+        .events
+        .iter()
+        .filter(|event| event.status == ForensicToolEventStatus::Accepted)
+        .count();
+    let rejected = journal.events.len() - accepted;
+    lifecycle_facts.push(fact(
+        format!(
+            "fact:security-work:tool-journal:{}",
+            journal.binding.task_ref
+        ),
+        WorkBlockFactKind::Lifecycle,
+        WorkBlockFactState::Active,
+        "Live typed forensic tools",
+        format!(
+            "cursor {} · {accepted} accepted · {rejected} rejected · model {} · tool {}",
+            journal.event_cursor(),
+            journal.binding.model_route_ref,
+            journal.binding.tool_version
+        ),
+        [
+            journal.binding.run_ref.as_str(),
+            journal.binding.task_ref.as_str(),
+            journal.binding.source_bundle_ref.as_str(),
+            journal.binding.budget_ref.as_str(),
+        ],
+    ));
+    for finding in &journal.findings {
+        evidence_facts.push(fact_vec(
+            format!("fact:security-work:live-finding:{}", finding.finding_ref),
+            WorkBlockFactKind::Evidence,
+            WorkBlockFactState::Observed,
+            "Live typed finding",
+            format!(
+                "{} · {} · {}",
+                finding.title,
+                finding.evidence_tier.label(),
+                finding.claim_state
+            ),
+            std::iter::once(journal.binding.prompt_digest.clone())
+                .chain(std::iter::once(journal.binding.model_route_ref.clone()))
+                .chain(
+                    finding
+                        .source_refs
+                        .iter()
+                        .map(|source| source.source_ref.clone()),
+                )
+                .collect(),
+        ));
+    }
+    for hypothesis in &journal.hypotheses {
+        evidence_facts.push(fact_vec(
+            format!(
+                "fact:security-work:live-hypothesis:{}",
+                hypothesis.hypothesis_ref
+            ),
+            WorkBlockFactKind::Evidence,
+            WorkBlockFactState::Active,
+            "Live typed hypothesis",
+            format!(
+                "{} · next {}",
+                hypothesis.suspected_mechanism, hypothesis.next_check
+            ),
+            hypothesis.supporting_refs.clone(),
+        ));
+    }
+    for limitation in &journal.limitations {
+        evidence_facts.push(fact_vec(
+            format!(
+                "fact:security-work:live-limitation:{}",
+                limitation.limitation_ref
+            ),
+            WorkBlockFactKind::MissingInput,
+            WorkBlockFactState::Missing,
+            "Live typed limitation",
+            format!(
+                "{} · next {}",
+                limitation.message, limitation.required_next_check
+            ),
+            limitation.affected_source_refs.clone(),
+        ));
+    }
+    for event in journal
+        .events
+        .iter()
+        .filter(|event| event.status == ForensicToolEventStatus::Rejected)
+    {
+        evidence_facts.push(fact(
+            format!("fact:security-work:tool-rejection:{}", event.event_ref),
+            WorkBlockFactKind::Evidence,
+            WorkBlockFactState::Blocked,
+            "Rejected forensic tool call",
+            format!(
+                "{} · {}",
+                event.tool.canonical_name(),
+                event
+                    .refusal_ref
+                    .as_deref()
+                    .unwrap_or("typed refusal missing")
+            ),
+            [&event.call_ref],
+        ));
+    }
 }
 
 fn push_prior_work(
@@ -1230,6 +1344,7 @@ mod tests {
             prompt: None,
             coldcard_fixture: None,
             prior_work: None,
+            tool_journal: None,
             source_loaded: false,
         })
         .expect("project case");
@@ -1258,6 +1373,7 @@ mod tests {
             prompt: None,
             coldcard_fixture: None,
             prior_work: None,
+            tool_journal: None,
             source_loaded: false,
         })
         .expect("project run");
@@ -1320,6 +1436,7 @@ mod tests {
             prompt: None,
             coldcard_fixture: None,
             prior_work: None,
+            tool_journal: None,
             source_loaded: true,
         })
         .expect("project source data");
@@ -1442,6 +1559,7 @@ mod tests {
             prompt: None,
             coldcard_fixture: None,
             prior_work: Some(&prior_work),
+            tool_journal: None,
             source_loaded: true,
         })
         .expect("project prior Work");
