@@ -1035,7 +1035,7 @@ pub fn write_dogfood_planning_snapshot(
     Ok(())
 }
 
-#[cfg(all(test, feature = "test-support"))]
+#[cfg(test)]
 mod tests {
     use super::*;
     use crate::DogfoodFixtureAdapter;

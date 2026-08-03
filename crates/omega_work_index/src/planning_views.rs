@@ -412,7 +412,7 @@ const fn lifecycle_label(lifecycle: FixtureLifecycleType) -> &'static str {
     }
 }
 
-#[cfg(all(test, feature = "test-support"))]
+#[cfg(test)]
 mod tests {
     use std::collections::BTreeSet;
 
