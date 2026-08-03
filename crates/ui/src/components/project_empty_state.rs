@@ -6,6 +6,7 @@ type ClickHandler = Box<dyn Fn(&ClickEvent, &mut Window, &mut App) + 'static>;
 #[derive(IntoElement)]
 pub struct ProjectEmptyState {
     label: SharedString,
+    description: Option<SharedString>,
     focus_handle: FocusHandle,
     open_project_key_binding: KeyBinding,
     on_open_project: Option<ClickHandler>,
@@ -20,11 +21,17 @@ impl ProjectEmptyState {
     ) -> Self {
         Self {
             label: label.into(),
+            description: None,
             focus_handle,
             open_project_key_binding,
             on_open_project: None,
             on_clone_repo: None,
         }
+    }
+
+    pub fn description(mut self, description: impl Into<SharedString>) -> Self {
+        self.description = Some(description.into());
+        self
     }
 
     pub fn on_open_project(
@@ -47,7 +54,10 @@ impl ProjectEmptyState {
 impl RenderOnce for ProjectEmptyState {
     fn render(self, _window: &mut Window, _cx: &mut App) -> impl IntoElement {
         let id = format!("empty-state-{}", self.label);
-        let label = format!("Choose one of the options below to use the {}", self.label);
+        let description_id = format!("{id}-description");
+        let description = self.description.unwrap_or_else(|| {
+            format!("Choose one of the options below to use the {}", self.label).into()
+        });
 
         v_flex()
             .id(id)
@@ -63,9 +73,16 @@ impl RenderOnce for ProjectEmptyState {
                     .gap_1()
                     .child(
                         div()
+                            .id(description_id)
+                            .role(gpui::Role::Label)
+                            .aria_label(description.clone())
                             .text_center()
                             .mb_2()
-                            .child(Label::new(label).size(LabelSize::Small).color(Color::Muted)),
+                            .child(
+                                Label::new(description)
+                                    .size(LabelSize::Small)
+                                    .color(Color::Muted),
+                            ),
                     )
                     .child(
                         Button::new("open_project", "Open Project")

@@ -1551,10 +1551,15 @@ pub fn init(cx: &mut App) {
             workspace
                 .register_action(|workspace, _: &NewThread, window, cx| {
                     if let Some(panel) = workspace.panel::<AgentPanel>(cx) {
+                        // Make the panel visible first. The new-thread path
+                        // then gives the final focus to the composer; doing
+                        // these in the opposite order lets panel activation
+                        // replace the composer's focus with the thread
+                        // container after Command-N.
+                        workspace.focus_panel::<AgentPanel>(window, cx);
                         panel.update(cx, |panel, cx| {
                             panel.new_thread_with_workspace(Some(workspace), window, cx)
                         });
-                        workspace.focus_panel::<AgentPanel>(window, cx);
                     }
                 })
                 .register_action(
@@ -3571,12 +3576,16 @@ impl AgentPanel {
                             .map(|(_, metadata)| metadata.thread_id)
                     })
                     .map(|thread_id| thread_id.to_key_string());
-                let restored_navigation = restore_omega_navigation(
-                    serialized_panel
-                        .as_ref()
-                        .and_then(|panel| panel.omega_navigation.clone()),
-                    legacy_thread_ref.as_deref(),
-                );
+                let restored_navigation = if has_open_project {
+                    restore_omega_navigation(
+                        serialized_panel
+                            .as_ref()
+                            .and_then(|panel| panel.omega_navigation.clone()),
+                        legacy_thread_ref.as_deref(),
+                    )
+                } else {
+                    OmegaNavigationHistory::default()
+                };
                 let panel = cx.new(|cx| match vim_mode_indicator {
                     Some(vim_mode_indicator) => Self::new_with_vim_mode_indicator(
                         workspace,
@@ -3666,9 +3675,10 @@ impl AgentPanel {
                             cx,
                         );
                     }
-                    if let Some(new_draft_thread_id) = serialized_panel
-                        .as_ref()
-                        .and_then(|p| p.new_draft_thread_id)
+                    if has_open_project
+                        && let Some(new_draft_thread_id) = serialized_panel
+                            .as_ref()
+                            .and_then(|p| p.new_draft_thread_id)
                     {
                         panel.restore_new_draft(new_draft_thread_id, window, cx);
                     }
@@ -4778,14 +4788,6 @@ impl AgentPanel {
         cx.notify();
     }
 
-    /// `OMEGA-DELTA-0034`. A new thread does not require an open project.
-    ///
-    /// Upstream refused this (`agent_ui: Require an open project for agent
-    /// panel`, "a bit brute force, but it works"). Omega's front door is the
-    /// agent, and a fresh install *is* the no-project case, so refusing here
-    /// refuses the front door to every new user. The generic `NewThread`
-    /// action is conversation-only; `NewTerminalThread` is the explicit
-    /// terminal action and retains its working-directory requirements.
     pub fn new_thread(&mut self, _action: &NewThread, window: &mut Window, cx: &mut Context<Self>) {
         self.new_thread_with_workspace(None, window, cx);
     }
@@ -4796,6 +4798,12 @@ impl AgentPanel {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
+        if !self.has_open_project(cx) {
+            self.focus_handle.focus(window, cx);
+            cx.notify();
+            return;
+        }
+
         // `OMEGA-DELTA-0184`, omega#165. `+` and `Thread > New Thread` land in
         // a normal thread with the composer focused — zero interstitial steps.
         // The default executor is Omega Agent; the composer's executor
@@ -4826,6 +4834,12 @@ impl AgentPanel {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
+        if !self.has_open_project(cx) {
+            self.focus_handle.focus(window, cx);
+            cx.notify();
+            return;
+        }
+
         self.set_last_created_entry_kind_from_user_action(AgentPanelEntryKind::Thread, cx);
         match &target {
             ConversationTarget::Sarah => {
@@ -4895,6 +4909,12 @@ impl AgentPanel {
     }
 
     fn open_startup_front_door(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if !self.has_open_project(cx) {
+            self.focus_handle.focus(window, cx);
+            cx.notify();
+            return;
+        }
+
         // The startup landing is the same composer surface the `+` path
         // reaches, minus the user-gesture side effects: startup must not
         // overwrite the person's persisted agent selection or entry kind.
@@ -5402,6 +5422,14 @@ impl AgentPanel {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
+        if !self.has_open_project(cx) {
+            if focus {
+                self.focus_handle.focus(window, cx);
+            }
+            cx.notify();
+            return;
+        }
+
         self.set_last_created_entry_kind_from_user_action(AgentPanelEntryKind::Thread, cx);
 
         // If the user is viewing a *parked* draft and the ephemeral
@@ -7202,6 +7230,7 @@ impl AgentPanel {
     }
 
     fn render_sidebar_controls(&self, cx: &mut Context<Self>) -> AnyElement {
+        let has_open_project = self.has_open_project(cx);
         h_flex()
             .w_full()
             .flex_shrink_0()
@@ -7237,7 +7266,14 @@ impl AgentPanel {
                 IconButton::new("new-omega-sidebar-thread", IconName::Plus)
                     .style(ButtonStyle::Subtle)
                     .icon_size(IconSize::Small)
-                    .tooltip(|_, cx| Tooltip::for_action("New Thread", &NewThread, cx))
+                    .disabled(!has_open_project)
+                    .tooltip(move |window, cx| {
+                        if has_open_project {
+                            Tooltip::for_action("New Thread", &NewThread, cx)
+                        } else {
+                            Tooltip::text("Select a project")(window, cx)
+                        }
+                    })
                     .on_click(cx.listener(|this, _, window, cx| {
                         this.new_thread(&NewThread, window, cx);
                     })),
@@ -10221,7 +10257,8 @@ impl AgentPanel {
         // Startup waits for the panel to be installed. Restore and fixture
         // work can complete during that wait, so the decision must be made
         // again when the task actually reaches the panel.
-        if self.showing_full_auto
+        if !self.has_open_project(cx)
+            || self.showing_full_auto
             || self.pending_terminal_spawn.is_some()
             || !matches!(self.base_view, BaseView::Uninitialized)
             || self.destination_has_meaningful_state(cx)
@@ -11024,10 +11061,11 @@ impl AgentPanel {
         let focus_handle = self.focus_handle(cx);
 
         ProjectEmptyState::new(
-            "Agent Panel",
+            "Omega",
             focus_handle.clone(),
             KeyBinding::for_action_in(&workspace::Open::default(), &focus_handle, cx),
         )
+        .description("Select a project to start a new thread.")
         .on_open_project(|_, window, cx| {
             telemetry::event!("Agent Panel Add Project Clicked");
             window.dispatch_action(workspace::Open::default().boxed_clone(), cx);
@@ -11043,11 +11081,7 @@ impl AgentPanel {
 
         let focus_handle = self.focus_handle(cx);
 
-        // OMEGA-DELTA-0034. A thread is creatable with no project open, so the
-        // toolbar's create controls are live on the front door. A leftover
-        // `has_open_project` here would leave the composer typable and the `+`
-        // beside it disabled.
-        let can_create_entries = true;
+        let can_create_entries = self.has_open_project(cx);
         let supports_terminal = self.supports_terminal(cx);
         let toolbar_state = if self.showing_sarah_admission {
             toolbar_surface_state(true, false, false)
@@ -15304,14 +15338,7 @@ impl AgentPanel {
 
     fn focus_thread_transcript(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         self.workbench_shell.return_to_transcript();
-        if let Some(thread_view) = self.active_thread_view(cx) {
-            thread_view
-                .read(cx)
-                .activation_focus_handle(cx)
-                .focus(window, cx);
-        } else {
-            self.focus_handle.focus(window, cx);
-        }
+        self.activation_focus_handle(cx).focus(window, cx);
         cx.notify();
     }
 
@@ -22763,21 +22790,10 @@ mod tests {
         });
     }
 
-    /// `OMEGA-DELTA-0034`. An empty workspace opens the front door — and still
-    /// refuses the things that genuinely need a worktree.
-    ///
-    /// This test used to assert the opposite, because it encoded upstream's
-    /// policy: `agent_ui: Require an open project for agent panel` (#56577) put
-    /// a `has_open_project` guard in front of every panel entry, and this test
-    /// pinned it. Omega's front door *is* the agent, and a window with nothing
-    /// to restore is by definition a window with no project, so that policy
-    /// refused a composer to every new user — omega#76's exit, failing.
-    ///
-    /// The clauses that were still true are kept and still asserted: an
-    /// external ACP agent and a terminal both need a working directory, and
-    /// neither is created here.
     #[gpui::test]
-    async fn test_empty_workspace_opens_the_front_door(cx: &mut TestAppContext) {
+    async fn test_empty_workspace_requires_a_project_before_creating_threads(
+        cx: &mut TestAppContext,
+    ) {
         init_test(cx);
         cx.update(|cx| {
             agent::ThreadStore::init_global(cx);
@@ -22785,11 +22801,7 @@ mod tests {
         });
 
         let fs = FakeFs::new(cx.executor());
-        // The global filesystem is what a *created* thread reaches for. This
-        // test used to assert that no thread was created, so it never needed
-        // one; now it asserts the opposite.
         cx.update(|cx| <dyn fs::Fs>::set_global(fs.clone(), cx));
-        // Still no worktree: this is the fresh-install state under test.
         let project = Project::test(fs.clone(), [], cx).await;
         let multi_workspace =
             cx.add_window(|window, cx| MultiWorkspace::test_new(project.clone(), window, cx));
@@ -22799,12 +22811,16 @@ mod tests {
             })
             .unwrap();
         let cx = &mut VisualTestContext::from_window(multi_workspace.into(), cx);
+        cx.set_debug_accessibility_active(true);
 
         let panel = workspace.update_in(cx, |workspace, window, cx| {
             let panel = cx.new(|cx| AgentPanel::new(workspace, window, cx));
             workspace.add_panel(panel.clone(), window, cx);
+            workspace.focus_panel::<AgentPanel>(window, cx);
+            AgentPanel::open_front_door(window, cx);
             panel
         });
+        cx.run_until_parked();
 
         panel.read_with(cx, |panel, cx| {
             assert_eq!(
@@ -22813,42 +22829,42 @@ mod tests {
                 "this test is about the projectless case; a worktree here \
                  would make every assertion below prove something else"
             );
-            assert_ne!(
-                panel
-                    .connection_store()
-                    .read(cx)
-                    .connection_status(&Agent::NativeAgent, cx),
-                crate::agent_connection_store::AgentConnectionStatus::Disconnected,
-                "an empty workspace must start the native agent connection; \
-                 NativeAgentServer::connect never reads the project, and \
-                 refusing here is what left omega#76's front door with no \
-                 composer to type into"
+            assert!(
+                panel.active_conversation_view().is_none(),
+                "startup without a project must not reveal a conversation"
+            );
+            assert!(
+                panel.draft_thread.is_none(),
+                "startup without a project must not create a draft thread"
             );
         });
+        let projectless_snapshot = cx.debug_render_snapshot();
+        let projectless_tree = projectless_snapshot
+            .accessibility_tree_json()
+            .expect("forced accessibility must capture the projectless state");
+        assert!(
+            projectless_tree.contains("Select a project to start a new thread."),
+            "the projectless surface must state the next action: {projectless_tree}"
+        );
 
-        panel.update_in(cx, |panel, window, cx| {
-            panel.new_thread(&NewThread, window, cx);
-        });
+        let metadata_count_before =
+            cx.update(|_, cx| ThreadMetadataStore::global(cx).read(cx).entries().count());
+
+        cx.focus(&workspace);
+        cx.dispatch_action(NewThread);
         cx.run_until_parked();
 
         panel.read_with(cx, |panel, _cx| {
             assert!(
-                panel.front_door_composer_visible_for_tests(),
-                "an empty workspace must land in the focused composer draft"
+                !panel.front_door_composer_visible_for_tests(),
+                "Command-N without a project must stay on project selection"
             );
             assert!(
-                panel.draft_thread.is_some(),
-                "an empty workspace must prepare one Omega session behind the composer"
+                panel.draft_thread.is_none(),
+                "Command-N without a project must not prepare a hidden draft"
             );
         });
 
-        // omega#161. The typed external-agent action lands the exact
-        // requested id as the composer draft (`OMEGA-DELTA-0184`); the legacy
-        // project guard that silently ignored the action on an empty
-        // workspace is dead with the mode split. What must stay true is
-        // legibility: the selection is visible, and the draft's preparation
-        // state reports readiness instead of silently running an executor
-        // with no working directory.
         panel.update_in(cx, |panel, window, cx| {
             panel.new_external_agent_thread(
                 &NewExternalAgentThread {
@@ -22859,26 +22875,24 @@ mod tests {
             );
         });
         cx.run_until_parked();
-        panel.read_with(cx, |panel, cx| {
+        panel.read_with(cx, |panel, _cx| {
             assert_eq!(
                 panel.selected_agent,
-                Agent::Custom {
-                    id: AgentId::new("external-agent")
-                },
-                "the typed action must land the exact requested direct agent"
+                Agent::NativeAgent,
+                "a blocked direct-agent action must not change the pending executor"
             );
-            let draft = panel
-                .draft_thread
-                .as_ref()
-                .expect("the direct selection must prepare a visible draft");
-            assert_eq!(
-                *draft.read(cx).agent_key(),
-                Agent::Custom {
-                    id: AgentId::new("external-agent")
-                },
-                "the draft must belong to the requested direct agent"
+            assert!(
+                panel.draft_thread.is_none(),
+                "a direct-agent action without a project must not create a draft"
             );
         });
+
+        let metadata_count_after =
+            cx.update(|_, cx| ThreadMetadataStore::global(cx).read(cx).entries().count());
+        assert_eq!(
+            metadata_count_after, metadata_count_before,
+            "projectless new-thread actions must not persist thread metadata"
+        );
 
         cx.update(|_, cx| {
             cx.update_flags(true, vec!["agent-panel-terminal".to_string()]);
@@ -22896,10 +22910,7 @@ mod tests {
             );
             assert!(
                 !panel.should_create_terminal_for_new_entry(cx),
-                "with no project, a new entry must be a thread and not a \
-                 terminal — project.supports_terminal() is true for any local \
-                 project, worktree or not, so this has to be checked on the \
-                 panel's own wrapper"
+                "with no project, neither thread nor terminal creation is available"
             );
         });
     }
@@ -27129,12 +27140,11 @@ mod tests {
             panel.selected_agent = custom_agent.clone();
         });
 
-        panel.update_in(cx, |panel, window, cx| {
-            panel.new_thread(&NewThread, window, cx);
-        });
+        cx.focus(&workspace);
+        cx.dispatch_action(NewThread);
         cx.run_until_parked();
 
-        panel.read_with(cx, |panel, cx| {
+        panel.update_in(cx, |panel, window, cx| {
             // omega#165: `+` lands on the default executor. There is no
             // hidden second selection store left behind — the dropdown is the
             // one authority, and it reads the conversation it sits under.
@@ -27154,6 +27164,15 @@ mod tests {
                     .map(|draft| draft.read(cx).agent_key()),
                 Some(Agent::NativeAgent)
             ));
+            let composer_focus = panel
+                .active_conversation_view()
+                .expect("Command-N must reveal a conversation")
+                .read(cx)
+                .activation_focus_handle(cx);
+            assert!(
+                composer_focus.is_focused(window),
+                "Command-N must leave keyboard focus in the new thread composer"
+            );
         });
     }
 

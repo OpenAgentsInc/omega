@@ -31,8 +31,9 @@ When you have multiple projects open:
 
 Think of projects in the threads sidebar like browser tabs, but for repositories.
 
-The new-conversation front door shows the exact current folder on all three
-mode rows before a send. A missing folder is stated as **No folder selected**;
+Until you select a project, Omega shows project selection instead of a
+new-conversation composer and does not create a draft. After selection, the
+new-conversation front door shows the exact current folder before a send.
 Omega does not silently borrow a folder from another conversation.
 
 ## Opening in a New Window
