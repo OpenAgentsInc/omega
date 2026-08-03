@@ -28202,9 +28202,7 @@ mod tests {
             );
         }
 
-        let evidence = without_comments(&read_repository_file(
-            "script/omega_identity_evidence.py",
-        ));
+        let evidence = without_comments(&read_repository_file("script/omega_identity_evidence.py"));
         assert!(
             evidence.contains("WAIVABLE_CHECKS: set[str] = set()"),
             "OMEGA-DELTA-0233: an installed accessibility observation became waivable"
@@ -28225,5 +28223,55 @@ mod tests {
                 "OMEGA-DELTA-0233: installed AX release gate lost `{required}`"
             );
         }
+    }
+
+    /// OMEGA-DELTA-0234. The Omega footer projects the selected public account
+    /// identity and signer state. It fails closed on conflicts and does not
+    /// manufacture Organization or Sync truth from the dogfood fixture.
+    #[test]
+    fn omega_footer_uses_the_effective_principal_authority() {
+        let projection = without_comments(&read_repository_file(
+            "crates/agent_ui/src/effective_principal.rs",
+        ));
+        for required in [
+            "AccountRegistryService",
+            "EffectivePrincipalState",
+            "Identity conflict",
+            "Local scope",
+            "Signer offline",
+            "Signer revoked",
+            "safe_display_name",
+            "ncryptsec1",
+        ] {
+            assert!(
+                projection.contains(required),
+                "OMEGA-DELTA-0234: Effective Principal projection lost `{required}`"
+            );
+        }
+        for forbidden in ["DogfoodPlanningViewModel", "FixtureOrganization"] {
+            assert!(
+                !projection.contains(forbidden),
+                "OMEGA-DELTA-0234: identity authority depends on fixture type `{forbidden}`"
+            );
+        }
+
+        let panel = without_comments(&read_repository_file("crates/agent_ui/src/agent_panel.rs"));
+        for required in [
+            "effective_principal",
+            "observe_effective_principal",
+            "omega.omega.effective-principal",
+            "principal_accessibility_label",
+            "principal.signer_label",
+            "principal.scope_label",
+        ] {
+            assert!(
+                panel.contains(required),
+                "OMEGA-DELTA-0234: Effective Principal UI lost `{required}`"
+            );
+        }
+        assert!(
+            !panel.contains(".child(\"Anonymous\")"),
+            "OMEGA-DELTA-0234: hard-coded Anonymous identity returned"
+        );
     }
 }

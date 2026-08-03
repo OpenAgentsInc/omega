@@ -3463,6 +3463,11 @@ pub struct AgentPanel {
     /// pairing, Sarah voice), so the panel reads the durable record rather
     /// than requiring a channel back from each of them.
     _identity_backup_nudge_poll: Option<Task<()>>,
+    /// Public-safe account-registry projection shown in the Omega footer.
+    /// Organization and Sync remain unclaimed until their own authorities are
+    /// attached; this value never derives either from fixture display text.
+    effective_principal: crate::effective_principal::EffectivePrincipalProjection,
+    _effective_principal_poll: Option<Task<()>>,
     /// `OMEGA-DELTA-0035`. The poll that feeds the router the engine's framed
     /// `get_capacity` answer.
     ///
@@ -4137,6 +4142,11 @@ impl AgentPanel {
                     None
                 }
             };
+        let effective_principal = if cfg!(any(test, feature = "test-support")) {
+            crate::effective_principal::EffectivePrincipalProjection::default()
+        } else {
+            crate::effective_principal::EffectivePrincipalProjection::current()
+        };
 
         cx.on_release(|this, cx| {
             this.dismiss_all_terminal_notifications(cx);
@@ -4229,6 +4239,8 @@ impl AgentPanel {
             identity_backup_surface: None,
             offers_identity_backup_nudge: false,
             _identity_backup_nudge_poll: None,
+            effective_principal,
+            _effective_principal_poll: None,
             _engine_capacity_poll: None,
             _forensics_workbench_subscriptions: Vec::new(),
             work_index,
@@ -4297,6 +4309,7 @@ impl AgentPanel {
         panel.ensure_native_agent_connection(cx);
         panel.observe_engine_capacity(cx);
         panel.observe_identity_backup_nudge(cx);
+        panel.observe_effective_principal(cx);
         panel.refresh_native_work_index(cx);
         panel.refresh_effect_work_index(cx);
         panel.load_public_channels(cx);
@@ -4339,6 +4352,37 @@ impl AgentPanel {
                     break;
                 }
                 executor.timer(std::time::Duration::from_secs(60)).await;
+            }
+        }));
+    }
+
+    /// Keep the footer on the exact selected account generation. The account
+    /// registry is durable file state and has no UI event bus, so the read runs
+    /// off the render path and the task ends with this panel.
+    fn observe_effective_principal(&mut self, cx: &mut Context<Self>) {
+        if cfg!(any(test, feature = "test-support")) {
+            return;
+        }
+        let executor = cx.background_executor().clone();
+        self._effective_principal_poll = Some(cx.spawn(async move |this, cx| {
+            loop {
+                let projection = cx
+                    .background_spawn(async {
+                        crate::effective_principal::EffectivePrincipalProjection::current()
+                    })
+                    .await;
+                let alive = this
+                    .update(cx, |panel, cx| {
+                        if panel.effective_principal != projection {
+                            panel.effective_principal = projection;
+                            cx.notify();
+                        }
+                    })
+                    .is_ok();
+                if !alive {
+                    break;
+                }
+                executor.timer(std::time::Duration::from_secs(5)).await;
             }
         }));
     }
@@ -18639,6 +18683,39 @@ impl AgentPanel {
         let text_placeholder = colors.text_placeholder;
         let text_accent = colors.text_accent;
         let icon_muted = colors.icon_muted;
+        let effective_principal = self.effective_principal.clone();
+        let principal_accessibility_label = effective_principal.accessibility_label();
+        let principal_initial = effective_principal
+            .display_name
+            .chars()
+            .next()
+            .map(|value| value.to_uppercase().to_string())
+            .unwrap_or_else(|| "?".into());
+        let principal_scope_status = format!(
+            "{} · {}",
+            effective_principal.scope_label,
+            effective_principal.status_label()
+        );
+        let (principal_icon, principal_color) = match effective_principal.state {
+            crate::effective_principal::EffectivePrincipalState::LocalOnly => {
+                (IconName::Lock, Color::Muted)
+            }
+            crate::effective_principal::EffectivePrincipalState::Enrolled => {
+                (IconName::UserCheck, Color::Success)
+            }
+            crate::effective_principal::EffectivePrincipalState::Offline => {
+                (IconName::Disconnected, Color::Warning)
+            }
+            crate::effective_principal::EffectivePrincipalState::SignerUnavailable => {
+                (IconName::LockOff, Color::Warning)
+            }
+            crate::effective_principal::EffectivePrincipalState::Revoked => {
+                (IconName::XCircle, Color::Error)
+            }
+            crate::effective_principal::EffectivePrincipalState::Conflict => {
+                (IconName::Warning, Color::Error)
+            }
+        };
         let tab_shortcuts_visible = omega_tab_shortcuts_visible(window);
         let active_work_index_view = self
             .omega_navigation_history
@@ -19663,13 +19740,15 @@ impl AgentPanel {
             )
             .child(
                 h_flex()
-                    .id("omega-open-settings")
-                    .h(px(42.))
+                    .id("omega-effective-principal")
+                    .debug_selector(|| "omega.omega.effective-principal".into())
+                    .h(px(60.))
                     .px(px(8.))
                     .gap(px(8.))
                     .rounded(px(8.))
                     .cursor_pointer()
-                    .aria_label("Open Settings")
+                    .role(gpui::Role::Button)
+                    .aria_label(principal_accessibility_label)
                     .hover(move |style| style.bg(hover_background))
                     .on_click(cx.listener(|this, _, window, cx| {
                         this.open_omega_settings(true, window, cx);
@@ -19683,9 +19762,43 @@ impl AgentPanel {
                             .flex()
                             .items_center()
                             .justify_center()
-                            .child("A"),
+                            .child(principal_initial),
                     )
-                    .child(v_flex().flex_1().child("Anonymous"))
+                    .child(
+                        v_flex()
+                            .min_w_0()
+                            .flex_1()
+                            .child(
+                                h_flex()
+                                    .gap(px(5.))
+                                    .child(
+                                        div()
+                                            .min_w_0()
+                                            .flex_1()
+                                            .truncate()
+                                            .child(effective_principal.display_name),
+                                    )
+                                    .child(
+                                        Icon::new(principal_icon)
+                                            .size(IconSize::XSmall)
+                                            .color(principal_color),
+                                    ),
+                            )
+                            .child(
+                                div()
+                                    .truncate()
+                                    .text_size(px(10.))
+                                    .text_color(text_muted)
+                                    .child(principal_scope_status),
+                            )
+                            .child(
+                                div()
+                                    .truncate()
+                                    .text_size(px(10.))
+                                    .text_color(text_muted)
+                                    .child(effective_principal.signer_label),
+                            ),
+                    )
                     .child(
                         Icon::new(IconName::Settings)
                             .size(IconSize::Small)
