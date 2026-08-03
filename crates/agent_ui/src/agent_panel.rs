@@ -26628,6 +26628,88 @@ mod tests {
         assert_eq!(pasted, "file.rs:2-3 ");
     }
 
+    // omega#221 close criterion: "Release and release-fast builds omit fixture
+    // destinations, counts, recents, routes, search results, and persisted
+    // restoration."
+    //
+    // A release binary cannot be exercised from a unit test, so this proves the
+    // second half of a two-link chain. The first link is proved at release
+    // profile by `script/prove-dogfood-release-omission`: with the gate
+    // requested (`OMEGA_UI_MOCKS=1`), a release-fast build still reports
+    // `enabled=false loaded_some=Ok(false)` and carries no fixture payload,
+    // because `DogfoodFixtureAdapter::load` requires `debug_assertions` and the
+    // fixture bytes are compiled out. This test proves the second link inside
+    // the panel: when that load yields `None` — the state a release build is
+    // pinned to — no fixture destination, route, or persisted restoration
+    // exists. Each assertion is paired with the fixture actually installed, so
+    // a check that can no longer fail shows up as a failing mutation half.
+    #[cfg(feature = "test-support")]
+    #[gpui::test]
+    async fn a_disabled_fixture_gate_omits_every_dogfood_route_and_restoration(
+        cx: &mut TestAppContext,
+    ) {
+        let (panel, mut cx) = setup_panel(cx).await;
+
+        panel.read_with(&cx, |panel, _cx| {
+            assert!(
+                panel.dogfood_fixture.is_none(),
+                "a panel built without the development gate must hold no fixture graph"
+            );
+            assert!(
+                panel._dogfood_planning_refresh.is_none(),
+                "a gate-disabled panel must not stage a planning refresh"
+            );
+            assert!(
+                panel._dogfood_planning_persist.is_none(),
+                "a gate-disabled panel must not stage a planning persist"
+            );
+        });
+
+        let fixture_routes = [
+            OmegaRoute::project(DOGFOOD_PROJECT_ID).expect("valid dogfood project route"),
+            OmegaRoute::project(SECURITY_PROJECT_ID).expect("valid security project route"),
+        ];
+
+        panel.read_with(&cx, |panel, cx| {
+            for route in &fixture_routes {
+                assert_eq!(
+                    panel.omega_route_state(route.clone(), cx).availability,
+                    RouteAvailability::Unavailable(RouteUnavailableReason::NotImplemented),
+                    "{route:?} must not be a reachable destination without the fixture gate"
+                );
+            }
+        });
+
+        panel.update(&mut cx, |panel, cx| {
+            panel.refresh_dogfood_planning(cx);
+            assert!(
+                panel._dogfood_planning_refresh.is_none(),
+                "a gate-disabled refresh must not schedule work or a snapshot write"
+            );
+            assert!(panel._dogfood_planning_persist.is_none());
+        });
+
+        // Mutation half: install exactly what the gate would have loaded. Every
+        // assertion above must now report the opposite, otherwise the checks are
+        // passing for a reason other than the fixture being absent.
+        panel.update(&mut cx, |panel, _cx| {
+            panel.dogfood_fixture = Some(DogfoodPlanningViewModel::from_fixture(
+                DogfoodFixtureAdapter::load_for_tests().expect("valid dogfood fixture"),
+            ));
+        });
+
+        panel.read_with(&cx, |panel, cx| {
+            for route in &fixture_routes {
+                assert_eq!(
+                    panel.omega_route_state(route.clone(), cx).availability,
+                    RouteAvailability::Available,
+                    "{route:?} must become reachable once the fixture graph is present, \
+                     otherwise the omission assertion above proves nothing"
+                );
+            }
+        });
+    }
+
     async fn setup_panel(cx: &mut TestAppContext) -> (Entity<AgentPanel>, VisualTestContext) {
         init_test(cx);
         cx.update(|cx| {

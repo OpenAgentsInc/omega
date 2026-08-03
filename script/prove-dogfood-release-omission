@@ -2,6 +2,13 @@
 set -euo pipefail
 
 # omega#220 close criterion: "release builds prove complete omission".
+# omega#221 close criterion: "Release and release-fast builds omit fixture
+# destinations, counts, recents, routes, search results, and persisted
+# restoration." This script proves the first link of that chain — a release
+# build never obtains a fixture graph even when one is explicitly requested.
+# The second link, "a panel holding no fixture graph exposes no destination,
+# route, or persisted restoration", is proved by the paired agent_ui test
+# `a_disabled_fixture_gate_omits_every_dogfood_route_and_restoration`.
 #
 # The runtime gate (DogfoodFixtureGate = debug_assertions && mocks_requested)
 # already stops a release build from routing, counting, mutating, or restoring
@@ -17,7 +24,11 @@ cd "$(dirname "$0")/.."
 
 profile="release-fast"
 example="omission_probe"
-binary="target/${profile}/examples/${example}"
+# Honour CARGO_TARGET_DIR. A worktree that shares the primary warm target
+# directory otherwise builds the probe somewhere this script never looks, and
+# the run aborts before it has asserted anything.
+target_dir="${CARGO_TARGET_DIR:-target}"
+binary="${target_dir}/${profile}/examples/${example}"
 
 echo "building ${example} with the ${profile} profile..."
 cargo build --profile "$profile" -p omega_work_index --example "$example" >/dev/null
@@ -28,14 +39,23 @@ if [[ ! -x "$binary" ]]; then
 fi
 
 echo "--- runtime gate ---"
-runtime_output="$("$binary")"
+# Ask for the fixture. With OMEGA_UI_MOCKS unset the gate is disabled in EVERY
+# profile, so an "enabled=false" reading would be true of a debug build too and
+# would prove nothing about release. Requesting the gate makes the assertion
+# below falsifiable: the same probe built with debug assertions reports
+# enabled=true and loads the graph.
+runtime_output="$(OMEGA_UI_MOCKS=1 "$binary")"
 echo "$runtime_output"
+case "$runtime_output" in
+  *"mocks_requested=true"*) ;;
+  *) echo "FAIL: the probe did not observe the requested development gate" >&2; exit 1 ;;
+esac
 case "$runtime_output" in
   *"debug_assertions=false"*) ;;
   *) echo "FAIL: probe was not built without debug assertions" >&2; exit 1 ;;
 esac
 case "$runtime_output" in
-  *"enabled=false"*) ;;
+  *" enabled=false"*) ;;
   *) echo "FAIL: the fixture gate reported enabled in a release build" >&2; exit 1 ;;
 esac
 case "$runtime_output" in
