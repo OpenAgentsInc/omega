@@ -283,6 +283,7 @@ impl<T> FlattenAcpResult<T> for Result<Result<T, acp::Error>, anyhow::Error> {
 
 /// Holds state needed by foreground work dispatched from background handler closures.
 struct ClientContext {
+    agent_id: AgentId,
     sessions: Rc<RefCell<HashMap<acp::SessionId, AcpSession>>>,
     session_list: Rc<RefCell<Option<Rc<AcpSessionList>>>>,
     request_elicitations: Entity<ElicitationStore>,
@@ -975,6 +976,7 @@ impl AcpConnection {
 
         // Set up the foreground dispatch loop to process work items from handlers.
         let dispatch_context = ClientContext {
+            agent_id: agent_id.clone(),
             sessions: sessions.clone(),
             session_list: client_session_list.clone(),
             request_elicitations: request_elicitations.clone(),
@@ -1359,9 +1361,19 @@ impl AcpConnection {
                     let (modes, config_options) =
                         config_state(response.modes, response.config_options);
 
-                    this.apply_default_mode(&session_id, modes.as_ref(), cx);
-                    if let Some(config_opts) = config_options.as_ref() {
-                        this.apply_default_config_options(&session_id, config_opts, cx);
+                    let defaults_result = async {
+                        this.apply_default_mode(&session_id, modes.as_ref()).await?;
+                        if let Some(config_opts) = config_options.as_ref() {
+                            this.apply_default_config_options(&session_id, config_opts)
+                                .await?;
+                        }
+                        Ok::<(), acp::Error>(())
+                    }
+                    .await;
+                    if let Err(err) = defaults_result {
+                        this.sessions.borrow_mut().remove(&session_id);
+                        this.pending_sessions.borrow_mut().remove(&session_id);
+                        return Err(Arc::new(map_acp_error(err)));
                     }
 
                     let ref_count = this
@@ -1404,77 +1416,88 @@ impl AcpConnection {
             .spawn(async move { shared_task.await.map_err(|err| anyhow!(err)) })
     }
 
-    fn apply_default_mode(
+    async fn apply_default_mode(
         &self,
         session_id: &acp::SessionId,
         modes: Option<&Rc<RefCell<acp::SessionModeState>>>,
-        cx: &mut AsyncApp,
-    ) {
+    ) -> Result<(), acp::Error> {
         let Some(default_mode) = self.defaults.mode() else {
-            return;
+            return Ok(());
         };
         let Some(modes) = modes else {
-            return;
+            return Ok(());
         };
 
-        let mut modes_ref = modes.borrow_mut();
-        let has_mode = modes_ref
-            .available_modes
-            .iter()
-            .any(|mode| mode.id == default_mode);
-        if !has_mode {
-            let available_modes = modes_ref
+        let initial_mode_id = {
+            let mut modes_ref = modes.borrow_mut();
+            let has_mode = modes_ref
                 .available_modes
                 .iter()
-                .map(|mode| format!("- `{}`: {}", mode.id, mode.name))
-                .collect::<Vec<_>>()
-                .join("\n");
-            log::warn!(
-                "`{default_mode}` is not a valid {} mode. Available options:\n{available_modes}",
-                self.id
-            );
-            return;
-        }
-        if modes_ref.current_mode_id == default_mode {
-            return;
-        }
-
-        let initial_mode_id = modes_ref.current_mode_id.clone();
-        modes_ref.current_mode_id = default_mode.clone();
-        drop(modes_ref);
-
-        cx.spawn({
-            let session_id = session_id.clone();
-            let modes = modes.clone();
-            let connection = self.connection.clone();
-            async move |_| {
-                let result = connection
-                    .send_request(acp::SetSessionModeRequest::new(session_id, default_mode))
-                    .block_task()
-                    .await
-                    .log_err();
-
-                if result.is_none() {
-                    modes.borrow_mut().current_mode_id = initial_mode_id;
+                .any(|mode| mode.id == default_mode);
+            if !has_mode {
+                let available_modes = modes_ref
+                    .available_modes
+                    .iter()
+                    .map(|mode| format!("- `{}`: {}", mode.id, mode.name))
+                    .collect::<Vec<_>>()
+                    .join("\n");
+                let message = format!(
+                    "`{default_mode}` is not a valid {} mode. Available options:\n{available_modes}",
+                    self.id
+                );
+                if crate::full_access_mode_for_agent(self.id.as_ref()).is_some() {
+                    return Err(acp::Error::internal_error().data(message));
                 }
+                log::warn!("{message}");
+                return Ok(());
             }
-        })
-        .detach();
+            if modes_ref.current_mode_id == default_mode {
+                return Ok(());
+            }
+
+            let initial_mode_id = modes_ref.current_mode_id.clone();
+            modes_ref.current_mode_id = default_mode.clone();
+            initial_mode_id
+        };
+
+        let result = self
+            .connection
+            .send_request(acp::SetSessionModeRequest::new(
+                session_id.clone(),
+                default_mode,
+            ))
+            .block_task()
+            .await;
+
+        if result.is_err() {
+            modes.borrow_mut().current_mode_id = initial_mode_id;
+        }
+        result?;
+        Ok(())
     }
 
-    fn apply_default_config_options(
+    async fn apply_default_config_options(
         &self,
         session_id: &acp::SessionId,
         config_options: &Rc<RefCell<Vec<acp::SessionConfigOption>>>,
-        cx: &mut AsyncApp,
-    ) {
+    ) -> Result<(), acp::Error> {
         let id = self.id.clone();
+        let forced_mode = crate::full_access_mode_for_agent(id.as_ref());
+        let mut forced_mode_found = forced_mode.is_none();
         let defaults_to_apply: Vec<_> = {
             let config_opts_ref = config_options.borrow();
             config_opts_ref
                 .iter()
                 .filter_map(|config_option| {
-                    let default_value = self.defaults.config_option(config_option.id.0.as_ref())?;
+                    let default_value = if config_option.category
+                        == Some(acp::SessionConfigOptionCategory::Mode)
+                    {
+                        forced_mode
+                            .map(|mode| AgentConfigOptionValue::from(mode.to_owned()))
+                            .or_else(|| self.defaults.config_option(config_option.id.0.as_ref()))?
+                    } else {
+                        self.defaults.config_option(config_option.id.0.as_ref())?
+                    };
 
                     let value_to_apply = match &config_option.kind {
                         acp::SessionConfigKind::Select(select) => {
@@ -1508,19 +1531,12 @@ impl AcpConnection {
                     };
 
                     if let Some(value_to_apply) = value_to_apply {
-                        let initial_value = match &config_option.kind {
-                            acp::SessionConfigKind::Select(select) => {
-                                acp::SessionConfigOptionValue::value_id(
-                                    select.current_value.clone(),
-                                )
-                            }
-                            acp::SessionConfigKind::Boolean(boolean) => {
-                                acp::SessionConfigOptionValue::boolean(boolean.current_value)
-                            }
-                            _ => return None,
-                        };
-
-                        Some((config_option.id.clone(), value_to_apply, initial_value))
+                        if config_option.category == Some(acp::SessionConfigOptionCategory::Mode)
+                            && forced_mode.is_some()
+                        {
+                            forced_mode_found = true;
+                        }
+                        Some((config_option.id.clone(), value_to_apply))
                     } else {
                         log::warn!(
                             "`{}` is not a valid value for config option `{}` in {}",
@@ -1534,67 +1550,27 @@ impl AcpConnection {
                 .collect()
         };
 
-        for (config_id, default_value, initial_value) in defaults_to_apply {
-            cx.spawn({
-                let default_value_for_request = default_value.clone();
-                let session_id = session_id.clone();
-                let config_id_clone = config_id.clone();
-                let config_opts = config_options.clone();
-                let conn = self.connection.clone();
-                async move |_| {
-                    let result = conn
-                        .send_request(acp::SetSessionConfigOptionRequest::new(
-                            session_id,
-                            config_id_clone.clone(),
-                            default_value_for_request,
-                        ))
-                        .block_task()
-                        .await
-                        .log_err();
-
-                    if result.is_none() {
-                        let mut opts = config_opts.borrow_mut();
-                        if let Some(opt) = opts.iter_mut().find(|o| o.id == config_id_clone) {
-                            match (&mut opt.kind, &initial_value) {
-                                (
-                                    acp::SessionConfigKind::Select(select),
-                                    acp::SessionConfigOptionValue::ValueId { value },
-                                ) => {
-                                    select.current_value = value.clone();
-                                }
-                                (
-                                    acp::SessionConfigKind::Boolean(boolean),
-                                    acp::SessionConfigOptionValue::Boolean { value },
-                                ) => {
-                                    boolean.current_value = *value;
-                                }
-                                _ => {}
-                            }
-                        }
-                    }
-                }
-            })
-            .detach();
-
-            let mut opts = config_options.borrow_mut();
-            if let Some(opt) = opts.iter_mut().find(|o| o.id == config_id) {
-                match (&mut opt.kind, &default_value) {
-                    (
-                        acp::SessionConfigKind::Select(select),
-                        acp::SessionConfigOptionValue::ValueId { value },
-                    ) => {
-                        select.current_value = value.clone();
-                    }
-                    (
-                        acp::SessionConfigKind::Boolean(boolean),
-                        acp::SessionConfigOptionValue::Boolean { value },
-                    ) => {
-                        boolean.current_value = *value;
-                    }
-                    _ => {}
-                }
-            }
+        if !forced_mode_found {
+            return Err(acp::Error::internal_error().data(format!(
+                "{} does not expose its required full-access mode `{}` through ACP session configuration",
+                self.id,
+                forced_mode.unwrap_or_default()
+            )));
         }
+
+        for (config_id, default_value) in defaults_to_apply {
+            let response = self
+                .connection
+                .send_request(acp::SetSessionConfigOptionRequest::new(
+                    session_id.clone(),
+                    config_id,
+                    default_value,
+                ))
+                .block_task()
+                .await?;
+            *config_options.borrow_mut() = response.config_options;
+        }
+        Ok(())
     }
 }
 
@@ -1873,10 +1849,14 @@ impl AgentConnection for AcpConnection {
 
             let (modes, config_options) = config_state(response.modes, response.config_options);
 
-            self.apply_default_mode(&response.session_id, modes.as_ref(), cx);
+            self.apply_default_mode(&response.session_id, modes.as_ref())
+                .await
+                .map_err(map_acp_error)?;
 
             if let Some(config_opts) = config_options.as_ref() {
-                self.apply_default_config_options(&response.session_id, config_opts, cx);
+                self.apply_default_config_options(&response.session_id, config_opts)
+                    .await
+                    .map_err(map_acp_error)?;
             }
 
             let action_log = cx.new(|_| ActionLog::new(project.clone()));
@@ -2790,6 +2770,7 @@ pub mod test_support {
 
         let request_elicitations = cx.new(|_| ElicitationStore::default());
         let dispatch_context = ClientContext {
+            agent_id: AgentId::new("test"),
             sessions: sessions.clone(),
             session_list: client_session_list.clone(),
             request_elicitations: request_elicitations.clone(),
@@ -2935,6 +2916,34 @@ mod tests {
             cx.set_global(settings_store);
             cx.update_flags(false, vec![]);
         });
+    }
+
+    #[test]
+    fn full_access_coding_agents_never_surface_permission_requests() {
+        let options = vec![
+            acp::PermissionOption::new(
+                "allow-once",
+                "Allow Once",
+                acp::PermissionOptionKind::AllowOnce,
+            ),
+            acp::PermissionOption::new(
+                "allow-session",
+                "Allow for Session",
+                acp::PermissionOptionKind::AllowAlways,
+            ),
+            acp::PermissionOption::new("reject", "Reject", acp::PermissionOptionKind::RejectOnce),
+        ];
+
+        let outcome = automatic_permission_outcome(&AgentId::new(crate::CODEX_ID), &options)
+            .expect("Codex should auto-approve");
+        assert_eq!(
+            outcome.option_id,
+            acp::PermissionOptionId::new("allow-session")
+        );
+        assert_eq!(outcome.option_kind, acp::PermissionOptionKind::AllowAlways);
+        assert!(
+            automatic_permission_outcome(&AgentId::new("third-party-agent"), &options).is_none()
+        );
     }
 
     #[gpui::test]
@@ -3936,13 +3945,13 @@ mod tests {
             false,
         )]));
 
-        let mut async_cx = cx.to_async();
-        connection.apply_default_config_options(
-            &acp::SessionId::new("session-config-defaults"),
-            &config_options,
-            &mut async_cx,
-        );
-        drop(async_cx);
+        connection
+            .apply_default_config_options(
+                &acp::SessionId::new("session-config-defaults"),
+                &config_options,
+            )
+            .await
+            .expect("default config options should apply");
         cx.run_until_parked();
 
         let requests = set_config_requests
@@ -3964,6 +3973,56 @@ mod tests {
         );
     }
 
+    #[gpui::test]
+    async fn codex_full_access_uses_the_mode_config_option_before_session_open_completes(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        let (mut connection, set_config_requests) = connect_config_defaults_test_agent(cx).await;
+        connection.id = AgentId::new(crate::CODEX_ID);
+        connection.defaults.set(
+            Some(acp::SessionModeId::new("agent-full-access")),
+            HashMap::default(),
+        );
+        let config_options = Rc::new(RefCell::new(vec![
+            acp::SessionConfigOption::new(
+                acp::SessionConfigId::new("mode"),
+                "Mode",
+                acp::SessionConfigKind::Select(acp::SessionConfigSelect::new(
+                    acp::SessionConfigValueId::new("agent"),
+                    vec![
+                        acp::SessionConfigSelectOption::new(
+                            acp::SessionConfigValueId::new("agent"),
+                            "Agent",
+                        ),
+                        acp::SessionConfigSelectOption::new(
+                            acp::SessionConfigValueId::new("agent-full-access"),
+                            "Agent (full access)",
+                        ),
+                    ],
+                )),
+            )
+            .category(acp::SessionConfigOptionCategory::Mode),
+        ]));
+
+        connection
+            .apply_default_config_options(
+                &acp::SessionId::new("codex-full-access-default"),
+                &config_options,
+            )
+            .await
+            .expect("Codex full-access mode should be acknowledged");
+
+        let requests = set_config_requests
+            .lock()
+            .expect("set config requests mutex poisoned");
+        assert_eq!(requests.len(), 1);
+        assert_eq!(requests[0].config_id, acp::SessionConfigId::new("mode"));
+        assert_eq!(
+            requests[0].value,
+            acp::SessionConfigOptionValue::value_id("agent-full-access")
+        );
+    }
+
     async fn connect_config_defaults_test_agent(
         cx: &mut gpui::TestAppContext,
     ) -> (
@@ -3981,12 +4040,24 @@ mod tests {
                     {
                         let set_config_requests = set_config_requests.clone();
                         async move |req: acp::SetSessionConfigOptionRequest, responder, _cx| {
+                            let response_config_options = match &req.value {
+                                acp::SessionConfigOptionValue::Boolean { value } => {
+                                    vec![acp::SessionConfigOption::boolean(
+                                        req.config_id.clone(),
+                                        "Boolean option",
+                                        *value,
+                                    )]
+                                }
+                                _ => Vec::new(),
+                            };
                             set_config_requests
                                 .lock()
                                 .expect("set config requests mutex poisoned")
                                 .push(req);
 
-                            responder.respond(acp::SetSessionConfigOptionResponse::new(Vec::new()))
+                            responder.respond(acp::SetSessionConfigOptionResponse::new(
+                                response_config_options,
+                            ))
                         }
                     },
                     agent_client_protocol::on_receive_request!(),
@@ -4297,6 +4368,7 @@ mod tests {
 
         let request_elicitations = cx.new(|_| ElicitationStore::default());
         let dispatch_context = ClientContext {
+            agent_id: AgentId::new("test"),
             sessions: sessions.clone(),
             session_list: client_session_list.clone(),
             request_elicitations: request_elicitations.clone(),
@@ -4893,12 +4965,43 @@ fn respond_result<T: JsonRpcResponse>(responder: Responder<T>, result: Result<T,
     }
 }
 
+fn automatic_permission_outcome(
+    agent_id: &AgentId,
+    options: &[acp::PermissionOption],
+) -> Option<acp_thread::SelectedPermissionOutcome> {
+    crate::full_access_mode_for_agent(agent_id.as_ref())?;
+    let option = [
+        acp::PermissionOptionKind::AllowAlways,
+        acp::PermissionOptionKind::AllowOnce,
+    ]
+    .into_iter()
+    .find_map(|kind| options.iter().find(|option| option.kind == kind))?;
+    Some(acp_thread::SelectedPermissionOutcome::new(
+        option.option_id.clone(),
+        option.kind,
+    ))
+}
+
 fn handle_request_permission(
     args: acp::RequestPermissionRequest,
     responder: Responder<acp::RequestPermissionResponse>,
     cx: &mut AsyncApp,
     ctx: &ClientContext,
 ) {
+    if let Some(outcome) = automatic_permission_outcome(&ctx.agent_id, &args.options) {
+        log::warn!(
+            "{} requested an approval while configured for full access; automatically selecting `{}`",
+            ctx.agent_id,
+            outcome.option_id
+        );
+        responder
+            .respond(acp::RequestPermissionResponse::new(
+                acp_thread::RequestPermissionOutcome::Selected(outcome).into(),
+            ))
+            .log_err();
+        return;
+    }
+
     let thread = match session_thread(ctx, &args.session_id) {
         Ok(t) => t,
         Err(e) => return respond_err(responder, e),

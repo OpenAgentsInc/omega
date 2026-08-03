@@ -19944,6 +19944,44 @@ mod tests {
         );
     }
 
+    #[test]
+    fn owner_coding_threads_acknowledge_full_access_and_hide_approvals() {
+        let acp = read_repository_file("crates/agent_servers/src/acp.rs");
+
+        for required in [
+            "async fn apply_default_mode(",
+            "async fn apply_default_config_options(",
+            "SessionConfigOptionCategory::Mode",
+            "automatic_permission_outcome(&ctx.agent_id, &args.options)",
+            "PermissionOptionKind::AllowAlways",
+            "full_access_mode_for_agent(agent_id.as_ref())",
+        ] {
+            assert!(
+                acp.contains(required),
+                "OMEGA-DELTA-0161: owner coding threads no longer enforce `{required}`"
+            );
+        }
+
+        let new_session = method_body(
+            &acp,
+            "fn new_session(",
+            &repository_path("crates/agent_servers/src/acp.rs"),
+            "Owner coding threads establish full access before returning from session creation.",
+        );
+        for call in ["apply_default_mode", "apply_default_config_options"] {
+            let statement = new_session
+                .split_once(call)
+                .map(|(_, rest)| rest)
+                .and_then(|rest| rest.split_once(';'))
+                .map(|(statement, _)| statement)
+                .unwrap_or_else(|| panic!("OMEGA-DELTA-0161: `{call}` call is unreadable"));
+            assert!(
+                statement.contains(".await"),
+                "OMEGA-DELTA-0161: `{call}` is detached, so a prompt can race the full-access mode"
+            );
+        }
+    }
+
     /// OMEGA-DELTA-0142. Provider credential failures must stop retrying and
     /// offer a direct route to the settings surface that can resolve them.
     #[test]

@@ -7178,11 +7178,11 @@ timeline work remains separate.
   *is* settings, so re-reading settings returns the same answer; a hardcoded
   mode is the one kind that cannot survive the refresh.
 - **So it is applied where it can be proven, not where it looks tidiest.**
-  `default_mode` no longer returns it. `create_external_acp_subagent` sets it on
-  the session it just opened and **awaits** the result. `new_session`'s own
-  default-mode handling detaches its `session/set_mode` and returns, so a prompt
-  can reach the agent while it is still in the mode it started in; the delegate
-  path holds the sub-agent back until the agent has answered.
+  Both panel threads and delegated sessions now wait for the adapter to
+  acknowledge the full-access mode before the session can receive a prompt.
+  `session/set_mode` and the newer mode `session/set_config_option` path are
+  awaited. A rejected mode fails the session open instead of silently exposing
+  a thread in the adapter's interactive default.
 - **The mode has two homes, and the agent picks.** ACP lets `session/new` answer
   with `modes` *or* with `configOptions`, and `config_state`
   (`agent_servers::acp`) keeps only whichever arrived — so for an agent of the
@@ -7203,17 +7203,26 @@ timeline work remains separate.
   runs as root, so this is a real state and not a defensive branch. A delegation
   that will stall is worse than one that refuses up front: the refusal is visible
   immediately, the stall is visible only to whoever looks at the card.
-- **Scope is delegation, deliberately.** The owner's own panel thread is not
-  touched: `default_mode` returning the mode would have applied it to every
-  `claude-acp` and `codex-acp` connection in the window, and the failure being
-  fixed is that a *delegated* agent has no one to ask. An agent with no entry in
-  `unattended_mode_for_agent` keeps whatever mode it chose; widening that set is
-  a policy decision, not a default.
-- **Known tradeoff, stated plainly:** a delegated sub-agent can now read and
+- **Scope is every owner coding-agent session.** Codex and Claude panel threads
+  use the same full-access modes as delegated sessions. This is an Omega product
+  default and is not inherited from the user's Codex config. An agent with no
+  entry in `full_access_mode_for_agent` keeps its own permission policy.
+- **The adapter's dual configuration surface is not optional.**
+  `codex-acp@1.1.9` returns both legacy `modes` and modern `configOptions`.
+  Omega's `config_state` deliberately keeps `configOptions` when both exist, so
+  applying full access only through `session/set_mode` skipped the setting
+  completely. The connection now finds the config option by its declared
+  `Mode` category, selects `agent-full-access`, and waits for the response.
+- **An approval request is treated as an adapter-policy defect, not UI.** If
+  Codex or Claude still sends `session/request_permission` while it is bound to
+  Omega's full-access profile, Omega selects the strongest offered allow option
+  immediately. No confirmation card is added to the thread. Other ACP agents
+  retain normal interactive permission behavior.
+- **Known tradeoff, stated plainly:** an owner coding-agent session can read and
   write outside the thread's folder and run commands without asking. That is the
-  requested behaviour. The line is still drawable at the agent's own
-  configuration, and `OMEGA-DELTA-0002`'s `always_confirm` / `always_deny`
-  patterns still gate Omega's native tools.
+  requested behaviour. `OMEGA-DELTA-0002`'s `always_confirm` / `always_deny`
+  patterns still gate Omega's native tools; they do not narrow an external ACP
+  agent that is intentionally running in its own full-access mode.
 - **What has run.** `a_delegated_claude_subagent_reads_outside_its_folder_without_asking`
   drives the real `claude-acp` adapter through the real
   `create_external_acp_subagent`, asks it to read a file the session's `cwd`
@@ -7226,7 +7235,8 @@ timeline work remains separate.
   `crates/agent_ui`, and `OMEGA-DELTA-0101` already names it unproven.
 - **Enforced by:** `a_delegated_subagent_is_admitted_only_in_its_unattended_mode`
   in `crates/omega_deltas`, plus
-  `routed_subagents_are_unattended_without_locking_other_cards`; and
+  `routed_subagents_are_unattended_without_locking_other_cards` and
+  `owner_coding_threads_acknowledge_full_access_and_hide_approvals`; and
   `a_delegated_claude_subagent_is_put_in_bypass_permissions`,
   `a_delegated_subagent_mode_is_set_through_config_options_when_that_is_the_surface`,
   `an_unlisted_delegate_executor_is_left_on_its_own_mode`,
