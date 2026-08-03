@@ -1,0 +1,84 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+# omega#220 close criterion: "release builds prove complete omission".
+#
+# The runtime gate (DogfoodFixtureGate = debug_assertions && mocks_requested)
+# already stops a release build from routing, counting, mutating, or restoring
+# fixture Work. It does NOT keep the fixture payload out of the shipped binary:
+# `include_bytes!` embeds the graph and `load` keeps it reachable, so before the
+# cfg gate a release-fast binary still carried every dogfood issue title,
+# project name, and public source URL. This script is the standing proof that it
+# no longer does.
+#
+# Usage: script/prove-dogfood-release-omission
+
+cd "$(dirname "$0")/.."
+
+profile="release-fast"
+example="omission_probe"
+binary="target/${profile}/examples/${example}"
+
+echo "building ${example} with the ${profile} profile..."
+cargo build --profile "$profile" -p omega_work_index --example "$example" >/dev/null
+
+if [[ ! -x "$binary" ]]; then
+  echo "FAIL: expected release binary at ${binary}" >&2
+  exit 1
+fi
+
+echo "--- runtime gate ---"
+runtime_output="$("$binary")"
+echo "$runtime_output"
+case "$runtime_output" in
+  *"debug_assertions=false"*) ;;
+  *) echo "FAIL: probe was not built without debug assertions" >&2; exit 1 ;;
+esac
+case "$runtime_output" in
+  *"enabled=false"*) ;;
+  *) echo "FAIL: the fixture gate reported enabled in a release build" >&2; exit 1 ;;
+esac
+case "$runtime_output" in
+  *"loaded_some=Ok(false)"*) ;;
+  *) echo "FAIL: a release build loaded fixture Work" >&2; exit 1 ;;
+esac
+
+echo "--- embedded payload ---"
+# Markers drawn from the fixture graph itself: project name, envelope field,
+# and the public source URLs. Any one of these appearing in a release binary
+# means the development-only graph shipped.
+#
+# Dump the strings ONCE to a file and grep the file. Do not pipe `strings` into
+# `grep -q` here: under `set -o pipefail`, `grep -q` exits on the first match and
+# `strings` then dies of SIGPIPE, so a MATCH makes the pipeline non-zero and the
+# check silently inverts — reporting "omitted" for a marker that is present.
+symbols="$(mktemp)"
+trap 'rm -f "$symbols"' EXIT
+strings -a "$binary" >"$symbols"
+
+status=0
+while IFS= read -r marker; do
+  [[ -z "$marker" ]] && continue
+  if grep -qF -- "$marker" "$symbols"; then
+    echo "FAIL: release binary still contains fixture marker: ${marker}" >&2
+    status=1
+  else
+    echo "omitted: ${marker}"
+  fi
+done <<'MARKERS'
+Omega v0.2.0 dogfood
+fixtureSha256
+OpenAgentsInc/omega/issues
+Security Work
+MARKERS
+
+if [[ "$status" -ne 0 ]]; then
+  echo >&2
+  echo "The development-only dogfood graph is present in a release build." >&2
+  echo "Check that FIXTURE_BYTES and the decode arm in" >&2
+  echo "crates/omega_work_index/src/dogfood_fixture.rs remain cfg-gated." >&2
+  exit 1
+fi
+
+echo
+echo "PASS: release build omits the dogfood fixture entirely."

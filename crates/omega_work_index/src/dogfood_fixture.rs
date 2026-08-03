@@ -17,6 +17,15 @@ pub const DOGFOOD_OPEN_ISSUE_COUNT: usize = 16;
 pub const SECURITY_OPEN_ISSUE_COUNT: usize = 12;
 pub const FOUNDATION_ISSUE_COUNT: usize = 6;
 
+// The fixture graph is development-only data: it carries internal roadmap issue
+// titles, project structure, and public source URLs. The runtime gate below
+// already stops a release build from routing, counting, mutating, or restoring
+// it, but a runtime gate does not keep the payload OUT OF THE SHIPPED BINARY:
+// `include_bytes!` embeds it and `load` keeps it reachable. omega#220 requires
+// release builds to prove COMPLETE omission, so the data is compiled out.
+// `test`/`test-support` stay included so `cargo test --release` still exercises
+// the admitted-fixture cases. Proof: script/prove-dogfood-release-omission.
+#[cfg(any(debug_assertions, test, feature = "test-support"))]
 const FIXTURE_BYTES: &[u8] = include_bytes!("../fixtures/v0.2.0-all-work.v1.json");
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -122,10 +131,20 @@ impl DogfoodFixtureAdapter {
         if !gate.enabled() {
             return Ok(None);
         }
-        let projection: DogfoodFixtureProjection = serde_json::from_slice(FIXTURE_BYTES)
-            .map_err(|error| DogfoodFixtureError::InvalidJson(error.to_string()))?;
-        projection.validate()?;
-        Ok(Some(projection))
+        #[cfg(any(debug_assertions, test, feature = "test-support"))]
+        {
+            let projection: DogfoodFixtureProjection = serde_json::from_slice(FIXTURE_BYTES)
+                .map_err(|error| DogfoodFixtureError::InvalidJson(error.to_string()))?;
+            projection.validate()?;
+            Ok(Some(projection))
+        }
+        // A release build carries no fixture bytes, so there is nothing to
+        // decode. This arm makes the omission structural rather than dependent
+        // on the runtime gate alone.
+        #[cfg(not(any(debug_assertions, test, feature = "test-support")))]
+        {
+            Ok(None)
+        }
     }
 
     #[cfg(any(test, feature = "test-support"))]
