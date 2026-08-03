@@ -41,6 +41,7 @@ use crate::ExpandMessageEditor;
 use crate::ManageProfiles;
 use crate::agent_connection_store::AgentConnectionStore;
 use crate::completion_provider::{AgentContextSelection, AgentContextSource};
+use crate::omega_work_index_surface::{WorkIndexSurface, WorkIndexSurfaceEvent};
 use crate::terminal_thread_metadata_store::{
     TerminalThreadMetadata, TerminalThreadMetadataStore, compose_terminal_thread_title,
     terminal_title_without_prefix,
@@ -106,9 +107,15 @@ use notifications::status_toast::StatusToast;
 use omega_front_door::{
     ConversationTarget, DirectAgentId, ModeReadiness, ModeSetupAction, PreparationReceipt,
 };
+use omega_work_index::{
+    EFFECT_ADAPTER_ID, FORENSICS_ADAPTER_ID, NativeForensicsPhase, NativeForensicsRecord,
+    NativeThreadLifecycle, NativeThreadRecord, THREAD_ADAPTER_ID, WorkIndex, WorkIndexItem,
+    WorkIndexView, WorkSourceEntity, adapt_forensics, adapt_thread,
+};
 use omega_workbench_state::{
     DomainBlockRoute, EntityNavigationHistory as OmegaNavigationHistory, EntityRoute as OmegaRoute,
     EntityRouteState, PersistedEntityNavigation, RouteAvailability, RouteUnavailableReason,
+    WorkIndexRoute,
 };
 use project::{
     Project, ProjectGroupKey, ProjectPath, Worktree, WorktreeId, git_store::RepositoryId,
@@ -2480,12 +2487,23 @@ fn is_omega_forensics_route(route: &OmegaRoute) -> bool {
     matches!(
         route,
         OmegaRoute::Work(work)
-            if work.work_ref.as_str() == OMEGA_FORENSICS_WORK_REF
-                && work.block.as_ref().is_some_and(|block| {
+            if work.block.as_ref().is_some_and(|block| {
                     block.block_ref.as_str() == OMEGA_FORENSICS_BLOCK_REF
                         && block.domain.as_str() == "forensics"
                 })
     )
+}
+
+fn work_contract_label(value: &impl fmt::Debug) -> String {
+    let raw = format!("{value:?}");
+    let mut label = String::with_capacity(raw.len() + 4);
+    for (index, character) in raw.chars().enumerate() {
+        if index > 0 && character.is_ascii_uppercase() {
+            label.push(' ');
+        }
+        label.push(character.to_ascii_lowercase());
+    }
+    label
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -3224,6 +3242,13 @@ pub struct AgentPanel {
     /// before it decides.
     _engine_capacity_poll: Option<Task<()>>,
     _forensics_workbench_subscriptions: Vec<Subscription>,
+    work_index: WorkIndex,
+    work_index_surface: Option<Entity<WorkIndexSurface>>,
+    _work_index_surface_subscription: Option<Subscription>,
+    _work_index_thread_observation: Subscription,
+    _work_index_effect_refresh: Option<Task<()>>,
+    _work_index_persist: Option<Task<()>>,
+    omega_work_detail: Option<WorkIndexItem>,
     workbench_shell: workbench_shell::WorkbenchShell,
     workbench_shell_enabled: bool,
     omega_titlebar_dragging: bool,
@@ -3792,8 +3817,21 @@ impl AgentPanel {
                 if this.retained_threads.remove(thread_id).is_some() {
                     cx.notify();
                 }
+                this.refresh_native_work_index(cx);
             },
         );
+        let _work_index_thread_observation = cx
+            .observe(&ThreadMetadataStore::global(cx), |this, _store, cx| {
+                this.refresh_native_work_index(cx)
+            });
+        let work_index = match omega_work_index::read_snapshot(paths::data_dir()) {
+            Ok(Some(index)) => index,
+            Ok(None) => WorkIndex::default(),
+            Err(error) => {
+                log::warn!("could not restore the qualified Work Index snapshot: {error:#}");
+                WorkIndex::default()
+            }
+        };
 
         cx.on_release(|this, cx| {
             this.dismiss_all_terminal_notifications(cx);
@@ -3888,6 +3926,13 @@ impl AgentPanel {
             _identity_backup_nudge_poll: None,
             _engine_capacity_poll: None,
             _forensics_workbench_subscriptions: Vec::new(),
+            work_index,
+            work_index_surface: None,
+            _work_index_surface_subscription: None,
+            _work_index_thread_observation,
+            _work_index_effect_refresh: None,
+            _work_index_persist: None,
+            omega_work_detail: None,
             workbench_shell,
             workbench_shell_enabled: omega_zero_base::is_active(),
             omega_titlebar_dragging: false,
@@ -3936,6 +3981,8 @@ impl AgentPanel {
         panel.ensure_native_agent_connection(cx);
         panel.observe_engine_capacity(cx);
         panel.observe_identity_backup_nudge(cx);
+        panel.refresh_native_work_index(cx);
+        panel.refresh_effect_work_index(cx);
         panel.load_public_channels(cx);
         panel
     }
@@ -4234,6 +4281,253 @@ impl AgentPanel {
                 executor.timer(std::time::Duration::from_secs(3)).await;
             }
         }));
+    }
+
+    fn refresh_native_work_index(&mut self, cx: &mut Context<Self>) {
+        let observed_at = forensics_timestamp();
+        let thread_result = ThreadMetadataStore::try_global(cx)
+            .map(|store| {
+                store
+                    .read(cx)
+                    .entries()
+                    .map(|metadata| {
+                        let lifecycle = match metadata.lifecycle {
+                            crate::omega_agent_supervision::SupervisedThreadLifecycle::Running => {
+                                NativeThreadLifecycle::Running
+                            }
+                            crate::omega_agent_supervision::SupervisedThreadLifecycle::WaitingForPerson => {
+                                NativeThreadLifecycle::WaitingForPerson
+                            }
+                            crate::omega_agent_supervision::SupervisedThreadLifecycle::Failed => {
+                                NativeThreadLifecycle::Failed
+                            }
+                            crate::omega_agent_supervision::SupervisedThreadLifecycle::Completed => {
+                                NativeThreadLifecycle::Completed
+                            }
+                            crate::omega_agent_supervision::SupervisedThreadLifecycle::Cancelled => {
+                                NativeThreadLifecycle::Canceled
+                            }
+                        };
+                        adapt_thread(NativeThreadRecord {
+                            thread_ref: metadata.thread_id.to_key_string(),
+                            title: metadata.display_title().to_string(),
+                            updated_at: metadata
+                                .updated_at
+                                .to_rfc3339_opts(chrono::SecondsFormat::Millis, true),
+                            observed_at: observed_at.clone(),
+                            revision: metadata.updated_at.timestamp_millis().max(0) as u64,
+                            archived: metadata.archived,
+                            lifecycle,
+                        })
+                    })
+                    .collect::<Result<Vec<_>, _>>()
+            })
+            .unwrap_or_else(|| Ok(Vec::new()));
+        match thread_result {
+            Ok(items) => {
+                let revision = items
+                    .iter()
+                    .map(|item| item.summary.revision.0)
+                    .max()
+                    .unwrap_or(0);
+                if let Err(error) = self.work_index.apply_native_items(
+                    THREAD_ADAPTER_ID,
+                    THREAD_ADAPTER_ID,
+                    items,
+                    observed_at.clone(),
+                    revision,
+                ) {
+                    self.work_index
+                        .fail_refresh(THREAD_ADAPTER_ID, error.to_string(), false);
+                }
+            }
+            Err(error) => {
+                self.work_index
+                    .fail_refresh(THREAD_ADAPTER_ID, error.to_string(), false);
+            }
+        }
+
+        let forensics_result = self
+            .workbench_shell
+            .identity()
+            .and_then(|identity| identity.selected.as_ref())
+            .filter(|candidate| candidate.git_repository_id.is_some())
+            .map(|candidate| {
+                let snapshot = self
+                    .workbench_shell
+                    .forensics_surface_for_active_binding(cx)
+                    .map(|surface| surface.read(cx).snapshot());
+                let run = snapshot.as_ref().and_then(|snapshot| snapshot.run.as_ref());
+                let phase = run.map_or(NativeForensicsPhase::Prepared, |run| match run.phase {
+                    omega_forensics::ForensicsRunPhase::Prepared => NativeForensicsPhase::Prepared,
+                    omega_forensics::ForensicsRunPhase::Admitting => {
+                        NativeForensicsPhase::Admitting
+                    }
+                    omega_forensics::ForensicsRunPhase::WorkerReady => {
+                        NativeForensicsPhase::WorkerReady
+                    }
+                    omega_forensics::ForensicsRunPhase::Running => NativeForensicsPhase::Running,
+                    omega_forensics::ForensicsRunPhase::CancelRequested
+                    | omega_forensics::ForensicsRunPhase::Interrupting
+                    | omega_forensics::ForensicsRunPhase::Deleting => NativeForensicsPhase::Waiting,
+                    omega_forensics::ForensicsRunPhase::Settled => NativeForensicsPhase::Settled,
+                    omega_forensics::ForensicsRunPhase::Cleaned => NativeForensicsPhase::Cleaned,
+                    omega_forensics::ForensicsRunPhase::Refused => NativeForensicsPhase::Refused,
+                    omega_forensics::ForensicsRunPhase::Failed => NativeForensicsPhase::Failed,
+                    omega_forensics::ForensicsRunPhase::RecoveryRequired => {
+                        NativeForensicsPhase::RecoveryRequired
+                    }
+                });
+                let revision = run
+                    .map(|run| run.event_cursor)
+                    .unwrap_or(candidate.source_revision);
+                let updated_at = run
+                    .and_then(|run| run.events.last())
+                    .map(|event| event.observed_at.clone())
+                    .unwrap_or_else(|| observed_at.clone());
+                let case_ref = match candidate.git_repository_id {
+                    Some(repository_id) => format!("repository:{repository_id}"),
+                    None => return Ok(Vec::new()),
+                };
+                adapt_forensics(NativeForensicsRecord {
+                    case_ref,
+                    repository_name: candidate.repository_name.to_string(),
+                    updated_at,
+                    observed_at: observed_at.clone(),
+                    revision,
+                    phase,
+                    run_ref: run.map(|run| run.run_ref.clone()),
+                })
+            })
+            .unwrap_or_else(|| Ok(Vec::new()));
+        match forensics_result {
+            Ok(items) => {
+                let revision = items
+                    .iter()
+                    .map(|item| item.summary.revision.0)
+                    .max()
+                    .unwrap_or(0);
+                if let Err(error) = self.work_index.apply_native_items(
+                    FORENSICS_ADAPTER_ID,
+                    FORENSICS_ADAPTER_ID,
+                    items,
+                    observed_at,
+                    revision,
+                ) {
+                    self.work_index
+                        .fail_refresh(FORENSICS_ADAPTER_ID, error.to_string(), false);
+                }
+            }
+            Err(error) => {
+                self.work_index
+                    .fail_refresh(FORENSICS_ADAPTER_ID, error.to_string(), false);
+            }
+        }
+        self.publish_work_index(true, cx);
+    }
+
+    fn refresh_effect_work_index(&mut self, cx: &mut Context<Self>) {
+        let supervisor = omega_effectd::shared_supervisor(cx).ok();
+        let resume_cursor = self.work_index.begin_resume(EFFECT_ADAPTER_ID).or_else(|| {
+            self.work_index.begin_refresh(
+                EFFECT_ADAPTER_ID,
+                "omega-effectd.v2",
+                omega_work_index::AdapterOrigin::EffectService,
+            );
+            None
+        });
+        self.publish_work_index(false, cx);
+        self._work_index_effect_refresh = Some(cx.spawn(async move |this, cx| {
+            let pages = async {
+                let Some(supervisor) = supervisor else {
+                    return Err("omega-effectd is unavailable".to_string());
+                };
+                let mut guard = supervisor.lock().await;
+                guard
+                    .ensure_started()
+                    .await
+                    .map_err(|error| error.to_string())?;
+                let mut requested_cursor = resume_cursor;
+                let mut pages = Vec::new();
+                for _ in 0..16 {
+                    let cursor = requested_cursor
+                        .clone()
+                        .map(|cursor| {
+                            omega_effectd::all_work_contract::WorkCursor::try_from(cursor).map(Some)
+                        })
+                        .transpose()
+                        .map_err(|error| error.to_string())?;
+                    let result = guard
+                        .read_work_index(omega_effectd::all_work_contract::WorkIndexReadRequest {
+                            cursor,
+                            limit: Some(omega_effectd::all_work_contract::SafeInteger(1_000)),
+                            filter: None,
+                        })
+                        .await
+                        .map_err(|error| error.to_string())?;
+                    let next_cursor = result
+                        .next_cursor
+                        .as_ref()
+                        .and_then(|cursor| cursor.as_ref())
+                        .map(|cursor| cursor.0.clone());
+                    if next_cursor == requested_cursor && next_cursor.is_some() {
+                        return Err(
+                            "omega-effectd returned a non-advancing Work cursor".to_string()
+                        );
+                    }
+                    pages.push((requested_cursor.clone(), result));
+                    let Some(next_cursor) = next_cursor else {
+                        return Ok(pages);
+                    };
+                    requested_cursor = Some(next_cursor);
+                }
+                Err("omega-effectd Work Index exceeded the 16-page reconciliation bound".into())
+            }
+            .await;
+            this.update(cx, |panel, cx| {
+                match pages {
+                    Ok(pages) => {
+                        for (requested_cursor, result) in pages {
+                            if let Err(error) = panel
+                                .work_index
+                                .apply_effect_result(result, requested_cursor)
+                            {
+                                panel.work_index.fail_refresh(
+                                    EFFECT_ADAPTER_ID,
+                                    error.to_string(),
+                                    false,
+                                );
+                                break;
+                            }
+                        }
+                    }
+                    Err(error) => {
+                        panel
+                            .work_index
+                            .fail_refresh(EFFECT_ADAPTER_ID, error, true);
+                    }
+                }
+                panel.publish_work_index(true, cx);
+            })
+            .ok();
+        }));
+    }
+
+    fn publish_work_index(&mut self, persist: bool, cx: &mut Context<Self>) {
+        if let Some(surface) = self.work_index_surface.as_ref() {
+            let index = self.work_index.clone();
+            surface.update(cx, |surface, cx| surface.set_index(index, cx));
+        }
+        if persist {
+            let index = self.work_index.clone();
+            let data_dir = paths::data_dir().clone();
+            self._work_index_persist = Some(cx.background_spawn(async move {
+                if let Err(error) = omega_work_index::write_snapshot(&data_dir, &index) {
+                    log::warn!("could not persist the qualified Work Index snapshot: {error:#}");
+                }
+            }));
+        }
+        cx.notify();
     }
 
     pub fn toggle_focus(
@@ -13419,6 +13713,10 @@ impl AgentPanel {
                     this.handle_forensics_command(surface.clone(), command.clone(), window, cx);
                 }),
             );
+        self._forensics_workbench_subscriptions
+            .push(cx.observe(&surface, |this, _surface, cx| {
+                this.refresh_native_work_index(cx)
+            }));
         Ok(surface)
     }
 
@@ -15119,6 +15417,10 @@ impl AgentPanel {
             Ok(workbench_shell::SurfaceSelection::Collapsed) => {
                 self.persist_active_workbench_selection(cx);
                 self.omega_unavailable_route = None;
+                if surface == omega_workbench_state::WorkSurface::Forensics {
+                    self.omega_settings = None;
+                    self.omega_work_detail = None;
+                }
                 if record_history
                     && surface == omega_workbench_state::WorkSurface::Forensics
                     && let Some(thread_id) = self.active_thread_id(cx)
@@ -15132,6 +15434,10 @@ impl AgentPanel {
             }
             Ok(workbench_shell::SurfaceSelection::Opened(host)) => {
                 self.persist_active_workbench_selection(cx);
+                if surface == omega_workbench_state::WorkSurface::Forensics {
+                    self.omega_settings = None;
+                    self.omega_work_detail = None;
+                }
                 if let Some(panel) = files_panel.as_ref()
                     && let Err(error) = self.detach_workspace_files_panel(panel, window, cx)
                 {
@@ -16031,6 +16337,13 @@ impl AgentPanel {
                     Err(_) => RouteAvailability::Unavailable(RouteUnavailableReason::Unknown),
                 }
             }
+            OmegaRoute::WorkIndex(_) => {
+                if self.work_index.admitted() {
+                    RouteAvailability::Available
+                } else {
+                    RouteAvailability::Unavailable(RouteUnavailableReason::Unknown)
+                }
+            }
             OmegaRoute::Work(work)
                 if work.work_ref.as_str() == OMEGA_FORENSICS_WORK_REF
                     && work.block.as_ref().is_some_and(|block| {
@@ -16052,9 +16365,33 @@ impl AgentPanel {
                     RouteAvailability::Unavailable(RouteUnavailableReason::Unknown)
                 }
             }
+            OmegaRoute::Work(work) => self
+                .work_index
+                .item(work.work_ref.as_str())
+                .map(|item| match item.source_entity {
+                    WorkSourceEntity::ForensicsCase { .. }
+                    | WorkSourceEntity::ForensicsRun { .. }
+                        if self.workbench_shell.projection().connection
+                            != omega_workbench_state::ConnectionPhase::Online =>
+                    {
+                        RouteAvailability::Unavailable(RouteUnavailableReason::Stale)
+                    }
+                    WorkSourceEntity::ForensicsCase { .. }
+                    | WorkSourceEntity::ForensicsRun { .. }
+                        if !self
+                            .workbench_shell
+                            .capability(omega_workbench_state::WorkSurface::Forensics)
+                            .is_some_and(|capability| capability.availability.is_available()) =>
+                    {
+                        RouteAvailability::Unavailable(RouteUnavailableReason::Unknown)
+                    }
+                    _ => RouteAvailability::Available,
+                })
+                .unwrap_or(RouteAvailability::Unavailable(
+                    RouteUnavailableReason::Unknown,
+                )),
             OmegaRoute::Settings => RouteAvailability::Available,
-            OmegaRoute::Work(_)
-            | OmegaRoute::IssueProjection { .. }
+            OmegaRoute::IssueProjection { .. }
             | OmegaRoute::Project(_)
             | OmegaRoute::Document(_)
             | OmegaRoute::Decision(_)
@@ -16075,6 +16412,7 @@ impl AgentPanel {
         cx: &mut Context<Self>,
     ) {
         self.omega_settings = None;
+        self.omega_work_detail = None;
         if let Err(error) = self.workbench_shell.collapse_dock() {
             log::warn!("failed to collapse a prior work surface: {error:#}");
         }
@@ -16103,15 +16441,48 @@ impl AgentPanel {
                 self.omega_unavailable_route = None;
                 self.open_omega_history_thread(thread_id, window, cx)
             }
-            OmegaRoute::Work(_) => {
+            OmegaRoute::WorkIndex(view) => self.open_work_index(
+                match view {
+                    WorkIndexRoute::Inbox => WorkIndexView::Inbox,
+                    WorkIndexRoute::MyWork => WorkIndexView::MyWork,
+                },
+                false,
+                window,
+                cx,
+            ),
+            OmegaRoute::Work(work) => {
                 self.omega_settings = None;
                 self.omega_unavailable_route = None;
-                self.select_work_surface_with_history(
-                    omega_workbench_state::WorkSurface::Forensics,
-                    false,
-                    window,
-                    cx,
-                )
+                let item = self.work_index.item(work.work_ref.as_str());
+                let opens_forensics = is_omega_forensics_route(&OmegaRoute::Work(work))
+                    || item.as_ref().is_some_and(|item| {
+                        matches!(
+                            item.source_entity,
+                            WorkSourceEntity::ForensicsCase { .. }
+                                | WorkSourceEntity::ForensicsRun { .. }
+                        )
+                    });
+                if opens_forensics {
+                    self.omega_work_detail = None;
+                    self.select_work_surface_with_history(
+                        omega_workbench_state::WorkSurface::Forensics,
+                        false,
+                        window,
+                        cx,
+                    )
+                } else if let Some(item) = item {
+                    if let Err(error) = self.workbench_shell.collapse_dock() {
+                        log::warn!(
+                            "failed to collapse a work surface before Work detail: {error:#}"
+                        );
+                    }
+                    self.omega_work_detail = Some(item);
+                    self.focus_handle.focus(window, cx);
+                    cx.notify();
+                    true
+                } else {
+                    false
+                }
             }
             OmegaRoute::Settings => {
                 self.omega_unavailable_route = None;
@@ -16246,6 +16617,7 @@ impl AgentPanel {
     fn show_active_omega_thread_transcript(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         self.omega_settings = None;
         self.omega_unavailable_route = None;
+        self.omega_work_detail = None;
         if let Err(error) = self.workbench_shell.collapse_dock() {
             log::warn!("failed to close the Omega work surface for a thread tab: {error:#}");
         }
@@ -16257,6 +16629,96 @@ impl AgentPanel {
         self.focus_thread_transcript(window, cx);
     }
 
+    fn open_work_index(
+        &mut self,
+        view: WorkIndexView,
+        record_history: bool,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> bool {
+        if !self.work_index.admitted() {
+            return false;
+        }
+        self.omega_settings = None;
+        self.omega_unavailable_route = None;
+        self.omega_work_detail = None;
+        if let Err(error) = self.workbench_shell.collapse_dock() {
+            log::warn!(
+                "failed to collapse a work surface before opening the Work Index: {error:#}"
+            );
+        }
+        let surface = if let Some(surface) = self.work_index_surface.as_ref() {
+            surface.clone()
+        } else {
+            let index = self.work_index.clone();
+            let surface = cx.new(|cx| WorkIndexSurface::new(view, index, window, cx));
+            self._work_index_surface_subscription = Some(cx.subscribe_in(
+                &surface,
+                window,
+                |this, _surface, event, window, cx| match event.clone() {
+                    WorkIndexSurfaceEvent::Open(item) => {
+                        this.open_work_index_item(item, window, cx);
+                    }
+                    WorkIndexSurfaceEvent::Refresh => {
+                        this.refresh_native_work_index(cx);
+                        this.refresh_effect_work_index(cx);
+                    }
+                    WorkIndexSurfaceEvent::SelectionChanged(work_ref) => {
+                        if this.work_index.select(work_ref) {
+                            this.publish_work_index(true, cx);
+                        }
+                    }
+                },
+            ));
+            self.work_index_surface = Some(surface.clone());
+            surface
+        };
+        let index = self.work_index.clone();
+        surface.update(cx, |surface, cx| {
+            surface.set_index(index, cx);
+            surface.set_view(view, cx);
+        });
+        if record_history {
+            let route = OmegaRoute::work_index(match view {
+                WorkIndexView::Inbox => WorkIndexRoute::Inbox,
+                WorkIndexView::MyWork => WorkIndexRoute::MyWork,
+            });
+            if self.omega_navigation_history.push(route) {
+                self.serialize(cx);
+            }
+        }
+        surface.focus_handle(cx).focus(window, cx);
+        cx.notify();
+        true
+    }
+
+    fn open_work_index_item(
+        &mut self,
+        item: WorkIndexItem,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if self.work_index.select(Some(item.work_ref().to_string())) {
+            self.publish_work_index(true, cx);
+        }
+        let route = match &item.source_entity {
+            WorkSourceEntity::Thread { thread_ref } => OmegaRoute::thread(thread_ref.clone()),
+            WorkSourceEntity::ForensicsCase { .. } | WorkSourceEntity::ForensicsRun { .. } => {
+                DomainBlockRoute::new(OMEGA_FORENSICS_BLOCK_REF, "forensics")
+                    .and_then(|block| OmegaRoute::work(item.work_ref(), Some(block)))
+            }
+            WorkSourceEntity::EffectWork { .. } => OmegaRoute::work(item.work_ref(), None),
+        };
+        let Ok(route) = route else {
+            log::warn!("could not construct a Work Index item route");
+            return;
+        };
+        if self.omega_navigation_history.push(route.clone()) {
+            self.serialize(cx);
+        }
+        self.open_omega_history_route(route, window, cx);
+    }
+
     fn close_active_omega_route_tab(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         if self.omega_settings.is_some() {
             self.close_omega_settings(window, cx);
@@ -16265,6 +16727,19 @@ impl AgentPanel {
         if self.omega_unavailable_route.take().is_some() {
             self.show_active_omega_thread_transcript(window, cx);
             cx.notify();
+            return;
+        }
+        if self.work_index_surface.is_some()
+            && self
+                .omega_navigation_history
+                .current()
+                .is_some_and(|route| matches!(route, OmegaRoute::WorkIndex(_)))
+        {
+            self.show_active_omega_thread_transcript(window, cx);
+            return;
+        }
+        if self.omega_work_detail.take().is_some() {
+            self.show_active_omega_thread_transcript(window, cx);
             return;
         }
         let forensics_is_open = self
@@ -16297,7 +16772,7 @@ impl AgentPanel {
             || self
                 .omega_navigation_history
                 .current()
-                .is_some_and(is_omega_forensics_route)
+                .is_some_and(|route| !matches!(route, OmegaRoute::Thread(_)))
             || self
                 .workbench_shell
                 .projection()
@@ -16373,6 +16848,174 @@ impl AgentPanel {
             .into_any_element()
     }
 
+    fn render_omega_work_detail(item: &WorkIndexItem, cx: &App) -> AnyElement {
+        let summary = &item.summary;
+        let colors = cx.theme().colors();
+        let accountability = if item.accountability.is_empty() {
+            "No local accountability recorded".to_string()
+        } else {
+            item.accountability
+                .iter()
+                .map(work_contract_label)
+                .join(", ")
+        };
+        let cursor = summary
+            .completeness
+            .cursor
+            .as_ref()
+            .and_then(|cursor| cursor.as_ref())
+            .map_or("None", |cursor| cursor.0.as_str());
+        let source_type = match &item.source_entity {
+            WorkSourceEntity::Thread { .. } => "Thread",
+            WorkSourceEntity::ForensicsCase { .. } => "Forensics case",
+            WorkSourceEntity::ForensicsRun { .. } => "Forensics run",
+            WorkSourceEntity::EffectWork { .. } => "Effect Work",
+        };
+        let gap_refs = if summary.completeness.gap_refs.is_empty() {
+            "None".to_string()
+        } else {
+            summary
+                .completeness
+                .gap_refs
+                .iter()
+                .map(|gap| gap.0.as_str())
+                .join(", ")
+        };
+        let detail_rows = [
+            ("Attention", work_contract_label(&item.attention)),
+            ("State", work_contract_label(&summary.state)),
+            ("Domain", work_contract_label(&summary.domain)),
+            ("Class", work_contract_label(&summary.work_class)),
+            ("Priority", work_contract_label(&summary.priority)),
+            ("Accountability", accountability),
+            (
+                "Source authority",
+                work_contract_label(&summary.source_authority.kind),
+            ),
+            ("Source type", source_type.to_string()),
+            (
+                "Source reference",
+                summary.source_authority.source_ref.0.clone(),
+            ),
+            (
+                "Source access",
+                if summary.source_authority.writable {
+                    "Writable only at the source"
+                } else {
+                    "Read-only source"
+                }
+                .to_string(),
+            ),
+            (
+                "Adapter version",
+                summary.source_authority.adapter_version.0.clone(),
+            ),
+            ("Revision", summary.revision.0.to_string()),
+            ("Source updated", summary.updated_at.0.clone()),
+            ("Freshness", work_contract_label(&summary.freshness.state)),
+            ("Observed", summary.freshness.observed_at.0.clone()),
+            (
+                "Completeness",
+                work_contract_label(&summary.completeness.state),
+            ),
+            ("Resume cursor", cursor.to_string()),
+            ("Reported gaps", gap_refs),
+            (
+                "Visibility",
+                work_contract_label(&summary.redaction.privacy_class),
+            ),
+            (
+                "Redacted fields",
+                summary.redaction.redacted_field_count.0.to_string(),
+            ),
+            ("Visibility policy", summary.redaction.policy_ref.0.clone()),
+        ];
+
+        v_flex()
+            .id("omega-work-detail")
+            .debug_selector(|| "omega.omega.work-detail".into())
+            .size_full()
+            .overflow_y_scroll()
+            .p(px(28.))
+            .gap(px(20.))
+            .role(gpui::Role::Main)
+            .aria_label(format!("Work detail for {}", summary.title.0))
+            .child(
+                v_flex()
+                    .gap(px(6.))
+                    .child(
+                        div()
+                            .id("omega-work-detail-title")
+                            .role(gpui::Role::Heading)
+                            .aria_level(1)
+                            .text_size(px(22.))
+                            .font_weight(gpui::FontWeight::SEMIBOLD)
+                            .text_color(colors.text)
+                            .child(summary.title.0.clone()),
+                    )
+                    .child(
+                        div()
+                            .text_size(px(12.))
+                            .text_color(colors.text_muted)
+                            .child(summary.work_ref.0.clone()),
+                    )
+                    .when_some(summary.description.as_ref(), |header, description| {
+                        header.child(
+                            div()
+                                .max_w(px(760.))
+                                .text_size(px(13.))
+                                .text_color(colors.text_muted)
+                                .child(description.0.clone()),
+                        )
+                    }),
+            )
+            .child(
+                v_flex()
+                    .max_w(px(760.))
+                    .rounded(px(10.))
+                    .border_1()
+                    .border_color(colors.border_variant)
+                    .children(detail_rows.into_iter().enumerate().map(
+                        |(index, (label, value))| {
+                            h_flex()
+                                .min_h(px(38.))
+                                .px(px(12.))
+                                .gap(px(16.))
+                                .when(index > 0, |row| {
+                                    row.border_t_1().border_color(colors.border_variant)
+                                })
+                                .child(
+                                    div()
+                                        .w(px(140.))
+                                        .flex_none()
+                                        .text_size(px(11.))
+                                        .text_color(colors.text_placeholder)
+                                        .child(label),
+                                )
+                                .child(
+                                    div()
+                                        .min_w_0()
+                                        .flex_1()
+                                        .text_size(px(12.))
+                                        .text_color(colors.text)
+                                        .child(value),
+                                )
+                        },
+                    )),
+            )
+            .child(
+                div()
+                    .max_w(px(760.))
+                    .rounded(px(8.))
+                    .bg(colors.element_background)
+                    .p(px(12.))
+                    .text_size(px(11.))
+                    .text_color(colors.text_muted)
+                    .child("Read-only projection. Changes remain with the named source authority."),
+            )
+            .into_any_element()
+    }
+
     fn render_omega_control(
         &self,
         id: &'static str,
@@ -16436,6 +17079,21 @@ impl AgentPanel {
         let text_accent = colors.text_accent;
         let icon_muted = colors.icon_muted;
         let tab_shortcuts_visible = omega_tab_shortcuts_visible(window);
+        let active_work_index_view = self
+            .omega_navigation_history
+            .current()
+            .and_then(|route| match route {
+                OmegaRoute::WorkIndex(WorkIndexRoute::Inbox) => Some(WorkIndexView::Inbox),
+                OmegaRoute::WorkIndex(WorkIndexRoute::MyWork) => Some(WorkIndexView::MyWork),
+                _ => None,
+            })
+            .filter(|_| self.omega_settings.is_none() && self.omega_unavailable_route.is_none());
+        let active_work_index_surface =
+            active_work_index_view.and_then(|_| self.work_index_surface.as_ref().cloned());
+        let active_work_detail = self
+            .omega_work_detail
+            .clone()
+            .filter(|_| self.omega_settings.is_none() && self.omega_unavailable_route.is_none());
         let workbench_forensics_selected = self
             .workbench_shell
             .projection()
@@ -16474,6 +17132,12 @@ impl AgentPanel {
         })
         .flatten();
         let main_content = unavailable_content
+            .or_else(|| active_work_index_surface.map(|surface| surface.into_any_element()))
+            .or_else(|| {
+                active_work_detail
+                    .as_ref()
+                    .map(|item| Self::render_omega_work_detail(item, cx))
+            })
             .or_else(|| omega_forensics_host.map(|host| host.into_any_element()))
             .or(missing_forensics_content)
             .unwrap_or_else(|| content.into_any_element());
@@ -16589,7 +17253,70 @@ impl AgentPanel {
             .when(tab_shortcuts_visible, |tab| {
                 tab.child(omega_tab_shortcut_hint(draft_tab_index, text_placeholder))
             });
-        let active_entity_tab = if omega_forensics_selected {
+        let active_entity_tab = if let Some(view) = active_work_index_view {
+            Some(
+                div()
+                    .id("omega-work-index-tab")
+                    .debug_selector(|| "omega.omega.work-index-tab.active".into())
+                    .w(px(TAB_WIDTH))
+                    .h(px(28.))
+                    .flex_none()
+                    .flex()
+                    .items_center()
+                    .gap(px(6.))
+                    .px(px(8.))
+                    .rounded(px(8.))
+                    .bg(selected_background)
+                    .border_1()
+                    .border_color(colors.border_selected)
+                    .text_size(px(12.))
+                    .text_color(text)
+                    .occlude()
+                    .child(
+                        Icon::new(match view {
+                            WorkIndexView::Inbox => IconName::Envelope,
+                            WorkIndexView::MyWork => IconName::ListTodo,
+                        })
+                        .size(IconSize::Small)
+                        .color(Color::Muted),
+                    )
+                    .child(div().min_w_0().flex_1().truncate().child(view.title()))
+                    .into_any_element(),
+            )
+        } else if let Some(item) = active_work_detail.as_ref() {
+            Some(
+                div()
+                    .id("omega-work-tab")
+                    .debug_selector(|| "omega.omega.work-tab.active".into())
+                    .w(px(TAB_WIDTH))
+                    .h(px(28.))
+                    .flex_none()
+                    .flex()
+                    .items_center()
+                    .gap(px(6.))
+                    .px(px(8.))
+                    .rounded(px(8.))
+                    .bg(selected_background)
+                    .border_1()
+                    .border_color(colors.border_selected)
+                    .text_size(px(12.))
+                    .text_color(text)
+                    .occlude()
+                    .child(
+                        Icon::new(IconName::ListTodo)
+                            .size(IconSize::Small)
+                            .color(Color::Muted),
+                    )
+                    .child(
+                        div()
+                            .min_w_0()
+                            .flex_1()
+                            .truncate()
+                            .child(item.summary.title.0.clone()),
+                    )
+                    .into_any_element(),
+            )
+        } else if omega_forensics_selected {
             Some(
                 div()
                     .id("omega-work-tab")
@@ -17019,6 +17746,78 @@ impl AgentPanel {
         let has_repositories = !repository_rows.is_empty();
         let (forensics_padding_x, forensics_padding_y) =
             omega_sidebar_row_padding(omega_forensics_selected);
+        let work_index_projection = self.work_index.projection();
+        let work_index_admitted = work_index_projection.admitted;
+        let inbox_count = work_index_projection
+            .rows
+            .iter()
+            .filter(|item| item.attention.requires_inbox_attention())
+            .count();
+        let my_work_count = work_index_projection
+            .rows
+            .iter()
+            .filter(|item| !item.accountability.is_empty())
+            .count();
+        let work_index_rows = if work_index_admitted {
+            [
+                (WorkIndexView::Inbox, inbox_count),
+                (WorkIndexView::MyWork, my_work_count),
+            ]
+            .into_iter()
+            .map(|(view, count)| {
+                let selected = active_work_index_view == Some(view);
+                let (padding_x, padding_y) = omega_sidebar_row_padding(selected);
+                let (id, selector, label, icon) = match view {
+                    WorkIndexView::Inbox => (
+                        "omega-open-inbox",
+                        "omega.omega.sidebar.inbox",
+                        "Inbox",
+                        IconName::Envelope,
+                    ),
+                    WorkIndexView::MyWork => (
+                        "omega-open-my-work",
+                        "omega.omega.sidebar.my-work",
+                        "My Work",
+                        IconName::ListTodo,
+                    ),
+                };
+                h_flex()
+                    .id(id)
+                    .debug_selector(move || selector.into())
+                    .w_full()
+                    .px(px(padding_x))
+                    .py(px(padding_y))
+                    .gap(px(8.))
+                    .rounded(px(8.))
+                    .cursor_pointer()
+                    .role(gpui::Role::Button)
+                    .tab_index(0isize)
+                    .aria_label(format!("Open {label}, {count} items"))
+                    .when(selected, |row| {
+                        row.bg(selected_background)
+                            .border_1()
+                            .border_color(colors.border_selected)
+                    })
+                    .when(!selected, |row| {
+                        row.hover(move |style| style.bg(hover_background))
+                    })
+                    .on_click(cx.listener(move |this, _, window, cx| {
+                        this.open_work_index(view, true, window, cx);
+                    }))
+                    .child(Icon::new(icon).size(IconSize::Small))
+                    .child(div().min_w_0().flex_1().truncate().child(label))
+                    .child(
+                        div()
+                            .text_size(px(10.))
+                            .text_color(text_placeholder)
+                            .child(count.to_string()),
+                    )
+                    .into_any_element()
+            })
+            .collect::<Vec<_>>()
+        } else {
+            Vec::new()
+        };
 
         let sidebar = div()
             .id("omega-sidebar")
@@ -17107,6 +17906,23 @@ impl AgentPanel {
                         .child("Forensics"),
                 ),
             )
+            .when(work_index_admitted, |sidebar| {
+                sidebar
+                    .child(
+                        div()
+                            .debug_selector(|| "omega.omega.sidebar.work".into())
+                            .mt(px(10.))
+                            .h(px(28.))
+                            .px(px(8.))
+                            .flex()
+                            .items_center()
+                            .text_size(px(11.))
+                            .font_weight(gpui::FontWeight::MEDIUM)
+                            .text_color(text_placeholder)
+                            .child("Work"),
+                    )
+                    .children(work_index_rows)
+            })
             .child(
                 div()
                     .debug_selector(|| "omega.omega.sidebar.threads".into())
@@ -18747,12 +19563,14 @@ mod tests {
         std::fs::write(&source_path, "const SOURCE: &str = \"committed\";\n")
             .expect("write committed source");
         let git = |arguments: &[&str]| {
-            let output = std::process::Command::new("git")
-                .arg("-C")
-                .arg(repository.path())
-                .args(arguments)
-                .output()
-                .expect("run Git command");
+            let output = smol::block_on(
+                smol::process::Command::new("git")
+                    .arg("-C")
+                    .arg(repository.path())
+                    .args(arguments)
+                    .output(),
+            )
+            .expect("run Git command");
             assert!(
                 output.status.success(),
                 "Git command failed: {}",
@@ -18792,13 +19610,15 @@ mod tests {
         );
         assert_eq!(
             String::from_utf8(
-                std::process::Command::new("git")
-                    .arg("-C")
-                    .arg(&checkout_root)
-                    .args(["rev-parse", "HEAD"])
-                    .output()
-                    .expect("read snapshot revision")
-                    .stdout
+                smol::block_on(
+                    smol::process::Command::new("git")
+                        .arg("-C")
+                        .arg(&checkout_root)
+                        .args(["rev-parse", "HEAD"])
+                        .output(),
+                )
+                .expect("read snapshot revision")
+                .stdout,
             )
             .expect("UTF-8 snapshot revision")
             .trim(),
@@ -25998,6 +26818,101 @@ mod tests {
             "rendered Omega selectors: {omega_selectors:?}"
         );
         assert!(cx.debug_bounds("omega.omega.sidebar.threads").is_some());
+        assert!(cx.debug_bounds("omega.omega.thread-tab.active").is_some());
+        assert!(
+            cx.debug_bounds("omega.omega.sidebar.inbox").is_none(),
+            "Work navigation stays hidden until two native authorities have real rows"
+        );
+
+        panel.update(&mut cx, |panel, cx| {
+            let observed_at = "2026-08-02T12:00:00.000Z".to_string();
+            let thread_ref = panel
+                .active_thread_id(cx)
+                .expect("active Thread fixture")
+                .to_key_string();
+            let thread = adapt_thread(NativeThreadRecord {
+                thread_ref,
+                title: "Question from a native thread".into(),
+                updated_at: observed_at.clone(),
+                observed_at: observed_at.clone(),
+                revision: 1,
+                archived: false,
+                lifecycle: NativeThreadLifecycle::WaitingForPerson,
+            })
+            .expect("valid native Thread fixture");
+            let forensics = adapt_forensics(NativeForensicsRecord {
+                case_ref: "repository:1".into(),
+                repository_name: "fixture".into(),
+                updated_at: observed_at.clone(),
+                observed_at: observed_at.clone(),
+                revision: 1,
+                phase: NativeForensicsPhase::Running,
+                run_ref: Some("forensics:run:fixture".into()),
+            })
+            .expect("valid native Forensics fixture");
+            panel
+                .work_index
+                .apply_native_items(
+                    THREAD_ADAPTER_ID,
+                    THREAD_ADAPTER_ID,
+                    vec![thread],
+                    observed_at.clone(),
+                    1,
+                )
+                .expect("Thread projection qualifies");
+            panel
+                .work_index
+                .apply_native_items(
+                    FORENSICS_ADAPTER_ID,
+                    FORENSICS_ADAPTER_ID,
+                    forensics,
+                    observed_at,
+                    1,
+                )
+                .expect("Forensics projection qualifies");
+            panel.publish_work_index(false, cx);
+        });
+        cx.run_until_parked();
+        assert!(cx.debug_bounds("omega.omega.sidebar.inbox").is_some());
+        assert!(cx.debug_bounds("omega.omega.sidebar.my-work").is_some());
+
+        panel.update_in(&mut cx, |panel, window, cx| {
+            assert!(panel.open_work_index(WorkIndexView::Inbox, true, window, cx));
+        });
+        cx.run_until_parked();
+        assert!(cx.debug_bounds("omega.omega.work-index.inbox").is_some());
+        assert!(
+            cx.debug_bounds("omega.omega.work-index-tab.active")
+                .is_some()
+        );
+        assert!(cx.debug_bounds("omega.omega.thread-tab.active").is_none());
+
+        cx.simulate_keystrokes("down");
+        cx.run_until_parked();
+        panel.read_with(&cx, |panel, _cx| {
+            assert!(
+                panel.work_index.selected_work_ref().is_some(),
+                "keyboard navigation selects a source-backed Work row"
+            );
+        });
+        cx.simulate_keystrokes("enter");
+        cx.run_until_parked();
+        assert!(cx.debug_bounds("omega.omega.work-index.inbox").is_none());
+        assert!(cx.debug_bounds("omega.omega.thread-tab.active").is_some());
+
+        panel.update_in(&mut cx, |panel, window, cx| {
+            assert!(panel.open_work_index(WorkIndexView::MyWork, true, window, cx));
+        });
+        cx.run_until_parked();
+        assert!(cx.debug_bounds("omega.omega.work-index.my-work").is_some());
+        panel.update_in(&mut cx, |panel, window, cx| {
+            panel.close_active_omega_route_tab(window, cx);
+        });
+        cx.run_until_parked();
+        assert!(
+            cx.debug_bounds("omega.omega.work-index-tab.active")
+                .is_none()
+        );
         assert!(cx.debug_bounds("omega.omega.thread-tab.active").is_some());
 
         let forensics_route = omega_forensics_route().expect("valid Forensics Work route");

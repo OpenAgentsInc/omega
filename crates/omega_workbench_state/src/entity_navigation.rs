@@ -70,6 +70,7 @@ impl From<EntityRef> for String {
 #[serde(rename_all = "snake_case")]
 pub enum EntityRouteKind {
     Thread,
+    WorkIndex,
     Work,
     IssueProjection,
     Project,
@@ -83,6 +84,8 @@ pub enum EntityRouteKind {
 #[serde(rename_all = "snake_case")]
 pub enum EntityRouteIcon {
     Thread,
+    Inbox,
+    MyWork,
     Work,
     Issue,
     Project,
@@ -96,6 +99,7 @@ pub enum EntityRouteIcon {
 #[serde(rename_all = "snake_case")]
 pub enum EntityRouteFocus {
     ThreadTranscript,
+    WorkList,
     WorkBlock,
     IssueProjection,
     ProjectOverview,
@@ -103,6 +107,22 @@ pub enum EntityRouteFocus {
     DecisionRecord,
     AgentSessionTranscript,
     Settings,
+}
+
+#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum WorkIndexRoute {
+    Inbox,
+    MyWork,
+}
+
+impl WorkIndexRoute {
+    pub const fn title(self) -> &'static str {
+        match self {
+            Self::Inbox => "Inbox",
+            Self::MyWork => "My Work",
+        }
+    }
 }
 
 #[derive(Clone, Debug, Eq, Hash, PartialEq, Serialize, Deserialize)]
@@ -148,6 +168,7 @@ impl WorkRoute {
 #[serde(tag = "kind", content = "target", rename_all = "snake_case")]
 pub enum EntityRoute {
     Thread(EntityRef),
+    WorkIndex(WorkIndexRoute),
     Work(WorkRoute),
     IssueProjection { work_ref: EntityRef },
     Project(EntityRef),
@@ -167,6 +188,10 @@ impl EntityRoute {
         block: Option<DomainBlockRoute>,
     ) -> Result<Self, EntityNavigationError> {
         Ok(Self::Work(WorkRoute::new(work_ref, block)?))
+    }
+
+    pub const fn work_index(view: WorkIndexRoute) -> Self {
+        Self::WorkIndex(view)
     }
 
     pub fn issue_projection(work_ref: impl Into<String>) -> Result<Self, EntityNavigationError> {
@@ -196,6 +221,7 @@ impl EntityRoute {
     pub const fn kind(&self) -> EntityRouteKind {
         match self {
             Self::Thread(_) => EntityRouteKind::Thread,
+            Self::WorkIndex(_) => EntityRouteKind::WorkIndex,
             Self::Work(_) => EntityRouteKind::Work,
             Self::IssueProjection { .. } => EntityRouteKind::IssueProjection,
             Self::Project(_) => EntityRouteKind::Project,
@@ -209,6 +235,8 @@ impl EntityRoute {
     pub const fn icon(&self) -> EntityRouteIcon {
         match self {
             Self::Thread(_) => EntityRouteIcon::Thread,
+            Self::WorkIndex(WorkIndexRoute::Inbox) => EntityRouteIcon::Inbox,
+            Self::WorkIndex(WorkIndexRoute::MyWork) => EntityRouteIcon::MyWork,
             Self::Work(_) => EntityRouteIcon::Work,
             Self::IssueProjection { .. } => EntityRouteIcon::Issue,
             Self::Project(_) => EntityRouteIcon::Project,
@@ -222,6 +250,7 @@ impl EntityRoute {
     pub const fn focus(&self) -> EntityRouteFocus {
         match self {
             Self::Thread(_) => EntityRouteFocus::ThreadTranscript,
+            Self::WorkIndex(_) => EntityRouteFocus::WorkList,
             Self::Work(_) => EntityRouteFocus::WorkBlock,
             Self::IssueProjection { .. } => EntityRouteFocus::IssueProjection,
             Self::Project(_) => EntityRouteFocus::ProjectOverview,
@@ -235,6 +264,7 @@ impl EntityRoute {
     pub const fn default_title(&self) -> &'static str {
         match self {
             Self::Thread(_) => "Thread",
+            Self::WorkIndex(view) => view.title(),
             Self::Work(_) => "Work",
             Self::IssueProjection { .. } => "Issue",
             Self::Project(_) => "Project",
@@ -248,6 +278,8 @@ impl EntityRoute {
     pub fn stable_key(&self) -> String {
         match self {
             Self::Thread(reference) => format!("thread:{}", reference.as_str()),
+            Self::WorkIndex(WorkIndexRoute::Inbox) => "work_index:inbox".to_string(),
+            Self::WorkIndex(WorkIndexRoute::MyWork) => "work_index:my_work".to_string(),
             Self::Work(route) => match &route.block {
                 Some(block) => format!(
                     "work:{}|block:{}|domain:{}",
@@ -440,6 +472,8 @@ mod tests {
             DomainBlockRoute::new("block:forensics", "forensics").expect("valid domain block");
         let routes = [
             EntityRoute::thread("thread:1").expect("thread route"),
+            EntityRoute::work_index(WorkIndexRoute::Inbox),
+            EntityRoute::work_index(WorkIndexRoute::MyWork),
             EntityRoute::work("work:1", Some(block)).expect("work route"),
             EntityRoute::issue_projection("work:issue:1").expect("issue route"),
             EntityRoute::project("project:1").expect("project route"),

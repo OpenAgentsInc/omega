@@ -601,6 +601,7 @@ dependencies = [
  "omega_identity_sync",
  "omega_invites",
  "omega_signer_broker",
+ "omega_work_index",
  "omega_workbench_harness",
  "omega_workbench_state",
  "omega_workdir",
@@ -11325,6 +11326,18 @@ dependencies = [
  "omega_identity",
  "serde_json",
  "smol",
+ "thiserror 2.0.17",
+]
+
+[[package]]
+name = "omega_work_index"
+version = "0.1.0"
+dependencies = [
+ "omega_effectd",
+ "proptest",
+ "serde",
+ "serde_json",
+ "tempfile",
  "thiserror 2.0.17",
 ]
 

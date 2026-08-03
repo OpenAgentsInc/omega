@@ -27781,4 +27781,83 @@ mod tests {
              Omega's brand-mark plus model face"
         );
     }
+
+    /// OMEGA-DELTA-0230. Inbox and My Work are read-only projections over the
+    /// generated All Work boundary. Production navigation exists only after
+    /// two independent source lanes have qualified real rows.
+    #[test]
+    fn omega_work_index_is_source_backed_read_only_and_conditionally_admitted() {
+        let index = without_comments(&read_repository_file(
+            "crates/omega_work_index/src/omega_work_index.rs",
+        ));
+        for required in [
+            "WorkSummary",
+            "THREAD_ADAPTER_ID",
+            "FORENSICS_ADAPTER_ID",
+            "EFFECT_ADAPTER_ID",
+            "writable: false",
+            "source entity and Work identity disagree",
+            "fn begin_refresh",
+            "fn begin_resume",
+            "fn apply_page",
+            "fn fail_refresh",
+            "fn projection",
+            "fn admitted",
+            "filter(|lane| !lane.items.is_empty())",
+            "collect::<BTreeSet<_>>()",
+            ">= 2",
+            "AdapterHealth::OfflineCached",
+            "WorkIndexError::AdapterMismatch",
+            "WorkIndexError::ConflictingIdentity",
+        ] {
+            assert!(
+                index.contains(required),
+                "OMEGA-DELTA-0230: the source-backed Work Index lost `{required}`"
+            );
+        }
+        assert!(
+            !index.contains("pub struct WorkSummary"),
+            "OMEGA-DELTA-0230: Omega duplicated the generated Work summary"
+        );
+
+        let panel = without_comments(&read_repository_file("crates/agent_ui/src/agent_panel.rs"));
+        let shell = body_of(&panel, "render_omega_shell");
+        for required in [
+            "work_index_projection.admitted",
+            ".when(work_index_admitted",
+            "omega.omega.sidebar.inbox",
+            "omega.omega.sidebar.my-work",
+            "open_work_index(view, true, window, cx)",
+            "render_omega_work_detail",
+        ] {
+            assert!(
+                shell.contains(required),
+                "OMEGA-DELTA-0230: conditional Work navigation lost `{required}`"
+            );
+        }
+
+        let surface = without_comments(&read_repository_file(
+            "crates/agent_ui/src/omega_work_index_surface.rs",
+        ));
+        for required in [
+            "UniformListScrollHandle",
+            "uniform_list(",
+            ".role(gpui::Role::Button)",
+            ".tab_index(0)",
+            ".aria_label(",
+            ".on_key_down(",
+            "\"down\" | \"j\"",
+            "\"up\" | \"k\"",
+            "\"enter\"",
+            "WorkIndexHealth::Offline",
+            "WorkIndexHealth::Partial",
+            "WorkIndexHealth::Error",
+            "WorkIndexHealth::Conflict",
+        ] {
+            assert!(
+                surface.contains(required),
+                "OMEGA-DELTA-0230: Work Index interaction or state truth lost `{required}`"
+            );
+        }
+    }
 }

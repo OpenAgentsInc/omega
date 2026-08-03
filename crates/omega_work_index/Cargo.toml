@@ -1,0 +1,24 @@
+[package]
+name = "omega_work_index"
+version = "0.1.0"
+edition.workspace = true
+publish.workspace = true
+license = "GPL-3.0-or-later"
+description = "Read-only multi-authority All Work index for Omega"
+
+[lints]
+workspace = true
+
+[lib]
+path = "src/omega_work_index.rs"
+doctest = false
+
+[dependencies]
+omega_effectd.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+thiserror.workspace = true
+
+[dev-dependencies]
+proptest.workspace = true
+tempfile.workspace = true

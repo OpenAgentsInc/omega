@@ -6,7 +6,8 @@ mod entity_navigation;
 pub use entity_navigation::{
     DomainBlockRoute, EntityNavigationError, EntityNavigationHistory, EntityRef, EntityRoute,
     EntityRouteFocus, EntityRouteIcon, EntityRouteKind, EntityRouteState,
-    PersistedEntityNavigation, RouteAvailability, RouteUnavailableReason, WorkRoute,
+    PersistedEntityNavigation, RouteAvailability, RouteUnavailableReason, WorkIndexRoute,
+    WorkRoute,
 };
 
 pub const PROJECTION_STATE_SCHEMA_V1: &str = "openagents.omega.workbench-state.v1";

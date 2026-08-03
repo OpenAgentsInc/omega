@@ -9,6 +9,7 @@ a conversation can open.
 `omega_workbench_state::EntityRoute` defines stable routes for:
 
 - Thread
+- Work Index
 - Work
 - Issue projection
 - Project
@@ -33,19 +34,28 @@ Invalid schema versions and invalid indexes are rejected before restoration.
 The production interface currently admits these destinations:
 
 - restorable Thread routes;
+- Inbox and My Work routes after two independent source adapters have
+  qualified, nonempty rows;
 - the Forensics Work route with its selected Forensics Block;
+- source-backed Work detail routes projected by the admitted Work Index;
 - Settings.
+
+Inbox and My Work do not appear as disabled or empty promises before that
+admission gate. They share one read-only index and keep independent route
+identity, selection, history, and restart restoration. See
+[Omega Work Index](./omega-work-index.md).
 
 Forensics has its own Work tab and browser-history identity. Opening it does not
 leave an unrelated Thread title selected. Closing its tab returns to the active
 Thread. Selecting a Thread closes the work surface and returns focus to the
 conversation transcript.
 
-The remaining route variants are contract-first. They do not appear in
-production navigation until their feature is implemented and admitted. If a
-persisted or linked destination is unknown, stale, deleted, unauthorized, or
-not implemented, Omega renders a typed unavailable surface. It does not render
-the previous entity's content or reveal the unavailable entity reference.
+Issue projections, Projects, Documents, Decisions, and Agent Sessions remain
+contract-first. They do not appear in production navigation until their
+feature is implemented and admitted. If a persisted or linked destination is
+unknown, stale, deleted, unauthorized, or not implemented, Omega renders a
+typed unavailable surface. It does not render the previous entity's content
+or reveal the unavailable entity reference.
 
 ## Interface terminology
 
@@ -62,8 +72,9 @@ Sessions** remain reserved for their canonical All Work entity meanings.
 The shared-state tests verify every route's identity, icon, focus target,
 Block ownership, bounded history, persistence validation, and legacy migration.
 The GPUI regression test verifies the Repositories and Threads sections,
-Forensics Work-tab selection, tab close, back and forward navigation, and the
-typed unavailable surface without an active Thread marker.
+conditional Inbox and My Work admission, both Work Index views, Forensics
+Work-tab selection, tab close, back and forward navigation, and the typed
+unavailable surface without an active Thread marker.
 
 Because installed UI automation was explicitly disabled for this delivery,
 release evidence consists of deterministic GPUI interaction tests, the

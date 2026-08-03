@@ -6,13 +6,13 @@ not create a second writable store.
 
 ## Immutable source
 
-| Field | Value |
-| --- | --- |
-| OpenAgents commit | `1ea08b1429cbd888875fef195f9b94bef666e70e` |
-| Contract | `openagents.all_work_boundary.v1` |
-| Definition SHA-256 | `f40c1d09b12103f0247a6354e020ed7322415c8b228e45a8fd3f8d7ccd3294f8` |
+| Field                 | Value                                                              |
+| --------------------- | ------------------------------------------------------------------ |
+| OpenAgents commit     | `1ea08b1429cbd888875fef195f9b94bef666e70e`                         |
+| Contract              | `openagents.all_work_boundary.v1`                                  |
+| Definition SHA-256    | `f40c1d09b12103f0247a6354e020ed7322415c8b228e45a8fd3f8d7ccd3294f8` |
 | Rust artifact SHA-256 | `298aa826cb7bdf182742251d53c9ab6a436ba8e386fd292a22701a7dec40cefb` |
-| Omega receipt | `crates/omega_effectd/all-work-contract/SOURCE.json` |
+| Omega receipt         | `crates/omega_effectd/all-work-contract/SOURCE.json`               |
 
 The generated Rust file, compatibility manifest, and shared fixtures are
 vendored together. `script/sync-all-work-contract` refuses a source checkout
@@ -32,9 +32,12 @@ separate All Work profile:
 - request and result domain payloads use generated Rust and Effect types;
 - objective and done-condition text do not enter the Work Index.
 
-The current adapter reads the Full Auto registry. That registry remains the
-writable authority. Other Work domains join through their own read adapters in
-later slices.
+The Effect adapter reads the Full Auto registry. That registry remains the
+writable authority. Omega combines its generated summaries with separate
+read-only native adapters for Threads and Forensics. Each adapter retains its
+own source authority and cursor. The qualified rows feed
+[Omega Work Index](./omega-work-index.md); they do not create a second writable
+store.
 
 ## Verify
 
