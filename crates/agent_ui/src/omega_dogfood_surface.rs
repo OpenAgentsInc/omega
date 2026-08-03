@@ -13,11 +13,11 @@ use omega_effectd::all_work_contract::{
 #[cfg(test)]
 use omega_work_index::DogfoodFixtureAdapter;
 use omega_work_index::{
-    DOGFOOD_PROJECT_ID, DogfoodPlanningOrigin, DogfoodPlanningViewModel, FixtureIssue,
-    FixtureIssueRelationKind, FixtureLifecycleType, FixturePriority, PlanningAttentionKind,
-    PlanningAttentionProjection, PlanningFilter, PlanningGroup, PlanningSavedView, PlanningSort,
-    PlanningViewKind, PlanningViewProjection, PlanningViewQuery, SECURITY_PROJECT_ID,
-    github_work_ref, project_planning_view_with_attention,
+    DOGFOOD_PROJECT_ID, DogfoodPlanningGraph, DogfoodPlanningOrigin, DogfoodPlanningViewModel,
+    FixtureIssue, FixtureIssueRelationKind, FixtureLifecycleType, FixturePriority,
+    PlanningAttentionKind, PlanningAttentionProjection, PlanningFilter, PlanningGroup,
+    PlanningSavedView, PlanningSort, PlanningViewKind, PlanningViewProjection, PlanningViewQuery,
+    SECURITY_PROJECT_ID, github_work_ref, project_planning_view_with_attention,
 };
 use serde::{Deserialize, Serialize};
 use settings::Settings as _;
@@ -1017,6 +1017,10 @@ impl DogfoodSurface {
             .map_or("Unknown Project", |project| project.name.as_str())
     }
 
+    fn project_breadcrumb(&self) -> String {
+        project_breadcrumb(&self.fixture.graph, &self.project_id)
+    }
+
     fn render_view_name_input(&self, cx: &mut Context<Self>) -> impl IntoElement {
         let settings = ThemeSettings::get_global(cx);
         let text_style = TextStyle {
@@ -1084,19 +1088,22 @@ impl DogfoodSurface {
                                             .child(self.project_name().to_string()),
                                     )
                                     .child(
-                                        Label::new(if self.fixture.origin
-                                            == DogfoodPlanningOrigin::Fixture
-                                        {
-                                            "DEV MOCKS"
-                                        } else {
-                                            "OWNED READ"
-                                        })
-                                            .size(LabelSize::XSmall)
-                                            .color(if self.fixture.is_fresh_live() {
+                                        Label::new(
+                                            if self.fixture.origin == DogfoodPlanningOrigin::Fixture
+                                            {
+                                                "DEV MOCKS"
+                                            } else {
+                                                "OWNED READ"
+                                            },
+                                        )
+                                        .size(LabelSize::XSmall)
+                                        .color(
+                                            if self.fixture.is_fresh_live() {
                                                 Color::Success
                                             } else {
                                                 Color::Warning
-                                            }),
+                                            },
+                                        ),
                                     ),
                             )
                             .child(
@@ -1111,11 +1118,9 @@ impl DogfoodSurface {
                                 .color(Color::Muted),
                             )
                             .child(
-                                Label::new(
-                                    "OpenAgentsInc / Omega / Omega as the first-class All Work client",
-                                )
-                                .size(LabelSize::XSmall)
-                                .color(Color::Muted),
+                                Label::new(self.project_breadcrumb())
+                                    .size(LabelSize::XSmall)
+                                    .color(Color::Muted),
                             ),
                     )
                     .child(
@@ -1137,7 +1142,7 @@ impl DogfoodSurface {
                                     this.select_project(SECURITY_PROJECT_ID, cx)
                                 }),
                             )),
-                    )
+                    ),
             )
             .child(h_flex().gap_1().children(DogfoodScene::ALL.map(|scene| {
                 Button::new(format!("dogfood-scene-{}", scene.label()), scene.label())
@@ -1180,9 +1185,9 @@ impl DogfoodSurface {
                         } else {
                             "Apply saved Work view"
                         })
-                        .on_click(cx.listener(move |this, _, _, cx| {
-                            this.set_saved_view(saved_view, cx)
-                        }))
+                        .on_click(
+                            cx.listener(move |this, _, _, cx| this.set_saved_view(saved_view, cx)),
+                        )
                     }))
                     .children(self.user_saved_views.views.iter().map(|view| {
                         let id = view.id.clone();
@@ -1190,28 +1195,36 @@ impl DogfoodSurface {
                             format!("planning-user-saved-view-{}", view.id),
                             view.name.clone(),
                         )
-                            .style(if self.user_saved_views.active
-                                && self.user_saved_views.selected_id.as_deref() == Some(view.id.as_str()) {
+                        .style(
+                            if self.user_saved_views.active
+                                && self.user_saved_views.selected_id.as_deref()
+                                    == Some(view.id.as_str())
+                            {
                                 ButtonStyle::Filled
                             } else {
                                 ButtonStyle::Subtle
-                            })
-                            .size(ButtonSize::Compact)
-                            .aria_description(if self.user_saved_views.active
-                                && self.user_saved_views.selected_id.as_deref() == Some(view.id.as_str()) {
+                            },
+                        )
+                        .size(ButtonSize::Compact)
+                        .aria_description(
+                            if self.user_saved_views.active
+                                && self.user_saved_views.selected_id.as_deref()
+                                    == Some(view.id.as_str())
+                            {
                                 "Current local saved Work view"
                             } else {
                                 "Apply local saved Work view"
-                            })
-                            .on_click(cx.listener(move |this, _, _, cx| this.apply_user_view(&id, cx)))
+                            },
+                        )
+                        .on_click(cx.listener(move |this, _, _, cx| this.apply_user_view(&id, cx)))
                     }))
                     .child(self.render_view_name_input(cx))
                     .child(
                         Button::new("planning-create-user-view", "Save new")
-                        .style(ButtonStyle::Subtle)
-                        .size(ButtonSize::Compact)
-                        .disabled(self.user_saved_views.views.len() >= MAX_USER_SAVED_VIEWS)
-                        .on_click(cx.listener(|this, _, _, cx| this.create_user_view(cx))),
+                            .style(ButtonStyle::Subtle)
+                            .size(ButtonSize::Compact)
+                            .disabled(self.user_saved_views.views.len() >= MAX_USER_SAVED_VIEWS)
+                            .on_click(cx.listener(|this, _, _, cx| this.create_user_view(cx))),
                     )
                     .child(
                         Button::new("planning-update-user-view", "Update")
@@ -1235,7 +1248,11 @@ impl DogfoodSurface {
                             .on_click(cx.listener(|this, _, _, cx| this.remove_user_view(cx))),
                     )
                     .when_some(self.user_saved_view_error.as_ref(), |row, error| {
-                        row.child(Label::new(error.clone()).size(LabelSize::XSmall).color(Color::Error))
+                        row.child(
+                            Label::new(error.clone())
+                                .size(LabelSize::XSmall)
+                                .color(Color::Error),
+                        )
                     }),
             )
             .when(
@@ -1264,32 +1281,39 @@ impl DogfoodSurface {
                             .size(LabelSize::XSmall)
                             .color(Color::Muted),
                     )
-                    .children([
-                        ("planning-filter-all", "All", PlanningFilter::All),
-                        ("planning-filter-open", "Open", PlanningFilter::Open),
-                        ("planning-filter-blocked", "Blocked", PlanningFilter::Blocked),
-                        (
-                            "planning-filter-completed",
-                            "Completed",
-                            PlanningFilter::Completed,
-                        ),
-                    ].map(|(id, label, filter)| {
-                        Button::new(id, label)
-                            .style(if self.filter == filter {
-                                ButtonStyle::Filled
-                            } else {
-                                ButtonStyle::Subtle
-                            })
-                            .size(ButtonSize::Compact)
-                            .aria_description(if self.filter == filter {
-                                "Current Work filter"
-                            } else {
-                                "Apply Work filter"
-                            })
-                            .on_click(cx.listener(move |this, _, _, cx| {
-                                this.set_filter(filter, cx)
-                            }))
-                    }))
+                    .children(
+                        [
+                            ("planning-filter-all", "All", PlanningFilter::All),
+                            ("planning-filter-open", "Open", PlanningFilter::Open),
+                            (
+                                "planning-filter-blocked",
+                                "Blocked",
+                                PlanningFilter::Blocked,
+                            ),
+                            (
+                                "planning-filter-completed",
+                                "Completed",
+                                PlanningFilter::Completed,
+                            ),
+                        ]
+                        .map(|(id, label, filter)| {
+                            Button::new(id, label)
+                                .style(if self.filter == filter {
+                                    ButtonStyle::Filled
+                                } else {
+                                    ButtonStyle::Subtle
+                                })
+                                .size(ButtonSize::Compact)
+                                .aria_description(if self.filter == filter {
+                                    "Current Work filter"
+                                } else {
+                                    "Apply Work filter"
+                                })
+                                .on_click(
+                                    cx.listener(move |this, _, _, cx| this.set_filter(filter, cx)),
+                                )
+                        }),
+                    )
                     .child(
                         Button::new(
                             "planning-group",
@@ -3318,6 +3342,41 @@ fn default_fixture_state() -> PersistedDogfoodSurfaceState {
     }
 }
 
+/// Builds the header breadcrumb from the loaded planning graph.
+///
+/// The breadcrumb used to be a string literal naming the organization, team, and
+/// initiative of the development-only graph. A literal in a normal render path is
+/// compiled into every shipped binary regardless of the runtime fixture gate, so
+/// that development-only phrasing was recoverable with `strings` from a signed
+/// release (omega#235). Deriving it means the names travel with the graph and a
+/// build that holds no graph holds none of them.
+fn project_breadcrumb(graph: &DogfoodPlanningGraph, project_id: &str) -> String {
+    let project = graph
+        .projects
+        .iter()
+        .find(|project| project.id == project_id);
+    let team = project.and_then(|project| {
+        graph
+            .teams
+            .iter()
+            .find(|team| team.id == project.team_id)
+            .map(|team| team.name.as_str())
+    });
+    let initiative = project.and_then(|project| {
+        graph
+            .initiatives
+            .iter()
+            .find(|initiative| initiative.id == project.initiative_id)
+            .map(|initiative| initiative.name.as_str())
+    });
+    [Some(graph.organization.name.as_str()), team, initiative]
+        .into_iter()
+        .flatten()
+        .filter(|segment| !segment.is_empty())
+        .collect::<Vec<_>>()
+        .join(" / ")
+}
+
 fn fixture_state_is_valid(
     fixture: &DogfoodPlanningViewModel,
     state: &PersistedDogfoodSurfaceState,
@@ -3516,6 +3575,86 @@ mod tests {
         assert_eq!(state.selected_issue_id, "issue:omega:214");
         assert_eq!(state.scene, DogfoodScene::Overview);
         assert_eq!(state.saved_view, PlanningSavedView::All);
+    }
+
+    #[test]
+    fn the_project_breadcrumb_is_derived_from_the_planning_graph() {
+        let fixture = load_dogfood_fixture();
+        for project in &fixture.graph.projects {
+            let team = fixture
+                .graph
+                .teams
+                .iter()
+                .find(|team| team.id == project.team_id)
+                .expect("every fixture project names a team");
+            let initiative = fixture
+                .graph
+                .initiatives
+                .iter()
+                .find(|initiative| initiative.id == project.initiative_id)
+                .expect("every fixture project names an initiative");
+            assert_eq!(
+                project_breadcrumb(&fixture.graph, &project.id),
+                format!(
+                    "{} / {} / {}",
+                    fixture.graph.organization.name, team.name, initiative.name
+                ),
+                "the breadcrumb for {} must read out of the graph",
+                project.id
+            );
+        }
+
+        // Falsifiability: a breadcrumb that is really derived moves when the
+        // graph moves. A literal would keep reading the same three names.
+        let mut renamed = fixture.graph.clone();
+        renamed.organization.name = "Other Org".into();
+        for team in &mut renamed.teams {
+            team.name = "Other Team".into();
+        }
+        for initiative in &mut renamed.initiatives {
+            initiative.name = "Other Initiative".into();
+        }
+        assert_eq!(
+            project_breadcrumb(&renamed, DOGFOOD_PROJECT_ID),
+            "Other Org / Other Team / Other Initiative"
+        );
+
+        // A project the graph does not describe degrades to the organization
+        // rather than borrowing another project's team or initiative.
+        assert_eq!(
+            project_breadcrumb(&fixture.graph, "project:not-in-this-graph"),
+            fixture.graph.organization.name
+        );
+    }
+
+    #[test]
+    fn no_planning_initiative_or_work_title_is_a_literal_in_this_surface() {
+        // omega#235: a development-language breadcrumb was written as a string
+        // literal in a normal render path, so it compiled into signed release
+        // binaries even though the fixture payload itself is cfg-gated out.
+        // Names that describe the development-only planning graph must reach the
+        // screen through the graph, never through this file's source.
+        let source = include_str!("omega_dogfood_surface.rs");
+        let fixture = load_dogfood_fixture();
+        let graph_names = fixture
+            .graph
+            .initiatives
+            .iter()
+            .map(|initiative| initiative.name.as_str())
+            .chain(
+                fixture
+                    .graph
+                    .issues
+                    .iter()
+                    .map(|issue| issue.title.as_str()),
+            );
+        for name in graph_names {
+            assert!(
+                !source.contains(name),
+                "{name:?} is a source literal in the Work surface; \
+                 derive it from the planning graph instead"
+            );
+        }
     }
 
     #[test]
