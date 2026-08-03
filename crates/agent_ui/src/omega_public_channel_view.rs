@@ -871,11 +871,9 @@ impl PublicChannelView {
                 .border_1()
                 .border_color(cx.theme().colors().border)
                 .child(
-                    Label::new(
-                        "The public relay is unavailable. Verified messages remain visible. Retry here, or use GitHub for support without relying on this relay.",
-                    )
-                    .size(LabelSize::Small)
-                    .line_clamp(3),
+                    Label::new("The public relay is unavailable; verified messages remain visible")
+                        .size(LabelSize::Small)
+                        .line_clamp(3),
                 )
                 .child(
                     h_flex()
@@ -1133,7 +1131,7 @@ impl PublicChannelView {
                 .severity(Severity::Warning)
                 .wrap_content(true)
                 .child(
-                    Label::new("Messages are verified. Group metadata is not authenticated.")
+                    Label::new("Messages are verified; group metadata is not authenticated")
                         .size(LabelSize::Small),
                 )
         })

@@ -1,5 +1,26 @@
 {
   "schema": "openagents.omega.control-crawl-copy-allowlist.v1",
-  "description": "Exact multi-sentence tooltip or status strings that are allowed to survive the control-crawl copy lint (owner law 2 / OMEGA-DELTA-0187). Prefer deleting the string over allowlisting it. Each entry must name the exact text and a reason.",
-  "entries": []
+  "description": "Exact multi-sentence presentation strings that are allowed to survive the control-crawl copy lint (owner law 2 / OMEGA-DELTA-0187). Prefer deleting the string over allowlisting it. Each entry must name the exact text and a reason. The only reason admitted so far is a consequence disclosure: copy a person must read in full before an irreversible or privacy-bearing action, where shortening it would remove a stated consequence rather than remove narration.",
+  "entries": [
+    {
+      "text": "Raw secret export is an advanced recovery option. NIP-49 encrypted recovery is recommended.",
+      "reason": "Consequence disclosure on the raw identity-key export path. It names the safer alternative before an irreversible reveal; conciseness must not drop the recommendation."
+    },
+    {
+      "text": "Anyone who sees this key controls your identity. Screenshots, screen sharing, and clipboard history can expose it. Omega cannot reset it.",
+      "reason": "Consequence disclosure before a raw private-key reveal. Each sentence carries a separate fact: who gains control, which exposure paths exist, and that the loss is unrecoverable."
+    },
+    {
+      "text": "Anyone with this key controls your Omega identity. Close this view when finished.",
+      "reason": "Consequence disclosure shown while a raw private key is on screen. It states the consequence and the mitigating action a person must take."
+    },
+    {
+      "text": "Sarah can help with the active editor and can propose a new Omega Agent thread. Voice identity alone grants no durable or sensitive action authority.",
+      "reason": "Authority disclosure. The second sentence is the exact authority boundary of a voice principal and must not be compressed into chrome."
+    },
+    {
+      "text": "Public channel. Messages and reports are signed with your Omega identity and may be retained. Don’t post secrets, credentials, private code, customer data, prompts, local paths, or unredacted logs. Moderators may remove messages, but deletion cannot guarantee erasure.",
+      "reason": "Privacy disclosure above the public-channel composer. It states signing, retention, the enumerated material not to post, and the limit of moderator deletion; each is a separate consequence."
+    }
+  ]
 }

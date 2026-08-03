@@ -28409,14 +28409,22 @@ mod tests {
             "omega.forensics.matrix.promotion-status",
             "omega.forensics.publication.source-status",
             "omega.forensics.publication.detail-status",
+            "omega.forensics.lifecycle.header-status",
+            "omega.forensics.lifecycle.detail-status",
             "omega_status_cue",
             "No source-owned publication gate projection is attached",
+            "A completed run, clean worker, relay state, or model agreement cannot authorize a claim",
+            "Recorded as a limitation, never a clean result",
         ] {
             assert!(
                 forensics.contains(required),
                 "OMEGA-DELTA-0235: concise Forensics status/evidence split lost `{required}`"
             );
         }
+        assert!(
+            !forensics.contains("Label::new(presentation.scene.label())"),
+            "OMEGA-DELTA-0235: the Forensics lifecycle header restored a textual status badge"
+        );
 
         let crawl = without_comments(&read_repository_file(
             "crates/omega_control_crawl/src/omega_control_crawl.rs",
@@ -28430,6 +28438,13 @@ mod tests {
             "scan_presentation_copy",
             "lint_repository_presentation_copy",
             "omega_owned_presentation_copy_is_concise",
+            "COPY_MARKERS",
+            "LEGACY_COPY_MARKERS",
+            "call: \"Label::new(\"",
+            "call: \"Button::new(\"",
+            "PresentationSlot::VisibleText",
+            "label_narration_is_invisible_to_the_previous_marker_set",
+            "every_marker_extracts_its_user_facing_argument",
         ] {
             assert!(
                 crawl.contains(required),

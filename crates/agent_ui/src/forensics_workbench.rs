@@ -354,13 +354,16 @@ impl ForensicsLifecycleScene {
         }
     }
 
-    fn color(self) -> Color {
+    /// The shared status channel for this lifecycle scene. The exact scene name
+    /// stays the accessible context, so the cue reads as `Awaiting profile:
+    /// Blocked` rather than losing which lifecycle state is meant.
+    fn status(self) -> OmegaStatus {
         match self {
-            Self::Complete | Self::Cleaned => Color::Success,
-            Self::Running => Color::Accent,
-            Self::AwaitingProfile | Self::AwaitingCoverage => Color::Muted,
-            Self::Incomplete | Self::Cancelled | Self::Stale => Color::Warning,
-            Self::Denied | Self::IncompatibleTool | Self::RecoveryRequired => Color::Error,
+            Self::Complete | Self::Cleaned => OmegaStatus::Complete,
+            Self::Running => OmegaStatus::Running,
+            Self::AwaitingProfile | Self::AwaitingCoverage => OmegaStatus::Blocked,
+            Self::Incomplete | Self::Cancelled | Self::Stale => OmegaStatus::Warning,
+            Self::Denied | Self::IncompatibleTool | Self::RecoveryRequired => OmegaStatus::Failed,
         }
     }
 }
@@ -2410,15 +2413,15 @@ impl ForensicsWorkbenchSurface {
                     .justify_between()
                     .gap_3()
                     .child(Label::new(selected.label()).size(LabelSize::Large))
-                    .child(
-                        Label::new(presentation.scene.label())
-                            .size(LabelSize::XSmall)
-                            .color(presentation.scene.color()),
-                    ),
+                    .child(omega_status_cue(
+                        "omega.forensics.lifecycle.detail-status",
+                        presentation.scene.status(),
+                        presentation.scene.label(),
+                    )),
             )
+            .child(Self::render_fact("State", presentation.scene.label()))
             .when(selected == LifecycleSelection::Summary, |detail| {
                 detail
-                    .child(Self::render_fact("State", presentation.scene.label()))
                     .child(Self::render_fact("Blocker", presentation.blocker))
                     .child(Self::render_fact("Next action", presentation.next_action))
                     .child(Self::render_fact("Authority", "OpenAgents projections"))
@@ -2576,11 +2579,11 @@ impl ForensicsWorkbenchSurface {
                     .border_b_1()
                     .border_color(cx.theme().colors().border_variant)
                     .child(Label::new("Preflight and lifecycle").size(LabelSize::Small))
-                    .child(
-                        Label::new(presentation.scene.label())
-                            .size(LabelSize::XSmall)
-                            .color(presentation.scene.color()),
-                    ),
+                    .child(omega_status_cue(
+                        "omega.forensics.lifecycle.header-status",
+                        presentation.scene.status(),
+                        presentation.scene.label(),
+                    )),
             )
             .child(h_flex().w_full().items_stretch().child(list).child(detail))
             .into_any_element()
@@ -3250,7 +3253,10 @@ impl ForensicsWorkbenchSurface {
                         "Not eligible for identification metrics"
                     },
                 ))
-                .child(Self::render_fact("Typed outcome", matrix_outcome_label(run.outcome)))
+                .child(Self::render_fact(
+                    "Typed outcome",
+                    matrix_outcome_label(run.outcome),
+                ))
                 .child(Self::render_fact(
                     "Censoring",
                     if run.censored {
@@ -3310,12 +3316,14 @@ impl ForensicsWorkbenchSurface {
                         matrix.finding_divergence.common_finding_refs.join(" · ")
                     },
                 ))
+                .child(Self::render_fact(
+                    "Promotion",
+                    "Agreement is not truth; majority vote never promotes a claim",
+                ))
                 .child(
-                    Label::new(
-                        "Models are compared under frozen inputs. Agreement is not truth, and majority vote never promotes a claim.",
-                    )
-                    .size(LabelSize::XSmall)
-                    .color(Color::Muted),
+                    Label::new("Compared under frozen inputs")
+                        .size(LabelSize::XSmall)
+                        .color(Color::Muted),
                 );
         } else {
             detail = detail.child(
@@ -3389,11 +3397,13 @@ impl ForensicsWorkbenchSurface {
                     "Publication",
                 ))
                 .child(
-                    Label::new(
-                        "No source-owned publication gate projection is attached. A completed run, clean worker, relay state, or model agreement cannot authorize a claim.",
-                    )
-                    .size(LabelSize::Small),
+                    Label::new("No source-owned publication gate projection is attached")
+                        .size(LabelSize::Small),
                 )
+                .child(Self::render_fact(
+                    "Authorization",
+                    "A completed run, clean worker, relay state, or model agreement cannot authorize a claim",
+                ))
                 .child(
                     Label::new(
                         "Synthetic publication scenes are available only in explicit development and mock builds.",
@@ -3468,11 +3478,9 @@ impl ForensicsWorkbenchSurface {
                     )),
             )
             .child(
-                Label::new(
-                    "This reader reports authority receipts. It cannot approve, authorize, or publish a case.",
-                )
-                .size(LabelSize::XSmall)
-                .color(Color::Muted),
+                Label::new("Reports authority receipts; never approves or publishes a case")
+                    .size(LabelSize::XSmall)
+                    .color(Color::Muted),
             );
         if let Some(projection) = projection {
             detail = detail
@@ -3916,13 +3924,15 @@ impl ForensicsWorkbenchSurface {
                         .gap_1()
                         .child(Label::new("Case overview").size(LabelSize::Large))
                         .child(
-                            Label::new(
-                                "A validated, public-safe fixture for inspecting the evidence boundary. It does not launch a worker or assert a live result.",
-                            )
-                            .size(LabelSize::Small)
-                            .color(Color::Muted),
+                            Label::new("Validated public-safe fixture for the evidence boundary")
+                                .size(LabelSize::Small)
+                                .color(Color::Muted),
                         ),
                 )
+                .child(Self::render_fact(
+                    "Execution",
+                    "No worker launch · no live result asserted",
+                ))
                 .child(Self::render_fact("Target", target.display_name))
                 .child(Self::render_fact("Repository", target.clone_url))
                 .child(Self::render_fact("Pinned commit", target.commit))
@@ -3944,7 +3954,10 @@ impl ForensicsWorkbenchSurface {
                         format!("{incomplete_provenance} incomplete projection")
                     },
                 ))
-                .child(Self::render_fact("Workspace", workspace.workspace_ref.clone()))
+                .child(Self::render_fact(
+                    "Workspace",
+                    workspace.workspace_ref.clone(),
+                ))
                 .child(Self::render_fact("Fixture run", workspace.run_ref.clone()))
                 .into_any_element(),
             ColdcardCaseSelection::Rung(rung_id) => {
@@ -4002,7 +4015,7 @@ impl ForensicsWorkbenchSurface {
                                     .bg(cx.theme().colors().element_background)
                                     .child(
                                         Label::new(
-                                            "Missing evidence remains missing. This reader never promotes a downstream inference into this rung.",
+                                            "Missing evidence remains missing; no downstream inference is promoted into this rung",
                                         )
                                         .size(LabelSize::Small)
                                         .color(Color::Warning),
@@ -4444,11 +4457,9 @@ impl Render for ForensicsWorkbenchSurface {
                             ),
                     )
                     .child(
-                        Label::new(
-                            "Read-only file traversal using the configured model. Source and tool limitations remain visible.",
-                        )
-                        .size(LabelSize::XSmall)
-                        .color(Color::Muted),
+                        Label::new("Read-only traversal using the configured model")
+                            .size(LabelSize::XSmall)
+                            .color(Color::Muted),
                     )
                     .child(
                         Label::new("Entropy prompt")
@@ -4609,12 +4620,14 @@ impl Render for ForensicsWorkbenchSurface {
                             ),
                     )
                     .child(
-                        Label::new(
-                            "One frozen prompt and source policy across exact repository pins. A missing or partial source remains a limitation, never a clean result.",
-                        )
-                        .size(LabelSize::XSmall)
-                        .color(Color::Muted),
+                        Label::new("One frozen prompt and source policy across pinned repositories")
+                            .size(LabelSize::XSmall)
+                            .color(Color::Muted),
                     )
+                    .child(Self::render_fact(
+                        "Missing source",
+                        "Recorded as a limitation, never a clean result",
+                    ))
                     .child(Self::render_fact(
                         "Catalog",
                         format!(

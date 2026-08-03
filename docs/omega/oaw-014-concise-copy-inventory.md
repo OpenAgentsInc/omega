@@ -36,25 +36,73 @@ exists rather than when someone remembers to list it. The shell file
 sidebar, navigation rows, and footer. Only the lint's own source is excluded,
 because it quotes the call markers it searches for and renders no chrome.
 
-`scan_presentation_copy` extracts user-facing string literals from three slots:
-`.aria_label(...)` accessible names, `Tooltip::text(...)`, and `.child("...")`
-visible labels. A trailing `#[cfg(test)]` module is skipped because test
-fixtures are not shipped chrome; an item-level `#[cfg(test)]` gate does not stop
-the scan. `lint_presentation_copy` then refuses any string that narrates more
-than one sentence, or that exceeds its slot's limit: 80 characters for an
-accessible name and 48 for a tooltip or visible label. The accessible name has
-the most generous limit on purpose — conciseness must never truncate assistive
-meaning. The one-word rule is the status channel's, not every tooltip's, and
-`lint_status_words` plus the cue's own tests enforce it there.
+`scan_presentation_copy` extracts user-facing string literals through the
+`COPY_MARKERS` table, which names every call this repository writes copy into
+and the argument that carries it. The first version of this scan read three
+markers — `.aria_label(`, `Tooltip::text(`, and `.child(` — and an installed
+review found that this left the dominant visible-text constructor entirely
+unscanned: `Label::new("…")` accounts for 113 of the literal strings in
+Omega-owned UI against 47 in `forensics_workbench.rs` alone, and none of them
+were ever read. The gate was green because it was looking at the wrong slot.
+
+The table now covers `.aria_label(` (accessible name); `Tooltip::text(` and
+`Tooltip::with_meta(` (tooltip); `.child(`, `Button::new(` argument 1,
+`.action(`, `.entry(`, `.header(`, `.title(`, `.description(`, and
+`.placeholder(` (visible label); and `Label::new(` (visible text). A marker
+declares which argument is user-facing, so `Button::new("id", "Label")` yields
+the label and never the element id. A trailing `#[cfg(test)]` module is skipped
+because test fixtures are not shipped chrome; an item-level `#[cfg(test)]` gate
+does not stop the scan. Wrapped literals decode through Rust's `\`-newline line
+continuation, so an offense and an allowlist entry compare equal.
+
+`lint_presentation_copy` refuses any string that narrates more than one
+sentence, or that exceeds its slot's limit: 80 characters for an accessible
+name, 48 for a tooltip or visible label, and 96 for general visible text. The
+accessible name is more generous than a visible label on purpose — conciseness
+must never truncate assistive meaning. `Label` gets the loosest ceiling because
+the same constructor carries button-sized labels, section subtitles, and
+one-line empty-state records; the defect this contract exists to catch there is
+narration, not width. With the current tree repaired, no single-sentence literal
+is near that ceiling, so the sentence rule is the binding constraint and the
+character limit is a backstop. The one-word rule is the status channel's, not
+every tooltip's, and `lint_status_words` plus the cue's own tests enforce it
+there.
+
+A sentence boundary requires whitespace after the terminator. Without that,
+`AGENTS.md`, `v0.2.0`, and `openagents.com` would each be read as two sentences
+and real menu labels would be pushed onto the allowlist.
+
+Three tests keep the extension honest.
+`label_narration_is_invisible_to_the_previous_marker_set` is the falsifier: it
+takes the exact narration the installed review photographed in the primary
+Forensics layout, proves the previous three-marker set neither sees nor refuses
+it, and proves the current table refuses it as visible-text narration. It fails
+in both mutation directions — with `Label::new` removed from `COPY_MARKERS`, and
+with `Label::new` added to `LEGACY_COPY_MARKERS`.
+`every_marker_extracts_its_user_facing_argument` synthesises a call for every
+marker in the table, so a marker cannot be added to widen the contract's claimed
+coverage without actually extracting anything.
+`leading_identifier_arguments_are_not_read_as_copy` pins the id/label split.
 
 `omega_owned_presentation_copy_is_concise` runs the whole scan over the real
-repository and must find nothing. The checked-in allowlist remains empty;
-deleting a string is preferred over allowlisting it.
+repository and must find nothing.
 
-Two boundaries stay explicit. The scan sees literals, so a `format!` string, a
+Three boundaries stay explicit. The scan sees literals, so a `format!` string, a
 source-owned domain record, or a runtime-composed accessible name is out of its
-reach and is governed by its own surface's tests. And a lint can prove a string
-is short; it cannot prove the short string is still true.
+reach and is governed by its own surface's tests. The scan sees calls, so copy
+routed through a helper the table does not name is invisible until the marker is
+added. And a lint can prove a string is short; it cannot prove the short string
+is still true.
+
+## Allowlist
+
+Deleting a string is still preferred over allowlisting it. The allowlist admits
+one reason: a **consequence disclosure** — copy a person must read in full
+before an irreversible or privacy-bearing action, where shortening it would
+remove a stated consequence rather than remove narration. The five current
+entries are the raw identity-key export warnings, the voice-principal authority
+boundary, and the public-channel privacy notice. Each entry names its exact text
+and its reason. None of them is Forensics or Work chrome.
 
 ## Current inventory disposition
 
@@ -84,9 +132,23 @@ is short; it cannot prove the short string is still true.
 - Forensics detail continues to show why publication authority is unavailable.
   That is the domain record that makes the blocked icon precise, not product
   exposition to hide.
-- Lifecycle-scene names such as `Awaiting profile` are fixture selector labels,
-  not the rendered status channel. They remain in development/mock navigation
-  and are absent with the fixture gate off.
+- Lifecycle-scene names such as `Awaiting profile` were previously recorded here
+  as fixture selector labels only. That was wrong: the installed review found
+  `Awaiting profile` rendered twice as a right-aligned textual status badge in
+  the primary Lifecycle layout, on the `Preflight and lifecycle` header and on
+  the selected-stage header. Both badges now use `omega_status_cue`, with the
+  exact scene name as the cue's accessible context — the cue reads as
+  `Awaiting profile: Blocked` rather than losing which lifecycle state is meant.
+  The labelled `State` record still carries the exact scene name as visible
+  text, and it is now shown for every lifecycle selection rather than only the
+  summary, so removing the badge removes narration and no fact.
+- Forensics narration repaired by the visible-text extension: the model-matrix
+  comparison note, the publication-authority and publication-readiness notes,
+  the Coldcard case-overview note, the missing-rung warning, the repository-scan
+  note, and the campaign note. Each exact fact that a shortened line no longer
+  states was moved into a labelled record — `Promotion`, `Authorization`,
+  `Execution`, and `Missing source` — beside the records that were already
+  there.
 - Work detail Block cards use the shared cue for source availability instead of
   the `Source-backed`/`Unavailable` word pair, and the narrated two-sentence
   authority note is now the concise `View only — grants no authority`. The exact
@@ -97,9 +159,25 @@ is short; it cannot prove the short string is still true.
 
 ## Remaining installed gate
 
-The automated rule now runs over the current inventory and passes. What it
-cannot do is confirm that the retained meaning is still legible: no installed
-light/dark, reduced-motion, localization-expansion, or assistive-technology pass
-has been run against these surfaces, and no accessibility-tree assertion exists
-for the migrated cues beyond their construction. omega#219 remains open for that
-installed visual and accessibility review.
+The automated rule now reads the constructor that carries most Omega copy, and
+passes over the current inventory. What it cannot do is confirm that the
+retained meaning is still legible.
+
+The installed review of build `16b6dc4b5b` found that none of the status
+information in the Forensics surface reaches the rendered accessibility tree:
+the badges, the `State`/`Blocker`/`Next action`/`Authority` rows and their
+values, and the per-row catalog states are all absent from it. That is the
+incomplete-tree defect tracked as omega#217, and it means the migrated cues are
+proved at construction and not against a rendered tree. The `#219` criterion
+"status chips/icons retain exact accessible names" is therefore **blocked on
+#217**, not met and not refuted here.
+
+Localization expansion is not runnable — Omega ships no localization mechanism,
+so the character limits remain calibrated on English only. Reduced motion is not
+meaningfully observable — nothing animates in the states reachable from the
+current preflight. Omega does not follow macOS appearance; the light theme
+applies through `theme.mode`, and the installed review reported secondary and
+muted text as noticeably lower contrast there, as an observation rather than a
+measured ratio.
+
+omega#219 remains open for that installed visual and accessibility review.

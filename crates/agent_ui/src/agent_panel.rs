@@ -3668,7 +3668,7 @@ fn render_ready_device_pairing_content(
                 .color(Color::Muted),
         )
         .child(
-            Label::new("Scan in OpenAgents Mobile. This code works once for 5 minutes.")
+            Label::new("Scan in OpenAgents Mobile · valid once for 5 minutes")
                 .size(LabelSize::XSmall)
                 .color(Color::Muted),
         )
@@ -11927,7 +11927,7 @@ impl AgentPanel {
                                         .icon_size(IconSize::Small)
                                         .tooltip(move |_window, cx| {
                                             Tooltip::with_meta(
-                                                "Title generation failed. Click to retry.",
+                                                "Title generation failed · click to retry",
                                                 None,
                                                 title_generation_error.clone(),
                                                 cx,

@@ -599,10 +599,16 @@ pub fn is_multi_sentence(text: &str) -> bool {
         let ch = bytes[index];
         if matches!(ch, b'.' | b'!' | b'?') {
             let mut look = index + 1;
+            let mut separated = false;
             while look < bytes.len() && bytes[look].is_ascii_whitespace() {
                 look += 1;
+                separated = true;
             }
-            if look < bytes.len() && bytes[look].is_ascii_alphabetic() {
+            // The separation is what makes this a sentence boundary. Without
+            // it the terminator belongs to a file name, a version, or an
+            // abbreviation (`AGENTS.md`, `v0.2.0`, `e.g.`), and treating those
+            // as exposition would push real control labels onto the allowlist.
+            if separated && look < bytes.len() && bytes[look].is_ascii_alphabetic() {
                 return true;
             }
         }
@@ -655,33 +661,36 @@ pub fn lint_status_words<'a>(strings: impl IntoIterator<Item = &'a str>) -> Vec<
 /// Where a user-facing string literal was written.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
 pub enum PresentationSlot {
-    /// `.aria_label("...")` — the accessible name.
+    /// The accessible name (`.aria_label("...")`).
     AccessibleName,
-    /// `Tooltip::text("...")` — hover/focus text.
+    /// Hover/focus text (`Tooltip::text`, `Tooltip::with_meta`).
     Tooltip,
-    /// `.child("...")` — a visible label rendered directly as chrome.
+    /// A short visible label attached to a control, menu row, or section
+    /// heading (`.child("...")`, `Button::new(id, "...")`, `.action("...")`).
     VisibleLabel,
+    /// General visible text (`Label::new("...")`).
+    VisibleText,
 }
 
 impl PresentationSlot {
-    const fn marker(self) -> &'static str {
-        match self {
-            Self::AccessibleName => ".aria_label(",
-            Self::Tooltip => "Tooltip::text(",
-            Self::VisibleLabel => ".child(",
-        }
-    }
-
     /// Longest string this slot may hold before it is exposition rather than a
-    /// label. The accessible name is deliberately the most generous limit:
-    /// conciseness must never truncate assistive meaning. A tooltip may name a
-    /// second gesture for the same control, so it shares the label limit; the
-    /// one-word rule belongs to the status channel and is enforced separately
-    /// by `lint_status_words`.
+    /// label. The accessible name is deliberately more generous than a visible
+    /// label: conciseness must never truncate assistive meaning. A tooltip may
+    /// name a second gesture for the same control, so it shares the label
+    /// limit; the one-word rule belongs to the status channel and is enforced
+    /// separately by `lint_status_words`.
+    ///
+    /// `Label` is the general visible-text primitive. The same constructor
+    /// carries button-sized labels, section subtitles, and one-line empty-state
+    /// records, so it gets the loosest ceiling and the sentence rule at full
+    /// strength: the defect this contract exists to catch is narration, not
+    /// width, and a single sentence that names an exact limitation is allowed
+    /// to be longer than a button label.
     pub const fn max_chars(self) -> usize {
         match self {
             Self::AccessibleName => 80,
             Self::Tooltip | Self::VisibleLabel => 48,
+            Self::VisibleText => 96,
         }
     }
 
@@ -690,9 +699,116 @@ impl PresentationSlot {
             Self::AccessibleName => "accessible name",
             Self::Tooltip => "tooltip",
             Self::VisibleLabel => "visible label",
+            Self::VisibleText => "visible text",
         }
     }
 }
+
+/// A call whose argument is a user-facing string literal.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct CopyMarker {
+    /// Call text written immediately before the argument list.
+    pub call: &'static str,
+    /// Slot the literal lands in.
+    pub slot: PresentationSlot,
+    /// Zero-based position of the user-facing argument. Leading arguments are
+    /// skipped, which is how an element id is told apart from a label in
+    /// `Button::new("id", "Label")`.
+    pub argument: usize,
+}
+
+/// Every call this scan reads as user-facing copy.
+///
+/// The set is deliberately wider than the constructors currently in use so a
+/// surface cannot escape the contract by switching primitive. It is derived
+/// from what Omega-owned UI actually writes: `Label` is the dominant visible
+/// text constructor by an order of magnitude, and reading only `.child(` left
+/// it entirely unscanned.
+pub const COPY_MARKERS: &[CopyMarker] = &[
+    CopyMarker {
+        call: ".aria_label(",
+        slot: PresentationSlot::AccessibleName,
+        argument: 0,
+    },
+    CopyMarker {
+        call: "Tooltip::text(",
+        slot: PresentationSlot::Tooltip,
+        argument: 0,
+    },
+    CopyMarker {
+        call: "Tooltip::with_meta(",
+        slot: PresentationSlot::Tooltip,
+        argument: 0,
+    },
+    CopyMarker {
+        call: ".child(",
+        slot: PresentationSlot::VisibleLabel,
+        argument: 0,
+    },
+    CopyMarker {
+        call: "Button::new(",
+        slot: PresentationSlot::VisibleLabel,
+        argument: 1,
+    },
+    CopyMarker {
+        call: ".action(",
+        slot: PresentationSlot::VisibleLabel,
+        argument: 0,
+    },
+    CopyMarker {
+        call: ".entry(",
+        slot: PresentationSlot::VisibleLabel,
+        argument: 0,
+    },
+    CopyMarker {
+        call: ".header(",
+        slot: PresentationSlot::VisibleLabel,
+        argument: 0,
+    },
+    CopyMarker {
+        call: ".title(",
+        slot: PresentationSlot::VisibleLabel,
+        argument: 0,
+    },
+    CopyMarker {
+        call: ".description(",
+        slot: PresentationSlot::VisibleLabel,
+        argument: 0,
+    },
+    CopyMarker {
+        call: ".placeholder(",
+        slot: PresentationSlot::VisibleLabel,
+        argument: 0,
+    },
+    CopyMarker {
+        call: "Label::new(",
+        slot: PresentationSlot::VisibleText,
+        argument: 0,
+    },
+];
+
+/// The marker set this scan shipped with before it learned the visible-text
+/// constructors. It exists only so the mutation proof can show that the wider
+/// set is load-bearing: an installed review found narration that the three
+/// original markers could not see, which is why the repository-wide gate was
+/// green for the wrong reason.
+pub const LEGACY_COPY_MARKERS: &[CopyMarker] = &[
+    CopyMarker {
+        call: ".aria_label(",
+        slot: PresentationSlot::AccessibleName,
+        argument: 0,
+    },
+    CopyMarker {
+        call: "Tooltip::text(",
+        slot: PresentationSlot::Tooltip,
+        argument: 0,
+    },
+    CopyMarker {
+        call: ".child(",
+        slot: PresentationSlot::VisibleLabel,
+        argument: 0,
+    },
+];
 
 /// One user-facing string literal found in Omega-owned source.
 #[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord)]
@@ -722,28 +838,40 @@ pub struct CopyOffense {
 /// fixtures are not shipped chrome.
 #[must_use]
 pub fn scan_presentation_copy(file: &str, source: &str) -> Vec<PresentationString> {
+    scan_presentation_copy_with(file, source, COPY_MARKERS)
+}
+
+/// Extract user-facing string literals using an explicit marker set.
+///
+/// Only the repository gate should choose a marker set other than
+/// `COPY_MARKERS`; the parameter exists so the mutation proof can demonstrate
+/// that a narrower set fails to see narration the wider set refuses.
+#[must_use]
+pub fn scan_presentation_copy_with(
+    file: &str,
+    source: &str,
+    markers: &[CopyMarker],
+) -> Vec<PresentationString> {
     let shipped = &source[..shipped_source_length(source)];
     let mut found = Vec::new();
-    for slot in [
-        PresentationSlot::AccessibleName,
-        PresentationSlot::Tooltip,
-        PresentationSlot::VisibleLabel,
-    ] {
-        let marker = slot.marker();
+    for marker in markers {
         let mut search = 0;
-        while let Some(offset) = shipped[search..].find(marker) {
-            let after = search + offset + marker.len();
+        while let Some(offset) = shipped[search..].find(marker.call) {
+            let after = search + offset + marker.call.len();
             search = after;
-            let rest = shipped[after..].trim_start();
+            let Some(rest) = skip_literal_arguments(&shipped[after..], marker.argument) else {
+                continue;
+            };
+            let rest = rest.trim_start();
             if !rest.starts_with('"') {
                 continue;
             }
-            let Some(text) = decode_rust_string_literal(&rest[1..]) else {
+            let Some((text, _)) = decode_rust_string_literal(&rest[1..]) else {
                 continue;
             };
             found.push(PresentationString {
                 file: file.to_string(),
-                slot,
+                slot: marker.slot,
                 text,
             });
         }
@@ -751,6 +879,21 @@ pub fn scan_presentation_copy(file: &str, source: &str) -> Vec<PresentationStrin
     found.sort();
     found.dedup();
     found
+}
+
+/// Advance past `count` leading string-literal arguments and their commas.
+///
+/// Returns `None` when a leading argument is not a plain string literal, which
+/// is how `Button::new(some_id, "Label")` is skipped rather than misread.
+fn skip_literal_arguments(mut rest: &str, count: usize) -> Option<&str> {
+    for _ in 0..count {
+        rest = rest.trim_start();
+        let body = rest.strip_prefix('"')?;
+        let (_, consumed) = decode_rust_string_literal(body)?;
+        rest = body.get(consumed + 1..)?.trim_start();
+        rest = rest.strip_prefix(',')?;
+    }
+    Some(rest)
 }
 
 /// Length of the shipped prefix of a source file, excluding a trailing
@@ -784,21 +927,35 @@ fn shipped_source_length(source: &str) -> usize {
 }
 
 /// Decode a Rust string literal body that starts immediately after the opening
-/// quote. Returns `None` when the literal is unterminated.
-fn decode_rust_string_literal(body: &str) -> Option<String> {
+/// quote. Returns the decoded text and the byte offset of the closing quote
+/// within `body`, or `None` when the literal is unterminated.
+///
+/// A backslash before a newline is Rust's line continuation: it removes the
+/// newline and the indentation that follows. Wrapped chrome must decode to the
+/// exact rendered string, otherwise a lint offense and an allowlist entry would
+/// never compare equal.
+fn decode_rust_string_literal(body: &str) -> Option<(String, usize)> {
     let mut decoded = String::new();
-    let mut characters = body.chars();
-    while let Some(character) = characters.next() {
+    let mut characters = body.char_indices().peekable();
+    while let Some((index, character)) = characters.next() {
         match character {
-            '"' => return Some(decoded),
+            '"' => return Some((decoded, index)),
             '\\' => {
-                let escaped = characters.next()?;
-                decoded.push(match escaped {
-                    'n' => '\n',
-                    't' => '\t',
-                    'r' => '\r',
-                    other => other,
-                });
+                let (_, escaped) = characters.next()?;
+                match escaped {
+                    'n' => decoded.push('\n'),
+                    't' => decoded.push('\t'),
+                    'r' => decoded.push('\r'),
+                    '\n' => {
+                        while characters
+                            .peek()
+                            .is_some_and(|(_, next)| *next == ' ' || *next == '\t')
+                        {
+                            characters.next();
+                        }
+                    }
+                    other => decoded.push(other),
+                }
             }
             other => decoded.push(other),
         }
@@ -1276,6 +1433,120 @@ mod tests {
                 },
             ]
         );
+    }
+
+    /// Falsifier for the visible-text extension.
+    ///
+    /// An installed review found that `Label::new` — the constructor that
+    /// carries most Omega copy — was never scanned, so the repository gate was
+    /// green because it was reading the wrong slot. This narration is invisible
+    /// to the marker set that shipped before the extension and refused by the
+    /// one that shipped after. If both halves ever agree, the extension has
+    /// stopped being load-bearing and must not land green.
+    #[test]
+    fn label_narration_is_invisible_to_the_previous_marker_set() {
+        const FIXTURE_FILE: &str = "crates/omega_example/src/example.rs";
+        const FIXTURE: &str = r#"
+fn render() {
+    v_flex().child(
+        Label::new(
+            "Read-only file traversal using the configured model. Source and tool limitations remain visible.",
+        ),
+    )
+}
+"#;
+        let empty = CopyAllowlist {
+            schema: COPY_ALLOWLIST_SCHEMA.into(),
+            entries: Vec::new(),
+        };
+
+        let before = scan_presentation_copy_with(FIXTURE_FILE, FIXTURE, LEGACY_COPY_MARKERS);
+        assert!(
+            before
+                .iter()
+                .all(|string| !string.text.contains("Read-only")),
+            "mutation proof inverted: the previous marker set already saw the narration"
+        );
+        assert!(
+            lint_presentation_copy(&before, &empty).is_empty(),
+            "mutation proof inverted: the previous marker set already refused the narration"
+        );
+
+        let after = scan_presentation_copy_with(FIXTURE_FILE, FIXTURE, COPY_MARKERS);
+        let offenses = lint_presentation_copy(&after, &empty);
+        assert_eq!(offenses.len(), 1, "unexpected offenses: {offenses:?}");
+        assert_eq!(offenses[0].string.slot, PresentationSlot::VisibleText);
+        assert!(offenses[0].detail.contains("more than one sentence"));
+    }
+
+    /// Every marker must actually extract its argument. A marker added to the
+    /// table without working extraction would silently widen the contract's
+    /// claimed coverage while changing nothing.
+    #[test]
+    fn every_marker_extracts_its_user_facing_argument() {
+        const NARRATION: &str = "Narrated one. Narrated two.";
+        for marker in COPY_MARKERS {
+            let mut call = String::from("fn render() { subject");
+            call.push_str(marker.call);
+            for index in 0..marker.argument {
+                call.push_str(&format!("\"leading-argument-{index}\", "));
+            }
+            call.push_str(&format!("\"{NARRATION}\") }}"));
+            let found = scan_presentation_copy("crates/omega_example/src/example.rs", &call);
+            assert!(
+                found
+                    .iter()
+                    .any(|string| string.text == NARRATION && string.slot == marker.slot),
+                "marker `{}` extracts no user-facing literal from `{call}`",
+                marker.call
+            );
+        }
+    }
+
+    /// `Button::new("id", "Label")` must yield the label, never the element id.
+    #[test]
+    fn leading_identifier_arguments_are_not_read_as_copy() {
+        let found = scan_presentation_copy(
+            "crates/omega_example/src/example.rs",
+            r#"fn render() { Button::new("omega.forensics.entropy.start", "Run entropy scan") }"#,
+        );
+        assert_eq!(
+            found,
+            vec![PresentationString {
+                file: "crates/omega_example/src/example.rs".into(),
+                slot: PresentationSlot::VisibleLabel,
+                text: "Run entropy scan".into(),
+            }]
+        );
+    }
+
+    /// Wrapped chrome must decode to the string the surface renders, otherwise
+    /// an offense and its allowlist entry can never compare equal.
+    #[test]
+    fn wrapped_literals_decode_to_the_rendered_string() {
+        let found = scan_presentation_copy(
+            "crates/omega_example/src/example.rs",
+            "fn render() {\n    Label::new(\n        \"Anyone with this key controls your Omega \\\n         identity.\",\n    )\n}\n",
+        );
+        assert_eq!(
+            found
+                .iter()
+                .map(|string| string.text.as_str())
+                .collect::<Vec<_>>(),
+            vec!["Anyone with this key controls your Omega identity."]
+        );
+    }
+
+    /// A file name or a version number is not a sentence boundary. Treating one
+    /// as exposition would push real menu labels onto the allowlist.
+    #[test]
+    fn terminators_without_separation_are_not_sentence_boundaries() {
+        assert!(!is_multi_sentence("Open Project Rules (AGENTS.md)"));
+        assert!(!is_multi_sentence("v0.2.0"));
+        assert!(!is_multi_sentence("openagents.com"));
+        assert!(is_multi_sentence(
+            "Title generation failed. Click to retry."
+        ));
     }
 
     #[test]
