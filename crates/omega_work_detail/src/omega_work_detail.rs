@@ -479,6 +479,8 @@ pub fn default_blocks(item: &WorkIndexItem) -> Result<Vec<WorkBlock>, WorkDetail
     let work_ref = item.summary.work_ref.clone();
     let source_ref = item.summary.source_authority.source_ref.clone();
     let mut kinds = Vec::new();
+    // What the SOURCE ENTITY can show. A thread has a conversation; a security
+    // case has a review. These are affordances of the entity, not of a domain.
     match &item.source_entity {
         WorkSourceEntity::Thread { .. } => {
             kinds.extend([WorkBlockKind::Conversation, WorkBlockKind::Log]);
@@ -491,6 +493,7 @@ pub fn default_blocks(item: &WorkIndexItem) -> Result<Vec<WorkBlock>, WorkDetail
                 WorkBlockKind::Receipt,
             ]);
         }
+        WorkSourceEntity::RuntimeService { .. } => {}
         WorkSourceEntity::EffectWork { .. } => {
             kinds.extend([
                 WorkBlockKind::Plan,
@@ -498,6 +501,19 @@ pub fn default_blocks(item: &WorkIndexItem) -> Result<Vec<WorkBlock>, WorkDetail
                 WorkBlockKind::Artifact,
                 WorkBlockKind::Receipt,
             ]);
+        }
+    }
+    // What the WORK DOMAIN admits. A domain that operates a service always has
+    // health to show, whatever entity carries it, so a new domain of that shape
+    // needs no new arm above.
+    if item
+        .profile()
+        .declares_field(omega_work_index::WorkDomainField::ServiceHealth)
+    {
+        for kind in [WorkBlockKind::Metric, WorkBlockKind::Log] {
+            if !kinds.contains(&kind) {
+                kinds.push(kind);
+            }
         }
     }
     kinds
@@ -1798,6 +1814,37 @@ mod tests {
                 thread_ref: "abc".to_string(),
             },
         }
+    }
+
+    #[test]
+    fn an_unspecified_domain_does_not_claim_a_capability_the_product_has_not_specified() {
+        // omega#215. Block composition reads what a domain DECLARES, not what
+        // it merely admits. An unspecified domain admits every field so that a
+        // missing table row cannot refuse real Work — but that permissiveness
+        // must never be read as a capability, or every unprofiled domain would
+        // silently grow a service-health surface it has no source for.
+        let mut unspecified = item(false);
+        unspecified.summary.domain = WorkDomain::Incident;
+        unspecified.summary.work_ref = work("work:omega:effect:incident-1");
+        unspecified.source_entity = WorkSourceEntity::EffectWork {
+            work_ref: "work:omega:effect:incident-1".into(),
+        };
+        unspecified.summary.source_authority.kind = SourceAuthorityKind::EffectService;
+        assert!(
+            unspecified
+                .profile()
+                .admits_field(omega_work_index::WorkDomainField::ServiceHealth),
+            "an unspecified domain must not refuse Work that carries a field"
+        );
+        let kinds = default_blocks(&unspecified)
+            .expect("default Blocks")
+            .into_iter()
+            .map(|block| block.kind)
+            .collect::<Vec<_>>();
+        assert!(
+            !kinds.contains(&WorkBlockKind::Metric),
+            "an unspecified domain must not claim a service-health Block: {kinds:?}"
+        );
     }
 
     fn detail(writable: bool) -> WorkDetail {

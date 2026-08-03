@@ -115,6 +115,11 @@ impl WorkDetailSurface {
             .then(|| self.detail.participation_journal())
     }
 
+    /// The Blocks this surface is rendering, in order.
+    pub fn blocks(&self) -> &[omega_work_detail::WorkBlock] {
+        self.detail.blocks()
+    }
+
     pub fn snapshot(&self) -> &WorkSnapshot {
         self.detail.snapshot()
     }
@@ -1488,8 +1493,13 @@ impl EventEmitter<WorkDetailSurfaceEvent> for WorkDetailSurface {}
 fn render_block_card(block: &WorkBlock, cx: &App) -> AnyElement {
     let colors = cx.theme().colors();
     let visible_fact_count = block.facts.len().min(96);
+    let block_selector = SharedString::from(format!(
+        "omega.omega.work-detail.block.{}",
+        block.kind.label().to_lowercase().replace(' ', "-")
+    ));
     v_flex()
         .id(format!("omega-work-block-content-{}", block.block_ref.0))
+        .debug_selector(move || block_selector.to_string())
         .min_h(px(112.))
         .rounded_lg()
         .border_1()

@@ -236,6 +236,7 @@
   - [Omega repository work claims](./development/omega-repository-work-claims.md)
   - [Omega signed Workroom projection](./development/omega-signed-workroom.md)
   - [Omega planning views](./development/omega-planning-views.md)
+  - [Omega Work Domains](./development/omega-work-domains.md)
   - [Omega Work Index](./development/omega-work-index.md)
   - [Omega Work and Issue detail](./development/omega-work-detail.md)
   - [Omega Security Work](./development/omega-security-work.md)

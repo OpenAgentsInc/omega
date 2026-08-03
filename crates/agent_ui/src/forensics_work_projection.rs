@@ -411,7 +411,9 @@ fn project_relations(
             });
             push_run_ref(links, run_ref);
         }
-        WorkSourceEntity::Thread { .. } | WorkSourceEntity::EffectWork { .. } => {}
+        WorkSourceEntity::Thread { .. }
+        | WorkSourceEntity::RuntimeService { .. }
+        | WorkSourceEntity::EffectWork { .. } => {}
     }
     Ok(())
 }

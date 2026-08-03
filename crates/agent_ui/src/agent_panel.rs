@@ -1,5 +1,6 @@
 use std::{
     cell::Cell,
+    collections::BTreeMap,
     fmt,
     path::{Path, PathBuf},
     rc::Rc,
@@ -4325,6 +4326,25 @@ pub struct AgentPanel {
     _work_index_thread_observation: Subscription,
     _work_index_effect_refresh: Option<Task<()>>,
     _work_index_persist: Option<Task<()>>,
+    /// Exactly what this process has observed about the language services it
+    /// operates, keyed by the Work identity the Operations domain publishes.
+    ///
+    /// The language store broadcasts binary lifecycle and health as events and
+    /// keeps neither, so the panel has to retain the last observation to have
+    /// anything exact to project. An absent entry means "not observed", never
+    /// "healthy".
+    runtime_service_observations:
+        BTreeMap<String, crate::runtime_service_work_projection::LanguageServiceObservation>,
+    /// The last binary lifecycle status the language registry broadcast, by
+    /// service name.
+    runtime_service_binary_status: HashMap<String, language::BinaryStatus>,
+    /// The last health a running server reported, by server id.
+    runtime_service_health:
+        HashMap<lsp::LanguageServerId, (language::ServerHealth, Option<String>)>,
+    /// A monotonic observation counter. Operations Work has no source revision
+    /// of its own: what advances is how many times this window looked.
+    runtime_service_revision: u64,
+    _runtime_service_observation: Option<Subscription>,
     dogfood_fixture: Option<DogfoodPlanningViewModel>,
     dogfood_surface: Option<Entity<DogfoodSurface>>,
     _dogfood_surface_subscription: Option<Subscription>,
@@ -5105,6 +5125,11 @@ impl AgentPanel {
             _work_index_thread_observation,
             _work_index_effect_refresh: None,
             _work_index_persist: None,
+            runtime_service_observations: BTreeMap::new(),
+            runtime_service_binary_status: HashMap::default(),
+            runtime_service_health: HashMap::default(),
+            runtime_service_revision: 0,
+            _runtime_service_observation: None,
             dogfood_fixture,
             dogfood_surface: None,
             _dogfood_surface_subscription: None,
@@ -5172,6 +5197,7 @@ impl AgentPanel {
         panel.observe_identity_backup_nudge(cx);
         panel.observe_effective_principal(cx);
         panel.refresh_native_work_index(cx);
+        panel.observe_runtime_services(cx);
         panel.refresh_effect_work_index(cx);
         panel.load_public_channels(cx);
         panel
@@ -5635,6 +5661,150 @@ impl AgentPanel {
                 executor.timer(std::time::Duration::from_secs(3)).await;
             }
         }));
+    }
+
+    /// Watch the language services this window operates.
+    ///
+    /// The store broadcasts binary lifecycle and health once and keeps neither,
+    /// so this retains the last observation. Without it the Operations domain
+    /// could only ever report that a service exists, never that it broke.
+    fn observe_runtime_services(&mut self, cx: &mut Context<Self>) {
+        let lsp_store = self.project.read(cx).lsp_store();
+        self._runtime_service_observation =
+            Some(cx.subscribe(&lsp_store, |this, _lsp_store, event, cx| {
+                if this.record_runtime_service_event(event) {
+                    this.refresh_runtime_service_work_index(cx);
+                }
+            }));
+        self.refresh_runtime_service_work_index(cx);
+    }
+
+    /// Retain one exact language-service observation.
+    ///
+    /// Returns whether the Operations projection needs to be rebuilt. An event
+    /// that carries no operational fact must not churn the Work Index.
+    fn record_runtime_service_event(&mut self, event: &project::LspStoreEvent) -> bool {
+        match event {
+            project::LspStoreEvent::LanguageServerAdded(..)
+            | project::LspStoreEvent::LanguageServerRemoved(..)
+            | project::LspStoreEvent::DiskBasedDiagnosticsStarted { .. }
+            | project::LspStoreEvent::DiskBasedDiagnosticsFinished { .. } => true,
+            project::LspStoreEvent::LanguageServerUpdate {
+                language_server_id,
+                name,
+                message: proto::update_language_server::Variant::StatusUpdate(status),
+            } => match &status.status {
+                Some(proto::status_update::Status::Binary(binary)) => {
+                    let Some(name) = name.as_ref() else {
+                        return false;
+                    };
+                    let Some(binary) =
+                        crate::runtime_service_work_projection::binary_status_from_proto(
+                            status, *binary,
+                        )
+                    else {
+                        return false;
+                    };
+                    self.runtime_service_binary_status
+                        .insert(name.0.to_string(), binary);
+                    true
+                }
+                Some(proto::status_update::Status::Health(health)) => {
+                    let Some(health) =
+                        crate::runtime_service_work_projection::health_from_proto(status, *health)
+                    else {
+                        return false;
+                    };
+                    self.runtime_service_health
+                        .insert(*language_server_id, health);
+                    true
+                }
+                None => false,
+            },
+            _ => false,
+        }
+    }
+
+    /// Project the language services this window operates as Operations Work.
+    ///
+    /// This is a local, in-process observation. It does not reach
+    /// `omega-effectd`, so it is the one Work Domain that can populate a lane
+    /// without a serving All Work component.
+    fn refresh_runtime_service_work_index(&mut self, cx: &mut Context<Self>) {
+        self.runtime_service_revision = self.runtime_service_revision.saturating_add(1);
+        let revision = self.runtime_service_revision;
+        let observed_at = chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Millis, true);
+        self.runtime_service_observations = self.collect_runtime_service_observations(cx);
+        let records = crate::runtime_service_work_projection::language_service_records(
+            &self.runtime_service_observations,
+            &observed_at,
+            revision,
+        );
+        // An empty observation is applied, not skipped. It is how a restored
+        // snapshot's stale service rows — whose processes died with the last
+        // session — are replaced at startup, and an empty lane never counts
+        // toward the index's two-authority admission.
+        let items = records
+            .into_iter()
+            .map(omega_work_index::adapt_runtime_service)
+            .collect::<Result<Vec<_>, _>>();
+        match items {
+            Ok(items) => {
+                if let Err(error) = self.work_index.apply_native_items(
+                    omega_work_index::RUNTIME_SERVICE_ADAPTER_ID,
+                    omega_work_index::RUNTIME_SERVICE_ADAPTER_ID,
+                    items,
+                    observed_at,
+                    revision,
+                ) {
+                    self.work_index.fail_refresh(
+                        omega_work_index::RUNTIME_SERVICE_ADAPTER_ID,
+                        error.to_string(),
+                        false,
+                    );
+                }
+            }
+            Err(error) => {
+                self.work_index.fail_refresh(
+                    omega_work_index::RUNTIME_SERVICE_ADAPTER_ID,
+                    error.to_string(),
+                    false,
+                );
+            }
+        }
+        // Not persisted: a snapshot of which services were running last week
+        // is not an observation of anything, and this refresh runs at startup.
+        self.publish_work_index(false, cx);
+    }
+
+    fn collect_runtime_service_observations(
+        &self,
+        cx: &App,
+    ) -> BTreeMap<String, crate::runtime_service_work_projection::LanguageServiceObservation> {
+        use crate::runtime_service_work_projection::language_service_ref;
+
+        let project = self.project.read(cx);
+        let mut observations = BTreeMap::new();
+        for (server_id, status) in project.language_server_statuses(cx) {
+            let name = status.name.0.to_string();
+            let scope = status
+                .worktree
+                .and_then(|worktree_id| project.worktree_for_id(worktree_id, cx))
+                .map(|worktree| worktree.read(cx).root_name_str().to_string());
+            let Some(service_ref) = language_service_ref(&name, scope.as_deref()) else {
+                continue;
+            };
+            observations.insert(
+                service_ref,
+                crate::runtime_service_work_projection::observation_from_language_server_status(
+                    status,
+                    scope,
+                    self.runtime_service_binary_status.get(&name).cloned(),
+                    self.runtime_service_health.get(&server_id).cloned(),
+                ),
+            );
+        }
+        observations
     }
 
     fn refresh_native_work_index(&mut self, cx: &mut Context<Self>) {
@@ -19948,6 +20118,7 @@ impl AgentPanel {
             WorkSourceEntity::Thread { thread_ref } => OmegaRoute::thread(thread_ref.clone()),
             WorkSourceEntity::ForensicsCase { .. }
             | WorkSourceEntity::ForensicsRun { .. }
+            | WorkSourceEntity::RuntimeService { .. }
             | WorkSourceEntity::EffectWork { .. } => OmegaRoute::work(item.work_ref(), None),
         };
         let Ok(route) = route else {
@@ -19999,7 +20170,9 @@ impl AgentPanel {
                     cx,
                 );
             }
-            WorkSourceEntity::EffectWork { .. } => {}
+            // An operated service has no second destination to open: the Work
+            // detail already carries every exact fact this window observed.
+            WorkSourceEntity::RuntimeService { .. } | WorkSourceEntity::EffectWork { .. } => {}
         }
     }
 
@@ -20192,6 +20365,21 @@ impl AgentPanel {
                     }
                 }
             }
+            WorkSourceEntity::RuntimeService { .. } => {
+                let observation = self
+                    .runtime_service_observations
+                    .get(item.source_ref().trim_start_matches("service:omega:"));
+                match crate::runtime_service_work_projection::project_runtime_service_work(
+                    &item,
+                    observation,
+                ) {
+                    Ok(blocks) => projected_blocks = Some(blocks),
+                    Err(error) => {
+                        log::error!("could not project Operations Work: {error}");
+                        return false;
+                    }
+                }
+            }
             WorkSourceEntity::EffectWork { .. } => {}
         }
         let snapshot = match snapshot_from_index_item(&item, links) {
@@ -20322,8 +20510,11 @@ impl AgentPanel {
                         host_ref,
                     })
                 }),
+            // Nobody delegates an operated service to an agent: the Operations
+            // profile admits no agent delegate at all.
             WorkSourceEntity::ForensicsCase { .. }
             | WorkSourceEntity::ForensicsRun { .. }
+            | WorkSourceEntity::RuntimeService { .. }
             | WorkSourceEntity::EffectWork { .. } => None,
         };
         let surface = cx.new(|cx| {
@@ -31710,6 +31901,211 @@ mod tests {
             assert_eq!(
                 panel.workbench_shell.focus_target(),
                 workbench_shell::WorkbenchFocusTarget::Transcript
+            );
+        });
+    }
+
+    #[gpui::test]
+    async fn a_second_work_domain_reaches_the_shell_without_a_serving_all_work_component(
+        cx: &mut TestAppContext,
+    ) {
+        // omega#215. The Work section requires two native authorities with real
+        // rows. Before this domain existed, a window with threads and no
+        // Security case had exactly one, so nothing in the Work Index was ever
+        // reachable. Operations is observed in-process, so it does not wait on
+        // `omega-effectd` to serve All Work.
+        let (panel, mut cx) = setup_visible_panel(cx).await;
+        panel.update_in(&mut cx, |panel, window, cx| {
+            panel.force_omega_primary_interface_for_tests = true;
+            panel.new_thread(&NewThread, window, cx);
+        });
+        cx.run_until_parked();
+
+        panel.update(&mut cx, |panel, cx| {
+            let observed_at = "2026-08-02T12:00:00.000Z".to_string();
+            let thread_ref = panel
+                .active_thread_id(cx)
+                .expect("active Thread fixture")
+                .to_key_string();
+            let thread = adapt_thread(NativeThreadRecord {
+                thread_ref,
+                title: "A native thread".into(),
+                updated_at: observed_at.clone(),
+                observed_at: observed_at.clone(),
+                revision: 1,
+                archived: false,
+                lifecycle: NativeThreadLifecycle::Running,
+                assignee: None,
+                agent_delegate: None,
+            })
+            .expect("valid native Thread fixture");
+            panel
+                .work_index
+                .apply_native_items(
+                    THREAD_ADAPTER_ID,
+                    THREAD_ADAPTER_ID,
+                    vec![thread],
+                    observed_at,
+                    1,
+                )
+                .expect("Thread projection qualifies");
+            panel.publish_work_index(false, cx);
+        });
+        cx.run_until_parked();
+        assert!(
+            cx.debug_bounds("omega.omega.sidebar.inbox").is_none(),
+            "one authority must not admit Work navigation"
+        );
+
+        // The same projection the panel runs against a live language server.
+        let broken =
+            crate::runtime_service_work_projection::observation_from_language_server_status(
+                &{
+                    let mut status = project::LanguageServerStatus {
+                        name: lsp::LanguageServerName("rust-analyzer".to_string().into()),
+                        language_name: None,
+                        server_version: None,
+                        server_readable_version: Some("1.2.3".into()),
+                        pending_work: BTreeMap::new(),
+                        has_pending_diagnostic_updates: false,
+                        progress_tokens: Default::default(),
+                        worktree: None,
+                        binary: None,
+                        configuration: None,
+                        workspace_folders: Default::default(),
+                        process_id: Some(4321),
+                    };
+                    status.has_pending_diagnostic_updates = true;
+                    status
+                },
+                Some("omega".into()),
+                None,
+                Some((
+                    language::ServerHealth::Error,
+                    Some("workspace load failed".into()),
+                )),
+            );
+        let service_ref = crate::runtime_service_work_projection::language_service_ref(
+            &broken.name,
+            broken.scope.as_deref(),
+        )
+        .expect("a stable Operations identity");
+        panel.update(&mut cx, |panel, cx| {
+            panel
+                .runtime_service_observations
+                .insert(service_ref.clone(), broken.clone());
+            let record = crate::runtime_service_work_projection::project_language_service(
+                &broken,
+                "2026-08-02T12:00:01.000Z",
+                1,
+            )
+            .expect("a projected Operations record");
+            let item = omega_work_index::adapt_runtime_service(record)
+                .expect("an admitted Operations row");
+            panel
+                .work_index
+                .apply_native_items(
+                    omega_work_index::RUNTIME_SERVICE_ADAPTER_ID,
+                    omega_work_index::RUNTIME_SERVICE_ADAPTER_ID,
+                    vec![item],
+                    "2026-08-02T12:00:01.000Z".into(),
+                    1,
+                )
+                .expect("Operations projection qualifies");
+            panel.publish_work_index(false, cx);
+        });
+        cx.run_until_parked();
+
+        assert!(
+            cx.debug_bounds("omega.omega.sidebar.work").is_some(),
+            "a second Work Domain admits the Work section"
+        );
+        assert!(cx.debug_bounds("omega.omega.sidebar.inbox").is_some());
+        assert!(cx.debug_bounds("omega.omega.sidebar.my-work").is_some());
+
+        panel.update_in(&mut cx, |panel, window, cx| {
+            assert!(panel.open_work_index(WorkIndexView::Inbox, true, window, cx));
+        });
+        cx.run_until_parked();
+        assert!(cx.debug_bounds("omega.omega.work-index.inbox").is_some());
+
+        // The unavailable service is the Inbox row: urgency is observed, and no
+        // priority was declared anywhere in this domain.
+        let operations_work_ref = panel.read_with(&cx, |panel, _cx| {
+            let inbox = panel.work_index.query(&omega_work_index::WorkIndexQuery {
+                view: WorkIndexView::Inbox,
+                ..Default::default()
+            });
+            let row = inbox
+                .into_iter()
+                .find(|item| {
+                    matches!(
+                        item.source_entity,
+                        omega_work_index::WorkSourceEntity::RuntimeService { .. }
+                    )
+                })
+                .expect("an unavailable operated service reaches the shared Inbox");
+            assert_eq!(
+                row.summary.priority,
+                omega_effectd::all_work_contract::WorkPriority::None
+            );
+            assert_eq!(row.profile().label, "Operations");
+            row.work_ref().to_string()
+        });
+
+        // Opening the row is the same path a person takes from the Inbox.
+        panel.update_in(&mut cx, |panel, window, cx| {
+            let item = panel
+                .work_index
+                .item(&operations_work_ref)
+                .expect("the Operations row");
+            panel.open_work_index_item(item, window, cx);
+        });
+        cx.run_until_parked();
+        // The Blocks are asserted twice: that the surface drew a card for each
+        // one, and that the cards carry this domain's exact facts. The
+        // accessibility tree is not used here because the main pane is still
+        // missing from it (omega#217), so it would prove nothing either way.
+        assert!(
+            cx.debug_bounds("omega.omega.work-detail.block.lifecycle")
+                .is_some(),
+            "the Operations domain's lifecycle Block must render"
+        );
+        assert!(
+            cx.debug_bounds("omega.omega.work-detail.block.conversation")
+                .is_none(),
+            "an operated service has no conversation to show"
+        );
+        panel.read_with(&cx, |panel, cx| {
+            let blocks = panel
+                .omega_work_detail
+                .as_ref()
+                .expect("the Work detail surface")
+                .read(cx)
+                .blocks()
+                .to_vec();
+            assert_eq!(
+                blocks.iter().map(|block| block.kind).collect::<Vec<_>>(),
+                vec![
+                    omega_work_detail::WorkBlockKind::Lifecycle,
+                    omega_work_detail::WorkBlockKind::Metric
+                ],
+                "the Operations domain publishes its own Blocks through the shared shell"
+            );
+            let facts = blocks
+                .iter()
+                .flat_map(|block| &block.facts)
+                .map(|fact| fact.value.clone())
+                .collect::<Vec<_>>();
+            assert!(
+                facts.iter().any(|value| value == "Unavailable"),
+                "the domain's own state vocabulary must reach the card: {facts:?}"
+            );
+            assert!(
+                facts
+                    .iter()
+                    .any(|value| value.contains("workspace load failed")),
+                "the exact observation must reach the card: {facts:?}"
             );
         });
     }

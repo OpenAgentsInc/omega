@@ -13,7 +13,11 @@ The first native adapters are:
 
 - `omega.thread-metadata.v1` for durable Threads;
 - `omega.forensics-workbench.v1` for repository-bound Security cases and
-  source-owned runs.
+  source-owned runs;
+- `omega.runtime-services.v1` for the runtime services this Omega process
+  operates, in the Operations Work Domain. It is observed in-process, so it
+  qualifies without `omega-effectd` and without a repository-bound Security
+  case. See [Omega Work Domains](./omega-work-domains.md).
 
 `openagents.omega-effectd.v2` adds generated All Work summaries when the
 Effect service is available. The index stays read-only. The Work detail surface

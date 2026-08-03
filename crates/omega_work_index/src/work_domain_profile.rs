@@ -82,8 +82,21 @@ impl WorkDomainProfile {
         !self.specified || self.admitted_states.contains(state)
     }
 
+    /// May Work in this domain carry `field`?
+    ///
+    /// An unspecified domain has not narrowed anything, so it admits every
+    /// field. Use this to REFUSE, never to assert that a field is present.
     pub fn admits_field(&self, field: WorkDomainField) -> bool {
         !self.specified || self.admitted_fields.contains(&field)
+    }
+
+    /// Does this domain assert that `field` is part of its shape?
+    ///
+    /// Exact, and false for an unspecified domain. Use this to decide what a
+    /// surface should render, so an unfilled table row cannot silently claim a
+    /// capability the product has not specified.
+    pub fn declares_field(&self, field: WorkDomainField) -> bool {
+        self.specified && self.admitted_fields.contains(&field)
     }
 
     pub fn admitted_classes(&self) -> &'static [WorkClass] {

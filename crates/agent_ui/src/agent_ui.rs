@@ -72,6 +72,7 @@ pub mod omega_work_index_surface;
 pub mod organization_scope;
 pub mod plan_presentation;
 mod profile_selector;
+pub mod runtime_service_work_projection;
 mod terminal_codegen;
 mod terminal_inline_assistant;
 pub mod terminal_thread_metadata_store;
