@@ -193,6 +193,7 @@ impl OmegaEffectdSupervisor {
             ],
             requested_capabilities: vec![
                 AllWorkProtocolCapability::WorkIndexRead,
+                AllWorkProtocolCapability::WorkIndexSubscribe,
                 AllWorkProtocolCapability::WorkSnapshotRead,
                 AllWorkProtocolCapability::PlanningGraphRead,
                 AllWorkProtocolCapability::RepositoryClaimRead,

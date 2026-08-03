@@ -53,7 +53,20 @@ mod tests {
         );
         assert_eq!(
             source["sourceCommit"].as_str(),
-            Some("b4c7d8c45fbd7b2b5183234a3a50485e85b875b0")
+            Some("ffee612faa7a4b330a0cbb30de959114874bfb57")
+        );
+        assert!(
+            compatibility["protocol"]["methods"]
+                .as_array()
+                .expect("protocol methods")
+                .iter()
+                .any(|entry| {
+                    entry["method"] == "work.index.subscribe"
+                        && entry["capability"] == "work.index.subscribe"
+                        && entry["params"] == "WorkIndexSubscriptionRequest"
+                        && entry["result"] == "WorkIndexSubscriptionEvent"
+                }),
+            "generated compatibility manifest must expose Work Index subscriptions"
         );
         assert!(
             compatibility["protocol"]["methods"]

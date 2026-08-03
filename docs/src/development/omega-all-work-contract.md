@@ -9,10 +9,10 @@ adapter creates a second writable store.
 
 | Field                 | Value                                                              |
 | --------------------- | ------------------------------------------------------------------ |
-| OpenAgents commit     | `b4c7d8c45fbd7b2b5183234a3a50485e85b875b0`                         |
+| OpenAgents commit     | `ffee612faa7a4b330a0cbb30de959114874bfb57`                         |
 | Contract              | `openagents.all_work_boundary.v1`                                  |
-| Definition SHA-256    | `012a5962bc2bea70792014f5b375d78b7afef2bee15408489a729278c641508b` |
-| Rust artifact SHA-256 | `7a8e88104a1f452de1d18028def0d4d8a24ab517ee3848e035307fa17f638e43` |
+| Definition SHA-256    | `df850124a53029e549f4f8281c77ee9d8c583e617d2adcc36f0be7abe8bca654` |
+| Rust artifact SHA-256 | `ecb0ebf3f237a48b50f76b54c2785abcb76e041145c47fce273f22af5f28faa7` |
 | Omega receipt         | `crates/omega_effectd/all-work-contract/SOURCE.json`               |
 
 The generated Rust file, compatibility manifest, and shared fixtures are
@@ -20,9 +20,10 @@ vendored together. `script/sync-all-work-contract` refuses a source checkout
 that is not at the pinned commit, then verifies the Rust digest before it
 copies any file.
 
-The current pin includes the generated Rust empty-struct-variant repair. This
-keeps `Unassign {}` validation compilable without changing the All Work schema
-or its definition digest.
+The current pin includes the generated TypeScript client contract and the
+implemented Work Index subscription request and event variants. Omega vendors
+the matching Rust artifact and negotiates the subscription capability; the
+OpenAgents compatibility manifest also pins the TypeScript client digest.
 
 ## Protocol
 
@@ -31,11 +32,11 @@ clients continue to initialize. Its initialization payload negotiates a
 separate All Work profile:
 
 - an omitted All Work request selects `omega-effectd.v1` with no Work methods;
-- `omega-effectd.v2` enables `work.index.read`, `work.snapshot.read`,
-  `planning.graph.read`, `repository.claim.read`, and separately negotiated
-  claim execution, signed Workroom read/prepare/commit/delivery/publication, Work
-  command, and Work cutover, Organization membership read, and strict bug
-  candidate capabilities;
+- `omega-effectd.v2` enables `work.index.read`, `work.index.subscribe`,
+  `work.snapshot.read`, `planning.graph.read`, `repository.claim.read`, and
+  separately negotiated claim execution, signed Workroom
+  read/prepare/commit/delivery/publication, Work command, and Work cutover,
+  Organization membership read, and strict bug candidate capabilities;
 - a v1 client that calls any All Work read method receives
   `incompatible_version`;
 - request and result domain payloads use generated Rust and Effect types;
