@@ -1839,6 +1839,23 @@ impl PlatformWindow for MacWindow {
     }
 
     fn a11y_init(&self, callbacks: gpui::A11yCallbacks) {
+        // omega#233. AppKit resolves the application-level
+        // `kAXFocusedUIElement` through the key window, and `NSWindow`'s
+        // default answer is the unignored ancestor of the first responder.
+        // GPUI's first responder is `GPUIView`, a plain `NSView` that
+        // accessibility ignores, so that walk ends at the window itself and
+        // assistive technology is told the whole window has focus no matter
+        // which control actually does. AccessKit ships this patch for exactly
+        // this shape: it makes the window forward the question to its content
+        // view, which the adapter below has subclassed and which answers with
+        // the focused node. Done once per process, after the classes the
+        // module constructor registered.
+        static FORWARD_FOCUS_FROM_WINDOW_CLASSES: std::sync::Once = std::sync::Once::new();
+        FORWARD_FOCUS_FROM_WINDOW_CLASSES.call_once(|| unsafe {
+            accesskit_macos::add_focus_forwarder_to_window_class("GPUIWindow");
+            accesskit_macos::add_focus_forwarder_to_window_class("GPUIPanel");
+        });
+
         let mut lock = self.0.lock();
 
         let activation_handler = A11yActivationHandler {
@@ -1846,7 +1863,7 @@ impl PlatformWindow for MacWindow {
         };
         let action_handler = A11yActionHandler(callbacks.action);
 
-        let adapter = unsafe {
+        let mut adapter = unsafe {
             accesskit_macos::SubclassingAdapter::for_window(
                 lock.native_window as *mut c_void,
                 activation_handler,
@@ -1854,7 +1871,20 @@ impl PlatformWindow for MacWindow {
             )
         };
 
+        // omega#233. AccessKit activates lazily, so this adapter is usually
+        // built long after the window became key, and it starts out believing
+        // the view is unfocused. While it believes that, no node reports
+        // `AXFocused` and the focus forwarder above has nothing to hand back.
+        // `windowDidBecomeKey:` would correct it, but that has already been
+        // and gone, so seed it from the live state here.
+        let is_key = unsafe { lock.native_window.isKeyWindow() == YES };
+        let events = adapter.update_view_focus_state(is_key);
+
         lock.accesskit_adapter = Some(adapter);
+        drop(lock);
+        if let Some(events) = events {
+            events.raise();
+        }
     }
 
     fn a11y_tree_update(&self, tree_update: accesskit::TreeUpdate) {
