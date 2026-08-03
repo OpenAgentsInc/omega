@@ -11,8 +11,8 @@ use omega_work_index::DogfoodFixtureAdapter;
 use omega_work_index::{
     DOGFOOD_PROJECT_ID, DogfoodPlanningOrigin, DogfoodPlanningViewModel, FixtureIssue,
     FixtureIssueRelationKind, FixtureLifecycleType, FixturePriority, PlanningFilter, PlanningGroup,
-    PlanningSort, PlanningViewKind, PlanningViewQuery, SECURITY_PROJECT_ID, github_work_ref,
-    project_planning_view,
+    PlanningSavedView, PlanningSort, PlanningViewKind, PlanningViewQuery, SECURITY_PROJECT_ID,
+    github_work_ref, project_planning_view,
 };
 use serde::{Deserialize, Serialize};
 use ui::{Button, ButtonSize, ButtonStyle, Color, Icon, IconName, Label, LabelSize, prelude::*};
@@ -119,6 +119,7 @@ pub struct DogfoodSurface {
     work_command_error: Option<String>,
     work_command_busy: bool,
     agent_session_simulation_scene: AgentSessionSimulationScene,
+    saved_view: PlanningSavedView,
     filter: PlanningFilter,
     group: PlanningGroup,
     sort: PlanningSort,
@@ -130,6 +131,8 @@ struct PersistedDogfoodSurfaceState {
     project_id: String,
     selected_issue_id: String,
     scene: DogfoodScene,
+    #[serde(default)]
+    saved_view: PlanningSavedView,
     #[serde(default)]
     filter: PlanningFilter,
     #[serde(default)]
@@ -166,6 +169,7 @@ impl DogfoodSurface {
             work_command_error: None,
             work_command_busy: false,
             agent_session_simulation_scene: AgentSessionSimulationScene::Pending,
+            saved_view: state.saved_view,
             filter: state.filter,
             group: state.group,
             sort: state.sort,
@@ -354,6 +358,7 @@ impl DogfoodSurface {
         PlanningViewQuery {
             organization_id: self.fixture.graph.organization.id.clone(),
             project_id: self.project_id.clone(),
+            saved_view: self.saved_view,
             filter: self.filter,
             group: self.group,
             sort: self.sort,
@@ -378,6 +383,12 @@ impl DogfoodSurface {
 
     fn set_filter(&mut self, filter: PlanningFilter, cx: &mut Context<Self>) {
         self.filter = filter;
+        self.save_state(cx);
+        cx.notify();
+    }
+
+    fn set_saved_view(&mut self, saved_view: PlanningSavedView, cx: &mut Context<Self>) {
+        self.saved_view = saved_view;
         self.save_state(cx);
         cx.notify();
     }
@@ -476,6 +487,7 @@ impl DogfoodSurface {
             project_id: self.project_id.clone(),
             selected_issue_id: self.selected_issue_id.clone(),
             scene: self.scene,
+            saved_view: self.saved_view,
             filter: self.filter,
             group: self.group,
             sort: self.sort,
@@ -640,6 +652,31 @@ impl DogfoodSurface {
                     .size(ButtonSize::Compact)
                     .on_click(cx.listener(move |this, _, _, cx| this.set_scene(scene, cx)))
             })))
+            .child(
+                h_flex()
+                    .gap_1()
+                    .flex_wrap()
+                    .child(
+                        Label::new("Saved views")
+                            .size(LabelSize::XSmall)
+                            .color(Color::Muted),
+                    )
+                    .children(PlanningSavedView::ALL.map(|saved_view| {
+                        Button::new(
+                            format!("planning-saved-view-{}", saved_view.key()),
+                            saved_view.label(),
+                        )
+                        .style(if self.saved_view == saved_view {
+                            ButtonStyle::Filled
+                        } else {
+                            ButtonStyle::Subtle
+                        })
+                        .size(ButtonSize::Compact)
+                        .on_click(cx.listener(move |this, _, _, cx| {
+                            this.set_saved_view(saved_view, cx)
+                        }))
+                    })),
+            )
             .child(
                 h_flex()
                     .gap_1()
@@ -1845,6 +1882,7 @@ fn default_fixture_state() -> PersistedDogfoodSurfaceState {
         project_id: DOGFOOD_PROJECT_ID.into(),
         selected_issue_id: "issue:omega:214".into(),
         scene: DogfoodScene::Overview,
+        saved_view: PlanningSavedView::All,
         filter: PlanningFilter::All,
         group: PlanningGroup::Lifecycle,
         sort: PlanningSort::SourceOrder,
@@ -2005,6 +2043,7 @@ mod tests {
         assert_eq!(state.project_id, DOGFOOD_PROJECT_ID);
         assert_eq!(state.selected_issue_id, "issue:omega:214");
         assert_eq!(state.scene, DogfoodScene::Overview);
+        assert_eq!(state.saved_view, PlanningSavedView::All);
     }
 
     #[test]
@@ -2025,6 +2064,7 @@ mod tests {
                 project_id: DOGFOOD_PROJECT_ID.into(),
                 selected_issue_id: "issue:omega:214".into(),
                 scene,
+                saved_view: PlanningSavedView::CriticalPath,
                 filter: PlanningFilter::Open,
                 group: PlanningGroup::Milestone,
                 sort: PlanningSort::Priority,
@@ -2035,11 +2075,26 @@ mod tests {
             project_id: SECURITY_PROJECT_ID.into(),
             selected_issue_id: "issue:omega:214".into(),
             scene: DogfoodScene::Issue,
+            saved_view: PlanningSavedView::All,
             filter: PlanningFilter::All,
             group: PlanningGroup::Lifecycle,
             sort: PlanningSort::SourceOrder,
         };
         assert!(!fixture_state_is_valid(&fixture, &invalid));
+    }
+
+    #[test]
+    fn older_persisted_query_defaults_to_all_work_saved_view() {
+        let state: PersistedDogfoodSurfaceState = serde_json::from_value(serde_json::json!({
+            "projectId": DOGFOOD_PROJECT_ID,
+            "selectedIssueId": "issue:omega:214",
+            "scene": "list",
+            "filter": "open",
+            "group": "lifecycle",
+            "sort": "source_order"
+        }))
+        .expect("backward-compatible saved state");
+        assert_eq!(state.saved_view, PlanningSavedView::All);
     }
 }
 use db::kvp::KeyValueStore;

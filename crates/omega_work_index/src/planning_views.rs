@@ -64,10 +64,64 @@ pub enum PlanningSort {
     Title,
 }
 
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum PlanningSavedView {
+    #[default]
+    All,
+    CriticalPath,
+    Unassigned,
+    Blocked,
+    AgentActive,
+    NeedsOwner,
+    InReview,
+    Verification,
+}
+
+impl PlanningSavedView {
+    pub const ALL: [Self; 8] = [
+        Self::All,
+        Self::CriticalPath,
+        Self::Unassigned,
+        Self::Blocked,
+        Self::AgentActive,
+        Self::NeedsOwner,
+        Self::InReview,
+        Self::Verification,
+    ];
+
+    pub const fn label(self) -> &'static str {
+        match self {
+            Self::All => "All Work",
+            Self::CriticalPath => "Critical path",
+            Self::Unassigned => "Unassigned",
+            Self::Blocked => "Blocked",
+            Self::AgentActive => "Agent active",
+            Self::NeedsOwner => "Needs owner",
+            Self::InReview => "In review",
+            Self::Verification => "Verification",
+        }
+    }
+
+    pub const fn key(self) -> &'static str {
+        match self {
+            Self::All => "all",
+            Self::CriticalPath => "critical-path",
+            Self::Unassigned => "unassigned",
+            Self::Blocked => "blocked",
+            Self::AgentActive => "agent-active",
+            Self::NeedsOwner => "needs-owner",
+            Self::InReview => "in-review",
+            Self::Verification => "verification",
+        }
+    }
+}
+
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct PlanningViewQuery {
     pub organization_id: String,
     pub project_id: String,
+    pub saved_view: PlanningSavedView,
     pub filter: PlanningFilter,
     pub group: PlanningGroup,
     pub sort: PlanningSort,
@@ -149,6 +203,7 @@ pub fn project_planning_view(
         .iter()
         .enumerate()
         .filter(|(_, issue)| issue.project_id == query.project_id)
+        .filter(|(_, issue)| saved_view_matches(model, issue, query.saved_view))
         .filter(|(_, issue)| filter_matches(model, issue, query.filter))
         .filter(|(_, issue)| {
             search.is_empty()
@@ -186,6 +241,33 @@ pub fn project_planning_view(
         groups,
         source_revision: model.revision,
         event_cursor: model.event_cursor.clone(),
+    }
+}
+
+fn saved_view_matches(
+    model: &DogfoodPlanningViewModel,
+    issue: &FixtureIssue,
+    saved_view: PlanningSavedView,
+) -> bool {
+    match saved_view {
+        PlanningSavedView::All => true,
+        PlanningSavedView::CriticalPath => {
+            issue.release_planning_record_id.is_some()
+                || model.graph.issue_relations.iter().any(|relation| {
+                    relation.issue_id == issue.id
+                        && relation.kind == crate::FixtureIssueRelationKind::Blocks
+                })
+        }
+        PlanningSavedView::Unassigned => issue.assignee_user_id.is_none(),
+        PlanningSavedView::Blocked => model.graph.issue_relations.iter().any(|relation| {
+            relation.related_issue_id == issue.id
+                && relation.kind == crate::FixtureIssueRelationKind::Blocks
+        }),
+        // An Agent Session reference alone does not prove an active state, and
+        // an Owner Disposition reference alone does not prove needs-owner.
+        PlanningSavedView::AgentActive | PlanningSavedView::NeedsOwner => false,
+        PlanningSavedView::InReview => issue.workflow_state_id == "workflow:in-review",
+        PlanningSavedView::Verification => issue.workflow_state_id == "workflow:verification",
     }
 }
 
@@ -290,6 +372,7 @@ mod tests {
         PlanningViewQuery {
             organization_id: model.graph.organization.id.clone(),
             project_id: DOGFOOD_PROJECT_ID.into(),
+            saved_view: PlanningSavedView::All,
             filter: PlanningFilter::Open,
             group: PlanningGroup::Lifecycle,
             sort: PlanningSort::SourceOrder,
@@ -363,5 +446,84 @@ mod tests {
         let searched = project_planning_view(&model, PlanningViewKind::List, &query);
         assert_eq!(searched.rows.len(), 1);
         assert_eq!(searched.rows[0].identifier, "omega#215");
+    }
+
+    #[test]
+    fn saved_views_use_only_exact_attention_facts_on_the_shared_rows() {
+        let model = model();
+        let mut query = query(&model);
+        query.filter = PlanningFilter::All;
+
+        query.saved_view = PlanningSavedView::CriticalPath;
+        let critical = project_planning_view(&model, PlanningViewKind::Roadmap, &query);
+        assert!(
+            critical
+                .rows
+                .iter()
+                .any(|row| row.identifier == "omega#160")
+        );
+        assert!(
+            critical
+                .rows
+                .iter()
+                .any(|row| row.identifier == "omega#214")
+        );
+
+        query.saved_view = PlanningSavedView::Blocked;
+        let blocked = project_planning_view(&model, PlanningViewKind::Board, &query);
+        assert!(blocked.rows.iter().all(|row| row.blocked_by_count > 0));
+
+        query.saved_view = PlanningSavedView::Unassigned;
+        let unassigned = project_planning_view(&model, PlanningViewKind::Table, &query);
+        assert_eq!(
+            unassigned.rows.len(),
+            model
+                .graph
+                .issues
+                .iter()
+                .filter(|issue| issue.project_id == DOGFOOD_PROJECT_ID)
+                .count()
+        );
+
+        for saved_view in [
+            PlanningSavedView::AgentActive,
+            PlanningSavedView::NeedsOwner,
+            PlanningSavedView::InReview,
+            PlanningSavedView::Verification,
+        ] {
+            query.saved_view = saved_view;
+            assert!(
+                project_planning_view(&model, PlanningViewKind::List, &query)
+                    .rows
+                    .is_empty(),
+                "{saved_view:?} must not infer unavailable attention state"
+            );
+        }
+    }
+
+    #[test]
+    fn saved_view_selection_preserves_identity_across_every_renderer() {
+        let model = model();
+        let mut query = query(&model);
+        query.filter = PlanningFilter::All;
+        query.saved_view = PlanningSavedView::CriticalPath;
+        let expected = project_planning_view(&model, PlanningViewKind::List, &query)
+            .rows
+            .into_iter()
+            .map(|row| (row.work_ref, row.source_revision))
+            .collect::<BTreeSet<_>>();
+        for kind in [
+            PlanningViewKind::Board,
+            PlanningViewKind::Table,
+            PlanningViewKind::Timeline,
+            PlanningViewKind::Roadmap,
+        ] {
+            let actual = project_planning_view(&model, kind, &query)
+                .rows
+                .into_iter()
+                .map(|row| (row.work_ref, row.source_revision))
+                .collect::<BTreeSet<_>>();
+            assert_eq!(actual, expected);
+        }
     }
 }
