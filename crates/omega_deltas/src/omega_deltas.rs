@@ -9593,6 +9593,19 @@ mod tests {
              the removal.",
             startup_path.display()
         );
+        assert!(
+            startup.contains("args.primary_interface = true;"),
+            "OMEGA-DELTA-0052: {} no longer selects the primary Omega \
+             interface for every normal launch. A plain Cargo build must not \
+             reopen the transitional presentation.",
+            startup_path.display()
+        );
+        assert!(
+            !startup.contains("OMEGA_PRIMARY_INTERFACE_BUILD"),
+            "OMEGA-DELTA-0052: {} makes the shipped interface depend on a \
+             build-time environment marker again.",
+            startup_path.display()
+        );
 
         let mode_path = repository_path(ZERO_BASE_MODE_PATH);
         let mode = std::fs::read_to_string(&mode_path)

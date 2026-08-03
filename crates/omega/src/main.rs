@@ -222,10 +222,11 @@ fn main() {
     }
 
     let mut args = Args::parse();
-    if option_env!("OMEGA_PRIMARY_INTERFACE_BUILD").is_some() {
-        args.primary_interface = true;
-        log::info!("Omega embedded primary-interface build is active");
-    }
+    // OMEGA-DELTA-0052. The primary interface is the application, including
+    // for a plain local Cargo build. The hidden argument remains accepted for
+    // compatibility, but no build-time marker or launch flag selects a second
+    // presentation.
+    args.primary_interface = true;
 
     // `zed --askpass` Makes zed operate in nc/netcat mode for use with askpass
     #[cfg(not(target_os = "windows"))]
@@ -2066,7 +2067,7 @@ struct Args {
     #[arg(long)]
     zero_base: bool,
 
-    /// Opens the primary Omega interface used by embedded release builds.
+    /// Accepted and ignored: the primary Omega interface is always active.
     #[arg(long, hide = true)]
     primary_interface: bool,
 

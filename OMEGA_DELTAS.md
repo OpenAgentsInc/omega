@@ -2669,6 +2669,14 @@ than it sounds, because the harness omega#81's acceptance sentence names —
   entry point and `ENTERED` static are gone, and the refusal sentence names no
   flag because there is no editor to start. The check now enforces absence:
   a revived selector, entry point, or flag literal fails it.
+- **The primary presentation is also flag-free.** A later scaffold left its
+  stricter presentation behind `OMEGA_PRIMARY_INTERFACE_BUILD` or the hidden
+  `--primary-interface` argument. That made a plain `cargo build` produce a
+  binary that opened the transitional presentation even though the mode split
+  was documented as removed. Startup now selects the primary presentation
+  immediately after parsing arguments. The hidden argument remains accepted
+  for old launchers but does not decide anything, and the delta check rejects
+  any return of the build-time marker.
 
 - **Upstream Zed:** starting the binary with no arguments opens the editor. There
   is no mode, so there is nothing to leave.
