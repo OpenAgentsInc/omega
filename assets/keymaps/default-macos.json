@@ -1435,24 +1435,24 @@
     "context": "AgentPanel && OmegaInterface",
     "use_key_equivalents": true,
     "bindings": {
-      "cmd-1": ["agent::ActivateOmegaSessionTab", 0],
-      "cmd-2": ["agent::ActivateOmegaSessionTab", 1],
-      "cmd-3": ["agent::ActivateOmegaSessionTab", 2],
-      "cmd-4": ["agent::ActivateOmegaSessionTab", 3],
-      "cmd-5": ["agent::ActivateOmegaSessionTab", 4],
-      "cmd-6": ["agent::ActivateOmegaSessionTab", 5],
-      "cmd-7": ["agent::ActivateOmegaSessionTab", 6],
-      "cmd-8": ["agent::ActivateOmegaSessionTab", 7],
-      "cmd-9": ["agent::ActivateOmegaSessionTab", 8],
-      "cmd-0": ["agent::ActivateOmegaSessionTab", 9],
-      "cmd-w": "omega_workbench::CloseActiveSessionTab"
+      "cmd-1": ["agent::ActivateOmegaThreadTab", 0],
+      "cmd-2": ["agent::ActivateOmegaThreadTab", 1],
+      "cmd-3": ["agent::ActivateOmegaThreadTab", 2],
+      "cmd-4": ["agent::ActivateOmegaThreadTab", 3],
+      "cmd-5": ["agent::ActivateOmegaThreadTab", 4],
+      "cmd-6": ["agent::ActivateOmegaThreadTab", 5],
+      "cmd-7": ["agent::ActivateOmegaThreadTab", 6],
+      "cmd-8": ["agent::ActivateOmegaThreadTab", 7],
+      "cmd-9": ["agent::ActivateOmegaThreadTab", 8],
+      "cmd-0": ["agent::ActivateOmegaThreadTab", 9],
+      "cmd-w": "omega_workbench::CloseActiveThreadTab"
     }
   },
   {
     "context": "OmegaComposerExecutorMenu",
     "use_key_equivalents": true,
     "bindings": {
-      "cmd-w": "omega_workbench::CloseActiveSessionTab"
+      "cmd-w": "omega_workbench::CloseActiveThreadTab"
     }
   }
 ]

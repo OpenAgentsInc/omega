@@ -38,8 +38,9 @@ The DMG SHA-256 digest was:
 
 `3a394a54b38d1acd56bfef7ca789a21eaeaaf5d3d0da3b48ec3ca2766140648c`
 
-The installed screenshot shows the production project sidebar with the
-implemented Forensics entry and no placeholder All Work destinations.
+The installed screenshot captures the production sidebar before OAW-003
+renamed its IDE workspace grouping to **Repositories**. It shows the implemented
+Forensics entry and no placeholder All Work destinations.
 
 ![Installed production sidebar](evidence/oaw-002/installed-production-sidebar.jpeg)
 

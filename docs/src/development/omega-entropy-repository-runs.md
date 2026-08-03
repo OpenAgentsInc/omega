@@ -62,7 +62,7 @@ cancelled instead of silently resuming against changed process state.
 
 In the Omega interface, choose **Forensics** in the left sidebar. The Forensics surface
 uses the existing main workbench region; it does not add another navigation
-rail. Choose the active session row or choose **Forensics** again to return to
+rail. Choose the active Thread row or choose **Forensics** again to return to
 the transcript.
 
 The live entropy traversal keeps manifest order while file states change. It

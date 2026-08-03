@@ -223,6 +223,7 @@
   - [Capture the Omega public demo](./development/omega-public-demo.md)
   - [Omega application identity](./development/omega-application-identity.md)
   - [OAW-002 production navigation acceptance](./development/oaw-002-production-navigation-acceptance.md)
+  - [Omega entity navigation](./development/omega-entity-navigation.md)
   - [The native Omega Agent in Omega](./development/omega-native-agent.md)
   - [Omega Full Auto contract freeze](./development/omega-full-auto-contract-freeze.md)
   - [Omega Agent Computer contract freeze](./development/omega-agent-computer-contract-freeze.md)

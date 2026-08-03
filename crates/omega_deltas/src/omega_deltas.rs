@@ -27451,10 +27451,10 @@ mod tests {
         );
     }
 
-    /// OMEGA-DELTA-0223. Omega interface exposes real project roots rather than a
+    /// OMEGA-DELTA-0223. Omega interface exposes real repository roots rather than a
     /// decorative space, and refuses to launch agent work until one exists.
     #[test]
-    fn omega_projects_own_the_agent_working_directory() {
+    fn omega_repositories_own_the_agent_working_directory() {
         let main = without_comments(&read_repository_file("crates/omega/src/main.rs"));
         let restore = body_of(&main, "restore_or_create_workspace");
         assert!(
@@ -27466,7 +27466,7 @@ mod tests {
         let panel = without_comments(&read_repository_file("crates/agent_ui/src/agent_panel.rs"));
         let shell = body_of(&panel, "render_omega_shell");
         for required in [
-            ".child(\"Projects\")",
+            ".child(\"Repositories\")",
             ".identity()",
             ".candidates",
             "select_thread_identity(",
@@ -27474,7 +27474,7 @@ mod tests {
         ] {
             assert!(
                 shell.contains(required),
-                "OMEGA-DELTA-0223: the Omega project sidebar lost `{required}`"
+                "OMEGA-DELTA-0223: the Omega repository sidebar lost `{required}`"
             );
         }
         assert!(
@@ -27697,11 +27697,11 @@ mod tests {
         }
     }
 
-    /// OMEGA-DELTA-0228. The first ten Omega session tabs have positional
+    /// OMEGA-DELTA-0228. The first ten Omega thread tabs have positional
     /// keyboard shortcuts, and their numbers appear only while the shortcut
     /// modifier is held.
     #[test]
-    fn omega_session_tabs_have_visible_positional_shortcuts() {
+    fn omega_thread_tabs_have_visible_positional_shortcuts() {
         let panel = without_comments(&read_repository_file("crates/agent_ui/src/agent_panel.rs"));
         for required in [
             "OMEGA_TAB_SHORTCUT_LABELS: [&str; 10]",
@@ -27709,9 +27709,9 @@ mod tests {
             "window.modifiers()",
             "modifiers.platform",
             "modifiers.control",
-            "fn omega_session_tab_rows",
+            "fn omega_thread_tab_rows",
             "left.created_at.cmp(&right.created_at)",
-            "activate_omega_session_tab(action.0, window, cx)",
+            "activate_omega_thread_tab(action.0, window, cx)",
             "on_modifiers_changed",
             "omega_tab_shortcut_hint(index, text_placeholder)",
             "active_tab_is_persisted",
@@ -27731,7 +27731,7 @@ mod tests {
             let keymap = read_repository_file(keymap);
             for index in 0..10 {
                 assert!(
-                    keymap.contains(&format!("[\"agent::ActivateOmegaSessionTab\", {index}]")),
+                    keymap.contains(&format!("[\"agent::ActivateOmegaThreadTab\", {index}]")),
                     "OMEGA-DELTA-0228: platform keymap lost tab index {index}"
                 );
             }

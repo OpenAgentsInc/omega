@@ -49,7 +49,7 @@ use crate::thread_metadata_store::{
     ThreadId, ThreadMetadataStore, ThreadMetadataStoreEvent, WorktreePaths,
 };
 use crate::{
-    ActivateOmegaSessionTab, Agent, AgentInitialContent, AgentThreadSource, ExternalSourcePrompt,
+    ActivateOmegaThreadTab, Agent, AgentInitialContent, AgentThreadSource, ExternalSourcePrompt,
     NewExternalAgentThread, NewNativeAgentThreadFromSummary,
 };
 use crate::{
@@ -105,6 +105,10 @@ use language_model::{
 use notifications::status_toast::StatusToast;
 use omega_front_door::{
     ConversationTarget, DirectAgentId, ModeReadiness, ModeSetupAction, PreparationReceipt,
+};
+use omega_workbench_state::{
+    DomainBlockRoute, EntityNavigationHistory as OmegaNavigationHistory, EntityRoute as OmegaRoute,
+    EntityRouteState, PersistedEntityNavigation, RouteAvailability, RouteUnavailableReason,
 };
 use project::{
     Project, ProjectGroupKey, ProjectPath, Worktree, WorktreeId, git_store::RepositoryId,
@@ -258,7 +262,7 @@ fn omega_thread_icon(row: &omega_threads_sidebar::ThreadRow) -> IconName {
     omega_executor_icon(omega_threads_sidebar::recorded_executor(&row.agent_id))
 }
 
-fn stable_omega_session_rows(
+fn stable_omega_thread_rows(
     mut rows: Vec<omega_threads_sidebar::ThreadRow>,
     active_thread_id: Option<ThreadId>,
     oldest_first: bool,
@@ -300,7 +304,7 @@ fn stable_omega_session_rows(
     rows
 }
 
-fn omega_project_workspaces(
+fn omega_repository_workspaces(
     multi_workspace: &MultiWorkspace,
     cx: &App,
 ) -> Vec<(Entity<Workspace>, ProjectGroupKey, SharedString)> {
@@ -323,7 +327,7 @@ fn omega_project_workspaces(
         .collect()
 }
 
-fn reconcile_new_omega_session_rows(
+fn reconcile_new_omega_thread_rows(
     rows: Vec<omega_threads_sidebar::ThreadRow>,
     active_thread_id: Option<ThreadId>,
     known_tabs: &mut HashSet<ThreadId>,
@@ -1473,6 +1477,8 @@ struct SerializedAgentPanel {
     last_active_terminal_id: Option<String>,
     #[serde(default)]
     new_draft_thread_id: Option<ThreadId>,
+    #[serde(default)]
+    omega_navigation: Option<PersistedEntityNavigation>,
 }
 
 #[derive(Serialize, Deserialize, Debug)]
@@ -1485,6 +1491,29 @@ struct SerializedActiveThread {
     agent_type: Agent,
     title: Option<String>,
     work_dirs: Option<SerializedPathList>,
+}
+
+fn restore_omega_navigation(
+    persisted: Option<PersistedEntityNavigation>,
+    legacy_thread_ref: Option<&str>,
+) -> OmegaNavigationHistory {
+    persisted
+        .and_then(
+            |persisted| match OmegaNavigationHistory::from_persisted(persisted) {
+                Ok(history) if history.current().is_some() => Some(history),
+                Ok(_) => None,
+                Err(error) => {
+                    log::warn!("could not restore Omega entity navigation: {error}");
+                    None
+                }
+            },
+        )
+        .or_else(|| {
+            OmegaNavigationHistory::migrate_legacy_thread(legacy_thread_ref)
+                .map_err(|error| log::warn!("could not migrate legacy Omega navigation: {error}"))
+                .ok()
+        })
+        .unwrap_or_default()
 }
 
 fn select_workbench_surface_from_workspace(
@@ -2026,9 +2055,15 @@ pub fn init(cx: &mut App) {
                         });
                     },
                 )
-                .register_action(|workspace, _: &menu::Cancel, _window, cx| {
+                .register_action(|workspace, _: &menu::Cancel, window, cx| {
                     if let Some(panel) = workspace.panel::<AgentPanel>(cx) {
                         let handled = panel.update(cx, |panel, cx| {
+                            if panel.renders_omega_primary_interface()
+                                && panel.omega_non_thread_route_open()
+                            {
+                                panel.close_active_omega_route_tab(window, cx);
+                                return true;
+                            }
                             if panel.dismiss_auxiliary_surfaces(cx) {
                                 return true;
                             }
@@ -2407,64 +2442,32 @@ enum BaseView {
     },
 }
 
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-enum OmegaRoute {
-    Thread(ThreadId),
-    Settings,
+const OMEGA_FORENSICS_WORK_REF: &str = "work:omega:forensics";
+const OMEGA_FORENSICS_BLOCK_REF: &str = "block:omega:forensics";
+
+fn omega_thread_route(thread_id: ThreadId) -> Option<OmegaRoute> {
+    OmegaRoute::thread(thread_id.to_key_string())
+        .map_err(|error| log::error!("could not construct a thread route: {error}"))
+        .ok()
 }
 
-#[derive(Debug, Default)]
-struct OmegaNavigationHistory {
-    entries: Vec<OmegaRoute>,
-    index: usize,
+fn omega_forensics_route() -> Option<OmegaRoute> {
+    DomainBlockRoute::new(OMEGA_FORENSICS_BLOCK_REF, "forensics")
+        .and_then(|block| OmegaRoute::work(OMEGA_FORENSICS_WORK_REF, Some(block)))
+        .map_err(|error| log::error!("could not construct the Forensics work route: {error}"))
+        .ok()
 }
 
-impl OmegaNavigationHistory {
-    fn push(&mut self, route: OmegaRoute) {
-        if self.entries.get(self.index) == Some(&route) {
-            return;
-        }
-        if self.entries.is_empty() {
-            self.entries.push(route);
-            self.index = 0;
-            return;
-        }
-        self.entries.truncate(self.index + 1);
-        self.entries.push(route);
-        self.index += 1;
-    }
-
-    fn can_back(&self, mut is_available: impl FnMut(OmegaRoute) -> bool) -> bool {
-        self.entries
-            .get(..self.index)
-            .is_some_and(|entries| entries.iter().rev().copied().any(&mut is_available))
-    }
-
-    fn can_forward(&self, mut is_available: impl FnMut(OmegaRoute) -> bool) -> bool {
-        self.entries
-            .get(self.index.saturating_add(1)..)
-            .is_some_and(|entries| entries.iter().copied().any(&mut is_available))
-    }
-
-    fn back(&mut self) -> Option<OmegaRoute> {
-        if self.index == 0 {
-            return None;
-        }
-        self.index -= 1;
-        self.entries.get(self.index).copied()
-    }
-
-    fn forward(&mut self) -> Option<OmegaRoute> {
-        if self.index.saturating_add(1) >= self.entries.len() {
-            return None;
-        }
-        self.index += 1;
-        self.entries.get(self.index).copied()
-    }
-
-    fn restore_index(&mut self, index: usize) {
-        self.index = index.min(self.entries.len().saturating_sub(1));
-    }
+fn is_omega_forensics_route(route: &OmegaRoute) -> bool {
+    matches!(
+        route,
+        OmegaRoute::Work(work)
+            if work.work_ref.as_str() == OMEGA_FORENSICS_WORK_REF
+                && work.block.as_ref().is_some_and(|block| {
+                    block.block_ref.as_str() == OMEGA_FORENSICS_BLOCK_REF
+                        && block.domain.as_str() == "forensics"
+                })
+    )
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -3207,10 +3210,13 @@ pub struct AgentPanel {
     workbench_shell_enabled: bool,
     omega_titlebar_dragging: bool,
     omega_sidebar_tween: Option<OmegaSidebarTween>,
-    omega_known_session_tabs: HashSet<ThreadId>,
-    omega_closed_session_tabs: HashSet<ThreadId>,
+    omega_known_thread_tabs: HashSet<ThreadId>,
+    omega_closed_thread_tabs: HashSet<ThreadId>,
     omega_navigation_history: OmegaNavigationHistory,
+    omega_unavailable_route: Option<EntityRouteState>,
     omega_settings: Option<Entity<settings_ui::SettingsWindow>>,
+    #[cfg(any(test, feature = "test-support"))]
+    force_omega_primary_interface_for_tests: bool,
     /// Thread keys whose durable disk selection was already adopted (or
     /// reset), so a render-driven sync does not re-read disk per frame.
     workbench_selection_restore_attempted: HashSet<String>,
@@ -3312,6 +3318,8 @@ impl AgentPanel {
             .draft_thread
             .as_ref()
             .map(|draft| draft.read(cx).thread_id);
+        let omega_navigation = omega_zero_base::is_primary_interface()
+            .then(|| self.omega_navigation_history.persisted());
 
         let kvp = KeyValueStore::global(cx);
         self.pending_serialization = Some(cx.background_spawn(async move {
@@ -3323,6 +3331,7 @@ impl AgentPanel {
                     last_active_thread,
                     last_active_terminal_id,
                     new_draft_thread_id,
+                    omega_navigation,
                 },
                 kvp,
             )
@@ -3477,6 +3486,22 @@ impl AgentPanel {
             };
 
             let panel = workspace.update_in(cx, |workspace, window, cx| {
+                let legacy_thread_ref = serialized_panel
+                    .as_ref()
+                    .and_then(|panel| panel.last_active_thread.as_ref())
+                    .and_then(|thread| thread.thread_id)
+                    .or_else(|| {
+                        thread_to_restore
+                            .as_ref()
+                            .map(|(_, metadata)| metadata.thread_id)
+                    })
+                    .map(|thread_id| thread_id.to_key_string());
+                let restored_navigation = restore_omega_navigation(
+                    serialized_panel
+                        .as_ref()
+                        .and_then(|panel| panel.omega_navigation.clone()),
+                    legacy_thread_ref.as_deref(),
+                );
                 let panel = cx.new(|cx| match vim_mode_indicator {
                     Some(vim_mode_indicator) => Self::new_with_vim_mode_indicator(
                         workspace,
@@ -3572,8 +3597,25 @@ impl AgentPanel {
                     {
                         panel.restore_new_draft(new_draft_thread_id, window, cx);
                     }
+                    panel.omega_navigation_history = restored_navigation;
+                    if omega_zero_base::is_primary_interface() {
+                        panel.serialize(cx);
+                    }
                     cx.notify();
                 });
+
+                let restored_route = panel
+                    .read_with(cx, |panel, _| panel.omega_navigation_history.current().cloned());
+                if let Some(restored_route) = restored_route {
+                    let panel = panel.downgrade();
+                    window.defer(cx, move |window, cx| {
+                        panel
+                            .update(cx, |panel, cx| {
+                                panel.open_omega_history_route(restored_route, window, cx);
+                            })
+                            .log_err();
+                    });
+                }
 
                 panel
             })?;
@@ -3832,10 +3874,13 @@ impl AgentPanel {
             workbench_shell_enabled: omega_zero_base::is_active(),
             omega_titlebar_dragging: false,
             omega_sidebar_tween: None,
-            omega_known_session_tabs: HashSet::default(),
-            omega_closed_session_tabs: HashSet::default(),
+            omega_known_thread_tabs: HashSet::default(),
+            omega_closed_thread_tabs: HashSet::default(),
             omega_navigation_history: OmegaNavigationHistory::default(),
+            omega_unavailable_route: None,
             omega_settings: None,
+            #[cfg(any(test, feature = "test-support"))]
+            force_omega_primary_interface_for_tests: false,
             workbench_selection_restore_attempted: HashSet::default(),
             workbench_sync_failure_log: DistinctFailureLog::default(),
             workbench_files_panel,
@@ -6411,7 +6456,7 @@ impl AgentPanel {
             return;
         }
 
-        self.omega_closed_session_tabs.remove(&row.thread_id);
+        self.omega_closed_thread_tabs.remove(&row.thread_id);
         self.threads_sidebar_refusal = None;
         // OMEGA-DELTA-0130. The sidebar stays. It used to close itself here,
         // because it was an overlay covering the thread it had just opened.
@@ -8868,10 +8913,13 @@ impl AgentPanel {
         let old_view = std::mem::replace(&mut self.base_view, new_view);
         self.retain_running_thread(old_view, cx);
 
+        let mut omega_navigation_changed = false;
         if let Some(thread_id) = omega_thread_id {
             self.omega_settings = None;
-            self.omega_navigation_history
-                .push(OmegaRoute::Thread(thread_id));
+            self.omega_unavailable_route = None;
+            if let Some(route) = omega_thread_route(thread_id) {
+                omega_navigation_changed = self.omega_navigation_history.push(route);
+            }
         }
 
         if let BaseView::AgentThread { conversation_view } = &self.base_view {
@@ -8881,6 +8929,9 @@ impl AgentPanel {
                 self.selected_agent = thread_agent;
                 self.serialize(cx);
             }
+        }
+        if omega_navigation_changed {
+            self.serialize(cx);
         }
 
         self.refresh_base_view_subscriptions(window, cx);
@@ -14879,6 +14930,16 @@ impl AgentPanel {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
+        self.select_work_surface_with_history(surface, true, window, cx);
+    }
+
+    fn select_work_surface_with_history(
+        &mut self,
+        surface: omega_workbench_state::WorkSurface,
+        record_history: bool,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> bool {
         let unavailable_reason = if !self.workbench_shell_enabled {
             Some(SharedString::from(
                 "Workbench surfaces are available in Omega's default thread view",
@@ -14915,7 +14976,7 @@ impl AgentPanel {
                     .log_err();
             });
             cx.notify();
-            return;
+            return false;
         }
 
         let (files_panel, previous_scope, previous_scope_was_unavailable) =
@@ -14928,7 +14989,7 @@ impl AgentPanel {
                         log::warn!("could not prepare the Files work surface: {error:#}");
                         self.workbench_shell.record_error(error.to_string());
                         cx.notify();
-                        return;
+                        return false;
                     }
                 }
             } else {
@@ -14941,7 +15002,7 @@ impl AgentPanel {
                     log::warn!("could not prepare the Search work surface: {error:#}");
                     self.workbench_shell.record_error(error.to_string());
                     cx.notify();
-                    return;
+                    return false;
                 }
             }
         } else {
@@ -14954,7 +15015,7 @@ impl AgentPanel {
                     log::warn!("could not prepare the Review work surface: {error:#}");
                     self.workbench_shell.record_error(error.to_string());
                     cx.notify();
-                    return;
+                    return false;
                 }
             }
         } else {
@@ -14967,7 +15028,7 @@ impl AgentPanel {
                     log::warn!("could not prepare the Forensics work surface: {error:#}");
                     self.workbench_shell.record_error(error.to_string());
                     cx.notify();
-                    return;
+                    return false;
                 }
             }
         } else {
@@ -14984,7 +15045,7 @@ impl AgentPanel {
                     log::warn!("could not prepare the Git work surface: {error:#}");
                     self.workbench_shell.record_error(error.to_string());
                     cx.notify();
-                    return;
+                    return false;
                 }
             }
         } else {
@@ -14997,7 +15058,7 @@ impl AgentPanel {
                     log::warn!("could not prepare the Terminal work surface: {error:#}");
                     self.workbench_shell.record_error(error.to_string());
                     cx.notify();
-                    return;
+                    return false;
                 }
             }
         } else {
@@ -15010,7 +15071,7 @@ impl AgentPanel {
                     log::warn!("could not prepare the Plan work surface: {error:#}");
                     self.workbench_shell.record_error(error.to_string());
                     cx.notify();
-                    return;
+                    return false;
                 }
             }
         } else {
@@ -15039,7 +15100,17 @@ impl AgentPanel {
         match selection {
             Ok(workbench_shell::SurfaceSelection::Collapsed) => {
                 self.persist_active_workbench_selection(cx);
+                self.omega_unavailable_route = None;
+                if record_history
+                    && surface == omega_workbench_state::WorkSurface::Forensics
+                    && let Some(thread_id) = self.active_thread_id(cx)
+                    && let Some(route) = omega_thread_route(thread_id)
+                {
+                    self.omega_navigation_history.push(route);
+                    self.serialize(cx);
+                }
                 self.focus_thread_transcript(window, cx);
+                true
             }
             Ok(workbench_shell::SurfaceSelection::Opened(host)) => {
                 self.persist_active_workbench_selection(cx);
@@ -15064,7 +15135,7 @@ impl AgentPanel {
                     );
                     self.workbench_shell.record_error(error.to_string());
                     cx.notify();
-                    return;
+                    return false;
                 }
                 let git_panel = git_surface
                     .as_ref()
@@ -15091,7 +15162,7 @@ impl AgentPanel {
                     );
                     self.workbench_shell.record_error(error.to_string());
                     cx.notify();
-                    return;
+                    return false;
                 }
                 let terminal_panel = terminal_surface
                     .as_ref()
@@ -15112,14 +15183,23 @@ impl AgentPanel {
                     );
                     self.workbench_shell.record_error(error.to_string());
                     cx.notify();
-                    return;
+                    return false;
                 }
                 if let Some(terminal_surface) = terminal_surface.as_ref() {
                     terminal_surface.update(cx, |_terminal_surface, cx| cx.notify());
                     host.update(cx, |_host, cx| cx.notify());
                 }
+                self.omega_unavailable_route = None;
+                if record_history
+                    && surface == omega_workbench_state::WorkSurface::Forensics
+                    && let Some(route) = omega_forensics_route()
+                {
+                    self.omega_navigation_history.push(route);
+                    self.serialize(cx);
+                }
                 host.focus_handle(cx).focus(window, cx);
                 cx.notify();
+                true
             }
             Err(error) => {
                 if let Some(panel) = files_panel {
@@ -15146,6 +15226,7 @@ impl AgentPanel {
                 );
                 self.workbench_shell.record_error(error.to_string());
                 cx.notify();
+                false
             }
         }
     }
@@ -15178,7 +15259,15 @@ impl AgentPanel {
 
     fn collapse_work_surface_dock(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         match self.workbench_shell.collapse_dock() {
-            Ok(true) => self.focus_thread_transcript(window, cx),
+            Ok(true) => {
+                self.omega_unavailable_route = None;
+                if let Some(route) = self.active_thread_id(cx).and_then(omega_thread_route)
+                    && self.omega_navigation_history.push(route)
+                {
+                    self.serialize(cx);
+                }
+                self.focus_thread_transcript(window, cx);
+            }
             Ok(false) => {}
             Err(error) => {
                 log::warn!("failed to collapse work-surface dock: {error:#}");
@@ -15839,9 +15928,10 @@ impl AgentPanel {
             return false;
         }
         if self.active_thread_id(cx) == Some(thread_id) {
+            self.show_active_omega_thread_transcript(window, cx);
             return true;
         }
-        self.omega_closed_session_tabs.remove(&thread_id);
+        self.omega_closed_thread_tabs.remove(&thread_id);
         if self
             .draft_thread
             .as_ref()
@@ -15874,9 +15964,10 @@ impl AgentPanel {
     }
 
     fn navigate_omega_back(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        let starting_index = self.omega_navigation_history.index;
+        let starting_index = self.omega_navigation_history.index();
         while let Some(route) = self.omega_navigation_history.back() {
             if self.open_omega_history_route(route, window, cx) {
+                self.serialize(cx);
                 cx.notify();
                 return;
             }
@@ -15886,9 +15977,10 @@ impl AgentPanel {
     }
 
     fn navigate_omega_forward(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        let starting_index = self.omega_navigation_history.index;
+        let starting_index = self.omega_navigation_history.index();
         while let Some(route) = self.omega_navigation_history.forward() {
             if self.open_omega_history_route(route, window, cx) {
+                self.serialize(cx);
                 cx.notify();
                 return;
             }
@@ -15897,11 +15989,80 @@ impl AgentPanel {
         cx.notify();
     }
 
-    fn omega_route_available(&self, route: OmegaRoute, cx: &App) -> bool {
-        match route {
-            OmegaRoute::Thread(thread_id) => self.omega_history_thread_available(thread_id, cx),
-            OmegaRoute::Settings => true,
+    fn omega_route_state(&self, route: OmegaRoute, cx: &App) -> EntityRouteState {
+        let availability = match &route {
+            OmegaRoute::Thread(thread_ref) => {
+                match ThreadId::from_key_string(thread_ref.as_str()) {
+                    Ok(thread_id) if self.omega_history_thread_available(thread_id, cx) => {
+                        RouteAvailability::Available
+                    }
+                    Ok(thread_id) => ThreadMetadataStore::try_global(cx)
+                        .and_then(|store| store.read(cx).entry(thread_id).cloned())
+                        .map(|metadata| {
+                            if metadata.archived {
+                                RouteAvailability::Unavailable(RouteUnavailableReason::Deleted)
+                            } else if metadata.restorable_agent().is_err() {
+                                RouteAvailability::Unavailable(RouteUnavailableReason::Unauthorized)
+                            } else {
+                                RouteAvailability::Unavailable(RouteUnavailableReason::Unknown)
+                            }
+                        })
+                        .unwrap_or(RouteAvailability::Unavailable(
+                            RouteUnavailableReason::Unknown,
+                        )),
+                    Err(_) => RouteAvailability::Unavailable(RouteUnavailableReason::Unknown),
+                }
+            }
+            OmegaRoute::Work(work)
+                if work.work_ref.as_str() == OMEGA_FORENSICS_WORK_REF
+                    && work.block.as_ref().is_some_and(|block| {
+                        block.block_ref.as_str() == OMEGA_FORENSICS_BLOCK_REF
+                            && block.domain.as_str() == "forensics"
+                    }) =>
+            {
+                if self.workbench_shell.projection().connection
+                    != omega_workbench_state::ConnectionPhase::Online
+                {
+                    RouteAvailability::Unavailable(RouteUnavailableReason::Stale)
+                } else if self
+                    .workbench_shell
+                    .capability(omega_workbench_state::WorkSurface::Forensics)
+                    .is_some_and(|capability| capability.availability.is_available())
+                {
+                    RouteAvailability::Available
+                } else {
+                    RouteAvailability::Unavailable(RouteUnavailableReason::Unknown)
+                }
+            }
+            OmegaRoute::Settings => RouteAvailability::Available,
+            OmegaRoute::Work(_)
+            | OmegaRoute::IssueProjection { .. }
+            | OmegaRoute::Project(_)
+            | OmegaRoute::Document(_)
+            | OmegaRoute::Decision(_)
+            | OmegaRoute::AgentSession(_) => {
+                RouteAvailability::Unavailable(RouteUnavailableReason::NotImplemented)
+            }
+        };
+        EntityRouteState {
+            route,
+            availability,
         }
+    }
+
+    fn show_omega_unavailable_route(
+        &mut self,
+        state: EntityRouteState,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.omega_settings = None;
+        if let Err(error) = self.workbench_shell.collapse_dock() {
+            log::warn!("failed to collapse a prior work surface: {error:#}");
+        }
+        self.omega_unavailable_route = Some(state);
+        self.focus_handle.focus(window, cx);
+        cx.notify();
     }
 
     fn open_omega_history_route(
@@ -15910,15 +16071,40 @@ impl AgentPanel {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> bool {
-        match route {
-            OmegaRoute::Thread(thread_id) => {
+        let state = self.omega_route_state(route, cx);
+        if !matches!(state.availability, RouteAvailability::Available) {
+            self.show_omega_unavailable_route(state, window, cx);
+            return true;
+        }
+        match state.route {
+            OmegaRoute::Thread(thread_ref) => {
+                let Ok(thread_id) = ThreadId::from_key_string(thread_ref.as_str()) else {
+                    return false;
+                };
                 self.omega_settings = None;
+                self.omega_unavailable_route = None;
                 self.open_omega_history_thread(thread_id, window, cx)
             }
+            OmegaRoute::Work(_) => {
+                self.omega_settings = None;
+                self.omega_unavailable_route = None;
+                self.select_work_surface_with_history(
+                    omega_workbench_state::WorkSurface::Forensics,
+                    false,
+                    window,
+                    cx,
+                )
+            }
             OmegaRoute::Settings => {
+                self.omega_unavailable_route = None;
                 self.open_omega_settings(false, window, cx);
                 true
             }
+            OmegaRoute::IssueProjection { .. }
+            | OmegaRoute::Project(_)
+            | OmegaRoute::Document(_)
+            | OmegaRoute::Decision(_)
+            | OmegaRoute::AgentSession(_) => false,
         }
     }
 
@@ -15928,6 +16114,7 @@ impl AgentPanel {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
+        self.omega_unavailable_route = None;
         if self.omega_settings.is_none() {
             let original_window = window.window_handle().downcast::<MultiWorkspace>();
             self.omega_settings = Some(cx.new(|cx| {
@@ -15936,30 +16123,41 @@ impl AgentPanel {
         }
         if record_history {
             self.omega_navigation_history.push(OmegaRoute::Settings);
+            self.serialize(cx);
         }
         cx.notify();
     }
 
     fn close_omega_settings(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         self.omega_settings = None;
-        if let Some(thread_id) = self.active_thread_id(cx) {
-            self.omega_navigation_history
-                .push(OmegaRoute::Thread(thread_id));
+        if self.omega_navigation_history.current() == Some(&OmegaRoute::Settings)
+            && let Some(route) = self.omega_navigation_history.back()
+            && self.open_omega_history_route(route, window, cx)
+        {
+            self.serialize(cx);
+            cx.notify();
+            return;
         }
+        if let Some(thread_id) = self.active_thread_id(cx) {
+            if let Some(route) = omega_thread_route(thread_id) {
+                self.omega_navigation_history.push(route);
+            }
+        }
+        self.serialize(cx);
         window.focus(&self.focus_handle, cx);
         cx.notify();
     }
 
-    fn close_active_omega_session_tab(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+    fn close_active_omega_thread_tab(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let active_thread_id = self.active_thread_id(cx);
         let fallback = self.threads_sidebar_rows(cx).into_iter().find(|row| {
             Some(row.thread_id) != active_thread_id
-                && !self.omega_closed_session_tabs.contains(&row.thread_id)
+                && !self.omega_closed_thread_tabs.contains(&row.thread_id)
                 && row.refusal.is_none()
         });
 
         if let Some(active_thread_id) = active_thread_id {
-            self.omega_closed_session_tabs.insert(active_thread_id);
+            self.omega_closed_thread_tabs.insert(active_thread_id);
         }
 
         if let Some(fallback) = fallback {
@@ -15970,32 +16168,32 @@ impl AgentPanel {
         cx.notify();
     }
 
-    fn omega_session_tab_rows(&self, cx: &App) -> Vec<omega_threads_sidebar::ThreadRow> {
+    fn omega_thread_tab_rows(&self, cx: &App) -> Vec<omega_threads_sidebar::ThreadRow> {
         let active_thread_id = self.active_thread_id(cx);
         let rows = self
             .threads_sidebar_rows(cx)
             .into_iter()
-            .filter(|row| !self.omega_closed_session_tabs.contains(&row.thread_id))
+            .filter(|row| !self.omega_closed_thread_tabs.contains(&row.thread_id))
             .collect::<Vec<_>>();
-        stable_omega_session_rows(rows, active_thread_id, true)
+        stable_omega_thread_rows(rows, active_thread_id, true)
     }
 
-    fn reconcile_omega_session_tabs(&mut self, cx: &App) {
+    fn reconcile_omega_thread_tabs(&mut self, cx: &App) {
         let active_thread_id = self.active_thread_id(cx);
-        reconcile_new_omega_session_rows(
+        reconcile_new_omega_thread_rows(
             self.threads_sidebar_rows(cx),
             active_thread_id,
-            &mut self.omega_known_session_tabs,
-            &mut self.omega_closed_session_tabs,
+            &mut self.omega_known_thread_tabs,
+            &mut self.omega_closed_thread_tabs,
         );
     }
 
-    fn omega_sidebar_session_rows(&self, cx: &App) -> Vec<omega_threads_sidebar::ThreadRow> {
+    fn omega_sidebar_thread_rows(&self, cx: &App) -> Vec<omega_threads_sidebar::ThreadRow> {
         let active_thread_id = self.active_thread_id(cx);
-        stable_omega_session_rows(self.threads_sidebar_rows(cx), active_thread_id, false)
+        stable_omega_thread_rows(self.threads_sidebar_rows(cx), active_thread_id, false)
     }
 
-    fn activate_omega_session_tab(
+    fn activate_omega_thread_tab(
         &mut self,
         index: usize,
         window: &mut Window,
@@ -16004,14 +16202,14 @@ impl AgentPanel {
         if index >= OMEGA_TAB_SHORTCUT_LABELS.len() {
             return;
         }
-        if let Some(row) = self.omega_session_tab_rows(cx).get(index).cloned() {
-            self.show_omega_session_transcript(&row, window, cx);
+        if let Some(row) = self.omega_thread_tab_rows(cx).get(index).cloned() {
+            self.show_omega_thread_transcript(&row, window, cx);
         }
     }
 
-    /// Select a Omega session tab as a chat destination, even when its thread
+    /// Select an Omega thread tab as a chat destination, even when its thread
     /// is already active underneath Settings or a retained work surface.
-    fn show_omega_session_transcript(
+    fn show_omega_thread_transcript(
         &mut self,
         row: &omega_threads_sidebar::ThreadRow,
         window: &mut Window,
@@ -16024,19 +16222,137 @@ impl AgentPanel {
             return;
         }
 
-        self.show_active_omega_session_transcript(window, cx);
+        self.show_active_omega_thread_transcript(window, cx);
     }
 
-    fn show_active_omega_session_transcript(
-        &mut self,
-        window: &mut Window,
-        cx: &mut Context<Self>,
-    ) {
+    fn show_active_omega_thread_transcript(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         self.omega_settings = None;
+        self.omega_unavailable_route = None;
         if let Err(error) = self.workbench_shell.collapse_dock() {
-            log::warn!("failed to close the Omega work surface for a session tab: {error:#}");
+            log::warn!("failed to close the Omega work surface for a thread tab: {error:#}");
+        }
+        if let Some(route) = self.active_thread_id(cx).and_then(omega_thread_route)
+            && self.omega_navigation_history.push(route)
+        {
+            self.serialize(cx);
         }
         self.focus_thread_transcript(window, cx);
+    }
+
+    fn close_active_omega_route_tab(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if self.omega_settings.is_some() {
+            self.close_omega_settings(window, cx);
+            return;
+        }
+        if self.omega_unavailable_route.take().is_some() {
+            self.show_active_omega_thread_transcript(window, cx);
+            cx.notify();
+            return;
+        }
+        let forensics_is_open = self
+            .workbench_shell
+            .projection()
+            .visible_projection()
+            .is_some_and(|visible| {
+                visible.dock_open
+                    && visible.effective_surface
+                        == Some(omega_workbench_state::WorkSurface::Forensics)
+            });
+        let forensics_route_is_active = self
+            .omega_navigation_history
+            .current()
+            .is_some_and(is_omega_forensics_route);
+        if forensics_is_open {
+            self.collapse_work_surface_dock(window, cx);
+            return;
+        }
+        if forensics_route_is_active {
+            self.show_active_omega_thread_transcript(window, cx);
+            return;
+        }
+        self.close_active_omega_thread_tab(window, cx);
+    }
+
+    fn omega_non_thread_route_open(&self) -> bool {
+        self.omega_settings.is_some()
+            || self.omega_unavailable_route.is_some()
+            || self
+                .omega_navigation_history
+                .current()
+                .is_some_and(is_omega_forensics_route)
+            || self
+                .workbench_shell
+                .projection()
+                .visible_projection()
+                .is_some_and(|visible| {
+                    visible.dock_open
+                        && visible.effective_surface
+                            == Some(omega_workbench_state::WorkSurface::Forensics)
+                })
+    }
+
+    fn renders_omega_primary_interface(&self) -> bool {
+        if omega_zero_base::is_primary_interface() {
+            return true;
+        }
+        #[cfg(any(test, feature = "test-support"))]
+        {
+            self.force_omega_primary_interface_for_tests
+        }
+        #[cfg(not(any(test, feature = "test-support")))]
+        {
+            false
+        }
+    }
+
+    fn render_omega_unavailable_route(state: &EntityRouteState, cx: &App) -> AnyElement {
+        let reason = match state.availability {
+            RouteAvailability::Unavailable(RouteUnavailableReason::Unknown) => {
+                "Omega cannot find this destination."
+            }
+            RouteAvailability::Unavailable(RouteUnavailableReason::Stale) => {
+                "This destination is stale. Reconnect and try again."
+            }
+            RouteAvailability::Unavailable(RouteUnavailableReason::Deleted) => {
+                "This destination was deleted."
+            }
+            RouteAvailability::Unavailable(RouteUnavailableReason::Unauthorized) => {
+                "You do not have access to this destination."
+            }
+            RouteAvailability::Unavailable(RouteUnavailableReason::NotImplemented) => {
+                "This destination is not available in this build."
+            }
+            RouteAvailability::Available => "This destination is available.",
+        };
+        v_flex()
+            .id("omega-route-unavailable")
+            .debug_selector(|| "omega.omega.route.unavailable".into())
+            .size_full()
+            .items_center()
+            .justify_center()
+            .gap(px(8.))
+            .px(px(32.))
+            .child(
+                Icon::new(IconName::Warning)
+                    .size(IconSize::XLarge)
+                    .color(Color::Muted),
+            )
+            .child(
+                div()
+                    .text_size(px(16.))
+                    .font_weight(gpui::FontWeight::MEDIUM)
+                    .text_color(cx.theme().colors().text)
+                    .child(format!("{} unavailable", state.route.default_title())),
+            )
+            .child(
+                div()
+                    .max_w(px(420.))
+                    .text_center()
+                    .text_size(px(12.))
+                    .text_color(cx.theme().colors().text_muted)
+                    .child(reason),
+            )
+            .into_any_element()
     }
 
     fn render_omega_control(
@@ -16102,7 +16418,7 @@ impl AgentPanel {
         let text_accent = colors.text_accent;
         let icon_muted = colors.icon_muted;
         let tab_shortcuts_visible = omega_tab_shortcuts_visible(window);
-        let omega_forensics_selected = self
+        let workbench_forensics_selected = self
             .workbench_shell
             .projection()
             .visible_projection()
@@ -16111,11 +16427,37 @@ impl AgentPanel {
                     && visible.effective_surface
                         == Some(omega_workbench_state::WorkSurface::Forensics)
             });
+        let history_forensics_selected = self.omega_settings.is_none()
+            && self.omega_unavailable_route.is_none()
+            && self
+                .omega_navigation_history
+                .current()
+                .is_some_and(is_omega_forensics_route);
+        let omega_forensics_selected = workbench_forensics_selected || history_forensics_selected;
         let omega_forensics_host = omega_forensics_selected
             .then(|| self.workbench_shell.visible_host().cloned())
             .flatten();
-        let main_content = omega_forensics_host
-            .map(|host| host.into_any_element())
+        let unavailable_content = self
+            .omega_unavailable_route
+            .as_ref()
+            .map(|state| Self::render_omega_unavailable_route(state, cx));
+        let missing_forensics_content = (omega_forensics_selected
+            && omega_forensics_host.is_none())
+        .then(|| {
+            omega_forensics_route().map(|route| {
+                Self::render_omega_unavailable_route(
+                    &EntityRouteState {
+                        route,
+                        availability: RouteAvailability::Unavailable(RouteUnavailableReason::Stale),
+                    },
+                    cx,
+                )
+            })
+        })
+        .flatten();
+        let main_content = unavailable_content
+            .or_else(|| omega_forensics_host.map(|host| host.into_any_element()))
+            .or(missing_forensics_content)
             .unwrap_or_else(|| content.into_any_element());
 
         let sidebar_open = self.sidebar.open;
@@ -16134,18 +16476,15 @@ impl AgentPanel {
             self.omega_sidebar_tween = None;
         }
         let active_thread_id = self.active_thread_id(cx);
-        self.reconcile_omega_session_tabs(cx);
+        self.reconcile_omega_thread_tabs(cx);
         let omega_settings_open = self.omega_settings.is_some();
-        if let Some(active_thread_id) = active_thread_id
-            && !omega_settings_open
-        {
-            self.omega_navigation_history
-                .push(OmegaRoute::Thread(active_thread_id));
-        }
+        let omega_unavailable_open = self.omega_unavailable_route.is_some();
+        let omega_thread_open =
+            !omega_settings_open && !omega_forensics_selected && !omega_unavailable_open;
         let active_title = self
             .active_conversation_view()
             .map(|view| view.read(cx).title(cx))
-            .unwrap_or_else(|| "New session".into());
+            .unwrap_or_else(|| "New thread".into());
         let active_sidebar_title = active_title.clone();
         let active_executor = self
             .active_conversation_view()
@@ -16159,22 +16498,22 @@ impl AgentPanel {
             })
             .or_else(crate::omega_executor_selector::selected);
         let active_icon = omega_executor_icon(active_executor);
-        let session_tab_rows = self.omega_session_tab_rows(cx);
+        let thread_tab_rows = self.omega_thread_tab_rows(cx);
         let active_tab_is_persisted = active_thread_id.is_some_and(|active_thread_id| {
-            session_tab_rows
+            thread_tab_rows
                 .iter()
                 .any(|row| row.thread_id == active_thread_id)
         });
-        let session_tabs = session_tab_rows.iter().enumerate().map(|(index, row)| {
+        let thread_tabs = thread_tab_rows.iter().enumerate().map(|(index, row)| {
             let row = row.clone();
             let click_row = row.clone();
             let title = row.title.clone();
             let icon = omega_thread_icon(&row);
-            let is_active = Some(row.thread_id) == active_thread_id;
+            let is_active = omega_thread_open && Some(row.thread_id) == active_thread_id;
             div()
-                .id(("omega-session-tab", index))
+                .id(("omega-thread-tab", index))
                 .when(is_active, |tab| {
-                    tab.debug_selector(|| "omega.omega.session-tab.active".into())
+                    tab.debug_selector(|| "omega.omega.thread-tab.active".into())
                         .bg(selected_background)
                         .border_1()
                         .border_color(colors.border_selected)
@@ -16187,7 +16526,7 @@ impl AgentPanel {
                 .cursor_pointer()
                 .on_click(cx.listener(move |this, _, window, cx| {
                     cx.stop_propagation();
-                    this.show_omega_session_transcript(&click_row, window, cx);
+                    this.show_omega_thread_transcript(&click_row, window, cx);
                 }))
                 .w(px(TAB_WIDTH))
                 .h(px(28.))
@@ -16206,10 +16545,10 @@ impl AgentPanel {
                 })
         });
 
-        let draft_tab_index = session_tab_rows.len();
+        let draft_tab_index = thread_tab_rows.len();
         let active_draft_tab = div()
-            .id("omega-active-session-tab")
-            .debug_selector(|| "omega.omega.session-tab.active".into())
+            .id("omega-active-thread-tab")
+            .debug_selector(|| "omega.omega.thread-tab.active".into())
             .w(px(TAB_WIDTH))
             .h(px(28.))
             .flex_none()
@@ -16234,6 +16573,67 @@ impl AgentPanel {
             .when(tab_shortcuts_visible, |tab| {
                 tab.child(omega_tab_shortcut_hint(draft_tab_index, text_placeholder))
             });
+        let active_entity_tab = if omega_forensics_selected {
+            Some(
+                div()
+                    .id("omega-work-tab")
+                    .debug_selector(|| "omega.omega.work-tab.active".into())
+                    .w(px(TAB_WIDTH))
+                    .h(px(28.))
+                    .flex_none()
+                    .flex()
+                    .items_center()
+                    .gap(px(6.))
+                    .px(px(8.))
+                    .rounded(px(8.))
+                    .bg(selected_background)
+                    .border_1()
+                    .border_color(colors.border_selected)
+                    .text_size(px(12.))
+                    .text_color(text)
+                    .occlude()
+                    .child(
+                        Icon::new(IconName::Crosshair)
+                            .size(IconSize::Small)
+                            .color(Color::Muted),
+                    )
+                    .child(div().min_w_0().flex_1().truncate().child("Forensics"))
+                    .into_any_element(),
+            )
+        } else {
+            self.omega_unavailable_route.as_ref().map(|state| {
+                div()
+                    .id("omega-unavailable-route-tab")
+                    .debug_selector(|| "omega.omega.route-tab.unavailable".into())
+                    .w(px(TAB_WIDTH))
+                    .h(px(28.))
+                    .flex_none()
+                    .flex()
+                    .items_center()
+                    .gap(px(6.))
+                    .px(px(8.))
+                    .rounded(px(8.))
+                    .bg(selected_background)
+                    .border_1()
+                    .border_color(colors.border_selected)
+                    .text_size(px(12.))
+                    .text_color(text)
+                    .occlude()
+                    .child(
+                        Icon::new(IconName::Warning)
+                            .size(IconSize::Small)
+                            .color(Color::Muted),
+                    )
+                    .child(
+                        div()
+                            .min_w_0()
+                            .flex_1()
+                            .truncate()
+                            .child(state.route.default_title()),
+                    )
+                    .into_any_element()
+            })
+        };
 
         let toggle = self.render_omega_control(
             "omega-toggle-sidebar",
@@ -16252,9 +16652,7 @@ impl AgentPanel {
             "omega-nav-back",
             "Back",
             IconName::ArrowLeft,
-            !self
-                .omega_navigation_history
-                .can_back(|route| self.omega_route_available(route, cx)),
+            !self.omega_navigation_history.can_back(),
             icon_muted,
             hover_background,
             cx.listener(|this, _, window, cx| this.navigate_omega_back(window, cx)),
@@ -16263,25 +16661,23 @@ impl AgentPanel {
             "omega-nav-forward",
             "Forward",
             IconName::ArrowRight,
-            !self
-                .omega_navigation_history
-                .can_forward(|route| self.omega_route_available(route, cx)),
+            !self.omega_navigation_history.can_forward(),
             icon_muted,
             hover_background,
             cx.listener(|this, _, window, cx| this.navigate_omega_forward(window, cx)),
         );
-        let new_session = self.render_omega_control(
-            "omega-new-session",
-            "New session",
+        let new_thread = self.render_omega_control(
+            "omega-new-thread",
+            "New thread",
             IconName::Plus,
             false,
             icon_muted,
             hover_background,
             cx.listener(|this, _, window, cx| this.new_thread(&NewThread, window, cx)),
         );
-        let open_project = self.render_omega_control(
-            "omega-open-project",
-            "Open project",
+        let open_repository = self.render_omega_control(
+            "omega-open-repository",
+            "Open repository",
             IconName::Plus,
             false,
             icon_muted,
@@ -16359,11 +16755,12 @@ impl AgentPanel {
                         .pt(px(2.))
                         .gap(px(4.))
                         .overflow_hidden()
-                        .children(session_tabs)
-                        .when(!active_tab_is_persisted, |tabs| {
+                        .children(thread_tabs)
+                        .when(omega_thread_open && !active_tab_is_persisted, |tabs| {
                             tabs.child(active_draft_tab)
                         })
-                        .child(new_session),
+                        .when_some(active_entity_tab, |tabs, tab| tabs.child(tab))
+                        .child(new_thread),
                 )
             })
             .when(omega_settings_open, |bar| {
@@ -16384,25 +16781,25 @@ impl AgentPanel {
                 )
             });
 
-        let sidebar_session_rows = self.omega_sidebar_session_rows(cx);
+        let sidebar_thread_rows = self.omega_sidebar_thread_rows(cx);
         let active_sidebar_row_is_persisted = active_thread_id.is_some_and(|active_thread_id| {
-            sidebar_session_rows
+            sidebar_thread_rows
                 .iter()
                 .any(|row| row.thread_id == active_thread_id)
         });
-        let sidebar_rows = sidebar_session_rows
+        let sidebar_rows = sidebar_thread_rows
             .into_iter()
             .enumerate()
             .map(|(index, row)| {
                 let title = row.title.clone();
                 let age = row.age.clone();
                 let icon = omega_thread_icon(&row);
-                let is_active = Some(row.thread_id) == active_thread_id;
+                let is_active = omega_thread_open && Some(row.thread_id) == active_thread_id;
                 let (padding_x, padding_y) = omega_sidebar_row_padding(is_active);
                 div()
-                    .id(("omega-sidebar-session", index))
+                    .id(("omega-sidebar-thread", index))
                     .when(is_active, |row| {
-                        row.debug_selector(|| "omega.omega.sidebar-session.active".into())
+                        row.debug_selector(|| "omega.omega.sidebar-thread.active".into())
                             .bg(selected_background)
                             .border_1()
                             .border_color(colors.border_selected)
@@ -16411,7 +16808,7 @@ impl AgentPanel {
                         item.cursor_pointer()
                             .hover(move |style| style.bg(hover_background))
                             .on_click(cx.listener(move |this, _, window, cx| {
-                                this.open_thread_from_threads_sidebar(&row, window, cx);
+                                this.show_omega_thread_transcript(&row, window, cx);
                             }))
                     })
                     .w_full()
@@ -16440,8 +16837,8 @@ impl AgentPanel {
 
         let (active_sidebar_padding_x, active_sidebar_padding_y) = omega_sidebar_row_padding(true);
         let active_draft_sidebar_row = h_flex()
-            .id("omega-sidebar-active-session")
-            .debug_selector(|| "omega.omega.sidebar-session.active".into())
+            .id("omega-sidebar-active-thread")
+            .debug_selector(|| "omega.omega.sidebar-thread.active".into())
             .w_full()
             .px(px(active_sidebar_padding_x))
             .py(px(active_sidebar_padding_y))
@@ -16464,8 +16861,8 @@ impl AgentPanel {
             )
             .child(div().size(px(6.)).rounded_full().bg(text_accent));
 
-        let active_project_key = self.project.read(cx).project_group_key(cx);
-        let active_project_rows = self
+        let active_repository_key = self.project.read(cx).project_group_key(cx);
+        let active_repository_rows = self
             .workbench_shell
             .identity()
             .cloned()
@@ -16486,17 +16883,18 @@ impl AgentPanel {
                     .enumerate()
                     .map(|(index, candidate)| {
                         let binding = candidate.binding.clone();
-                        let debug_selector = format!("omega.omega.project.{}", binding.worktree_id);
+                        let debug_selector =
+                            format!("omega.omega.repository.{}", binding.worktree_id);
                         let selected = selected_worktree_id.as_ref() == Some(&binding.worktree_id);
                         let source_thread_id = visible.thread_id.clone();
                         let source_binding = visible.binding.clone();
                         let source_generation = visible.generation;
                         let accessible_label = candidate.accessible_label();
-                        let project_name = candidate.project_name.clone();
+                        let repository_name = candidate.project_name.clone();
                         let branch = candidate.branch.label();
                         let (padding_x, padding_y) = omega_sidebar_row_padding(selected);
                         h_flex()
-                            .id(("omega-project", index))
+                            .id(("omega-repository", index))
                             .debug_selector(move || debug_selector)
                             .w_full()
                             .px(px(padding_x))
@@ -16523,7 +16921,7 @@ impl AgentPanel {
                                 );
                             }))
                             .child(Icon::new(IconName::Folder).size(IconSize::Small))
-                            .child(div().min_w_0().flex_1().truncate().child(project_name))
+                            .child(div().min_w_0().flex_1().truncate().child(repository_name))
                             .child(
                                 div()
                                     .max_w(px(72.))
@@ -16537,18 +16935,18 @@ impl AgentPanel {
                     .collect::<Vec<_>>()
             })
             .unwrap_or_default();
-        let active_project_has_candidates = !active_project_rows.is_empty();
+        let active_repository_has_candidates = !active_repository_rows.is_empty();
         let source_workspace = self.workspace.clone();
-        let retained_project_rows = window
+        let retained_repository_rows = window
             .root::<MultiWorkspace>()
             .flatten()
             .map(|multi_workspace| {
-                let project_rows = multi_workspace.read(cx);
-                omega_project_workspaces(&project_rows, cx)
+                let repository_rows = multi_workspace.read(cx);
+                omega_repository_workspaces(&repository_rows, cx)
                     .into_iter()
                     .filter_map(|(target, key, name)| {
-                        let selected = key == active_project_key;
-                        (!selected || !active_project_has_candidates)
+                        let selected = key == active_repository_key;
+                        (!selected || !active_repository_has_candidates)
                             .then_some((target, selected, name))
                     })
                     .collect::<Vec<_>>()
@@ -16556,14 +16954,14 @@ impl AgentPanel {
             .unwrap_or_default()
             .into_iter()
             .enumerate()
-            .map(|(index, (target, selected, project_name))| {
+            .map(|(index, (target, selected, repository_name))| {
                 let multi_workspace = window.root::<MultiWorkspace>().flatten();
-                let debug_selector = format!("omega.omega.project.{index}");
-                let accessible_label = format!("Open project {project_name}");
+                let debug_selector = format!("omega.omega.repository.{index}");
+                let accessible_label = format!("Open repository {repository_name}");
                 let source_workspace = source_workspace.clone();
                 let (padding_x, padding_y) = omega_sidebar_row_padding(selected);
                 h_flex()
-                    .id(("omega-project", index))
+                    .id(("omega-repository", index))
                     .debug_selector(move || debug_selector)
                     .w_full()
                     .px(px(padding_x))
@@ -16594,15 +16992,15 @@ impl AgentPanel {
                         });
                     })
                     .child(Icon::new(IconName::Folder).size(IconSize::Small))
-                    .child(div().min_w_0().flex_1().truncate().child(project_name))
+                    .child(div().min_w_0().flex_1().truncate().child(repository_name))
                     .into_any_element()
             })
             .collect::<Vec<_>>();
-        let project_rows = active_project_rows
+        let repository_rows = active_repository_rows
             .into_iter()
-            .chain(retained_project_rows)
+            .chain(retained_repository_rows)
             .collect::<Vec<_>>();
-        let has_projects = !project_rows.is_empty();
+        let has_repositories = !repository_rows.is_empty();
         let (forensics_padding_x, forensics_padding_y) =
             omega_sidebar_row_padding(omega_forensics_selected);
 
@@ -16625,25 +17023,28 @@ impl AgentPanel {
                     .justify_between()
                     .child(
                         div()
+                            .debug_selector(|| "omega.omega.sidebar.repositories".into())
                             .text_size(px(11.))
                             .font_weight(gpui::FontWeight::MEDIUM)
                             .text_color(text_placeholder)
-                            .child("Projects"),
+                            .child("Repositories"),
                     )
-                    .child(open_project),
+                    .child(open_repository),
             )
-            .when(has_projects, |sidebar| sidebar.children(project_rows))
-            .when(!has_projects, |sidebar| {
+            .when(has_repositories, |sidebar| {
+                sidebar.children(repository_rows)
+            })
+            .when(!has_repositories, |sidebar| {
                 sidebar.child(
                     h_flex()
-                        .id("omega-open-project-empty")
+                        .id("omega-open-repository-empty")
                         .w_full()
                         .px(px(8.))
                         .py(px(7.))
                         .gap(px(8.))
                         .rounded(px(8.))
                         .cursor_pointer()
-                        .aria_label("Open a project folder")
+                        .aria_label("Open a repository folder")
                         .hover(move |style| style.bg(hover_background))
                         .on_click(|_, window, cx| {
                             window.dispatch_action(
@@ -16692,6 +17093,7 @@ impl AgentPanel {
             )
             .child(
                 div()
+                    .debug_selector(|| "omega.omega.sidebar.threads".into())
                     .mt(px(12.))
                     .h(px(28.))
                     .px(px(8.))
@@ -16700,18 +17102,19 @@ impl AgentPanel {
                     .text_size(px(11.))
                     .font_weight(gpui::FontWeight::MEDIUM)
                     .text_color(text_placeholder)
-                    .child("Sessions"),
+                    .child("Threads"),
             )
             .child(
                 v_flex()
-                    .id("omega-sidebar-sessions")
+                    .id("omega-sidebar-threads")
                     .flex_1()
                     .min_h_0()
                     .overflow_y_scroll()
                     .gap(px(2.))
-                    .when(!active_sidebar_row_is_persisted, |rows| {
-                        rows.child(active_draft_sidebar_row)
-                    })
+                    .when(
+                        omega_thread_open && !active_sidebar_row_is_persisted,
+                        |rows| rows.child(active_draft_sidebar_row),
+                    )
                     .children(sidebar_rows),
             )
             .child(
@@ -16822,7 +17225,7 @@ impl AgentPanel {
 impl Render for AgentPanel {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         self.sync_workbench_shell(window, cx);
-        let primary_interface = omega_zero_base::is_primary_interface();
+        let primary_interface = self.renders_omega_primary_interface();
 
         // WARNING: Changes to this element hierarchy can have
         // non-obvious implications to the layout of children.
@@ -16856,20 +17259,20 @@ impl Render for AgentPanel {
                 this.new_thread(action, window, cx);
             }))
             .on_action(cx.listener(
-                |this, _: &workbench_shell::CloseActiveSessionTab, window, cx| {
-                    if omega_zero_base::is_primary_interface() {
+                move |this, _: &workbench_shell::CloseActiveThreadTab, window, cx| {
+                    if primary_interface {
                         cx.stop_propagation();
-                        this.close_active_omega_session_tab(window, cx);
+                        this.close_active_omega_route_tab(window, cx);
                     } else {
                         cx.propagate();
                     }
                 },
             ))
             .on_action(
-                cx.listener(|this, action: &ActivateOmegaSessionTab, window, cx| {
-                    if omega_zero_base::is_primary_interface() {
+                cx.listener(move |this, action: &ActivateOmegaThreadTab, window, cx| {
+                    if primary_interface {
                         cx.stop_propagation();
-                        this.activate_omega_session_tab(action.0, window, cx);
+                        this.activate_omega_thread_tab(action.0, window, cx);
                     } else {
                         cx.propagate();
                     }
@@ -16934,8 +17337,11 @@ impl Render for AgentPanel {
                     })
                 }
             }))
-            .on_action(cx.listener(|this, _: &menu::Cancel, _window, cx| {
-                if this.dismiss_auxiliary_surfaces(cx) {
+            .on_action(cx.listener(move |this, _: &menu::Cancel, window, cx| {
+                if primary_interface && this.omega_non_thread_route_open() {
+                    this.close_active_omega_route_tab(window, cx);
+                    cx.stop_propagation();
+                } else if this.dismiss_auxiliary_surfaces(cx) {
                     cx.stop_propagation();
                 }
             }))
@@ -17461,7 +17867,7 @@ mod omega_sidebar_motion_tests {
         let rows = vec![newest.clone(), middle.clone(), oldest.clone()];
 
         for active_thread_id in [oldest.thread_id, middle.thread_id, newest.thread_id] {
-            let tabs = stable_omega_session_rows(rows.clone(), Some(active_thread_id), true);
+            let tabs = stable_omega_thread_rows(rows.clone(), Some(active_thread_id), true);
             assert_eq!(
                 tabs.iter()
                     .map(|row| row.title.as_ref())
@@ -17469,7 +17875,7 @@ mod omega_sidebar_motion_tests {
                 ["oldest", "middle", "newest"]
             );
 
-            let sidebar = stable_omega_session_rows(rows.clone(), Some(active_thread_id), false);
+            let sidebar = stable_omega_thread_rows(rows.clone(), Some(active_thread_id), false);
             assert_eq!(
                 sidebar
                     .iter()
@@ -17489,7 +17895,7 @@ mod omega_sidebar_motion_tests {
         let mut known_tabs = HashSet::default();
         let mut closed_tabs = HashSet::default();
 
-        reconcile_new_omega_session_rows(
+        reconcile_new_omega_thread_rows(
             vec![active.clone(), recent.clone(), older.clone()],
             Some(active.thread_id),
             &mut known_tabs,
@@ -17501,7 +17907,7 @@ mod omega_sidebar_motion_tests {
         assert!(closed_tabs.contains(&older.thread_id));
 
         closed_tabs.remove(&recent.thread_id);
-        reconcile_new_omega_session_rows(
+        reconcile_new_omega_thread_rows(
             vec![active, recent.clone(), older],
             Some(recent.thread_id),
             &mut known_tabs,
@@ -18392,43 +18798,70 @@ mod tests {
         let third = ThreadId::new();
         let branch = ThreadId::new();
         let mut history = OmegaNavigationHistory::default();
+        let thread_route = |thread_id| omega_thread_route(thread_id).expect("valid thread route");
 
-        history.push(OmegaRoute::Thread(first));
+        history.push(thread_route(first));
         history.push(OmegaRoute::Settings);
-        history.push(OmegaRoute::Thread(third));
-        assert!(history.can_back(|_| true));
-        assert!(!history.can_forward(|_| true));
+        history.push(thread_route(third));
+        assert!(history.can_back());
+        assert!(!history.can_forward());
         assert_eq!(history.back(), Some(OmegaRoute::Settings));
-        assert_eq!(history.back(), Some(OmegaRoute::Thread(first)));
+        assert_eq!(history.back(), Some(thread_route(first)));
         assert_eq!(history.back(), None);
-        assert!(history.can_forward(|_| true));
+        assert!(history.can_forward());
         assert_eq!(history.forward(), Some(OmegaRoute::Settings));
 
-        history.push(OmegaRoute::Thread(branch));
+        history.push(thread_route(branch));
         assert_eq!(history.back(), Some(OmegaRoute::Settings));
-        assert_eq!(history.forward(), Some(OmegaRoute::Thread(branch)));
+        assert_eq!(history.forward(), Some(thread_route(branch)));
         assert_eq!(history.forward(), None);
     }
 
     #[test]
-    fn omega_navigation_history_ignores_unavailable_targets() {
+    fn omega_navigation_history_retains_unavailable_targets() {
         let first = ThreadId::new();
         let unavailable = ThreadId::new();
         let current = ThreadId::new();
         let mut history = OmegaNavigationHistory::default();
+        let thread_route = |thread_id| omega_thread_route(thread_id).expect("valid thread route");
 
-        history.push(OmegaRoute::Thread(first));
-        history.push(OmegaRoute::Thread(unavailable));
-        history.push(OmegaRoute::Thread(current));
+        history.push(thread_route(first));
+        history.push(thread_route(unavailable));
+        history.push(thread_route(current));
 
-        assert!(history.can_back(|route| route == OmegaRoute::Thread(first)));
-        assert!(!history.can_back(|route| route == OmegaRoute::Thread(current)));
-        assert_eq!(history.back(), Some(OmegaRoute::Thread(unavailable)));
-        assert_eq!(history.back(), Some(OmegaRoute::Thread(first)));
+        assert!(history.can_back());
+        assert_eq!(history.back(), Some(thread_route(unavailable)));
+        assert_eq!(history.back(), Some(thread_route(first)));
+    }
+
+    #[test]
+    fn omega_navigation_migrates_legacy_panel_state_and_rejects_invalid_history() {
+        let legacy_panel: SerializedAgentPanel = serde_json::from_value(json!({
+            "selected_agent": null
+        }))
+        .expect("legacy panel JSON without entity navigation remains readable");
+        assert!(legacy_panel.omega_navigation.is_none());
+
+        let invalid = PersistedEntityNavigation {
+            schema: "openagents.omega.entity-navigation.v99".to_string(),
+            entries: vec![OmegaRoute::Settings],
+            index: 0,
+        };
+        let restored = restore_omega_navigation(Some(invalid), Some("thread:legacy"));
+        assert_eq!(
+            restored.current(),
+            Some(&OmegaRoute::thread("thread:legacy").expect("valid legacy thread route"))
+        );
+
+        let restored_from_empty = restore_omega_navigation(
+            Some(OmegaNavigationHistory::default().persisted()),
+            Some("thread:legacy"),
+        );
+        assert_eq!(restored_from_empty.current(), restored.current());
     }
 
     #[gpui::test]
-    async fn omega_project_list_keeps_each_opened_project(cx: &mut TestAppContext) {
+    async fn omega_repository_list_keeps_each_opened_repository(cx: &mut TestAppContext) {
         init_test(cx);
         let fs = FakeFs::new(cx.executor());
         fs.insert_tree("/project-a", json!({ "file.txt": "" }))
@@ -18447,7 +18880,7 @@ mod tests {
 
         let mut names = multi_workspace
             .read_with(cx, |multi_workspace, cx| {
-                omega_project_workspaces(multi_workspace, cx)
+                omega_repository_workspaces(multi_workspace, cx)
                     .into_iter()
                     .map(|(_, _, name)| name.to_string())
                     .collect::<Vec<_>>()
@@ -18458,7 +18891,7 @@ mod tests {
     }
 
     #[gpui::test]
-    async fn omega_sessions_are_scoped_to_the_selected_project(cx: &mut TestAppContext) {
+    async fn omega_threads_are_scoped_to_the_selected_repository(cx: &mut TestAppContext) {
         use crate::thread_metadata_store::{ConversationOwnerVersion, ThreadMetadata};
 
         let (panel, mut cx) = setup_panel(cx).await;
@@ -18494,7 +18927,7 @@ mod tests {
 
         let titles = panel.read_with(&cx, |panel, cx| {
             panel
-                .omega_sidebar_session_rows(cx)
+                .omega_sidebar_thread_rows(cx)
                 .into_iter()
                 .map(|row| row.title.to_string())
                 .collect::<Vec<_>>()
@@ -25490,7 +25923,7 @@ mod tests {
     }
 
     #[gpui::test]
-    async fn test_active_omega_session_tab_leaves_forensics(cx: &mut TestAppContext) {
+    async fn test_active_omega_thread_tab_leaves_forensics(cx: &mut TestAppContext) {
         let (panel, mut cx) = setup_visible_panel(cx).await;
 
         panel.update_in(&mut cx, |panel, window, cx| {
@@ -25506,7 +25939,7 @@ mod tests {
         });
 
         panel.update_in(&mut cx, |panel, window, cx| {
-            panel.show_active_omega_session_transcript(window, cx);
+            panel.show_active_omega_thread_transcript(window, cx);
         });
 
         panel.read_with(&cx, |panel, _cx| {
@@ -25515,7 +25948,7 @@ mod tests {
                     .workbench_shell
                     .projection()
                     .visible_projection()
-                    .expect("the selected session remains active")
+                    .expect("the selected thread remains active")
                     .dock_open,
                 "selecting the active chat tab must close Forensics"
             );
@@ -25524,6 +25957,100 @@ mod tests {
                 workbench_shell::WorkbenchFocusTarget::Transcript
             );
         });
+    }
+
+    #[gpui::test]
+    async fn omega_entity_routes_render_and_navigate_without_thread_identity_leaks(
+        cx: &mut TestAppContext,
+    ) {
+        let (panel, mut cx) = setup_visible_panel(cx).await;
+        panel.update_in(&mut cx, |panel, window, cx| {
+            panel.force_omega_primary_interface_for_tests = true;
+            panel.new_thread(&NewThread, window, cx);
+        });
+        cx.run_until_parked();
+
+        let omega_selectors = cx
+            .debug_render_snapshot()
+            .selectors()
+            .map(|(selector, _)| selector.to_string())
+            .filter(|selector| selector.contains("omega"))
+            .collect::<Vec<_>>();
+        assert!(
+            cx.debug_bounds("omega.omega.sidebar.repositories")
+                .is_some(),
+            "rendered Omega selectors: {omega_selectors:?}"
+        );
+        assert!(cx.debug_bounds("omega.omega.sidebar.threads").is_some());
+        assert!(cx.debug_bounds("omega.omega.thread-tab.active").is_some());
+
+        let forensics_route = omega_forensics_route().expect("valid Forensics Work route");
+        panel.update(&mut cx, |panel, cx| {
+            panel
+                .workbench_shell
+                .open_surface_for_tests(omega_workbench_state::WorkSurface::Forensics)
+                .expect("open Forensics fixture");
+            panel.omega_navigation_history.push(forensics_route.clone());
+            cx.notify();
+        });
+        cx.run_until_parked();
+
+        assert!(cx.debug_bounds("omega.omega.work-tab.active").is_some());
+        assert!(cx.debug_bounds("omega.omega.thread-tab.active").is_none());
+        panel.read_with(&cx, |panel, _cx| {
+            assert_eq!(
+                panel.omega_navigation_history.current(),
+                Some(&forensics_route)
+            );
+        });
+
+        panel.update_in(&mut cx, |panel, window, cx| {
+            panel.close_active_omega_route_tab(window, cx);
+        });
+        cx.run_until_parked();
+        assert!(cx.debug_bounds("omega.omega.work-tab.active").is_none());
+        assert!(cx.debug_bounds("omega.omega.thread-tab.active").is_some());
+
+        let unavailable_route =
+            OmegaRoute::document("document:deleted").expect("valid unavailable document route");
+        panel.update_in(&mut cx, |panel, window, cx| {
+            panel
+                .omega_navigation_history
+                .push(unavailable_route.clone());
+            panel.show_omega_unavailable_route(
+                EntityRouteState {
+                    route: unavailable_route.clone(),
+                    availability: RouteAvailability::Unavailable(RouteUnavailableReason::Deleted),
+                },
+                window,
+                cx,
+            );
+        });
+        cx.run_until_parked();
+        assert!(cx.debug_bounds("omega.omega.route.unavailable").is_some());
+        assert!(
+            cx.debug_bounds("omega.omega.route-tab.unavailable")
+                .is_some()
+        );
+        assert!(cx.debug_bounds("omega.omega.thread-tab.active").is_none());
+
+        panel.update_in(&mut cx, |panel, window, cx| {
+            panel.navigate_omega_back(window, cx);
+        });
+        cx.run_until_parked();
+        assert!(cx.debug_bounds("omega.omega.route.unavailable").is_none());
+        assert!(cx.debug_bounds("omega.omega.thread-tab.active").is_some());
+
+        panel.update_in(&mut cx, |panel, window, cx| {
+            panel.navigate_omega_forward(window, cx);
+        });
+        cx.run_until_parked();
+        assert!(cx.debug_bounds("omega.omega.route.unavailable").is_some());
+
+        cx.dispatch_action(menu::Cancel);
+        cx.run_until_parked();
+        assert!(cx.debug_bounds("omega.omega.route.unavailable").is_none());
+        assert!(cx.debug_bounds("omega.omega.thread-tab.active").is_some());
     }
 
     #[gpui::test]

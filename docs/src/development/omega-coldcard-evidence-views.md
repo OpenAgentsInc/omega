@@ -18,7 +18,7 @@ selected overview or rung. This replaces the former vertical pile of evidence
 cards while preserving the surrounding Omega sidebar, tabs, composer, and
 thread history.
 
-Users can open Forensics from the project sidebar or from **View → Workbench →
+Users can open Forensics from the repository sidebar or from **View → Workbench →
 Forensics**. Both paths select the same native work surface.
 
 Production navigation always contains the functional entropy dashboard and

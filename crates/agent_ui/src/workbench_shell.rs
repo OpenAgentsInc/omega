@@ -91,8 +91,8 @@ actions!(
         ActivatePreviousTerminalTab,
         /// Close the active tab in the embedded Terminal pane.
         CloseActiveTerminalTab,
-        /// Close the active Omega session tab.
-        CloseActiveSessionTab,
+        /// Close the active Omega thread or entity-route tab.
+        CloseActiveThreadTab,
         /// Open the active thread repository picker.
         ToggleRepositoryPicker,
         /// Open the active thread worktree picker.

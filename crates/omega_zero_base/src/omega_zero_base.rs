@@ -733,24 +733,24 @@ mod tests {
     }
 
     #[test]
-    fn omega_session_tab_keymaps_win_over_workspace_pane_bindings() {
+    fn omega_thread_tab_keymaps_win_over_workspace_pane_bindings() {
         const OMEGA_CONTEXT: &str = "\"context\": \"AgentPanel && OmegaInterface\"";
 
         for (platform, keymap, first_shortcut) in [
             (
                 "linux",
                 include_str!("../../../assets/keymaps/default-linux.json"),
-                "\"ctrl-1\": [\"agent::ActivateOmegaSessionTab\", 0]",
+                "\"ctrl-1\": [\"agent::ActivateOmegaThreadTab\", 0]",
             ),
             (
                 "macos",
                 include_str!("../../../assets/keymaps/default-macos.json"),
-                "\"cmd-1\": [\"agent::ActivateOmegaSessionTab\", 0]",
+                "\"cmd-1\": [\"agent::ActivateOmegaThreadTab\", 0]",
             ),
             (
                 "windows",
                 include_str!("../../../assets/keymaps/default-windows.json"),
-                "\"ctrl-1\": [\"agent::ActivateOmegaSessionTab\", 0]",
+                "\"ctrl-1\": [\"agent::ActivateOmegaThreadTab\", 0]",
             ),
         ] {
             let omega_offset = keymap
