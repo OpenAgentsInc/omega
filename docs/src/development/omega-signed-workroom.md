@@ -1,10 +1,11 @@
 # Omega signed Workroom projection
 
 Omega consumes the generated signed Workroom boundary from OpenAgents commit
-`b0ff32b73ff61cccfca8107ac8984252371c9e5f`. The contract definition SHA-256
-is `513432ed4d7deee1a8511f59b86cc1958d33cc32b76b314ebb0b901500dfb56d`.
+`66ccc9c55b1ef74dde30875993ff304ba634a729`. The contract definition SHA-256
+is `c6557022965ea9f92450fefcc7e3ef5eb77d43654280b611e9966b7a1fbbe26a`.
 
 The Rust supervisor negotiates `workroom.activity.read`,
+`workroom.activity.prepare`, `workroom.activity.commit`, the legacy internal
 `workroom.activity.enqueue`, the transport-only `workroom.activity.deliver`
 reducer, and the authority-owned `workroom.activity.publish` operation. The
 development Work screen reads the
@@ -15,7 +16,26 @@ pending/partial/failed/accepted delivery state, the exact accepted relay count,
 and the newest bounded delivery attempts. Empty and unavailable states remain
 explicit.
 
-The OpenAgents authority now recomputes the deterministic NIP-01 event ID,
+The OpenAgents authority prepares the exact canonical unsigned NIP-01 JSON,
+event identity, next revision and generation, five-minute expiry, and a digest
+of its configured relay policy. Omega cannot supply relay targets. It verifies
+that the prepared direct actor and signer equal the selected enrolled account,
+authorizes a durable `workroom_activity` identity action, and signs through the
+existing local-custody or NIP-46 route. Remote custody must explicitly allow
+the prepared signed Workroom kind (32150 through 32163); an older capability
+that does not declare that kind fails closed. Omega rechecks the selected
+account, identity action, signature, and all prepared event fields after
+custody returns.
+
+Commit sends the unchanged preparation and signed JSON back to OpenAgents. The
+authority recomputes the preparation reference, current relay-policy digest,
+event ID, and signature before it writes the canonical activity and pending
+outbox row. The UI accepts the commit result only when it names the prepared
+event, reports persistence before publication, and denies relay authority and
+admitted effect. A relay failure after commit keeps and displays the durable
+outbox row for retry.
+
+The OpenAgents authority also recomputes the deterministic NIP-01 event ID,
 verifies the BIP-340 Schnorr signature, and requires a direct actor to equal
 `principal:nostr:<signer-pubkey>`. New writes use signed projection v2. Agent,
 device, and organization actors require an authoritative active grant that
@@ -45,9 +65,12 @@ do not become verification, owner acceptance, merge, or release authority.
 Supersession and revocation advance a generation and retain prior history.
 
 The screen remains behind the dogfood development gate. No production Workroom
-navigation is exposed. Enqueue has no direct UI control until identity
-enrollment and authoritative grant provisioning are complete. The publish
-control cannot create or sign an event, and accepted, superseded, and revoked
-rows have no retry action.
+navigation is exposed. Its **Sign checkpoint** control creates only a direct
+actor `thread` checkpoint for the selected v0.2.0 Work item, with a public-safe
+digest and the newest activity as its causal parent. It does not accept
+undisclosed note content, infer completion, create an agent grant, verify Work,
+merge, release, or record Owner Disposition. The separate publish/retry control
+still cannot create or sign an event, and accepted, superseded, and revoked rows
+have no retry action.
 Test execution and the installed two-client journey remain deferred to the
 final omega#208 gate.

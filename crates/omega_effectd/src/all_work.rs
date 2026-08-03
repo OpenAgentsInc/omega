@@ -53,7 +53,7 @@ mod tests {
         );
         assert_eq!(
             source["sourceCommit"].as_str(),
-            Some("b0ff32b73ff61cccfca8107ac8984252371c9e5f")
+            Some("66ccc9c55b1ef74dde30875993ff304ba634a729")
         );
         assert!(
             compatibility["protocol"]["methods"]
@@ -68,6 +68,34 @@ mod tests {
                 }),
             "generated compatibility manifest must expose the authority-owned publisher"
         );
+        for (method, capability, params, result) in [
+            (
+                "workroom.activity.prepare",
+                "workroom.activity.prepare",
+                "SignedWorkroomPrepareRequest",
+                "SignedWorkroomPrepareResult",
+            ),
+            (
+                "workroom.activity.commit",
+                "workroom.activity.commit",
+                "SignedWorkroomCommitRequest",
+                "SignedWorkroomEnqueueResult",
+            ),
+        ] {
+            assert!(
+                compatibility["protocol"]["methods"]
+                    .as_array()
+                    .expect("protocol methods")
+                    .iter()
+                    .any(|entry| {
+                        entry["method"] == method
+                            && entry["capability"] == capability
+                            && entry["params"] == params
+                            && entry["result"] == result
+                    }),
+                "generated compatibility manifest must expose {method}"
+            );
+        }
     }
 
     #[test]

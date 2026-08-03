@@ -46,8 +46,9 @@ use crate::agent_connection_store::AgentConnectionStore;
 use crate::completion_provider::{AgentContextSelection, AgentContextSource};
 use crate::forensics_work_projection::{ForensicsWorkProjection, project_forensics_work};
 use crate::omega_dogfood_surface::{
-    DogfoodClaimAction, DogfoodDelegationCandidate, DogfoodProviderEventProjection, DogfoodSurface,
-    DogfoodSurfaceEvent, DogfoodWorkCommandAction, DogfoodWorkCommandContext,
+    DOGFOOD_SIGNED_WORKROOM_REF, DogfoodClaimAction, DogfoodDelegationCandidate,
+    DogfoodProviderEventProjection, DogfoodSurface, DogfoodSurfaceEvent, DogfoodWorkCommandAction,
+    DogfoodWorkCommandContext,
 };
 use crate::omega_work_detail_surface::{
     WorkDelegationCandidate, WorkDetailSurface, WorkDetailSurfaceEvent,
@@ -18791,6 +18792,183 @@ impl AgentPanel {
         }));
     }
 
+    fn checkpoint_dogfood_workroom(
+        &mut self,
+        work_ref: String,
+        causal_parent_refs: Vec<String>,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(surface) = self.dogfood_surface.clone() else {
+            return;
+        };
+        let supervisor = omega_effectd::shared_supervisor(cx).ok();
+        self._dogfood_workroom_publish = Some(cx.spawn(async move |_this, cx| {
+            let result: Result<(
+                omega_effectd::all_work_contract::SignedWorkroomLedger,
+                Option<String>,
+            )> = async {
+                use omega_effectd::all_work_contract::{
+                    CapabilityRef, ContractDigest, IdempotencyKey, IsoTimestamp, LongText,
+                    NostrPublicKey, Nullable, PrincipalRef, PrivacyClass,
+                    SignedProjectionEventRef, SignedWorkroomActivityKind,
+                    SignedWorkroomCommitRequest, SignedWorkroomPrepareRequest,
+                    SignedWorkroomPublishRequest, WorkRef, WorkroomAudience, WorkroomRef,
+                };
+
+                let registry = omega_identity::AccountRegistryService::for_channel(
+                    *app_identity::CHANNEL,
+                );
+                let selection = registry
+                    .selection_token()
+                    .context("reading the selected Omega signing account")?;
+                registry
+                    .validate_signing_selection(&selection)
+                    .context("validating the selected Omega signing account")?;
+                let signer_pubkey = selection.identity.public_key_hex().as_str().to_string();
+                let effective_principal_ref = format!("principal:nostr:{signer_pubkey}");
+                let occurred_at = Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Millis, true);
+                let payload_digest = format!(
+                    "{:x}",
+                    Sha256::digest(
+                        format!(
+                            "openagents.signed-workroom.checkpoint.v1\0{work_ref}\0{occurred_at}"
+                        )
+                        .as_bytes()
+                    )
+                );
+                let operation_digest = format!(
+                    "{:x}",
+                    Sha256::digest(
+                        format!("{effective_principal_ref}\0{work_ref}\0{occurred_at}").as_bytes()
+                    )
+                );
+                let supervisor = supervisor.context("omega-effectd is unavailable")?;
+                let preparation = {
+                    let mut guard = supervisor.lock().await;
+                    guard.ensure_started().await?;
+                    guard
+                        .prepare_signed_workroom(SignedWorkroomPrepareRequest {
+                            idempotency_key: IdempotencyKey::try_from(format!(
+                                "omega-ui-workroom-prepare-{operation_digest}"
+                            ))?,
+                            effective_principal_ref: PrincipalRef::try_from(
+                                effective_principal_ref.clone(),
+                            )?,
+                            capability_ref: CapabilityRef::try_from(
+                                "capability:workroom-activity:prepare".to_string(),
+                            )?,
+                            signer_pubkey: NostrPublicKey::try_from(signer_pubkey)?,
+                            workroom_ref: WorkroomRef::try_from(
+                                DOGFOOD_SIGNED_WORKROOM_REF.to_string(),
+                            )?,
+                            work_ref: Nullable(Some(WorkRef::try_from(work_ref)?)),
+                            kind: SignedWorkroomActivityKind::Thread,
+                            audience: WorkroomAudience::Workroom,
+                            privacy_class: PrivacyClass::Workroom,
+                            causal_parent_refs: causal_parent_refs
+                                .into_iter()
+                                .map(SignedProjectionEventRef::try_from)
+                                .collect::<std::result::Result<Vec<_>, _>>()?,
+                            occurred_at: IsoTimestamp::try_from(occurred_at)?,
+                            payload_digest: ContractDigest::try_from(payload_digest)?,
+                            evidence_refs: Vec::new(),
+                            supersedes_event_ref: Nullable(None),
+                            revokes_event_ref: Nullable(None),
+                        })
+                        .await?
+                        .preparation
+                };
+
+                let signed_event_json =
+                    crate::omega_signed_workroom::sign_signed_workroom_preparation(&preparation)
+                        .await?;
+                let requested_event_ref = preparation.activity.event_ref.0.clone();
+                let committed = {
+                    let mut guard = supervisor.lock().await;
+                    guard.ensure_started().await?;
+                    guard
+                        .commit_signed_workroom(SignedWorkroomCommitRequest {
+                            idempotency_key: IdempotencyKey::try_from(format!(
+                                "omega-ui-workroom-commit-{operation_digest}"
+                            ))?,
+                            effective_principal_ref: PrincipalRef::try_from(
+                                effective_principal_ref.clone(),
+                            )?,
+                            capability_ref: CapabilityRef::try_from(
+                                "capability:workroom-activity:commit".to_string(),
+                            )?,
+                            preparation,
+                            signed_event_json: LongText::try_from(signed_event_json)?,
+                        })
+                        .await?
+                };
+                if committed.receipt.event_ref.0 != requested_event_ref
+                    || !committed.receipt.persisted_before_publish
+                    || committed.receipt.relay_acceptance_is_authority
+                    || committed.receipt.admitted_effect
+                {
+                    return Err(anyhow!(
+                        "signed Workroom commit receipt violated the durable outbox boundary"
+                    ));
+                }
+
+                let publish_result = {
+                    let mut guard = supervisor.lock().await;
+                    guard.ensure_started().await?;
+                    guard
+                        .publish_signed_workroom(SignedWorkroomPublishRequest {
+                            idempotency_key: IdempotencyKey::try_from(format!(
+                                "omega-ui-workroom-publish-{operation_digest}"
+                            ))?,
+                            effective_principal_ref: PrincipalRef::try_from(
+                                effective_principal_ref,
+                            )?,
+                            capability_ref: CapabilityRef::try_from(
+                                "capability:workroom-activity:publish".to_string(),
+                            )?,
+                            event_ref: SignedProjectionEventRef::try_from(
+                                requested_event_ref.clone(),
+                            )?,
+                        })
+                        .await
+                };
+                match publish_result {
+                    Ok(published)
+                        if published.receipt.event_ref.0 == requested_event_ref
+                            && !published.receipt.relay_acceptance_is_authority
+                            && !published.receipt.admitted_effect =>
+                    {
+                        Ok((published.ledger, None))
+                    }
+                    Ok(_) => Ok((
+                        committed.ledger,
+                        Some(
+                            "Saved to the durable outbox; relay publication returned an invalid transport receipt."
+                                .into(),
+                        ),
+                    )),
+                    Err(error) => Ok((
+                        committed.ledger,
+                        Some(format!(
+                            "Saved to the durable outbox; relay publication failed: {error}"
+                        )),
+                    )),
+                }
+            }
+            .await;
+            let _ = surface.update(cx, |surface, cx| match result {
+                Ok((ledger, warning)) => {
+                    surface.finish_signed_workroom_checkpoint(Some(ledger), warning, cx)
+                }
+                Err(error) => surface.finish_signed_workroom_checkpoint(
+                    None,
+                    Some(format!("Signed checkpoint failed: {error}")),
+                    cx,
+                ),
+            });
+        }));
+    }
+
     fn open_dogfood_project(
         &mut self,
         project_id: &str,
@@ -18869,6 +19047,10 @@ impl AgentPanel {
                         attempt_count,
                         cx,
                     ),
+                    DogfoodSurfaceEvent::SignedWorkroomCheckpointRequested {
+                        work_ref,
+                        causal_parent_refs,
+                    } => this.checkpoint_dogfood_workroom(work_ref, causal_parent_refs, cx),
                 },
             ));
             self.dogfood_surface = Some(surface.clone());

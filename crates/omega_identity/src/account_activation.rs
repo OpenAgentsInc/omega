@@ -81,6 +81,7 @@ pub enum DurableIdentityActionKind {
     DeviceGrant,
     HostedAccountLink,
     AgentAttestation,
+    WorkroomActivity,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -196,4 +197,18 @@ fn is_lower_hex_64(value: &str) -> bool {
         && value
             .bytes()
             .all(|byte| byte.is_ascii_digit() || matches!(byte, b'a'..=b'f'))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::DurableIdentityActionKind;
+
+    #[test]
+    fn workroom_activity_action_has_a_stable_public_name() {
+        assert_eq!(
+            serde_json::to_string(&DurableIdentityActionKind::WorkroomActivity)
+                .expect("serialize Workroom identity action"),
+            "\"workroom_activity\""
+        );
+    }
 }

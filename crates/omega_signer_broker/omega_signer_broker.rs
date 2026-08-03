@@ -24,6 +24,10 @@ use serde_json::{Value, json};
 use thiserror::Error;
 
 pub const FIRST_WAVE_SIGN_EVENT_KINDS: &[u16] = &[9, 1_111, 1_984, 22_242, 27_235];
+pub const SIGNED_WORKROOM_EVENT_KINDS: &[u16] = &[
+    32_150, 32_151, 32_152, 32_153, 32_154, 32_155, 32_156, 32_157, 32_158, 32_159, 32_160, 32_161,
+    32_162, 32_163,
+];
 pub const PROFILE_METADATA_KIND: u16 = 0;
 pub const GROUP_JOIN_REQUEST_KIND: u16 = 9_021;
 pub const GROUP_LIST_KIND: u16 = 10_009;
@@ -78,6 +82,13 @@ mod protocol_tests {
         assert_eq!(
             FIRST_WAVE_SIGN_EVENT_KINDS,
             &[9, 1_111, 1_984, 22_242, 27_235]
+        );
+        assert_eq!(
+            SIGNED_WORKROOM_EVENT_KINDS,
+            &[
+                32_150, 32_151, 32_152, 32_153, 32_154, 32_155, 32_156, 32_157, 32_158, 32_159,
+                32_160, 32_161, 32_162, 32_163,
+            ]
         );
     }
 
@@ -879,6 +890,7 @@ fn authorize_remote_sign_event(
         && kind != GROUP_JOIN_REQUEST_KIND
         && kind != GROUP_LIST_KIND
         && !FIRST_WAVE_SIGN_EVENT_KINDS.contains(&kind)
+        && !SIGNED_WORKROOM_EVENT_KINDS.contains(&kind)
     {
         return Err(SignerBrokerError::EventKindNotDeclared { kind });
     }

@@ -28,6 +28,7 @@ use crate::omega_status_cue::{OmegaStatus, omega_status_cue};
 
 const DOGFOOD_SURFACE_STATE_KEY: &str = "omega_dogfood_surface_state_v1";
 const MAX_USER_SAVED_VIEWS: usize = 8;
+pub const DOGFOOD_SIGNED_WORKROOM_REF: &str = "workroom:omega:release-v0.2.0";
 
 #[derive(Clone, Copy, Debug, Default, Deserialize, Eq, PartialEq, Serialize)]
 pub enum DogfoodScene {
@@ -89,6 +90,10 @@ pub enum DogfoodSurfaceEvent {
         event_ref: String,
         effective_principal_ref: String,
         attempt_count: u64,
+    },
+    SignedWorkroomCheckpointRequested {
+        work_ref: String,
+        causal_parent_refs: Vec<String>,
     },
 }
 
@@ -154,6 +159,7 @@ pub struct DogfoodSurface {
     repository_claim_busy: bool,
     signed_workroom_ledger: Option<SignedWorkroomLedger>,
     signed_workroom_error: Option<String>,
+    signed_workroom_checkpoint_in_flight: bool,
     signed_workroom_publish_in_flight: Option<String>,
     work_command_context: Option<DogfoodWorkCommandContext>,
     work_command_context_error: Option<String>,
@@ -410,6 +416,7 @@ impl DogfoodSurface {
             repository_claim_busy: false,
             signed_workroom_ledger: None,
             signed_workroom_error: None,
+            signed_workroom_checkpoint_in_flight: false,
             signed_workroom_publish_in_flight: None,
             work_command_context: None,
             work_command_context_error: Some(
@@ -526,6 +533,20 @@ impl DogfoodSurface {
         cx.notify();
     }
 
+    pub fn finish_signed_workroom_checkpoint(
+        &mut self,
+        ledger: Option<SignedWorkroomLedger>,
+        error: Option<String>,
+        cx: &mut Context<Self>,
+    ) {
+        if let Some(ledger) = ledger {
+            self.signed_workroom_ledger = Some(ledger);
+        }
+        self.signed_workroom_error = error;
+        self.signed_workroom_checkpoint_in_flight = false;
+        cx.notify();
+    }
+
     pub fn set_work_command_context(
         &mut self,
         context: Option<DogfoodWorkCommandContext>,
@@ -628,7 +649,9 @@ impl DogfoodSurface {
         attempt_count: u64,
         cx: &mut Context<Self>,
     ) {
-        if self.signed_workroom_publish_in_flight.is_some() {
+        if self.signed_workroom_checkpoint_in_flight
+            || self.signed_workroom_publish_in_flight.is_some()
+        {
             return;
         }
         self.signed_workroom_publish_in_flight = Some(event_ref.clone());
@@ -637,6 +660,26 @@ impl DogfoodSurface {
             event_ref,
             effective_principal_ref,
             attempt_count,
+        });
+        cx.notify();
+    }
+
+    fn request_signed_workroom_checkpoint(
+        &mut self,
+        work_ref: String,
+        causal_parent_refs: Vec<String>,
+        cx: &mut Context<Self>,
+    ) {
+        if self.signed_workroom_checkpoint_in_flight
+            || self.signed_workroom_publish_in_flight.is_some()
+        {
+            return;
+        }
+        self.signed_workroom_checkpoint_in_flight = true;
+        self.signed_workroom_error = None;
+        cx.emit(DogfoodSurfaceEvent::SignedWorkroomCheckpointRequested {
+            work_ref,
+            causal_parent_refs,
         });
         cx.notify();
     }
@@ -2401,11 +2444,50 @@ impl DogfoodSurface {
                     .collect::<Vec<_>>()
             })
             .unwrap_or_default();
+        let causal_parent_refs = activities
+            .iter()
+            .filter(|activity| activity.workroom_ref.0 == DOGFOOD_SIGNED_WORKROOM_REF)
+            .max_by_key(|activity| activity.revision.0)
+            .map(|activity| vec![activity.event_ref.0.clone()])
+            .unwrap_or_default();
+        let checkpoint_work_ref = work_ref.clone();
+        let checkpoint_busy = self.signed_workroom_checkpoint_in_flight;
+        let any_signed_workroom_operation =
+            checkpoint_busy || self.signed_workroom_publish_in_flight.is_some();
         v_flex()
             .gap_3()
             .role(gpui::Role::List)
             .aria_label("Signed Work history")
-            .child(section_heading("Signed Work history", cx))
+            .child(
+                h_flex()
+                    .justify_between()
+                    .child(section_heading("Signed Work history", cx))
+                    .when_some(checkpoint_work_ref, |header, work_ref| {
+                        header.child(
+                            Button::new(
+                                "signed-workroom-checkpoint",
+                                if checkpoint_busy {
+                                    "Signing…"
+                                } else {
+                                    "Sign checkpoint"
+                                },
+                            )
+                            .style(ButtonStyle::Subtle)
+                            .size(ButtonSize::Compact)
+                            .disabled(any_signed_workroom_operation)
+                            .aria_description(
+                                "Prepare an exact Workroom checkpoint, sign it with the selected enrolled Omega identity, and commit it to the durable outbox before relay publication",
+                            )
+                            .on_click(cx.listener(move |this, _, _, cx| {
+                                this.request_signed_workroom_checkpoint(
+                                    work_ref.clone(),
+                                    causal_parent_refs.clone(),
+                                    cx,
+                                )
+                            })),
+                        )
+                    }),
+            )
             .child(
                 Label::new(
                     self.signed_workroom_error
@@ -2591,7 +2673,7 @@ impl DogfoodSurface {
                                                 )
                                                 .style(ButtonStyle::Subtle)
                                                 .size(ButtonSize::Compact)
-                                                .disabled(publish_in_flight)
+                                                .disabled(any_signed_workroom_operation)
                                                 .aria_description(
                                                     "Transport retry for the existing signed outbox event; this does not sign, enqueue, verify, merge, or release Work",
                                                 )

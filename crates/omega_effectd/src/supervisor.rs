@@ -31,8 +31,9 @@ use crate::all_work::generated::{
     ProtocolInitializeRequest as AllWorkProtocolInitializeRequest,
     ProtocolVersion as AllWorkProtocolVersion, RepositoryClaimExecuteRequest,
     RepositoryClaimExecuteResult, RepositoryClaimReadRequest, RepositoryClaimReadResult,
-    SignedWorkroomDeliveryRequest, SignedWorkroomDeliveryResult, SignedWorkroomEnqueueRequest,
-    SignedWorkroomEnqueueResult, SignedWorkroomPublishRequest, SignedWorkroomReadRequest,
+    SignedWorkroomCommitRequest, SignedWorkroomDeliveryRequest, SignedWorkroomDeliveryResult,
+    SignedWorkroomEnqueueRequest, SignedWorkroomEnqueueResult, SignedWorkroomPrepareRequest,
+    SignedWorkroomPrepareResult, SignedWorkroomPublishRequest, SignedWorkroomReadRequest,
     SignedWorkroomReadResult, StrictBugCandidateExecuteRequest, StrictBugCandidateExecuteResult,
     StrictBugCandidateReadRequest, StrictBugCandidateReadResult, WorkCommandExecuteRequest,
     WorkCommandExecuteResult, WorkCutoverExecuteRequest, WorkCutoverExecuteResult,
@@ -154,6 +155,8 @@ impl OmegaEffectdSupervisor {
                 AllWorkProtocolCapability::RepositoryClaimRead,
                 AllWorkProtocolCapability::RepositoryClaimExecute,
                 AllWorkProtocolCapability::WorkroomActivityRead,
+                AllWorkProtocolCapability::WorkroomActivityPrepare,
+                AllWorkProtocolCapability::WorkroomActivityCommit,
                 AllWorkProtocolCapability::WorkroomActivityEnqueue,
                 AllWorkProtocolCapability::WorkroomActivityDeliver,
                 AllWorkProtocolCapability::WorkroomActivityPublish,
@@ -338,6 +341,50 @@ impl OmegaEffectdSupervisor {
             .await?;
         let result: SignedWorkroomEnqueueResult =
             serde_json::from_value(result).context("decode signed Workroom enqueue")?;
+        result
+            .validate()
+            .map_err(|error| SupervisorError::Anyhow(error.into()))?;
+        Ok(result)
+    }
+
+    pub async fn prepare_signed_workroom(
+        &mut self,
+        params: SignedWorkroomPrepareRequest,
+    ) -> Result<SignedWorkroomPrepareResult, SupervisorError> {
+        params
+            .validate()
+            .map_err(|error| SupervisorError::Anyhow(error.into()))?;
+        let result = self
+            .request(
+                "workroom.activity.prepare",
+                Some(serde_json::to_value(params).context("encode signed Workroom preparation")?),
+                self.generation(),
+            )
+            .await?;
+        let result: SignedWorkroomPrepareResult =
+            serde_json::from_value(result).context("decode signed Workroom preparation")?;
+        result
+            .validate()
+            .map_err(|error| SupervisorError::Anyhow(error.into()))?;
+        Ok(result)
+    }
+
+    pub async fn commit_signed_workroom(
+        &mut self,
+        params: SignedWorkroomCommitRequest,
+    ) -> Result<SignedWorkroomEnqueueResult, SupervisorError> {
+        params
+            .validate()
+            .map_err(|error| SupervisorError::Anyhow(error.into()))?;
+        let result = self
+            .request(
+                "workroom.activity.commit",
+                Some(serde_json::to_value(params).context("encode signed Workroom commit")?),
+                self.generation(),
+            )
+            .await?;
+        let result: SignedWorkroomEnqueueResult =
+            serde_json::from_value(result).context("decode signed Workroom commit")?;
         result
             .validate()
             .map_err(|error| SupervisorError::Anyhow(error.into()))?;
@@ -1077,6 +1124,8 @@ impl OmegaEffectdSupervisor {
                             | "repository.claim.read"
                             | "repository.claim.execute"
                             | "workroom.activity.read"
+                            | "workroom.activity.prepare"
+                            | "workroom.activity.commit"
                             | "workroom.activity.enqueue"
                             | "workroom.activity.deliver"
                             | "workroom.activity.publish"

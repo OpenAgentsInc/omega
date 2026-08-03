@@ -437,6 +437,13 @@ challenge under the reported account key. Remote accounts use the same
 generation-fenced selection registry as local accounts, while **Disconnect
 signer** remains distinct from sign out.
 
+Signed Workroom preparation uses this same selected-account route. The broker
+admits registry kinds 32150 through 32163 only when the active NIP-46 capability
+also declares the exact requested kind. This broker allowlist does not expand an
+enrolled signer's permission: an older capability must be reauthorized before
+it can sign a Workroom checkpoint. Local and remote routes both revalidate the
+account selection and exact prepared event after signing.
+
 Omega persists only the disposable NIP-46 client capability and public signer
 metadata below `identity/nip46/<capability-ref>/`. Its `client.secret` and
 short-lived `pairing.secret` are atomic owner-only local files on Unix. The

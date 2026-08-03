@@ -9,10 +9,10 @@ adapter creates a second writable store.
 
 | Field                 | Value                                                              |
 | --------------------- | ------------------------------------------------------------------ |
-| OpenAgents commit     | `b0ff32b73ff61cccfca8107ac8984252371c9e5f`                         |
+| OpenAgents commit     | `66ccc9c55b1ef74dde30875993ff304ba634a729`                         |
 | Contract              | `openagents.all_work_boundary.v1`                                  |
-| Definition SHA-256    | `513432ed4d7deee1a8511f59b86cc1958d33cc32b76b314ebb0b901500dfb56d` |
-| Rust artifact SHA-256 | `97edd7447145d7d52140e60549b465dfe5f3440a0b9f1748f20ad9469b54e560` |
+| Definition SHA-256    | `c6557022965ea9f92450fefcc7e3ef5eb77d43654280b611e9966b7a1fbbe26a` |
+| Rust artifact SHA-256 | `83ee03c2af2ae43b1f46b307a135d91ea716b25b6be4a740c0b7cf7db3c6899d` |
 | Omega receipt         | `crates/omega_effectd/all-work-contract/SOURCE.json`               |
 
 The generated Rust file, compatibility manifest, and shared fixtures are
@@ -29,7 +29,7 @@ separate All Work profile:
 - an omitted All Work request selects `omega-effectd.v1` with no Work methods;
 - `omega-effectd.v2` enables `work.index.read`, `work.snapshot.read`,
   `planning.graph.read`, `repository.claim.read`, and separately negotiated
-  claim execution, signed Workroom read/enqueue/delivery/publication, Work
+  claim execution, signed Workroom read/prepare/commit/delivery/publication, Work
   command, and Work cutover, Organization membership read, and strict bug
   candidate capabilities;
 - a v1 client that calls any All Work read method receives
@@ -102,7 +102,11 @@ post-cutover commands. See
 [Omega repository work claims](./omega-repository-work-claims.md).
 
 The generated profile also includes signed Workroom activity reads and a
-persist-before-publish enqueue boundary. Signed identity, audience, causal
+prepare/commit boundary in front of the persist-before-publish outbox. The
+OpenAgents authority fixes the canonical unsigned NIP-01 bytes, event identity,
+revision, generation, expiry, and server relay-policy digest before Omega asks
+the selected enrolled identity to sign. Commit accepts only that exact
+preparation and signed event. Signed identity, audience, causal
 parents, generation, outbox state, and revocation remain projection facts.
 They do not become command or effect authority. See
 [Omega signed Workroom projection](./omega-signed-workroom.md).
