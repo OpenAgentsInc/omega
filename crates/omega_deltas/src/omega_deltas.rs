@@ -27573,12 +27573,16 @@ mod tests {
         }
     }
 
-    /// OMEGA-DELTA-0225. Omega titlebar history is real browser-style route
-    /// navigation across sessions and Settings, not decorative controls.
+    /// OMEGA-DELTA-0225. Omega titlebar history is real browser-style typed
+    /// entity navigation across Threads, Work, and Settings, not decorative
+    /// controls.
     #[test]
-    fn omega_titlebar_back_and_forward_walk_session_history() {
+    fn omega_titlebar_back_and_forward_walk_entity_history() {
         let panel = without_comments(&read_repository_file("crates/agent_ui/src/agent_panel.rs"));
-        let history = outside_the_tests(&panel);
+        let entity_navigation = without_comments(&read_repository_file(
+            "crates/omega_workbench_state/src/entity_navigation.rs",
+        ));
+        let history = outside_the_tests(&entity_navigation);
         for required in [
             "self.entries.truncate(self.index + 1)",
             "fn can_back",
@@ -27598,8 +27602,9 @@ mod tests {
             "navigate_omega_back",
             "omega-nav-forward",
             "navigate_omega_forward",
-            "omega_route_available",
-            "OmegaRoute::Thread(active_thread_id)",
+            "omega_navigation_history.can_back()",
+            "omega_navigation_history.can_forward()",
+            "omega_unavailable_route",
         ] {
             assert!(
                 shell.contains(required),
