@@ -993,3 +993,34 @@ The focused projectless-startup, Command-N focus, delayed-front-door, and
 Forensics-to-composer tests passed. `./script/clippy -p agent_ui -p ui`, Rust
 formatting, the documentation build, and diff checks also passed. The app was
 not launched, and no GUI automation was used for this receipt.
+
+## Working-folder and Forensics-target build receipt {#working-folder-forensics-build-receipt}
+
+On 2026-08-03, the working-folder navigation and selected Forensics-target
+change was built from source commit
+`2369dfb7b135196ba6b8a777b2bd3e0476859fb4`, whose parent was
+`b08497a2de1bc752df1c7273fb2a7ad00deee84d`.
+
+- Application: `/Applications/Omega Dev.app`
+- Bundle identifier: `com.openagents.omega.dev`
+- Bundle version: `20260803.045948`
+- Short version: `0.2.0`
+- Architecture: `arm64`
+- Installed and bundled `omega` binary SHA-256:
+  `2d87039ad9960b7a7749f91e336c8a7b5078773889f015e587512fb7c5880e33`
+- DMG SHA-256:
+  `cce8c1eb9c3f76806f12ec38ff71720447a2f5e3e59e36c8771af996fa97f6c0`
+- CLI receipt: `Omega 0.2.0 – /Applications/Omega Dev.app`
+- Signature: ad hoc; deep strict verification passed.
+- Previous development app backups:
+  `/private/tmp/Omega-Dev-before-working-folder-forensics-20260803-ab74fe4e.app`
+  and `/private/tmp/Omega-Dev-replaced-working-folder-forensics-20260803.app`
+- Unchanged production binary SHA-256:
+  `0475b4f52bd0c79b53a9b4dfafd83a9ed081b7ee8858ba48966ead53ae5a5f73`
+
+The complete `agent_ui` library suite, all 316 `omega_deltas` tests, the
+selected-catalog-project and explicit-working-directory regressions, and the
+working-folder focus and switching regressions passed. Clippy for `agent_ui`,
+`ui`, and `omega_deltas`, Rust formatting, the documentation build, and diff
+checks also passed. The app was not launched, and no GUI automation was used
+for this receipt.
