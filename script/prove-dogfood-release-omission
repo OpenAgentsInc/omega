@@ -101,4 +101,81 @@ if [[ "$status" -ne 0 ]]; then
 fi
 
 echo
-echo "PASS: release build omits the dogfood fixture entirely."
+echo "PASS: the omega_work_index release build omits the dogfood fixture payload."
+
+# --- scope, stated honestly -------------------------------------------------
+# Everything above proves ONE thing: the `omega_work_index` crate compiled at a
+# release profile carries no fixture payload. It says NOTHING about the shipped
+# application bundle, which links far more code and has its own literals.
+#
+# That gap was real. omega#235 found `OpenAgentsInc / Omega / Omega as the
+# first-class All Work client` hardcoded in non-gated production UI and present
+# in the shipped binary, while this script passed — because it only ever
+# inspected the probe. `Security Work` is one of the markers above AND is in the
+# shipped app as a button label, so the passing result was true of the probe and
+# false of the product.
+#
+# Pass an app bundle or binary to check the real artifact:
+#   script/prove-dogfood-release-omission /Applications/Omega.app
+app="${1:-}"
+if [[ -z "$app" ]]; then
+  echo
+  echo "NOTE: no application checked. This run proves the crate only."
+  echo "      Pass an app bundle to check the shipped artifact:"
+  echo "      $0 /Applications/Omega.app"
+  exit 0
+fi
+
+app_binary="$app"
+[[ -d "$app" ]] && app_binary="${app}/Contents/MacOS/omega"
+if [[ ! -x "$app_binary" ]]; then
+  echo "FAIL: no executable at ${app_binary}" >&2
+  exit 1
+fi
+
+echo
+# The application marker set is deliberately NARROWER than the crate set, and
+# the difference is the point. Two crate markers are excluded here because in
+# the app they are legitimate, and a gate that reports a legitimate string is a
+# gate people learn to ignore:
+#
+#   fixtureSha256              a serde field name in a schema the app really
+#                              ships; its presence says nothing about payload.
+#   OpenAgentsInc/omega/issues generic bug-report copy. It was 22 occurrences in
+#                              a contaminated build and 2 in a clean one, so the
+#                              count is a signal but the string is not a defect.
+#
+# What IS listed is development-only CONTENT that has no business rendering to a
+# user: fixture project names and internal issue titles. Add a marker here only
+# if its presence in the shipped app is always wrong.
+echo "--- shipped application: ${app_binary} ---"
+app_symbols="$(mktemp)"
+trap 'rm -f "$symbols" "$app_symbols"' EXIT
+strings -a "$app_binary" >"$app_symbols"
+
+app_status=0
+while IFS= read -r marker; do
+  [[ -z "$marker" ]] && continue
+  hits="$(grep -cF -- "$marker" "$app_symbols" || true)"
+  if [[ "$hits" != "0" ]]; then
+    echo "FAIL: shipped application contains development marker (${hits}x): ${marker}" >&2
+    app_status=1
+  else
+    echo "omitted: ${marker}"
+  fi
+done <<'APPMARKERS'
+Omega v0.2.0 dogfood
+Security Work
+first-class All Work client
+APPMARKERS
+
+if [[ "$app_status" -ne 0 ]]; then
+  echo >&2
+  echo "Development-only language reached the shipped application." >&2
+  echo "A literal in a normal render path is NOT removed by the cfg gate on" >&2
+  echo "FIXTURE_BYTES -- derive it from real context or remove it." >&2
+  exit 1
+fi
+
+echo
+echo "PASS: the shipped application also omits development markers."
