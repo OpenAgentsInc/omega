@@ -45,7 +45,7 @@ own source authority and cursor. The qualified rows feed
 store.
 
 The planning authority is Effect-owned state beneath the injected application
-data root. Its initial bounded GitHub reconciliation contains 22 open and six
+data root. Its final bootstrap GitHub reconciliation contains 28 open and six
 closed Work rows. GitHub remains an imported read-only source. A successful
 read does not grant command, claim, delegation, verification, release, or
 owner-disposition authority. Release Planning Records remain planning metadata.
@@ -147,5 +147,5 @@ against its TypeScript binary. The Omega test uses the Rust supervisor and a
 newline-framed child process to verify negotiation, Work Index decoding, and
 Work snapshot decoding. The ignored cross-repository smoke starts that actual
 OpenAgents TypeScript process through the Omega Rust supervisor; it requires
-the immutable source checkout named above and also verifies all 28 planning
+the immutable source checkout named above and also verifies all 34 planning
 rows through the generated `PlanningGraphReadResult`.

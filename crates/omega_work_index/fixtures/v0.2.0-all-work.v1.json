@@ -1,8 +1,8 @@
 {
   "fixtureVersion": "openagents.omega.dogfood-fixture.v1",
-  "fixtureSha256": "037cfda2bfc86f20ed2eca3c0169d9660c305c0f33bb88a4f9894d5613f4f839",
-  "generatedAt": "2026-08-03T05:00:00Z",
-  "sourceSnapshotAt": "2026-08-03T05:00:00Z",
+  "fixtureSha256": "5590d03e1c533aa67b1ab8988ebcc9394d352ff2488fc9bd3d5a03ea7d332eac",
+  "generatedAt": "2026-08-03T09:15:00Z",
+  "sourceSnapshotAt": "2026-08-03T09:15:00Z",
   "simulation": true,
   "graph": {
     "sourceRepositories": [
@@ -11,7 +11,7 @@
         "name": "omega",
         "owner": "OpenAgentsInc",
         "url": "https://github.com/OpenAgentsInc/omega",
-        "revision": "989b5fe73078aa850ef64e466bcb15b100ee83e2",
+        "revision": "699aefc4feb0a2ce2811072c7dbe8b8f8d8f55b8",
         "defaultBranch": "main"
       },
       {
@@ -19,7 +19,7 @@
         "name": "openagents",
         "owner": "OpenAgentsInc",
         "url": "https://github.com/OpenAgentsInc/openagents",
-        "revision": "2b3ca74b051ad12f259aed573716d84540564ef6",
+        "revision": "430a432e526dc37901d04c1e7fdf89bcb3556d2f",
         "defaultBranch": "main"
       }
     ],
@@ -119,6 +119,12 @@
       { "id": "issue:omega:217", "identifier": "omega#217", "title": "Restore a complete macOS accessibility tree for installed Omega", "repositoryId": "repository:omega", "number": 217, "sourceUrl": "https://github.com/OpenAgentsInc/omega/issues/217", "projectId": "project:omega-v0.2.0-dogfood", "projectMilestoneId": "milestone:candidate-launch-proof", "cycleId": "cycle:v0.2.0-dogfood", "releasePlanningRecordId": null, "workflowStateId": "workflow:ready", "priority": "urgent", "labelIds": ["label:accessibility", "label:s0"], "completed": false, "assigneeUserId": null, "delegateUserId": null },
       { "id": "issue:omega:218", "identifier": "omega#218", "title": "Show effective principal and Organization identity in Omega", "repositoryId": "repository:omega", "number": 218, "sourceUrl": "https://github.com/OpenAgentsInc/omega/issues/218", "projectId": "project:omega-v0.2.0-dogfood", "projectMilestoneId": "milestone:agentic-execution-loop", "cycleId": "cycle:v0.2.0-dogfood", "releasePlanningRecordId": null, "workflowStateId": "workflow:ready", "priority": "normal", "labelIds": ["label:all-work"], "completed": false, "assigneeUserId": null, "delegateUserId": null },
       { "id": "issue:omega:219", "identifier": "omega#219", "title": "Enforce concise Omega copy and non-text status cues", "repositoryId": "repository:omega", "number": 219, "sourceUrl": "https://github.com/OpenAgentsInc/omega/issues/219", "projectId": "project:omega-v0.2.0-dogfood", "projectMilestoneId": "milestone:candidate-launch-proof", "cycleId": "cycle:v0.2.0-dogfood", "releasePlanningRecordId": null, "workflowStateId": "workflow:ready", "priority": "high", "labelIds": ["label:copy", "label:s2"], "completed": false, "assigneeUserId": null, "delegateUserId": null },
+      { "id": "issue:omega:220", "identifier": "omega#220", "title": "Add the v0.2.0 All Work release-planning fixture graph", "repositoryId": "repository:omega", "number": 220, "sourceUrl": "https://github.com/OpenAgentsInc/omega/issues/220", "projectId": "project:omega-v0.2.0-dogfood", "projectMilestoneId": "milestone:planning-projections-sdk", "cycleId": "cycle:v0.2.0-dogfood", "releasePlanningRecordId": null, "workflowStateId": "workflow:ready", "priority": "high", "labelIds": ["label:all-work"], "completed": false, "assigneeUserId": null, "delegateUserId": null },
+      { "id": "issue:omega:221", "identifier": "omega#221", "title": "Render the v0.2.0 dogfood project across Omega planning screens", "repositoryId": "repository:omega", "number": 221, "sourceUrl": "https://github.com/OpenAgentsInc/omega/issues/221", "projectId": "project:omega-v0.2.0-dogfood", "projectMilestoneId": "milestone:planning-projections-sdk", "cycleId": "cycle:v0.2.0-dogfood", "releasePlanningRecordId": null, "workflowStateId": "workflow:ready", "priority": "normal", "labelIds": ["label:all-work"], "completed": false, "assigneeUserId": null, "delegateUserId": null },
+      { "id": "issue:omega:222", "identifier": "omega#222", "title": "Back the dogfood graph with canonical All Work planning state", "repositoryId": "repository:omega", "number": 222, "sourceUrl": "https://github.com/OpenAgentsInc/omega/issues/222", "projectId": "project:omega-v0.2.0-dogfood", "projectMilestoneId": "milestone:planning-projections-sdk", "cycleId": "cycle:v0.2.0-dogfood", "releasePlanningRecordId": null, "workflowStateId": "workflow:ready", "priority": "high", "labelIds": ["label:all-work"], "completed": false, "assigneeUserId": null, "delegateUserId": null },
+      { "id": "issue:omega:223", "identifier": "omega#223", "title": "Refresh the dogfood planning graph through the owned All Work client", "repositoryId": "repository:omega", "number": 223, "sourceUrl": "https://github.com/OpenAgentsInc/omega/issues/223", "projectId": "project:omega-v0.2.0-dogfood", "projectMilestoneId": "milestone:planning-projections-sdk", "cycleId": "cycle:v0.2.0-dogfood", "releasePlanningRecordId": null, "workflowStateId": "workflow:ready", "priority": "normal", "labelIds": ["label:all-work"], "completed": false, "assigneeUserId": null, "delegateUserId": null },
+      { "id": "issue:omega:224", "identifier": "omega#224", "title": "Move Repository Work Claims and work packets into Omega", "repositoryId": "repository:omega", "number": 224, "sourceUrl": "https://github.com/OpenAgentsInc/omega/issues/224", "projectId": "project:omega-v0.2.0-dogfood", "projectMilestoneId": "milestone:agentic-execution-loop", "cycleId": "cycle:v0.2.0-dogfood", "releasePlanningRecordId": null, "workflowStateId": "workflow:ready", "priority": "high", "labelIds": ["label:all-work"], "completed": false, "assigneeUserId": null, "delegateUserId": null },
+      { "id": "issue:omega:225", "identifier": "omega#225", "title": "Cut internal Work and Repository Work Claims over from GitHub to Omega", "repositoryId": "repository:omega", "number": 225, "sourceUrl": "https://github.com/OpenAgentsInc/omega/issues/225", "projectId": "project:omega-v0.2.0-dogfood", "projectMilestoneId": "milestone:candidate-launch-proof", "cycleId": "cycle:v0.2.0-dogfood", "releasePlanningRecordId": null, "workflowStateId": "workflow:ready", "priority": "high", "labelIds": ["label:all-work"], "completed": false, "assigneeUserId": null, "delegateUserId": null },
 
       { "id": "issue:openagents:9289", "identifier": "openagents#9289", "title": "Admit the OpenAgents Cloud forensic worker", "repositoryId": "repository:openagents", "number": 9289, "sourceUrl": "https://github.com/OpenAgentsInc/openagents/issues/9289", "projectId": "project:forensics-security-work", "projectMilestoneId": "milestone:live-evidence-completion", "cycleId": null, "releasePlanningRecordId": null, "workflowStateId": "workflow:ready", "priority": "high", "labelIds": ["label:security"], "completed": false, "assigneeUserId": null, "delegateUserId": null },
       { "id": "issue:openagents:9290", "identifier": "openagents#9290", "title": "Materialize immutable forensic source bundles", "repositoryId": "repository:openagents", "number": 9290, "sourceUrl": "https://github.com/OpenAgentsInc/openagents/issues/9290", "projectId": "project:forensics-security-work", "projectMilestoneId": "milestone:live-evidence-completion", "cycleId": null, "releasePlanningRecordId": null, "workflowStateId": "workflow:ready", "priority": "normal", "labelIds": ["label:security"], "completed": false, "assigneeUserId": null, "delegateUserId": null },
@@ -145,6 +151,16 @@
       { "id": "relation:214-blocks-216", "issueId": "issue:omega:214", "relatedIssueId": "issue:omega:216", "kind": "blocks" },
       { "id": "relation:9304-blocks-216", "issueId": "issue:openagents:9304", "relatedIssueId": "issue:omega:216", "kind": "blocks" },
       { "id": "relation:214-blocks-218", "issueId": "issue:omega:214", "relatedIssueId": "issue:omega:218", "kind": "blocks" },
+      { "id": "relation:220-blocks-221", "issueId": "issue:omega:220", "relatedIssueId": "issue:omega:221", "kind": "blocks" },
+      { "id": "relation:220-blocks-223", "issueId": "issue:omega:220", "relatedIssueId": "issue:omega:223", "kind": "blocks" },
+      { "id": "relation:221-blocks-223", "issueId": "issue:omega:221", "relatedIssueId": "issue:omega:223", "kind": "blocks" },
+      { "id": "relation:222-blocks-223", "issueId": "issue:omega:222", "relatedIssueId": "issue:omega:223", "kind": "blocks" },
+      { "id": "relation:9305-blocks-223", "issueId": "issue:openagents:9305", "relatedIssueId": "issue:omega:223", "kind": "blocks" },
+      { "id": "relation:222-blocks-224", "issueId": "issue:omega:222", "relatedIssueId": "issue:omega:224", "kind": "blocks" },
+      { "id": "relation:9304-blocks-224", "issueId": "issue:openagents:9304", "relatedIssueId": "issue:omega:224", "kind": "blocks" },
+      { "id": "relation:9305-blocks-224", "issueId": "issue:openagents:9305", "relatedIssueId": "issue:omega:224", "kind": "blocks" },
+      { "id": "relation:223-blocks-225", "issueId": "issue:omega:223", "relatedIssueId": "issue:omega:225", "kind": "blocks" },
+      { "id": "relation:224-blocks-225", "issueId": "issue:omega:224", "relatedIssueId": "issue:omega:225", "kind": "blocks" },
       { "id": "relation:9289-blocks-9290", "issueId": "issue:openagents:9289", "relatedIssueId": "issue:openagents:9290", "kind": "blocks" },
       { "id": "relation:9290-blocks-9291", "issueId": "issue:openagents:9290", "relatedIssueId": "issue:openagents:9291", "kind": "blocks" },
       { "id": "relation:9289-blocks-9292", "issueId": "issue:openagents:9289", "relatedIssueId": "issue:openagents:9292", "kind": "blocks" },
@@ -202,7 +218,7 @@
     "openAgentsExtensions": {
       "workIdentityScheme": "work:fixture:{issueId}",
       "issueProjectionIdentityScheme": "{issueId}",
-      "sourceSnapshotAt": "2026-08-03T05:00:00Z",
+      "sourceSnapshotAt": "2026-08-03T09:15:00Z",
       "simulation": true,
       "canonicalAuthority": false,
       "allowedCommands": [],

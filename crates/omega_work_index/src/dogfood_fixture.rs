@@ -13,7 +13,7 @@ pub const DOGFOOD_FIXTURE_SCHEMA_V1: &str = "openagents.omega.dogfood-fixture.v1
 pub const DOGFOOD_FIXTURE_ENV: &str = "OMEGA_UI_MOCKS";
 pub const DOGFOOD_PROJECT_ID: &str = "project:omega-v0.2.0-dogfood";
 pub const SECURITY_PROJECT_ID: &str = "project:forensics-security-work";
-pub const DOGFOOD_OPEN_ISSUE_COUNT: usize = 10;
+pub const DOGFOOD_OPEN_ISSUE_COUNT: usize = 16;
 pub const SECURITY_OPEN_ISSUE_COUNT: usize = 12;
 pub const FOUNDATION_ISSUE_COUNT: usize = 6;
 
@@ -96,8 +96,8 @@ impl DogfoodFixtureProjection {
             ));
         }
         if !self.simulation
-            || self.generated_at != "2026-08-03T05:00:00Z"
-            || self.source_snapshot_at != "2026-08-03T05:00:00Z"
+            || self.generated_at != "2026-08-03T09:15:00Z"
+            || self.source_snapshot_at != "2026-08-03T09:15:00Z"
             || self.fixture_sha256.len() != 64
             || !self
                 .fixture_sha256
@@ -386,7 +386,7 @@ impl DogfoodPlanningGraph {
         let extension = &self.open_agents_extensions;
         if extension.work_identity_scheme != "work:fixture:{issueId}"
             || extension.issue_projection_identity_scheme != "{issueId}"
-            || extension.source_snapshot_at != "2026-08-03T05:00:00Z"
+            || extension.source_snapshot_at != "2026-08-03T09:15:00Z"
             || !extension.simulation
             || extension.canonical_authority
             || !extension.allowed_commands.is_empty()
@@ -729,7 +729,7 @@ mod tests {
             DogfoodFixtureAdapter::load(DogfoodFixtureGate::from_runtime_state(true, true))
                 .expect("valid fixture")
                 .expect("enabled fixture");
-        assert_eq!(fixture.graph.issues.len(), 28);
+        assert_eq!(fixture.graph.issues.len(), 34);
         assert_eq!(
             fixture.normalized_graph_sha256().expect("digest"),
             fixture.fixture_sha256
