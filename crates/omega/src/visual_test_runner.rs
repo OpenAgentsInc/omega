@@ -9185,6 +9185,16 @@ fn run_omega_tester_channel_visual_tests(
 ) -> Result<Vec<TestResult>> {
     use agent_ui::omega_public_channels::{ChannelLifecycle, ChannelSnapshot};
 
+    // omega#238. These scenes seal the surface but do not enable the primary
+    // interface, so they capture the workbench presentation and its
+    // `omega.public.channel.dock` — not the shell every launch renders. What
+    // they still prove is presentation-independent: the channel view's
+    // composer, disclosure copy, relay fallback and fail-closed room controls
+    // are the same elements in both. That the destination is reachable at all
+    // in the shipped presentation is proven by `agent_ui`'s
+    // `the_primary_interface_draws_the_tester_channel_destination` and by the
+    // release gate's `tester-channel-destination` OCR row. Moving these scenes
+    // onto the primary interface needs both baselines recaptured.
     const FIRST_LAUNCH_SCENE: &str = "omega_tester_channel_first_launch";
     const RELAY_UNAVAILABLE_SCENE: &str = "omega_tester_channel_relay_unavailable";
     fn require_fail_closed_room(probe: &mut SemanticProbe<'_>) -> Result<()> {
