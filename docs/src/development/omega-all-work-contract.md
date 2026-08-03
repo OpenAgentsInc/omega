@@ -9,10 +9,10 @@ adapter creates a second writable store.
 
 | Field                 | Value                                                              |
 | --------------------- | ------------------------------------------------------------------ |
-| OpenAgents commit     | `07e79366bbdf0ea3133ba799175c72e4d925cb17`                         |
+| OpenAgents commit     | `41ff4cb5327aac61e3f366dead7e508bdbe89340`                         |
 | Contract              | `openagents.all_work_boundary.v1`                                  |
-| Definition SHA-256    | `2f3119cf7822fe9bd770d2c97f913d609dd49e8918fb3ea4c7df9662d20492c4` |
-| Rust artifact SHA-256 | `87fe5a88e669276672027464635f484a2a01de218424a2c063e8502602abe985` |
+| Definition SHA-256    | `287a9c3803c15e73743d0b452b79c5755b1fdd34fb42882a6ccb1125f2c5250b` |
+| Rust artifact SHA-256 | `cf7c01d7d03553cbd1766b563f93e9d39d3cd5b3fae102ce36b7fc649a2d6dc2` |
 | Omega receipt         | `crates/omega_effectd/all-work-contract/SOURCE.json`               |
 
 The generated Rust file, compatibility manifest, and shared fixtures are
@@ -29,7 +29,8 @@ separate All Work profile:
 - an omitted All Work request selects `omega-effectd.v1` with no Work methods;
 - `omega-effectd.v2` enables `work.index.read`, `work.snapshot.read`,
   `planning.graph.read`, `repository.claim.read`, and separately negotiated
-  claim execution, signed Workroom, and `work.command.execute` capabilities;
+  claim execution, signed Workroom read/enqueue/delivery, and
+  `work.command.execute` capabilities;
 - a v1 client that calls any All Work read method receives
   `incompatible_version`;
 - request and result domain payloads use generated Rust and Effect types;

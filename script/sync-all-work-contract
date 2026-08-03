@@ -7,7 +7,7 @@ import subprocess
 from pathlib import Path
 
 
-SOURCE_COMMIT = "430a432e526dc37901d04c1e7fdf89bcb3556d2f"
+SOURCE_COMMIT = "41ff4cb5327aac61e3f366dead7e508bdbe89340"
 SOURCE_PACKAGE = Path("packages/all-work-contract")
 
 

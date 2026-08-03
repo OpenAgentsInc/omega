@@ -4,8 +4,8 @@ use gpui::{
 };
 use omega_effectd::all_work_contract::{
     AgentRef, AgentSessionRef, HostRef, OrganizationRef, PrincipalRef, RepositoryClaimLedger,
-    RepositoryWorkClaim, RepositoryWorkClaimState, SignedWorkroomLedger, ThreadRef, WorkSnapshot,
-    WorkroomAudience,
+    RepositoryWorkClaim, RepositoryWorkClaimState, SignedWorkroomDeliveryOutcome,
+    SignedWorkroomLedger, SignedWorkroomOutboxState, ThreadRef, WorkSnapshot, WorkroomAudience,
 };
 #[cfg(all(test, feature = "test-support"))]
 use omega_work_index::DogfoodFixtureAdapter;
@@ -1968,12 +1968,37 @@ impl DogfoodSurface {
                     .child(Label::new("No activity is not an execution, verification, or owner-disposition fact.").size(LabelSize::Small).color(Color::Muted)),
             ))
             .children(activities.into_iter().map(|activity| {
+                let delivery = self.signed_workroom_ledger.as_ref().and_then(|ledger| {
+                    ledger
+                        .outbox
+                        .iter()
+                        .find(|record| record.activity.event_ref == activity.event_ref)
+                });
                 v_flex().gap_1().p_3().rounded_lg().border_1().border_color(colors.border_variant)
                     .child(h_flex().justify_between()
                         .child(Label::new(format!("{:?}", activity.kind)).size(LabelSize::Small))
                         .child(Label::new(workroom_audience_label(&activity.audience)).size(LabelSize::XSmall).color(Color::Muted)))
                     .child(Label::new(format!("Actor {} · signer {}…", activity.actor_ref.0, &activity.signer_pubkey.0[..12])).size(LabelSize::XSmall))
                     .child(Label::new(format!("{} · generation {} · {} parent(s)", activity.occurred_at.0, activity.generation.0, activity.causal_parent_refs.len())).size(LabelSize::XSmall).color(Color::Muted))
+                    .when_some(delivery, |card, record| {
+                        let attempts = record.delivery_attempts.iter().rev().take(3).map(|attempt| {
+                            let detail = attempt.detail.0.as_ref().map(|value| format!(" · {}", value.0)).unwrap_or_default();
+                            h_flex().justify_between()
+                                .child(Label::new(format!("{}{}", signed_workroom_delivery_outcome_label(&attempt.outcome), detail)).size(LabelSize::XSmall).color(signed_workroom_delivery_outcome_color(&attempt.outcome)))
+                                .child(Label::new(format!("{} · {}", attempt.relay_url.0, attempt.attempted_at.0)).size(LabelSize::XSmall).color(Color::Muted))
+                        }).collect::<Vec<_>>();
+                        card.child(
+                            v_flex().gap_1().pt_2().border_t_1().border_color(colors.border_variant)
+                                .child(h_flex().justify_between()
+                                    .child(Label::new(format!("Delivery · {}", signed_workroom_outbox_state_label(&record.state))).size(LabelSize::XSmall).color(signed_workroom_outbox_state_color(&record.state)))
+                                    .child(Label::new(format!("{}/{} relays · {} attempts", record.accepted_relay_urls.len(), record.relay_urls.len(), record.attempt_count.0)).size(LabelSize::XSmall).color(Color::Muted)))
+                                .when(record.delivery_attempts.len() > 3, |history| history.child(Label::new(format!("{} earlier attempts", record.delivery_attempts.len() - 3)).size(LabelSize::XSmall).color(Color::Muted)))
+                                .children(attempts)
+                        )
+                    })
+                    .when(delivery.is_none(), |card| card.child(
+                        Label::new("Delivery status unavailable").size(LabelSize::XSmall).color(Color::Warning)
+                    ))
             }))
     }
 
@@ -2110,6 +2135,44 @@ fn workroom_audience_label(audience: &WorkroomAudience) -> &'static str {
         WorkroomAudience::Workroom => "Workroom",
         WorkroomAudience::Private => "Private",
         WorkroomAudience::OwnerOnly => "Owner only",
+    }
+}
+
+fn signed_workroom_outbox_state_label(state: &SignedWorkroomOutboxState) -> &'static str {
+    match state {
+        SignedWorkroomOutboxState::Pending => "Pending",
+        SignedWorkroomOutboxState::Publishing => "Partial",
+        SignedWorkroomOutboxState::Accepted => "Accepted",
+        SignedWorkroomOutboxState::Failed => "Failed",
+        SignedWorkroomOutboxState::Superseded => "Superseded",
+        SignedWorkroomOutboxState::Revoked => "Revoked",
+    }
+}
+
+fn signed_workroom_outbox_state_color(state: &SignedWorkroomOutboxState) -> Color {
+    match state {
+        SignedWorkroomOutboxState::Accepted => Color::Success,
+        SignedWorkroomOutboxState::Failed => Color::Error,
+        SignedWorkroomOutboxState::Pending | SignedWorkroomOutboxState::Publishing => {
+            Color::Warning
+        }
+        SignedWorkroomOutboxState::Superseded | SignedWorkroomOutboxState::Revoked => Color::Muted,
+    }
+}
+
+fn signed_workroom_delivery_outcome_label(outcome: &SignedWorkroomDeliveryOutcome) -> &'static str {
+    match outcome {
+        SignedWorkroomDeliveryOutcome::Accepted => "Accepted",
+        SignedWorkroomDeliveryOutcome::Rejected => "Rejected",
+        SignedWorkroomDeliveryOutcome::Unreachable => "Unreachable",
+    }
+}
+
+fn signed_workroom_delivery_outcome_color(outcome: &SignedWorkroomDeliveryOutcome) -> Color {
+    match outcome {
+        SignedWorkroomDeliveryOutcome::Accepted => Color::Success,
+        SignedWorkroomDeliveryOutcome::Rejected => Color::Error,
+        SignedWorkroomDeliveryOutcome::Unreachable => Color::Warning,
     }
 }
 
@@ -2443,6 +2506,22 @@ mod tests {
         editable.remove();
         assert_eq!(editable.apply(), None);
         assert!(!editable.active);
+    }
+
+    #[test]
+    fn signed_workroom_delivery_labels_stay_transport_specific() {
+        assert_eq!(
+            signed_workroom_outbox_state_label(&SignedWorkroomOutboxState::Publishing),
+            "Partial"
+        );
+        assert_eq!(
+            signed_workroom_outbox_state_label(&SignedWorkroomOutboxState::Accepted),
+            "Accepted"
+        );
+        assert_eq!(
+            signed_workroom_delivery_outcome_label(&SignedWorkroomDeliveryOutcome::Unreachable),
+            "Unreachable"
+        );
     }
 }
 use db::kvp::KeyValueStore;

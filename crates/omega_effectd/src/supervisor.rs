@@ -30,9 +30,10 @@ use crate::all_work::generated::{
     ProtocolInitializeRequest as AllWorkProtocolInitializeRequest,
     ProtocolVersion as AllWorkProtocolVersion, RepositoryClaimExecuteRequest,
     RepositoryClaimExecuteResult, RepositoryClaimReadRequest, RepositoryClaimReadResult,
-    SignedWorkroomEnqueueRequest, SignedWorkroomEnqueueResult, SignedWorkroomReadRequest,
-    SignedWorkroomReadResult, WorkCommandExecuteRequest, WorkCommandExecuteResult,
-    WorkIndexReadRequest, WorkIndexReadResult, WorkSnapshotReadRequest, WorkSnapshotReadResult,
+    SignedWorkroomDeliveryRequest, SignedWorkroomDeliveryResult, SignedWorkroomEnqueueRequest,
+    SignedWorkroomEnqueueResult, SignedWorkroomReadRequest, SignedWorkroomReadResult,
+    WorkCommandExecuteRequest, WorkCommandExecuteResult, WorkIndexReadRequest, WorkIndexReadResult,
+    WorkSnapshotReadRequest, WorkSnapshotReadResult,
 };
 use crate::protocol::{
     HealthResult, HostMethod, HostRequestFrame, HostResponseError, HostResponseErrorCode,
@@ -150,6 +151,7 @@ impl OmegaEffectdSupervisor {
                 AllWorkProtocolCapability::RepositoryClaimExecute,
                 AllWorkProtocolCapability::WorkroomActivityRead,
                 AllWorkProtocolCapability::WorkroomActivityEnqueue,
+                AllWorkProtocolCapability::WorkroomActivityDeliver,
                 AllWorkProtocolCapability::WorkCommandExecute,
             ],
         };
@@ -326,6 +328,28 @@ impl OmegaEffectdSupervisor {
             .await?;
         let result: SignedWorkroomEnqueueResult =
             serde_json::from_value(result).context("decode signed Workroom enqueue")?;
+        result
+            .validate()
+            .map_err(|error| SupervisorError::Anyhow(error.into()))?;
+        Ok(result)
+    }
+
+    pub async fn deliver_signed_workroom(
+        &mut self,
+        params: SignedWorkroomDeliveryRequest,
+    ) -> Result<SignedWorkroomDeliveryResult, SupervisorError> {
+        params
+            .validate()
+            .map_err(|error| SupervisorError::Anyhow(error.into()))?;
+        let result = self
+            .request(
+                "workroom.activity.deliver",
+                Some(serde_json::to_value(params).context("encode signed Workroom delivery")?),
+                self.generation(),
+            )
+            .await?;
+        let result: SignedWorkroomDeliveryResult =
+            serde_json::from_value(result).context("decode signed Workroom delivery")?;
         result
             .validate()
             .map_err(|error| SupervisorError::Anyhow(error.into()))?;
@@ -902,6 +926,7 @@ impl OmegaEffectdSupervisor {
                             | "repository.claim.execute"
                             | "workroom.activity.read"
                             | "workroom.activity.enqueue"
+                            | "workroom.activity.deliver"
                             | "work.command.execute"
                     ) {
                         MAX_ALL_WORK_GRAPH_RESPONSE_BYTES
