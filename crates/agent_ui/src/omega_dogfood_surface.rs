@@ -141,6 +141,50 @@ pub struct DogfoodSurface {
     filter: PlanningFilter,
     group: PlanningGroup,
     sort: PlanningSort,
+    user_saved_view: EditableSavedPlanningView,
+}
+
+#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct SavedPlanningQuery {
+    saved_view: PlanningSavedView,
+    filter: PlanningFilter,
+    group: PlanningGroup,
+    sort: PlanningSort,
+}
+
+#[derive(Clone, Debug, Default, Eq, PartialEq)]
+struct EditableSavedPlanningView {
+    query: Option<SavedPlanningQuery>,
+    active: bool,
+}
+
+impl EditableSavedPlanningView {
+    fn from_persisted(query: Option<SavedPlanningQuery>, active: bool) -> Self {
+        Self {
+            active: active && query.is_some(),
+            query,
+        }
+    }
+
+    fn save(&mut self, query: SavedPlanningQuery) {
+        self.query = Some(query);
+        self.active = true;
+    }
+
+    fn apply(&mut self) -> Option<SavedPlanningQuery> {
+        self.active = self.query.is_some();
+        self.query
+    }
+
+    fn diverge(&mut self) {
+        self.active = false;
+    }
+
+    fn remove(&mut self) {
+        self.query = None;
+        self.active = false;
+    }
 }
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
@@ -157,6 +201,10 @@ struct PersistedDogfoodSurfaceState {
     group: PlanningGroup,
     #[serde(default)]
     sort: PlanningSort,
+    #[serde(default)]
+    user_saved_view: Option<SavedPlanningQuery>,
+    #[serde(default)]
+    user_saved_view_active: bool,
 }
 
 impl DogfoodSurface {
@@ -191,6 +239,10 @@ impl DogfoodSurface {
             filter: state.filter,
             group: state.group,
             sort: state.sort,
+            user_saved_view: EditableSavedPlanningView::from_persisted(
+                state.user_saved_view,
+                state.user_saved_view_active,
+            ),
         }
     }
 
@@ -401,12 +453,14 @@ impl DogfoodSurface {
 
     fn set_filter(&mut self, filter: PlanningFilter, cx: &mut Context<Self>) {
         self.filter = filter;
+        self.user_saved_view.diverge();
         self.save_state(cx);
         cx.notify();
     }
 
     fn set_saved_view(&mut self, saved_view: PlanningSavedView, cx: &mut Context<Self>) {
         self.saved_view = saved_view;
+        self.user_saved_view.diverge();
         self.save_state(cx);
         cx.notify();
     }
@@ -418,6 +472,7 @@ impl DogfoodSurface {
             PlanningGroup::Project => PlanningGroup::Priority,
             PlanningGroup::Priority => PlanningGroup::Lifecycle,
         };
+        self.user_saved_view.diverge();
         self.save_state(cx);
         cx.notify();
     }
@@ -428,6 +483,41 @@ impl DogfoodSurface {
             PlanningSort::Priority => PlanningSort::Title,
             PlanningSort::Title => PlanningSort::SourceOrder,
         };
+        self.user_saved_view.diverge();
+        self.save_state(cx);
+        cx.notify();
+    }
+
+    fn current_saved_planning_query(&self) -> SavedPlanningQuery {
+        SavedPlanningQuery {
+            saved_view: self.saved_view,
+            filter: self.filter,
+            group: self.group,
+            sort: self.sort,
+        }
+    }
+
+    fn save_user_view(&mut self, cx: &mut Context<Self>) {
+        let query = self.current_saved_planning_query();
+        self.user_saved_view.save(query);
+        self.save_state(cx);
+        cx.notify();
+    }
+
+    fn apply_user_view(&mut self, cx: &mut Context<Self>) {
+        let Some(query) = self.user_saved_view.apply() else {
+            return;
+        };
+        self.saved_view = query.saved_view;
+        self.filter = query.filter;
+        self.group = query.group;
+        self.sort = query.sort;
+        self.save_state(cx);
+        cx.notify();
+    }
+
+    fn remove_user_view(&mut self, cx: &mut Context<Self>) {
+        self.user_saved_view.remove();
         self.save_state(cx);
         cx.notify();
     }
@@ -509,6 +599,8 @@ impl DogfoodSurface {
             filter: self.filter,
             group: self.group,
             sort: self.sort,
+            user_saved_view: self.user_saved_view.query,
+            user_saved_view_active: self.user_saved_view.active,
         };
         let Ok(json) = serde_json::to_string(&state) else {
             return;
@@ -693,7 +785,38 @@ impl DogfoodSurface {
                         .on_click(cx.listener(move |this, _, _, cx| {
                             this.set_saved_view(saved_view, cx)
                         }))
-                    })),
+                    }))
+                    .child(
+                        Button::new("planning-user-saved-view", "My view")
+                            .style(if self.user_saved_view.active {
+                                ButtonStyle::Filled
+                            } else {
+                                ButtonStyle::Subtle
+                            })
+                            .size(ButtonSize::Compact)
+                            .disabled(self.user_saved_view.query.is_none())
+                            .on_click(cx.listener(|this, _, _, cx| this.apply_user_view(cx))),
+                    )
+                    .child(
+                        Button::new(
+                            "planning-save-user-view",
+                            if self.user_saved_view.query.is_some() {
+                                "Update"
+                            } else {
+                                "Save"
+                            },
+                        )
+                        .style(ButtonStyle::Subtle)
+                        .size(ButtonSize::Compact)
+                        .on_click(cx.listener(|this, _, _, cx| this.save_user_view(cx))),
+                    )
+                    .child(
+                        Button::new("planning-remove-user-view", "Remove")
+                            .style(ButtonStyle::Subtle)
+                            .size(ButtonSize::Compact)
+                            .disabled(self.user_saved_view.query.is_none())
+                            .on_click(cx.listener(|this, _, _, cx| this.remove_user_view(cx))),
+                    ),
             )
             .child(
                 h_flex()
@@ -2073,6 +2196,8 @@ fn default_fixture_state() -> PersistedDogfoodSurfaceState {
         filter: PlanningFilter::All,
         group: PlanningGroup::Lifecycle,
         sort: PlanningSort::SourceOrder,
+        user_saved_view: None,
+        user_saved_view_active: false,
     }
 }
 
@@ -2255,6 +2380,8 @@ mod tests {
                 filter: PlanningFilter::Open,
                 group: PlanningGroup::Milestone,
                 sort: PlanningSort::Priority,
+                user_saved_view: None,
+                user_saved_view_active: false,
             };
             assert!(fixture_state_is_valid(&fixture, &state));
         }
@@ -2266,6 +2393,8 @@ mod tests {
             filter: PlanningFilter::All,
             group: PlanningGroup::Lifecycle,
             sort: PlanningSort::SourceOrder,
+            user_saved_view: None,
+            user_saved_view_active: false,
         };
         assert!(!fixture_state_is_valid(&fixture, &invalid));
     }
@@ -2282,6 +2411,38 @@ mod tests {
         }))
         .expect("backward-compatible saved state");
         assert_eq!(state.saved_view, PlanningSavedView::All);
+        assert_eq!(state.user_saved_view, None);
+        assert!(!state.user_saved_view_active);
+    }
+
+    #[test]
+    fn editable_saved_view_captures_reapplies_updates_and_removes_one_exact_query() {
+        let initial = SavedPlanningQuery {
+            saved_view: PlanningSavedView::CriticalPath,
+            filter: PlanningFilter::Open,
+            group: PlanningGroup::Milestone,
+            sort: PlanningSort::Priority,
+        };
+        let updated = SavedPlanningQuery {
+            saved_view: PlanningSavedView::Blocked,
+            filter: PlanningFilter::Blocked,
+            group: PlanningGroup::Priority,
+            sort: PlanningSort::Title,
+        };
+        let mut editable = EditableSavedPlanningView::default();
+
+        editable.save(initial);
+        assert_eq!(editable.apply(), Some(initial));
+        assert!(editable.active);
+
+        editable.diverge();
+        assert!(!editable.active);
+        editable.save(updated);
+        assert_eq!(editable.apply(), Some(updated));
+
+        editable.remove();
+        assert_eq!(editable.apply(), None);
+        assert!(!editable.active);
     }
 }
 use db::kvp::KeyValueStore;

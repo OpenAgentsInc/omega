@@ -40,10 +40,13 @@ The v0.2.0 dogfood Project exposes Overview, List, Board, Table, Timeline,
 Roadmap, Issue, Session, and Review scenes behind the existing debug/mock gate.
 List and Board now use the same reducer as the three added views. Saved View,
 filter, group, and sort controls update one persisted query state. Older saved
-state defaults to All Work. Table provides a dense keyboard-addressable field
-view. Timeline shows grouped Work tracks with non-text completion and blocker
-cues. Roadmap shows group progress without turning a portfolio Project or
-milestone into the root Work object.
+state defaults to All Work. The inline My view slot captures that exact typed
+Saved View, filter, group, and sort tuple. It can reapply, update, or remove the
+tuple without introducing a renderer-owned copy. Changing any shared control
+makes the slot inactive until it is reapplied or updated. Table provides a
+dense keyboard-addressable field view. Timeline shows grouped Work tracks with
+non-text completion and blocker cues. Roadmap shows group progress without
+turning a portfolio Project or milestone into the root Work object.
 
 The input may be the checked fixture, the complete owned planning read, or the
 explicit last-known-good offline projection. Its provenance and loss state
@@ -54,8 +57,9 @@ the planning views remain read-only.
 ## Scope boundary
 
 This is a substantive OAW-008 slice, not its close proof. Production portfolio
-navigation remains absent. Native Organization switching, saved-View editing,
-bulk actions, inline mutations, drag/drop Intent admission, large-dataset
+navigation remains absent. Native Organization switching, multiple named and
+shared saved Views, real attention-state inputs, Inbox/triage interaction, bulk
+actions, inline mutations, drag/drop Intent admission, large-dataset
 performance, installed accessibility, and complete two-domain workflows remain
 required before omega#215 can close. Test execution is deferred to the single
 final omega#208 build gate by owner direction.
