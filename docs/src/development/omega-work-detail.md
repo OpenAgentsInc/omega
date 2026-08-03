@@ -116,6 +116,14 @@ kind/status summary, not message or tool payload; an explicit
 path supplies an Effect or translates activity into completion, verification,
 or owner acceptance.
 
+Canonical reads expose Session lifecycle and portable Agent Activity as full
+generated projection rows beside the compatibility reference arrays. The
+Inspector shows active, paused, stopped, or revoked state with exact Thread,
+Agent Session, Run, Delegation Grant, Host, and generation. It separately shows
+the portable activity kind/summary, provider event, explicit projection loss,
+and nullable Effect. Cross-reference or generation mismatches fail the read;
+an Effect ref still is not a Receipt, verification, or Owner Disposition.
+
 For a generating retained Thread, **Stop agent** invokes the exact local ACP
 cancel path before it records the bounded Session as stopped. Omega refuses the
 command when the Thread is not open or is not generating. Cancellation and the

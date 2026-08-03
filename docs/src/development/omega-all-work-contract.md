@@ -9,10 +9,10 @@ adapter creates a second writable store.
 
 | Field                 | Value                                                              |
 | --------------------- | ------------------------------------------------------------------ |
-| OpenAgents commit     | `66ccc9c55b1ef74dde30875993ff304ba634a729`                         |
+| OpenAgents commit     | `2630b1d38393df7b5cd9a10cd12584b604b49351`                         |
 | Contract              | `openagents.all_work_boundary.v1`                                  |
-| Definition SHA-256    | `c6557022965ea9f92450fefcc7e3ef5eb77d43654280b611e9966b7a1fbbe26a` |
-| Rust artifact SHA-256 | `83ee03c2af2ae43b1f46b307a135d91ea716b25b6be4a740c0b7cf7db3c6899d` |
+| Definition SHA-256    | `012a5962bc2bea70792014f5b375d78b7afef2bee15408489a729278c641508b` |
+| Rust artifact SHA-256 | `717ba307518d7cacfdb8867658d89880b1f602bc83a151474f77e266380d1243` |
 | Omega receipt         | `crates/omega_effectd/all-work-contract/SOURCE.json`               |
 
 The generated Rust file, compatibility manifest, and shared fixtures are
@@ -186,6 +186,16 @@ payload into Work and records
 `loss:omega:provider-native-payload-not-projected` explicitly. Neither path
 supplies an Effect. Real execution-effect receipts and the installed owner
 journey remain incomplete.
+
+The snapshot also carries additive full Session and portable Agent Activity
+projections beside the compatibility ref arrays. A Session binds its Thread,
+Agent Session, Run, Delegation Grant, Host, generation, and exact
+active/paused/stopped/revoked lifecycle. An activity binds its Session, Run,
+generation, portable kind and summary, provider event, explicit projection
+losses, and nullable Effect. Omega rejects duplicate, zero-generation,
+cross-ref, or activity-to-session mismatches before displaying the result.
+This makes restart and revocation state inspectable without treating a provider
+event or Effect reference as a Receipt, verification, or owner acceptance.
 
 When the exact retained Thread is generating, **Stop agent** first calls
 Omega's existing local ACP cancel path and only then records the generated

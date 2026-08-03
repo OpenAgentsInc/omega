@@ -53,7 +53,7 @@ mod tests {
         );
         assert_eq!(
             source["sourceCommit"].as_str(),
-            Some("66ccc9c55b1ef74dde30875993ff304ba634a729")
+            Some("2630b1d38393df7b5cd9a10cd12584b604b49351")
         );
         assert!(
             compatibility["protocol"]["methods"]
@@ -96,6 +96,14 @@ mod tests {
                 "generated compatibility manifest must expose {method}"
             );
         }
+        assert_eq!(
+            compatibility["implementationStatus"]["WorkSessionProjection"].as_str(),
+            Some("implemented")
+        );
+        assert_eq!(
+            compatibility["implementationStatus"]["WorkAgentActivityProjection"].as_str(),
+            Some("implemented")
+        );
     }
 
     #[test]

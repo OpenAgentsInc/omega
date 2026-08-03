@@ -38,7 +38,7 @@ use crate::all_work::generated::{
     StrictBugCandidateReadRequest, StrictBugCandidateReadResult, WorkCommandExecuteRequest,
     WorkCommandExecuteResult, WorkCutoverExecuteRequest, WorkCutoverExecuteResult,
     WorkCutoverReadRequest, WorkCutoverReadResult, WorkIndexReadRequest, WorkIndexReadResult,
-    WorkSnapshotReadRequest, WorkSnapshotReadResult,
+    WorkSnapshot, WorkSnapshotReadRequest, WorkSnapshotReadResult,
 };
 use crate::protocol::{
     HealthResult, HostMethod, HostRequestFrame, HostResponseError, HostResponseErrorCode,
@@ -53,6 +53,49 @@ const AGENT_COMPUTER_TURN_TIMEOUT: Duration = Duration::from_secs(180);
 const DEFAULT_REQUEST_TIMEOUT: Duration = Duration::from_secs(180);
 const DEFAULT_HOST_REQUEST_TIMEOUT: Duration = Duration::from_secs(30);
 const MAX_HOST_ERROR_MESSAGE_BYTES: usize = 1024;
+
+fn validate_work_execution_projections(snapshot: &WorkSnapshot) -> Result<()> {
+    let sessions = snapshot.session_projections.as_deref().unwrap_or_default();
+    for (index, session) in sessions.iter().enumerate() {
+        if session.generation.0 == 0
+            || sessions[..index]
+                .iter()
+                .any(|previous| previous.session_ref == session.session_ref)
+            || !snapshot.session_refs.contains(&session.session_ref)
+            || !snapshot.thread_refs.contains(&session.thread_ref)
+            || !snapshot
+                .agent_session_refs
+                .contains(&session.agent_session_ref)
+            || !snapshot.run_refs.contains(&session.run_ref)
+        {
+            bail!("Work snapshot contains an inconsistent Session projection");
+        }
+    }
+    let activities = snapshot
+        .agent_activity_projections
+        .as_deref()
+        .unwrap_or_default();
+    for (index, activity) in activities.iter().enumerate() {
+        if activity.generation.0 == 0
+            || activities[..index]
+                .iter()
+                .any(|previous| previous.activity_ref == activity.activity_ref)
+            || !snapshot
+                .agent_activity_refs
+                .contains(&activity.activity_ref)
+            || !snapshot.session_refs.contains(&activity.session_ref)
+            || !snapshot.run_refs.contains(&activity.run_ref)
+            || !sessions.iter().any(|session| {
+                session.session_ref == activity.session_ref
+                    && session.run_ref == activity.run_ref
+                    && session.generation == activity.generation
+            })
+        {
+            bail!("Work snapshot contains an inconsistent Agent Activity projection");
+        }
+    }
+    Ok(())
+}
 
 pub type OmegaEffectdHostFuture =
     Pin<Box<dyn Future<Output = std::result::Result<Value, HostResponseError>> + 'static>>;
@@ -234,6 +277,7 @@ impl OmegaEffectdSupervisor {
         result
             .validate()
             .map_err(|error| SupervisorError::Anyhow(error.into()))?;
+        validate_work_execution_projections(&result.snapshot).map_err(SupervisorError::Anyhow)?;
         Ok(result)
     }
 
@@ -454,6 +498,7 @@ impl OmegaEffectdSupervisor {
         result
             .validate()
             .map_err(|error| SupervisorError::Anyhow(error.into()))?;
+        validate_work_execution_projections(&result.snapshot).map_err(SupervisorError::Anyhow)?;
         if result.receipt.github_write_count.0 != 0 {
             return Err(SupervisorError::Anyhow(anyhow!(
                 "Work command receipt reported a GitHub write"

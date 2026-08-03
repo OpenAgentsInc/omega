@@ -1,11 +1,11 @@
 {
   "schema": "openagents.omega.all_work_contract_consumer.v1",
   "sourceRepository": "https://github.com/OpenAgentsInc/openagents",
-  "sourceCommit": "66ccc9c55b1ef74dde30875993ff304ba634a729",
+  "sourceCommit": "2630b1d38393df7b5cd9a10cd12584b604b49351",
   "contractRef": "openagents.all_work_boundary.v1",
-  "definitionSha256": "c6557022965ea9f92450fefcc7e3ef5eb77d43654280b611e9966b7a1fbbe26a",
-  "rustSha256": "83ee03c2af2ae43b1f46b307a135d91ea716b25b6be4a740c0b7cf7db3c6899d",
-  "jsonSchemaSha256": "13e60ec1f9fadd95ca88b6363ffe537e55aef6976f0a615c013c96468f775370",
-  "fixtureIndexSha256": "39a1cd52cd333154d04c6a00e2a774dbdb105af82c25360b6a4e13b81a6b111f",
+  "definitionSha256": "012a5962bc2bea70792014f5b375d78b7afef2bee15408489a729278c641508b",
+  "rustSha256": "717ba307518d7cacfdb8867658d89880b1f602bc83a151474f77e266380d1243",
+  "jsonSchemaSha256": "43692d5f6032aa2d096a92d3de37b0e957bf607ac18ce19544f93ad7c9f6e375",
+  "fixtureIndexSha256": "b00468c392eb667a080f8e17b4c69612946d88c0e014e57de8cdb75d062245d5",
   "consumption": "vendored-digest-bound-generated-artifact"
 }

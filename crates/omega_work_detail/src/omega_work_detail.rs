@@ -462,6 +462,8 @@ pub fn snapshot_from_index_item(
         agent_session_refs: links.agent_session_refs,
         agent_activity_refs: links.agent_activity_refs,
         run_refs: links.run_refs,
+        session_projections: None,
+        agent_activity_projections: None,
         intent_refs: links.intent_refs,
         event_refs: links.event_refs,
         receipt_refs: links.receipt_refs,

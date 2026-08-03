@@ -7,8 +7,8 @@ use omega_effectd::all_work_contract::{
     AgentRef, AgentSessionRef, DelegationGrantRef, HostRef, OrganizationRef, PrincipalRef,
     RepositoryClaimLedger, RepositoryWorkClaim, RepositoryWorkClaimState, SafeInteger, ShortText,
     SignedWorkroomDeliveryOutcome, SignedWorkroomLedger, SignedWorkroomOutboxState,
-    SignedWorkroomProjectionProfile, SourceRef, ThreadRef, WorkCommandActivityKind, WorkSnapshot,
-    WorkroomAudience,
+    SignedWorkroomProjectionProfile, SourceRef, ThreadRef, WorkCommandActivityKind,
+    WorkSessionState, WorkSnapshot, WorkroomAudience,
 };
 #[cfg(all(test, feature = "test-support"))]
 use omega_work_index::DogfoodFixtureAdapter;
@@ -1844,6 +1844,12 @@ impl DogfoodSurface {
                 .as_ref()
                 .is_some_and(|delegate| delegate.is_some())
         });
+        let latest_session_projection = command_snapshot
+            .and_then(|snapshot| snapshot.session_projections.as_ref())
+            .and_then(|sessions| sessions.last());
+        let latest_activity_projection = command_snapshot
+            .and_then(|snapshot| snapshot.agent_activity_projections.as_ref())
+            .and_then(|activities| activities.last());
         let session = command_snapshot
             .and_then(|snapshot| snapshot.session_refs.last())
             .map_or("None".into(), |session| session.0.clone());
@@ -1856,6 +1862,49 @@ impl DogfoodSurface {
         let run = command_snapshot
             .and_then(|snapshot| snapshot.run_refs.last())
             .map_or("None".into(), |run| run.0.clone());
+        let session_state = latest_session_projection.map_or("Not projected", |session| {
+            work_session_state_label(&session.state)
+        });
+        let session_generation = latest_session_projection
+            .map_or("Not projected".into(), |session| {
+                session.generation.0.to_string()
+            });
+        let session_grant = latest_session_projection.map_or("Not projected".into(), |session| {
+            session.delegation_grant_ref.0.clone()
+        });
+        let session_host = latest_session_projection
+            .map_or("Not projected".into(), |session| session.host_ref.0.clone());
+        let activity = latest_activity_projection
+            .map_or("None".into(), |activity| activity.activity_ref.0.clone());
+        let activity_kind = latest_activity_projection.map_or("Not projected", |activity| {
+            work_activity_kind_label(&activity.kind)
+        });
+        let activity_generation = latest_activity_projection
+            .map_or("Not projected".into(), |activity| {
+                activity.generation.0.to_string()
+            });
+        let activity_summary = latest_activity_projection
+            .map_or("Not projected".into(), |activity| {
+                activity.summary.0.clone()
+            });
+        let canonical_provider_event = latest_activity_projection
+            .and_then(|activity| activity.provider_event_ref.0.as_ref())
+            .map_or("None".into(), |provider_event| provider_event.0.clone());
+        let activity_losses = latest_activity_projection.map_or("None".into(), |activity| {
+            if activity.loss_refs.is_empty() {
+                "None".into()
+            } else {
+                activity
+                    .loss_refs
+                    .iter()
+                    .map(|loss| loss.0.as_str())
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            }
+        });
+        let activity_effect = latest_activity_projection
+            .and_then(|activity| activity.effect_ref.0.as_ref())
+            .map_or("None".into(), |effect| effect.0.clone());
         let delegation_candidate = self
             .work_command_context
             .as_ref()
@@ -1972,7 +2021,9 @@ impl DogfoodSurface {
                     )
                     .child(section_heading("Execution", cx))
                     .child(
-                        Label::new(format!("{assignee} · {delegate} · {session}"))
+                        Label::new(format!(
+                            "{assignee} · {delegate} · {session} · {session_state}"
+                        ))
                             .size(LabelSize::Small)
                             .color(Color::Muted),
                     ),
@@ -2019,8 +2070,19 @@ impl DogfoodSurface {
                     .child(inspector_row("Agent delegate", delegate, cx))
                     .child(inspector_row("Thread", thread, cx))
                     .child(inspector_row("Session", session, cx))
+                    .child(inspector_row("Session state", session_state.into(), cx))
+                    .child(inspector_row("Session generation", session_generation, cx))
+                    .child(inspector_row("Delegation Grant", session_grant, cx))
+                    .child(inspector_row("Session Host", session_host, cx))
                     .child(inspector_row("Agent Session", agent_session, cx))
                     .child(inspector_row("Run", run, cx))
+                    .child(inspector_row("Agent Activity", activity, cx))
+                    .child(inspector_row("Activity kind", activity_kind.into(), cx))
+                    .child(inspector_row("Activity generation", activity_generation, cx))
+                    .child(inspector_row("Portable summary", activity_summary, cx))
+                    .child(inspector_row("Canonical provider event", canonical_provider_event, cx))
+                    .child(inspector_row("Projection loss", activity_losses, cx))
+                    .child(inspector_row("Effect", activity_effect, cx))
                     .child(inspector_row(
                         "Eligible delegate",
                         delegation_candidate.map_or("None".into(), |candidate| {
@@ -2036,7 +2098,7 @@ impl DogfoodSurface {
                         cx,
                     ))
                     .child(inspector_row(
-                        "Provider event",
+                        "Observed provider candidate",
                         provider_event.map_or("Not observed".into(), |event| {
                             event.provider_event_ref.0.clone()
                         }),
@@ -2861,6 +2923,28 @@ fn signed_workroom_projection_profile_label(
     }
 }
 
+fn work_session_state_label(state: &WorkSessionState) -> &'static str {
+    match state {
+        WorkSessionState::Active => "Active",
+        WorkSessionState::Paused => "Paused",
+        WorkSessionState::Stopped => "Stopped",
+        WorkSessionState::Revoked => "Revoked",
+    }
+}
+
+fn work_activity_kind_label(kind: &WorkCommandActivityKind) -> &'static str {
+    match kind {
+        WorkCommandActivityKind::Plan => "Plan",
+        WorkCommandActivityKind::Progress => "Progress",
+        WorkCommandActivityKind::Question => "Question",
+        WorkCommandActivityKind::Action => "Action",
+        WorkCommandActivityKind::Artifact => "Artifact",
+        WorkCommandActivityKind::Error => "Error",
+        WorkCommandActivityKind::Interruption => "Interruption",
+        WorkCommandActivityKind::Result => "Result",
+    }
+}
+
 fn signed_workroom_actor_grant_label(
     grant_ref: Option<&Option<DelegationGrantRef>>,
     generation: Option<&Option<SafeInteger>>,
@@ -3417,6 +3501,26 @@ mod tests {
         assert_eq!(
             signed_workroom_publish_action(&SignedWorkroomOutboxState::Revoked),
             None
+        );
+    }
+
+    #[test]
+    fn execution_projection_labels_keep_lifecycle_and_activity_distinct() {
+        assert_eq!(
+            work_session_state_label(&WorkSessionState::Active),
+            "Active"
+        );
+        assert_eq!(
+            work_session_state_label(&WorkSessionState::Revoked),
+            "Revoked"
+        );
+        assert_eq!(
+            work_activity_kind_label(&WorkCommandActivityKind::Interruption),
+            "Interruption"
+        );
+        assert_eq!(
+            work_activity_kind_label(&WorkCommandActivityKind::Result),
+            "Result"
         );
     }
 

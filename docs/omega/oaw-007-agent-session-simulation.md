@@ -38,6 +38,14 @@ generic kind/status facts cross the boundary, with an explicit loss ref for the
 provider-native payload that Work does not copy. This projection grants no
 Effect, Receipt, verification, completion, or Owner Disposition authority.
 
+The canonical `WorkSnapshot` read now returns complete generated Session and
+portable Agent Activity rows, not only their refs. The inspector shows the
+latest Session lifecycle, generation, Delegation Grant and Host, plus the
+latest activity kind, public-safe summary, provider-event ref, projection-loss
+refs, and nullable Effect ref. Those rows survive restart from the Effect-owned
+command state. Omega validates their cross-references and does not turn any of
+them into a Receipt, verification, or human disposition.
+
 This packet is deterministic UI/model coverage. It cannot close omega#214.
 The shared command/admission processor now exists, but the real close journey
 still requires an explicitly provisioned Organization membership, live bounded
