@@ -753,6 +753,10 @@ pub enum ForensicsWorkbenchCommand {
     StartEntropy {
         prompt_snapshot: EntropyPromptSnapshot,
     },
+    StartCatalogEntropy {
+        prompt_snapshot: EntropyPromptSnapshot,
+        project: omega_forensics::EntropyProjectRecord,
+    },
     CancelEntropy,
     StartEntropyCampaign {
         prompt_snapshot: EntropyPromptSnapshot,
@@ -994,6 +998,21 @@ impl ForensicsWorkbenchSurface {
             }),
             "finish or cancel the active entropy campaign before starting a repository run"
         );
+        let selected_project_ref = self
+            .selected_entropy_project
+            .as_deref()
+            .ok_or_else(|| anyhow::anyhow!("select a project before starting an entropy scan"))?;
+        let project = self
+            .entropy_catalog
+            .projects
+            .iter()
+            .find(|project| project.product_ref == selected_project_ref)
+            .cloned()
+            .ok_or_else(|| anyhow::anyhow!("the selected project is not in the catalog"))?;
+        anyhow::ensure!(
+            project.repository_url.is_some() && project.pinned_revision.is_some(),
+            "the selected project has no complete source pin"
+        );
         let snapshot = EntropyPromptSnapshot::new(
             format!("prompt.omega.entropy.{}", uuid::Uuid::new_v4().simple()),
             self.entropy_parent_prompt_ref.clone(),
@@ -1010,8 +1029,9 @@ impl ForensicsWorkbenchSurface {
             self.entropy_run_history.push(previous);
         }
         self.status = "Preparing an entropy file manifest…".into();
-        cx.emit(ForensicsWorkbenchCommand::StartEntropy {
+        cx.emit(ForensicsWorkbenchCommand::StartCatalogEntropy {
             prompt_snapshot: snapshot,
+            project,
         });
         self.persist_entropy_state(cx);
         cx.notify();
@@ -5880,30 +5900,33 @@ mod tests {
     }
 
     #[gpui::test]
-    fn entropy_run_button_emits_start_command(cx: &mut gpui::TestAppContext) {
+    fn entropy_run_button_emits_the_selected_catalog_project(cx: &mut gpui::TestAppContext) {
         crate::test_support::init_test(cx);
         let binding = RepositoryBinding::new("repo", "worktree").expect("valid binding");
         let candidate = candidate(binding);
         let (surface, cx) = cx.add_window_view(|window, cx| {
             ForensicsWorkbenchSurface::new_with_window(&candidate, window, cx)
         });
-        let started = std::rc::Rc::new(std::cell::Cell::new(false));
+        let started_project = std::rc::Rc::new(std::cell::RefCell::new(None));
         let _subscription = surface.update(cx, |_, cx| {
-            let started = started.clone();
+            let started_project = started_project.clone();
             cx.subscribe(&cx.entity(), move |_, _, event, _| {
-                if matches!(event, ForensicsWorkbenchCommand::StartEntropy { .. }) {
-                    started.set(true);
+                if let ForensicsWorkbenchCommand::StartCatalogEntropy { project, .. } = event {
+                    *started_project.borrow_mut() = Some(project.product_ref.clone());
                 }
             })
         });
 
+        cx.simulate_click_selector("omega.forensics.entropy.project.product.bitkey")
+            .expect("the Bitkey catalog row must accept pointer input");
         cx.simulate_click_selector("omega.forensics.entropy.start")
             .expect("Run entropy scan must accept pointer input");
         cx.run_until_parked();
 
-        assert!(
-            started.get(),
-            "Run entropy scan must dispatch a start command"
+        assert_eq!(
+            started_project.borrow().as_deref(),
+            Some("product.bitkey"),
+            "Run entropy scan must dispatch the selected catalog project"
         );
         assert_eq!(
             surface.read_with(cx, |surface, _| surface.snapshot().status),

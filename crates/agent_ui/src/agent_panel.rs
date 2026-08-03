@@ -318,7 +318,7 @@ fn stable_omega_thread_rows(
     rows
 }
 
-fn omega_repository_workspaces(
+fn omega_working_folder_workspaces(
     multi_workspace: &MultiWorkspace,
     cx: &App,
 ) -> Vec<(Entity<Workspace>, ProjectGroupKey, SharedString)> {
@@ -410,6 +410,48 @@ Execution and result\n\
         prompt_digest = prompt_snapshot.canonical_digest,
         analysis_prompt = prompt_snapshot.text,
     )
+}
+
+fn entropy_catalog_agent_task_prompt(
+    project: &omega_forensics::EntropyProjectRecord,
+    repository_root: &Path,
+    prompt_snapshot: &omega_forensics::EntropyPromptSnapshot,
+) -> Result<String> {
+    let revision = project
+        .pinned_revision
+        .as_deref()
+        .context("the selected catalog project has no pinned revision")?;
+    Ok(format!(
+        "Run a read-only entropy forensics scan of the selected project now.\n\n\
+Target\n\
+- Project: {project_name}\n\
+- Repository: {repository}\n\
+- Selected path: {path}\n\
+- Exact HEAD: {revision}\n\
+- Worktree: clean pinned catalog checkout\n\
+- Frozen prompt digest: {prompt_digest}\n\n\
+Source handling\n\
+- Work only inside the selected path above. It is the working directory attached to this session.\n\
+- Verify the repository and exact HEAD before analysis.\n\
+- Analyze the selected pinned checkout in place and do not modify repository source.\n\
+- Do not substitute the workspace that launched Forensics or another open working folder.\n\n\
+Analysis prompt\n\
+{analysis_prompt}\n\n\
+Execution and result\n\
+- Start immediately and keep all tool activity and progress visible in this task.\n\
+- Traverse the repository, following relevant definitions and consumers across files and dependencies.\n\
+- Ground every claim in exact file and line references from the verified snapshot.\n\
+- Separate observations, hypotheses, limitations, and the next falsifiable checks.\n\
+- Do not claim a linked artifact contains a source path without artifact evidence.\n\
+- Present the final result as readable Markdown, not as a raw JSON object. Preserve every field requested by the analysis prompt under clear Summary, Findings, Hypotheses, Limitations, and Next checks sections.\n\
+- Begin the final response with `Entropy scan complete` or `Entropy scan complete with limitations`, as applicable.\n\
+- Finish with a concise entropy-risk summary and explicitly state any incomplete source or evidence.",
+        project_name = project.product_name,
+        repository = project.repository_ref.as_deref().unwrap_or("unavailable"),
+        path = repository_root.display(),
+        prompt_digest = prompt_snapshot.canonical_digest,
+        analysis_prompt = prompt_snapshot.text,
+    ))
 }
 
 async fn materialize_entropy_campaign_project(
@@ -3821,17 +3863,28 @@ impl AgentPanel {
         });
 
         let connection_store = cx.new(|cx| AgentConnectionStore::new(project.clone(), cx));
-        let _project_subscription =
-            cx.subscribe(&project, |this, _project, event, cx| match event {
+        let _project_subscription = cx.subscribe_in(
+            &project,
+            window,
+            |this, _project, event, window, cx| match event {
                 project::Event::WorktreeAdded(_)
                 | project::Event::WorktreeRemoved(_)
                 | project::Event::WorktreeOrderChanged
                 | project::Event::WorktreePathsChanged { .. } => {
+                    let should_open_first_thread =
+                        matches!(event, project::Event::WorktreeAdded(_))
+                            && this.has_open_project(cx)
+                            && matches!(&this.base_view, BaseView::Uninitialized)
+                            && this.draft_thread.is_none()
+                            && !this.destination_has_meaningful_state(cx);
                     this.thread_identity_observation_revision =
                         this.thread_identity_observation_revision.saturating_add(1);
                     this.ensure_native_agent_connection(cx);
                     this.update_thread_work_dirs(cx);
                     this.persist_all_terminal_metadata(cx);
+                    if should_open_first_thread {
+                        this.open_startup_front_door(window, cx);
+                    }
                     cx.notify();
                 }
                 project::Event::DisconnectedFromHost
@@ -3844,7 +3897,8 @@ impl AgentPanel {
                     cx.notify();
                 }
                 _ => {}
-            });
+            },
+        );
         let git_store = project.read_with(cx, |project, _cx| project.git_store().clone());
         let _git_store_subscription = cx.subscribe(&git_store, |this, _git_store, _event, cx| {
             this.thread_identity_observation_revision =
@@ -5406,15 +5460,9 @@ impl AgentPanel {
         }
     }
 
-    /// `OMEGA-DELTA-0034`. The front door's own entry point, project or no
-    /// project.
-    ///
-    /// `AgentPanel::open_front_door` calls this on a window with nothing to
-    /// restore, and a window with nothing to restore is by definition a window
-    /// with no project. The guard that used to stand here is why omega#76's
-    /// exit — *typing starts a real thread* — did not hold on a fresh install:
-    /// landing worked, and the composer the user was supposed to type into was
-    /// never built.
+    /// `OMEGA-DELTA-0034`. Thread creation requires a selected working folder.
+    /// The projectless surface stays on its explicit folder-selection state;
+    /// once a first folder arrives, startup creates and focuses the composer.
     pub fn activate_new_thread(
         &mut self,
         focus: bool,
@@ -5684,15 +5732,13 @@ impl AgentPanel {
         self.has_open_project(cx) && self.project.read(cx).supports_terminal(cx)
     }
 
-    /// `OMEGA-DELTA-0034`. A terminal entry still requires an open project.
+    /// `OMEGA-DELTA-0034`. A terminal entry requires a selected working folder.
     ///
     /// This asks `supports_terminal` rather than `project.supports_terminal`
     /// because the latter is `true` for *any* local project, worktree or not.
-    /// Before the front-door guards moved, `new_thread`'s own
-    /// `has_open_project` check was what stopped that: a fresh window whose
-    /// persisted `last_created_entry_kind` was `Terminal` would otherwise open
-    /// a terminal with no working directory instead of the composer. That is
-    /// what those guards were protecting, and it is protected here now, where
+    /// A fresh window whose persisted `last_created_entry_kind` was `Terminal`
+    /// must not open a terminal without a working directory. That requirement
+    /// is protected here, where
     /// the requirement actually is.
     pub fn should_create_terminal_for_new_entry(&self, cx: &App) -> bool {
         self.last_created_entry_kind == AgentPanelEntryKind::Terminal && self.supports_terminal(cx)
@@ -7271,7 +7317,7 @@ impl AgentPanel {
                         if has_open_project {
                             Tooltip::for_action("New Thread", &NewThread, cx)
                         } else {
-                            Tooltip::text("Select a project")(window, cx)
+                            Tooltip::text("Select a working folder")(window, cx)
                         }
                     })
                     .on_click(cx.listener(|this, _, window, cx| {
@@ -7779,16 +7825,8 @@ impl AgentPanel {
             .into_any_element()
     }
 
-    /// `OMEGA-DELTA-0034`. Connect the native agent, project or no project.
-    ///
-    /// This was the guard that had to be understood before any of the others
-    /// could move, because it is the one that could plausibly have been
-    /// protecting something. It is not: `NativeAgentServer::connect` takes the
-    /// project as `_project` and never reads it, and `NativeAgent::new_session`
-    /// builds a thread from the project entity without requiring a visible
-    /// worktree. What the guard actually bought was not spinning up an agent
-    /// connection for a window that upstream had decided would never show the
-    /// agent — a resource choice, on a premise Omega does not share.
+    /// `OMEGA-DELTA-0034`. Keep connection preparation separate from thread
+    /// creation; public entry points enforce the working-folder requirement.
     fn ensure_native_agent_connection(&self, cx: &mut Context<Self>) {
         let fs = self.fs.clone();
         let thread_store = self.thread_store.clone();
@@ -7801,7 +7839,8 @@ impl AgentPanel {
         });
     }
 
-    /// `OMEGA-DELTA-0034`. The composer, project or no project.
+    /// `OMEGA-DELTA-0034`. Internal draft activation; public entry points
+    /// enforce the working-folder requirement before calling this helper.
     pub fn activate_draft(
         &mut self,
         focus: bool,
@@ -8096,16 +8135,32 @@ impl AgentPanel {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> Option<ThreadId> {
+        self.create_omega_thread_with_message_in_working_folder(
+            message, None, None, reveal, window, cx,
+        )
+    }
+
+    fn create_omega_thread_with_message_in_working_folder(
+        &mut self,
+        message: String,
+        title: Option<SharedString>,
+        working_folder: Option<PathBuf>,
+        reveal: bool,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> Option<ThreadId> {
         if !self.has_open_project(cx) {
             return None;
         }
         let thread_id = self.create_thread_with_options(
             CreateThreadOptions {
+                title,
                 initial_content: Some(AgentInitialContent::ContentBlock {
                     blocks: vec![acp::ContentBlock::Text(acp::TextContent::new(message))],
                     auto_submit: true,
                 }),
                 agent: Some(Agent::NativeAgent),
+                work_dirs: working_folder.map(|folder| PathList::new(&[folder])),
                 ..CreateThreadOptions::default()
             },
             AgentThreadSource::AgentPanel,
@@ -8552,8 +8607,8 @@ impl AgentPanel {
         self.agent_panel_menu_handle.toggle(window, cx);
     }
 
-    /// `OMEGA-DELTA-0034`. The new-thread menu, project or no project — it is
-    /// how the front door reaches Full Auto and the executor choices.
+    /// `OMEGA-DELTA-0034`. The new-thread menu is available only after a
+    /// working folder is selected.
     pub fn toggle_new_thread_menu(
         &mut self,
         _: &ToggleNewThreadMenu,
@@ -10425,8 +10480,8 @@ impl AgentPanel {
     fn should_show_title_edit(&self, window: &Window, cx: &Context<Self>) -> bool {
         // A Full Auto run's title is edited on its own launch surface, so the
         // toolbar's thread-title editor must not appear over it.
-        // OMEGA-DELTA-0034. A project-optional thread has a title like any
-        // other, so editing it does not wait for a worktree.
+        // OMEGA-DELTA-0034. Folder presence gates thread creation, not title
+        // editability for an already-created thread.
         !self.showing_full_auto
             && matches!(
                 self.visible_surface(),
@@ -11065,14 +11120,11 @@ impl AgentPanel {
             focus_handle.clone(),
             KeyBinding::for_action_in(&workspace::Open::default(), &focus_handle, cx),
         )
-        .description("Select a project to start a new thread.")
+        .description("Select a working folder to start a new thread.")
+        .open_project_label("Open Folder")
         .on_open_project(|_, window, cx| {
             telemetry::event!("Agent Panel Add Project Clicked");
             window.dispatch_action(workspace::Open::default().boxed_clone(), cx);
-        })
-        .on_clone_repo(|_, window, cx| {
-            telemetry::event!("Agent Panel Clone Repo Clicked");
-            window.dispatch_action(git::Clone.boxed_clone(), cx);
         })
     }
 
@@ -13943,6 +13995,125 @@ impl AgentPanel {
             spawn_entropy_campaign(surface, configured_model, cx);
             return;
         }
+        if let crate::forensics_workbench::ForensicsWorkbenchCommand::StartCatalogEntropy {
+            prompt_snapshot,
+            project,
+        } = command.clone()
+        {
+            log::info!(
+                "Forensics catalog entropy scan requested for {}",
+                project.product_name
+            );
+            if let Err(error) = prompt_snapshot.validate().and_then(|_| project.validate()) {
+                surface.update(cx, |surface, cx| {
+                    surface.set_entropy_error(
+                        format!("Entropy project selection is invalid · {error}"),
+                        cx,
+                    )
+                });
+                return;
+            }
+
+            let source_ref = format!("scan.omega.entropy.{}", uuid::Uuid::new_v4().simple());
+            let repository_root = crate::forensics_workbench::entropy_campaign_checkout_root(
+                &source_ref,
+                &project.product_ref,
+            );
+            let project_entity = self.project.clone();
+            let surface = surface.downgrade();
+            cx.spawn_in(window, async move |this, cx| {
+                surface.update(cx, |surface, cx| {
+                    surface.set_entropy_status(
+                        format!(
+                            "Materializing {} at its selected revision…",
+                            project.product_name
+                        ),
+                        cx,
+                    )
+                })?;
+                if let Err(error) =
+                    materialize_entropy_campaign_project(&source_ref, &project).await
+                {
+                    surface.update(cx, |surface, cx| {
+                        surface.set_entropy_error(
+                            format!("Selected project materialization failed · {error}"),
+                            cx,
+                        )
+                    })?;
+                    return anyhow::Ok(());
+                }
+
+                let (worktree, _) = match project_entity
+                    .update(cx, |project_graph, cx| {
+                        project_graph.find_or_create_worktree(repository_root.clone(), true, cx)
+                    })
+                    .await
+                {
+                    Ok(worktree) => worktree,
+                    Err(error) => {
+                        surface.update(cx, |surface, cx| {
+                            surface.set_entropy_error(
+                                format!("Selected working folder could not be opened · {error}"),
+                                cx,
+                            )
+                        })?;
+                        return anyhow::Ok(());
+                    }
+                };
+                if let Some(scan_complete) = worktree.read_with(cx, |worktree, _cx| {
+                    worktree.as_local().map(|local| local.scan_complete())
+                }) {
+                    scan_complete.await;
+                }
+
+                let task_prompt = entropy_catalog_agent_task_prompt(
+                    &project,
+                    &repository_root,
+                    &prompt_snapshot,
+                )?;
+                let thread_title: SharedString =
+                    format!("{} Entropy Forensics", project.product_name).into();
+                let project_ref = project.product_ref.clone();
+                let thread_id = this.update_in(cx, |panel, window, cx| {
+                    panel.create_omega_thread_with_message_in_working_folder(
+                        task_prompt,
+                        Some(thread_title),
+                        Some(repository_root.clone()),
+                        true,
+                        window,
+                        cx,
+                    )
+                })?;
+                let Some(thread_id) = thread_id else {
+                    surface.update(cx, |surface, cx| {
+                        surface.set_entropy_error(
+                            "Select a working folder before starting entropy analysis",
+                            cx,
+                        )
+                    })?;
+                    return anyhow::Ok(());
+                };
+                surface.update(cx, |surface, cx| {
+                    surface.install_entropy_campaign_root(project_ref, repository_root.clone(), cx);
+                    surface.set_entropy_status(
+                        format!(
+                            "Opened {} entropy scan in task {}",
+                            project.product_name,
+                            thread_id.to_key_string()
+                        ),
+                        cx,
+                    );
+                })?;
+                log::info!(
+                    "Forensics entropy scan opened as a visible Omega task for {} at {}",
+                    project.product_name,
+                    project.pinned_revision.as_deref().unwrap_or("unavailable")
+                );
+                anyhow::Ok(())
+            })
+            .detach_and_log_err(cx);
+            return;
+        }
         if matches!(
             &command,
             crate::forensics_workbench::ForensicsWorkbenchCommand::CancelEntropy
@@ -14591,6 +14762,9 @@ impl AgentPanel {
                 }
                 crate::forensics_workbench::ForensicsWorkbenchCommand::OpenSource { .. } => {}
                 crate::forensics_workbench::ForensicsWorkbenchCommand::StartEntropy { .. }
+                | crate::forensics_workbench::ForensicsWorkbenchCommand::StartCatalogEntropy {
+                    ..
+                }
                 | crate::forensics_workbench::ForensicsWorkbenchCommand::CancelEntropy
                 | crate::forensics_workbench::ForensicsWorkbenchCommand::StartEntropyCampaign {
                     ..
@@ -17899,9 +18073,9 @@ impl AgentPanel {
             hover_background,
             cx.listener(|this, _, window, cx| this.new_thread(&NewThread, window, cx)),
         );
-        let open_repository = self.render_omega_control(
-            "omega-open-repository",
-            "Open repository",
+        let open_working_folder = self.render_omega_control(
+            "omega-open-working-folder",
+            "Open Folder",
             IconName::Plus,
             false,
             icon_muted,
@@ -18085,8 +18259,8 @@ impl AgentPanel {
             )
             .child(div().size(px(6.)).rounded_full().bg(text_accent));
 
-        let active_repository_key = self.project.read(cx).project_group_key(cx);
-        let active_repository_rows = self
+        let active_working_folder_key = self.project.read(cx).project_group_key(cx);
+        let active_working_folder_rows = self
             .workbench_shell
             .identity()
             .cloned()
@@ -18108,17 +18282,18 @@ impl AgentPanel {
                     .map(|(index, candidate)| {
                         let binding = candidate.binding.clone();
                         let debug_selector =
-                            format!("omega.omega.repository.{}", binding.worktree_id);
+                            format!("omega.omega.working-folder.{}", binding.worktree_id);
                         let selected = selected_worktree_id.as_ref() == Some(&binding.worktree_id);
                         let source_thread_id = visible.thread_id.clone();
                         let source_binding = visible.binding.clone();
                         let source_generation = visible.generation;
-                        let accessible_label = candidate.accessible_label();
-                        let repository_name = candidate.project_name.clone();
+                        let folder_name = candidate.project_name.clone();
                         let branch = candidate.branch.label();
+                        let accessible_label =
+                            format!("Select working folder {folder_name}, branch {branch}");
                         let (padding_x, padding_y) = omega_sidebar_row_padding(selected);
                         h_flex()
-                            .id(("omega-repository", index))
+                            .id(("omega-active-working-folder", index))
                             .debug_selector(move || debug_selector)
                             .w_full()
                             .px(px(padding_x))
@@ -18145,7 +18320,7 @@ impl AgentPanel {
                                 );
                             }))
                             .child(Icon::new(IconName::Folder).size(IconSize::Small))
-                            .child(div().min_w_0().flex_1().truncate().child(repository_name))
+                            .child(div().min_w_0().flex_1().truncate().child(folder_name))
                             .child(
                                 div()
                                     .max_w(px(72.))
@@ -18159,18 +18334,18 @@ impl AgentPanel {
                     .collect::<Vec<_>>()
             })
             .unwrap_or_default();
-        let active_repository_has_candidates = !active_repository_rows.is_empty();
+        let active_working_folder_has_candidates = !active_working_folder_rows.is_empty();
         let source_workspace = self.workspace.clone();
-        let retained_repository_rows = window
+        let retained_working_folder_rows = window
             .root::<MultiWorkspace>()
             .flatten()
             .map(|multi_workspace| {
-                let repository_rows = multi_workspace.read(cx);
-                omega_repository_workspaces(&repository_rows, cx)
+                let working_folder_rows = multi_workspace.read(cx);
+                omega_working_folder_workspaces(&working_folder_rows, cx)
                     .into_iter()
                     .filter_map(|(target, key, name)| {
-                        let selected = key == active_repository_key;
-                        (!selected || !active_repository_has_candidates)
+                        let selected = key == active_working_folder_key;
+                        (!selected || !active_working_folder_has_candidates)
                             .then_some((target, selected, name))
                     })
                     .collect::<Vec<_>>()
@@ -18178,14 +18353,14 @@ impl AgentPanel {
             .unwrap_or_default()
             .into_iter()
             .enumerate()
-            .map(|(index, (target, selected, repository_name))| {
+            .map(|(index, (target, selected, folder_name))| {
                 let multi_workspace = window.root::<MultiWorkspace>().flatten();
-                let debug_selector = format!("omega.omega.repository.{index}");
-                let accessible_label = format!("Open repository {repository_name}");
+                let debug_selector = format!("omega.omega.working-folder.workspace.{index}");
+                let accessible_label = format!("Select working folder {folder_name}");
                 let source_workspace = source_workspace.clone();
                 let (padding_x, padding_y) = omega_sidebar_row_padding(selected);
                 h_flex()
-                    .id(("omega-repository", index))
+                    .id(("omega-retained-working-folder", index))
                     .debug_selector(move || debug_selector)
                     .w_full()
                     .px(px(padding_x))
@@ -18216,15 +18391,15 @@ impl AgentPanel {
                         });
                     })
                     .child(Icon::new(IconName::Folder).size(IconSize::Small))
-                    .child(div().min_w_0().flex_1().truncate().child(repository_name))
+                    .child(div().min_w_0().flex_1().truncate().child(folder_name))
                     .into_any_element()
             })
             .collect::<Vec<_>>();
-        let repository_rows = active_repository_rows
+        let working_folder_rows = active_working_folder_rows
             .into_iter()
-            .chain(retained_repository_rows)
+            .chain(retained_working_folder_rows)
             .collect::<Vec<_>>();
-        let has_repositories = !repository_rows.is_empty();
+        let has_working_folders = !working_folder_rows.is_empty();
         let (forensics_padding_x, forensics_padding_y) =
             omega_sidebar_row_padding(omega_forensics_selected);
         let work_index_projection = self.work_index.projection();
@@ -18319,28 +18494,31 @@ impl AgentPanel {
                     .justify_between()
                     .child(
                         div()
-                            .debug_selector(|| "omega.omega.sidebar.repositories".into())
+                            .id("omega-working-folders-heading")
+                            .debug_selector(|| "omega.omega.sidebar.working-folders".into())
+                            .role(gpui::Role::Label)
+                            .aria_label("Working folders")
                             .text_size(px(11.))
                             .font_weight(gpui::FontWeight::MEDIUM)
                             .text_color(text_placeholder)
-                            .child("Repositories"),
+                            .child("Working folders"),
                     )
-                    .child(open_repository),
+                    .child(open_working_folder),
             )
-            .when(has_repositories, |sidebar| {
-                sidebar.children(repository_rows)
+            .when(has_working_folders, |sidebar| {
+                sidebar.children(working_folder_rows)
             })
-            .when(!has_repositories, |sidebar| {
+            .when(!has_working_folders, |sidebar| {
                 sidebar.child(
                     h_flex()
-                        .id("omega-open-repository-empty")
+                        .id("omega-open-working-folder-empty")
                         .w_full()
                         .px(px(8.))
                         .py(px(7.))
                         .gap(px(8.))
                         .rounded(px(8.))
                         .cursor_pointer()
-                        .aria_label("Open a repository folder")
+                        .aria_label("Open a working folder")
                         .hover(move |style| style.bg(hover_background))
                         .on_click(|_, window, cx| {
                             window.dispatch_action(
@@ -18351,7 +18529,7 @@ impl AgentPanel {
                             );
                         })
                         .child(Icon::new(IconName::Folder).size(IconSize::Small))
-                        .child("Open folder"),
+                        .child("Open Folder"),
                 )
             })
             .when(work_index_admitted, |sidebar| {
@@ -20051,6 +20229,37 @@ mod tests {
     }
 
     #[test]
+    fn entropy_catalog_task_prompt_uses_the_selected_project_and_working_folder() {
+        let catalog = omega_forensics::EntropyProjectCatalog::wallet_entropy_v1()
+            .expect("the entropy catalog should be valid");
+        let bitkey = catalog
+            .projects
+            .iter()
+            .find(|project| project.product_ref == "product.bitkey")
+            .expect("Bitkey should be in the entropy catalog");
+        let snapshot = omega_forensics::EntropyPromptSnapshot::new(
+            "prompt.omega.entropy.catalog-test".to_string(),
+            None,
+            None,
+            "Trace every entropy source and secret consumer.".to_string(),
+            "2026-08-02T20:30:00.000Z".to_string(),
+        )
+        .expect("valid prompt snapshot");
+        let selected_root = Path::new("/tmp/omega-entropy-campaigns/bitkey-selected");
+
+        let prompt = entropy_catalog_agent_task_prompt(bitkey, selected_root, &snapshot)
+            .expect("the selected project has a complete source pin");
+
+        assert!(prompt.contains("Project: Bitkey"));
+        assert!(prompt.contains("Repository: repository.github.proto-at-block.bitkey"));
+        assert!(prompt.contains("/tmp/omega-entropy-campaigns/bitkey-selected"));
+        assert!(prompt.contains("cf16705543d0c66ff982635733d380944cc2677d"));
+        assert!(prompt.contains("working directory attached to this session"));
+        assert!(prompt.contains("Do not substitute the workspace that launched Forensics"));
+        assert!(!prompt.contains("/work/openagents"));
+    }
+
+    #[test]
     fn dirty_entropy_repository_uses_a_clean_pinned_snapshot() {
         let repository = tempfile::tempdir().expect("temporary Git repository");
         let source_path = repository.path().join("entropy.rs");
@@ -20191,8 +20400,12 @@ mod tests {
     }
 
     #[gpui::test]
-    async fn omega_repository_list_keeps_each_opened_repository(cx: &mut TestAppContext) {
+    async fn omega_working_folder_list_switches_to_an_inactive_folder(cx: &mut TestAppContext) {
         init_test(cx);
+        cx.update(|cx| {
+            agent::ThreadStore::init_global(cx);
+            language_model::LanguageModelRegistry::test(cx);
+        });
         let fs = FakeFs::new(cx.executor());
         fs.insert_tree("/project-a", json!({ "file.txt": "" }))
             .await;
@@ -20201,16 +20414,21 @@ mod tests {
         let project_a = Project::test(fs.clone(), [Path::new("/project-a")], cx).await;
         let project_b = Project::test(fs, [Path::new("/project-b")], cx).await;
         let multi_workspace =
-            cx.add_window(|window, cx| MultiWorkspace::test_new(project_a, window, cx));
-        multi_workspace
+            cx.add_window(|window, cx| MultiWorkspace::test_new(project_a.clone(), window, cx));
+        let workspace_a = multi_workspace
+            .read_with(cx, |multi_workspace, _cx| {
+                multi_workspace.workspace().clone()
+            })
+            .expect("the first working folder should own a workspace");
+        let workspace_b = multi_workspace
             .update(cx, |multi_workspace, window, cx| {
-                multi_workspace.test_add_workspace(project_b, window, cx);
+                multi_workspace.test_add_workspace(project_b.clone(), window, cx)
             })
             .expect("second project should open in the current window");
 
         let mut names = multi_workspace
             .read_with(cx, |multi_workspace, cx| {
-                omega_repository_workspaces(multi_workspace, cx)
+                omega_working_folder_workspaces(multi_workspace, cx)
                     .into_iter()
                     .map(|(_, _, name)| name.to_string())
                     .collect::<Vec<_>>()
@@ -20218,6 +20436,55 @@ mod tests {
             .expect("project rows should be readable");
         names.sort();
         assert_eq!(names, ["project-a", "project-b"]);
+
+        let cx = &mut VisualTestContext::from_window(multi_workspace.into(), cx);
+        cx.set_debug_accessibility_active(true);
+        workspace_a.update_in(cx, |workspace, window, cx| {
+            let panel = cx.new(|cx| AgentPanel::new(workspace, window, cx));
+            workspace.add_panel(panel, window, cx);
+        });
+        let panel_b = workspace_b.update_in(cx, |workspace, window, cx| {
+            let panel = cx.new(|cx| AgentPanel::new(workspace, window, cx));
+            workspace.add_panel(panel.clone(), window, cx);
+            workspace.focus_panel::<AgentPanel>(window, cx);
+            panel
+        });
+        panel_b.update_in(cx, |panel, window, cx| {
+            panel.force_omega_primary_interface_for_tests = true;
+            panel.new_thread(&NewThread, window, cx);
+        });
+        cx.run_until_parked();
+
+        let snapshot = cx.debug_render_snapshot();
+        let tree = snapshot
+            .accessibility_tree_json()
+            .expect("forced accessibility should capture the working-folder list");
+        assert!(
+            tree.contains("Working folders"),
+            "the folder list must use the canonical user-facing name: {tree}"
+        );
+        assert!(
+            !tree.contains("Repositories"),
+            "the folder list must not label project roots as repositories: {tree}"
+        );
+        assert_eq!(
+            snapshot.selector_count("omega.omega.working-folder.workspace.0"),
+            1,
+            "the inactive working folder must have a unique interactive row"
+        );
+
+        cx.simulate_click_selector("omega.omega.working-folder.workspace.0")
+            .expect("the inactive working folder row should accept a click");
+        cx.run_until_parked();
+        multi_workspace
+            .read_with(cx, |multi_workspace, _cx| {
+                assert_eq!(
+                    multi_workspace.workspace(),
+                    &workspace_a,
+                    "clicking the inactive row must activate its workspace"
+                );
+            })
+            .expect("the window should remain available after folder activation");
     }
 
     #[gpui::test]
@@ -22791,7 +23058,7 @@ mod tests {
     }
 
     #[gpui::test]
-    async fn test_empty_workspace_requires_a_project_before_creating_threads(
+    async fn test_empty_workspace_requires_a_working_folder_before_creating_threads(
         cx: &mut TestAppContext,
     ) {
         init_test(cx);
@@ -22843,8 +23110,16 @@ mod tests {
             .accessibility_tree_json()
             .expect("forced accessibility must capture the projectless state");
         assert!(
-            projectless_tree.contains("Select a project to start a new thread."),
+            projectless_tree.contains("Select a working folder to start a new thread."),
             "the projectless surface must state the next action: {projectless_tree}"
+        );
+        assert!(
+            projectless_tree.contains("Open Folder"),
+            "the projectless surface must expose the folder picker: {projectless_tree}"
+        );
+        assert!(
+            !projectless_tree.contains("Clone Repository"),
+            "Omega must not expose an inert clone action: {projectless_tree}"
         );
 
         let metadata_count_before =
@@ -22911,6 +23186,33 @@ mod tests {
             assert!(
                 !panel.should_create_terminal_for_new_entry(cx),
                 "with no project, neither thread nor terminal creation is available"
+            );
+        });
+
+        fs.insert_tree("/project", json!({ "file.txt": "" })).await;
+        let (new_tree, _) = project
+            .update(cx, |project, cx| {
+                project.find_or_create_worktree("/project", true, cx)
+            })
+            .await
+            .expect("the first working folder should be added");
+        cx.read(|cx| new_tree.read(cx).as_local().unwrap().scan_complete())
+            .await;
+        cx.run_until_parked();
+
+        panel.update_in(cx, |panel, window, cx| {
+            assert!(
+                panel.front_door_composer_visible_for_tests(),
+                "the first working folder must open the new-thread composer"
+            );
+            let composer_focus = panel
+                .active_conversation_view()
+                .expect("the composer should have an active conversation view")
+                .read(cx)
+                .activation_focus_handle(cx);
+            assert!(
+                composer_focus.is_focused(window),
+                "opening the first working folder must focus the input"
             );
         });
     }
@@ -27299,7 +27601,7 @@ mod tests {
             .filter(|selector| selector.contains("omega"))
             .collect::<Vec<_>>();
         assert!(
-            cx.debug_bounds("omega.omega.sidebar.repositories")
+            cx.debug_bounds("omega.omega.sidebar.working-folders")
                 .is_some(),
             "rendered Omega selectors: {omega_selectors:?}"
         );
@@ -29659,6 +29961,32 @@ mod tests {
             assert_eq!(panel.active_thread_id(cx), Some(foreground_id));
             assert!(!panel.retained_threads.contains_key(&foreground_id));
             assert_eq!(panel.selected_agent, Agent::NativeAgent);
+        });
+
+        let selected_folder = PathBuf::from("/selected/bitkey");
+        let selected_id = panel
+            .update_in(&mut cx, |panel, window, cx| {
+                panel.create_omega_thread_with_message_in_working_folder(
+                    "Scan Bitkey".into(),
+                    Some("Bitkey Entropy Forensics".into()),
+                    Some(selected_folder.clone()),
+                    false,
+                    window,
+                    cx,
+                )
+            })
+            .expect("an explicitly targeted task should be created");
+        panel.read_with(&cx, |panel, cx| {
+            let selected = panel
+                .retained_threads
+                .get(&selected_id)
+                .expect("the background selected-folder task should be retained")
+                .read(cx);
+            assert_eq!(
+                selected.work_dirs().ordered_paths().collect::<Vec<_>>(),
+                vec![&selected_folder],
+                "an explicitly targeted task must not inherit /project"
+            );
         });
     }
 }

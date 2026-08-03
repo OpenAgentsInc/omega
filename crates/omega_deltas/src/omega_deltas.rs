@@ -1213,26 +1213,20 @@ pub const ROUTER_DISPATCH_PATH: &str = "crates/agent_ui/src/omega_router.rs";
 /// OMEGA-DELTA-0034. The panel that owns the front door.
 pub const AGENT_PANEL_PATH: &str = "crates/agent_ui/src/agent_panel.rs";
 
-/// OMEGA-DELTA-0034. Front-door entry points that must work with no project.
+/// OMEGA-DELTA-0034. Thread-creation paths that require a working folder.
 ///
-/// Each of these stood between a fresh install and a composer. The check is on
-/// the *function body*, not the file, because a `has_open_project` line
-/// elsewhere in a six-thousand-line panel is fine and one of these is not.
-pub const PROJECT_OPTIONAL_FRONT_DOOR_FNS: &[&str] = &[
+/// The check is on each function body so a transitive or unrelated guard
+/// cannot make a projectless thread look prevented when it is not.
+pub const WORKING_FOLDER_REQUIRED_THREAD_FNS: &[&str] = &[
+    "new_thread_with_workspace",
+    "compose_on_executor",
+    "open_startup_front_door",
     "activate_new_thread",
-    "activate_draft",
-    "new_thread",
-    "ensure_native_agent_connection",
-    "toggle_new_thread_menu",
+    "should_open_startup_front_door",
 ];
 
-/// OMEGA-DELTA-0034. Paths that must keep requiring a project.
-///
-/// Removing the guard from these would not be project-optional threads; it
-/// would be threads that fail later and less legibly. Asserted in the opposite
-/// direction from `PROJECT_OPTIONAL_FRONT_DOOR_FNS` so a blanket deletion of
-/// every guard fails as loudly as restoring one.
-pub const PROJECT_REQUIRED_FNS: &[&str] = &[
+/// OMEGA-DELTA-0034. Other workspace-touching paths that require a folder.
+pub const WORKING_FOLDER_REQUIRED_WORKSPACE_FNS: &[&str] = &[
     "restore_new_draft",
     "refresh_skills",
     "load_thread_from_clipboard",
@@ -6966,41 +6960,21 @@ mod tests {
             })
     }
 
-    /// OMEGA-DELTA-0034. The front door works with no project open.
+    /// OMEGA-DELTA-0034. A working folder gates every thread-creation path.
     ///
-    /// Checked in both directions. Upstream's guard restored on a front-door
-    /// path is the omega#76 defect coming back — a fresh install lands on the
-    /// agent and has no composer to type into. A guard *removed* from a
-    /// workspace-touching path is the opposite mistake: a terminal with no
-    /// working directory, or a clipboard thread with nowhere to put its files,
-    /// failing later and less legibly than a refusal would have.
+    /// The no-folder state offers one real action and creates no hidden draft.
+    /// After the first folder arrives, the Agent Panel opens the same composer
+    /// and transfers focus to its input.
     #[test]
-    fn the_front_door_does_not_require_an_open_project() {
+    fn the_front_door_requires_a_working_folder_before_creating_threads() {
         let path = repository_path(AGENT_PANEL_PATH);
         let source = std::fs::read_to_string(&path)
             .unwrap_or_else(|error| panic!("cannot read {}: {error}", path.display()));
 
-        for name in PROJECT_OPTIONAL_FRONT_DOOR_FNS {
-            let body = function_body(&source, name).unwrap_or_else(|| {
-                panic!(
-                    "OMEGA-DELTA-0034: {} no longer has a `{name}` to check. \
-                     If it was renamed, rename it here too; a check that \
-                     cannot find its subject passes for the wrong reason.",
-                    path.display()
-                )
-            });
-            assert!(
-                !body.contains("has_open_project"),
-                "OMEGA-DELTA-0034: `{name}` in {} refuses a window with no \
-                 project again. A window with nothing to restore is by \
-                 definition a window with no project, so this is omega#76's \
-                 exit failing: the front door opens and there is no composer \
-                 to type into.",
-                path.display()
-            );
-        }
-
-        for name in PROJECT_REQUIRED_FNS {
+        for name in WORKING_FOLDER_REQUIRED_THREAD_FNS
+            .iter()
+            .chain(WORKING_FOLDER_REQUIRED_WORKSPACE_FNS)
+        {
             let body = function_body(&source, name).unwrap_or_else(|| {
                 panic!(
                     "OMEGA-DELTA-0034: {} no longer has a `{name}` to check.",
@@ -7009,13 +6983,33 @@ mod tests {
             });
             assert!(
                 body.contains("has_open_project"),
-                "OMEGA-DELTA-0034: `{name}` in {} stopped requiring an open \
-                 project. Project-optional *threads* is the delta; a terminal \
-                 with no working directory, a resumed draft with no worktree, \
-                 or a clipboard import with nowhere to land is not.",
+                "OMEGA-DELTA-0034: `{name}` in {} stopped requiring a working \
+                 folder. The no-folder state must never create a thread, \
+                 terminal, restored draft, or workspace-bound action.",
                 path.display()
             );
         }
+
+        let empty_state = function_body(&source, "render_no_project_state")
+            .expect("OMEGA-DELTA-0034: the no-folder surface is gone");
+        assert!(
+            empty_state.contains("Select a working folder to start a new thread.")
+                && empty_state.contains("open_project_label(\"Open Folder\")")
+                && !empty_state.contains("on_clone_repo"),
+            "OMEGA-DELTA-0034: the no-folder surface must offer one working \
+             Open Folder action and no inert Clone Repository control"
+        );
+
+        let shell = function_body(&source, "render_omega_shell")
+            .expect("OMEGA-DELTA-0034: the Omega shell is gone");
+        assert!(
+            shell.contains("Working folders")
+                && shell.contains("omega-active-working-folder")
+                && shell.contains("omega-retained-working-folder")
+                && shell.contains("multi_workspace.activate("),
+            "OMEGA-DELTA-0034: the Working folders list must keep distinct \
+             active and retained row identities and activate the selected workspace"
+        );
 
         let external_wrapper = function_body(&source, "new_external_agent_thread")
             .expect("OMEGA-DELTA-0034: the external-agent action wrapper is gone");
@@ -27451,10 +27445,10 @@ mod tests {
         );
     }
 
-    /// OMEGA-DELTA-0223. Omega interface exposes real repository roots rather than a
+    /// OMEGA-DELTA-0223. Omega exposes real working folders rather than a
     /// decorative space, and refuses to launch agent work until one exists.
     #[test]
-    fn omega_repositories_own_the_agent_working_directory() {
+    fn omega_working_folders_own_the_agent_working_directory() {
         let main = without_comments(&read_repository_file("crates/omega/src/main.rs"));
         let restore = body_of(&main, "restore_or_create_workspace");
         assert!(
@@ -27466,7 +27460,7 @@ mod tests {
         let panel = without_comments(&read_repository_file("crates/agent_ui/src/agent_panel.rs"));
         let shell = body_of(&panel, "render_omega_shell");
         for required in [
-            ".child(\"Repositories\")",
+            ".child(\"Working folders\")",
             ".identity()",
             ".candidates",
             "select_thread_identity(",
@@ -27474,12 +27468,32 @@ mod tests {
         ] {
             assert!(
                 shell.contains(required),
-                "OMEGA-DELTA-0223: the Omega repository sidebar lost `{required}`"
+                "OMEGA-DELTA-0223: the Omega working-folder sidebar lost `{required}`"
             );
         }
         assert!(
             !shell.contains(".child(\"Spaces\")"),
             "OMEGA-DELTA-0223: the decorative Omega Spaces label returned"
+        );
+
+        let forensics = without_comments(&read_repository_file(
+            "crates/agent_ui/src/forensics_workbench.rs",
+        ));
+        let request_entropy_run = body_of(&forensics, "request_entropy_run");
+        assert!(
+            request_entropy_run.contains("selected_entropy_project")
+                && request_entropy_run.contains("StartCatalogEntropy")
+                && request_entropy_run.contains("project,"),
+            "OMEGA-DELTA-0223: a Forensics scan no longer carries the selected \
+             catalog project into the session launch"
+        );
+        let handle_forensics = body_of(&panel, "handle_forensics_command");
+        assert!(
+            handle_forensics.contains("StartCatalogEntropy")
+                && handle_forensics.contains("materialize_entropy_campaign_project")
+                && handle_forensics.contains("create_omega_thread_with_message_in_working_folder",),
+            "OMEGA-DELTA-0223: Forensics can substitute the launch workspace \
+             for the selected catalog project's pinned working folder"
         );
 
         let selection = body_of(&panel, "select_thread_identity");

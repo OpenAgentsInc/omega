@@ -164,10 +164,11 @@ select the rail item again.
 
 ### Creating New Threads {#new-thread}
 
-With a project selected, {#action agent::NewThread} and the **Thread > New
+With a working folder selected, {#action agent::NewThread} and the **Thread > New
 Thread** menu item open a normal thread with the composer focused — there is no
-interstitial mode screen. Without a selected project, Omega asks you to select
-one and does not create a draft thread. The default executor is **Omega
+interstitial mode screen. Without a selected working folder, Omega shows only
+**Open Folder** and does not create a draft thread. The first folder selection
+opens the composer and focuses its input. The default executor is **Omega
 Agent**, and the executor selection is a dropdown in the composer bar, beside
 the Flash/Pro tier control. The
 dropdown offers the executor rows in one fixed order: Omega Agent, the named

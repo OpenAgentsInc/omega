@@ -1,14 +1,17 @@
 # Omega entropy repository runs
 
-Omega can run a read-only entropy analysis over the repository selected in the
-Forensics workbench. This is a repository-local path. It does not use the
+Omega can run a read-only entropy analysis over the catalog project selected in
+the Forensics workbench. This is a project-pinned path. It does not use the
 OpenAgents Cloud worker lifecycle and does not grant reporting, disclosure, or
 source-write authority.
 
-Edit the visible **Entropy prompt**, then choose **Run entropy scan** in
-Forensics. Omega immediately opens a normal task, submits the frozen prompt,
-and shows the agent's progress, tool calls, stop control, and result in the
-standard transcript. A terminal response begins with an explicit completion
+Select a project row, edit the visible **Entropy prompt**, then choose **Run
+entropy scan** in Forensics. Omega materializes that project's exact catalog
+revision, opens it as a working folder, and then opens a normal task whose
+working directory and generated scan prompt both name that same folder. The
+Workspace that launched Forensics is never substituted for the selected
+project. Omega submits the frozen prompt and shows the agent's progress, tool
+calls, stop control, and result in the standard transcript. A terminal response begins with an explicit completion
 state and presents the typed result as readable Summary, Findings, Hypotheses,
 Limitations, and Next checks sections instead of an unformatted JSON blob. The
 built-in prompt asks for source-grounded entropy
@@ -17,15 +20,13 @@ falsifiable check. **Reset prompt** restores that default. **Use prior prompt**
 copies the latest run's text into a new editable draft with explicit
 parent-prompt and source-run lineage.
 
-For a single-repository run, Omega binds the task to the selected repository
-and exact 40-character revision. For a clean worktree, the task verifies HEAD
-and reads the existing project path. If the selected worktree has changes, the
-task creates a temporary clean detached worktree or local clone, scans the
-exact selected HEAD instead of silently including uncommitted source, and
-removes the temporary checkout when it finishes. The user does not pin or
-prepare a worktree. Neither path creates a publication destination. The
-multi-project campaign uses the separate isolated-checkout behavior described
-below.
+For a single-project run, Omega binds the task to the selected catalog project
+and exact 40-character revision. It creates an isolated checkout, verifies
+HEAD, adds that root to the IDE Project Graph, and passes the same absolute path
+as the task's working directory before the agent Session starts. The user does
+not pin or prepare a worktree. This path creates no publication destination.
+The multi-project campaign uses the sequential isolated-checkout behavior
+described below.
 
 ## Frozen run input {#frozen-run-input}
 

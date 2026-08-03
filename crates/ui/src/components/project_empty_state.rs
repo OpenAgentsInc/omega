@@ -7,6 +7,7 @@ type ClickHandler = Box<dyn Fn(&ClickEvent, &mut Window, &mut App) + 'static>;
 pub struct ProjectEmptyState {
     label: SharedString,
     description: Option<SharedString>,
+    open_project_label: SharedString,
     focus_handle: FocusHandle,
     open_project_key_binding: KeyBinding,
     on_open_project: Option<ClickHandler>,
@@ -22,6 +23,7 @@ impl ProjectEmptyState {
         Self {
             label: label.into(),
             description: None,
+            open_project_label: "Open Project".into(),
             focus_handle,
             open_project_key_binding,
             on_open_project: None,
@@ -31,6 +33,11 @@ impl ProjectEmptyState {
 
     pub fn description(mut self, description: impl Into<SharedString>) -> Self {
         self.description = Some(description.into());
+        self
+    }
+
+    pub fn open_project_label(mut self, label: impl Into<SharedString>) -> Self {
+        self.open_project_label = label.into();
         self
     }
 
@@ -58,6 +65,7 @@ impl RenderOnce for ProjectEmptyState {
         let description = self.description.unwrap_or_else(|| {
             format!("Choose one of the options below to use the {}", self.label).into()
         });
+        let clone_handler = self.on_clone_repo;
 
         v_flex()
             .id(id)
@@ -85,27 +93,32 @@ impl RenderOnce for ProjectEmptyState {
                             ),
                     )
                     .child(
-                        Button::new("open_project", "Open Project")
+                        Button::new("open_project", self.open_project_label)
                             .full_width()
                             .key_binding(self.open_project_key_binding)
                             .when_some(self.on_open_project, |button, handler| {
                                 button.on_click(handler)
                             }),
                     )
-                    .child(
-                        h_flex()
-                            .gap_2()
-                            .child(Divider::horizontal().color(DividerColor::Border))
-                            .child(Label::new("or").size(LabelSize::XSmall).color(Color::Muted))
-                            .child(Divider::horizontal().color(DividerColor::Border)),
-                    )
-                    .child(
-                        Button::new("clone_repo", "Clone Repository")
-                            .full_width()
-                            .when_some(self.on_clone_repo, |button, handler| {
-                                button.on_click(handler)
-                            }),
-                    ),
+                    .when_some(clone_handler, |state, handler| {
+                        state
+                            .child(
+                                h_flex()
+                                    .gap_2()
+                                    .child(Divider::horizontal().color(DividerColor::Border))
+                                    .child(
+                                        Label::new("or")
+                                            .size(LabelSize::XSmall)
+                                            .color(Color::Muted),
+                                    )
+                                    .child(Divider::horizontal().color(DividerColor::Border)),
+                            )
+                            .child(
+                                Button::new("clone_repo", "Clone Repository")
+                                    .full_width()
+                                    .on_click(handler),
+                            )
+                    }),
             )
     }
 }

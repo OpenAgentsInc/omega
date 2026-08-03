@@ -29,12 +29,17 @@ When you have multiple projects open:
 - Agent threads are tied to their project context
 - Your workspace layout (splits, tabs) is preserved per project
 
-Think of projects in the threads sidebar like browser tabs, but for repositories.
+Think of working folders in the threads sidebar like browser tabs for filesystem
+roots and their retained workspace state.
 
-Until you select a project, Omega shows project selection instead of a
-new-conversation composer and does not create a draft. After selection, the
-new-conversation front door shows the exact current folder before a send.
-Omega does not silently borrow a folder from another conversation.
+Omega labels its corresponding sidebar section **Working folders**. Select any
+folder row to activate that folder and its retained workspace state.
+
+Until you select a working folder, Omega shows **Open Folder** instead of a
+new-conversation composer and does not create a draft. The first selection
+opens the new-conversation composer and focuses its input. The front door shows
+the exact current folder before a send. Omega does not silently borrow a folder
+from another conversation.
 
 ## Opening in a New Window
 

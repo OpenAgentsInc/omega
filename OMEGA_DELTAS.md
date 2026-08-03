@@ -1578,44 +1578,36 @@ than it sounds, because the harness omega#81's acceptance sentence names —
   `crates/omega_harness/src/front_door.rs` and
   `crates/project/tests/integration/harness_maintenance.rs`.
 
-### OMEGA-DELTA-0034 — The front door works with no project open
+### OMEGA-DELTA-0034 — A working folder gates thread creation
 
 - **Upstream Zed:** the agent panel requires an open project. `agent_ui: Require
-  an open project for agent panel` (#56577, "a bit brute force, but it works")
-  put a `has_open_project` early return in front of every entry to the panel, so
-  a window with no worktree shows "Open a Project" and nothing else. That is
-  coherent for an editor whose agent is an accessory to a project.
-- **Omega, before this:** `OMEGA-DELTA-0019` made a window with nothing to
-  restore open on the agent instead of on an untitled buffer, and
-  `OMEGA-DELTA-0020` folded Full Auto into that panel. Both landed. The exit
-  omega#76 actually asked for — *fresh launch lands on the surface **and typing
-  starts a thread*** — did not: a window with nothing to restore is by
-  definition a window with no project, so the front door opened onto
-  "Open Project / Clone Repository" and there was no composer to type into. The
-  landing half shipped and the typing half did not, and the two were reported
-  together.
-- **Omega now:** the guards on the front door's own path are gone.
-  `compose_on_executor`, `activate_draft`, `new_thread`, and
-  `ensure_native_agent_connection` no longer refuse a projectless window. The
-  front door prepares one Omega session and lands in its focused composer
-  (`OMEGA-DELTA-0184` moved the landing from a chooser screen to the composer
-  itself; the project-optional law is unchanged).
-- **What the guards protected, checked rather than assumed.** The one that could
-  plausibly have been load-bearing was `ensure_native_agent_connection`, and it
-  is not: `NativeAgentServer::connect` takes the project as `_project` and never
-  reads it, and `NativeAgent::new_session` builds a thread from the project
-  entity without requiring a visible worktree. What the guard bought was not
-  spinning up a connection for a window upstream had decided would never show
-  the agent — a resource choice resting on a premise Omega does not share.
-- **The workspace-touching guards stay.** A terminal genuinely needs a working
-  directory, so `should_create_terminal_for_new_entry` keeps its check and
-  `agent::NewTerminalThread` remains distinct. Generic `agent::NewThread`
-  always opens the mode boundary and never repeats a previous terminal choice.
+  an open project for agent panel` (#56577) put a `has_open_project` early
+  return in front of panel entry points.
+- **Superseded Omega behavior:** Omega briefly allowed a projectless composer
+  so a fresh window could accept a prompt immediately. The owner reversed that
+  decision on 2026-08-03: a thread without a selected filesystem root has
+  ambiguous tool and context authority, and a hidden draft before folder
+  selection is not an honest front door.
+- **Omega now:** without a selected working folder, the panel shows **Select a
+  working folder to start a new thread** and one **Open Folder** action. It
+  does not create or restore a draft, does not persist thread metadata, and
+  does not show the inherited Clone Repository control. Command-N, direct-agent
+  creation, terminal creation, startup restoration, and internal composition
+  paths all fail closed in this state.
+- **The first folder completes the transition.** When the Project Graph admits
+  its first visible Project Root, the panel opens the normal new-thread
+  composer and transfers keyboard focus to its input. Later folder additions
+  do not replace an active thread or other meaningful destination state.
+- **The sidebar names what the user selects.** The Omega shell labels the list
+  **Working folders**, not Repositories. A working folder can contain a Git
+  Repository, but the two are not the same model. Active thread-target rows and
+  retained workspace rows use distinct element identities; selecting an
+  inactive folder activates its retained Workspace instead of colliding with
+  the active row's click handler.
+- **The workspace-touching guards stay.** A terminal needs a working directory.
   Loading a thread from the clipboard, resuming a persisted draft, refreshing
-  skills, initialising from a source workspace, and starting an external ACP
-  agent all still require a project. Removing *those* would not be
-  project-optional threads; it would be threads that fail later and less
-  legibly.
+  skills, initializing from a source Workspace, and starting an external ACP
+  agent also require a selected folder.
 - **`cmd-?` gave the agent panel back to macOS.** `agent::ToggleFocus` was bound
   to `cmd-?`, which is macOS's reserved Help chord — the Help menu's search
   field. Omega cannot win that keystroke, so the binding was a keybinding that
@@ -1623,41 +1615,18 @@ than it sounds, because the harness omega#81's acceptance sentence names —
   system-reserved, and on the same letter as `cmd-shift-a`. Linux (`ctrl-?`) and
   Windows (`ctrl-shift-/`) are untouched, because neither is reserved there and
   changing them would be churn with no defect behind it.
-- **The rendered proof, and why the runner needed standing up.**
-  `zed_visual_test_runner` was already in the fork — macOS headless Metal
-  capture, no Screen Recording permission, no window to get frontmost — and it
-  had no committed baselines and no invocation, so no Omega packet had ever
-  used it. `script/omega-visual-proof` is the invocation, `OMEGA_VISUAL_ONLY=1`
-  runs Omega's suite alone, and the `omega_*` baselines are re-included in
-  `.gitignore` and committed. A baseline nobody committed cannot fail. The
-  suite asserts the rendered line's text through the same method the render
-  calls and asserts the record is coherent *before* each capture, so a picture
-  can never be the only thing standing behind a claim.
-- **Enforced by:** `the_front_door_does_not_require_an_open_project` and
+- **Enforced by:**
+  `the_front_door_requires_a_working_folder_before_creating_threads` and
   `required_keymap_bindings_resolve` in `crates/omega_deltas`;
-  `test_empty_workspace_opens_the_front_door` in `crates/agent_ui`; the rendered
-  proofs `omega_front_door_no_project` and `omega_front_door_typing` in
-  `crates/omega/src/visual_test_runner.rs`.
-- **What this does not cover.** A **first-ever** launch lands on the Onboarding
-  tab, not on the agent — observed on a packaged build with a fresh
-  `--user-data-dir`, where the front door is behind onboarding and the agent
-  dock is closed until it is finished. Every launch after that lands on the
-  agent. That ordering was left open here as a question for the owner; it is
-  now decided and recorded as `OMEGA-DELTA-0040`, which tests the handoff from
-  onboarding to this front door. A projectless thread is also not yet *bound* to a
-  project on its first workspace-touching action, which is the rest of omega#76's
-  project-optional deliverable. Today it simply has no worktree: file mentions
-  find nothing and a tool that needs a path fails the way it would in any
-  worktree-less window. The `cmd-shift-a` bindings named in omega#76 are
-  resolved rather than changed, and the resolution is now checked by
-  `the_new_thread_chord_is_window_global` under `OMEGA-DELTA-0013`: on macOS
-  there is no editor-context collision to fix — upstream's
-  `editor::SelectToBeginningOfLine` is on `ctrl-shift-a`, a different chord —
-  and the only narrower `cmd-shift-a` bindings are inside modal pickers
-  (`ToolchainSelector`, `RecentProjects`) that fire while the user has opened
-  them on purpose. On Linux and Windows the chord is `ctrl-shift-a` and a
-  terminal's select-all shadows it there, which is admitted for the same
-  reason and enumerated rather than left to be discovered.
+  `test_empty_workspace_requires_a_working_folder_before_creating_threads`,
+  `test_new_thread_defaults_to_omega_and_syncs_the_selection`, and
+  `omega_working_folder_list_switches_to_an_inactive_folder` in
+  `crates/agent_ui`. The old projectless-composer visual baselines are retained
+  only as historical evidence and are not acceptance evidence for this policy.
+- **What this does not cover.** The `cmd-shift-a` bindings named in omega#76 are
+  resolved rather than changed. Their platform-specific resolution remains
+  checked by `the_new_thread_chord_is_window_global` under
+  `OMEGA-DELTA-0013`.
 
 ### OMEGA-DELTA-0035 — The router is wired, and a pin is a gesture
 
@@ -1972,7 +1941,8 @@ than it sounds, because the harness omega#81's acceptance sentence names —
 - **Enforced by:**
   `startup_provisions_identity_in_the_background_and_opens_the_front_door`
   in `crates/omega_deltas`, alongside `a_fresh_window_opens_on_the_agent`
-  (`OMEGA-DELTA-0019`) and `the_front_door_does_not_require_an_open_project`
+  (`OMEGA-DELTA-0019`) and
+  `the_front_door_requires_a_working_folder_before_creating_threads`
   (`OMEGA-DELTA-0034`); plus
   `process_start_provisioning_creates_adopts_and_is_idempotent` and
   `process_start_provisioning_refuses_every_state_it_cannot_answer` in
@@ -8252,9 +8222,9 @@ startup recheck — survives unchanged behind that dropdown.
 - **Enforced by:**
   `the_composer_executor_dropdown_is_the_new_conversation_front_door` in
   `crates/omega_deltas`, the rewritten `OMEGA-DELTA-0177` claim check, the
-  Agent Panel GPUI tests for the compose path, and the sealed
-  `omega_front_door_no_project` / `omega_front_door_typing` visual baselines,
-  which photograph the composer landing.
+  Agent Panel GPUI tests for Command-N and for the folder-selection handoff.
+  The projectless-composer baselines predate the working-folder gate and no
+  longer prove the current landing policy.
 
 ### OMEGA-DELTA-0185 — The sealed baselines and the installed release gate are release evidence
 
