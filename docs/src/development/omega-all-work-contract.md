@@ -140,8 +140,20 @@ Session, and Run references at the active grant generation; it does not start a
 provider process. **Record handoff** then records only the exact link fact as
 portable progress. It supplies no provider event or Effect and retains an
 explicit `loss:omega:provider-event-not-supplied` fact. Provider event ingestion,
-real execution control/effects, and the installed owner journey remain
-incomplete.
+real execution effects, and the installed owner journey remain incomplete.
+
+When the exact retained Thread is generating, **Stop agent** first calls
+Omega's existing local ACP cancel path and only then records the generated
+Session `stop` transition at the active grant generation. If the Thread is not
+open or not generating, no Work command is sent. A crash between cancellation
+and command persistence can leave a visible stopped-agent/pending-record gap;
+refresh and idempotent retry reconcile the command, and the UI does not claim an
+atomic external Effect Receipt.
+
+After portable activity exists, **Needs changes** records a human Owner
+Disposition separately from the Agent Delegate, Session state, activity, and
+any verification refs already attached to the Work. It never converts agent
+completion or the stop record into human acceptance.
 
 ## Verify
 

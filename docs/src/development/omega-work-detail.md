@@ -110,6 +110,17 @@ handoff** records that exact link as audience-safe progress with no Effect and
 an explicit missing-provider-event loss fact. Omega does not translate that
 activity into completion, verification, or owner acceptance.
 
+For a generating retained Thread, **Stop agent** invokes the exact local ACP
+cancel path before it records the bounded Session as stopped. Omega refuses the
+command when the Thread is not open or is not generating. Cancellation and the
+canonical Session transition are deliberately not described as one atomic
+Effect; a restart can expose the reconciliation gap until refresh/retry.
+
+**Needs changes** is a separate accountable-human Owner Disposition available
+after portable activity exists. It retains any attached Verification refs but
+does not infer them, and it does not change Agent Session, Run, Receipt, or
+Release state.
+
 The same actions are available to pointer users. Focus returns to the detail
 surface after edit submission or cancellation.
 

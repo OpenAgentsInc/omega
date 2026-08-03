@@ -99,6 +99,8 @@ pub enum DogfoodWorkCommandAction {
     RevokeDelegate,
     LinkAgentSession,
     RecordHandoff,
+    StopAgentSession,
+    NeedsChanges,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -107,6 +109,7 @@ pub struct DogfoodDelegationCandidate {
     pub host_ref: HostRef,
     pub label: String,
     pub thread_ref: ThreadRef,
+    pub thread_key: String,
     pub agent_session_ref: Option<AgentSessionRef>,
 }
 
@@ -1568,6 +1571,48 @@ impl DogfoodSurface {
                                         .on_click(cx.listener(|this, _, _, cx| {
                                             this.request_work_command(
                                                 DogfoodWorkCommandAction::RecordHandoff,
+                                                cx,
+                                            )
+                                        })),
+                                    )
+                                },
+                            )
+                            .when(
+                                has_active_delegate
+                                    && command_snapshot.is_some_and(|snapshot| {
+                                        !snapshot.session_refs.is_empty()
+                                    }),
+                                |controls| {
+                                    controls.child(
+                                        claim_button(
+                                            "work-command-stop-agent-session",
+                                            "Stop agent",
+                                            self.work_command_busy || !command_mutation_ready,
+                                        )
+                                        .on_click(cx.listener(|this, _, _, cx| {
+                                            this.request_work_command(
+                                                DogfoodWorkCommandAction::StopAgentSession,
+                                                cx,
+                                            )
+                                        })),
+                                    )
+                                },
+                            )
+                            .when(
+                                command_snapshot.is_some_and(|snapshot| {
+                                    !snapshot.agent_activity_refs.is_empty()
+                                        && snapshot.owner_disposition_refs.is_empty()
+                                }),
+                                |controls| {
+                                    controls.child(
+                                        claim_button(
+                                            "work-command-needs-changes",
+                                            "Needs changes",
+                                            self.work_command_busy || !command_mutation_ready,
+                                        )
+                                        .on_click(cx.listener(|this, _, _, cx| {
+                                            this.request_work_command(
+                                                DogfoodWorkCommandAction::NeedsChanges,
                                                 cx,
                                             )
                                         })),

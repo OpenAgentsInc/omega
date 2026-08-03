@@ -2861,6 +2861,8 @@ fn dogfood_work_command_action_label(action: DogfoodWorkCommandAction) -> &'stat
         DogfoodWorkCommandAction::RevokeDelegate => "revoke-delegate",
         DogfoodWorkCommandAction::LinkAgentSession => "link-agent-session",
         DogfoodWorkCommandAction::RecordHandoff => "record-handoff",
+        DogfoodWorkCommandAction::StopAgentSession => "stop-agent-session",
+        DogfoodWorkCommandAction::NeedsChanges => "needs-changes",
     }
 }
 
@@ -4660,6 +4662,7 @@ impl AgentPanel {
                 metadata.thread_id.0
             ))
             .ok()?,
+            thread_key: metadata.thread_id.to_key_string(),
             agent_session_ref: metadata.session_id.as_ref().and_then(|session_id| {
                 let digest = format!("{:x}", Sha256::digest(session_id.0.as_bytes()));
                 omega_effectd::all_work_contract::AgentSessionRef::try_from(format!(
@@ -18130,6 +18133,27 @@ impl AgentPanel {
             });
             return;
         };
+        if action == DogfoodWorkCommandAction::StopAgentSession {
+            let stop_result = context
+                .delegation_candidate
+                .as_ref()
+                .ok_or_else(|| anyhow!("The linked local Thread is unavailable."))
+                .and_then(|candidate| ThreadId::from_key_string(&candidate.thread_key))
+                .and_then(|thread_id| {
+                    if !self.is_thread_generating(&thread_id, cx) {
+                        return Err(anyhow!("The linked local agent is not generating."));
+                    }
+                    self.cancel_thread(&thread_id, cx)
+                        .then_some(())
+                        .ok_or_else(|| anyhow!("The linked local Thread is not open."))
+                });
+            if let Err(error) = stop_result {
+                surface.update(cx, |surface, cx| {
+                    surface.set_work_command_state(None, Some(error.to_string()), false, cx)
+                });
+                return;
+            }
+        }
         let revision = snapshot.summary.revision.0;
         let work_ref = snapshot.summary.work_ref.clone();
         let work_digest = format!("{:x}", Sha256::digest(work_ref.0.as_bytes()));
@@ -18274,6 +18298,45 @@ impl AgentPanel {
                             "loss:omega:provider-event-not-supplied".to_string(),
                         )?],
                         effect_ref: omega_effectd::all_work_contract::Nullable(None),
+                    }
+                }
+                DogfoodWorkCommandAction::StopAgentSession => {
+                    let delegate = snapshot
+                        .summary
+                        .agent_delegate
+                        .as_ref()
+                        .and_then(|delegate| delegate.as_ref())
+                        .context("The canonical Work has no active Agent Delegate.")?;
+                    let session_ref = snapshot
+                        .session_refs
+                        .last()
+                        .cloned()
+                        .context("No bounded Session is linked to this Work.")?;
+                    omega_effectd::all_work_contract::WorkCommand::ControlSession {
+                        control: omega_effectd::all_work_contract::WorkCommandControlKind::Stop,
+                        session_ref,
+                        expected_generation: delegate.generation.clone(),
+                        body: omega_effectd::all_work_contract::Nullable(Some(
+                            omega_effectd::all_work_contract::LongText::try_from(
+                                "Omega canceled the exact linked local ACP Thread before recording this stopped state."
+                                    .to_string(),
+                            )?,
+                        )),
+                    }
+                }
+                DogfoodWorkCommandAction::NeedsChanges => {
+                    omega_effectd::all_work_contract::WorkCommand::OwnerDisposition {
+                        disposition_ref:
+                            omega_effectd::all_work_contract::OwnerDispositionRef::try_from(
+                                format!("owner-disposition:omega-ui:{work_key}:r{revision}"),
+                            )?,
+                        decision:
+                            omega_effectd::all_work_contract::OwnerDispositionDecision::NeedsChanges,
+                        verification_refs: snapshot.verification_refs.clone(),
+                        summary: omega_effectd::all_work_contract::ShortText::try_from(
+                            "The accountable human requested changes after reviewing the linked activity."
+                                .to_string(),
+                        )?,
                     }
                 }
                 DogfoodWorkCommandAction::Refresh => unreachable!(),
