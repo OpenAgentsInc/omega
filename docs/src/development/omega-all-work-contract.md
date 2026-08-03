@@ -9,10 +9,10 @@ adapter creates a second writable store.
 
 | Field                 | Value                                                              |
 | --------------------- | ------------------------------------------------------------------ |
-| OpenAgents commit     | `c82cbe7394f68615e3a3a189b07037c1204f2d83`                         |
+| OpenAgents commit     | `00d19fb9212c518ba4dc1f5e8f53b7a4d1a7e2d7`                         |
 | Contract              | `openagents.all_work_boundary.v1`                                  |
-| Definition SHA-256    | `e504e3084007e8bddab99e9703f1f62c6bf62e1aa7a9f612de75fb522848b628` |
-| Rust artifact SHA-256 | `2fa857cfd6f52c51723e7572b8f682a8251fc5f046e0a873a3ccb894b8d7f7ca` |
+| Definition SHA-256    | `2f3119cf7822fe9bd770d2c97f913d609dd49e8918fb3ea4c7df9662d20492c4` |
+| Rust artifact SHA-256 | `87fe5a88e669276672027464635f484a2a01de218424a2c063e8502602abe985` |
 | Omega receipt         | `crates/omega_effectd/all-work-contract/SOURCE.json`               |
 
 The generated Rust file, compatibility manifest, and shared fixtures are
@@ -28,8 +28,8 @@ separate All Work profile:
 
 - an omitted All Work request selects `omega-effectd.v1` with no Work methods;
 - `omega-effectd.v2` enables `work.index.read`, `work.snapshot.read`,
-  `planning.graph.read`, `repository.claim.read`, and the separately
-  negotiated `repository.claim.execute` capability;
+  `planning.graph.read`, `repository.claim.read`, and separately negotiated
+  claim execution, signed Workroom, and `work.command.execute` capabilities;
 - a v1 client that calls any All Work read method receives
   `incompatible_version`;
 - request and result domain payloads use generated Rust and Effect types;
@@ -104,6 +104,26 @@ persist-before-publish enqueue boundary. Signed identity, audience, causal
 parents, generation, outbox state, and revocation remain projection facts.
 They do not become command or effect authority. See
 [Omega signed Workroom projection](./omega-signed-workroom.md).
+
+## Work command admission
+
+The generated profile includes `work.command.execute`. The Rust supervisor
+validates the request and result, requires the negotiated capability, and
+refuses any receipt that reports a GitHub write. The OpenAgents process remains
+the command authority. Omega does not infer command authority from a planning
+read or recreate command transitions in Rust.
+
+Each request names the Organization, Effective Principal, capability, expected
+Work revision, Intent, and idempotency key. Assignee, Agent Delegate,
+Delegation Grant, Repository Work Claim, Lease, Thread, Session, Agent Session,
+Run, provider event, loss, effect, review, verification, and Owner Disposition
+remain separate facts. Revocation fences late generation effects. Verification
+does not imply Owner Disposition.
+
+The current consumer slice exposes the typed supervised method. Fixture Work UI
+controls remain simulated until the application binds its Effective Principal
+and Organization selection to this method and the installed owner journey is
+complete.
 
 ## Verify
 

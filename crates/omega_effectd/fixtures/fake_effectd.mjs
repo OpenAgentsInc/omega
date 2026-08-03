@@ -37,6 +37,7 @@ const supportedAllWorkCapabilities = [
   "repository.claim.execute",
   "workroom.activity.read",
   "workroom.activity.enqueue",
+  "work.command.execute",
 ]
 let allWorkCapabilities = []
 let claimLedger = {
@@ -92,6 +93,22 @@ const allWorkSummary = {
     redactedFieldCount: 2,
     policyRef: "policy:omega:full-auto-work-summary-v1",
   },
+}
+
+let workCommandSnapshot = {
+  summary: allWorkSummary,
+  relations: [],
+  threadRefs: ["thread:fixture:1"],
+  sessionRefs: [],
+  agentSessionRefs: [],
+  agentActivityRefs: [],
+  runRefs: ["run:fixture:1"],
+  intentRefs: [],
+  eventRefs: [],
+  receiptRefs: [],
+  evidenceRefs: [],
+  verificationRefs: [],
+  ownerDispositionRefs: [],
 }
 
 const respond = (id, gen, ok, result, error) => {
@@ -464,7 +481,7 @@ for await (const line of rl) {
       allWork: {
         selectedVersion: allWorkVersion,
         contractRef: "openagents.all_work_boundary.v1",
-        contractDigest: "e504e3084007e8bddab99e9703f1f62c6bf62e1aa7a9f612de75fb522848b628",
+        contractDigest: "2f3119cf7822fe9bd770d2c97f913d609dd49e8918fb3ea4c7df9662d20492c4",
         capabilities: allWorkCapabilities,
       },
       dataRoot,
@@ -532,21 +549,7 @@ for await (const line of rl) {
       continue
     }
     respond(request.id, generation, true, {
-      snapshot: {
-        summary: allWorkSummary,
-        relations: [],
-        threadRefs: ["thread:fixture:1"],
-        sessionRefs: [],
-        agentSessionRefs: [],
-        agentActivityRefs: [],
-        runRefs: ["run:fixture:1"],
-        intentRefs: [],
-        eventRefs: [],
-        receiptRefs: [],
-        evidenceRefs: [],
-        verificationRefs: [],
-        ownerDispositionRefs: [],
-      },
+      snapshot: workCommandSnapshot,
     })
     continue
   }
@@ -737,6 +740,57 @@ for await (const line of rl) {
       continue
     }
     respond(request.id, generation, true, { ledger: signedWorkroomLedger })
+    continue
+  }
+  if (request.method === "work.command.execute") {
+    if (!allWorkCapabilities.includes("work.command.execute")) {
+      respond(request.id, generation, false, undefined, {
+        code: "incompatible_version",
+        message: "work.command.execute was not negotiated.",
+      })
+      continue
+    }
+    const input = request.params
+    const previousRevision = workCommandSnapshot.summary.revision
+    const revision = previousRevision + 1
+    const eventRef = `event:work-command:${revision}`
+    const receiptRef = `receipt:work-command:${revision}`
+    const assignee =
+      input.command?.command === "assign"
+        ? input.command.assignee
+        : input.command?.command === "unassign"
+          ? null
+          : workCommandSnapshot.summary.assignee
+    workCommandSnapshot = {
+      ...workCommandSnapshot,
+      summary: {
+        ...workCommandSnapshot.summary,
+        assignee,
+        revision,
+        updatedAt: input.occurredAt,
+        freshness: { state: "fresh", observedAt: input.occurredAt },
+      },
+      intentRefs: [...workCommandSnapshot.intentRefs, input.intentRef],
+      eventRefs: [...workCommandSnapshot.eventRefs, eventRef],
+      receiptRefs: [...workCommandSnapshot.receiptRefs, receiptRef],
+    }
+    respond(request.id, generation, true, {
+      snapshot: workCommandSnapshot,
+      receipt: {
+        intentRef: input.intentRef,
+        idempotencyKey: input.idempotencyKey,
+        commandDigest: "a".repeat(64),
+        workRef: input.workRef,
+        previousRevision,
+        revision,
+        eventCursor: `cursor:work-command:${revision}`,
+        effectivePrincipalRef: input.effectivePrincipalRef,
+        organizationRef: input.organizationRef,
+        acceptedAt: input.occurredAt,
+        outcome: { admitted: true, eventRef, effectRef: null, refusalReason: null },
+        githubWriteCount: 0,
+      },
+    })
     continue
   }
   if (request.method === "workroom.activity.enqueue") {

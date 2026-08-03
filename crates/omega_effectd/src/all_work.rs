@@ -53,7 +53,7 @@ mod tests {
         );
         assert_eq!(
             source["sourceCommit"].as_str(),
-            Some("c82cbe7394f68615e3a3a189b07037c1204f2d83")
+            Some("00d19fb9212c518ba4dc1f5e8f53b7a4d1a7e2d7")
         );
     }
 

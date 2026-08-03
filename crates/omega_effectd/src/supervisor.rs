@@ -31,8 +31,8 @@ use crate::all_work::generated::{
     ProtocolVersion as AllWorkProtocolVersion, RepositoryClaimExecuteRequest,
     RepositoryClaimExecuteResult, RepositoryClaimReadRequest, RepositoryClaimReadResult,
     SignedWorkroomEnqueueRequest, SignedWorkroomEnqueueResult, SignedWorkroomReadRequest,
-    SignedWorkroomReadResult, WorkIndexReadRequest, WorkIndexReadResult, WorkSnapshotReadRequest,
-    WorkSnapshotReadResult,
+    SignedWorkroomReadResult, WorkCommandExecuteRequest, WorkCommandExecuteResult,
+    WorkIndexReadRequest, WorkIndexReadResult, WorkSnapshotReadRequest, WorkSnapshotReadResult,
 };
 use crate::protocol::{
     HealthResult, HostMethod, HostRequestFrame, HostResponseError, HostResponseErrorCode,
@@ -150,6 +150,7 @@ impl OmegaEffectdSupervisor {
                 AllWorkProtocolCapability::RepositoryClaimExecute,
                 AllWorkProtocolCapability::WorkroomActivityRead,
                 AllWorkProtocolCapability::WorkroomActivityEnqueue,
+                AllWorkProtocolCapability::WorkCommandExecute,
             ],
         };
         all_work
@@ -328,6 +329,33 @@ impl OmegaEffectdSupervisor {
         result
             .validate()
             .map_err(|error| SupervisorError::Anyhow(error.into()))?;
+        Ok(result)
+    }
+
+    pub async fn execute_work_command(
+        &mut self,
+        params: WorkCommandExecuteRequest,
+    ) -> Result<WorkCommandExecuteResult, SupervisorError> {
+        params
+            .validate()
+            .map_err(|error| SupervisorError::Anyhow(error.into()))?;
+        let result = self
+            .request(
+                "work.command.execute",
+                Some(serde_json::to_value(params).context("encode Work command")?),
+                self.generation(),
+            )
+            .await?;
+        let result: WorkCommandExecuteResult =
+            serde_json::from_value(result).context("decode Work command result")?;
+        result
+            .validate()
+            .map_err(|error| SupervisorError::Anyhow(error.into()))?;
+        if result.receipt.github_write_count.0 != 0 {
+            return Err(SupervisorError::Anyhow(anyhow!(
+                "Work command receipt reported a GitHub write"
+            )));
+        }
         Ok(result)
     }
 
@@ -874,6 +902,7 @@ impl OmegaEffectdSupervisor {
                             | "repository.claim.execute"
                             | "workroom.activity.read"
                             | "workroom.activity.enqueue"
+                            | "work.command.execute"
                     ) {
                         MAX_ALL_WORK_GRAPH_RESPONSE_BYTES
                     } else {

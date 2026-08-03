@@ -879,6 +879,60 @@ mod tests {
                 snapshot.snapshot.run_refs.first().expect("one Run ref").0,
                 "run:fixture:1"
             );
+            let assigned = supervisor
+                .execute_work_command(all_work_contract::WorkCommandExecuteRequest {
+                    intent_ref: all_work_contract::IntentRef::try_from(
+                        "intent:fixture:assign".to_string(),
+                    )
+                    .expect("intent ref"),
+                    idempotency_key: all_work_contract::IdempotencyKey::try_from(
+                        "fixture-work-command-assign".to_string(),
+                    )
+                    .expect("idempotency key"),
+                    expected_revision: all_work_contract::SafeInteger(1),
+                    effective_principal_ref: all_work_contract::PrincipalRef::try_from(
+                        "principal:omega:owner".to_string(),
+                    )
+                    .expect("principal ref"),
+                    organization_ref: all_work_contract::OrganizationRef::try_from(
+                        "organization:openagents".to_string(),
+                    )
+                    .expect("organization ref"),
+                    capability_ref: all_work_contract::CapabilityRef::try_from(
+                        "capability:work-command:execute".to_string(),
+                    )
+                    .expect("capability ref"),
+                    work_ref: all_work_contract::WorkRef::try_from("work:fixture:1".to_string())
+                        .expect("Work ref"),
+                    occurred_at: all_work_contract::IsoTimestamp::try_from(
+                        "2026-08-03T11:00:00.000Z".to_string(),
+                    )
+                    .expect("timestamp"),
+                    command: all_work_contract::WorkCommand::Assign {
+                        assignee: all_work_contract::HumanAssignee {
+                            kind: all_work_contract::AssigneeKind::Human,
+                            principal_ref: all_work_contract::PrincipalRef::try_from(
+                                "principal:omega:owner".to_string(),
+                            )
+                            .expect("assignee ref"),
+                        },
+                    },
+                })
+                .await
+                .expect("typed Work command");
+            assert_eq!(
+                assigned
+                    .snapshot
+                    .summary
+                    .assignee
+                    .0
+                    .as_ref()
+                    .expect("assigned human")
+                    .principal_ref
+                    .0,
+                "principal:omega:owner"
+            );
+            assert_eq!(assigned.receipt.github_write_count.0, 0);
             let planning = supervisor
                 .read_planning_graph(all_work_contract::PlanningGraphReadRequest {
                     after_revision: None,
