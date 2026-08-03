@@ -28,8 +28,9 @@ use crate::all_work::generated::{
     ContractValidate, PlanningGraphReadRequest, PlanningGraphReadResult,
     ProtocolCapability as AllWorkProtocolCapability,
     ProtocolInitializeRequest as AllWorkProtocolInitializeRequest,
-    ProtocolVersion as AllWorkProtocolVersion, WorkIndexReadRequest, WorkIndexReadResult,
-    WorkSnapshotReadRequest, WorkSnapshotReadResult,
+    ProtocolVersion as AllWorkProtocolVersion, RepositoryClaimExecuteRequest,
+    RepositoryClaimExecuteResult, RepositoryClaimReadRequest, RepositoryClaimReadResult,
+    WorkIndexReadRequest, WorkIndexReadResult, WorkSnapshotReadRequest, WorkSnapshotReadResult,
 };
 use crate::protocol::{
     HealthResult, HostMethod, HostRequestFrame, HostResponseError, HostResponseErrorCode,
@@ -38,7 +39,7 @@ use crate::protocol::{
 };
 
 pub use crate::protocol::MAX_FRAME_BYTES;
-const MAX_PLANNING_GRAPH_RESPONSE_BYTES: usize = 2 * 1024 * 1024;
+const MAX_ALL_WORK_GRAPH_RESPONSE_BYTES: usize = 2 * 1024 * 1024;
 const SHUTDOWN_GRACE_PERIOD: Duration = Duration::from_secs(2);
 const AGENT_COMPUTER_TURN_TIMEOUT: Duration = Duration::from_secs(180);
 const DEFAULT_REQUEST_TIMEOUT: Duration = Duration::from_secs(180);
@@ -143,6 +144,8 @@ impl OmegaEffectdSupervisor {
                 AllWorkProtocolCapability::WorkIndexRead,
                 AllWorkProtocolCapability::WorkSnapshotRead,
                 AllWorkProtocolCapability::PlanningGraphRead,
+                AllWorkProtocolCapability::RepositoryClaimRead,
+                AllWorkProtocolCapability::RepositoryClaimExecute,
             ],
         };
         all_work
@@ -230,6 +233,50 @@ impl OmegaEffectdSupervisor {
             .await?;
         let result: PlanningGraphReadResult =
             serde_json::from_value(result).context("decode planning graph result")?;
+        result
+            .validate()
+            .map_err(|error| SupervisorError::Anyhow(error.into()))?;
+        Ok(result)
+    }
+
+    pub async fn read_repository_claims(
+        &mut self,
+        params: RepositoryClaimReadRequest,
+    ) -> Result<RepositoryClaimReadResult, SupervisorError> {
+        params
+            .validate()
+            .map_err(|error| SupervisorError::Anyhow(error.into()))?;
+        let result = self
+            .request(
+                "repository.claim.read",
+                Some(serde_json::to_value(params).context("encode claim-ledger read")?),
+                self.generation(),
+            )
+            .await?;
+        let result: RepositoryClaimReadResult =
+            serde_json::from_value(result).context("decode claim-ledger read")?;
+        result
+            .validate()
+            .map_err(|error| SupervisorError::Anyhow(error.into()))?;
+        Ok(result)
+    }
+
+    pub async fn execute_repository_claim(
+        &mut self,
+        params: RepositoryClaimExecuteRequest,
+    ) -> Result<RepositoryClaimExecuteResult, SupervisorError> {
+        params
+            .validate()
+            .map_err(|error| SupervisorError::Anyhow(error.into()))?;
+        let result = self
+            .request(
+                "repository.claim.execute",
+                Some(serde_json::to_value(params).context("encode claim-ledger command")?),
+                self.generation(),
+            )
+            .await?;
+        let result: RepositoryClaimExecuteResult =
+            serde_json::from_value(result).context("decode claim-ledger command")?;
         result
             .validate()
             .map_err(|error| SupervisorError::Anyhow(error.into()))?;
@@ -772,8 +819,11 @@ impl OmegaEffectdSupervisor {
         let response_result = smol::future::or(
             async {
                 loop {
-                    let response_limit = if method == "planning.graph.read" {
-                        MAX_PLANNING_GRAPH_RESPONSE_BYTES
+                    let response_limit = if matches!(
+                        method,
+                        "planning.graph.read" | "repository.claim.read" | "repository.claim.execute"
+                    ) {
+                        MAX_ALL_WORK_GRAPH_RESPONSE_BYTES
                     } else {
                         MAX_FRAME_BYTES
                     };

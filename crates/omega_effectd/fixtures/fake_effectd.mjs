@@ -29,6 +29,24 @@ let generation = 0
 let running = false
 let pendingHostHealth = null
 let allWorkVersion = "omega-effectd.v1"
+const supportedAllWorkCapabilities = [
+  "work.index.read",
+  "work.snapshot.read",
+  "planning.graph.read",
+  "repository.claim.read",
+  "repository.claim.execute",
+]
+let allWorkCapabilities = []
+let claimLedger = {
+  contractVersion: "openagents.all_work_boundary.v1",
+  revision: 0,
+  eventCursor: "cursor:repository-claim:0",
+  packets: [],
+  claims: [],
+  audit: [],
+  completeness: { state: "complete", cursor: "cursor:repository-claim:0", gapRefs: [] },
+  freshness: { state: "fresh", observedAt: "2026-08-03T05:00:00Z" },
+}
 
 const allWorkSummary = {
   contractVersion: "openagents.all_work_boundary.v1",
@@ -389,6 +407,12 @@ for await (const line of rl) {
     allWorkVersion = request.params?.allWork?.supportedVersions?.includes("omega-effectd.v2")
       ? "omega-effectd.v2"
       : "omega-effectd.v1"
+    allWorkCapabilities =
+      allWorkVersion === "omega-effectd.v2"
+        ? supportedAllWorkCapabilities.filter((capability) =>
+            request.params?.allWork?.requestedCapabilities?.includes(capability),
+          )
+        : []
     running = true
     respond(request.id, generation, true, {
       schema,
@@ -424,18 +448,13 @@ for await (const line of rl) {
         "sarah_room_snapshot",
         "sarah_send_message",
         "sarah_interrupt_turn",
-        ...(allWorkVersion === "omega-effectd.v2"
-          ? ["work.index.read", "work.snapshot.read", "planning.graph.read"]
-          : []),
+        ...allWorkCapabilities,
       ],
       allWork: {
         selectedVersion: allWorkVersion,
         contractRef: "openagents.all_work_boundary.v1",
-        contractDigest: "f41f9e8b44f95936694c74799027fa78b9e35ffe102a1a85e4b86027bb15748b",
-        capabilities:
-          allWorkVersion === "omega-effectd.v2"
-            ? ["work.index.read", "work.snapshot.read", "planning.graph.read"]
-            : [],
+        contractDigest: "aa933ba19f0245905ce21c8ed6b90e6279c68b09f3352101a026a10786362535",
+        capabilities: allWorkCapabilities,
       },
       dataRoot,
       activeRunLimit: 8,
@@ -516,6 +535,184 @@ for await (const line of rl) {
         evidenceRefs: [],
         verificationRefs: [],
         ownerDispositionRefs: [],
+      },
+    })
+    continue
+  }
+  if (request.method === "repository.claim.read") {
+    if (!allWorkCapabilities.includes("repository.claim.read")) {
+      respond(request.id, generation, false, undefined, {
+        code: "incompatible_version",
+        message: "repository.claim.read was not negotiated.",
+      })
+      continue
+    }
+    respond(request.id, generation, true, { ledger: claimLedger })
+    continue
+  }
+  if (request.method === "repository.claim.execute") {
+    if (!allWorkCapabilities.includes("repository.claim.execute")) {
+      respond(request.id, generation, false, undefined, {
+        code: "incompatible_version",
+        message: "repository.claim.execute was not negotiated.",
+      })
+      continue
+    }
+    const input = request.params
+    const command = input?.command
+    const previousRevision = claimLedger.revision
+    const revision = previousRevision + 1
+    let claimRef = null
+    if (command?.command === "create_packet") {
+      claimLedger.packets.push({
+        packetRef: command.packetRef,
+        workRef: command.workRef,
+        repositoryRef: command.repositoryRef,
+        title: command.title,
+        scope: command.scope,
+        ownedPaths: command.ownedPaths,
+        hotFiles: command.hotFiles,
+        hotContracts: command.hotContracts,
+        verification: command.verification,
+        state: "ready",
+        revision: 1,
+        createdAt: input.occurredAt,
+        updatedAt: input.occurredAt,
+      })
+      claimLedger.audit.push({
+        eventRef: `claim-event:${revision}`,
+        kind: "packet_created",
+        packetRef: command.packetRef,
+        claimRef: null,
+        principalRef: input.effectivePrincipalRef,
+        generation: 0,
+        occurredAt: input.occurredAt,
+        evidenceRefs: [],
+        detail: "Fixture Work Packet created without claim authority.",
+      })
+    } else if (command?.command === "claim_packet") {
+      const packet = claimLedger.packets.find((value) => value.packetRef === command.packetRef)
+      if (!packet) {
+        respond(request.id, generation, false, undefined, {
+          code: "not_found",
+          message: "Fixture Work Packet not found.",
+        })
+        continue
+      }
+      claimRef = command.claimRef
+      packet.state = "claimed"
+      packet.revision += 1
+      packet.updatedAt = input.occurredAt
+      claimLedger.claims.push({
+        claimRef,
+        packetRef: packet.packetRef,
+        workRef: packet.workRef,
+        repositoryRef: packet.repositoryRef,
+        holderRef: input.effectivePrincipalRef,
+        scope: packet.scope,
+        ownedPaths: packet.ownedPaths,
+        hotFiles: packet.hotFiles,
+        hotContracts: packet.hotContracts,
+        claimedAt: input.occurredAt,
+        lastEvidenceAt: input.occurredAt,
+        evidenceRefs: [],
+        state: "claimed",
+        generation: 1,
+        revision: 1,
+        releasedAt: null,
+        releaserRef: null,
+        releaseEvidenceRefs: [],
+      })
+      claimLedger.audit.push({
+        eventRef: `claim-event:${revision}`,
+        kind: "claimed",
+        packetRef: packet.packetRef,
+        claimRef,
+        principalRef: input.effectivePrincipalRef,
+        generation: 1,
+        occurredAt: input.occurredAt,
+        evidenceRefs: [],
+        detail: "Fixture Repository Work Claim admitted.",
+      })
+    } else if (["status", "heartbeat", "block", "release"].includes(command?.command)) {
+      const claim = claimLedger.claims.find((value) => value.claimRef === command.claimRef)
+      if (!claim || claim.generation !== command.expectedGeneration) {
+        respond(request.id, generation, false, undefined, {
+          code: "stale_generation",
+          message: "Fixture Repository Work Claim generation does not match.",
+        })
+        continue
+      }
+      if (!["claimed", "blocked"].includes(claim.state)) {
+        respond(request.id, generation, false, undefined, {
+          code: "conflict",
+          message: "Fixture Repository Work Claim is not active.",
+        })
+        continue
+      }
+      const packet = claimLedger.packets.find((value) => value.packetRef === claim.packetRef)
+      claimRef = claim.claimRef
+      claim.lastEvidenceAt = input.occurredAt
+      claim.evidenceRefs = [...claim.evidenceRefs, ...(command.evidenceRefs ?? [])]
+      claim.revision += 1
+      if (command.command === "block") {
+        claim.state = "blocked"
+        if (packet) packet.state = "blocked"
+      } else if (command.command === "release") {
+        claim.state = "released"
+        claim.releasedAt = input.occurredAt
+        claim.releaserRef = input.effectivePrincipalRef
+        claim.releaseEvidenceRefs = command.evidenceRefs ?? []
+        if (packet) packet.state = "released"
+      }
+      if (packet) {
+        packet.revision += 1
+        packet.updatedAt = input.occurredAt
+      }
+      claimLedger.audit.push({
+        eventRef: `claim-event:${revision}`,
+        kind: command.command,
+        packetRef: claim.packetRef,
+        claimRef,
+        principalRef: input.effectivePrincipalRef,
+        generation: claim.generation,
+        occurredAt: input.occurredAt,
+        evidenceRefs: command.evidenceRefs ?? [],
+        detail: command.detail ?? `Fixture ${command.command} accepted.`,
+      })
+    } else {
+      respond(request.id, generation, false, undefined, {
+        code: "invalid_request",
+        message: "Unsupported fixture claim command.",
+      })
+      continue
+    }
+    claimLedger = {
+      ...claimLedger,
+      revision,
+      eventCursor: `cursor:repository-claim:${revision}`,
+      completeness: {
+        state: "complete",
+        cursor: `cursor:repository-claim:${revision}`,
+        gapRefs: [],
+      },
+      freshness: { state: "fresh", observedAt: input.occurredAt },
+    }
+    respond(request.id, generation, true, {
+      ledger: claimLedger,
+      receipt: {
+        requestRef: input.requestRef,
+        idempotencyKey: input.idempotencyKey,
+        commandDigest: "0".repeat(64),
+        previousRevision,
+        revision,
+        eventCursor: claimLedger.eventCursor,
+        effectivePrincipalRef: input.effectivePrincipalRef,
+        claimRef,
+        acceptedAt: input.occurredAt,
+        admitted: true,
+        refusalReason: null,
+        githubWriteCount: 0,
       },
     })
     continue

@@ -27,6 +27,8 @@ pub enum ProtocolErrorCode {
     Unavailable,
     StaleCursor,
     Gap,
+    Forbidden,
+    Conflict,
     Internal,
 }
 

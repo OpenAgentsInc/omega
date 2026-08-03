@@ -2,6 +2,9 @@ use gpui::{
     App, Context, EventEmitter, FocusHandle, Focusable, IntoElement, KeyContext, Render, Styled,
     Window, prelude::*,
 };
+use omega_effectd::all_work_contract::{
+    RepositoryClaimLedger, RepositoryWorkClaim, RepositoryWorkClaimState,
+};
 #[cfg(all(test, feature = "test-support"))]
 use omega_work_index::DogfoodFixtureAdapter;
 use omega_work_index::{
@@ -52,6 +55,20 @@ pub enum DogfoodSurfaceEvent {
         project_id: String,
         issue_id: String,
     },
+    RepositoryClaimRequested {
+        issue_id: String,
+        action: DogfoodClaimAction,
+    },
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum DogfoodClaimAction {
+    Refresh,
+    Claim,
+    Status,
+    Heartbeat,
+    Block,
+    Release,
 }
 
 pub struct DogfoodSurface {
@@ -60,6 +77,9 @@ pub struct DogfoodSurface {
     project_id: String,
     selected_issue_id: String,
     scene: DogfoodScene,
+    repository_claim_ledger: Option<RepositoryClaimLedger>,
+    repository_claim_error: Option<String>,
+    repository_claim_busy: bool,
 }
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
@@ -85,6 +105,9 @@ impl DogfoodSurface {
             project_id: state.project_id,
             selected_issue_id: state.selected_issue_id,
             scene: state.scene,
+            repository_claim_ledger: None,
+            repository_claim_error: None,
+            repository_claim_busy: false,
         }
     }
 
@@ -127,6 +150,60 @@ impl DogfoodSurface {
                 self.selected_issue_id = issue.id.clone();
             }
         }
+        cx.notify();
+    }
+
+    pub fn set_repository_claim_state(
+        &mut self,
+        ledger: Option<RepositoryClaimLedger>,
+        error: Option<String>,
+        busy: bool,
+        cx: &mut Context<Self>,
+    ) {
+        if let Some(ledger) = ledger {
+            self.repository_claim_ledger = Some(ledger);
+        }
+        self.repository_claim_error = error;
+        self.repository_claim_busy = busy;
+        cx.notify();
+    }
+
+    fn selected_work_ref(&self) -> Option<String> {
+        let issue = self.selected_issue()?;
+        let repository = self
+            .fixture
+            .graph
+            .source_repositories
+            .iter()
+            .find(|repository| repository.id == issue.repository_id)?;
+        let number = issue.id.rsplit(':').next()?;
+        Some(format!(
+            "work:github:{}/{}:{number}",
+            repository.owner.to_ascii_lowercase(),
+            repository.name.to_ascii_lowercase()
+        ))
+    }
+
+    fn selected_repository_claim(&self) -> Option<&RepositoryWorkClaim> {
+        let work_ref = self.selected_work_ref()?;
+        self.repository_claim_ledger
+            .as_ref()?
+            .claims
+            .iter()
+            .filter(|claim| claim.work_ref.0 == work_ref)
+            .max_by_key(|claim| claim.generation.0)
+    }
+
+    fn request_claim_action(&mut self, action: DogfoodClaimAction, cx: &mut Context<Self>) {
+        if self.repository_claim_busy {
+            return;
+        }
+        self.repository_claim_busy = true;
+        self.repository_claim_error = None;
+        cx.emit(DogfoodSurfaceEvent::RepositoryClaimRequested {
+            issue_id: self.selected_issue_id.clone(),
+            action,
+        });
         cx.notify();
     }
 
@@ -635,6 +712,17 @@ impl DogfoodSurface {
             .source_repositories
             .iter()
             .find(|repository| repository.id == issue.repository_id);
+        let claim = self.selected_repository_claim().cloned();
+        let claim_is_active = claim.as_ref().is_some_and(|claim| {
+            matches!(
+                &claim.state,
+                RepositoryWorkClaimState::Claimed | RepositoryWorkClaimState::Blocked
+            )
+        });
+        let claim_state = claim
+            .as_ref()
+            .map(|claim| repository_claim_state_label(&claim.state))
+            .unwrap_or("Unclaimed");
         h_flex()
             .items_start()
             .gap_4()
@@ -762,6 +850,104 @@ impl DogfoodSurface {
                         },
                         cx,
                     ))
+                    .child(section_heading("Repository claim", cx))
+                    .child(inspector_row("Claim state", claim_state.into(), cx))
+                    .child(inspector_row(
+                        "Holder",
+                        claim
+                            .as_ref()
+                            .map_or("None".into(), |claim| claim.holder_ref.0.clone()),
+                        cx,
+                    ))
+                    .child(inspector_row(
+                        "Generation",
+                        claim
+                            .as_ref()
+                            .map_or("None".into(), |claim| claim.generation.0.to_string()),
+                        cx,
+                    ))
+                    .child(inspector_row(
+                        "Last evidence",
+                        claim.as_ref().map_or("None".into(), |claim| {
+                            claim.last_evidence_at.0.clone()
+                        }),
+                        cx,
+                    ))
+                    .child(inspector_row(
+                        "Bounded scope",
+                        claim.as_ref().map_or("None".into(), |claim| {
+                            format!(
+                                "{} path(s) · {} hot file(s) · {} hot contract(s)",
+                                claim.owned_paths.len(),
+                                claim.hot_files.len(),
+                                claim.hot_contracts.len()
+                            )
+                        }),
+                        cx,
+                    ))
+                    .child(
+                        h_flex()
+                            .gap_1()
+                            .flex_wrap()
+                            .child(
+                                claim_button("claim-refresh", "Refresh", self.repository_claim_busy)
+                                    .on_click(cx.listener(|this, _, _, cx| {
+                                        this.request_claim_action(DogfoodClaimAction::Refresh, cx)
+                                    })),
+                            )
+                            .child(
+                                claim_button(
+                                    "claim-create",
+                                    "Claim packet",
+                                    self.repository_claim_busy || claim_is_active,
+                                )
+                                .on_click(cx.listener(|this, _, _, cx| {
+                                    this.request_claim_action(DogfoodClaimAction::Claim, cx)
+                                })),
+                            )
+                            .when(claim_is_active, |controls| {
+                                controls
+                                    .child(
+                                        claim_button("claim-status", "Status", self.repository_claim_busy)
+                                            .on_click(cx.listener(|this, _, _, cx| {
+                                                this.request_claim_action(DogfoodClaimAction::Status, cx)
+                                            })),
+                                    )
+                                    .child(
+                                        claim_button("claim-heartbeat", "Heartbeat", self.repository_claim_busy)
+                                            .on_click(cx.listener(|this, _, _, cx| {
+                                                this.request_claim_action(DogfoodClaimAction::Heartbeat, cx)
+                                            })),
+                                    )
+                                    .child(
+                                        claim_button("claim-block", "Block", self.repository_claim_busy)
+                                            .on_click(cx.listener(|this, _, _, cx| {
+                                                this.request_claim_action(DogfoodClaimAction::Block, cx)
+                                            })),
+                                    )
+                                    .child(
+                                        claim_button("claim-release", "Release", self.repository_claim_busy)
+                                            .on_click(cx.listener(|this, _, _, cx| {
+                                                this.request_claim_action(DogfoodClaimAction::Release, cx)
+                                            })),
+                                    )
+                            }),
+                    )
+                    .child(
+                        Label::new(
+                            self.repository_claim_error
+                                .clone()
+                                .unwrap_or_else(|| {
+                                    "Claim authority is separate from assignee, delegate, lease, verification, merge, and release authority.".into()
+                                }),
+                        )
+                        .size(LabelSize::XSmall)
+                        .color(if self.repository_claim_error.is_some() {
+                            Color::Error
+                        } else {
+                            Color::Muted
+                        }),
+                    )
                     .child(inspector_row(
                         "Planning source",
                         self.fixture.provenance_label().into(),
@@ -830,6 +1016,22 @@ impl DogfoodSurface {
                     .color(Color::Warning),
             )
     }
+}
+
+fn repository_claim_state_label(state: &RepositoryWorkClaimState) -> &'static str {
+    match state {
+        RepositoryWorkClaimState::Claimed => "Claimed",
+        RepositoryWorkClaimState::Blocked => "Blocked",
+        RepositoryWorkClaimState::Released => "Released",
+        RepositoryWorkClaimState::Superseded => "Superseded",
+    }
+}
+
+fn claim_button(id: &'static str, label: &'static str, disabled: bool) -> Button {
+    Button::new(id, label)
+        .style(ButtonStyle::Subtle)
+        .size(ButtonSize::Compact)
+        .disabled(disabled)
 }
 
 impl Render for DogfoodSurface {

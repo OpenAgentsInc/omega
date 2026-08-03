@@ -42,7 +42,7 @@ use crate::ManageProfiles;
 use crate::agent_connection_store::AgentConnectionStore;
 use crate::completion_provider::{AgentContextSelection, AgentContextSource};
 use crate::forensics_work_projection::{ForensicsWorkProjection, project_forensics_work};
-use crate::omega_dogfood_surface::{DogfoodSurface, DogfoodSurfaceEvent};
+use crate::omega_dogfood_surface::{DogfoodClaimAction, DogfoodSurface, DogfoodSurfaceEvent};
 use crate::omega_work_detail_surface::{
     WorkDelegationCandidate, WorkDetailSurface, WorkDetailSurfaceEvent,
 };
@@ -2619,6 +2619,105 @@ fn work_issue_identifier(work_ref: &str) -> Option<omega_effectd::all_work_contr
         .ok()
 }
 
+fn dogfood_claim_action_label(action: DogfoodClaimAction) -> &'static str {
+    match action {
+        DogfoodClaimAction::Refresh => "refresh",
+        DogfoodClaimAction::Claim => "claim",
+        DogfoodClaimAction::Status => "status",
+        DogfoodClaimAction::Heartbeat => "heartbeat",
+        DogfoodClaimAction::Block => "block",
+        DogfoodClaimAction::Release => "release",
+    }
+}
+
+fn dogfood_claim_collision_scope(
+    repository: &str,
+    number: u64,
+) -> (Vec<&'static str>, Vec<&'static str>, Vec<&'static str>) {
+    match (repository, number) {
+        ("omega", 224) => (
+            vec![
+                "crates/omega_effectd",
+                "crates/omega_work_index",
+                "crates/agent_ui",
+                "docs/src/development",
+            ],
+            vec!["script/sync-all-work-contract"],
+            vec![
+                "All Work generated Effect/Rust boundary",
+                "Repository Work Claim writer cutover",
+            ],
+        ),
+        ("openagents", 9305) => (
+            vec!["packages/all-work-contract", "packages/omega-effectd"],
+            vec![],
+            vec![
+                "All Work contract definition and generated artifacts",
+                "Repository Work Claim canonical authority",
+            ],
+        ),
+        _ => (vec![], vec![], vec![]),
+    }
+}
+
+#[cfg(test)]
+mod dogfood_claim_tests {
+    use super::dogfood_claim_collision_scope;
+
+    #[test]
+    fn omega_224_packet_names_its_owned_paths_and_hot_contracts() {
+        let (paths, hot_files, hot_contracts) = dogfood_claim_collision_scope("omega", 224);
+        assert!(paths.contains(&"crates/omega_effectd"));
+        assert!(paths.contains(&"crates/agent_ui"));
+        assert_eq!(hot_files, vec!["script/sync-all-work-contract"]);
+        assert!(hot_contracts.contains(&"All Work generated Effect/Rust boundary"));
+        assert!(hot_contracts.contains(&"Repository Work Claim writer cutover"));
+    }
+}
+
+async fn execute_dogfood_claim_command(
+    supervisor: &mut omega_effectd::OmegaEffectdSupervisor,
+    ledger: omega_effectd::all_work_contract::RepositoryClaimLedger,
+    issue_identifier: &str,
+    action: &str,
+    command: omega_effectd::all_work_contract::RepositoryClaimCommand,
+) -> Result<omega_effectd::all_work_contract::RepositoryClaimLedger> {
+    let revision = ledger.revision.0;
+    let key_suffix = format!(
+        "{}-{}-r{revision}",
+        issue_identifier.to_ascii_lowercase(),
+        action
+    );
+    let occurred_at = Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Millis, true);
+    let result = supervisor
+        .execute_repository_claim(
+            omega_effectd::all_work_contract::RepositoryClaimExecuteRequest {
+                request_ref: omega_effectd::all_work_contract::ClaimRequestRef::try_from(format!(
+                    "claim-request:omega-ui:{key_suffix}"
+                ))?,
+                idempotency_key: omega_effectd::all_work_contract::IdempotencyKey::try_from(
+                    format!("omega-ui:{key_suffix}"),
+                )?,
+                expected_revision: omega_effectd::all_work_contract::SafeInteger(revision),
+                effective_principal_ref: omega_effectd::all_work_contract::PrincipalRef::try_from(
+                    "principal:omega:local-owner".to_string(),
+                )?,
+                capability_ref: omega_effectd::all_work_contract::CapabilityRef::try_from(
+                    "capability:repository-claim:write".to_string(),
+                )?,
+                occurred_at: omega_effectd::all_work_contract::IsoTimestamp::try_from(occurred_at)?,
+                command,
+            },
+        )
+        .await?;
+    if result.receipt.github_write_count.0 != 0 {
+        return Err(anyhow!(
+            "repository claim command violated the zero-GitHub-write cutover"
+        ));
+    }
+    Ok(result.ledger)
+}
+
 fn work_event_ref(
     work_ref: &str,
     revision: u64,
@@ -3384,6 +3483,7 @@ pub struct AgentPanel {
     _dogfood_surface_subscription: Option<Subscription>,
     _dogfood_planning_refresh: Option<Task<()>>,
     _dogfood_planning_persist: Option<Task<()>>,
+    _dogfood_claim_task: Option<Task<()>>,
     omega_work_detail: Option<Entity<WorkDetailSurface>>,
     _omega_work_detail_subscription: Option<Subscription>,
     _omega_work_detail_load: Option<Task<()>>,
@@ -4141,6 +4241,7 @@ impl AgentPanel {
             _dogfood_surface_subscription: None,
             _dogfood_planning_refresh: None,
             _dogfood_planning_persist: None,
+            _dogfood_claim_task: None,
             omega_work_detail: None,
             _omega_work_detail_subscription: None,
             _omega_work_detail_load: None,
@@ -17296,6 +17397,255 @@ impl AgentPanel {
         }));
     }
 
+    fn execute_dogfood_claim_action(
+        &mut self,
+        issue_id: &str,
+        action: DogfoodClaimAction,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(fixture) = self.dogfood_fixture.as_ref() else {
+            return;
+        };
+        let Some(issue) = fixture
+            .graph
+            .issues
+            .iter()
+            .find(|issue| issue.id == issue_id)
+            .cloned()
+        else {
+            return;
+        };
+        let Some(repository) = fixture
+            .graph
+            .source_repositories
+            .iter()
+            .find(|repository| repository.id == issue.repository_id)
+            .cloned()
+        else {
+            return;
+        };
+        let surface = self.dogfood_surface.clone();
+        if let Some(surface) = &surface {
+            surface.update(cx, |surface, cx| {
+                surface.set_repository_claim_state(None, None, true, cx)
+            });
+        }
+        let supervisor = omega_effectd::shared_supervisor(cx).ok();
+        self._dogfood_claim_task = Some(cx.spawn(async move |_this, cx| {
+            let result: Result<omega_effectd::all_work_contract::RepositoryClaimLedger> = async {
+                let supervisor = supervisor.context("omega-effectd is unavailable")?;
+                let mut guard = supervisor.lock().await;
+                guard.ensure_started().await?;
+                let mut ledger = guard
+                    .read_repository_claims(
+                        omega_effectd::all_work_contract::RepositoryClaimReadRequest {
+                            after_revision: None,
+                            repository_ref: Some(Some(
+                                omega_effectd::all_work_contract::RepositoryRef::try_from(
+                                    repository.id.clone(),
+                                )?,
+                            )),
+                            work_ref: None,
+                        },
+                    )
+                    .await?
+                    .ledger;
+                if action == DogfoodClaimAction::Refresh {
+                    return Ok(ledger);
+                }
+
+                let work_ref = omega_effectd::all_work_contract::WorkRef::try_from(format!(
+                    "work:github:{}/{}:{}",
+                    repository.owner.to_ascii_lowercase(),
+                    repository.name.to_ascii_lowercase(),
+                    issue.number
+                ))?;
+                let packet_ref = omega_effectd::all_work_contract::WorkPacketRef::try_from(
+                    format!(
+                        "work-packet:github:{}/{}:{}",
+                        repository.owner.to_ascii_lowercase(),
+                        repository.name.to_ascii_lowercase(),
+                        issue.number
+                    ),
+                )?;
+                let claim_ref =
+                    omega_effectd::all_work_contract::RepositoryWorkClaimRef::try_from(format!(
+                        "repository-claim:github:{}/{}:{}",
+                        repository.owner.to_ascii_lowercase(),
+                        repository.name.to_ascii_lowercase(),
+                        issue.number
+                    ))?;
+
+                if action == DogfoodClaimAction::Claim
+                    && !ledger
+                        .packets
+                        .iter()
+                        .any(|packet| packet.packet_ref == packet_ref)
+                {
+                    let (owned_paths, hot_files, mut hot_contracts) =
+                        dogfood_claim_collision_scope(
+                            &repository.name.to_ascii_lowercase(),
+                            issue.number,
+                        );
+                    hot_contracts.push("GitHub issue identity");
+                    let command =
+                        omega_effectd::all_work_contract::RepositoryClaimCommand::CreatePacket {
+                            packet_ref: packet_ref.clone(),
+                            work_ref: work_ref.clone(),
+                            repository_ref:
+                                omega_effectd::all_work_contract::RepositoryRef::try_from(
+                                    repository.id.clone(),
+                                )?,
+                            title: omega_effectd::all_work_contract::ShortText::try_from(
+                                issue.title.clone(),
+                            )?,
+                            scope: omega_effectd::all_work_contract::LongText::try_from(format!(
+                                "Implement {} from the Omega v0.2.0 Work screen.",
+                                issue.identifier
+                            ))?,
+                            owned_paths: owned_paths
+                                .into_iter()
+                                .map(|path| {
+                                    omega_effectd::all_work_contract::ShortText::try_from(
+                                        path.to_string(),
+                                    )
+                                })
+                                .collect::<Result<Vec<_>, _>>()?,
+                            hot_files: hot_files
+                                .into_iter()
+                                .map(|path| {
+                                    omega_effectd::all_work_contract::ShortText::try_from(
+                                        path.to_string(),
+                                    )
+                                })
+                                .collect::<Result<Vec<_>, _>>()?,
+                            hot_contracts: hot_contracts
+                                .into_iter()
+                                .map(|contract| {
+                                    omega_effectd::all_work_contract::ShortText::try_from(
+                                        if contract == "GitHub issue identity" {
+                                            format!(
+                                                "github-issue:{}/{}#{}",
+                                                repository.owner.to_ascii_lowercase(),
+                                                repository.name.to_ascii_lowercase(),
+                                                issue.number
+                                            )
+                                        } else {
+                                            contract.to_string()
+                                        },
+                                    )
+                                })
+                                .collect::<Result<Vec<_>, _>>()?,
+                            verification: omega_effectd::all_work_contract::LongText::try_from(
+                                "Use the exact verification declared by the Work packet; claim state is not verification."
+                                    .to_string(),
+                            )?,
+                        };
+                    ledger = execute_dogfood_claim_command(
+                        &mut guard,
+                        ledger,
+                        &issue.identifier,
+                        "create",
+                        command,
+                    )
+                    .await?;
+                }
+
+                let current_claim = ledger
+                    .claims
+                    .iter()
+                    .filter(|claim| claim.work_ref == work_ref)
+                    .max_by_key(|claim| claim.generation.0)
+                    .cloned();
+                let command = match action {
+                    DogfoodClaimAction::Claim => {
+                        if current_claim.as_ref().is_some_and(|claim| {
+                            matches!(
+                                &claim.state,
+                                omega_effectd::all_work_contract::RepositoryWorkClaimState::Claimed
+                                    | omega_effectd::all_work_contract::RepositoryWorkClaimState::Blocked
+                            )
+                        }) {
+                            return Ok(ledger);
+                        }
+                        omega_effectd::all_work_contract::RepositoryClaimCommand::ClaimPacket {
+                            packet_ref,
+                            claim_ref,
+                        }
+                    }
+                    DogfoodClaimAction::Status
+                    | DogfoodClaimAction::Heartbeat
+                    | DogfoodClaimAction::Block
+                    | DogfoodClaimAction::Release => {
+                        let claim = current_claim.context("this Work has no repository claim")?;
+                        let evidence = vec![
+                            omega_effectd::all_work_contract::EvidenceRef::try_from(format!(
+                                "evidence:omega-ui:{}:r{}",
+                                dogfood_claim_action_label(action),
+                                ledger.revision.0
+                            ))?,
+                        ];
+                        match action {
+                            DogfoodClaimAction::Status => {
+                                omega_effectd::all_work_contract::RepositoryClaimCommand::Status {
+                                    claim_ref: claim.claim_ref,
+                                    expected_generation: claim.generation,
+                                    detail: omega_effectd::all_work_contract::ShortText::try_from(
+                                        "Status reported from the Omega Work inspector.".to_string(),
+                                    )?,
+                                    evidence_refs: evidence,
+                                }
+                            }
+                            DogfoodClaimAction::Heartbeat => omega_effectd::all_work_contract::RepositoryClaimCommand::Heartbeat {
+                                claim_ref: claim.claim_ref,
+                                expected_generation: claim.generation,
+                                evidence_refs: evidence,
+                            },
+                            DogfoodClaimAction::Block => omega_effectd::all_work_contract::RepositoryClaimCommand::Block {
+                                claim_ref: claim.claim_ref,
+                                expected_generation: claim.generation,
+                                detail: omega_effectd::all_work_contract::ShortText::try_from(
+                                    "Blocked from the Omega Work inspector; add the exact blocker as follow-up evidence."
+                                        .to_string(),
+                                )?,
+                                evidence_refs: evidence,
+                            },
+                            DogfoodClaimAction::Release => omega_effectd::all_work_contract::RepositoryClaimCommand::Release {
+                                claim_ref: claim.claim_ref,
+                                expected_generation: claim.generation,
+                                evidence_refs: evidence,
+                            },
+                            _ => unreachable!(),
+                        }
+                    }
+                    DogfoodClaimAction::Refresh => unreachable!(),
+                };
+                execute_dogfood_claim_command(
+                    &mut guard,
+                    ledger,
+                    &issue.identifier,
+                    dogfood_claim_action_label(action),
+                    command,
+                )
+                .await
+            }
+            .await;
+            if let Some(surface) = surface {
+                let _ = surface.update(cx, |surface, cx| match result {
+                    Ok(ledger) => {
+                        surface.set_repository_claim_state(Some(ledger), None, false, cx)
+                    }
+                    Err(error) => surface.set_repository_claim_state(
+                        None,
+                        Some(error.to_string()),
+                        false,
+                        cx,
+                    ),
+                });
+            }
+        }));
+    }
+
     fn open_dogfood_project(
         &mut self,
         project_id: &str,
@@ -17340,13 +17690,24 @@ impl AgentPanel {
                 &surface,
                 window,
                 |this, _surface, event, _window, cx| match event.clone() {
-                    DogfoodSurfaceEvent::SelectionChanged { project_id, .. } => {
+                    DogfoodSurfaceEvent::SelectionChanged {
+                        project_id,
+                        issue_id,
+                    } => {
                         if let Ok(route) = OmegaRoute::project(project_id)
                             && this.omega_navigation_history.push(route)
                         {
                             this.serialize(cx);
                         }
+                        this.execute_dogfood_claim_action(
+                            &issue_id,
+                            DogfoodClaimAction::Refresh,
+                            cx,
+                        );
                         cx.notify();
+                    }
+                    DogfoodSurfaceEvent::RepositoryClaimRequested { issue_id, action } => {
+                        this.execute_dogfood_claim_action(&issue_id, action, cx);
                     }
                 },
             ));
@@ -17355,6 +17716,8 @@ impl AgentPanel {
         };
         surface.update(cx, |surface, cx| surface.select_project(project_id, cx));
         self.refresh_dogfood_planning(cx);
+        let selected_issue_id = surface.read(cx).selected_issue_id().to_string();
+        self.execute_dogfood_claim_action(&selected_issue_id, DogfoodClaimAction::Refresh, cx);
         surface.read(cx).focus_handle(cx).focus(window, cx);
         cx.notify();
         true

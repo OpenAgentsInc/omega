@@ -885,6 +885,111 @@ mod tests {
                 .expect("typed planning graph read");
             assert_eq!(planning.graph.revision.0, 1);
             assert_eq!(planning.graph.graph_ref.0, "planning-graph:fixture");
+            let claims = supervisor
+                .read_repository_claims(all_work_contract::RepositoryClaimReadRequest {
+                    after_revision: None,
+                    repository_ref: None,
+                    work_ref: None,
+                })
+                .await
+                .expect("typed repository claim read");
+            assert!(claims.ledger.packets.is_empty());
+            let created = supervisor
+                .execute_repository_claim(all_work_contract::RepositoryClaimExecuteRequest {
+                    request_ref: all_work_contract::ClaimRequestRef::try_from(
+                        "claim-request:fixture:create".to_string(),
+                    )
+                    .expect("request ref"),
+                    idempotency_key: all_work_contract::IdempotencyKey::try_from(
+                        "fixture-create-packet".to_string(),
+                    )
+                    .expect("idempotency key"),
+                    expected_revision: all_work_contract::SafeInteger(0),
+                    effective_principal_ref: all_work_contract::PrincipalRef::try_from(
+                        "principal:fixture:owner".to_string(),
+                    )
+                    .expect("principal ref"),
+                    capability_ref: all_work_contract::CapabilityRef::try_from(
+                        "capability:repository-claim:write".to_string(),
+                    )
+                    .expect("capability ref"),
+                    occurred_at: all_work_contract::IsoTimestamp::try_from(
+                        "2026-08-03T08:30:00.000Z".to_string(),
+                    )
+                    .expect("timestamp"),
+                    command: all_work_contract::RepositoryClaimCommand::CreatePacket {
+                        packet_ref: all_work_contract::WorkPacketRef::try_from(
+                            "work-packet:fixture:224".to_string(),
+                        )
+                        .expect("packet ref"),
+                        work_ref: all_work_contract::WorkRef::try_from(
+                            "work:github:openagentsinc/omega:224".to_string(),
+                        )
+                        .expect("work ref"),
+                        repository_ref: all_work_contract::RepositoryRef::try_from(
+                            "repository:omega".to_string(),
+                        )
+                        .expect("repository ref"),
+                        title: all_work_contract::ShortText::try_from(
+                            "Move repository claims into Omega".to_string(),
+                        )
+                        .expect("title"),
+                        scope: all_work_contract::LongText::try_from(
+                            "Exercise the generated Omega claim client.".to_string(),
+                        )
+                        .expect("scope"),
+                        owned_paths: vec![],
+                        hot_files: vec![],
+                        hot_contracts: vec![],
+                        verification: all_work_contract::LongText::try_from(
+                            "Run the final deferred repository claim suite.".to_string(),
+                        )
+                        .expect("verification"),
+                    },
+                })
+                .await
+                .expect("typed Work Packet create");
+            assert_eq!(created.ledger.revision.0, 1);
+            assert_eq!(created.receipt.github_write_count.0, 0);
+            let claimed = supervisor
+                .execute_repository_claim(all_work_contract::RepositoryClaimExecuteRequest {
+                    request_ref: all_work_contract::ClaimRequestRef::try_from(
+                        "claim-request:fixture:claim".to_string(),
+                    )
+                    .expect("request ref"),
+                    idempotency_key: all_work_contract::IdempotencyKey::try_from(
+                        "fixture-claim-packet".to_string(),
+                    )
+                    .expect("idempotency key"),
+                    expected_revision: all_work_contract::SafeInteger(1),
+                    effective_principal_ref: all_work_contract::PrincipalRef::try_from(
+                        "principal:fixture:owner".to_string(),
+                    )
+                    .expect("principal ref"),
+                    capability_ref: all_work_contract::CapabilityRef::try_from(
+                        "capability:repository-claim:write".to_string(),
+                    )
+                    .expect("capability ref"),
+                    occurred_at: all_work_contract::IsoTimestamp::try_from(
+                        "2026-08-03T08:31:00.000Z".to_string(),
+                    )
+                    .expect("timestamp"),
+                    command: all_work_contract::RepositoryClaimCommand::ClaimPacket {
+                        packet_ref: all_work_contract::WorkPacketRef::try_from(
+                            "work-packet:fixture:224".to_string(),
+                        )
+                        .expect("packet ref"),
+                        claim_ref: all_work_contract::RepositoryWorkClaimRef::try_from(
+                            "repository-claim:fixture:224".to_string(),
+                        )
+                        .expect("claim ref"),
+                    },
+                })
+                .await
+                .expect("typed repository claim");
+            assert_eq!(claimed.ledger.revision.0, 2);
+            assert_eq!(claimed.ledger.claims.len(), 1);
+            assert_eq!(claimed.ledger.claims[0].generation.0, 1);
             supervisor.stop().await.expect("stop");
         });
     }

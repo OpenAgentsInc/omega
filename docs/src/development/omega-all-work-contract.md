@@ -9,10 +9,10 @@ adapter creates a second writable store.
 
 | Field                 | Value                                                              |
 | --------------------- | ------------------------------------------------------------------ |
-| OpenAgents commit     | `f169754d09f3c56532c7f11660ed3de007c7c612`                         |
+| OpenAgents commit     | `963dc8384b00c52aa0774ea2ce3e64ead5cbbf0f`                         |
 | Contract              | `openagents.all_work_boundary.v1`                                  |
-| Definition SHA-256    | `f41f9e8b44f95936694c74799027fa78b9e35ffe102a1a85e4b86027bb15748b` |
-| Rust artifact SHA-256 | `da18308417540bbac93124ebf15dda7bb192649afc2460fa591f592d3945ab14` |
+| Definition SHA-256    | `aa933ba19f0245905ce21c8ed6b90e6279c68b09f3352101a026a10786362535` |
+| Rust artifact SHA-256 | `3d6ba1402f2681ea5c1a34d6c0d191e82bff3285ca64bdc9f0fbd71ab7624ecc` |
 | Omega receipt         | `crates/omega_effectd/all-work-contract/SOURCE.json`               |
 
 The generated Rust file, compatibility manifest, and shared fixtures are
@@ -27,8 +27,9 @@ clients continue to initialize. Its initialization payload negotiates a
 separate All Work profile:
 
 - an omitted All Work request selects `omega-effectd.v1` with no Work methods;
-- `omega-effectd.v2` enables `work.index.read`, `work.snapshot.read`, and
-  `planning.graph.read`;
+- `omega-effectd.v2` enables `work.index.read`, `work.snapshot.read`,
+  `planning.graph.read`, `repository.claim.read`, and the separately
+  negotiated `repository.claim.execute` capability;
 - a v1 client that calls any All Work read method receives
   `incompatible_version`;
 - request and result domain payloads use generated Rust and Effect types;
@@ -73,6 +74,30 @@ The persisted cache is read only when the existing debug fixture gate is
 enabled. The refresh does not make this development route available in a
 release build, and neither the cache nor a successful read grants command or
 release authority.
+
+## Repository claim authority
+
+The generated boundary now includes Work Packets, Repository Work Claims,
+claim audit events, reads, and commands. OpenAgents keeps the only persistent
+claim ledger under the injected application data root. Omega does not copy
+that ledger into its planning cache. The Work Inspector reads it through the
+supervised generated client and submits create, claim, status, heartbeat,
+block, and release commands through the same client.
+
+Every command names an Effective Principal and the repository-claim write
+capability, uses optimistic ledger revision and claim-generation fences, and
+returns a receipt. Omega refuses a receipt whose `githubWriteCount` is not
+zero. A Repository Work Claim is collision coordination only. It is not an
+Assignee, Agent Delegate, Lease, process-health proof, verification, merge,
+release, or owner disposition.
+
+Collision policy covers same Work, paths, hot files, hot contracts, generated
+artifacts, migrations, route tables, lockfiles, and shared schemas. A claim
+that has no evidence for 90 minutes is still owned until a named process and
+worktree audit also proves abandonment. Imported GitHub claim comments remain
+canceled historical packets and audit records; they cannot become native
+post-cutover commands. See
+[Omega repository work claims](./omega-repository-work-claims.md).
 
 ## Verify
 

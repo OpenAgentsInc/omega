@@ -76,6 +76,15 @@ It validates those IDs against the checked fixture before restoration and
 defaults to omega#214 when no valid state exists. A build without the fixture
 gate does not read or render that development-only selection.
 
+The Issue Inspector also projects the canonical Repository Work Claim for the
+selected GitHub Work identity. It shows state, holder, generation, last
+evidence, and declared collision scope. Claim, Status, Heartbeat, Block,
+Release, and Refresh controls go through the generated supervised client; the
+planning fixture and offline planning cache never become claim stores. The
+Inspector states that claim state is separate from assignment, delegation,
+lease, verification, merge, and release authority. See
+[Omega repository work claims](./omega-repository-work-claims.md).
+
 Use Up/Down or J/K to change the selected Issue and Enter to open its Issue
 scene. Keys 1, 2, and 3 open Overview, List, and Board. Keys 4 and 5 open the
 empty Session and Review scenes. The same controls are available as standard
