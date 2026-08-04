@@ -58,7 +58,12 @@ pub fn app_menus(_cx: &mut App) -> Vec<Menu> {
                 MenuItem::action("Files", agent_ui::workbench_shell::SelectFiles),
                 MenuItem::action("Search", agent_ui::workbench_shell::SelectSearch),
                 MenuItem::action("Review", agent_ui::workbench_shell::SelectReview),
-                MenuItem::action("Forensics", agent_ui::workbench_shell::SelectForensics),
+                // DISABLED 2026-08-04 (owner request): the Forensics entry
+                // points are hidden — the sidebar row, the cmd-shift-f
+                // bindings, and this menu item. Leaving the item would keep an
+                // entry point the sidebar no longer advertises, and would make
+                // the menu advertise a shortcut the keymaps no longer bind.
+                // MenuItem::action("Forensics", agent_ui::workbench_shell::SelectForensics),
                 MenuItem::action("Git", agent_ui::workbench_shell::SelectGit),
                 MenuItem::action("Terminal", agent_ui::workbench_shell::SelectTerminal),
                 MenuItem::action("Plan", agent_ui::workbench_shell::SelectPlan),
@@ -168,7 +173,8 @@ mod tests {
             "action:View/Workbench/Files=omega_workbench::SelectFiles:enabled",
             "action:View/Workbench/Search=omega_workbench::SelectSearch:enabled",
             "action:View/Workbench/Review=omega_workbench::SelectReview:enabled",
-            "action:View/Workbench/Forensics=omega_workbench::SelectForensics:enabled",
+            // DISABLED 2026-08-04 with the menu item above.
+            // "action:View/Workbench/Forensics=omega_workbench::SelectForensics:enabled",
             "action:View/Workbench/Git=omega_workbench::SelectGit:enabled",
             "action:View/Workbench/Terminal=omega_workbench::SelectTerminal:enabled",
             "action:View/Workbench/Plan=omega_workbench::SelectPlan:enabled",
@@ -215,7 +221,8 @@ mod tests {
             "action:View/Workbench/Files=omega_workbench::SelectFiles:enabled",
             "action:View/Workbench/Search=omega_workbench::SelectSearch:enabled",
             "action:View/Workbench/Review=omega_workbench::SelectReview:enabled",
-            "action:View/Workbench/Forensics=omega_workbench::SelectForensics:enabled",
+            // DISABLED 2026-08-04 with the menu item above.
+            // "action:View/Workbench/Forensics=omega_workbench::SelectForensics:enabled",
             "action:View/Workbench/Git=omega_workbench::SelectGit:enabled",
             "action:View/Workbench/Terminal=omega_workbench::SelectTerminal:enabled",
             "action:View/Workbench/Plan=omega_workbench::SelectPlan:enabled",

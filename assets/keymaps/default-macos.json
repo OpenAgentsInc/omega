@@ -521,7 +521,8 @@
       "escape": "project_search::ToggleFocus",
       "cmd-shift-j": "project_search::ToggleFilters",
       "cmd-shift-enter": "project_search::ToggleAllSearchResults",
-      "cmd-shift-f": "omega_workbench::SelectForensics",
+      // DISABLED 2026-08-04 (owner request): Forensics is hidden from the sidebar; restore with it.
+      // "cmd-shift-f": "omega_workbench::SelectForensics",
       "cmd-shift-h": "search::ToggleReplace",
       "alt-cmd-g": "search::ToggleRegex",
       "alt-cmd-x": "search::ToggleRegex",
@@ -701,8 +702,9 @@
       "ctrl-9": ["pane::ActivateItem", 8],
       "ctrl-0": "pane::ActivateLastItem",
       "ctrl--": "pane::GoBack",
-      "ctrl-_": "pane::GoForward",
-      "cmd-shift-f": "omega_workbench::SelectForensics"
+      "ctrl-_": "pane::GoForward"
+      // DISABLED 2026-08-04 (owner request): Forensics is hidden from the sidebar; restore with it.
+      // "cmd-shift-f": "omega_workbench::SelectForensics"
     }
   },
   {
@@ -750,7 +752,8 @@
       "ctrl-alt-)": "workspace::ResetOpenDocksSize",
       "ctrl-alt-_": ["workspace::DecreaseOpenDocksSize", { "px": 0 }],
       "ctrl-alt-+": ["workspace::IncreaseOpenDocksSize", { "px": 0 }],
-      "cmd-shift-f": "omega_workbench::SelectForensics",
+      // DISABLED 2026-08-04 (owner request): Forensics is hidden from the sidebar; restore with it.
+      // "cmd-shift-f": "omega_workbench::SelectForensics",
       "cmd-shift-h": ["pane::DeploySearch", { "replace_enabled": true }],
       "cmd-shift-t": "pane::ReopenClosedItem",
       "cmd-k cmd-p": "workspace::ReopenLastPicker",

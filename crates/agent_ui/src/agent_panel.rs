@@ -22141,7 +22141,9 @@ impl AgentPanel {
             .chain(retained_working_folder_rows)
             .collect::<Vec<_>>();
         let has_working_folders = !working_folder_rows.is_empty();
-        let (forensics_padding_x, forensics_padding_y) =
+        // Underscored while the Forensics sidebar row is commented out below;
+        // the row's restored code still refers to these by their real names.
+        let (_forensics_padding_x, _forensics_padding_y) =
             omega_sidebar_row_padding(omega_forensics_selected);
         let work_index_projection = self.work_index.projection();
         // TEMPORARILY HIDDEN (2026-08-04, owner request): the sidebar "Work"
@@ -22526,55 +22528,63 @@ impl AgentPanel {
                             .child(tester_channel_destinations),
                     )
             })
-            .child(
-                div()
-                    .id("omega-experimental-heading")
-                    .debug_selector(|| "omega.omega.sidebar.experimental".into())
-                    .role(gpui::Role::Label)
-                    .aria_label("Experimental")
-                    .mt(px(10.))
-                    .h(px(28.))
-                    .px(px(8.))
-                    .flex_none()
-                    .flex()
-                    .items_center()
-                    .text_size(px(11.))
-                    .font_weight(gpui::FontWeight::MEDIUM)
-                    .text_color(text_placeholder)
-                    .child("Experimental"),
-            )
-            .child(
-                h_flex()
-                    .id("omega-open-forensics")
-                    .debug_selector(|| "omega.omega.sidebar.forensics".into())
-                    .w_full()
-                    .h(px(30.))
-                    .flex_none()
-                    .px(px(forensics_padding_x))
-                    .py(px(forensics_padding_y))
-                    .gap(px(8.))
-                    .rounded(px(8.))
-                    .cursor_pointer()
-                    .role(gpui::Role::Button)
-                    .aria_label("Open Forensics")
-                    .when(omega_forensics_selected, |row| {
-                        row.bg(selected_background)
-                            .border_1()
-                            .border_color(colors.border_selected)
-                    })
-                    .when(!omega_forensics_selected, |row| {
-                        row.hover(move |style| style.bg(hover_background))
-                    })
-                    .on_click(cx.listener(|this, _, window, cx| {
-                        this.select_work_surface(
-                            omega_workbench_state::WorkSurface::Forensics,
-                            window,
-                            cx,
-                        );
-                    }))
-                    .child(Icon::new(IconName::Crosshair).size(IconSize::Small))
-                    .child("Forensics"),
-            )
+            // TEMPORARILY HIDDEN (2026-08-04, owner request): the sidebar
+            // "Experimental" heading and its Forensics row are commented out,
+            // alongside the Work, Planning, and Tester channels sections. The
+            // Forensics work surface itself is untouched — only this entry
+            // point is gone, and the `cmd-shift-f` bindings in
+            // assets/keymaps/default-macos.json are commented out to match, so
+            // the surface cannot be reached by accident either. Restore both
+            // together.
+            // .child(
+            // div()
+            // .id("omega-experimental-heading")
+            // .debug_selector(|| "omega.omega.sidebar.experimental".into())
+            // .role(gpui::Role::Label)
+            // .aria_label("Experimental")
+            // .mt(px(10.))
+            // .h(px(28.))
+            // .px(px(8.))
+            // .flex_none()
+            // .flex()
+            // .items_center()
+            // .text_size(px(11.))
+            // .font_weight(gpui::FontWeight::MEDIUM)
+            // .text_color(text_placeholder)
+            // .child("Experimental"),
+            // )
+            // .child(
+            // h_flex()
+            // .id("omega-open-forensics")
+            // .debug_selector(|| "omega.omega.sidebar.forensics".into())
+            // .w_full()
+            // .h(px(30.))
+            // .flex_none()
+            // .px(px(forensics_padding_x))
+            // .py(px(forensics_padding_y))
+            // .gap(px(8.))
+            // .rounded(px(8.))
+            // .cursor_pointer()
+            // .role(gpui::Role::Button)
+            // .aria_label("Open Forensics")
+            // .when(omega_forensics_selected, |row| {
+            // row.bg(selected_background)
+            // .border_1()
+            // .border_color(colors.border_selected)
+            // })
+            // .when(!omega_forensics_selected, |row| {
+            // row.hover(move |style| style.bg(hover_background))
+            // })
+            // .on_click(cx.listener(|this, _, window, cx| {
+            // this.select_work_surface(
+            // omega_workbench_state::WorkSurface::Forensics,
+            // window,
+            // cx,
+            // );
+            // }))
+            // .child(Icon::new(IconName::Crosshair).size(IconSize::Small))
+            // .child("Forensics"),
+            // )
             .child(
                 h_flex()
                     .id("omega-effective-principal")
@@ -27241,11 +27251,12 @@ mod tests {
             .expect("forced accessibility should capture the Omega surface");
         let nodes = omega_accessibility_nodes(tree);
 
-        for (role, label) in [
-            ("Label", "Threads"),
-            ("Label", "Experimental"),
-            ("TabList", "Open threads"),
-        ] {
+        // 2026-08-04 (owner request): the "Experimental" section and its
+        // Forensics row are commented out of the sidebar, so there is no such
+        // Label to publish. The rest of this check is unchanged — what it
+        // guards is that the sections the sidebar does draw reach assistive
+        // technology, not that any particular section exists.
+        for (role, label) in [("Label", "Threads"), ("TabList", "Open threads")] {
             assert!(
                 nodes.iter().any(|node| node.0 == role && node.1 == label),
                 "the {label:?} {role} must be published to assistive technology: {tree}"

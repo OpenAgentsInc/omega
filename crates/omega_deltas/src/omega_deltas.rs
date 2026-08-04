@@ -22636,7 +22636,12 @@ mod tests {
                     ("cmd-v", "editor::Paste"),
                     ("cmd-a", "editor::SelectAll"),
                     ("cmd-f", "agent::ToggleSearch"),
-                    ("cmd-shift-f", "omega_workbench::SelectForensics"),
+                    // Withdrawn 2026-08-04 (owner request) with the Forensics
+                    // menu item and sidebar row. The menu no longer advertises
+                    // this shortcut, so there is nothing here for the keymaps
+                    // to resolve honestly; `macos_forensics_shortcut_is_
+                    // withdrawn_from_bundled_keymaps` now guards the reverse.
+                    // ("cmd-shift-f", "omega_workbench::SelectForensics"),
                     ("cmd-=", "omega::IncreaseBufferFontSize"),
                     ("cmd--", "omega::DecreaseBufferFontSize"),
                     ("cmd-0", "omega::ResetBufferFontSize"),
@@ -22751,10 +22756,18 @@ mod tests {
         }
     }
 
-    /// The macOS Forensics shortcut wins in every bundled focus context and
-    /// in the optional JetBrains keymap instead of falling back to search.
+    /// Amended 2026-08-04 (owner request): the Forensics entry points are
+    /// hidden — the sidebar row, the `cmd-shift-f` bindings, and the
+    /// View > Workbench > Forensics menu item. The original rule was that the
+    /// shortcut must win over search in every bundled context rather than
+    /// resolving ambiguously; with the shortcut withdrawn, the equivalent rule
+    /// is that no bundled keymap binds it at all, so `cmd-shift-f` falls back
+    /// to the platform's ordinary search behaviour and a stray reintroduction
+    /// is still noticed. `honest_menu_shortcuts_resolve_on_every_platform`
+    /// continues to guard that the menu never advertises a shortcut the
+    /// keymaps do not bind — it passes now because the menu item is gone too.
     #[test]
-    fn macos_forensics_shortcut_is_consistent_across_bundled_keymaps() {
+    fn macos_forensics_shortcut_is_withdrawn_from_bundled_keymaps() {
         for keymap_path in [
             "assets/keymaps/default-macos.json",
             "assets/keymaps/macos/jetbrains.json",
@@ -22774,14 +22787,11 @@ mod tests {
                 .collect::<Vec<_>>();
 
             assert!(
-                !actions.is_empty(),
-                "{keymap_path} does not bind cmd-shift-f"
-            );
-            assert!(
-                actions
+                !actions
                     .iter()
-                    .all(|action| *action == "omega_workbench::SelectForensics"),
-                "{keymap_path} retains a conflicting cmd-shift-f binding: {actions:?}"
+                    .any(|action| *action == "omega_workbench::SelectForensics"),
+                "{keymap_path} still binds cmd-shift-f to Forensics while the \
+                 Forensics entry points are hidden: {actions:?}"
             );
         }
     }
