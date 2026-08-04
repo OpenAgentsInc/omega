@@ -175,12 +175,20 @@ impl EffectivePrincipalProjection {
         ) {
             return Self::conflict("Identity conflict");
         }
+        // With no published profile name the account still has one public
+        // name a Nostr user recognizes: its `npub`. The fallback used to be the
+        // first sixteen hex characters of the key's SHA-256, grouped in fours
+        // (`377D 76EB 1526 B21E`), which is a correct fingerprint and reads as
+        // nothing. The `npub` is the bech32 encoding of the public key the
+        // account already holds — no derivation, and no secret form of the key
+        // is involved. The fingerprint stays visible as its own fact in
+        // `identity_label`.
         let display_name = account
             .profile
             .as_ref()
             .and_then(|profile| profile.display_name.as_deref())
             .and_then(safe_display_name)
-            .unwrap_or_else(|| account.identity.fingerprint().display());
+            .unwrap_or_else(|| account.identity.npub().as_str().to_string());
         let identity_label = format!("Identity {}", account.identity.fingerprint().display());
         let signer_label = signer_label(account.signer.kind, account.signer.availability);
         let state = match account.lifecycle {
@@ -432,12 +440,19 @@ mod tests {
         RecoveryProtectionState,
     };
 
+    /// The secret key `dashboard` gives account `index`. Shared with the guard
+    /// below so it proves the real secret never reaches a visible or accessible
+    /// field, rather than a literal that has drifted away from it.
+    fn secret_key_hex(index: usize) -> String {
+        format!("{}", index + 1).repeat(64)
+    }
+
     fn dashboard(active_refs: &[&str]) -> AccountDashboardProjection {
         let accounts = active_refs
             .iter()
             .enumerate()
             .map(|(index, account_ref)| {
-                let secret = format!("{}", index + 1).repeat(64);
+                let secret = secret_key_hex(index);
                 let keys = Keys::new(SecretKey::from_hex(&secret).expect("secret key"));
                 AccountDashboardEntry {
                     account_ref: AccountRef::new(*account_ref).expect("account ref"),
@@ -948,23 +963,84 @@ mod tests {
             );
         }
 
+        // `npub` is deliberately absent from this list. It is the bech32 form
+        // of the public key and publishing it is its entire purpose; the
+        // secret forms (`nsec`, `ncryptsec`) and the private key are what must
+        // never appear. Raw public-key hex stays excluded too, because the
+        // presentation names the account with the `npub`, not with hex.
+        let private_key_hex = secret_key_hex(0);
+        let mut dashboard = dashboard;
+        dashboard.accounts[0].profile = None;
         let projection = EffectivePrincipalProjection::from_dashboard(&dashboard);
         let accessibility_label = projection.accessibility_label();
-        for forbidden in ["nsec", "npub", "ncryptsec", public_key_hex.as_str()] {
+        for forbidden in [
+            "nsec",
+            "ncryptsec",
+            public_key_hex.as_str(),
+            private_key_hex.as_str(),
+        ] {
             assert!(
                 !accessibility_label.contains(forbidden),
                 "accessibility label leaked `{forbidden}`"
             );
         }
-        assert!(!projection.display_name.contains(&public_key_hex));
-        assert!(!projection.identity_label.contains(&public_key_hex));
-        assert!(!projection.scope_label.contains(&public_key_hex));
-        assert!(!projection.signer_label.contains(&public_key_hex));
+        for field in [
+            &projection.display_name,
+            &projection.identity_label,
+            &projection.scope_label,
+            &projection.signer_label,
+        ] {
+            for forbidden in [
+                "nsec",
+                "ncryptsec",
+                public_key_hex.as_str(),
+                private_key_hex.as_str(),
+            ] {
+                assert!(!field.contains(forbidden), "`{field}` leaked `{forbidden}`");
+            }
+        }
+        assert_eq!(
+            projection.display_name,
+            dashboard.accounts[0].identity.npub().as_str(),
+            "the public identity is named by its npub"
+        );
+        assert!(accessibility_label.contains(projection.display_name.as_str()));
+    }
+
+    /// The published NIP-06 test vectors, used only for the half this build
+    /// performs: bech32 encoding of a public key already held. Omega keeps one
+    /// Nostr keypair per account and derives nothing, so BIP-39/BIP-32 seed
+    /// derivation is not in this path. The `nsec` values published beside these
+    /// vectors are deliberately absent.
+    #[test]
+    fn the_projected_identity_matches_the_published_npub_for_its_public_key() {
+        for (public_key_hex, expected_npub) in [
+            (
+                "17162c921dc4d2518f9a101db33695df1afb56ab82f5ff3e5da6eec3ca5cd917",
+                "npub1zutzeysacnf9rru6zqwmxd54mud0k44tst6l70ja5mhv8jjumytsd2x7nu",
+            ),
+            (
+                "d41b22899549e1f3d335a31002cfd382174006e166d3e658e3a5eecdb6463573",
+                "npub16sdj9zv4f8sl85e45vgq9n7nsgt5qphpvmf7vk8r5hhvmdjxx4es8rq74h",
+            ),
+        ] {
+            let mut dashboard = dashboard(&["account-a"]);
+            dashboard.accounts[0].identity = PublicIdentity::from_public_key_hex(
+                IdentityRef::new("identity-vector").expect("identity ref"),
+                public_key_hex,
+            )
+            .expect("public identity");
+            dashboard.accounts[0].profile = None;
+            let projection = EffectivePrincipalProjection::from_dashboard(&dashboard);
+            assert_eq!(projection.display_name, expected_npub);
+            assert!(projection.accessibility_label().contains(expected_npub));
+        }
     }
 
     #[test]
-    fn unsafe_profile_names_fall_back_to_a_public_fingerprint() {
+    fn unsafe_profile_names_fall_back_to_the_public_npub() {
         let mut dashboard = dashboard(&["account-a"]);
+        let npub = dashboard.accounts[0].identity.npub().as_str().to_string();
         dashboard.accounts[0]
             .profile
             .as_mut()
@@ -972,7 +1048,7 @@ mod tests {
             .display_name = Some("line one\nline two".into());
         let projection = EffectivePrincipalProjection::from_dashboard(&dashboard);
         assert_ne!(projection.display_name, "line one\nline two");
-        assert!(!projection.display_name.contains("npub"));
+        assert_eq!(projection.display_name, npub);
 
         dashboard.accounts[0]
             .profile
@@ -981,5 +1057,16 @@ mod tests {
             .display_name = Some(format!("nsec1{}", "q".repeat(58)));
         let projection = EffectivePrincipalProjection::from_dashboard(&dashboard);
         assert!(!projection.display_name.contains("nsec1"));
+        assert!(!projection.display_name.contains("ncryptsec1"));
+        assert_eq!(projection.display_name, npub);
+
+        dashboard.accounts[0]
+            .profile
+            .as_mut()
+            .expect("profile")
+            .display_name = Some(secret_key_hex(0));
+        let projection = EffectivePrincipalProjection::from_dashboard(&dashboard);
+        assert!(!projection.display_name.contains(&secret_key_hex(0)));
+        assert_eq!(projection.display_name, npub);
     }
 }

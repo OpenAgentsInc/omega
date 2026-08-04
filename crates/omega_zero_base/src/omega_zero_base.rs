@@ -346,6 +346,18 @@ pub const ADMITTED_ACTIONS: &[&str] = &[
     "omega::OpenDocs",
     "omega::OpenLicenses",
     "omega::OpenSettings",
+    // omega#242. Omega's own Settings route is dispatched, not called: the
+    // admitted `omega::OpenSettings` handler re-dispatches
+    // `omega::OpenEmbeddedSettings`, and the Back control at the foot of the
+    // drawn Settings sidebar dispatches `omega::CloseEmbeddedSettings`. Both
+    // are in the `omega` namespace, which is refused wholesale, so the gate
+    // stopped them before any listener ran and reported it only to the log.
+    // The route could still be entered by clicking the Effective Principal
+    // footer, which calls the panel method directly — so Settings opened, and
+    // then nothing closed it. A control this surface draws must not be refused
+    // by the surface's own gate.
+    "omega::OpenEmbeddedSettings",
+    "omega::CloseEmbeddedSettings",
     "omega::OpenLegacySettings",
     "omega::OpenSettingsAt",
     "omega::OpenSettingsPage",
@@ -602,6 +614,8 @@ mod tests {
             "omega::OpenLicenses",
             "omega::Quit",
             "omega::OpenSettings",
+            "omega::OpenEmbeddedSettings",
+            "omega::CloseEmbeddedSettings",
             "omega::OpenLegacySettings",
             "omega::OpenSettingsAt",
             "omega::OpenSettingsPage",

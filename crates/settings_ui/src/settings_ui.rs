@@ -5635,6 +5635,39 @@ fn render_icon_theme_picker(
         .into_any_element()
 }
 
+/// omega#242. The Back control this file draws at the foot of the embedded
+/// Settings sidebar dispatches `omega::CloseEmbeddedSettings`, and the
+/// `omega::OpenSettings` handler above re-dispatches
+/// `omega::OpenEmbeddedSettings`. Omega's action gate refuses every name
+/// outside its admitted inventory *before any listener runs*, and the whole
+/// `omega` namespace is refused, so both dispatches were dropped with only a
+/// line in the log. Settings could still be entered by clicking the Effective
+/// Principal footer, which calls the panel method directly rather than
+/// dispatching, so the route opened and nothing closed it: a control that
+/// renders enabled and does nothing.
+///
+/// The names come from the actions themselves, so renaming an action without
+/// admitting the new name fails here rather than in a user's hands.
+#[cfg(test)]
+mod zero_base_gate {
+    use gpui::Action as _;
+
+    #[test]
+    fn the_drawn_settings_route_controls_are_not_refused_by_the_action_gate() {
+        for action in [
+            omega_actions::OpenEmbeddedSettings.name(),
+            omega_actions::CloseEmbeddedSettings.name(),
+        ] {
+            assert!(
+                omega_zero_base::admits_action(action),
+                "the embedded Settings route draws a control that dispatches \
+                 `{action}`, and Omega's action gate refuses it before any \
+                 listener runs"
+            );
+        }
+    }
+}
+
 #[cfg(test)]
 pub mod test {
 
