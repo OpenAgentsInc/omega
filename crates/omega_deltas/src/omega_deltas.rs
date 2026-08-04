@@ -28396,14 +28396,25 @@ mod tests {
             );
         }
 
+        // Amended 2026-08-04 (owner request): the sidebar footer no longer
+        // renders the scope/status line or the signer line — the owner judged
+        // "Local scope · Local" and "Local signer ready" to be noise in the
+        // footer. `principal.scope_label` and `principal.signer_label` are
+        // therefore no longer expected in the panel's render path.
+        //
+        // The authority itself is unchanged and still asserted above: the
+        // projection continues to produce both labels, and the panel still
+        // consumes them through `principal_accessibility_label`, which composes
+        // scope, status, and signer for assistive technology. This delta
+        // continues to guard that the footer reads from the Effective Principal
+        // authority rather than inventing its own identity text — it just no
+        // longer requires those two facts to be painted.
         let panel = without_comments(&read_repository_file("crates/agent_ui/src/agent_panel.rs"));
         for required in [
             "effective_principal",
             "observe_effective_principal",
             "omega.omega.effective-principal",
             "principal_accessibility_label",
-            "principal.signer_label",
-            "principal.scope_label",
             "principal.state.cue()",
         ] {
             assert!(

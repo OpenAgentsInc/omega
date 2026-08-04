@@ -21290,11 +21290,11 @@ impl AgentPanel {
             .next()
             .map(|value| value.to_uppercase().to_string())
             .unwrap_or_else(|| "?".into());
-        let principal_scope_status = format!(
-            "{} · {}",
-            effective_principal.scope_label,
-            effective_principal.status_label()
-        );
+        // OMEGA-DELTA-0234 amended 2026-08-04 (owner request): the sidebar
+        // footer no longer renders the scope/status and signer lines. The same
+        // facts remain in `principal_accessibility_label`, so assistive tech and
+        // the identity settings surface still expose them; only the visual
+        // clutter is gone.
         let (principal_icon, principal_color) = effective_principal.state.cue();
         let tab_shortcuts_visible = omega_tab_shortcuts_visible(window);
         let active_work_index_view = self
@@ -22145,6 +22145,8 @@ impl AgentPanel {
         // computed so nothing else changes behaviour. To restore, flip this to
         // `false` (or delete it and use `work_index_projection.admitted`).
         const OMEGA_SIDEBAR_WORK_SECTION_HIDDEN: bool = true;
+        // Same owner request: hide the "Planning" section too.
+        const OMEGA_SIDEBAR_PLANNING_SECTION_HIDDEN: bool = true;
         let work_index_admitted =
             !OMEGA_SIDEBAR_WORK_SECTION_HIDDEN && work_index_projection.admitted;
         let inbox_count = work_index_projection
@@ -22403,23 +22405,31 @@ impl AgentPanel {
                     )
                     .children(dogfood_project_rows)
             })
-            .child(
-                div()
-                    .id("omega-planning-heading")
-                    .debug_selector(|| "omega.omega.sidebar.planning-heading".into())
-                    .role(gpui::Role::Label)
-                    .aria_label("Planning")
-                    .mt(px(10.))
-                    .h(px(28.))
-                    .px(px(8.))
-                    .flex()
-                    .items_center()
-                    .text_size(px(11.))
-                    .font_weight(gpui::FontWeight::MEDIUM)
-                    .text_color(text_placeholder)
-                    .child("Planning"),
-            )
-            .child(planning_row)
+            // TEMPORARILY HIDDEN (2026-08-04, owner request): the sidebar
+            // "Planning" heading and its row are suppressed alongside the Work
+            // section while those surfaces are not ready to show. The heading
+            // and `planning_row` are still built above; restore by re-adding
+            // these two children.
+            .when(!OMEGA_SIDEBAR_PLANNING_SECTION_HIDDEN, |sidebar| {
+                sidebar
+                    .child(
+                        div()
+                            .id("omega-planning-heading")
+                            .debug_selector(|| "omega.omega.sidebar.planning-heading".into())
+                            .role(gpui::Role::Label)
+                            .aria_label("Planning")
+                            .mt(px(10.))
+                            .h(px(28.))
+                            .px(px(8.))
+                            .flex()
+                            .items_center()
+                            .text_size(px(11.))
+                            .font_weight(gpui::FontWeight::MEDIUM)
+                            .text_color(text_placeholder)
+                            .child("Planning"),
+                    )
+                    .child(planning_row)
+            })
             .when(work_index_admitted, |sidebar| {
                 sidebar
                     .child(
@@ -22583,39 +22593,22 @@ impl AgentPanel {
                             .child(principal_initial),
                     )
                     .child(
-                        v_flex()
-                            .min_w_0()
-                            .flex_1()
-                            .child(
-                                h_flex()
-                                    .gap(px(5.))
-                                    .child(
-                                        div()
-                                            .min_w_0()
-                                            .flex_1()
-                                            .truncate()
-                                            .child(effective_principal.display_name),
-                                    )
-                                    .child(
-                                        Icon::new(principal_icon)
-                                            .size(IconSize::XSmall)
-                                            .color(principal_color),
-                                    ),
-                            )
-                            .child(
-                                div()
-                                    .truncate()
-                                    .text_size(px(10.))
-                                    .text_color(text_muted)
-                                    .child(principal_scope_status),
-                            )
-                            .child(
-                                div()
-                                    .truncate()
-                                    .text_size(px(10.))
-                                    .text_color(text_muted)
-                                    .child(effective_principal.signer_label),
-                            ),
+                        v_flex().min_w_0().flex_1().child(
+                            h_flex()
+                                .gap(px(5.))
+                                .child(
+                                    div()
+                                        .min_w_0()
+                                        .flex_1()
+                                        .truncate()
+                                        .child(effective_principal.display_name),
+                                )
+                                .child(
+                                    Icon::new(principal_icon)
+                                        .size(IconSize::XSmall)
+                                        .color(principal_color),
+                                ),
+                        ),
                     )
                     .child(
                         Icon::new(IconName::Settings)

@@ -163,7 +163,12 @@ impl SectionId {
     /// Draw order, top to bottom.
     ///
     /// Threads first because that is the section with something to do in it.
-    pub const ALL: &'static [SectionId] = &[SectionId::RecentThreads, SectionId::PublicChannels];
+    /// TEMPORARILY HIDDEN (2026-08-04, owner request): `SectionId::PublicChannels`
+    /// ("Tester channels") is out of the draw order while it is not ready to
+    /// show. The variant, its key, and its title are intentionally retained so
+    /// persisted collapse state and `OMEGA-DELTA` checks still resolve; restore
+    /// by putting it back in this list.
+    pub const ALL: &'static [SectionId] = &[SectionId::RecentThreads];
 
     /// The stable name this section is remembered under.
     ///
