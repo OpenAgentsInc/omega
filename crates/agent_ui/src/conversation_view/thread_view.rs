@@ -14751,6 +14751,19 @@ impl ThreadView {
                                 })),
                         )
                     })
+                    // `OMEGA-DELTA-0204` restated the rule as "the two bars are
+                    // the same set in the same order in the same places", and
+                    // then only the pre-session bar got the microphone: this
+                    // bar is the one zero base actually draws, and it never
+                    // carried one. So the voice button was present on a new
+                    // conversation and disappeared the moment the thread
+                    // connected — the opposite of the complaint that rule
+                    // exists to answer. Same control, same position, drawn
+                    // from the same code as the pre-session bar.
+                    .child(crate::composer_voice::render_composer_voice_controls(
+                        self.workspace.entity_id(),
+                        cx,
+                    ))
                     // `OMEGA-DELTA-0150`. External executors stay behind
                     // Omega's router and contribute no controls to zero base.
                     // Stop lives here too: `render_send_button` already turns

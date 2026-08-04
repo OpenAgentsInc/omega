@@ -242,6 +242,15 @@ pub const SHARED_COMPOSER_CONTROLS: &[(&str, &str, &str)] = &[
         "IconName::Paperclip",
         "render_add_context_button(",
     ),
+    // Listed late, and that is the finding. The parity check above only sees
+    // controls named here, so a microphone added to the pre-session bar alone
+    // read as parity for as long as this row was missing: on a launched app the
+    // voice button was on a new conversation and gone one message later.
+    (
+        "the voice control",
+        "composer_voice::render_composer_voice_controls(",
+        "composer_voice::render_composer_voice_controls(",
+    ),
     ("Send", "IconName::ArrowUp", "render_send_button("),
 ];
 
@@ -7040,6 +7049,43 @@ mod tests {
         assert!(
             zero_base_return < project_guard,
             "OMEGA-DELTA-0034: the zero-base external-agent refusal reaches the full-editor project guard"
+        );
+    }
+
+    /// The enabled `+` in Omega's header never does nothing.
+    ///
+    /// omega#237's class, observed on a clean profile launched from Finder: the
+    /// working directory is `/`, so no project opens, so `has_open_project` is
+    /// false. `omega-new-thread` in the header is built with `false` for
+    /// disabled and a tooltip that promises a new thread, and
+    /// `new_thread_with_workspace` answered it by focusing the panel and
+    /// returning. No thread, no message, no dialog — and with no thread there
+    /// is no composer, so chat was unreachable on first run.
+    ///
+    /// A source check because `is_primary_interface` is a process global that
+    /// is false in tests: the branch a launched app takes is the one no GPUI
+    /// test here renders.
+    #[test]
+    fn new_thread_without_a_working_folder_asks_for_one() {
+        let panel = read_repository_file(AGENT_PANEL_PATH);
+        let creation = body_of(&panel, "new_thread_with_workspace");
+        let guard = creation
+            .find("if !self.has_open_project(cx)")
+            .expect("the project guard in `new_thread_with_workspace` is gone");
+        let tail = &creation[guard..];
+        let silent_return = tail
+            .find("self.focus_handle.focus(window, cx);")
+            .expect("the no-project arm no longer focuses the panel");
+        let asks = tail.find("workspace::Open {").unwrap_or(usize::MAX);
+        assert!(
+            asks < silent_return && tail[..asks].contains("is_primary_interface()"),
+            "`new_thread_with_workspace` in {} answers `+` with no working \
+             folder by focusing the panel and returning. The control that \
+             raised it is enabled and promises a thread, so in Omega's \
+             interface that press has to ask for the working folder it needs — \
+             the same answer `ConversationView::submit_before_session` already \
+             gives the first send.",
+            repository_path(AGENT_PANEL_PATH).display()
         );
     }
 

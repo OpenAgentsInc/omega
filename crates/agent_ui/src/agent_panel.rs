@@ -6334,6 +6334,23 @@ impl AgentPanel {
         cx: &mut Context<Self>,
     ) {
         if !self.has_open_project(cx) {
+            // omega#237's class, found on a clean profile launched from Finder:
+            // `omega-new-thread` in the primary interface's header is never
+            // disabled and its tooltip promises a new thread, so pressing it
+            // with no working folder open did nothing at all — no thread, no
+            // message, no dialog — and chat was unreachable on first run.
+            // A working folder is the thing that is missing, so ask for one,
+            // exactly as `ConversationView::submit_before_session` already
+            // does when the first send arrives without a worktree.
+            if omega_zero_base::is_primary_interface() {
+                window.dispatch_action(
+                    Box::new(workspace::Open {
+                        create_new_window: Some(false),
+                    }),
+                    cx,
+                );
+                return;
+            }
             self.focus_handle.focus(window, cx);
             cx.notify();
             return;
