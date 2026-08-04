@@ -22139,7 +22139,14 @@ impl AgentPanel {
         let (forensics_padding_x, forensics_padding_y) =
             omega_sidebar_row_padding(omega_forensics_selected);
         let work_index_projection = self.work_index.projection();
-        let work_index_admitted = work_index_projection.admitted;
+        // TEMPORARILY HIDDEN (2026-08-04, owner request): the sidebar "Work"
+        // section — its heading plus the Inbox and My Work rows — is suppressed
+        // while those surfaces are not ready to show. The projection is still
+        // computed so nothing else changes behaviour. To restore, flip this to
+        // `false` (or delete it and use `work_index_projection.admitted`).
+        const OMEGA_SIDEBAR_WORK_SECTION_HIDDEN: bool = true;
+        let work_index_admitted =
+            !OMEGA_SIDEBAR_WORK_SECTION_HIDDEN && work_index_projection.admitted;
         let inbox_count = work_index_projection
             .rows
             .iter()
