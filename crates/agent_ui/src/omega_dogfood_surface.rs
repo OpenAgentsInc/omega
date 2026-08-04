@@ -176,7 +176,16 @@ pub struct DogfoodSurface {
     user_saved_views: NamedSavedPlanningViews,
     view_name_editor: Entity<Editor>,
     user_saved_view_error: Option<String>,
+    /// The search term the query carries, mirrored out of `search_editor`.
+    ///
+    /// omega#221. `planning_query` cannot read the editor — it has no `App` —
+    /// so the text is mirrored here on every edit. The mirror is the field the
+    /// query reads and the field that is persisted, so a restart restores the
+    /// term the person typed and not merely an input that looks filled in.
+    search: String,
+    search_editor: Entity<Editor>,
     _view_name_subscription: gpui::Subscription,
+    _search_subscription: gpui::Subscription,
 }
 
 #[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
@@ -385,6 +394,8 @@ struct PersistedDogfoodSurfaceState {
     user_saved_view_matches_query: bool,
     #[serde(default)]
     next_user_saved_view_sequence: u64,
+    #[serde(default)]
+    search: String,
 }
 
 impl DogfoodSurface {
@@ -408,6 +419,22 @@ impl DogfoodSurface {
         let view_name_subscription = cx.subscribe(&view_name_editor, |this, _, event, cx| {
             if matches!(event, editor::EditorEvent::Edited { .. }) {
                 this.user_saved_view_error = None;
+                cx.notify();
+            }
+        });
+        let search = state.search.clone();
+        let search_editor = cx.new(|cx| {
+            let mut editor = Editor::single_line(window, cx);
+            editor.set_placeholder_text("Search Work…", window, cx);
+            if !search.is_empty() {
+                editor.set_text(search.clone(), window, cx);
+            }
+            editor
+        });
+        let search_subscription = cx.subscribe(&search_editor, |this, editor, event, cx| {
+            if matches!(event, editor::EditorEvent::Edited { .. }) {
+                this.search = editor.read(cx).text(cx);
+                this.save_state(cx);
                 cx.notify();
             }
         });
@@ -447,7 +474,10 @@ impl DogfoodSurface {
             ),
             view_name_editor,
             user_saved_view_error: None,
+            search,
+            search_editor,
             _view_name_subscription: view_name_subscription,
+            _search_subscription: search_subscription,
         }
     }
 
@@ -707,7 +737,7 @@ impl DogfoodSurface {
             filter: self.filter,
             group: self.group,
             sort: self.sort,
-            search: String::new(),
+            search: self.search.clone(),
         }
     }
 
@@ -802,6 +832,14 @@ impl DogfoodSurface {
             PlanningSort::Title => PlanningSort::SourceOrder,
         };
         self.user_saved_views.diverge();
+        self.save_state(cx);
+        cx.notify();
+    }
+
+    fn clear_search(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.search_editor
+            .update(cx, |editor, cx| editor.set_text("", window, cx));
+        self.search.clear();
         self.save_state(cx);
         cx.notify();
     }
@@ -959,6 +997,7 @@ impl DogfoodSurface {
             selected_user_saved_view_id: self.user_saved_views.selected_id.clone(),
             user_saved_view_matches_query: self.user_saved_views.active,
             next_user_saved_view_sequence: self.user_saved_views.next_sequence,
+            search: self.search.clone(),
         };
         let Ok(json) = serde_json::to_string(&state) else {
             return;
@@ -1042,6 +1081,55 @@ impl DogfoodSurface {
                 ..Default::default()
             },
         ))
+    }
+
+    /// The search input the shared query reads.
+    ///
+    /// omega#221. `planning_query` hard-coded an empty search and the surface
+    /// drew no input, so search was the one part of the shared query that had
+    /// no state to persist and nothing a restart could observe.
+    fn render_search_input(&self, cx: &mut Context<Self>) -> impl IntoElement {
+        let settings = ThemeSettings::get_global(cx);
+        let colors = cx.theme().colors();
+        let text_style = TextStyle {
+            color: colors.text,
+            font_family: settings.ui_font.family.clone(),
+            font_features: settings.ui_font.features.clone(),
+            font_fallbacks: settings.ui_font.fallbacks.clone(),
+            font_size: rems(0.75).into(),
+            font_weight: settings.ui_font.weight,
+            line_height: relative(1.3),
+            ..Default::default()
+        };
+        h_flex()
+            .id("planning-search")
+            .debug_selector(|| "omega.dogfood.search".into())
+            .w(px(190.))
+            .px_1p5()
+            .py_0p5()
+            .rounded_md()
+            .border_1()
+            .border_color(colors.border_variant)
+            .role(gpui::Role::TextInput)
+            .aria_label("Search Work")
+            .cursor_text()
+            // The box is the target, not the glyphs inside it: clicking
+            // anywhere in the field has to put the keyboard in it.
+            .on_mouse_down(
+                gpui::MouseButton::Left,
+                cx.listener(|this, _, window, cx| {
+                    window.focus(&this.search_editor.focus_handle(cx), cx);
+                }),
+            )
+            .child(EditorElement::new(
+                &self.search_editor,
+                EditorStyle {
+                    background: colors.editor_background,
+                    local_player: cx.theme().players().local(),
+                    text: text_style,
+                    ..Default::default()
+                },
+            ))
     }
 
     fn render_header(&self, cx: &mut Context<Self>) -> impl IntoElement {
@@ -1331,7 +1419,18 @@ impl DogfoodSurface {
                         .style(ButtonStyle::Subtle)
                         .size(ButtonSize::Compact)
                         .on_click(cx.listener(|this, _, _, cx| this.cycle_sort(cx))),
-                    ),
+                    )
+                    .child(self.render_search_input(cx))
+                    .when(!self.search.trim().is_empty(), |row| {
+                        row.child(
+                            Button::new("planning-clear-search", "Clear search")
+                                .style(ButtonStyle::Subtle)
+                                .size(ButtonSize::Compact)
+                                .on_click(cx.listener(|this, _, window, cx| {
+                                    this.clear_search(window, cx);
+                                })),
+                        )
+                    }),
             )
     }
 
@@ -3279,8 +3378,13 @@ impl Render for DogfoodSurface {
             .role(gpui::Role::Main)
             .aria_label("Omega v0.2.0 development mock planning surface")
             .on_key_down(cx.listener(|this, event: &gpui::KeyDownEvent, window, cx| {
+                // omega#221. A focused text input owns its keystrokes. Without
+                // the search guard, typing `j`, `k` or a digit into the search
+                // field walks the Work list or changes the scene underneath the
+                // person typing.
                 if event.keystroke.modifiers.modified()
                     || this.view_name_editor.focus_handle(cx).is_focused(window)
+                    || this.search_editor.focus_handle(cx).is_focused(window)
                 {
                     return;
                 }
@@ -3339,6 +3443,7 @@ fn default_fixture_state() -> PersistedDogfoodSurfaceState {
         selected_user_saved_view_id: None,
         user_saved_view_matches_query: false,
         next_user_saved_view_sequence: 1,
+        search: String::new(),
     }
 }
 
@@ -3686,6 +3791,7 @@ mod tests {
                 selected_user_saved_view_id: None,
                 user_saved_view_matches_query: false,
                 next_user_saved_view_sequence: 1,
+                search: String::new(),
             };
             assert!(fixture_state_is_valid(&fixture, &state));
         }
@@ -3704,6 +3810,7 @@ mod tests {
             selected_user_saved_view_id: None,
             user_saved_view_matches_query: false,
             next_user_saved_view_sequence: 1,
+            search: String::new(),
         };
         assert!(!fixture_state_is_valid(&fixture, &invalid));
     }
@@ -3722,6 +3829,11 @@ mod tests {
         assert_eq!(state.saved_view, PlanningSavedView::All);
         assert_eq!(state.user_saved_view, None);
         assert!(!state.user_saved_view_active);
+        assert_eq!(
+            state.search, "",
+            "a state saved before the search input must restore an empty search \
+             rather than failing to parse"
+        );
     }
 
     #[test]
@@ -4595,6 +4707,229 @@ mod tests {
         assert_eq!(after.query.group, PlanningGroup::Project);
         assert_eq!(after.query.saved_view, PlanningSavedView::Blocked);
         assert_eq!(after.query.filter, PlanningFilter::Open);
+    }
+
+    /// The rows the List renderer paints, in painted order.
+    fn painted_list_rows(cx: &mut VisualTestContext, ordered_issue_ids: &[String]) -> Vec<String> {
+        let rendered = cx.debug_render_snapshot();
+        ordered_issue_ids
+            .iter()
+            .filter(|issue_id| {
+                !rendered
+                    .occurrences(&work_row_debug_selector("list", issue_id))
+                    .is_empty()
+            })
+            .cloned()
+            .collect()
+    }
+
+    fn list_rows_for(surface: &Entity<DogfoodSurface>, cx: &mut VisualTestContext) -> Vec<String> {
+        surface.update(cx, |surface, _cx| {
+            surface
+                .visible_issues(PlanningViewKind::List)
+                .into_iter()
+                .map(|issue| issue.id.clone())
+                .collect()
+        })
+    }
+
+    /// Reach the search input the way a person does — it has to be drawn,
+    /// hit-testable and focusable by a click — then type into it.
+    fn type_search(surface: &Entity<DogfoodSurface>, cx: &mut VisualTestContext, term: &str) {
+        let rendered = cx.debug_render_snapshot();
+        let occurrences = rendered.occurrences("omega.dogfood.search");
+        assert_eq!(
+            occurrences.len(),
+            1,
+            "the planning surface must draw exactly one search input"
+        );
+        assert!(
+            occurrences[0].hit_testable
+                && matches!(
+                    occurrences[0].visibility,
+                    gpui::DebugVisibility::Visible | gpui::DebugVisibility::PartiallyClipped
+                ),
+            "the search input must be reachable in the rendered frame"
+        );
+        cx.simulate_click_selector("omega.dogfood.search")
+            .expect("the search input must be clickable");
+        cx.run_until_parked();
+        surface.update_in(cx, |surface, window, cx| {
+            assert!(
+                surface.search_editor.focus_handle(cx).is_focused(window),
+                "clicking the search input must put the keyboard in it"
+            );
+        });
+        cx.simulate_input(term);
+        cx.run_until_parked();
+    }
+
+    /// omega#221. Search is the one part of the shared planning query the
+    /// surface could not own: `planning_query` hard-coded an empty term and
+    /// there was no input, so a "search survives restart" test would have
+    /// passed while observing nothing.
+    ///
+    /// The restart comparison alone is not enough and this test says why in
+    /// code: a surface that ignores the persisted term *consistently* agrees
+    /// with itself across both runs while showing the wrong Work twice. So the
+    /// restored run also has to prove that `planning_query` carries the term
+    /// and that the term still reduces the Work on screen.
+    #[gpui::test]
+    async fn planning_search_restores_and_still_reduces_the_work_across_restart(
+        cx: &mut TestAppContext,
+    ) {
+        crate::test_support::init_test(cx);
+        let (surface, mut first_run) = open_dogfood_surface(cx, load_dogfood_fixture());
+        let ordered_issue_ids = project_issue_ids(&surface, &mut first_run);
+        assert!(
+            ordered_issue_ids.len() > 2,
+            "the development Project must carry enough Work for a search to reduce"
+        );
+
+        // A term taken from the graph, not invented: the identifier of one Work
+        // item, which the projection matches on identifier or title.
+        let (target_issue_id, term) = surface.update(&mut first_run, |surface, _cx| {
+            let issue = surface
+                .project_issues()
+                .into_iter()
+                .nth(1)
+                .expect("the development Project must carry a second Work item");
+            (issue.id.clone(), issue.identifier.clone())
+        });
+
+        surface.update(&mut first_run, |surface, cx| {
+            surface.scene = DogfoodScene::List;
+            cx.notify();
+        });
+        first_run.run_until_parked();
+        let unsearched_rows = list_rows_for(&surface, &mut first_run);
+        assert!(
+            unsearched_rows.len() > 1,
+            "an unsearched List must carry more than the target, or the search \
+             cannot be shown to reduce anything"
+        );
+
+        type_search(&surface, &mut first_run, &term);
+        surface.update(&mut first_run, |surface, cx| {
+            assert_eq!(
+                surface.search, term,
+                "the search input must reach the state the query reads"
+            );
+            assert_eq!(
+                surface.planning_query().search,
+                term,
+                "the query the renderers consume must carry the typed term"
+            );
+            cx.notify();
+        });
+        first_run.run_until_parked();
+
+        let searched_rows = list_rows_for(&surface, &mut first_run);
+        assert_eq!(
+            searched_rows,
+            vec![target_issue_id.clone()],
+            "searching one Work identifier must leave exactly that Work"
+        );
+        let painted_rows = painted_list_rows(&mut first_run, &ordered_issue_ids);
+        assert_eq!(
+            painted_rows, searched_rows,
+            "the painted List must be the searched List, not the whole Project"
+        );
+        first_run.run_until_parked();
+        drop(first_run);
+
+        let (restored, mut second_run) = open_dogfood_surface(cx, load_dogfood_fixture());
+        surface_search_survived(&restored, &mut second_run, &term);
+        restored.update(&mut second_run, |surface, cx| {
+            surface.scene = DogfoodScene::List;
+            cx.notify();
+        });
+        second_run.run_until_parked();
+
+        assert_eq!(
+            list_rows_for(&restored, &mut second_run),
+            searched_rows,
+            "the restored surface projects different Work than the run that saved it"
+        );
+        assert_eq!(
+            painted_list_rows(&mut second_run, &ordered_issue_ids),
+            painted_rows,
+            "the restored surface paints different Work than the run that saved it"
+        );
+
+        // The half a run-1-versus-run-2 comparison cannot see: a surface that
+        // ignores the restored term agrees with itself and is still wrong.
+        restored.update(&mut second_run, |surface, _cx| {
+            let mut unsearched = surface.planning_query();
+            unsearched.search = String::new();
+            let unsearched = omega_work_index::project_planning_view(
+                &surface.fixture,
+                PlanningViewKind::List,
+                &unsearched,
+            )
+            .rows
+            .into_iter()
+            .map(|row| row.issue_id)
+            .collect::<Vec<_>>();
+            assert_eq!(
+                unsearched, unsearched_rows,
+                "the same query without the term must project the whole Project again"
+            );
+            assert!(
+                unsearched.len() > 1,
+                "the restored term must still be the thing reducing the rows"
+            );
+        });
+    }
+
+    fn surface_search_survived(
+        surface: &Entity<DogfoodSurface>,
+        cx: &mut VisualTestContext,
+        term: &str,
+    ) {
+        surface.update(cx, |surface, cx| {
+            assert_eq!(
+                surface.search, term,
+                "the typed search term did not survive the restart"
+            );
+            assert_eq!(
+                surface.planning_query().search,
+                term,
+                "the restored query ignores the restored search term"
+            );
+            assert_eq!(
+                surface.search_editor.read(cx).text(cx),
+                term,
+                "the input must show the term that is filtering the Work"
+            );
+        });
+    }
+
+    /// omega#221. A focused search input owns its keystrokes.
+    #[gpui::test]
+    async fn typing_in_the_planning_search_does_not_drive_the_work_list(cx: &mut TestAppContext) {
+        crate::test_support::init_test(cx);
+        let (surface, mut cx) = open_dogfood_surface(cx, load_dogfood_fixture());
+        let ordered_issue_ids = project_issue_ids(&surface, &mut cx);
+        let first_issue_id = ordered_issue_ids[0].clone();
+        reset_surface(&surface, &mut cx, DogfoodScene::List, &first_issue_id);
+
+        type_search(&surface, &mut cx, "j4k");
+        assert_eq!(
+            surface_outcome(&surface, &mut cx),
+            SurfaceOutcome {
+                project_id: DOGFOOD_PROJECT_ID.into(),
+                selected_issue_id: first_issue_id,
+                scene: DogfoodScene::List,
+            },
+            "keystrokes typed into the search input moved the Work list or the scene"
+        );
+        surface.update(&mut cx, |surface, _cx| {
+            assert_eq!(
+                surface.search, "j4k",
+                "the search input did not receive what was typed into it"
+            );
+        });
     }
 
     #[gpui::test]
