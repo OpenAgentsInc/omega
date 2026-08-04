@@ -72,25 +72,25 @@ Platform-specific prerequisites and inherited build details are available for
 During the bootstrap phase, build products and application identifiers can
 still use upstream names.
 
-## Dev build (Comet only)
+## Dev build
 
-A dev build must run **Comet only**: against its own isolated user-data
-directory, never the default profile. The default profile is shared with the
-installed Omega, so a dev build pointed at it can write settings, databases,
-identity material, and logs that the installed app then inherits. Isolate it
-and a bad dev run costs you a directory you can delete.
+Run a dev build against **its own user-data directory**, never the default
+profile. The default profile is shared with the installed Omega, so a dev build
+pointed at it can write settings, databases, identity material, and logs that
+the installed app then inherits. Isolate it and a bad dev run costs you a
+directory you can delete.
 
 Build and run in one step:
 
 ```sh
-cargo run --profile release-fast -- --user-data-dir ~/.omega-comet
+cargo run --profile release-fast -- --user-data-dir ~/.omega-dev
 ```
 
 Or build once and launch the binary directly:
 
 ```sh
 cargo build --profile release-fast
-./target/release-fast/omega --user-data-dir ~/.omega-comet
+./target/release-fast/omega --user-data-dir ~/.omega-dev
 ```
 
 To produce a signed `.app` and DMG instead, use the bundler:
@@ -111,10 +111,8 @@ place, and mistaking one for the other means testing a stale binary:
 the target-triple directory. Check the binary's timestamp before concluding a
 change did or did not take effect.
 
-There is no `--comet` flag. "Comet" names the practice of running a dev build
-against an isolated profile; `--user-data-dir` is the mechanism. Pick a
-directory you are willing to delete, and delete it when a dev build leaves
-state you do not want to keep.
+No flag selects the entry surface. Omega opens on its agent surface; the full
+editor is one reveal away rather than the thing that boots.
 
 ## Contribute
 
