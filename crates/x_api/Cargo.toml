@@ -1,0 +1,27 @@
+[package]
+name = "x_api"
+version = "0.1.0"
+edition.workspace = true
+publish.workspace = true
+license = "GPL-3.0-or-later"
+description = "X API v2 client (posts, users, recent search) for Omega tooling"
+readme = "README.md"
+
+[lints]
+workspace = true
+
+[lib]
+path = "src/x_api.rs"
+doctest = false
+
+[[bin]]
+name = "x-api"
+path = "src/main.rs"
+
+[dependencies]
+anyhow.workspace = true
+clap = { workspace = true, features = ["derive"] }
+reqwest = { workspace = true, features = ["json", "blocking"] }
+serde.workspace = true
+serde_json.workspace = true
+urlencoding.workspace = true

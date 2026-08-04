@@ -20841,6 +20841,18 @@ dependencies = [
 ]
 
 [[package]]
+name = "x_api"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "clap",
+ "serde",
+ "serde_json",
+ "urlencoding",
+ "zed-reqwest",
+]
+
+[[package]]
 name = "xattr"
 version = "1.6.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -21183,6 +21195,7 @@ dependencies = [
  "base64 0.22.1",
  "bytes 1.11.1",
  "encoding_rs",
+ "futures-channel",
  "futures-core",
  "futures-util",
  "h2 0.4.12",
