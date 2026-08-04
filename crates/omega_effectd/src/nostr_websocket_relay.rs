@@ -92,6 +92,12 @@ const ISSUE31_COMMUNITY_KINDS: &[u16] = &[
     LBR_FEEDBACK_KIND,
 ];
 const SARAH_RECORD_KINDS: &[u16] = &[24200, 44200, 44300, 44301];
+/// Block NIP-AO (24200) and NIP-AM (44200) are recipient-private: the relay
+/// refuses a read scoped only by `authors` and requires `#p` = the
+/// authenticated pubkey. Keep them in their own filter.
+const SARAH_RECIPIENT_PRIVATE_KINDS: &[u16] = &[24200, 44200];
+/// The remaining Sarah record kinds are author-scoped and read normally.
+const SARAH_AUTHORED_RECORD_KINDS: &[u16] = &[44300, 44301];
 
 enum IncomingMessage {
     Json(Value),
@@ -767,7 +773,12 @@ impl WebSocketRelayAdapter {
             "limit": 256
         }));
         request.push(json!({
-            "kinds": SARAH_RECORD_KINDS
+            "kinds": SARAH_RECIPIENT_PRIVATE_KINDS,
+            "#p": [self.custody_public_key_hex()?],
+            "limit": 256
+        }));
+        request.push(json!({
+            "kinds": SARAH_AUTHORED_RECORD_KINDS
                 .iter()
                 .copied()
                 .chain([ISSUE31_HOST_DISCOVERY_KIND])
