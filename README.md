@@ -72,6 +72,50 @@ Platform-specific prerequisites and inherited build details are available for
 During the bootstrap phase, build products and application identifiers can
 still use upstream names.
 
+## Dev build (Comet only)
+
+A dev build must run **Comet only**: against its own isolated user-data
+directory, never the default profile. The default profile is shared with the
+installed Omega, so a dev build pointed at it can write settings, databases,
+identity material, and logs that the installed app then inherits. Isolate it
+and a bad dev run costs you a directory you can delete.
+
+Build and run in one step:
+
+```sh
+cargo run --profile release-fast -- --user-data-dir ~/.omega-comet
+```
+
+Or build once and launch the binary directly:
+
+```sh
+cargo build --profile release-fast
+./target/release-fast/omega --user-data-dir ~/.omega-comet
+```
+
+To produce a signed `.app` and DMG instead, use the bundler:
+
+```sh
+script/bundle-mac -f
+```
+
+**Know which path you built.** The two commands do not write to the same
+place, and mistaking one for the other means testing a stale binary:
+
+| Command | Binary |
+| --- | --- |
+| `cargo build --profile release-fast` | `target/release-fast/omega` |
+| `script/bundle-mac -f` | `target/aarch64-apple-darwin/release-fast/omega`, plus `Omega-arm64.dmg` |
+
+`bundle-mac` passes an explicit `--target`, which is why its output lands under
+the target-triple directory. Check the binary's timestamp before concluding a
+change did or did not take effect.
+
+There is no `--comet` flag. "Comet" names the practice of running a dev build
+against an isolated profile; `--user-data-dir` is the mechanism. Pick a
+directory you are willing to delete, and delete it when a dev build leaves
+state you do not want to keep.
+
 ## Contribute
 
 Read [`AGENTS.md`](./AGENTS.md) before agent-assisted work. The inherited
