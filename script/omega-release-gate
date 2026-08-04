@@ -1723,12 +1723,12 @@ def main() -> int:
     parser.add_argument(
         "--dmg",
         type=Path,
-        default=ROOT / "target/omega-rc/Omega-v0.2.0-rc31-macos-arm64.dmg",
+        default=ROOT / "target/omega-rc/Omega-v0.2.0-rc32-macos-arm64.dmg",
     )
     parser.add_argument(
         "--release-record",
         type=Path,
-        default=ROOT / "target/omega-rc/omega-v0.2.0-rc31-macos-arm64.release.json",
+        default=ROOT / "target/omega-rc/omega-v0.2.0-rc32-macos-arm64.release.json",
     )
     parser.add_argument(
         "--output-dir", type=Path, default=ROOT / "target/omega-release-gate"

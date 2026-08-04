@@ -1,17 +1,17 @@
 # Omega RC release procedure
 
 This document is the owned OpenAgents procedure for producing and publishing
-`v0.2.0-rc31`. It replaces inherited Zed release automation for this candidate.
+`v0.2.0-rc32`. It replaces inherited Zed release automation for this candidate.
 
 `v0.2.0-rc1` was withdrawn after publication and remains an immutable historical
 candidate. All RC tags and assets are immutable; this build, its proof, and its
-publication use the rc31 names below.
+publication use the rc32 names below.
 
 ## Goal
 
 Produce a signed macOS arm64 candidate:
 
-- Artifact: `Omega-v0.2.0-rc31-macos-arm64.dmg`
+- Artifact: `Omega-v0.2.0-rc32-macos-arm64.dmg`
 - Volume name: `Omega RC`
 - Bundle identifier: `com.openagents.omega.rc`
 - Team ID: `HQWSG26L43`
@@ -75,8 +75,8 @@ OpenAgents signing identity is missing, does not attach Zed commercial terms,
 copies `LICENSE-GPL` / `LICENSE-APACHE` into the disk image, and writes:
 
 ```text
-target/omega-rc/Omega-v0.2.0-rc31-macos-arm64.dmg
-target/omega-rc/omega-v0.2.0-rc31-macos-arm64.release.json
+target/omega-rc/Omega-v0.2.0-rc32-macos-arm64.dmg
+target/omega-rc/omega-v0.2.0-rc32-macos-arm64.release.json
 ```
 
 The release record keeps `source.dirty` false only when the sole worktree
@@ -120,7 +120,7 @@ cargo test -p app_identity release_record -- --nocapture
 2. Confirm `digests.package_sha256` matches `shasum -a 256` of the DMG.
 3. Confirm notarization status honestly (`not_attempted`, `submit_failed`, or
    `submitted_and_stapled`).
-4. Create a GitHub **prerelease** tagged `v0.2.0-rc31` on
+4. Create a GitHub **prerelease** tagged `v0.2.0-rc32` on
    `OpenAgentsInc/omega`.
 5. Upload the DMG and release-record JSON.
 6. Do **not** set the release as latest.
