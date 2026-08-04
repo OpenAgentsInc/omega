@@ -24153,9 +24153,17 @@ mod tests {
         // the primary interface never calls, so every check above this line
         // passed against source nobody could reach. Reachability itself is
         // proven by `agent_panel::tests::
-        // the_primary_interface_draws_the_tester_channel_destination`, which
-        // renders the forced primary interface; this keeps the destination from
-        // being moved back out of that shell without the move being noticed.
+        // the_primary_interface_keeps_the_tester_channel_destination_while_hidden`,
+        // which renders the forced primary interface; this keeps the
+        // destination from being moved back out of that shell without the move
+        // being noticed.
+        //
+        // Amended 2026-08-04 (owner request): the sidebar section is hidden, so
+        // that test now asserts the heading is absent. The requirements below
+        // are unchanged and still meaningful — the shell continues to own the
+        // destination, its rows, and the surface a selection opens, so the
+        // section is one render flag away from returning rather than something
+        // that has to be rebuilt.
         let omega_shell = function_body(&panel, "render_omega_shell")
             .expect("OMEGA-DELTA-0182: the primary interface shell is gone");
         for required in [

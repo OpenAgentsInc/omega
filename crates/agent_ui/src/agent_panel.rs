@@ -21254,6 +21254,11 @@ impl AgentPanel {
     ) -> AnyElement {
         const TITLEBAR_HEIGHT: f32 = 38.;
         const TAB_WIDTH: f32 = 140.;
+        // TEMPORARILY HIDDEN (2026-08-04, owner request): suppress the sidebar
+        // "Tester channels" section. Both halves of the destination are still
+        // built below so selection, the surface, and OMEGA-DELTA-0182's shell
+        // requirements are unchanged; only the sidebar rows are not drawn.
+        const OMEGA_SIDEBAR_TESTER_CHANNELS_HIDDEN: bool = true;
 
         // omega#238. `omega#156` shipped the tester-channel destination into
         // `render_sidebar`, which only the workbench presentation calls, so the
@@ -22485,38 +22490,42 @@ impl AgentPanel {
                     )
                     .children(sidebar_rows),
             )
-            .child(
-                // omega#238. `omega#156` shipped this destination into
-                // `render_sidebar`, which only the workbench presentation ever
-                // calls, so the primary interface — the only presentation the
-                // application launches — drew no tester channels at all. The
-                // section belongs in the shell that is actually rendered, and
-                // its title still comes from `SectionId` so the two cannot
-                // drift apart.
-                div()
-                    .id("omega-tester-channels-heading")
-                    .debug_selector(|| "omega.omega.sidebar.tester-channels".into())
-                    .role(gpui::Role::Label)
-                    .aria_label(omega_sidebar::SectionId::PublicChannels.title())
-                    .mt(px(10.))
-                    .h(px(28.))
-                    .px(px(8.))
-                    .flex_none()
-                    .flex()
-                    .items_center()
-                    .text_size(px(11.))
-                    .font_weight(gpui::FontWeight::MEDIUM)
-                    .text_color(text_placeholder)
-                    .child(omega_sidebar::SectionId::PublicChannels.title()),
-            )
-            .child(
-                div()
-                    .id("omega-sidebar-tester-channels")
-                    .role(gpui::Role::Tree)
-                    .aria_label(omega_sidebar::SectionId::PublicChannels.title())
-                    .flex_none()
-                    .child(tester_channel_destinations),
-            )
+            // TEMPORARILY HIDDEN (2026-08-04, owner request): the sidebar
+            // "Tester channels" heading and its destination rows are suppressed
+            // alongside the Work and Planning sections. `omega#238` moved this
+            // block out of `render_sidebar` and into the shell precisely
+            // because the shipped presentation was drawing no tester channels
+            // by accident; hiding it here is the deliberate version of that,
+            // and `OMEGA-DELTA-0182` records the difference. The title still
+            // comes from `SectionId` so restoring these two children is enough.
+            .when(!OMEGA_SIDEBAR_TESTER_CHANNELS_HIDDEN, |shell| {
+                shell
+                    .child(
+                        div()
+                            .id("omega-tester-channels-heading")
+                            .debug_selector(|| "omega.omega.sidebar.tester-channels".into())
+                            .role(gpui::Role::Label)
+                            .aria_label(omega_sidebar::SectionId::PublicChannels.title())
+                            .mt(px(10.))
+                            .h(px(28.))
+                            .px(px(8.))
+                            .flex_none()
+                            .flex()
+                            .items_center()
+                            .text_size(px(11.))
+                            .font_weight(gpui::FontWeight::MEDIUM)
+                            .text_color(text_placeholder)
+                            .child(omega_sidebar::SectionId::PublicChannels.title()),
+                    )
+                    .child(
+                        div()
+                            .id("omega-sidebar-tester-channels")
+                            .role(gpui::Role::Tree)
+                            .aria_label(omega_sidebar::SectionId::PublicChannels.title())
+                            .flex_none()
+                            .child(tester_channel_destinations),
+                    )
+            })
             .child(
                 div()
                     .id("omega-experimental-heading")
@@ -35607,7 +35616,9 @@ mod tests {
     /// asserted the shape of code that nothing selected — so this test forces
     /// the presentation the application takes and reads the drawn surface.
     #[gpui::test]
-    async fn the_primary_interface_draws_the_tester_channel_destination(cx: &mut TestAppContext) {
+    async fn the_primary_interface_keeps_the_tester_channel_destination_while_hidden(
+        cx: &mut TestAppContext,
+    ) {
         let (panel, mut cx) = setup_visible_panel(cx).await;
         panel.update_in(&mut cx, |panel, window, cx| {
             panel.force_omega_primary_interface_for_tests = true;
@@ -35629,34 +35640,24 @@ mod tests {
             );
         });
 
-        let threads = cx
-            .debug_bounds("omega.omega.sidebar.threads")
-            .expect("the shell draws the Threads section");
-        let heading = cx
-            .debug_bounds("omega.omega.sidebar.tester-channels")
-            .expect(
-                "the shell the application renders must draw the tester-channel \
-             destination",
-            );
-        let experimental = cx
-            .debug_bounds("omega.omega.sidebar.experimental")
-            .expect("the shell draws the Experimental section");
+        // 2026-08-04 (owner request): the sidebar section is hidden, so the
+        // shell must NOT draw its heading. What must survive is the
+        // destination itself — the registry above, the selection below, and
+        // the surface it opens — so restoring the section is a render change
+        // rather than a rebuild.
         assert!(
-            heading.origin.y > threads.origin.y && heading.origin.y < experimental.origin.y,
-            "the destination sits between Threads and Experimental"
+            cx.debug_bounds("omega.omega.sidebar.threads").is_some(),
+            "the shell still draws the Threads section"
+        );
+        assert!(
+            cx.debug_bounds("omega.omega.sidebar.tester-channels")
+                .is_none(),
+            "the tester-channel section is hidden and must not be drawn"
         );
         assert!(
             cx.debug_bounds("omega-public-channel-alpha-feedback")
-                .is_some(),
-            "the alpha feedback row is the destination a tester clicks"
-        );
-        let snapshot = cx.debug_render_snapshot();
-        let tree = snapshot
-            .accessibility_tree_json()
-            .expect("forced accessibility should capture the sidebar");
-        assert!(
-            tree.contains(omega_sidebar::SectionId::PublicChannels.title()),
-            "a screen reader must reach the destination by its shipped name: {tree}"
+                .is_none(),
+            "its destination rows are hidden with it"
         );
 
         // Deliberately not `select_public_channel`: that opens a live relay
