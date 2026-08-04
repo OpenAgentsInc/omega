@@ -24148,6 +24148,28 @@ mod tests {
                 "OMEGA-DELTA-0182: Agent Panel lost bundled-first behavior `{required}`"
             );
         }
+        // omega#238. The destination has to be drawn by the presentation the
+        // application launches. It was drawn only by `render_sidebar`, which
+        // the primary interface never calls, so every check above this line
+        // passed against source nobody could reach. Reachability itself is
+        // proven by `agent_panel::tests::
+        // the_primary_interface_draws_the_tester_channel_destination`, which
+        // renders the forced primary interface; this keeps the destination from
+        // being moved back out of that shell without the move being noticed.
+        let omega_shell = function_body(&panel, "render_omega_shell")
+            .expect("OMEGA-DELTA-0182: the primary interface shell is gone");
+        for required in [
+            "omega_sidebar::SectionId::PublicChannels.title()",
+            "render_public_channel_destinations",
+            "render_selected_public_channel",
+        ] {
+            assert!(
+                omega_shell.contains(required),
+                "OMEGA-DELTA-0182: the shipped Omega shell lost the tester-channel \
+                 destination `{required}`"
+            );
+        }
+
         // Stray lifecycle words under Tester channels are gone (item 14 / law 3).
         let channel_destinations = function_body(&panel, "render_public_channel_destinations")
             .expect("OMEGA-DELTA-0182: channel destination renderer is gone");
