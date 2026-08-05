@@ -3566,7 +3566,6 @@ impl SettingsWindow {
         let hover_background = colors.ghost_element_hover;
         let text = colors.text;
         let text_muted = colors.text_muted;
-        let text_placeholder = colors.text_placeholder;
         let root_entries = self
             .navbar_entries
             .iter()
@@ -3626,14 +3625,32 @@ impl SettingsWindow {
             .border_color(colors.border_variant)
             .when(cfg!(target_os = "macos"), |sidebar| sidebar.pt_10())
             .child(
-                div()
-                    .px_4()
+                h_flex()
+                    .w_full()
+                    .justify_between()
+                    .px_3()
                     .pt_3()
                     .pb_1()
-                    .text_size(px(11.))
-                    .font_weight(gpui::FontWeight::MEDIUM)
-                    .text_color(text_placeholder)
-                    .child("Settings"),
+                    .child("Settings")
+                    .child(
+                        IconButton::new(
+                            "toggle-settings-sidebar",
+                            IconName::ThreadsSidebarLeftOpen,
+                        )
+                        .shape(IconButtonShape::Square)
+                        .icon_size(IconSize::Small)
+                        .tooltip(Tooltip::text("Collapse settings sidebar"))
+                        .on_click(cx.listener(|this, _, window, cx| {
+                            if let Some(original_window) = this.original_window {
+                                original_window
+                                    .update(cx, |multi_workspace, original_window, cx| {
+                                        multi_workspace.toggle_sidebar(original_window, cx);
+                                    })
+                                    .log_err();
+                            }
+                            window.activate_window();
+                        })),
+                    ),
             )
             .child(
                 v_flex()
