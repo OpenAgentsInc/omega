@@ -1,10 +1,9 @@
 //! OpenAgents hosted inference provider.
 //!
 //! Serves the hosted lanes from `openagents.com` that Omega selects through the
-//! model tier control. The primary tier is GPT-5.6 Luna through the hosted
-//! OpenAgents passthrough lane (owner direction 2026-07-30: the core Omega
-//! Agent always hits our API first; Gemini is the backup). Pro maps to Kimi K3
-//! on Fireworks; Flash stays on the Google provider's hosted Gemini path.
+//! model tier control. The GPT-5.6 family is served through the hosted
+//! OpenAgents passthrough lane. Pro maps to Kimi K3 on Fireworks; Flash stays
+//! on the Google provider's hosted Gemini path.
 //! Authentication reuses the verified OpenAgents session from zero base — no
 //! local OpenAI, Fireworks, or Gemini key is required when that session is
 //! ready.
@@ -15,12 +14,13 @@ use gpui::{App, AppContext, AsyncApp, Entity, SharedString, Task};
 use http_client::{CustomHeaders, HttpClient};
 use language_model::{
     AuthenticateError, IconOrSvg, LanguageModel, LanguageModelCompletionError,
-    LanguageModelCompletionEvent, LanguageModelId, LanguageModelName, LanguageModelProvider,
-    LanguageModelProviderId, LanguageModelProviderName, LanguageModelProviderState,
-    LanguageModelRequest, LanguageModelToolChoice, ProviderSettingsView, RateLimiter,
+    LanguageModelCompletionEvent, LanguageModelEffortLevel, LanguageModelId, LanguageModelName,
+    LanguageModelProvider, LanguageModelProviderId, LanguageModelProviderName,
+    LanguageModelProviderState, LanguageModelRequest, LanguageModelToolChoice,
+    ProviderSettingsView, RateLimiter,
 };
 use open_ai::{
-    ResponseStreamEvent,
+    ReasoningEffort, ResponseStreamEvent,
     completion::{ChatCompletionMaxTokensParameter, OpenAiEventMapper, into_open_ai},
     stream_completion,
 };
@@ -37,6 +37,12 @@ pub const KIMI_K3_MODEL_ID: &str = "kimi-k3";
 /// passthrough lane).
 pub const GPT_56_LUNA_MODEL_ID: &str = "gpt-5.6-luna";
 
+/// Wire model id for GPT-5.6 Terra over the hosted OpenAI passthrough lane.
+pub const GPT_56_TERRA_MODEL_ID: &str = "gpt-5.6-terra";
+
+/// Wire model id for GPT-5.6 Sol over the hosted OpenAI passthrough lane.
+pub const GPT_56_SOL_MODEL_ID: &str = "gpt-5.6-sol";
+
 /// Wire model id for the Flash tier over the hosted Gemini lane.
 ///
 /// `OMEGA-DELTA-0202`. The Flash tier used to point at the direct Google
@@ -52,6 +58,8 @@ const CHAT_COMPLETIONS_PREFIX: &str = "/api/v1";
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum HostedModel {
     Gpt56Luna,
+    Gpt56Terra,
+    Gpt56Sol,
     Gemini36Flash,
     KimiK3,
 }
@@ -60,6 +68,8 @@ impl HostedModel {
     fn id(self) -> &'static str {
         match self {
             Self::Gpt56Luna => GPT_56_LUNA_MODEL_ID,
+            Self::Gpt56Terra => GPT_56_TERRA_MODEL_ID,
+            Self::Gpt56Sol => GPT_56_SOL_MODEL_ID,
             Self::Gemini36Flash => GEMINI_36_FLASH_MODEL_ID,
             Self::KimiK3 => KIMI_K3_MODEL_ID,
         }
@@ -68,6 +78,8 @@ impl HostedModel {
     fn display_name(self) -> &'static str {
         match self {
             Self::Gpt56Luna => "GPT-5.6 Luna",
+            Self::Gpt56Terra => "GPT-5.6 Terra",
+            Self::Gpt56Sol => "GPT-5.6 Sol",
             Self::Gemini36Flash => "Gemini 3.6 Flash",
             Self::KimiK3 => "Kimi K3",
         }
@@ -75,8 +87,8 @@ impl HostedModel {
 
     fn max_tokens(self) -> u64 {
         match self {
-            // Matches open_ai::Model::FivePointSixLuna.
-            Self::Gpt56Luna => 1_050_000,
+            // Matches the corresponding open_ai::Model GPT-5.6 variants.
+            Self::Gpt56Luna | Self::Gpt56Terra | Self::Gpt56Sol => 1_050_000,
             // Matches google_ai::Model::Gemini36Flash.
             Self::Gemini36Flash => 1_048_576,
             Self::KimiK3 => 131_072,
@@ -85,15 +97,93 @@ impl HostedModel {
 
     fn max_output_tokens(self) -> Option<u64> {
         match self {
-            Self::Gpt56Luna => Some(128_000),
+            Self::Gpt56Luna | Self::Gpt56Terra | Self::Gpt56Sol => Some(128_000),
             Self::Gemini36Flash => Some(65_536),
             Self::KimiK3 => Some(16_384),
         }
     }
 
     fn all() -> &'static [Self] {
-        &[Self::Gpt56Luna, Self::Gemini36Flash, Self::KimiK3]
+        &[
+            Self::Gpt56Luna,
+            Self::Gpt56Terra,
+            Self::Gpt56Sol,
+            Self::Gemini36Flash,
+            Self::KimiK3,
+        ]
     }
+
+    fn default_reasoning_effort(self) -> Option<ReasoningEffort> {
+        match self {
+            Self::Gpt56Sol => Some(ReasoningEffort::Low),
+            Self::Gpt56Luna | Self::Gpt56Terra => Some(ReasoningEffort::Medium),
+            Self::Gemini36Flash | Self::KimiK3 => None,
+        }
+    }
+
+    fn supported_reasoning_efforts(self) -> &'static [ReasoningEffort] {
+        match self {
+            Self::Gpt56Luna | Self::Gpt56Terra | Self::Gpt56Sol => &[
+                ReasoningEffort::None,
+                ReasoningEffort::Low,
+                ReasoningEffort::Medium,
+                ReasoningEffort::High,
+                ReasoningEffort::XHigh,
+                ReasoningEffort::Max,
+            ],
+            Self::Gemini36Flash | Self::KimiK3 => &[],
+        }
+    }
+}
+
+fn reasoning_effort_for_request(
+    request: &LanguageModelRequest,
+    model: HostedModel,
+) -> Option<ReasoningEffort> {
+    let supported_efforts = model.supported_reasoning_efforts();
+    if supported_efforts.is_empty() {
+        return None;
+    }
+
+    if request.thinking_allowed {
+        request
+            .thinking_effort
+            .as_deref()
+            .and_then(|effort| effort.parse::<ReasoningEffort>().ok())
+            .filter(|effort| supported_efforts.contains(effort))
+            .filter(|effort| *effort != ReasoningEffort::None)
+            .or_else(|| model.default_reasoning_effort())
+    } else if supported_efforts.contains(&ReasoningEffort::None) {
+        Some(ReasoningEffort::None)
+    } else {
+        None
+    }
+}
+
+fn supported_thinking_effort_levels(model: HostedModel) -> Vec<LanguageModelEffortLevel> {
+    let default_effort = model.default_reasoning_effort();
+    model
+        .supported_reasoning_efforts()
+        .iter()
+        .copied()
+        .filter_map(|effort| {
+            let (name, value) = match effort {
+                ReasoningEffort::None => return None,
+                ReasoningEffort::Minimal => ("Minimal", "minimal"),
+                ReasoningEffort::Low => ("Low", "low"),
+                ReasoningEffort::Medium => ("Medium", "medium"),
+                ReasoningEffort::High => ("High", "high"),
+                ReasoningEffort::XHigh => ("Extra High", "xhigh"),
+                ReasoningEffort::Max => ("Max", "max"),
+            };
+
+            Some(LanguageModelEffortLevel {
+                name: name.into(),
+                value: value.into(),
+                is_default: Some(effort) == default_effort,
+            })
+        })
+        .collect()
 }
 
 pub struct OpenAgentsLanguageModelProvider {
@@ -345,6 +435,14 @@ impl LanguageModel for OpenAgentsLanguageModel {
         true
     }
 
+    fn supports_thinking(&self) -> bool {
+        !self.model.supported_reasoning_efforts().is_empty()
+    }
+
+    fn supported_effort_levels(&self) -> Vec<LanguageModelEffortLevel> {
+        supported_thinking_effort_levels(self.model)
+    }
+
     fn telemetry_id(&self) -> String {
         format!("openagents/{}", self.model.id())
     }
@@ -371,6 +469,7 @@ impl LanguageModel for OpenAgentsLanguageModel {
             LanguageModelCompletionError,
         >,
     > {
+        let reasoning_effort = reasoning_effort_for_request(&request, self.model);
         let request = match into_open_ai(
             request,
             self.model.id(),
@@ -378,7 +477,7 @@ impl LanguageModel for OpenAgentsLanguageModel {
             false,
             self.max_output_tokens(),
             ChatCompletionMaxTokensParameter::MaxCompletionTokens,
-            None,
+            reasoning_effort,
             false,
         ) {
             Ok(request) => request,
@@ -410,6 +509,92 @@ mod tests {
         assert_eq!(HostedModel::Gpt56Luna.id(), "gpt-5.6-luna");
         assert_eq!(GPT_56_LUNA_MODEL_ID, "gpt-5.6-luna");
         assert_eq!(HostedModel::all().first(), Some(&HostedModel::Gpt56Luna));
+    }
+
+    #[test]
+    fn hosted_gpt_56_family_has_wire_ids_and_reasoning_efforts() {
+        assert_eq!(HostedModel::Gpt56Terra.id(), "gpt-5.6-terra");
+        assert_eq!(HostedModel::Gpt56Sol.id(), "gpt-5.6-sol");
+        assert_eq!(GPT_56_TERRA_MODEL_ID, "gpt-5.6-terra");
+        assert_eq!(GPT_56_SOL_MODEL_ID, "gpt-5.6-sol");
+        assert!(HostedModel::all().contains(&HostedModel::Gpt56Terra));
+        assert!(HostedModel::all().contains(&HostedModel::Gpt56Sol));
+
+        for model in [
+            HostedModel::Gpt56Luna,
+            HostedModel::Gpt56Terra,
+            HostedModel::Gpt56Sol,
+        ] {
+            assert_eq!(
+                model.supported_reasoning_efforts(),
+                &[
+                    ReasoningEffort::None,
+                    ReasoningEffort::Low,
+                    ReasoningEffort::Medium,
+                    ReasoningEffort::High,
+                    ReasoningEffort::XHigh,
+                    ReasoningEffort::Max,
+                ]
+            );
+        }
+    }
+
+    #[test]
+    fn hosted_gpt_56_reasoning_efforts_are_selectable() {
+        let effort_levels = supported_thinking_effort_levels(HostedModel::Gpt56Sol);
+        let values = effort_levels
+            .iter()
+            .map(|level| level.value.as_ref())
+            .collect::<Vec<_>>();
+
+        assert_eq!(values, ["low", "medium", "high", "xhigh", "max"]);
+        assert_eq!(
+            effort_levels
+                .iter()
+                .find(|level| level.is_default)
+                .map(|level| level.value.as_ref()),
+            Some("low")
+        );
+    }
+
+    #[test]
+    fn hosted_gpt_56_request_uses_selected_or_disabled_reasoning_effort() {
+        let selected = LanguageModelRequest {
+            thinking_allowed: true,
+            thinking_effort: Some("xhigh".to_string()),
+            ..Default::default()
+        };
+        assert_eq!(
+            reasoning_effort_for_request(&selected, HostedModel::Gpt56Terra),
+            Some(ReasoningEffort::XHigh)
+        );
+
+        let disabled = LanguageModelRequest {
+            thinking_allowed: false,
+            ..Default::default()
+        };
+        assert_eq!(
+            reasoning_effort_for_request(&disabled, HostedModel::Gpt56Luna),
+            Some(ReasoningEffort::None)
+        );
+
+        let reasoning_effort = reasoning_effort_for_request(&selected, HostedModel::Gpt56Terra);
+        let Ok(open_ai_request) = into_open_ai(
+            selected,
+            HostedModel::Gpt56Terra.id(),
+            true,
+            false,
+            HostedModel::Gpt56Terra.max_output_tokens(),
+            ChatCompletionMaxTokensParameter::MaxCompletionTokens,
+            reasoning_effort,
+            false,
+        ) else {
+            panic!("the hosted GPT-5.6 request should convert to OpenAI format");
+        };
+        assert_eq!(
+            open_ai_request.reasoning_effort,
+            Some(ReasoningEffort::XHigh)
+        );
     }
 
     /// `OMEGA-DELTA-0202`. Flash is served by the hosted lane, so the middle
