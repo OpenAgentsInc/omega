@@ -1,8 +1,8 @@
 #!/usr/bin/env bash
 #
 # Build eval-cli for x86_64 Linux from any host (macOS, Linux, etc.)
-# using Docker + cargo-zigbuild. Targets musl libc, producing a fully
-# static binary that runs on any Linux distro (glibc or musl / Alpine).
+# using an amd64 Debian 12 Docker builder. The resulting glibc binary runs on
+# Debian 12, Ubuntu 24.04, and newer compatible Linux distributions.
 # The resulting binary is placed at the path printed on completion
 # (default: target/eval-cli).
 #
@@ -38,7 +38,7 @@ cd "$REPO_ROOT"
 
 IMAGE_TAG="eval-cli-builder"
 
-echo "Building eval-cli for x86_64-unknown-linux-musl (static binary)..."
+echo "Building eval-cli for x86_64-unknown-linux-gnu..."
 echo "  Repo root: $REPO_ROOT"
 echo "  Output:    $OUTPUT"
 echo ""

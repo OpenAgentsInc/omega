@@ -7,45 +7,41 @@
 # Or use the helper script:
 #   crates/eval_cli/script/build-linux
 
-FROM rust:1.95.0@sha256:f49565f188ee00bc2a18dd418183f2c5f23ef7d6e691890517ed341a598f67c3 AS builder
-
-ARG CARGO_ZIGBUILD_VERSION=0.22.3
+FROM rust:1.95.0-bookworm@sha256:6258907abe69656e41cd992e0b705cdcfabcbbe3db374f92ed2d47121282d4a1 AS builder
 
 WORKDIR /app
 
 # Pre-install the toolchain specified in rust-toolchain.toml so it is cached.
 RUN rustup toolchain install 1.95.0 --profile minimal \
     --component rustfmt --component clippy --component rust-analyzer --component rust-src \
-    --target wasm32-wasip2 --target wasm32-unknown-unknown --target x86_64-unknown-linux-musl --target x86_64-unknown-linux-gnu
+    --target wasm32-wasip2 --target wasm32-unknown-unknown --target x86_64-unknown-linux-gnu
 
-# Install build tools.  cmake + build-essential are needed for vendored C
-# libraries (libgit2-sys, zstd-sys, libsqlite3-sys).  No audio/GUI -dev
-# packages required — eval-cli runs headless with those features disabled.
-#
-# cargo-zigbuild cross-compiles against musl libc, producing a fully
-# static binary that runs on any Linux distro (glibc or musl / Alpine).
+# Install build tools and the native libraries inherited through agent_ui.
+# The image is pinned to Debian 12 so the resulting glibc baseline remains
+# compatible with supported contemporary Linux hosts.
 RUN apt-get update && apt-get install -y --no-install-recommends \
     cmake \
     build-essential \
-    curl \
-    xz-utils \
+    libasound2-dev \
+    libglib2.0-dev \
+    libssl-dev \
+    pkg-config \
     && rm -rf /var/lib/apt/lists/*
 
-RUN mkdir -p /opt/zig \
-    && curl -fsSL https://ziglang.org/download/0.15.2/zig-x86_64-linux-0.15.2.tar.xz \
-    | tar -xJ -C /opt/zig --strip-components=1 \
-    && ln -s /opt/zig/zig /usr/local/bin/zig
-
-RUN cargo install --locked cargo-zigbuild --version ${CARGO_ZIGBUILD_VERSION}
+# The pinned WebRTC bridge contains C++ declarations that GCC 12 diagnoses as
+# name-changing errors unless permissive mode is enabled. eval-cli is headless,
+# but agent_ui currently inherits this bridge through settings_ui/audio.
+ENV CXXFLAGS="-fpermissive"
 
 COPY . .
 
 RUN --mount=type=cache,target=/usr/local/cargo/registry \
     --mount=type=cache,target=/usr/local/cargo/git \
-    --mount=type=cache,target=/app/target \
-    cargo zigbuild --release --package eval_cli \
-        --target x86_64-unknown-linux-musl && \
-    cp /app/target/x86_64-unknown-linux-musl/release/eval-cli /eval-cli && \
+    --mount=type=cache,id=eval-cli-bookworm-gnu-target,target=/app/target \
+    cargo build --profile release-fast --package eval_cli \
+        --jobs 1 \
+        --target x86_64-unknown-linux-gnu && \
+    cp /app/target/x86_64-unknown-linux-gnu/release-fast/eval-cli /eval-cli && \
     strip /eval-cli
 
 FROM scratch
