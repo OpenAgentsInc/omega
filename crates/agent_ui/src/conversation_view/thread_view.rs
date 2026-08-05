@@ -2915,13 +2915,13 @@ impl ThreadView {
 
         QueueEntry {
             id,
-            durable_item_id,
+            durable_item_id: Some(durable_item_id),
             content,
             tracked_buffers,
             steer,
             executor_class,
             steer_capability,
-            is_durably_synced: true,
+            can_dispatch: true,
             editor,
             _subscription: subscription,
         }

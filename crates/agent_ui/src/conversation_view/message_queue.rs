@@ -17,7 +17,7 @@ pub struct QueueEntryId(usize);
 
 pub struct QueueEntry {
     pub id: QueueEntryId,
-    pub(crate) durable_item_id: String,
+    pub(crate) durable_item_id: Option<String>,
     pub content: Vec<acp::ContentBlock>,
     pub tracked_buffers: Vec<Entity<Buffer>>,
     /// When true, this message interrupts the agent at the next turn boundary
@@ -26,7 +26,7 @@ pub struct QueueEntry {
     pub steer: bool,
     pub(crate) executor_class: ExecutorClass,
     pub(crate) steer_capability: SteerCapability,
-    pub(crate) is_durably_synced: bool,
+    pub(crate) can_dispatch: bool,
     pub editor: Entity<MessageEditor>,
     pub _subscription: Subscription,
 }
@@ -48,7 +48,6 @@ impl QueueEntry {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum MessageQueueError {
     NotConfigured,
-    UnsupportedRichContent,
     UnsavedEntry,
     Journal(SendQueueRefusal),
 }
@@ -58,9 +57,6 @@ impl MessageQueueError {
         match self {
             Self::NotConfigured =>
                 "Omega could not prepare durable queued input. Your text remains in the composer."
-                    .into(),
-            Self::UnsupportedRichContent =>
-                "Queued input with images, files, or other rich content cannot yet be restored after a restart. It was not durably queued and remains visible in its editor."
                     .into(),
             Self::UnsavedEntry =>
                 "This queued message has edits that could not be saved. It will not send until those edits are saved or moved back to the composer."
@@ -197,21 +193,29 @@ impl MessageQueue {
         self.can_fast_track = false;
     }
 
-    pub fn enqueue(&mut self, entry: QueueEntry) -> Result<(), MessageQueueError> {
-        let text = durable_text(&entry.content)?;
+    pub fn enqueue(&mut self, mut entry: QueueEntry) -> Result<(), MessageQueueError> {
         let durable = self.durable()?;
-        durable.journal.admit(
-            &durable.thread_id,
-            &entry.durable_item_id,
-            &text,
-            if entry.steer {
-                SendCommand::Steer
-            } else {
-                SendCommand::Enqueue
-            },
-            entry.executor_class,
-            entry.steer_capability,
-        )?;
+        if let Some(text) = durable_text(&entry.content) {
+            let durable_item_id = entry
+                .durable_item_id
+                .as_deref()
+                .ok_or(MessageQueueError::Journal(SendQueueRefusal::UnknownItem))?;
+            durable.journal.admit(
+                &durable.thread_id,
+                durable_item_id,
+                &text,
+                if entry.steer {
+                    SendCommand::Steer
+                } else {
+                    SendCommand::Enqueue
+                },
+                entry.executor_class,
+                entry.steer_capability,
+            )?;
+        } else {
+            entry.durable_item_id = None;
+        }
+        entry.can_dispatch = true;
         self.entries.push_back(entry);
         self.processing_state = SendQueueProcessingState::AutoProcess;
         self.can_fast_track = true;
@@ -224,40 +228,63 @@ impl MessageQueue {
         content: Vec<acp::ContentBlock>,
         tracked_buffers: Vec<Entity<Buffer>>,
     ) -> Result<(), MessageQueueError> {
-        let text = match durable_text(&content) {
-            Ok(text) => text,
-            Err(error) => {
-                if let Some(entry) = self.entries.iter_mut().find(|entry| entry.id == id) {
-                    entry.content = content;
-                    entry.tracked_buffers = tracked_buffers;
-                    entry.is_durably_synced = false;
-                }
-                return Err(error);
-            }
-        };
         let durable = self.durable()?;
         let entry = self
             .entry_by_id(id)
             .ok_or(MessageQueueError::Journal(SendQueueRefusal::UnknownItem))?;
-        if let Err(error) = durable.journal.update(
-            &durable.thread_id,
-            &entry.durable_item_id,
-            &text,
-            if entry.steer {
-                SendCommand::Steer
-            } else {
-                SendCommand::Enqueue
-            },
-            entry.executor_class,
-            entry.steer_capability,
-        ) {
-            if let Some(entry) = self.entries.iter_mut().find(|entry| entry.id == id) {
-                entry.content = content;
-                entry.tracked_buffers = tracked_buffers;
-                entry.is_durably_synced = false;
+        let previous_durable_item_id = entry.durable_item_id.clone();
+        let next_text = durable_text(&content);
+        let next_durable_item_id = match (&previous_durable_item_id, next_text.as_deref()) {
+            (Some(item_id), Some(text)) => durable
+                .journal
+                .update(
+                    &durable.thread_id,
+                    item_id,
+                    text,
+                    if entry.steer {
+                        SendCommand::Steer
+                    } else {
+                        SendCommand::Enqueue
+                    },
+                    entry.executor_class,
+                    entry.steer_capability,
+                )
+                .map(|_| Some(item_id.clone())),
+            (Some(item_id), None) => durable
+                .journal
+                .cancel(&durable.thread_id, item_id)
+                .map(|_| None),
+            (None, Some(text)) => {
+                let item_id = Self::new_durable_item_id();
+                durable
+                    .journal
+                    .admit(
+                        &durable.thread_id,
+                        &item_id,
+                        text,
+                        if entry.steer {
+                            SendCommand::Steer
+                        } else {
+                            SendCommand::Enqueue
+                        },
+                        entry.executor_class,
+                        entry.steer_capability,
+                    )
+                    .map(|_| Some(item_id))
             }
-            return Err(error.into());
-        }
+            (None, None) => Ok(None),
+        };
+        let next_durable_item_id = match next_durable_item_id {
+            Ok(item_id) => item_id,
+            Err(error) => {
+                if let Some(entry) = self.entries.iter_mut().find(|entry| entry.id == id) {
+                    entry.content = content;
+                    entry.tracked_buffers = tracked_buffers;
+                    entry.can_dispatch = false;
+                }
+                return Err(error.into());
+            }
+        };
         let entry = self
             .entries
             .iter_mut()
@@ -265,7 +292,8 @@ impl MessageQueue {
             .ok_or(MessageQueueError::Journal(SendQueueRefusal::UnknownItem))?;
         entry.content = content;
         entry.tracked_buffers = tracked_buffers;
-        entry.is_durably_synced = true;
+        entry.durable_item_id = next_durable_item_id;
+        entry.can_dispatch = true;
         Ok(())
     }
 
@@ -273,11 +301,12 @@ impl MessageQueue {
         let Some(index) = self.entries.iter().position(|entry| entry.id == id) else {
             return Ok(None);
         };
-        let durable = self.durable()?;
-        let durable_item_id = self.entries[index].durable_item_id.clone();
-        durable
-            .journal
-            .cancel(&durable.thread_id, &durable_item_id)?;
+        if let Some(durable_item_id) = self.entries[index].durable_item_id.as_deref() {
+            let durable = self.durable()?;
+            durable
+                .journal
+                .cancel(&durable.thread_id, durable_item_id)?;
+        }
         Ok(self.entries.remove(index))
     }
 
@@ -297,23 +326,26 @@ impl MessageQueue {
         let Some(entry) = self.entry_by_id(id) else {
             return Ok(false);
         };
-        let text = durable_text(&entry.content)?;
         let steer = !entry.steer;
-        durable.journal.update(
-            &durable.thread_id,
-            &entry.durable_item_id,
-            &text,
-            if steer {
-                SendCommand::Steer
-            } else {
-                SendCommand::Enqueue
-            },
-            entry.executor_class,
-            entry.steer_capability,
-        )?;
+        if let Some(durable_item_id) = entry.durable_item_id.as_deref() {
+            let text = durable_text(&entry.content)
+                .ok_or(MessageQueueError::Journal(SendQueueRefusal::UnknownItem))?;
+            durable.journal.update(
+                &durable.thread_id,
+                durable_item_id,
+                &text,
+                if steer {
+                    SendCommand::Steer
+                } else {
+                    SendCommand::Enqueue
+                },
+                entry.executor_class,
+                entry.steer_capability,
+            )?;
+        }
         if let Some(entry) = self.entries.iter_mut().find(|entry| entry.id == id) {
             entry.steer = steer;
-            entry.is_durably_synced = true;
+            entry.can_dispatch = true;
         }
         Ok(true)
     }
@@ -372,7 +404,7 @@ impl MessageQueue {
             Quiescence::Proven
         };
         let entry = &self.entries[index];
-        if !entry.is_durably_synced {
+        if !entry.can_dispatch {
             return Err(MessageQueueError::UnsavedEntry);
         }
         if quiescence == Quiescence::Running && !entry.disposition().reaches_running_turn() {
@@ -406,7 +438,7 @@ impl MessageQueue {
             return Ok(None);
         };
         let entry = &self.entries[index];
-        if !entry.is_durably_synced {
+        if !entry.can_dispatch {
             return Err(MessageQueueError::UnsavedEntry);
         }
         let next_state = if quiescence == Quiescence::Running {
@@ -414,10 +446,16 @@ impl MessageQueue {
         } else {
             SendQueueProcessingState::AutoProcess
         };
+        let Some(durable_item_id) = entry.durable_item_id.clone() else {
+            self.set_processing_state(next_state)?;
+            self.pending_dispatch = None;
+            self.pending_dispatch_was_fast_track = false;
+            return Ok(self.entries.remove(index));
+        };
         let durable = self.durable()?;
         match durable.journal.claim_for_dispatch(
             &durable.thread_id,
-            &entry.durable_item_id,
+            &durable_item_id,
             quiescence,
             next_state,
         ) {
@@ -455,7 +493,7 @@ impl MessageQueue {
         let Some(entry) = self.entries.front() else {
             return Ok(None);
         };
-        if !entry.is_durably_synced {
+        if !entry.can_dispatch {
             return Err(MessageQueueError::UnsavedEntry);
         }
         if quiescence == Quiescence::Running && !entry.disposition().reaches_running_turn() {
@@ -488,15 +526,15 @@ impl MessageQueue {
     }
 }
 
-fn durable_text(content: &[acp::ContentBlock]) -> Result<String, MessageQueueError> {
+fn durable_text(content: &[acp::ContentBlock]) -> Option<String> {
     let mut text = String::new();
     for block in content {
         let acp::ContentBlock::Text(block) = block else {
-            return Err(MessageQueueError::UnsupportedRichContent);
+            return None;
         };
         text.push_str(&block.text);
     }
-    Ok(text)
+    Some(text)
 }
 
 #[cfg(test)]
@@ -504,15 +542,12 @@ mod tests {
     use super::*;
 
     #[test]
-    fn durable_text_refuses_rich_content_instead_of_dropping_it() {
+    fn durable_text_leaves_rich_content_for_the_in_memory_queue() {
         let content = vec![acp::ContentBlock::ResourceLink(acp::ResourceLink::new(
             "README",
             "file:///README.md",
         ))];
-        assert_eq!(
-            durable_text(&content),
-            Err(MessageQueueError::UnsupportedRichContent)
-        );
+        assert_eq!(durable_text(&content), None);
     }
 
     #[test]

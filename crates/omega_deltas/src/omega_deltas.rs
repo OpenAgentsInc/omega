@@ -24096,6 +24096,13 @@ mod tests {
         let renderer_queue =
             read_repository_file("crates/agent_ui/src/conversation_view/message_queue.rs");
         assert!(renderer_queue.contains("restart_with_an_open_queue_requires_explicit_resume"));
+        assert!(renderer_queue.contains("durable_item_id: Option<String>"));
+        assert!(!renderer_queue.contains("Queued input with images, files, or other rich content"));
+        let conversation_view = read_repository_file("crates/agent_ui/src/conversation_view.rs");
+        assert!(
+            conversation_view
+                .contains("queued_image_is_kept_in_memory_and_dispatches_without_an_error")
+        );
 
         let metadata = read_repository_file("crates/agent_ui/src/thread_metadata_store.rs");
         assert!(metadata.contains("lifecycle TEXT NOT NULL DEFAULT \"completed\""));

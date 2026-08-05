@@ -8094,9 +8094,13 @@ startup recheck — survives unchanged behind that dropdown.
   `WorktreeAdmission::Cancelled` outcome with its prompt-restore path are
   deleted. Nothing about claim scoping, canonicalization, remote identity, or
   turn-scoped claim lifetime changes.
-- **The queue is durable and fail-closed.** A prompt is acknowledged as queued
-  only after its text, executor class, steer capability, disposition inputs,
-  ordering identity, and per-thread processing state are atomically persisted.
+- **The text queue is durable and fail-closed.** A text-only prompt is
+  acknowledged as queued only after its text, executor class, steer capability,
+  disposition inputs, ordering identity, and per-thread processing state are
+  atomically persisted. Images, files, and other rich blocks retain their exact
+  content in the live queue and dispatch normally; they are not represented as
+  restart-safe because the journal has no rich-content schema. This limitation
+  does not reject the message or surface as an error.
   Promotion happens only after worktree admission, terminal items cannot be
   reopened, failed edits remain visibly unsaved, and corrupt storage is never
   overwritten. Restored open queues start paused until a person explicitly
@@ -8105,8 +8109,9 @@ startup recheck — survives unchanged behind that dropdown.
   thread.
 - **Enforced by:** `concurrent_agent_supervision_is_visible_durable_and_guarded`
   in `crates/omega_deltas`; lifecycle, collision, metadata migration, and queue
-  journal unit tests; Agent Panel GPUI coverage; and the concurrent-agent visual
-  workbench sequence.
+  journal unit tests; `queued_image_is_kept_in_memory_and_dispatches_without_an_error`
+  in the Conversation View GPUI suite; Agent Panel GPUI coverage; and the
+  concurrent-agent visual workbench sequence.
 
 ### OMEGA-DELTA-0182 — Alpha feedback is a pinned, bounded public writer
 

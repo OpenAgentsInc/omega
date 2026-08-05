@@ -6805,6 +6805,38 @@ pub(crate) mod tests {
     }
 
     #[gpui::test]
+    async fn queued_image_is_kept_in_memory_and_dispatches_without_an_error(
+        cx: &mut TestAppContext,
+    ) {
+        init_test(cx);
+
+        let (conversation_view, cx) =
+            setup_conversation_view(StubAgentServer::default_response(), cx).await;
+        add_to_workspace(conversation_view.clone(), cx);
+
+        let image = acp::ContentBlock::Image(acp::ImageContent::new(
+            "iVBORw0KGgo=".to_string(),
+            "image/png".to_string(),
+        ));
+        active_thread(&conversation_view, cx).update_in(cx, |thread, window, cx| {
+            thread
+                .add_to_queue(vec![image.clone()], Vec::new(), window, cx)
+                .expect("rich input should enter the in-memory queue");
+            let id = thread.message_queue.first_id().expect("queued image");
+            let entry = thread.message_queue.first().expect("queued image entry");
+            assert!(entry.durable_item_id.is_none());
+            assert!(entry.can_dispatch);
+            assert_eq!(thread.message_queue.send_now(id, false), Ok(Some(id)));
+            let promoted = thread
+                .message_queue
+                .promote_for_dispatch(id, omega_front_door::Quiescence::Proven)
+                .expect("in-memory queue promotion")
+                .expect("queued image promoted");
+            assert_eq!(promoted.content, vec![image]);
+        });
+    }
+
+    #[gpui::test]
     async fn failed_queued_edit_cannot_send_stale_text_and_moves_new_text_to_composer(
         cx: &mut TestAppContext,
     ) {
