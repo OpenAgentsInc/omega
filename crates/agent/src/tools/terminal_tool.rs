@@ -343,7 +343,7 @@ fn update_git_data_loss_receipt(
 ///
 /// The output results will be shown to the user already, only list it again if necessary, avoid being redundant.
 ///
-/// Make sure you use the `cd` parameter to navigate to one of the root directories of the project. NEVER do it as part of the `command` itself, otherwise it will error.
+/// Use the `cd` parameter to set the command's working directory. Pass an absolute path when working outside the project. NEVER change directories as part of the `command` itself, otherwise it will error.
 ///
 /// Do not generate terminal commands that use shell substitutions or interpolations such as `$VAR`, `${VAR}`, `$(...)`, backticks, `$((...))`, `<(...)`, or `>(...)`. Resolve those values yourself before calling this tool, or ask the user for the literal value to use.
 ///
@@ -367,7 +367,7 @@ pub struct TerminalToolInput {
     ///
     /// REMINDER: read-only git commands (`git log`, `git diff`, `git show`, `git blame`) MUST include `--no-pager` (e.g. `git --no-pager log`). Prefer `git --no-optional-locks status` over `git status` to avoid optional metadata writes. Git commands that may open an editor (`git rebase`, `git commit`, `git merge`, `git tag`) MUST be prefixed with `GIT_EDITOR=true ` (e.g. `GIT_EDITOR=true git rebase origin/main`). Otherwise the terminal will hang.
     pub command: String,
-    /// Working directory for the command. This must be one of the root directories of the project.
+    /// Working directory for the command. Use a project root name, `.` for the thread's selected directory, or an absolute path.
     pub cd: String,
     /// Optional maximum runtime (in milliseconds). If exceeded, the running terminal task is killed.
     pub timeout_ms: Option<u64>,
@@ -385,7 +385,7 @@ pub struct TerminalToolInput {
 ///
 /// The output results will be shown to the user already, only list it again if necessary, avoid being redundant.
 ///
-/// Make sure you use the `cd` parameter to navigate to one of the root directories of the project. NEVER do it as part of the `command` itself, otherwise it will error.
+/// Use the `cd` parameter to set the command's working directory. Pass an absolute path when working outside the project. NEVER change directories as part of the `command` itself, otherwise it will error.
 ///
 /// Do not generate terminal commands that use shell substitutions or interpolations such as `$VAR`, `${VAR}`, `$(...)`, backticks, `$((...))`, `<(...)`, or `>(...)`. Resolve those values first or ask the user for the literal value to use.
 ///
@@ -409,7 +409,7 @@ pub struct SandboxedTerminalToolInput {
     ///
     /// REMINDER: read-only git commands (`git log`, `git diff`, `git show`, `git blame`) MUST include `--no-pager` (e.g. `git --no-pager log`). Prefer `git --no-optional-locks status` over `git status` to avoid optional metadata writes. Git commands that may open an editor (`git rebase`, `git commit`, `git merge`, `git tag`) MUST be prefixed with `GIT_EDITOR=true ` (e.g. `GIT_EDITOR=true git rebase origin/main`). Otherwise the terminal will hang.
     pub command: String,
-    /// Working directory for the command. This must be one of the root directories of the project.
+    /// Working directory for the command. Use a project root name, `.` for the thread's selected directory, or an absolute path.
     pub cd: String,
     /// Optional maximum runtime (in milliseconds). If exceeded, the running terminal task is killed.
     pub timeout_ms: Option<u64>,
@@ -1655,31 +1655,18 @@ fn working_dir(
 
     let input_path = Path::new(cd);
     let resolved_path = if input_path.is_absolute() {
-        project
-            .worktrees(cx)
-            .any(|worktree| input_path.starts_with(&worktree.read(cx).abs_path()))
-            .then(|| input_path.to_path_buf())
+        Some(input_path.to_path_buf())
     } else {
         project
             .worktree_for_root_name(cd, cx)
             .map(|worktree| worktree.read(cx).abs_path().to_path_buf())
     };
 
-    if let Some(resolved_path) = resolved_path
-        && selected_paths.is_none_or(|paths| {
-            paths
-                .iter()
-                .any(|selected_path| resolved_path.starts_with(selected_path))
-        })
-    {
+    if let Some(resolved_path) = resolved_path {
         return Ok(Some(resolved_path));
     }
 
-    if selected_paths.is_some() {
-        anyhow::bail!("`cd` directory {cd:?} was not in this thread's selected worktree.");
-    } else {
-        anyhow::bail!("`cd` directory {cd:?} was not in any of the project's worktrees.");
-    }
+    anyhow::bail!("`cd` directory {cd:?} was not a project root name or an absolute path.");
 }
 
 #[cfg(test)]
@@ -1727,7 +1714,7 @@ mod tests {
     }
 
     #[gpui::test]
-    async fn terminal_working_directory_is_scoped_to_the_threads_selected_worktree(
+    async fn terminal_working_directory_allows_explicit_paths_outside_the_selected_worktree(
         cx: &mut gpui::TestAppContext,
     ) {
         crate::tests::init_test(cx);
@@ -1746,9 +1733,16 @@ mod tests {
                     .expect("selected worktree should resolve"),
                 Some(PathBuf::from("/root-b"))
             );
-            let error = working_dir("/root-a", Some(&selected), &project, cx)
-                .expect_err("another project root must not route this thread's terminal");
-            assert!(error.to_string().contains("thread's selected worktree"));
+            assert_eq!(
+                working_dir("root-a", Some(&selected), &project, cx)
+                    .expect("another project root should resolve"),
+                Some(PathBuf::from("/root-a"))
+            );
+            assert_eq!(
+                working_dir("/outside", Some(&selected), &project, cx)
+                    .expect("an absolute path outside the project should resolve"),
+                Some(PathBuf::from("/outside"))
+            );
         });
     }
 

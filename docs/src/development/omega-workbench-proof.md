@@ -163,7 +163,8 @@ Selection tests also inject a connection-level cwd rejection and prove that
 binding, generation, metadata eligibility, and an old-target load are
 unchanged. Busy and connection-phase tests prove both button and keyboard
 actions are disabled, while the native terminal test proves `.` resolves to
-the selected worktree and another project root is rejected. A real
+the selected worktree and explicit project roots or absolute paths can select
+another command directory. A real
 multi-session partial-retarget test makes one session accept, another reject,
 and the first reject rollback; it then proves the rendered projection is
 `Inconsistent` and repository-bound actions stop. A recovery test reselects

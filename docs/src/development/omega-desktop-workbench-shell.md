@@ -595,12 +595,12 @@ forces that directory update through every session, even when it matches the
 last projected path, and clears the inconsistent state only after every
 session accepts it. That successful reconciliation advances the binding
 content epoch so pre-recovery completions cannot publish.
-The native terminal resolver reads those thread directories, uses the single
-selected worktree for `.`, and rejects an explicit cwd in another project
-root. ACP servers whose cwd is fixed when the session starts leave the
-repository/worktree controls disabled and explain that a new thread is
-required. Updating a client-side presentation field alone is not treated as
-proof that an agent session accepted the new target.
+The native terminal resolver reads those thread directories and uses the single
+selected worktree for `.`. An explicit project root or absolute path can run a
+command outside that selected worktree. ACP servers whose cwd is fixed when the
+session starts leave the repository/worktree controls disabled and explain that
+a new thread is required. Updating a client-side presentation field alone is
+not treated as proof that an agent session accepted the new target.
 
 Target selection is unavailable while the session-open request is loading,
 while any affected thread is generating or waiting for a permission or
