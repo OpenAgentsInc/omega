@@ -11057,7 +11057,7 @@ impl AgentPanel {
             .iter()
             .filter(|(_id, view)| {
                 let view = view.read(cx);
-                if view.submitted_message_is_waiting_for_session(cx) {
+                if view.submitted_message_is_waiting_for_metadata(cx) {
                     return false;
                 }
                 let Some(thread_view) = view.root_thread_view() else {
@@ -33118,7 +33118,9 @@ mod tests {
     }
 
     #[gpui::test]
-    async fn submitted_message_stays_in_sidebar_while_session_connects(cx: &mut TestAppContext) {
+    async fn submitted_message_stays_in_sidebar_until_metadata_is_promoted(
+        cx: &mut TestAppContext,
+    ) {
         init_test(cx);
         let fs = FakeFs::new(cx.executor());
         cx.update(|cx| {
@@ -33164,9 +33166,21 @@ mod tests {
             conversation.set_composer_text_for_tests("keep this conversation", window, cx);
             conversation.send_for_tests(window, cx);
             assert!(conversation.first_message_was_submitted_while_connecting());
-            assert!(conversation.submitted_message_is_waiting_for_session(cx));
+            assert!(conversation.submitted_message_is_waiting_for_metadata(cx));
+        });
+        cx.run_until_parked();
+
+        submitted_thread.read_with(cx, |conversation, cx| {
+            assert!(
+                conversation
+                    .root_thread(cx)
+                    .is_some_and(|thread| !thread.read(cx).is_draft_thread()),
+                "the session should exist before navigation exercises the metadata handoff"
+            );
         });
 
+        // Recreate the handoff window: ACP has created the session, but the
+        // sidebar metadata update has not landed yet.
         cx.update(|_, cx| {
             let worktree_paths = project.read(cx).worktree_paths(cx);
             ThreadMetadataStore::global(cx).update(cx, |store, cx| {
@@ -33190,6 +33204,9 @@ mod tests {
                     cx,
                 );
             });
+        });
+        submitted_thread.read_with(cx, |conversation, cx| {
+            assert!(conversation.submitted_message_is_waiting_for_metadata(cx));
         });
 
         panel.update_in(cx, |panel, window, cx| {

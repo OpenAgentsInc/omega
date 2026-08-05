@@ -27554,6 +27554,21 @@ mod tests {
              is Omega's job; `generate_worktree_name` is the fallback, not a person."
         );
 
+        let metadata = read_repository_file("crates/agent_ui/src/thread_metadata_store.rs");
+        for required in [
+            "fn migrate_linked_worktree_identities",
+            "resolve_git_worktree_to_main_repo",
+            "fn newly_isolated_worktree_keeps_the_original_project_identity",
+            "fn existing_isolated_worktree_identity_is_repaired",
+        ] {
+            assert!(
+                metadata.contains(required),
+                "OMEGA-DELTA-0214: thread isolation lost `{required}`. An isolated \
+                 conversation would then be grouped under its generated checkout and disappear \
+                 from the original project's sidebar."
+            );
+        }
+
         // 5. The whole start path is prompt-free. This is the assertion the
         //    owner's complaint reduces to.
         let thread_view = read_repository_file(ZERO_BASE_THREAD_VIEW_PATH);

@@ -67,6 +67,8 @@ impl Column for ThreadId {
 
 const THREAD_REMOTE_CONNECTION_MIGRATION_KEY: &str = "thread-metadata-remote-connection-backfill";
 const THREAD_ID_MIGRATION_KEY: &str = "thread-metadata-thread-id-backfill";
+const THREAD_LINKED_WORKTREE_IDENTITY_MIGRATION_KEY: &str =
+    "thread-metadata-linked-worktree-identity-v1";
 
 /// List all sidebar thread metadata from an arbitrary SQLite connection.
 ///
@@ -109,6 +111,7 @@ pub fn init(cx: &mut App) {
     let migration_task = migrate_thread_metadata(cx);
     migrate_thread_remote_connections(cx, migration_task);
     migrate_thread_ids(cx);
+    migrate_linked_worktree_identities(cx);
 }
 
 /// Migrate existing thread metadata from native agent thread store to the new metadata storage.
@@ -322,6 +325,69 @@ fn migrate_thread_ids(cx: &mut App) {
     .detach_and_log_err(cx);
 }
 
+fn migrate_linked_worktree_identities(cx: &mut App) {
+    let store = ThreadMetadataStore::global(cx);
+    let db = store.read(cx).db.clone();
+    let kvp = KeyValueStore::global(cx);
+    let fs = <dyn Fs>::global(cx);
+
+    cx.spawn(async move |cx| -> anyhow::Result<()> {
+        if kvp
+            .read_kvp(THREAD_LINKED_WORKTREE_IDENTITY_MIGRATION_KEY)?
+            .is_some()
+        {
+            return Ok(());
+        }
+
+        let rows = db.list()?;
+        let candidates: HashSet<PathBuf> = rows
+            .iter()
+            .filter(|metadata| metadata.remote_connection.is_none())
+            .flat_map(|metadata| metadata.worktree_paths.ordered_pairs())
+            .filter(|(main_path, folder_path)| main_path == folder_path)
+            .map(|(_, folder_path)| folder_path.clone())
+            .collect();
+        let mut resolved_main_paths = HashMap::default();
+        for folder_path in candidates {
+            if let Some(main_path) =
+                project::git_store::resolve_git_worktree_to_main_repo(fs.as_ref(), &folder_path)
+                    .await
+            {
+                resolved_main_paths.insert(folder_path, main_path);
+            }
+        }
+
+        let mut reloaded = false;
+        for metadata in rows {
+            if metadata.remote_connection.is_some() {
+                continue;
+            }
+            let worktree_paths =
+                worktree_paths_with_resolved_mains(&metadata.worktree_paths, &resolved_main_paths);
+            if worktree_paths == metadata.worktree_paths {
+                continue;
+            }
+            db.save(ThreadMetadata {
+                worktree_paths,
+                ..metadata
+            })
+            .await?;
+            reloaded = true;
+        }
+
+        if reloaded {
+            store.update(cx, |store, cx| store.reload(cx)).await;
+        }
+        kvp.write_kvp(
+            THREAD_LINKED_WORKTREE_IDENTITY_MIGRATION_KEY.to_string(),
+            "1".to_string(),
+        )
+        .await?;
+        Ok(())
+    })
+    .detach_and_log_err(cx);
+}
+
 struct GlobalThreadMetadataStore(Entity<ThreadMetadataStore>);
 impl Global for GlobalThreadMetadataStore {}
 
@@ -446,6 +512,14 @@ fn worktree_paths_for_work_dirs(
 
     let mut selected = WorktreePaths::default();
     for folder_path in work_dirs.ordered_paths() {
+        let inferred_main_paths: HashSet<&PathBuf> = existing
+            .into_iter()
+            .flat_map(WorktreePaths::ordered_pairs)
+            .chain(project.ordered_pairs())
+            .filter_map(|(main_path, _)| {
+                (main_path.file_name() == folder_path.file_name()).then_some(main_path)
+            })
+            .collect();
         let main_path = existing
             .and_then(|paths| {
                 paths
@@ -459,10 +533,32 @@ fn worktree_paths_for_work_dirs(
                     .find(|(_, folder)| *folder == folder_path)
                     .map(|(main, _)| main)
             })
+            .or_else(|| {
+                if inferred_main_paths.len() != 1 {
+                    return None;
+                }
+                inferred_main_paths.iter().next().copied()
+            })
             .unwrap_or(folder_path);
         selected.add_path(main_path, folder_path);
     }
     selected
+}
+
+fn worktree_paths_with_resolved_mains(
+    worktree_paths: &WorktreePaths,
+    resolved_main_paths: &HashMap<PathBuf, PathBuf>,
+) -> WorktreePaths {
+    let mut repaired = WorktreePaths::default();
+    for (main_path, folder_path) in worktree_paths.ordered_pairs() {
+        let main_path = if main_path == folder_path {
+            resolved_main_paths.get(folder_path).unwrap_or(main_path)
+        } else {
+            main_path
+        };
+        repaired.add_path(main_path, folder_path);
+    }
+    repaired
 }
 
 /// Derives worktree display info from a thread's stored path list.
@@ -4428,6 +4524,51 @@ mod tests {
         let selected = worktree_paths_for_work_dirs(Some(&existing), &project, Some(&work_dirs));
 
         assert_eq!(selected, existing);
+    }
+
+    #[test]
+    fn newly_isolated_worktree_keeps_the_original_project_identity() {
+        let existing = make_worktree_paths(&[("/projects/omega", "/projects/omega")]);
+        let project = existing.clone();
+        let work_dirs = PathList::new(&[PathBuf::from("/worktrees/polar-pier/omega")]);
+
+        let selected = worktree_paths_for_work_dirs(Some(&existing), &project, Some(&work_dirs));
+
+        assert_eq!(
+            selected
+                .ordered_pairs()
+                .map(|(main, folder)| (main.clone(), folder.clone()))
+                .collect::<Vec<_>>(),
+            vec![(
+                PathBuf::from("/projects/omega"),
+                PathBuf::from("/worktrees/polar-pier/omega")
+            )]
+        );
+    }
+
+    #[test]
+    fn existing_isolated_worktree_identity_is_repaired() {
+        let broken =
+            make_worktree_paths(&[("/worktrees/polar-pier/omega", "/worktrees/polar-pier/omega")]);
+        let resolved_main_paths = [(
+            PathBuf::from("/worktrees/polar-pier/omega"),
+            PathBuf::from("/projects/omega"),
+        )]
+        .into_iter()
+        .collect();
+
+        let repaired = worktree_paths_with_resolved_mains(&broken, &resolved_main_paths);
+
+        assert_eq!(
+            repaired
+                .ordered_pairs()
+                .map(|(main, folder)| (main.clone(), folder.clone()))
+                .collect::<Vec<_>>(),
+            vec![(
+                PathBuf::from("/projects/omega"),
+                PathBuf::from("/worktrees/polar-pier/omega")
+            )]
+        );
     }
 
     #[test]

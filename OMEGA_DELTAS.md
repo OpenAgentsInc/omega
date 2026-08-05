@@ -9616,6 +9616,13 @@ success is a distinct preserved status, not an automated pass.
 - **Deliberate isolation is a control, not a dialog.** The per-thread worktree
   picker gains **New worktree**, which provisions through the same path and
   retargets the active conversation.
+- **Isolation does not move the conversation to another project.** The linked
+  checkout becomes the thread's working folder, while its main-worktree path
+  remains the project where the conversation was created. The threads sidebar
+  groups by that main path, so switching away cannot make an isolated chat
+  disappear. A one-time metadata repair resolves linked checkouts through
+  Git's `commondir` and restores rows written before this invariant was
+  enforced.
 - **Known gap: no reaper.** A worktree provisioned for a draft the person then
   abandons — switching executor on an empty draft while another agent is live
   rebuilds the draft — stays on disk. So does an archived thread's.
@@ -9637,7 +9644,8 @@ success is a distinct preserved status, not an automated pass.
   `a_terminal_thread_does_not_occupy_its_root`, and
   `removing_a_snapshot_releases_its_binding` in
   `crates/agent_ui/src/omega_agent_supervision.rs`; the slug tests in
-  `crates/agent_ui/src/omega_thread_worktree.rs`;
+  `crates/agent_ui/src/omega_thread_worktree.rs`; the isolated-worktree
+  identity and migration tests in `crates/agent_ui/src/thread_metadata_store.rs`;
   `assert_no_worktree_collision_prompt` in the Agent Panel GPUI suite; and the
   `omega_concurrent_agents_worktree_no_dialog` visual scene.
 ### OMEGA-DELTA-0215 — Community Sarah never manufactures room authority

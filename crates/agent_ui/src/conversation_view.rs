@@ -3059,11 +3059,11 @@ impl ConversationView {
         self.first_message_submitted_while_connecting
     }
 
-    pub(crate) fn submitted_message_is_waiting_for_session(&self, cx: &App) -> bool {
+    pub(crate) fn submitted_message_is_waiting_for_metadata(&self, cx: &App) -> bool {
         self.first_message_submitted_while_connecting
-            && self
-                .root_thread(cx)
-                .is_none_or(|thread| thread.read(cx).is_draft_thread())
+            && ThreadMetadataStore::try_global(cx)
+                .and_then(|store| store.read(cx).entry(self.thread_id).cloned())
+                .is_none_or(|metadata| metadata.is_draft())
     }
 
     fn handle_thread_event(
