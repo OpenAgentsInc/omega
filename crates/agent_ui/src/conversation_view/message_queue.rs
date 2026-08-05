@@ -7,7 +7,7 @@ use omega_front_door::{
 };
 
 use crate::omega_send_queue::{
-    QueuedSend, SendQueueJournal, SendQueueProcessingState, SendQueueRefusal,
+    QueueDispatchIntent, QueuedSend, SendQueueJournal, SendQueueProcessingState, SendQueueRefusal,
 };
 
 use super::*;
@@ -99,8 +99,19 @@ pub struct MessageQueue {
     can_fast_track: bool,
     next_id: usize,
     durable: Option<DurableQueueBinding>,
-    pending_dispatch: Option<QueueEntryId>,
+    pending_dispatch: Option<PendingDispatch>,
     pending_dispatch_was_fast_track: bool,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct PendingDispatch {
+    id: QueueEntryId,
+    intent: QueueDispatchIntent,
+}
+
+pub(crate) struct QueuedEntryDispatch {
+    pub entry: QueueEntry,
+    pub cancel_running_turn: bool,
 }
 
 impl Default for MessageQueue {
@@ -362,7 +373,7 @@ impl MessageQueue {
         } else {
             Quiescence::Proven
         };
-        let candidate = self.select_front(quiescence)?;
+        let candidate = self.select_front(quiescence, QueueDispatchIntent::UserRequested)?;
         if candidate.is_some() {
             self.can_fast_track = false;
             self.pending_dispatch_was_fast_track = true;
@@ -384,7 +395,7 @@ impl MessageQueue {
                 if is_first_editor_focused {
                     Ok(None)
                 } else {
-                    self.select_front(Quiescence::Proven)
+                    self.select_front(Quiescence::Proven, QueueDispatchIntent::Automatic)
                 }
             }
         }
@@ -393,27 +404,21 @@ impl MessageQueue {
     pub fn send_now(
         &mut self,
         id: QueueEntryId,
-        is_generating: bool,
     ) -> Result<Option<QueueEntryId>, MessageQueueError> {
         let Some(index) = self.entries.iter().position(|entry| entry.id == id) else {
             return Ok(None);
-        };
-        let quiescence = if is_generating {
-            Quiescence::Running
-        } else {
-            Quiescence::Proven
         };
         let entry = &self.entries[index];
         if !entry.can_dispatch {
             return Err(MessageQueueError::UnsavedEntry);
         }
-        if quiescence == Quiescence::Running && !entry.disposition().reaches_running_turn() {
-            return Ok(None);
-        }
         if self.pending_dispatch.is_some() {
             return Ok(None);
         }
-        self.pending_dispatch = Some(id);
+        self.pending_dispatch = Some(PendingDispatch {
+            id,
+            intent: QueueDispatchIntent::UserRequested,
+        });
         Ok(Some(id))
     }
 
@@ -429,8 +434,11 @@ impl MessageQueue {
         &mut self,
         id: QueueEntryId,
         quiescence: Quiescence,
-    ) -> Result<Option<QueueEntry>, MessageQueueError> {
-        if self.pending_dispatch != Some(id) {
+    ) -> Result<Option<QueuedEntryDispatch>, MessageQueueError> {
+        let Some(pending_dispatch) = self.pending_dispatch else {
+            return Ok(None);
+        };
+        if pending_dispatch.id != id {
             return Ok(None);
         }
         let Some(index) = self.entries.iter().position(|entry| entry.id == id) else {
@@ -446,11 +454,17 @@ impl MessageQueue {
         } else {
             SendQueueProcessingState::AutoProcess
         };
+        let cancel_running_turn = quiescence == Quiescence::Running
+            && (pending_dispatch.intent == QueueDispatchIntent::UserRequested
+                || entry.disposition().reaches_running_turn());
         let Some(durable_item_id) = entry.durable_item_id.clone() else {
             self.set_processing_state(next_state)?;
             self.pending_dispatch = None;
             self.pending_dispatch_was_fast_track = false;
-            return Ok(self.entries.remove(index));
+            return Ok(self.entries.remove(index).map(|entry| QueuedEntryDispatch {
+                entry,
+                cancel_running_turn,
+            }));
         };
         let durable = self.durable()?;
         match durable.journal.claim_for_dispatch(
@@ -458,12 +472,16 @@ impl MessageQueue {
             &durable_item_id,
             quiescence,
             next_state,
+            pending_dispatch.intent,
         ) {
             Ok(_) => {
                 self.processing_state = next_state;
                 self.pending_dispatch = None;
                 self.pending_dispatch_was_fast_track = false;
-                Ok(self.entries.remove(index))
+                Ok(self.entries.remove(index).map(|entry| QueuedEntryDispatch {
+                    entry,
+                    cancel_running_turn,
+                }))
             }
             Err(SendQueueRefusal::NotQuiescent) => {
                 self.finish_dispatch_attempt(id);
@@ -474,7 +492,10 @@ impl MessageQueue {
     }
 
     pub(crate) fn finish_dispatch_attempt(&mut self, id: QueueEntryId) {
-        if self.pending_dispatch == Some(id) {
+        if self
+            .pending_dispatch
+            .is_some_and(|pending| pending.id == id)
+        {
             self.pending_dispatch = None;
             if self.pending_dispatch_was_fast_track {
                 self.can_fast_track = true;
@@ -486,6 +507,7 @@ impl MessageQueue {
     fn select_front(
         &mut self,
         quiescence: Quiescence,
+        intent: QueueDispatchIntent,
     ) -> Result<Option<QueueEntryId>, MessageQueueError> {
         if self.pending_dispatch.is_some() {
             return Ok(None);
@@ -496,11 +518,14 @@ impl MessageQueue {
         if !entry.can_dispatch {
             return Err(MessageQueueError::UnsavedEntry);
         }
-        if quiescence == Quiescence::Running && !entry.disposition().reaches_running_turn() {
+        if quiescence == Quiescence::Running
+            && intent == QueueDispatchIntent::Automatic
+            && !entry.disposition().reaches_running_turn()
+        {
             return Ok(None);
         }
         let id = entry.id;
-        self.pending_dispatch = Some(id);
+        self.pending_dispatch = Some(PendingDispatch { id, intent });
         Ok(Some(id))
     }
 
@@ -582,6 +607,7 @@ mod tests {
                     "item-1",
                     Quiescence::Running,
                     SendQueueProcessingState::AbsorbingCancel,
+                    QueueDispatchIntent::Automatic,
                 )
                 .expect("first item and mid-cancel state persisted atomically");
         }

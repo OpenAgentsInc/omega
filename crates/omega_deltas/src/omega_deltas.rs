@@ -24067,9 +24067,9 @@ mod tests {
             );
         }
         assert!(
-            thread_view.contains("let reaches_running_turn = entry.disposition()")
-                && thread_view.contains("let cancelled = if reaches_running_turn"),
-            "OMEGA-DELTA-0181: queued dispatch must use the promoted entry's durable disposition"
+            thread_view.contains("let cancel_running_turn = dispatch.cancel_running_turn")
+                && thread_view.contains("let cancelled = if cancel_running_turn"),
+            "OMEGA-DELTA-0181: queued dispatch must use the promotion's cancellation decision"
         );
 
         let queue = read_repository_file("crates/agent_ui/src/omega_send_queue.rs");

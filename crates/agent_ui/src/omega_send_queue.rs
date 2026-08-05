@@ -134,6 +134,12 @@ pub enum SendQueueProcessingState {
     AbsorbingCancel,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum QueueDispatchIntent {
+    Automatic,
+    UserRequested,
+}
+
 impl SendQueueProcessingState {
     const fn token(self) -> &'static str {
         match self {
@@ -439,14 +445,15 @@ impl SendQueueJournal {
 
     /// Claim an item immediately before dispatching it.
     ///
-    /// A running turn admits only an explicit send disposition that reaches
-    /// that turn. Ordinary queued input still requires proven quiescence.
-    pub fn claim_for_dispatch(
+    /// A running turn admits a user-requested dispatch or a disposition that
+    /// reaches that turn. Automatic queued input still requires quiescence.
+    pub(crate) fn claim_for_dispatch(
         &self,
         thread_id: &str,
         item_id: &str,
         quiescence: Quiescence,
         processing_state: SendQueueProcessingState,
+        intent: QueueDispatchIntent,
     ) -> Result<QueuedSend, SendQueueRefusal> {
         self.ensure_readable()?;
         let key = Self::key(thread_id, item_id);
@@ -461,7 +468,8 @@ impl SendQueueJournal {
         }
         let may_dispatch = previous_item.may_promote(quiescence)
             || (quiescence == Quiescence::Running
-                && previous_item.disposition().reaches_running_turn());
+                && (intent == QueueDispatchIntent::UserRequested
+                    || previous_item.disposition().reaches_running_turn()));
         if !may_dispatch {
             return Err(SendQueueRefusal::NotQuiescent);
         }
@@ -875,6 +883,47 @@ mod tests {
         assert!(
             journal
                 .promote("thread-1", "item-1", Quiescence::Proven)
+                .is_ok()
+        );
+    }
+
+    #[test]
+    fn only_user_requested_dispatch_claims_an_enqueue_during_a_running_turn() {
+        let (journal, _directory) = journal();
+        admit(
+            &journal,
+            "automatic-item",
+            SendCommand::Enqueue,
+            ExecutorClass::NativeLoop,
+            SteerCapability::Unknown,
+        );
+        assert_eq!(
+            journal.claim_for_dispatch(
+                "thread-1",
+                "automatic-item",
+                Quiescence::Running,
+                SendQueueProcessingState::AbsorbingCancel,
+                QueueDispatchIntent::Automatic,
+            ),
+            Err(SendQueueRefusal::NotQuiescent)
+        );
+
+        admit(
+            &journal,
+            "user-requested-item",
+            SendCommand::Enqueue,
+            ExecutorClass::NativeLoop,
+            SteerCapability::Unknown,
+        );
+        assert!(
+            journal
+                .claim_for_dispatch(
+                    "thread-1",
+                    "user-requested-item",
+                    Quiescence::Running,
+                    SendQueueProcessingState::AbsorbingCancel,
+                    QueueDispatchIntent::UserRequested,
+                )
                 .is_ok()
         );
     }

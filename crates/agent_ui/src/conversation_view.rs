@@ -6826,13 +6826,90 @@ pub(crate) mod tests {
             let entry = thread.message_queue.first().expect("queued image entry");
             assert!(entry.durable_item_id.is_none());
             assert!(entry.can_dispatch);
-            assert_eq!(thread.message_queue.send_now(id, false), Ok(Some(id)));
+            assert_eq!(thread.message_queue.send_now(id), Ok(Some(id)));
             let promoted = thread
                 .message_queue
                 .promote_for_dispatch(id, omega_front_door::Quiescence::Proven)
                 .expect("in-memory queue promotion")
                 .expect("queued image promoted");
-            assert_eq!(promoted.content, vec![image]);
+            assert_eq!(promoted.entry.content, vec![image]);
+            assert!(!promoted.cancel_running_turn);
+        });
+    }
+
+    #[gpui::test]
+    async fn enter_fast_tracks_an_ordinary_queued_message_while_generating(
+        cx: &mut TestAppContext,
+    ) {
+        init_test(cx);
+
+        let (conversation_view, cx) =
+            setup_conversation_view(StubAgentServer::default_response(), cx).await;
+        add_to_workspace(conversation_view.clone(), cx);
+
+        active_thread(&conversation_view, cx).update_in(cx, |thread, window, cx| {
+            thread
+                .add_to_queue(
+                    vec![acp::ContentBlock::Text(acp::TextContent::new("send next"))],
+                    Vec::new(),
+                    window,
+                    cx,
+                )
+                .expect("queued message");
+            assert!(
+                !thread
+                    .message_queue
+                    .first()
+                    .expect("queued entry")
+                    .disposition()
+                    .reaches_running_turn(),
+                "the test requires an ordinary enqueue entry"
+            );
+
+            let id = thread
+                .message_queue
+                .try_fast_track(true)
+                .expect("fast-track selection")
+                .expect("Enter should select the queued entry while generating");
+            let dispatch = thread
+                .message_queue
+                .promote_for_dispatch(id, omega_front_door::Quiescence::Running)
+                .expect("fast-track promotion")
+                .expect("fast-tracked entry");
+
+            assert!(dispatch.cancel_running_turn);
+        });
+    }
+
+    #[gpui::test]
+    async fn send_now_promotes_an_ordinary_queued_message_while_generating(
+        cx: &mut TestAppContext,
+    ) {
+        init_test(cx);
+
+        let (conversation_view, cx) =
+            setup_conversation_view(StubAgentServer::default_response(), cx).await;
+        add_to_workspace(conversation_view.clone(), cx);
+
+        active_thread(&conversation_view, cx).update_in(cx, |thread, window, cx| {
+            thread
+                .add_to_queue(
+                    vec![acp::ContentBlock::Text(acp::TextContent::new("send now"))],
+                    Vec::new(),
+                    window,
+                    cx,
+                )
+                .expect("queued message");
+            let id = thread.message_queue.first_id().expect("queued entry");
+            assert_eq!(thread.message_queue.send_now(id), Ok(Some(id)));
+
+            let dispatch = thread
+                .message_queue
+                .promote_for_dispatch(id, omega_front_door::Quiescence::Running)
+                .expect("Send Now promotion")
+                .expect("Send Now entry");
+
+            assert!(dispatch.cancel_running_turn);
         });
     }
 
@@ -6888,7 +6965,7 @@ pub(crate) mod tests {
             ));
             assert!(
                 matches!(
-                    thread.message_queue.send_now(id, false),
+                    thread.message_queue.send_now(id),
                     Err(MessageQueueError::UnsavedEntry)
                 ),
                 "Send Now must not dispatch the stale durable body under newer visible text"

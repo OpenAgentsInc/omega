@@ -3125,8 +3125,7 @@ impl ThreadView {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        let is_generating = self.thread.read(cx).status() == acp_thread::ThreadStatus::Generating;
-        match self.message_queue.send_now(id, is_generating) {
+        match self.message_queue.send_now(id) {
             Ok(Some(candidate)) => self.dispatch_queued_candidate(candidate, window, cx),
             Ok(None) => {}
             Err(error) => self.handle_message_queue_error(error, cx),
@@ -3173,9 +3172,9 @@ impl ThreadView {
     /// The shared "actually send this entry" path, used by fast-track,
     /// auto-processing on Stopped, and "Send Now". The entry must already have
     /// been removed from the queue.
-    pub fn dispatch_queued_entry(
+    pub(crate) fn dispatch_queued_entry(
         &mut self,
-        entry: QueueEntry,
+        dispatch: QueuedEntryDispatch,
         worktree_claim: Option<WorktreeClaimToken>,
         window: &mut Window,
         cx: &mut Context<Self>,
@@ -3186,7 +3185,8 @@ impl ThreadView {
 
         self.message_editor.focus_handle(cx).focus(window, cx);
 
-        let reaches_running_turn = entry.disposition().reaches_running_turn();
+        let cancel_running_turn = dispatch.cancel_running_turn;
+        let entry = dispatch.entry;
         let content = entry.content;
         let tracked_buffers = entry.tracked_buffers;
 
@@ -3205,13 +3205,12 @@ impl ThreadView {
             })
             .is_some();
 
-        // `OMEGA-DELTA-0032`. A dispatch cancels the running turn only when
-        // this executor's declared answer is to reach it. An enqueue, and any
-        // steer the law refused, is promoted after the turn is quiescent — it
-        // never cancels one. Cancelling unconditionally here is what turned a
-        // refused steer into an interrupted turn on the two classes that were
-        // never asked.
-        let cancelled = if reaches_running_turn {
+        // `OMEGA-DELTA-0032`. Promotion records whether this dispatch was an
+        // explicit user request or an automatic disposition that reaches the
+        // running turn. Keeping that decision with the promoted entry prevents
+        // passive enqueues from interrupting a turn while allowing Enter and
+        // Send Now to do so.
+        let cancelled = if cancel_running_turn {
             self.thread.update(cx, |thread, cx| thread.cancel(cx))
         } else {
             Task::ready(())
