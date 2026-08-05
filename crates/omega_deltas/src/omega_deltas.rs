@@ -17310,18 +17310,32 @@ mod tests {
         let rows_path = repository_path(THREADS_SIDEBAR_PATH);
         let rows_source = read_repository_file(THREADS_SIDEBAR_PATH);
         let indented = with_free_functions_indented(&rows_source);
-        // `body_of` finds `fn name(`, and this one is `pub fn rows<'a>(`. The
-        // generic parameter is between the name and the paren, so the helper
-        // misses it — and `OMEGA-DELTA-0090`'s rule says a check that cannot
-        // find its subject must fail rather than pass, which is why this reads
-        // it explicitly instead of falling back to the whole file.
-        let rows = rows_source
+        let rows_wrapper = rows_source
             .split("pub fn rows<")
             .nth(1)
             .map(|rest| rest.split("\npub fn ").next().unwrap_or(rest))
             .unwrap_or_else(|| {
                 panic!(
                     "OMEGA-DELTA-0118: `pub fn rows` is gone from {}.",
+                    rows_path.display()
+                )
+            });
+        assert!(
+            rows_wrapper.contains("rows_with_submitted_drafts("),
+            "OMEGA-DELTA-0118: `rows` in {} no longer delegates to the row-set \
+             implementation that retains submitted drafts while they connect.",
+            rows_path.display()
+        );
+        // `body_of` finds `fn name(`, and this one has a generic parameter
+        // between its name and the paren. Read it explicitly so a missing
+        // subject fails instead of making the assertions search the whole file.
+        let rows = rows_source
+            .split("pub fn rows_with_submitted_drafts<")
+            .nth(1)
+            .map(|rest| rest.split("\npub fn ").next().unwrap_or(rest))
+            .unwrap_or_else(|| {
+                panic!(
+                    "OMEGA-DELTA-0118: `pub fn rows_with_submitted_drafts` is gone from {}.",
                     rows_path.display()
                 )
             });
@@ -26905,11 +26919,15 @@ mod tests {
         );
 
         let tier = read_repository_file(OMEGA_MODEL_TIER_PATH);
+        let select_before_session = body_of(&tier, "select_before_session");
+        let select_model_before_session = body_of(&tier, "select_model_before_session");
         assert!(
             tier.contains("pub fn select_before_session(")
-                && body_of(&tier, "select_before_session").contains("set_model("),
+                && select_before_session.contains("select_model_before_session(")
+                && select_model_before_session.contains("update_settings_file(")
+                && select_model_before_session.contains("set_model(selection)"),
             "OMEGA-DELTA-0204: {} no longer writes the settings default when a \
-             tier is chosen before the session exists. That control then moves \
+             model is chosen before the session exists. That control then moves \
              its own label and nothing else, which is OMEGA-DELTA-0202's defect \
              reintroduced one composer earlier.",
             repository_path(OMEGA_MODEL_TIER_PATH).display()
