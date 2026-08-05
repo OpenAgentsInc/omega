@@ -24973,6 +24973,12 @@ mod tests {
             "OMEGA-DELTA-0189: SettingsWindow must handle CloseWindow (Escape) \
              by removing itself."
         );
+        assert!(
+            settings.contains(".when(self.embedded, |surface| {")
+                && settings.contains("omega_actions::CloseEmbeddedSettings.boxed_clone()"),
+            "OMEGA-DELTA-0189: the embedded Settings route must handle CloseWindow \
+             (Escape) by re-dispatching CloseEmbeddedSettings."
+        );
         for keymap in [
             "assets/keymaps/default-macos.json",
             "assets/keymaps/default-linux.json",

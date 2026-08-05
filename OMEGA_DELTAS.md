@@ -8444,7 +8444,10 @@ startup recheck — survives unchanged behind that dropdown.
   presentation half of `OMEGA-DELTA-0181`.
 - **Escape closes every modal/auxiliary window.** Settings
   (`crates/settings_ui`) handles `workspace::CloseWindow` (the keymap binding
-  for Escape in the `SettingsWindow` context) by removing its own window.
+  for Escape in the `SettingsWindow` context) by removing its own window. The
+  embedded Settings route (the Omega shell's Settings page) re-dispatches
+  `CloseEmbeddedSettings` instead — the same action its Back control sends —
+  so Escape leaves the route without closing the shell's window.
 - **Why:** the owner hit the Automatic/Omega routing control and the
   "route selected when sent" status and rejected both as unclear exposition.
   Status words next to every thread row are noise; colors carry the same

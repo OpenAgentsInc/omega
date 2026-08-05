@@ -27343,6 +27343,40 @@ mod tests {
         );
     }
 
+    /// The `SettingsWindow` keymap context binds Escape to
+    /// `workspace::CloseWindow`. The embedded Settings route must re-route
+    /// that to `omega::CloseEmbeddedSettings` — the same action its Back
+    /// control sends — instead of letting the action reach the workspace's
+    /// window-close path. OMEGA-DELTA-0189.
+    #[gpui::test]
+    async fn escape_closes_the_embedded_settings_route(cx: &mut TestAppContext) {
+        let (panel, mut cx) = setup_visible_panel(cx).await;
+        let cx = &mut cx;
+
+        panel.update_in(cx, |panel, window, cx| {
+            panel.force_omega_primary_interface_for_tests = true;
+            panel.open_omega_settings(false, window, cx);
+        });
+        cx.run_until_parked();
+
+        assert!(
+            panel.read_with(cx, |panel, _| panel.omega_settings.is_some()),
+            "precondition: the embedded Settings route is open"
+        );
+
+        // Opening the route focuses the Settings search bar, so the dispatch
+        // reaches the embedded Settings surface without an explicit focus
+        // step. The `SettingsWindow` keymap context binds Escape to
+        // CloseWindow (OMEGA-DELTA-0189 checks all three shipped keymaps).
+        cx.dispatch_action(workspace::CloseWindow);
+        cx.run_until_parked();
+
+        assert!(
+            panel.read_with(cx, |panel, _| panel.omega_settings.is_none()),
+            "Escape (CloseWindow) must close the embedded Settings route"
+        );
+    }
+
     /// omega#217. The independent VoiceOver pass renamed a thread and changed
     /// route and heard nothing either time: "no live region exists; thread
     /// rename and route change are silent".
@@ -28109,6 +28143,13 @@ mod tests {
 
         let mut cx = VisualTestContext::from_window(multi_workspace.into(), cx);
         register_test_sidebar(threads_list_active, &mut cx);
+
+        // The embedded Settings route reads `AppState::global` (settings_ui
+        // resolves the user store and workspace store through it), but the
+        // workspace test helper builds its AppState without registering it.
+        // Register the real one so Settings can open in these tests.
+        let app_state = workspace.read_with(&cx, |workspace, _| workspace.app_state().clone());
+        cx.update(|_window, cx| workspace::AppState::set_global(app_state, cx));
 
         let panel = workspace.update_in(&mut cx, |workspace, window, cx| {
             let panel = cx.new(|cx| AgentPanel::new(workspace, window, cx));

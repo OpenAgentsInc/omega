@@ -5008,11 +5008,22 @@ impl Render for SettingsWindow {
                     // Escape (and cmd/ctrl-w) bind to `workspace::CloseWindow`
                     // in the SettingsWindow keymap context. Handle it here —
                     // Settings is not a Workspace, so the multi-workspace
-                    // close path never sees the action. OMEGA-DELTA-0189.
+                    // close path never sees the action. A standalone window
+                    // removes itself; the embedded route is owned by the shell,
+                    // so its Escape re-dispatches the same action the Back
+                    // control sends. OMEGA-DELTA-0189.
                     .when(!self.embedded, |surface| {
                         surface.on_action(|_: &CloseWindow, window, _cx| {
                             window.remove_window();
                         })
+                    })
+                    .when(self.embedded, |surface| {
+                        surface.on_action(cx.listener(|_, _: &CloseWindow, window, cx| {
+                            window.dispatch_action(
+                                omega_actions::CloseEmbeddedSettings.boxed_clone(),
+                                cx,
+                            );
+                        }))
                     })
                     .on_action(cx.listener(|this, _: &OpenCurrentFile, window, cx| {
                         this.open_current_settings_file(window, cx);
