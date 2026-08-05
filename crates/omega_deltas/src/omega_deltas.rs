@@ -7763,6 +7763,8 @@ mod tests {
     fn the_composer_decides_a_mid_turn_send_through_the_law() {
         let path = repository_path(CONVERSATION_SEND_PATH);
         let source = std::fs::read_to_string(&path).expect("the composer is readable");
+        let message_queue =
+            read_repository_file("crates/agent_ui/src/conversation_view/message_queue.rs");
         assert!(
             source.contains("omega_front_door::disposition("),
             "OMEGA-DELTA-0035: {} no longer calls the send law. Deciding a              mid-turn send in the view is the upstream behaviour this delta              replaces.",
@@ -7773,8 +7775,10 @@ mod tests {
             "OMEGA-DELTA-0035: the boundary flag must be set from the law's              own answer, not from a steer flag the other two classes never see."
         );
         assert!(
-            source.contains(".reaches_running_turn()"),
-            "OMEGA-DELTA-0035: {} must gate its cancel on whether this              executor's declared answer reaches the running turn. An              unconditional cancel turns a refused steer into an interrupted              turn.",
+            message_queue.contains("entry.disposition().reaches_running_turn()")
+                && source.contains("let cancel_running_turn = dispatch.cancel_running_turn")
+                && source.contains("let cancelled = if cancel_running_turn"),
+            "OMEGA-DELTA-0035: {} must consume the queue promotion's cancellation decision, and automatic promotion must derive that decision from whether the executor's declared answer reaches the running turn. An unconditional cancel turns a refused steer into an interrupted turn.",
             path.display()
         );
     }
