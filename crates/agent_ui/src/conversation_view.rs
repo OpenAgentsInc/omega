@@ -874,6 +874,9 @@ pub struct ConversationView {
     /// `ServerState::Loading`, so a connection that terminally fails carries
     /// the text into `LoadError` instead of dropping it with the state.
     pending_connect_messages: Vec<PendingConnectMessage>,
+    /// Stays true after the pending vector is handed to the connected queue so
+    /// sidebar visibility cannot flicker before thread metadata is promoted.
+    first_message_submitted_while_connecting: bool,
     /// When settings change, use this to see if the theme has changed (which
     /// causes mermaid diagrams to re-render).
     last_theme_id: Option<String>,
@@ -1589,6 +1592,7 @@ impl ConversationView {
             deferred_omega_session: None,
             omega_route_summary: None,
             pending_connect_messages: Vec::new(),
+            first_message_submitted_while_connecting: false,
             last_theme_id: Some(cx.theme().id.clone()),
             draft_prompt_persist_task: None,
             send_queue_journal,
@@ -1845,6 +1849,7 @@ impl ConversationView {
         });
         self.pending_connect_messages
             .push(PendingConnectMessage { text, content });
+        self.first_message_submitted_while_connecting = true;
         cx.notify();
         true
     }
@@ -3048,6 +3053,17 @@ impl ConversationView {
                 .draft_prompt()
                 .is_some_and(|blocks| !blocks.is_empty())
         })
+    }
+
+    pub(crate) fn first_message_was_submitted_while_connecting(&self) -> bool {
+        self.first_message_submitted_while_connecting
+    }
+
+    pub(crate) fn submitted_message_is_waiting_for_session(&self, cx: &App) -> bool {
+        self.first_message_submitted_while_connecting
+            && self
+                .root_thread(cx)
+                .is_none_or(|thread| thread.read(cx).is_draft_thread())
     }
 
     fn handle_thread_event(
@@ -9414,7 +9430,7 @@ pub(crate) mod tests {
         assert!(
             contents
                 .values()
-                .any(|mention| matches!(mention, Mention::Image(_)))
+                .any(|(_, mention)| matches!(mention, Mention::Image(_)))
         );
     }
 

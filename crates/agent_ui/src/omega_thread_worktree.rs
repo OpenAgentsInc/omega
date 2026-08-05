@@ -122,6 +122,7 @@ pub fn worktree_name_for_thread(title: Option<&str>) -> Option<String> {
     if title.is_empty()
         || title == crate::DEFAULT_THREAD_TITLE
         || title == crate::LEGACY_DEFAULT_THREAD_TITLE
+        || title == "Loading…"
     {
         return None;
     }
@@ -248,5 +249,6 @@ mod tests {
         );
         assert_eq!(worktree_name_for_thread(Some("!!!")), None);
         assert_eq!(worktree_name_for_thread(Some("2026-07-31")), None);
+        assert_eq!(worktree_name_for_thread(Some("Loading…")), None);
     }
 }

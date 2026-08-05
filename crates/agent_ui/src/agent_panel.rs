@@ -8431,7 +8431,17 @@ impl AgentPanel {
             .external_agents()
             .cloned()
             .collect();
-        omega_threads_sidebar::rows(
+        let submitted_drafts = self
+            .conversation_views()
+            .into_iter()
+            .filter_map(|conversation| {
+                let conversation = conversation.read(cx);
+                conversation
+                    .first_message_was_submitted_while_connecting()
+                    .then_some(conversation.thread_id)
+            })
+            .collect();
+        omega_threads_sidebar::rows_with_submitted_drafts(
             store.read(cx).entries().filter(|thread| {
                 thread.main_worktree_paths() == &project_paths
                     && thread.matches_remote_connection(project_host.as_ref())
@@ -8439,6 +8449,7 @@ impl AgentPanel {
             Utc::now(),
             &omega_executor_selector::unavailable_here(),
             &registered,
+            &submitted_drafts,
         )
     }
 
@@ -10971,12 +10982,7 @@ impl AgentPanel {
             return;
         }
 
-        // The thread still uses the default placeholder here — its title comes
-        // from the first message — so this hint is almost always `None` and the
-        // adjective-noun generator names the worktree. Nobody is asked.
-        let title = conversation_view.read(cx).title(cx);
-        let name_hint = crate::omega_thread_worktree::worktree_name_for_thread(Some(&title));
-        let provisioning = crate::omega_thread_worktree::provision(project, name_hint, cx);
+        let provisioning = crate::omega_thread_worktree::provision(project, None, cx);
         let task = cx
             .background_spawn(async move {
                 match provisioning.await {
@@ -11050,7 +11056,11 @@ impl AgentPanel {
             .retained_threads
             .iter()
             .filter(|(_id, view)| {
-                let Some(thread_view) = view.read(cx).root_thread_view() else {
+                let view = view.read(cx);
+                if view.submitted_message_is_waiting_for_session(cx) {
+                    return false;
+                }
+                let Some(thread_view) = view.root_thread_view() else {
                     return true;
                 };
                 let thread = thread_view.read(cx).thread.read(cx);
@@ -33105,6 +33115,109 @@ mod tests {
             active_text, None,
             "fresh ephemeral draft should start empty, not carry the parked draft's prompt"
         );
+    }
+
+    #[gpui::test]
+    async fn submitted_message_stays_in_sidebar_while_session_connects(cx: &mut TestAppContext) {
+        init_test(cx);
+        let fs = FakeFs::new(cx.executor());
+        cx.update(|cx| {
+            agent::ThreadStore::init_global(cx);
+            language_model::LanguageModelRegistry::test(cx);
+            <dyn fs::Fs>::set_global(fs.clone(), cx);
+            cx.set_global(MaxIdleRetainedThreads(0));
+        });
+
+        fs.insert_tree("/project", json!({ "file.txt": "" })).await;
+        let project = Project::test(fs, [Path::new("/project")], cx).await;
+        let multi_workspace =
+            cx.add_window(|window, cx| MultiWorkspace::test_new(project.clone(), window, cx));
+        let workspace = multi_workspace
+            .read_with(cx, |multi_workspace, _cx| {
+                multi_workspace.workspace().clone()
+            })
+            .expect("test workspace");
+        workspace.update(cx, |workspace, _cx| workspace.set_random_database_id());
+        let cx = &mut VisualTestContext::from_window(multi_workspace.into(), cx);
+        let panel = workspace.update_in(cx, |workspace, window, cx| {
+            let panel = cx.new(|cx| AgentPanel::new(workspace, window, cx));
+            workspace.add_panel(panel.clone(), window, cx);
+            panel
+        });
+
+        panel.update_in(cx, |panel, window, cx| {
+            panel.open_draft_with_server(
+                Rc::new(StubAgentServer::new(StubAgentConnection::new())),
+                window,
+                cx,
+            );
+        });
+        let submitted_thread = panel.read_with(cx, |panel, _cx| {
+            panel
+                .active_conversation_view()
+                .expect("active connecting conversation")
+                .clone()
+        });
+        let submitted_thread_id =
+            submitted_thread.read_with(cx, |conversation, _cx| conversation.thread_id);
+        submitted_thread.update_in(cx, |conversation, window, cx| {
+            conversation.set_composer_text_for_tests("keep this conversation", window, cx);
+            conversation.send_for_tests(window, cx);
+            assert!(conversation.first_message_was_submitted_while_connecting());
+            assert!(conversation.submitted_message_is_waiting_for_session(cx));
+        });
+
+        cx.update(|_, cx| {
+            let worktree_paths = project.read(cx).worktree_paths(cx);
+            ThreadMetadataStore::global(cx).update(cx, |store, cx| {
+                store.save(
+                    crate::thread_metadata_store::ThreadMetadata {
+                        thread_id: submitted_thread_id,
+                        session_id: None,
+                        agent_id: submitted_thread.read(cx).agent_key().id(),
+                        conversation_owner_version:
+                            crate::thread_metadata_store::ConversationOwnerVersion::V1,
+                        title: Some("keep this conversation".into()),
+                        title_override: None,
+                        updated_at: Utc::now(),
+                        created_at: Some(Utc::now()),
+                        interacted_at: Some(Utc::now()),
+                        worktree_paths,
+                        remote_connection: project.read(cx).remote_connection_options(cx),
+                        archived: false,
+                        lifecycle: Default::default(),
+                    },
+                    cx,
+                );
+            });
+        });
+
+        panel.update_in(cx, |panel, window, cx| {
+            panel.new_thread(&NewThread, window, cx);
+        });
+
+        panel.read_with(cx, |panel, cx| {
+            assert!(panel.retained_threads.contains_key(&submitted_thread_id));
+            assert!(
+                panel
+                    .omega_sidebar_thread_rows(cx)
+                    .iter()
+                    .any(|row| row.thread_id == submitted_thread_id),
+                "an accepted first message must stay in the sidebar before its session id arrives"
+            );
+        });
+        panel.update_in(cx, |panel, window, cx| {
+            panel.activate_retained_thread(submitted_thread_id, true, window, cx);
+        });
+        panel.read_with(cx, |panel, cx| {
+            assert_eq!(panel.active_thread_id(cx), Some(submitted_thread_id));
+            assert!(
+                panel
+                    .active_conversation_view()
+                    .is_some_and(|active| active.entity_id() == submitted_thread.entity_id()),
+                "the sidebar row must reactivate the retained connecting conversation"
+            );
+        });
     }
 
     /// When the user is viewing a *parked* draft (selected from the

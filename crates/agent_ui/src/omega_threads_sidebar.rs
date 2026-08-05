@@ -31,6 +31,7 @@
 //! unit test. The drawing lives in `agent_panel.rs` beside the state it toggles.
 
 use chrono::{DateTime, Utc};
+use collections::HashSet;
 use gpui::SharedString;
 use omega_front_door::ExecutorClass;
 use project::AgentId;
@@ -105,8 +106,9 @@ impl ThreadRow {
 ///
 /// Drafts are excluded. A draft is a thread whose first message was never sent
 /// — it has no session id and therefore no transcript — and the owner asked for
-/// historical chats. A list whose top row is the empty composer he is currently
-/// looking at would bury the thing he opened it to find.
+/// historical chats. A first message accepted while an executor is connecting
+/// is the exception: it has no session id yet, but it is already a conversation
+/// and remains listed while session creation catches up.
 ///
 /// Archived threads are excluded for the same reason they are excluded
 /// everywhere else: archiving is the act of saying "not in the list".
@@ -123,9 +125,27 @@ pub fn rows<'a>(
     unavailable: &[(SelectableExecutor, &'static str)],
     registered_agents: &[AgentId],
 ) -> Vec<ThreadRow> {
+    rows_with_submitted_drafts(
+        entries,
+        now,
+        unavailable,
+        registered_agents,
+        &HashSet::default(),
+    )
+}
+
+/// Includes sessionless conversations whose first message was accepted while
+/// their executor was still connecting.
+pub fn rows_with_submitted_drafts<'a>(
+    entries: impl Iterator<Item = &'a ThreadMetadata>,
+    now: DateTime<Utc>,
+    unavailable: &[(SelectableExecutor, &'static str)],
+    registered_agents: &[AgentId],
+    submitted_drafts: &HashSet<ThreadId>,
+) -> Vec<ThreadRow> {
     let mut listed: Vec<&ThreadMetadata> = entries
         .filter(|thread| !thread.archived)
-        .filter(|thread| !thread.is_draft())
+        .filter(|thread| !thread.is_draft() || submitted_drafts.contains(&thread.thread_id))
         .collect();
 
     // Creation time is immutable, so reading or resuming a conversation cannot
@@ -407,6 +427,24 @@ mod tests {
 
         assert_eq!(rows.len(), 1);
         assert_eq!(rows[0].title.as_ref(), "sent");
+    }
+
+    #[test]
+    fn a_submitted_draft_is_listed_while_its_session_is_connecting() {
+        let now = at(10);
+        let submitted = thread("first message", omega(), at(9), false);
+        let submitted_drafts = [submitted.thread_id].into_iter().collect();
+
+        let rows = rows_with_submitted_drafts(
+            [&submitted].into_iter(),
+            now,
+            ALL_READY,
+            &[],
+            &submitted_drafts,
+        );
+
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].thread_id, submitted.thread_id);
     }
 
     #[test]
