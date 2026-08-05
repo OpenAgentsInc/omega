@@ -156,14 +156,26 @@ pub fn select(tier: ModelTier) {
 /// provider finishes loading gets Pro — with the conservative defaults the
 /// model's own capabilities would otherwise supply.
 pub fn select_before_session(tier: ModelTier, fs: std::sync::Arc<dyn fs::Fs>, cx: &mut App) {
+    select(tier);
+    select_model_before_session(tier.agent_model_id(), fs, cx);
+}
+
+pub fn select_model_before_session(
+    agent_model_id: &str,
+    fs: std::sync::Arc<dyn fs::Fs>,
+    cx: &mut App,
+) {
     use agent_settings::{AgentSettings, language_model_to_selection};
     use language_model::{LanguageModelId, LanguageModelProviderId, LanguageModelRegistry};
     use settings::{LanguageModelSelection, Settings as _, update_settings_file};
 
-    select(tier);
+    let Some((provider_name, model_name)) = agent_model_id.split_once('/') else {
+        log::error!("omega_model_tier: invalid agent model id {agent_model_id}");
+        return;
+    };
 
-    let provider_id = LanguageModelProviderId::from(tier.provider_id().to_owned());
-    let model_id = LanguageModelId::from(tier.model_id().to_owned());
+    let provider_id = LanguageModelProviderId::from(provider_name.to_owned());
+    let model_id = LanguageModelId::from(model_name.to_owned());
     // `try_global`, not `read_global`: a tier choice is not worth panicking
     // over, and a process without a registry — a test harness, or a window
     // drawn before the providers install — must still write the pair.
@@ -180,19 +192,17 @@ pub fn select_before_session(tier: ModelTier, fs: std::sync::Arc<dyn fs::Fs>, cx
     let favorite = AgentSettings::get_global(cx)
         .favorite_models
         .iter()
-        .find(|favorite| {
-            favorite.provider.0 == tier.provider_id() && favorite.model == tier.model_id()
-        })
+        .find(|favorite| favorite.provider.0 == provider_name && favorite.model == model_name)
         .cloned();
 
     let selection = match model {
         Some(model) => language_model_to_selection(&model, favorite.as_ref()),
         None => LanguageModelSelection {
-            provider: tier.provider_id().to_owned().into(),
-            model: tier.model_id().to_owned(),
+            provider: provider_name.to_owned().into(),
+            model: model_name.to_owned(),
             ..favorite.unwrap_or_else(|| LanguageModelSelection {
-                provider: tier.provider_id().to_owned().into(),
-                model: tier.model_id().to_owned(),
+                provider: provider_name.to_owned().into(),
+                model: model_name.to_owned(),
                 enable_thinking: false,
                 effort: None,
                 speed: None,
@@ -285,6 +295,7 @@ pub struct RoutedFace {
     pub label: SharedString,
     pub model_name: SharedString,
     pub tier: Option<ModelTier>,
+    pub agent_model_id: SharedString,
 }
 
 impl RoutedFace {
@@ -296,11 +307,19 @@ impl RoutedFace {
                 label: SharedString::from(tier.name()),
                 model_name: SharedString::from(tier.model_name()),
                 tier: Some(tier),
+                agent_model_id: SharedString::from(tier.agent_model_id()),
+            },
+            None if provider_id == "deepseek" && model_id == "deepseek-v4-flash" => Self {
+                label: "DeepSeek V4 Flash".into(),
+                model_name: "DeepSeek V4 Flash".into(),
+                tier: None,
+                agent_model_id: "deepseek/deepseek-v4-flash".into(),
             },
             None => Self {
                 label: SharedString::from(model_id.to_owned()),
                 model_name: SharedString::from(model_id.to_owned()),
                 tier: None,
+                agent_model_id: SharedString::from(format!("{provider_id}/{model_id}")),
             },
         }
     }
@@ -315,6 +334,7 @@ impl RoutedFace {
             label: SharedString::from(standing.name()),
             model_name: SharedString::from(standing.model_name()),
             tier: Some(standing),
+            agent_model_id: SharedString::from(standing.agent_model_id()),
         }
     }
 
@@ -407,12 +427,21 @@ mod tests {
         let face = RoutedFace::for_model("anthropic", "claude-sonnet-4");
         assert_eq!(face.tier, None);
         assert_eq!(face.label.as_ref(), "claude-sonnet-4");
+        assert_eq!(face.agent_model_id.as_ref(), "anthropic/claude-sonnet-4");
         assert!(
             !ModelTier::ALL
                 .iter()
                 .any(|tier| tier.name() == face.label.as_ref()),
             "an off-chain fallback rung must not borrow a tier name"
         );
+    }
+
+    #[test]
+    fn deepseek_v4_flash_uses_its_display_name() {
+        let face = RoutedFace::for_model("deepseek", "deepseek-v4-flash");
+        assert_eq!(face.label.as_ref(), "DeepSeek V4 Flash");
+        assert_eq!(face.model_name.as_ref(), "DeepSeek V4 Flash");
+        assert_eq!(face.agent_model_id.as_ref(), "deepseek/deepseek-v4-flash");
     }
 
     #[test]

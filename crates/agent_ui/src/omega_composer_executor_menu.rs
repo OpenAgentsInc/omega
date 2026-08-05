@@ -45,6 +45,9 @@ use workspace::Workspace;
 use crate::agent_panel::{AgentPanel, ComposerExecutorRow};
 use crate::omega_model_tier::{ModelTier, RoutedFace};
 
+const DEEPSEEK_PROVIDER_ID: &str = "deepseek";
+const DEEPSEEK_V4_FLASH_AGENT_MODEL_ID: &str = "deepseek/deepseek-v4-flash";
+
 #[derive(Clone)]
 pub struct ComposerModelOption {
     pub id: acp_thread::AgentModelId,
@@ -83,21 +86,11 @@ impl ComposerModelPicker {
     pub fn omega(
         face: RoutedFace,
         enabled: bool,
-        on_select: Rc<dyn Fn(ModelTier, &mut Window, &mut App)>,
+        on_select: Rc<dyn Fn(acp_thread::AgentModelId, &mut Window, &mut App)>,
+        cx: &App,
     ) -> Self {
-        let current_model = face
-            .tier
-            .map(|tier| acp_thread::AgentModelId::new(tier.agent_model_id()));
-        let models = ModelTier::ALL
-            .iter()
-            .copied()
-            .map(|tier| ComposerModelOption {
-                id: acp_thread::AgentModelId::new(tier.agent_model_id()),
-                name: tier.model_name().into(),
-                description: Some(tier.description().into()),
-                disabled: false,
-            })
-            .collect();
+        let current_model = Some(acp_thread::AgentModelId::new(face.agent_model_id));
+        let models = omega_model_options(deepseek_is_authenticated(cx));
         Self {
             label: face.label,
             current_model,
@@ -105,17 +98,41 @@ impl ComposerModelPicker {
             traits: Vec::new(),
             enabled,
             empty_message: "Choose a model for the next turn.".into(),
-            on_select: Rc::new(move |model_id, window, cx| {
-                if let Some(tier) = ModelTier::ALL
-                    .iter()
-                    .copied()
-                    .find(|tier| tier.agent_model_id() == model_id.as_str())
-                {
-                    on_select(tier, window, cx);
-                }
-            }),
+            on_select,
         }
     }
+}
+
+fn deepseek_is_authenticated(cx: &App) -> bool {
+    use language_model::{LanguageModelProviderId, LanguageModelRegistry};
+
+    let provider_id = LanguageModelProviderId::from(DEEPSEEK_PROVIDER_ID.to_owned());
+    LanguageModelRegistry::try_global(cx)
+        .and_then(|registry| registry.read(cx).provider(&provider_id))
+        .is_some_and(|provider| provider.is_authenticated(cx))
+}
+
+fn omega_model_options(include_deepseek: bool) -> Vec<ComposerModelOption> {
+    let mut models = Vec::new();
+    for tier in ModelTier::ALL.iter().copied() {
+        models.push(ComposerModelOption {
+            id: acp_thread::AgentModelId::new(tier.agent_model_id()),
+            name: tier.model_name().into(),
+            description: Some(tier.description().into()),
+            disabled: false,
+        });
+        if tier == ModelTier::Luna && include_deepseek {
+            models.push(ComposerModelOption {
+                id: acp_thread::AgentModelId::new(DEEPSEEK_V4_FLASH_AGENT_MODEL_ID),
+                name: "DeepSeek V4 Flash".into(),
+                description: Some(
+                    "DeepSeek V4 Flash — uses your DeepSeek API key directly.".into(),
+                ),
+                disabled: false,
+            });
+        }
+    }
+    models
 }
 
 /// The popover handles behind every composer executor dropdown, one per
@@ -949,6 +966,35 @@ impl Render for OmegaComposerModelMenu {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn deepseek_v4_flash_is_only_curated_for_authenticated_users() {
+        let models_without_deepseek = omega_model_options(false);
+        assert!(
+            models_without_deepseek
+                .iter()
+                .all(|model| model.id.as_str() != DEEPSEEK_V4_FLASH_AGENT_MODEL_ID)
+        );
+
+        let models_with_deepseek = omega_model_options(true);
+        assert_eq!(
+            models_with_deepseek
+                .iter()
+                .map(|model| model.id.as_str())
+                .collect::<Vec<_>>(),
+            vec![
+                ModelTier::Luna.agent_model_id(),
+                DEEPSEEK_V4_FLASH_AGENT_MODEL_ID,
+                ModelTier::Flash.agent_model_id(),
+                ModelTier::Pro.agent_model_id(),
+            ]
+        );
+        let deepseek = models_with_deepseek
+            .iter()
+            .find(|model| model.id.as_str() == DEEPSEEK_V4_FLASH_AGENT_MODEL_ID)
+            .expect("the authenticated DeepSeek option is present");
+        assert_eq!(deepseek.name.as_ref(), "DeepSeek V4 Flash");
+    }
 
     /// The two headers say different things because they do different
     /// things: re-homing an unbound draft is not starting a second thread.

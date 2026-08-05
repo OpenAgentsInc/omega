@@ -14832,19 +14832,24 @@ impl ThreadView {
             let mut picker = crate::omega_composer_executor_menu::ComposerModelPicker::omega(
                 face,
                 enabled,
-                Rc::new(move |tier, _window, cx| {
-                    select(tier);
+                Rc::new(move |model_id, _window, cx| {
+                    if let Some(tier) = crate::omega_model_tier::ModelTier::ALL
+                        .iter()
+                        .copied()
+                        .find(|tier| tier.agent_model_id() == model_id.as_str())
+                    {
+                        select(tier);
+                    }
                     if let Some(entity) = model_selector.as_ref() {
                         let agent = entity.read(cx).agent_selector();
-                        let model_id = AgentModelId::new(tier.agent_model_id());
                         agent.select_model(model_id, cx).detach_and_log_err(cx);
                     } else {
                         log::warn!(
-                            "omega_model_tier: chose {} but this thread has no model selector",
-                            tier.name()
+                            "omega_model_tier: chose a model but this thread has no model selector"
                         );
                     }
                 }),
+                cx,
             );
             if let Some(thread) = self.as_native_thread(cx) {
                 let (supports_disabling, thinking_enabled, selected_effort, effort_levels) = {

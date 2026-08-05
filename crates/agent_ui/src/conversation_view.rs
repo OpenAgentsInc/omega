@@ -4707,9 +4707,21 @@ impl ConversationView {
             crate::omega_composer_executor_menu::ComposerModelPicker::omega(
                 face_for_next_turn(None, selected(), cx),
                 true,
-                Rc::new(move |tier, _window, cx| {
-                    crate::omega_model_tier::select_before_session(tier, fs.clone(), cx);
+                Rc::new(move |model_id, _window, cx| {
+                    if let Some(tier) = crate::omega_model_tier::ModelTier::ALL
+                        .iter()
+                        .copied()
+                        .find(|tier| tier.agent_model_id() == model_id.as_str())
+                    {
+                        crate::omega_model_tier::select(tier);
+                    }
+                    crate::omega_model_tier::select_model_before_session(
+                        model_id.as_str(),
+                        fs.clone(),
+                        cx,
+                    );
                 }),
+                cx,
             )
         } else {
             crate::omega_composer_executor_menu::ComposerModelPicker {
@@ -10607,6 +10619,54 @@ pub(crate) mod tests {
         );
 
         crate::omega_model_tier::clear_selection_for_test();
+    }
+
+    #[gpui::test]
+    async fn a_direct_model_chosen_before_the_session_exists_moves_the_model(
+        cx: &mut TestAppContext,
+    ) {
+        init_test(cx);
+
+        let fs = FakeFs::new(cx.executor());
+        fs.create_dir(
+            paths::settings_file()
+                .parent()
+                .expect("settings have a parent"),
+        )
+        .await
+        .expect("the settings directory is creatable");
+        fs.insert_file(
+            paths::settings_file(),
+            json!({ "agent": { "default_model": { "provider": "openagents", "model": "gpt-5.6-luna" } } })
+                .to_string()
+                .into_bytes(),
+        )
+        .await;
+
+        cx.update(|cx| {
+            crate::omega_model_tier::select_model_before_session(
+                "deepseek/deepseek-v4-flash",
+                fs.clone(),
+                cx,
+            );
+        });
+        cx.run_until_parked();
+
+        let settings = fs
+            .load(paths::settings_file())
+            .await
+            .expect("the settings file is readable");
+        let settings: serde_json::Value =
+            serde_json::from_str(&settings).expect("the settings file stays valid JSON");
+
+        assert_eq!(
+            settings["agent"]["default_model"]["provider"],
+            json!("deepseek")
+        );
+        assert_eq!(
+            settings["agent"]["default_model"]["model"],
+            json!("deepseek-v4-flash")
+        );
     }
 
     pub(crate) fn init_test(cx: &mut TestAppContext) {
