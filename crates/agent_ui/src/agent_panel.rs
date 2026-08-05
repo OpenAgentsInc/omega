@@ -8329,6 +8329,12 @@ impl AgentPanel {
             .then_some(OMEGA_SIDEBAR_WIDTH)
             .unwrap_or_default();
         self.sidebar.open = !self.sidebar.open;
+        let sidebar_open = self.sidebar.open;
+        if let Some(settings) = self.omega_settings.as_ref() {
+            settings.update(cx, |settings, cx| {
+                settings.set_embedded_sidebar_open(sidebar_open, cx);
+            });
+        }
         if omega_zero_base::is_primary_interface() {
             let omega_to = self
                 .sidebar
@@ -18786,8 +18792,14 @@ impl AgentPanel {
         self.omega_unavailable_surface = None;
         if self.omega_settings.is_none() {
             let original_window = window.window_handle().downcast::<MultiWorkspace>();
+            let sidebar_open = self.sidebar.open;
             self.omega_settings = Some(cx.new(|cx| {
-                settings_ui::SettingsWindow::new_embedded_omega(original_window, window, cx)
+                settings_ui::SettingsWindow::new_embedded_omega(
+                    original_window,
+                    sidebar_open,
+                    window,
+                    cx,
+                )
             }));
         }
         if record_history {
@@ -27282,6 +27294,42 @@ mod tests {
                 .any(|(role, label)| role == "TreeItem"
                     && label.starts_with("Select working folder ")),
             "the working-folder row must be reachable: {tree}"
+        );
+    }
+
+    #[gpui::test]
+    async fn embedded_settings_sidebar_toggle_reaches_the_shell(cx: &mut TestAppContext) {
+        let (panel, mut cx) = setup_visible_panel(cx).await;
+        let cx = &mut cx;
+        cx.update(|_, cx| cx.set_reduce_motion(true));
+
+        panel.update_in(cx, |panel, window, cx| {
+            panel.force_omega_primary_interface_for_tests = true;
+            if !panel.sidebar.open {
+                panel.toggle_threads_sidebar(cx);
+            }
+            panel.open_omega_settings(false, window, cx);
+        });
+        cx.run_until_parked();
+
+        assert!(panel.read_with(cx, |panel, _| panel.sidebar.open));
+        cx.simulate_click_selector("omega.settings.toggle-sidebar")
+            .expect("the embedded Settings sidebar toggle should accept a click");
+        cx.run_until_parked();
+
+        assert!(
+            !panel.read_with(cx, |panel, _| panel.sidebar.open),
+            "the Settings control must route to AgentPanel's sidebar state"
+        );
+        let snapshot = cx.debug_render_snapshot();
+        let settings_sidebar = snapshot
+            .occurrences("omega.omega.settings-sidebar")
+            .first()
+            .expect("the clipped Settings sidebar should remain in the element tree");
+        assert_eq!(
+            settings_sidebar.visibility,
+            gpui::DebugVisibility::FullyClipped,
+            "the Settings navigation must collapse with the shell sidebar state"
         );
     }
 

@@ -33,7 +33,7 @@ use std::{
     path::PathBuf,
     rc::Rc,
     sync::{Arc, LazyLock, RwLock},
-    time::Duration,
+    time::{Duration, Instant},
 };
 use theme_settings::ThemeSettings;
 use ui::{
@@ -72,6 +72,82 @@ const CONTENT_GROUP_TAB_INDEX: isize = 5;
 
 const SIDEBAR_WIDTH: Pixels = px(226.);
 const CONTENT_MIN_WIDTH: Pixels = px(400.);
+const OMEGA_SETTINGS_SIDEBAR_WIDTH: f32 = 256.;
+const OMEGA_SETTINGS_SIDEBAR_RESIZE_DURATION: Duration = Duration::from_millis(200);
+const TOGGLE_THREADS_SIDEBAR_ACTION: &str = "agent::ToggleThreadsSidebar";
+
+#[derive(Clone, Copy, Debug)]
+struct OmegaSettingsSidebarTween {
+    from: f32,
+    to: f32,
+    started: Instant,
+}
+
+impl OmegaSettingsSidebarTween {
+    fn new(from: f32, to: f32) -> Self {
+        Self {
+            from,
+            to,
+            started: Instant::now(),
+        }
+    }
+
+    fn value(self, now: Instant, reduce_motion: bool) -> (f32, bool) {
+        if reduce_motion {
+            return (self.to, false);
+        }
+        let progress = now.saturating_duration_since(self.started).as_secs_f32()
+            / OMEGA_SETTINGS_SIDEBAR_RESIZE_DURATION.as_secs_f32();
+        if progress >= 1. {
+            return (self.to, false);
+        }
+        let progress = omega_settings_sidebar_ease_out(progress);
+        (self.from + (self.to - self.from) * progress, true)
+    }
+}
+
+fn omega_settings_sidebar_ease_out(progress: f32) -> f32 {
+    fn coefficients(first: f32, second: f32) -> (f32, f32, f32) {
+        let c = 3. * first;
+        let b = 3. * (second - first) - c;
+        (1. - c - b, b, c)
+    }
+
+    fn sample((a, b, c): (f32, f32, f32), time: f32) -> f32 {
+        ((a * time + b) * time + c) * time
+    }
+
+    let progress = progress.clamp(0., 1.);
+    if progress == 0. || progress == 1. {
+        return progress;
+    }
+
+    let x = coefficients(0., 0.58);
+    let y = coefficients(0., 1.);
+    let mut time = progress;
+    for _ in 0..8 {
+        let error = sample(x, time) - progress;
+        if error.abs() < 1e-6 {
+            return sample(y, time).clamp(0., 1.);
+        }
+        let derivative = (3. * x.0 * time + 2. * x.1) * time + x.2;
+        if derivative.abs() < 1e-6 {
+            break;
+        }
+        time -= error / derivative;
+    }
+
+    let (mut low, mut high) = (0., 1.);
+    for _ in 0..32 {
+        let midpoint = (low + high) / 2.;
+        if sample(x, midpoint) < progress {
+            low = midpoint;
+        } else {
+            high = midpoint;
+        }
+    }
+    sample(y, (low + high) / 2.).clamp(0., 1.)
+}
 
 actions!(
     settings_editor,
@@ -994,6 +1070,8 @@ fn active_language_mut() -> Option<std::sync::RwLockWriteGuard<'static, Option<S
 pub struct SettingsWindow {
     kind: SettingsWindowKind,
     embedded: bool,
+    embedded_sidebar_open: bool,
+    embedded_sidebar_tween: Option<OmegaSettingsSidebarTween>,
     title_bar: Option<Entity<PlatformTitleBar>>,
     original_window: Option<WindowHandle<MultiWorkspace>>,
     files: Vec<(SettingsUiFile, FocusHandle)>,
@@ -2058,6 +2136,8 @@ impl SettingsWindow {
         let mut this = Self {
             kind,
             embedded: false,
+            embedded_sidebar_open: true,
+            embedded_sidebar_tween: None,
             title_bar,
             original_window,
 
@@ -2133,13 +2213,41 @@ impl SettingsWindow {
     /// Omega treats Settings as a shell route, not as another OS window.
     pub fn new_embedded_omega(
         original_window: Option<WindowHandle<MultiWorkspace>>,
+        sidebar_open: bool,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> Self {
         let mut this = Self::new_with_kind(SettingsWindowKind::Omega, original_window, window, cx);
         this.embedded = true;
+        this.embedded_sidebar_open = sidebar_open;
         this.navigate_to_sub_page("llm_providers", window, cx);
         this
+    }
+
+    pub fn set_embedded_sidebar_open(&mut self, sidebar_open: bool, cx: &mut Context<Self>) {
+        if self.embedded_sidebar_open == sidebar_open {
+            return;
+        }
+
+        let now = Instant::now();
+        let from = self
+            .embedded_sidebar_tween
+            .map(|tween| tween.value(now, cx.reduce_motion()).0)
+            .unwrap_or_else(|| {
+                if self.embedded_sidebar_open {
+                    OMEGA_SETTINGS_SIDEBAR_WIDTH
+                } else {
+                    0.
+                }
+            });
+        let to = if sidebar_open {
+            OMEGA_SETTINGS_SIDEBAR_WIDTH
+        } else {
+            0.
+        };
+        self.embedded_sidebar_open = sidebar_open;
+        self.embedded_sidebar_tween = Some(OmegaSettingsSidebarTween::new(from, to));
+        cx.notify();
     }
 
     /// Recompute what the External Agents page shows about pins and
@@ -3555,12 +3663,10 @@ impl SettingsWindow {
     }
 
     fn render_omega_nav(
-        &self,
-        _window: &mut Window,
+        &mut self,
+        window: &mut Window,
         cx: &mut Context<SettingsWindow>,
     ) -> AnyElement {
-        const OMEGA_SETTINGS_SIDEBAR_WIDTH: f32 = 256.;
-
         let colors = cx.theme().colors();
         let selected_background = colors.element_selected;
         let hover_background = colors.ghost_element_hover;
@@ -3613,7 +3719,22 @@ impl SettingsWindow {
             })
             .collect::<Vec<_>>();
 
-        v_flex()
+        let sidebar_target = if self.embedded_sidebar_open {
+            OMEGA_SETTINGS_SIDEBAR_WIDTH
+        } else {
+            0.
+        };
+        let (sidebar_width, sidebar_animating) = self
+            .embedded_sidebar_tween
+            .map(|tween| tween.value(Instant::now(), cx.reduce_motion()))
+            .unwrap_or((sidebar_target, false));
+        if sidebar_animating {
+            window.request_animation_frame();
+        } else {
+            self.embedded_sidebar_tween = None;
+        }
+
+        let sidebar = v_flex()
             .id("omega-omega-settings-sidebar")
             .debug_selector(|| "omega.omega.settings-sidebar".into())
             .key_context("NavigationMenu")
@@ -3637,18 +3758,19 @@ impl SettingsWindow {
                             "toggle-settings-sidebar",
                             IconName::ThreadsSidebarLeftOpen,
                         )
+                        .debug_selector(|| "omega.settings.toggle-sidebar".into())
                         .shape(IconButtonShape::Square)
                         .icon_size(IconSize::Small)
                         .tooltip(Tooltip::text("Collapse settings sidebar"))
-                        .on_click(cx.listener(|this, _, window, cx| {
-                            if let Some(original_window) = this.original_window {
-                                original_window
-                                    .update(cx, |multi_workspace, original_window, cx| {
-                                        multi_workspace.toggle_sidebar(original_window, cx);
-                                    })
-                                    .log_err();
-                            }
-                            window.activate_window();
+                        .on_click(cx.listener(|_, _, window, cx| {
+                            window.defer(cx, |window, cx| {
+                                match cx.build_action(TOGGLE_THREADS_SIDEBAR_ACTION, None) {
+                                    Ok(action) => window.dispatch_action(action, cx),
+                                    Err(error) => {
+                                        log::error!("failed to toggle settings sidebar: {error}")
+                                    }
+                                }
+                            });
                         })),
                     ),
             )
@@ -3703,7 +3825,14 @@ impl SettingsWindow {
                         )
                         .child("Back"),
                 ),
-            )
+            );
+
+        div()
+            .w(px(sidebar_width))
+            .h_full()
+            .flex_none()
+            .overflow_hidden()
+            .child(sidebar)
             .into_any_element()
     }
 
@@ -5686,6 +5815,42 @@ mod zero_base_gate {
 }
 
 #[cfg(test)]
+mod omega_settings_sidebar_motion_tests {
+    use super::*;
+
+    #[test]
+    fn settings_sidebar_tween_matches_shell_timing_and_reduced_motion() {
+        let started = Instant::now();
+        let tween = OmegaSettingsSidebarTween {
+            from: OMEGA_SETTINGS_SIDEBAR_WIDTH,
+            to: 0.,
+            started,
+        };
+
+        assert_eq!(
+            tween.value(started, false),
+            (OMEGA_SETTINGS_SIDEBAR_WIDTH, true)
+        );
+        assert_eq!(
+            tween.value(started + OMEGA_SETTINGS_SIDEBAR_RESIZE_DURATION, false),
+            (0., false)
+        );
+        assert_eq!(tween.value(started, true), (0., false));
+    }
+
+    #[test]
+    fn settings_sidebar_ease_out_is_bounded_and_monotonic() {
+        let mut previous = 0.;
+        for step in 0..=1_000 {
+            let value = omega_settings_sidebar_ease_out(step as f32 / 1_000.);
+            assert!((0.0..=1.).contains(&value));
+            assert!(value >= previous);
+            previous = value;
+        }
+    }
+}
+
+#[cfg(test)]
 pub mod test {
 
     use super::*;
@@ -5705,6 +5870,8 @@ pub mod test {
             Self {
                 kind: SettingsWindowKind::Legacy,
                 embedded: false,
+                embedded_sidebar_open: true,
+                embedded_sidebar_tween: None,
                 title_bar: None,
                 original_window: None,
                 worktree_root_dirs: HashMap::default(),
@@ -5849,6 +6016,8 @@ pub mod test {
         let mut settings_window = SettingsWindow {
             kind: SettingsWindowKind::Legacy,
             embedded: false,
+            embedded_sidebar_open: true,
+            embedded_sidebar_tween: None,
             title_bar: None,
             original_window: None,
             worktree_root_dirs: HashMap::default(),
