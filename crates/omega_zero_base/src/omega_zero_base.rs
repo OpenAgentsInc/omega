@@ -82,12 +82,12 @@ static LOGGED_REFUSALS: AtomicU64 = AtomicU64::new(0);
 /// - `markdown` is copying out of the transcript.
 /// - `omega_workbench` owns the desktop activity rail and work-surface dock.
 ///
-/// Terminal, pane, buffer-search, and workspace actions remain absent here.
+/// Terminal, pane, buffer-search, and workspace namespaces remain absent here.
 /// The workbench terminal admits terminal input and search actions
 /// individually below. Terminal creation uses `omega_workbench`'s
-/// thread-bound wrapper instead of admitting a workspace action. Pane actions
-/// stay refused because this process-wide gate cannot prove they were
-/// dispatched from the terminal.
+/// thread-bound wrapper instead of admitting a workspace action. The standard
+/// close-active-item action is admitted individually for editor items revealed
+/// beside the agent surface; other pane actions remain refused.
 ///
 /// `OMEGA-DELTA-0052` removed `omega_zero_base` from this list. That namespace
 /// held one action, `Leave`, and there is no leaving now. An admitted namespace
@@ -334,6 +334,10 @@ pub const ADMITTED_ACTIONS: &[&str] = &[
     "buffer_search::Dismiss",
     "buffer_search::FocusEditor",
     "buffer_search::UseSelectionForFind",
+    // The center editor is a supported auxiliary surface. Its standard close
+    // action also routes correctly while the agent dock retains focus, and
+    // closing the final item restores the agent-only surface.
+    "pane::CloseActiveItem",
     "omega::About",
     "omega::AcpRegistry",
     "omega::DecreaseBufferFontSize",
@@ -630,6 +634,7 @@ mod tests {
             "workroom::RetryVoice",
             "workspace::ToggleVimMode",
             "workspace::Save",
+            "pane::CloseActiveItem",
         ] {
             assert!(admits_action(admitted), "{admitted} must be admitted");
         }
@@ -653,7 +658,6 @@ mod tests {
             "pane::ActivateLastItem",
             "pane::ActivateNextItem",
             "pane::ActivatePreviousItem",
-            "pane::CloseActiveItem",
             "pane::CloseAllItems",
             "pane::SplitDown",
             "pane::SplitLeft",

@@ -22174,6 +22174,17 @@ mod tests {
             "OMEGA-DELTA-0174: a default-surface handler bypasses the semantic user-open boundary"
         );
 
+        let zero_base = read_repository_file("crates/omega_zero_base/src/omega_zero_base.rs");
+        let admitted_actions = zero_base
+            .split_once("pub const ADMITTED_ACTIONS: &[&str] = &[")
+            .and_then(|(_, source)| source.split_once("];"))
+            .map(|(actions, _)| actions)
+            .expect("OMEGA-DELTA-0174: cannot find the admitted action list");
+        assert!(
+            admitted_actions.contains("\"pane::CloseActiveItem\""),
+            "OMEGA-DELTA-0174: the action gate prevents closing a revealed center item"
+        );
+
         let documentation =
             read_repository_file("docs/src/development/omega-desktop-workbench-shell.md");
         for required in [
