@@ -830,6 +830,12 @@ pub struct ConversationView {
     /// `OMEGA-DELTA-0122`. Handed to the real composer the moment one exists —
     /// see [`ConversationView::hand_loading_draft_over`] — and dropped there.
     loading_composer: Option<Entity<Editor>>,
+    /// Files dropped while the pre-session composer is visible.
+    ///
+    /// That composer is intentionally a plain [`Editor`], so it cannot own
+    /// resolved mentions. Keep the project paths alive until the session's
+    /// [`MessageEditor`] exists and can resolve them with its capabilities.
+    pending_dragged_files: Vec<(Vec<project::ProjectPath>, Vec<Entity<project::Worktree>>)>,
     /// Whether the pre-session composer is expanded to most of the window.
     ///
     /// `OMEGA-DELTA-0204`. `ThreadView` keeps the same bit as `editor_expanded`.
@@ -1576,6 +1582,7 @@ impl ConversationView {
             auth_task: None,
             loading_status: None,
             loading_composer: None,
+            pending_dragged_files: Vec::new(),
             loading_composer_expanded: false,
             vim_mode_indicator,
             pending_executor_rebuild: None,
@@ -1768,32 +1775,34 @@ impl ConversationView {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        let Some(loading_composer) = self.loading_composer.take() else {
-            return;
-        };
-
-        let (text, cursor_offset) = loading_composer.update(cx, |editor, cx| {
-            let snapshot = editor.display_snapshot(cx);
-            let cursor = editor
-                .selections
-                .newest::<MultiBufferOffset>(&snapshot)
-                .head();
-            (editor.text(cx), cursor.0)
-        });
-        if text.is_empty() {
-            return;
+        let message_editor = thread_view.read(cx).message_editor.clone();
+        if let Some(loading_composer) = self.loading_composer.take() {
+            let (text, cursor_offset) = loading_composer.update(cx, |editor, cx| {
+                let snapshot = editor.display_snapshot(cx);
+                let cursor = editor
+                    .selections
+                    .newest::<MultiBufferOffset>(&snapshot)
+                    .head();
+                (editor.text(cx), cursor.0)
+            });
+            if !text.is_empty() {
+                message_editor.update(cx, |message_editor, cx| {
+                    if message_editor.is_empty(cx) {
+                        message_editor.insert_text(&text, window, cx);
+                        message_editor.set_cursor_offset(cursor_offset, window, cx);
+                    } else {
+                        message_editor.set_cursor_offset(usize::MAX, window, cx);
+                        message_editor.insert_text(&format!("\n\n{text}"), window, cx);
+                    }
+                });
+            }
         }
 
-        let message_editor = thread_view.read(cx).message_editor.clone();
-        message_editor.update(cx, |message_editor, cx| {
-            if message_editor.is_empty(cx) {
-                message_editor.insert_text(&text, window, cx);
-                message_editor.set_cursor_offset(cursor_offset, window, cx);
-            } else {
-                message_editor.set_cursor_offset(usize::MAX, window, cx);
-                message_editor.insert_text(&format!("\n\n{text}"), window, cx);
-            }
-        });
+        for (paths, added_worktrees) in self.pending_dragged_files.drain(..) {
+            message_editor.update(cx, |message_editor, cx| {
+                message_editor.insert_dragged_files(paths, added_worktrees, window, cx);
+            });
+        }
     }
 
     /// The executor the pending turns are waiting on, named the way the
@@ -3010,6 +3019,7 @@ impl ConversationView {
     /// for a connection, and turns already handed to the connected queue.
     pub fn has_unsubmitted_or_pending_content(&self, cx: &App) -> bool {
         if !self.pending_connect_messages.is_empty()
+            || !self.pending_dragged_files.is_empty()
             || self
                 .loading_composer
                 .as_ref()
@@ -5348,7 +5358,7 @@ impl ConversationView {
     }
 
     pub(crate) fn insert_dragged_files(
-        &self,
+        &mut self,
         paths: Vec<project::ProjectPath>,
         added_worktrees: Vec<Entity<project::Worktree>>,
         window: &mut Window,
@@ -5361,6 +5371,8 @@ impl ConversationView {
                     editor.focus_handle(cx).focus(window, cx);
                 })
             });
+        } else {
+            self.pending_dragged_files.push((paths, added_worktrees));
         }
     }
 
@@ -5954,6 +5966,7 @@ pub(crate) mod tests {
 
     use crate::agent_panel;
     use crate::completion_provider::AgentContextSource;
+    use crate::mention_set::Mention;
     use crate::test_support::register_test_sidebar;
     use crate::thread_metadata_store::ThreadMetadataStore;
 
@@ -8584,6 +8597,25 @@ pub(crate) mod tests {
         fs.insert_tree(util::paths::home_dir().as_path(), serde_json::json!({}))
             .await;
         let project = Project::test(fs, [], cx).await;
+        setup_conversation_view_with_project_without_settling(
+            agent,
+            agent_key,
+            initial_content,
+            thread_id,
+            project,
+            cx,
+        )
+        .await
+    }
+
+    async fn setup_conversation_view_with_project_without_settling(
+        agent: impl AgentServer + 'static,
+        agent_key: Agent,
+        initial_content: Option<AgentInitialContent>,
+        thread_id: Option<ThreadId>,
+        project: Entity<Project>,
+        cx: &mut TestAppContext,
+    ) -> (Entity<ConversationView>, &mut VisualTestContext) {
         let (multi_workspace, cx) =
             cx.add_window_view(|window, cx| MultiWorkspace::test_new(project.clone(), window, cx));
         let workspace = multi_workspace.read_with(cx, |mw, _| mw.workspace().clone());
@@ -9320,6 +9352,69 @@ pub(crate) mod tests {
             message_editor(&conversation_view, cx).read_with(cx, |editor, cx| editor.text(cx)),
             "pointerinput",
             "the loaded composer must receive mouse focus and typed text"
+        );
+    }
+
+    #[gpui::test]
+    async fn image_dropped_while_connecting_is_attached_after_loading(cx: &mut TestAppContext) {
+        init_test(cx);
+
+        use base64::Engine as _;
+        let image_bytes = base64::prelude::BASE64_STANDARD
+            .decode("iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNkYPhfDwAChwGA60e6kgAAAABJRU5ErkJggg==")
+            .expect("decode test image");
+        let fs = FakeFs::new(cx.executor());
+        fs.insert_file("/project/dropped.png", image_bytes).await;
+        let project = Project::test(fs, [Path::new("/project")], cx).await;
+        let image_path = project.read_with(cx, |project, cx| {
+            project
+                .project_path_for_absolute_path(Path::new("/project/dropped.png"), cx)
+                .expect("test image should be in the project")
+        });
+        let (conversation_view, cx) = setup_conversation_view_with_project_without_settling(
+            StubAgentServer::new(StubAgentConnection::new()),
+            Agent::Custom { id: "Test".into() },
+            None,
+            None,
+            project,
+            cx,
+        )
+        .await;
+
+        conversation_view.update_in(cx, |view, window, cx| {
+            assert!(view.active_thread().is_none());
+            view.insert_dragged_files(vec![image_path], Vec::new(), window, cx);
+            assert_eq!(view.pending_dragged_files.len(), 1);
+            assert!(view.has_unsubmitted_or_pending_content(cx));
+        });
+        cx.run_until_parked();
+
+        let editor = message_editor(&conversation_view, cx);
+        let expected_uri = MentionUri::File {
+            abs_path: PathBuf::from("/project/dropped.png"),
+        }
+        .to_uri()
+        .to_string();
+        assert_eq!(
+            editor.read_with(cx, |editor, cx| editor.text(cx)),
+            format!("[@dropped.png]({expected_uri}) ")
+        );
+        conversation_view.read_with(cx, |view, _| {
+            assert!(view.pending_dragged_files.is_empty());
+        });
+
+        let contents = editor
+            .update(cx, |editor, cx| {
+                editor
+                    .mention_set()
+                    .update(cx, |mention_set, cx| mention_set.contents(false, cx))
+            })
+            .await
+            .expect("resolve dropped image mention");
+        assert!(
+            contents
+                .values()
+                .any(|mention| matches!(mention, Mention::Image(_)))
         );
     }
 
