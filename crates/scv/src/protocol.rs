@@ -15,7 +15,7 @@ use crate::error::{ToolError, method_not_found_error};
 use crate::read::{ReadInput, ReadOutput, parse_read_input};
 
 pub const AGENT_NAME: &str = "scv";
-pub const AGENT_TITLE: &str = "Space Construction Vehicle";
+pub const AGENT_TITLE: &str = "SCV";
 pub const AGENT_VERSION: &str = env!("CARGO_PKG_VERSION");
 pub const READ_TOOL_NAME: &str = "read";
 
