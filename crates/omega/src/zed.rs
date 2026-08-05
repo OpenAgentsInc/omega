@@ -766,6 +766,23 @@ pub(crate) fn initialize_panels(
             .context("failed to load Sarah voice owner")
             .log_err();
 
+        // Development-gated NIP-MKT Markets panel (omega#244); absent from
+        // normal builds until the negotiated session flow is implemented.
+        if market_ui::market_panel_enabled() {
+            if let Some(market_panel) =
+                market_ui::MarketPanel::load(workspace_handle.clone(), cx.clone())
+                    .await
+                    .context("failed to load the Markets panel")
+                    .log_err()
+            {
+                workspace_handle
+                    .update_in(cx, |workspace, window, cx| {
+                        workspace.add_panel(market_panel, window, cx);
+                    })
+                    .log_err();
+            }
+        }
+
         workspace_handle
             .update_in(cx, |workspace, window, cx| {
                 workspace.open_panel::<agent_ui::AgentPanel>(window, cx);
@@ -6104,6 +6121,7 @@ mod tests {
             );
             agent_computer_ui::init(cx);
             workroom_ui::init(cx);
+            market_ui::init(cx);
             initialize_workspace(app_state.clone(), cx);
             search::init(cx);
             lsp_locations::init(cx);

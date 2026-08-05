@@ -142,6 +142,7 @@ languages = { workspace = true, features = ["load-grammars"] }
 log.workspace = true
 lsp_locations.workspace = true
 markdown.workspace = true
+market_ui.workspace = true
 menu.workspace = true
 migrator.workspace = true
 mimalloc = { version = "0.1", optional = true }

@@ -102,6 +102,7 @@ members = [
     "crates/lsp",
     "crates/lsp_locations",
     "crates/markdown",
+    "crates/market_ui",
     "crates/mermaid_render",
     "crates/media",
     "crates/menu",
@@ -341,6 +342,9 @@ http_client = { path = "crates/http_client" }
 http_client_tls = { path = "crates/http_client_tls" }
 http_proxy = { path = "crates/http_proxy" }
 icons = { path = "crates/icons" }
+immortal-client = { git = "https://github.com/OpenAgentsInc/immortal", rev = "a4fff0985c0236e29a74c2db84f941d54df4d0b9", default-features = false, features = [
+    "mkt-swp-verify",
+] }
 edit_prediction_types = { path = "crates/edit_prediction_types" }
 json_schema_store = { path = "crates/json_schema_store" }
 language = { path = "crates/language" }
@@ -357,6 +361,7 @@ lmstudio = { path = "crates/lmstudio" }
 lsp = { path = "crates/lsp" }
 lsp_locations = { path = "crates/lsp_locations" }
 markdown = { path = "crates/markdown" }
+market_ui = { path = "crates/market_ui" }
 mermaid_render = { path = "crates/mermaid_render" }
 media = { path = "crates/media" }
 menu = { path = "crates/menu" }
