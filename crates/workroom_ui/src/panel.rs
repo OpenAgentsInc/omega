@@ -82,6 +82,102 @@ const PANEL_KEY: &str = "SarahWorkroomPanel";
 const MAX_NOSTR_RECORD_ROWS: usize = 64;
 const MAX_VOICE_TRANSCRIPT_CHARS: usize = 16 * 1024;
 const MAX_VOICE_SELECTION_SNAPSHOT_BYTES: usize = 64 * 1024;
+const VOICE_TRANSCRIPT_PACING_INTERVAL: Duration = Duration::from_millis(75);
+const VOICE_TRANSCRIPT_CHARACTERS_PER_SECOND: usize = 16;
+// This keeps a new Sarah row from appearing empty without letting a full sentence precede audio.
+const VOICE_TRANSCRIPT_INITIAL_LEAD_CHARS: usize = 12;
+
+#[derive(Default)]
+struct VoiceTranscriptPresentation {
+    sarah_visible_chars: HashMap<(String, String, String), usize>,
+    fractional_millichars: usize,
+}
+
+impl VoiceTranscriptPresentation {
+    fn observe_authoritative_change(
+        &mut self,
+        item: &VoiceTranscriptItem,
+        previous_char_count: usize,
+    ) {
+        let key = voice_transcript_item_key(item);
+        if item.participant == VoiceParticipant::User {
+            self.sarah_visible_chars.remove(&key);
+            return;
+        }
+
+        let character_count = item.text.chars().count();
+        let visible_chars = self.sarah_visible_chars.entry(key).or_insert_with(|| {
+            previous_char_count
+                .saturating_add(VOICE_TRANSCRIPT_INITIAL_LEAD_CHARS)
+                .min(character_count)
+        });
+        *visible_chars = (*visible_chars).min(character_count);
+    }
+
+    fn visible_chars(&self, item: &VoiceTranscriptItem) -> usize {
+        if item.participant == VoiceParticipant::User {
+            return item.text.chars().count();
+        }
+        self.sarah_visible_chars
+            .get(&voice_transcript_item_key(item))
+            .copied()
+            .unwrap_or_else(|| item.text.chars().count())
+    }
+
+    fn advance(&mut self, transcript: &[VoiceTranscriptItem]) -> bool {
+        self.fractional_millichars = self.fractional_millichars.saturating_add(
+            VOICE_TRANSCRIPT_CHARACTERS_PER_SECOND
+                .saturating_mul(VOICE_TRANSCRIPT_PACING_INTERVAL.as_millis() as usize),
+        );
+        let mut remaining_chars = self.fractional_millichars / 1_000;
+        self.fractional_millichars %= 1_000;
+        if remaining_chars == 0 {
+            return false;
+        }
+
+        let mut changed = false;
+        for item in transcript {
+            if item.participant != VoiceParticipant::Sarah || remaining_chars == 0 {
+                continue;
+            }
+            let key = voice_transcript_item_key(item);
+            let Some(visible_chars) = self.sarah_visible_chars.get_mut(&key) else {
+                continue;
+            };
+            let hidden_chars = item.text.chars().count().saturating_sub(*visible_chars);
+            let revealed_chars = hidden_chars.min(remaining_chars);
+            *visible_chars = visible_chars.saturating_add(revealed_chars);
+            remaining_chars -= revealed_chars;
+            changed |= revealed_chars > 0;
+        }
+        changed
+    }
+
+    fn has_hidden_sarah_text(&self, transcript: &[VoiceTranscriptItem]) -> bool {
+        transcript.iter().any(|item| {
+            item.participant == VoiceParticipant::Sarah
+                && self.visible_chars(item) < item.text.chars().count()
+        })
+    }
+
+    fn flush(&mut self) {
+        self.sarah_visible_chars.clear();
+        self.fractional_millichars = 0;
+    }
+
+    fn forget(&mut self, item: &VoiceTranscriptItem) {
+        self.sarah_visible_chars
+            .remove(&voice_transcript_item_key(item));
+    }
+}
+
+fn voice_transcript_item_key(item: &VoiceTranscriptItem) -> (String, String, String) {
+    (
+        item.thread_ref.clone(),
+        item.session_ref.clone(),
+        item.item_id.clone(),
+    )
+}
 
 #[derive(Debug)]
 struct VoiceCommandRefusal(String);
@@ -359,6 +455,8 @@ pub struct SarahWorkroomPanel {
     /// `OMEGA-DELTA-0211`. A composer click is waiting on admission terms.
     start_voice_after_admission: bool,
     voice_transcript: Vec<VoiceTranscriptItem>,
+    voice_transcript_presentation: VoiceTranscriptPresentation,
+    voice_transcript_pacing_task: Option<Task<()>>,
     voice_transcript_recovery: SharedString,
     pending_voice_command: Option<VoiceCommandRequest>,
     created_agent_thread: Option<SarahCreatedAgentThread>,
@@ -671,6 +769,8 @@ impl SarahWorkroomPanel {
             settlement_retrying: false,
             start_voice_after_admission: false,
             voice_transcript: Vec::new(),
+            voice_transcript_presentation: VoiceTranscriptPresentation::default(),
+            voice_transcript_pacing_task: None,
             voice_transcript_recovery: "No prior transcript rows were recovered.".into(),
             pending_voice_command: None,
             created_agent_thread: None,
@@ -1906,6 +2006,7 @@ impl SarahWorkroomPanel {
         let reviewed_admission = prepared_admission.projection.clone();
 
         self.voice_task.take();
+        self.flush_voice_transcript_presentation();
         self.voice_controls.take();
         self.pending_voice_command = None;
         self.voice_retryable = false;
@@ -2263,6 +2364,7 @@ impl SarahWorkroomPanel {
             return;
         }
         self.send_voice_control(SarahVoiceControl::Interrupt);
+        self.flush_voice_transcript_presentation();
         self.voice_state = SarahVoiceState::Listening;
         self.voice_status = "Sarah's spoken response was interrupted.".into();
         cx.notify();
@@ -2384,6 +2486,7 @@ impl SarahWorkroomPanel {
             log::debug!("Sarah voice control channel was already closed during cleanup");
         }
         self.voice_task.take();
+        self.flush_voice_transcript_presentation();
         self.pending_voice_command = None;
         self.voice_session_id = None;
         self.voice_muted = false;
@@ -2512,6 +2615,7 @@ impl SarahWorkroomPanel {
                         })
                         .into(),
                 };
+                self.flush_voice_transcript_presentation();
             }
             SarahVoiceEvent::TranscriptDelta {
                 thread_ref,
@@ -2526,6 +2630,7 @@ impl SarahWorkroomPanel {
                     item_id,
                     participant,
                     delta,
+                    cx,
                 );
             }
             SarahVoiceEvent::TranscriptCompleted {
@@ -2535,7 +2640,14 @@ impl SarahWorkroomPanel {
                 participant,
                 text,
             } => {
-                self.complete_voice_transcript(thread_ref, session_ref, item_id, participant, text);
+                self.complete_voice_transcript(
+                    thread_ref,
+                    session_ref,
+                    item_id,
+                    participant,
+                    text,
+                    cx,
+                );
             }
             SarahVoiceEvent::CommandProposal(request) => {
                 if self.pending_voice_command.is_some() {
@@ -2574,6 +2686,7 @@ impl SarahWorkroomPanel {
                 retryable,
                 action,
             } => {
+                self.flush_voice_transcript_presentation();
                 self.voice_state = SarahVoiceState::Error;
                 self.voice_retryable = retryable;
                 self.voice_status = match action {
@@ -2582,6 +2695,7 @@ impl SarahWorkroomPanel {
                 };
             }
             SarahVoiceEvent::Ended { reason } => {
+                self.flush_voice_transcript_presentation();
                 self.voice_controls = None;
                 self.pending_voice_command = None;
                 self.voice_session_id = None;
@@ -2666,28 +2780,45 @@ impl SarahWorkroomPanel {
         item_id: String,
         participant: VoiceParticipant,
         delta: String,
+        cx: &mut Context<Self>,
     ) {
-        if let Some(item) = self.voice_transcript.iter_mut().find(|item| {
+        let transcript_key = (thread_ref.clone(), session_ref.clone(), item_id.clone());
+        let item_index = self.voice_transcript.iter().position(|item| {
             item.thread_ref == thread_ref
                 && item.session_ref == session_ref
                 && item.item_id == item_id
-        }) {
+        });
+        let previous_char_count = item_index
+            .and_then(|index| self.voice_transcript.get(index))
+            .map_or(0, |item| item.text.chars().count());
+        if let Some(item_index) = item_index {
+            let item = &mut self.voice_transcript[item_index];
             item.text.push_str(&delta);
             item.text = truncate_chars(std::mem::take(&mut item.text), MAX_VOICE_TRANSCRIPT_CHARS);
             item.complete = false;
-            return;
+        } else {
+            self.voice_transcript.push(VoiceTranscriptItem {
+                thread_ref,
+                session_ref,
+                item_id,
+                participant,
+                text: truncate_chars(delta, MAX_VOICE_TRANSCRIPT_CHARS),
+                complete: false,
+            });
+            if self.voice_transcript.len() > 100 {
+                let removed_item = self.voice_transcript.remove(0);
+                self.voice_transcript_presentation.forget(&removed_item);
+            }
         }
-        self.voice_transcript.push(VoiceTranscriptItem {
-            thread_ref,
-            session_ref,
-            item_id,
-            participant,
-            text: truncate_chars(delta, MAX_VOICE_TRANSCRIPT_CHARS),
-            complete: false,
-        });
-        if self.voice_transcript.len() > 100 {
-            self.voice_transcript.remove(0);
+        if let Some(item) = self.voice_transcript.iter().find(|item| {
+            item.thread_ref == transcript_key.0
+                && item.session_ref == transcript_key.1
+                && item.item_id == transcript_key.2
+        }) {
+            self.voice_transcript_presentation
+                .observe_authoritative_change(item, previous_char_count);
         }
+        self.ensure_voice_transcript_pacing(cx);
     }
 
     fn complete_voice_transcript(
@@ -2697,28 +2828,107 @@ impl SarahWorkroomPanel {
         item_id: String,
         participant: VoiceParticipant,
         text: String,
+        cx: &mut Context<Self>,
     ) {
-        if let Some(item) = self.voice_transcript.iter_mut().find(|item| {
+        let transcript_key = (thread_ref.clone(), session_ref.clone(), item_id.clone());
+        let item_index = self.voice_transcript.iter().position(|item| {
             item.thread_ref == thread_ref
                 && item.session_ref == session_ref
                 && item.item_id == item_id
-        }) {
+        });
+        let previous_char_count = item_index
+            .and_then(|index| self.voice_transcript.get(index))
+            .map_or(0, |item| item.text.chars().count());
+        if let Some(item_index) = item_index {
+            let item = &mut self.voice_transcript[item_index];
             item.participant = participant;
             item.text = truncate_chars(text, MAX_VOICE_TRANSCRIPT_CHARS);
             item.complete = true;
+        } else {
+            self.voice_transcript.push(VoiceTranscriptItem {
+                thread_ref,
+                session_ref,
+                item_id,
+                participant,
+                text: truncate_chars(text, MAX_VOICE_TRANSCRIPT_CHARS),
+                complete: true,
+            });
+            if self.voice_transcript.len() > 100 {
+                let removed_item = self.voice_transcript.remove(0);
+                self.voice_transcript_presentation.forget(&removed_item);
+            }
+        }
+        if let Some(item) = self.voice_transcript.iter().find(|item| {
+            item.thread_ref == transcript_key.0
+                && item.session_ref == transcript_key.1
+                && item.item_id == transcript_key.2
+        }) {
+            self.voice_transcript_presentation
+                .observe_authoritative_change(item, previous_char_count);
+        }
+        self.ensure_voice_transcript_pacing(cx);
+    }
+
+    fn ensure_voice_transcript_pacing(&mut self, cx: &mut Context<Self>) {
+        if cx.reduce_motion() {
+            self.flush_voice_transcript_presentation();
             return;
         }
-        self.voice_transcript.push(VoiceTranscriptItem {
-            thread_ref,
-            session_ref,
-            item_id,
-            participant,
-            text: truncate_chars(text, MAX_VOICE_TRANSCRIPT_CHARS),
-            complete: true,
-        });
-        if self.voice_transcript.len() > 100 {
-            self.voice_transcript.remove(0);
+        if self.voice_transcript_pacing_task.is_some()
+            || !self
+                .voice_transcript_presentation
+                .has_hidden_sarah_text(&self.voice_transcript)
+        {
+            return;
         }
+
+        let executor = cx.background_executor().clone();
+        self.voice_transcript_pacing_task = Some(cx.spawn(async move |this, cx| {
+            loop {
+                executor.timer(VOICE_TRANSCRIPT_PACING_INTERVAL).await;
+                let should_continue = match this.update(cx, |panel, cx| {
+                    if cx.reduce_motion() {
+                        let had_hidden_text = panel
+                            .voice_transcript_presentation
+                            .has_hidden_sarah_text(&panel.voice_transcript);
+                        panel.voice_transcript_presentation.flush();
+                        panel.voice_transcript_pacing_task = None;
+                        if had_hidden_text {
+                            cx.notify();
+                        }
+                        return false;
+                    }
+
+                    let changed = panel
+                        .voice_transcript_presentation
+                        .advance(&panel.voice_transcript);
+                    let has_hidden_text = panel
+                        .voice_transcript_presentation
+                        .has_hidden_sarah_text(&panel.voice_transcript);
+                    if !has_hidden_text {
+                        panel.voice_transcript_pacing_task = None;
+                    }
+                    if changed {
+                        cx.notify();
+                    }
+                    has_hidden_text
+                }) {
+                    Ok(should_continue) => should_continue,
+                    Err(error) => {
+                        log::debug!("Sarah voice transcript pacing stopped: {error:#}");
+                        break;
+                    }
+                };
+                if !should_continue {
+                    break;
+                }
+            }
+        }));
+    }
+
+    fn flush_voice_transcript_presentation(&mut self) {
+        self.voice_transcript_presentation.flush();
+        self.voice_transcript_pacing_task.take();
     }
 
     fn current_voice_selection(&self, cx: &mut Context<Self>) -> Result<CurrentVoiceSelection> {
@@ -3327,6 +3537,7 @@ impl Drop for SarahWorkroomPanel {
             log::debug!("Sarah voice control channel was already closed while dropping the panel");
         }
         self.voice_task.take();
+        self.voice_transcript_pacing_task.take();
     }
 }
 
@@ -3711,7 +3922,11 @@ impl Render for SarahWorkroomPanel {
                     .border_color(cx.theme().colors().border)
                     .rounded_md()
                     .p_2()
-                    .child(voice_transcript_body(&self.voice_transcript)),
+                    .child(voice_transcript_body(
+                        &self.voice_transcript,
+                        &self.voice_transcript_presentation,
+                        cx.reduce_motion(),
+                    )),
             );
 
         v_flex()
@@ -4341,7 +4556,11 @@ fn transcript_body(transcript: &TranscriptProjection) -> impl IntoElement {
     col
 }
 
-fn voice_transcript_body(transcript: &[VoiceTranscriptItem]) -> impl IntoElement {
+fn voice_transcript_body(
+    transcript: &[VoiceTranscriptItem],
+    presentation: &VoiceTranscriptPresentation,
+    reduce_motion: bool,
+) -> impl IntoElement {
     if transcript.is_empty() {
         return v_flex().child(
             Label::new("Start voice to see live speech transcripts here.")
@@ -4351,15 +4570,40 @@ fn voice_transcript_body(transcript: &[VoiceTranscriptItem]) -> impl IntoElement
     }
     let mut column = v_flex().gap_1();
     for item in transcript {
-        let suffix = if item.complete { "" } else { " …" };
+        let (text, fully_presented) =
+            visible_voice_transcript_text(item, presentation, reduce_motion);
+        let suffix = if item.complete && fully_presented {
+            ""
+        } else {
+            " …"
+        };
         column = column.child(Label::new(format!(
             "{}: {}{}",
             item.participant.label(),
-            item.text,
+            text,
             suffix
         )));
     }
     column
+}
+
+fn visible_voice_transcript_text(
+    item: &VoiceTranscriptItem,
+    presentation: &VoiceTranscriptPresentation,
+    reduce_motion: bool,
+) -> (String, bool) {
+    let authoritative_char_count = item.text.chars().count();
+    let visible_char_count = if reduce_motion {
+        authoritative_char_count
+    } else {
+        presentation.visible_chars(item)
+    };
+    let text = if visible_char_count < authoritative_char_count {
+        item.text.chars().take(visible_char_count).collect()
+    } else {
+        item.text.clone()
+    };
+    (text, visible_char_count == authoritative_char_count)
 }
 
 fn activity_body(activity: &ActivityProjection) -> impl IntoElement {
@@ -4592,6 +4836,87 @@ mod panel_logic_tests {
     use super::*;
     use crate::projections::WorkroomProjection;
     use serde_json::json;
+
+    fn voice_transcript_item(
+        participant: VoiceParticipant,
+        item_id: &str,
+        text: &str,
+        complete: bool,
+    ) -> VoiceTranscriptItem {
+        VoiceTranscriptItem {
+            thread_ref: "thread".into(),
+            session_ref: "session".into(),
+            item_id: item_id.into(),
+            participant,
+            text: text.into(),
+            complete,
+        }
+    }
+
+    #[test]
+    fn sarah_transcript_presentation_reveals_a_small_lead_then_speech_cadence() {
+        let item = voice_transcript_item(
+            VoiceParticipant::Sarah,
+            "sarah",
+            "abcdefghijklmnopqrstuvwxyz0123456789",
+            false,
+        );
+        let mut presentation = VoiceTranscriptPresentation::default();
+        presentation.observe_authoritative_change(&item, 0);
+
+        assert_eq!(presentation.visible_chars(&item), 12);
+        for _ in 0..10 {
+            presentation.advance(std::slice::from_ref(&item));
+        }
+        assert_eq!(presentation.visible_chars(&item), 24);
+    }
+
+    #[test]
+    fn transcript_pacing_counts_unicode_characters_and_never_delays_user_rows() {
+        let sarah = voice_transcript_item(
+            VoiceParticipant::Sarah,
+            "sarah",
+            "🙂é界abcdefghijklmno",
+            true,
+        );
+        let user = voice_transcript_item(
+            VoiceParticipant::User,
+            "user",
+            "user transcript is immediate",
+            false,
+        );
+        let mut presentation = VoiceTranscriptPresentation::default();
+        presentation.observe_authoritative_change(&sarah, 0);
+        presentation.observe_authoritative_change(&user, 0);
+
+        let (sarah_text, sarah_fully_presented) =
+            visible_voice_transcript_text(&sarah, &presentation, false);
+        assert_eq!(sarah_text, "🙂é界abcdefghi");
+        assert!(!sarah_fully_presented);
+        assert_eq!(presentation.visible_chars(&user), user.text.chars().count());
+    }
+
+    #[test]
+    fn transcript_presentation_flushes_for_recovery_and_reduced_motion() {
+        let item = voice_transcript_item(
+            VoiceParticipant::Sarah,
+            "sarah",
+            "This sentence is longer than the initial presentation lead.",
+            true,
+        );
+        let mut presentation = VoiceTranscriptPresentation::default();
+        presentation.observe_authoritative_change(&item, 0);
+        assert!(presentation.has_hidden_sarah_text(std::slice::from_ref(&item)));
+
+        let (reduced_motion_text, fully_presented) =
+            visible_voice_transcript_text(&item, &presentation, true);
+        assert_eq!(reduced_motion_text, item.text);
+        assert!(fully_presented);
+
+        presentation.flush();
+        assert!(!presentation.has_hidden_sarah_text(std::slice::from_ref(&item)));
+        assert_eq!(presentation.visible_chars(&item), item.text.chars().count());
+    }
 
     fn selection_effect_fixture() -> (VoiceSelectionEffectBinding, VoiceEditorTarget) {
         (
