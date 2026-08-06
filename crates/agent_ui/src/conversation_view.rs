@@ -1809,6 +1809,42 @@ impl ConversationView {
         }
     }
 
+    fn add_context_before_session(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let paths_receiver = cx.prompt_for_paths(gpui::PathPromptOptions {
+            files: true,
+            directories: true,
+            multiple: true,
+            prompt: Some("Add Context".into()),
+        });
+        let project = self.project.clone();
+
+        cx.spawn_in(window, async move |this, cx| {
+            let paths = match paths_receiver.await {
+                Ok(Ok(Some(paths))) => paths,
+                Ok(Ok(None)) => return Ok(()),
+                Ok(Err(error)) => return Err(error.into()),
+                Err(error) => return Err(error.into()),
+            };
+
+            let mut project_paths = Vec::new();
+            let mut added_worktrees = Vec::new();
+            for path in paths {
+                let project_path = cx.update(|_, cx| {
+                    Workspace::project_path_for_path(project.clone(), &path, false, cx)
+                })?;
+                if let Some((worktree, project_path)) = project_path.await.log_err() {
+                    added_worktrees.push(worktree);
+                    project_paths.push(project_path);
+                }
+            }
+
+            this.update_in(cx, |this, window, cx| {
+                this.insert_dragged_files(project_paths, added_worktrees, window, cx);
+            })
+        })
+        .detach_and_log_err(cx);
+    }
+
     /// The executor the pending turns are waiting on, named the way the
     /// loading composer's placeholder names it: the one the person just chose,
     /// falling back to the router's display name on a first launch where
@@ -4513,15 +4549,23 @@ impl ConversationView {
             })
             .child(
                 div()
-                    .id("add-context-connecting")
                     .size(px(28.))
                     .flex()
                     .items_center()
                     .justify_center()
                     .child(
-                        Icon::new(IconName::Paperclip)
-                            .size(IconSize::Small)
-                            .color(Color::Muted),
+                        IconButton::new("add-context-connecting", IconName::Paperclip)
+                            .debug_selector(|| "omega.workbench.pre-session.add-context".into())
+                            .icon_size(IconSize::Small)
+                            .icon_color(Color::Muted)
+                            .aria_label("Add context")
+                            .style(ButtonStyle::Transparent)
+                            .size(ButtonSize::Medium)
+                            .width(rems_from_px(28.))
+                            .tooltip(Tooltip::text("Add Context"))
+                            .on_click(cx.listener(|this, _, window, cx| {
+                                this.add_context_before_session(window, cx);
+                            })),
                     ),
             )
             .child(
@@ -9553,6 +9597,77 @@ pub(crate) mod tests {
                 .values()
                 .any(|(_, mention)| matches!(mention, Mention::Image(_)))
         );
+    }
+
+    #[gpui::test]
+    async fn pre_session_attachment_button_attaches_selected_file_after_loading(
+        cx: &mut TestAppContext,
+    ) {
+        init_test(cx);
+
+        let fs = FakeFs::new(cx.executor());
+        fs.insert_tree(
+            "/project",
+            json!({
+                "attached.txt": "selected before the session was ready"
+            }),
+        )
+        .await;
+        let directory = tempfile::tempdir().expect("temporary route journal directory");
+        let project = Project::test(fs, [Path::new("/project")], cx).await;
+        let (conversation_view, cx) = setup_conversation_view_with_project_without_settling(
+            RouterTestServer {
+                native: StubAgentConnection::new(),
+                journal_path: directory.path().join("routes.json"),
+            },
+            Agent::NativeAgent,
+            None,
+            None,
+            project,
+            cx,
+        )
+        .await;
+        cx.run_until_parked();
+        conversation_view.read_with(cx, |view, cx| {
+            assert_eq!(
+                view.preparation_state(cx),
+                ConversationPreparation::RouterReady
+            );
+        });
+        add_to_workspace(conversation_view.clone(), cx);
+
+        cx.simulate_click_selector("omega.workbench.pre-session.add-context")
+            .expect("the pre-session attachment button must be clickable");
+        assert!(cx.did_prompt_for_paths());
+        cx.simulate_path_prompt_response(|options| {
+            assert!(options.files);
+            assert!(options.directories);
+            assert!(options.multiple);
+            Some(vec![PathBuf::from("/project/attached.txt")])
+        });
+        cx.run_until_parked();
+        conversation_view.update_in(cx, |view, window, cx| {
+            assert_eq!(view.pending_dragged_files.len(), 1);
+            let editor = view.loading_composer(window, cx);
+            editor.update(cx, |editor, cx| {
+                editor.set_text("use the attachment", window, cx);
+            });
+            view.submit_before_session(window, cx);
+        });
+        cx.run_until_parked();
+
+        let expected_uri = MentionUri::File {
+            abs_path: PathBuf::from("/project/attached.txt"),
+        }
+        .to_uri()
+        .to_string();
+        assert_eq!(
+            message_editor(&conversation_view, cx).read_with(cx, |editor, cx| editor.text(cx)),
+            format!("[@attached.txt]({expected_uri}) ")
+        );
+        conversation_view.read_with(cx, |view, _| {
+            assert!(view.pending_dragged_files.is_empty());
+        });
     }
 
     /// `OMEGA-DELTA-0170`, the failure half. A message sent while connecting
