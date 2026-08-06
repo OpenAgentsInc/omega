@@ -124,6 +124,7 @@ members = [
     "crates/omega_audience",
     "crates/omega_community",
     "crates/omega_control_crawl",
+    "crates/omega_convex",
     "crates/omega_deltas",
     "crates/omega_acp_server",
     "crates/omega_device_bridge",
@@ -383,6 +384,7 @@ omega_agent_detect = { path = "crates/omega_agent_detect" }
 omega_audience = { path = "crates/omega_audience" }
 omega_community = { path = "crates/omega_community" }
 omega_control_crawl = { path = "crates/omega_control_crawl" }
+omega_convex = { path = "crates/omega_convex" }
 omega_deltas = { path = "crates/omega_deltas" }
 omega_acp_server = { path = "crates/omega_acp_server" }
 omega_device_bridge = { path = "crates/omega_device_bridge" }
@@ -601,6 +603,7 @@ futures = "0.3.32"
 futures-concurrency = "7.7.1"
 futures-lite = "1.13"
 futures-util = "0.3.32"
+convex = { version = "=0.10.4", default-features = false, features = ["rustls-tls-native-roots"] }
 
 globset = "0.4"
 heapless = "0.9.2"

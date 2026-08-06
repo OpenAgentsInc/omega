@@ -653,6 +653,7 @@ fn main() {
         #[cfg(target_os = "macos")]
         project::Project::init(&client, cx);
         omega_effectd::init_openagents_session(cx);
+        omega_convex::init(cx);
         omega_effectd::init_openagents_binding(cx);
         omega_effectd::init_with_host_handler(Some(agent_ui::omega_effectd_host_handler(cx)), cx);
         agent_computer_ui::init(cx);

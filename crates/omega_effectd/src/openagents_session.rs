@@ -16,6 +16,8 @@ use super::openagents_nostr_auth::HostedSessionBlocker;
 
 pub const OPENAGENTS_BASE_URL: &str = "https://openagents.com";
 pub const OPENAGENTS_AUTH_SESSION_URL: &str = "https://openagents.com/api/mobile/auth/session";
+pub const OPENAGENTS_CONTROLLER_TOKEN_URL: &str =
+    "https://pro.openagents.com/api/mobile/controller/token";
 pub const OPENAGENTS_SESSION_KEY: &str = "omega://openagents/native-session/v1";
 pub const OPENAGENTS_DEVICE_KEY: &str = "omega://openagents/device-binding/v1";
 
@@ -206,6 +208,55 @@ pub struct VerifiedOpenAgentsSession {
     pub base_url: String,
     pub owner_user_id: String,
     pub access_token: String,
+}
+
+/// Public, non-secret metadata returned with a short-lived Convex read token.
+///
+/// The token itself is intentionally not serializable or debuggable. The
+/// official Convex client consumes it inside its authentication callback and
+/// requests a fresh one after every WebSocket reconnect.
+#[derive(Clone)]
+pub struct OpenAgentsControllerBootstrap {
+    pub convex_url: String,
+    pub token: String,
+    pub owner_user_id: String,
+    pub workspace_id: String,
+}
+
+/// Opaque bearer-backed source for short-lived native controller tokens.
+///
+/// Omega's GPUI surface receives this source, not the stored OpenAgents
+/// credential. Fetches are bounded to the one fixed Pro endpoint and never log
+/// either bearer. The source is deliberately process-local; the canonical
+/// credential remains owned and rotated by [`OpenAgentsSession`].
+#[derive(Clone)]
+pub struct OpenAgentsControllerTokenSource {
+    http_client: Arc<dyn HttpClient>,
+    access_token: Arc<Mutex<String>>,
+    owner_user_id: String,
+    endpoint: String,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct ControllerTokenResponse {
+    version: String,
+    token: String,
+    convex_url: String,
+    actor: ControllerActor,
+    workspace: ControllerWorkspace,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct ControllerActor {
+    user_id: String,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct ControllerWorkspace {
+    workspace_id: String,
 }
 
 #[derive(Clone)]
@@ -604,6 +655,24 @@ impl OpenAgentsSession {
                 None
             }
         }
+    }
+
+    /// Resolve the canonical hosted session and narrow it to the one Pro
+    /// controller-token operation needed by the native Convex client.
+    pub async fn controller_token_source(
+        &self,
+        cx: &mut AsyncApp,
+    ) -> Result<OpenAgentsControllerTokenSource> {
+        let verified = self
+            .resolve_verified(cx)
+            .await
+            .ok_or_else(|| anyhow!("a verified OpenAgents session is required"))?;
+        Ok(OpenAgentsControllerTokenSource {
+            http_client: self.http_client.clone(),
+            access_token: Arc::new(Mutex::new(verified.access_token)),
+            owner_user_id: verified.owner_user_id,
+            endpoint: OPENAGENTS_CONTROLLER_TOKEN_URL.to_string(),
+        })
     }
 
     pub async fn community_sarah_request<Response>(
@@ -1079,6 +1148,56 @@ impl OpenAgentsSession {
             .write_credentials(OPENAGENTS_DEVICE_KEY, "omega", &secret, cx)
             .await?;
         Ok(device_ref)
+    }
+}
+
+impl OpenAgentsControllerTokenSource {
+    /// Mint one five-minute read token for the official Convex client.
+    ///
+    /// This method is safe to call from the client's Tokio authentication
+    /// callback, including during a reconnect. It has no GPUI or keychain
+    /// dependency and cannot target an arbitrary URL.
+    pub async fn fetch(&self) -> Result<OpenAgentsControllerBootstrap> {
+        let access_token = self
+            .access_token
+            .lock()
+            .map_err(|_| anyhow!("OpenAgents controller credential lock was poisoned"))?
+            .clone();
+        let request = Request::builder()
+            .method(Method::GET)
+            .uri(&self.endpoint)
+            .header("authorization", format!("Bearer {access_token}"))
+            .body(AsyncBody::empty())?;
+        let (status, body) = send_json(&self.http_client, request).await?;
+        if !status.is_success() {
+            return Err(anyhow!(
+                "OpenAgents controller token request was refused (HTTP {})",
+                status.as_u16()
+            ));
+        }
+        let response: ControllerTokenResponse = serde_json::from_slice(&body)
+            .context("OpenAgents controller token response was invalid")?;
+        if response.version != "openagents.mobile_controller.v1"
+            || response.token.trim().is_empty()
+            || response.token.len() > MAX_ACCESS_TOKEN_BYTES
+            || response.actor.user_id != self.owner_user_id
+            || response.workspace.workspace_id != self.owner_user_id
+        {
+            return Err(anyhow!(
+                "OpenAgents controller token response was inconsistent"
+            ));
+        }
+        let convex_url = url::Url::parse(&response.convex_url)
+            .context("OpenAgents controller Convex URL was invalid")?;
+        if convex_url.scheme() != "https" || convex_url.host_str().is_none() {
+            return Err(anyhow!("OpenAgents controller Convex URL was not HTTPS"));
+        }
+        Ok(OpenAgentsControllerBootstrap {
+            convex_url: response.convex_url,
+            token: response.token,
+            owner_user_id: response.actor.user_id,
+            workspace_id: response.workspace.workspace_id,
+        })
     }
 }
 

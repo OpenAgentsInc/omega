@@ -99,6 +99,7 @@ debug_adapter_extension.workspace = true
 agent_computer_ui.workspace = true
 workroom_ui.workspace = true
 omega_effectd.workspace = true
+omega_convex.workspace = true
 omega_front_door.workspace = true
 omega_workbench_harness = { workspace = true, features = ["gpui-support"], optional = true }
 omega_workbench_state = { workspace = true, optional = true }
