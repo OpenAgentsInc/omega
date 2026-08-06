@@ -487,6 +487,7 @@ async fn poll_path_until_created(
     registrations: Arc<Mutex<HashMap<WatchKey, FsWatcherRegistration>>>,
     pending_registrations: Arc<Mutex<HashMap<Arc<Path>, Task<()>>>>,
 ) {
+    let mut failed_attempts: u32 = 0;
     loop {
         executor.timer(poll_interval()).await;
 
@@ -541,7 +542,16 @@ async fn poll_path_until_created(
             }
             Ok(None) => {}
             Err(error) => {
-                log::warn!("failed to watch newly-created path {path:?}: {error}; retrying");
+                // A persistently failing registration retries on every poll;
+                // log the first failure and then once per ~30 attempts so one
+                // stuck path cannot flood the log.
+                if failed_attempts.is_multiple_of(30) {
+                    log::warn!(
+                        "failed to watch newly-created path {path:?}: {error}; retrying (attempt {})",
+                        failed_attempts + 1
+                    );
+                }
+                failed_attempts = failed_attempts.saturating_add(1);
             }
         }
     }
@@ -1084,7 +1094,14 @@ impl GlobalWatcher {
 fn is_max_files_watch_error(error: &anyhow::Error) -> bool {
     error
         .downcast_ref::<notify::Error>()
-        .is_some_and(|error| matches!(&error.kind, notify::ErrorKind::MaxFilesWatch))
+        .is_some_and(|error| match &error.kind {
+            notify::ErrorKind::MaxFilesWatch => true,
+            // macOS FSEvents reports watch-root (kqueue) exhaustion only as a
+            // failed stream start with this generic message, so it must engage
+            // the same watch-limit cooldown as MaxFilesWatch.
+            notify::ErrorKind::Generic(message) => message == "unable to start FSEvent stream",
+            _ => false,
+        })
 }
 
 static POLL_INTERVAL: LazyLock<Duration> = LazyLock::new(|| {
@@ -1141,6 +1158,23 @@ fn global_watcher() -> &'static GlobalWatcher {
 mod tests {
     use super::*;
     use std::{collections::HashSet, path::PathBuf};
+
+    #[test]
+    fn detects_watch_limit_errors_from_both_backends() {
+        let inotify_limit =
+            anyhow::Error::new(notify::Error::new(notify::ErrorKind::MaxFilesWatch));
+        assert!(is_max_files_watch_error(&inotify_limit));
+
+        let fsevents_limit =
+            anyhow::Error::new(notify::Error::generic("unable to start FSEvent stream"));
+        assert!(is_max_files_watch_error(&fsevents_limit));
+
+        let other_generic = anyhow::Error::new(notify::Error::generic("something else broke"));
+        assert!(!is_max_files_watch_error(&other_generic));
+
+        let unrelated = anyhow::anyhow!("plain error");
+        assert!(!is_max_files_watch_error(&unrelated));
+    }
 
     fn rescan(path: &str) -> PathEvent {
         PathEvent {
