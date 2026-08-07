@@ -28050,12 +28050,13 @@ mod tests {
             "window.modifiers()",
             "modifiers.platform",
             "modifiers.control",
-            "fn omega_thread_tab_rows",
-            "left.created_at.cmp(&right.created_at)",
+            "fn omega_window_thread_tabs",
+            "stable_omega_window_thread_tabs",
+            "tabs.sort_by(oldest_first)",
             "activate_omega_thread_tab(action.0, window, cx)",
             "on_modifiers_changed",
             "omega_tab_shortcut_hint(index, text_placeholder)",
-            "active_tab_is_persisted",
+            "show_omega_window_thread_tab",
             "active_sidebar_row_is_persisted",
         ] {
             assert!(

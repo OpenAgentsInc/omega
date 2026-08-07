@@ -399,6 +399,55 @@ fn stable_omega_thread_rows(
     rows
 }
 
+#[derive(Clone)]
+struct OmegaWindowThreadTab {
+    workspace: Entity<Workspace>,
+    thread_id: ThreadId,
+    title: SharedString,
+    icon: IconName,
+    created_at: Option<DateTime<Utc>>,
+    row: Option<omega_threads_sidebar::ThreadRow>,
+}
+
+fn stable_omega_window_thread_tabs(
+    mut tabs: Vec<OmegaWindowThreadTab>,
+    active_thread_id: Option<ThreadId>,
+) -> Vec<OmegaWindowThreadTab> {
+    let oldest_first = |left: &OmegaWindowThreadTab, right: &OmegaWindowThreadTab| {
+        match (left.created_at, right.created_at) {
+            (Some(left), Some(right)) => left.cmp(&right),
+            (Some(_), None) => std::cmp::Ordering::Less,
+            (None, Some(_)) => std::cmp::Ordering::Greater,
+            (None, None) => std::cmp::Ordering::Equal,
+        }
+        .then_with(|| {
+            left.thread_id
+                .to_key_string()
+                .cmp(&right.thread_id.to_key_string())
+        })
+    };
+    let mut seen = HashSet::default();
+    tabs.retain(|tab| seen.insert(tab.thread_id));
+    tabs.sort_by(|left, right| oldest_first(right, left));
+
+    if tabs.len() > OMEGA_TAB_SHORTCUT_LABELS.len() {
+        if let Some(active_position) = active_thread_id.and_then(|active_thread_id| {
+            tabs.iter()
+                .position(|tab| tab.thread_id == active_thread_id)
+        }) && active_position >= OMEGA_TAB_SHORTCUT_LABELS.len()
+        {
+            let active_tab = tabs.remove(active_position);
+            tabs.truncate(OMEGA_TAB_SHORTCUT_LABELS.len().saturating_sub(1));
+            tabs.push(active_tab);
+        } else {
+            tabs.truncate(OMEGA_TAB_SHORTCUT_LABELS.len());
+        }
+    }
+
+    tabs.sort_by(oldest_first);
+    tabs
+}
+
 fn omega_working_folder_workspaces(
     multi_workspace: &MultiWorkspace,
     cx: &App,
@@ -18859,14 +18908,115 @@ impl AgentPanel {
         cx.notify();
     }
 
-    fn omega_thread_tab_rows(&self, cx: &App) -> Vec<omega_threads_sidebar::ThreadRow> {
-        let active_thread_id = self.active_thread_id(cx);
-        let rows = self
-            .threads_sidebar_rows(cx)
+    fn open_omega_thread_rows(&self, cx: &App) -> Vec<omega_threads_sidebar::ThreadRow> {
+        self.threads_sidebar_rows(cx)
             .into_iter()
             .filter(|row| !self.omega_closed_thread_tabs.contains(&row.thread_id))
+            .collect()
+    }
+
+    fn local_omega_window_thread_tabs(
+        &self,
+        workspace: Entity<Workspace>,
+        cx: &App,
+    ) -> Vec<OmegaWindowThreadTab> {
+        let rows = self.open_omega_thread_rows(cx);
+        let active_thread_id = self.active_thread_id(cx);
+        let active_is_persisted = active_thread_id.is_some_and(|active_thread_id| {
+            rows.iter().any(|row| row.thread_id == active_thread_id)
+        });
+        let mut tabs = rows
+            .into_iter()
+            .map(|row| OmegaWindowThreadTab {
+                workspace: workspace.clone(),
+                thread_id: row.thread_id,
+                title: row.title.clone(),
+                icon: omega_thread_icon(&row),
+                created_at: Some(row.created_at),
+                row: Some(row),
+            })
             .collect::<Vec<_>>();
-        stable_omega_thread_rows(rows, active_thread_id, true)
+
+        if let Some(thread_id) = active_thread_id
+            && !active_is_persisted
+        {
+            let title = self
+                .active_conversation_view()
+                .map(|view| view.read(cx).title(cx))
+                .unwrap_or_else(|| "New thread".into());
+            tabs.push(OmegaWindowThreadTab {
+                workspace,
+                thread_id,
+                title,
+                icon: self.active_omega_thread_icon(cx),
+                created_at: None,
+                row: None,
+            });
+        }
+
+        tabs
+    }
+
+    fn active_omega_thread_icon(&self, cx: &App) -> IconName {
+        let active_executor = self
+            .active_conversation_view()
+            .and_then(|view| view.read(cx).active_thread().cloned())
+            .and_then(|thread| {
+                let disclosure = thread.read(cx).executor_disclosure(cx);
+                crate::omega_executor_selector::SelectableExecutor::of(
+                    disclosure.class,
+                    disclosure.agent_id.as_ref(),
+                )
+            })
+            .or_else(crate::omega_executor_selector::selected);
+        omega_executor_icon(active_executor)
+    }
+
+    fn reconcile_omega_window_thread_tabs(&mut self, window: &Window, cx: &mut Context<Self>) {
+        self.reconcile_omega_thread_tabs(cx);
+        let Some(current_workspace) = self.workspace.upgrade() else {
+            return;
+        };
+        let Some(multi_workspace) = window.root::<MultiWorkspace>().flatten() else {
+            return;
+        };
+        let panels = multi_workspace
+            .read(cx)
+            .workspaces()
+            .filter(|workspace| **workspace != current_workspace)
+            .filter_map(|workspace| workspace.read(cx).panel::<AgentPanel>(cx))
+            .collect::<Vec<_>>();
+        for panel in panels {
+            panel.update(cx, |panel, cx| panel.reconcile_omega_thread_tabs(cx));
+        }
+    }
+
+    fn omega_window_thread_tabs(&self, window: &Window, cx: &App) -> Vec<OmegaWindowThreadTab> {
+        let Some(current_workspace) = self.workspace.upgrade() else {
+            return Vec::new();
+        };
+        let active_thread_id = self.active_thread_id(cx);
+        let Some(multi_workspace) = window.root::<MultiWorkspace>().flatten() else {
+            return stable_omega_window_thread_tabs(
+                self.local_omega_window_thread_tabs(current_workspace, cx),
+                active_thread_id,
+            );
+        };
+        let workspaces = multi_workspace
+            .read(cx)
+            .workspaces()
+            .cloned()
+            .collect::<Vec<_>>();
+        let mut tabs = self.local_omega_window_thread_tabs(current_workspace.clone(), cx);
+        for workspace in workspaces
+            .into_iter()
+            .filter(|workspace| *workspace != current_workspace)
+        {
+            if let Some(panel) = workspace.read(cx).panel::<AgentPanel>(cx) {
+                tabs.extend(panel.read(cx).local_omega_window_thread_tabs(workspace, cx));
+            }
+        }
+        stable_omega_window_thread_tabs(tabs, active_thread_id)
     }
 
     fn reconcile_omega_thread_tabs(&mut self, cx: &App) {
@@ -18893,8 +19043,63 @@ impl AgentPanel {
         if index >= OMEGA_TAB_SHORTCUT_LABELS.len() {
             return;
         }
-        if let Some(row) = self.omega_thread_tab_rows(cx).get(index).cloned() {
-            self.show_omega_thread_transcript(&row, window, cx);
+        self.reconcile_omega_window_thread_tabs(window, cx);
+        if let Some(tab) = self
+            .omega_window_thread_tabs(window, cx)
+            .get(index)
+            .cloned()
+        {
+            self.show_omega_window_thread_tab(&tab, window, cx);
+        }
+    }
+
+    fn show_omega_window_thread_tab(
+        &mut self,
+        tab: &OmegaWindowThreadTab,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(current_workspace) = self.workspace.upgrade() else {
+            return;
+        };
+        if current_workspace == tab.workspace {
+            self.show_local_omega_window_thread_tab(tab, window, cx);
+            return;
+        }
+
+        let Some(target_panel) = tab.workspace.read(cx).panel::<AgentPanel>(cx) else {
+            return;
+        };
+        let Some(multi_workspace) = window.root::<MultiWorkspace>().flatten() else {
+            return;
+        };
+        multi_workspace.update(cx, |multi_workspace, cx| {
+            multi_workspace.activate(
+                tab.workspace.clone(),
+                Some(current_workspace.downgrade()),
+                window,
+                cx,
+            );
+        });
+        tab.workspace.update(cx, |workspace, cx| {
+            workspace.reveal_panel::<AgentPanel>(window, cx);
+            target_panel.update(cx, |panel, cx| {
+                panel.show_local_omega_window_thread_tab(tab, window, cx);
+            });
+            workspace.focus_panel::<AgentPanel>(window, cx);
+        });
+    }
+
+    fn show_local_omega_window_thread_tab(
+        &mut self,
+        tab: &OmegaWindowThreadTab,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if let Some(row) = tab.row.as_ref() {
+            self.show_omega_thread_transcript(row, window, cx);
+        } else if self.active_thread_id(cx) == Some(tab.thread_id) {
+            self.show_active_omega_thread_transcript(window, cx);
         }
     }
 
@@ -21282,6 +21487,8 @@ impl AgentPanel {
         // requirements are unchanged; only the sidebar rows are not drawn.
         const OMEGA_SIDEBAR_TESTER_CHANNELS_HIDDEN: bool = true;
 
+        self.reconcile_omega_window_thread_tabs(window, cx);
+
         // omega#238. `omega#156` shipped the tester-channel destination into
         // `render_sidebar`, which only the workbench presentation calls, so the
         // interface every launch renders drew no channels at all. Both halves
@@ -21456,7 +21663,6 @@ impl AgentPanel {
             self.omega_sidebar_tween = None;
         }
         let active_thread_id = self.active_thread_id(cx);
-        self.reconcile_omega_thread_tabs(cx);
         let omega_settings_open = self.omega_settings.is_some();
         let omega_thread_open = !self.omega_non_thread_route_open();
         let active_title = self
@@ -21516,31 +21722,18 @@ impl AgentPanel {
                 title,
             })
         };
-        let active_executor = self
-            .active_conversation_view()
-            .and_then(|view| view.read(cx).active_thread().cloned())
-            .and_then(|thread| {
-                let disclosure = thread.read(cx).executor_disclosure(cx);
-                crate::omega_executor_selector::SelectableExecutor::of(
-                    disclosure.class,
-                    disclosure.agent_id.as_ref(),
-                )
-            })
-            .or_else(crate::omega_executor_selector::selected);
-        let active_icon = omega_executor_icon(active_executor);
-        let thread_tab_rows = self.omega_thread_tab_rows(cx);
-        let active_tab_is_persisted = active_thread_id.is_some_and(|active_thread_id| {
-            thread_tab_rows
-                .iter()
-                .any(|row| row.thread_id == active_thread_id)
-        });
-        let thread_tabs = thread_tab_rows.iter().enumerate().map(|(index, row)| {
-            let row = row.clone();
-            let click_row = row.clone();
-            let title = row.title.clone();
-            let icon = omega_thread_icon(&row);
-            let is_active = omega_thread_open && Some(row.thread_id) == active_thread_id;
+        let active_icon = self.active_omega_thread_icon(cx);
+        let current_workspace = self.workspace.upgrade();
+        let thread_tab_rows = self.omega_window_thread_tabs(window, cx);
+        let thread_tabs = thread_tab_rows.iter().enumerate().map(|(index, tab)| {
+            let click_tab = tab.clone();
+            let title = tab.title.clone();
+            let icon = tab.icon;
+            let is_active = omega_thread_open
+                && current_workspace.as_ref() == Some(&tab.workspace)
+                && Some(tab.thread_id) == active_thread_id;
             omega_thread_tab(div().id(("omega-thread-tab", index)), &title, is_active)
+                .debug_selector(move || format!("omega.omega.thread-tab.{index}"))
                 .when(is_active, |tab| {
                     tab.debug_selector(|| "omega.omega.thread-tab.active".into())
                         .bg(selected_background)
@@ -21555,7 +21748,7 @@ impl AgentPanel {
                 .cursor_pointer()
                 .on_click(cx.listener(move |this, _, window, cx| {
                     cx.stop_propagation();
-                    this.show_omega_thread_transcript(&click_row, window, cx);
+                    this.show_omega_window_thread_tab(&click_tab, window, cx);
                 }))
                 .w(px(TAB_WIDTH))
                 .h(px(28.))
@@ -21572,39 +21765,6 @@ impl AgentPanel {
                 .when(tab_shortcuts_visible, |tab| {
                     tab.child(omega_tab_shortcut_hint(index, text_placeholder))
                 })
-        });
-
-        let draft_tab_index = thread_tab_rows.len();
-        let active_draft_tab = omega_thread_tab(
-            div()
-                .id("omega-active-thread-tab")
-                .debug_selector(|| "omega.omega.thread-tab.active".into()),
-            &active_title,
-            true,
-        )
-        .w(px(TAB_WIDTH))
-        .h(px(28.))
-        .flex_none()
-        .flex()
-        .items_center()
-        .gap(px(6.))
-        .pl(px(8.))
-        .pr(px(6.))
-        .rounded(px(8.))
-        .bg(selected_background)
-        .border_1()
-        .border_color(colors.border_selected)
-        .text_size(px(12.))
-        .text_color(text)
-        .occlude()
-        .child(
-            Icon::new(active_icon)
-                .size(IconSize::Small)
-                .color(Color::Muted),
-        )
-        .child(div().min_w_0().flex_1().truncate().child(active_title))
-        .when(tab_shortcuts_visible, |tab| {
-            tab.child(omega_tab_shortcut_hint(draft_tab_index, text_placeholder))
         });
         let active_entity_tab = if let Some(view) = active_work_index_view {
             Some(
@@ -21896,9 +22056,6 @@ impl AgentPanel {
                         .gap(px(4.))
                         .overflow_hidden()
                         .children(thread_tabs)
-                        .when(omega_thread_open && !active_tab_is_persisted, |tabs| {
-                            tabs.child(active_draft_tab)
-                        })
                         .when_some(active_entity_tab, |tabs, tab| tabs.child(tab))
                         .child(new_thread),
                 )
@@ -24677,6 +24834,113 @@ mod tests {
                 );
             })
             .expect("the window should remain available after folder activation");
+    }
+
+    #[gpui::test]
+    async fn omega_thread_tabs_are_stable_across_projects_and_activate_their_owner(
+        cx: &mut TestAppContext,
+    ) {
+        init_test(cx);
+        cx.update(|cx| {
+            agent::ThreadStore::init_global(cx);
+            language_model::LanguageModelRegistry::test(cx);
+        });
+        let fs = FakeFs::new(cx.executor());
+        fs.insert_tree("/project-a", json!({ "file.txt": "" }))
+            .await;
+        fs.insert_tree("/project-b", json!({ "file.txt": "" }))
+            .await;
+        cx.update(|cx| <dyn fs::Fs>::set_global(fs.clone(), cx));
+        let project_a = Project::test(fs.clone(), [Path::new("/project-a")], cx).await;
+        let project_b = Project::test(fs, [Path::new("/project-b")], cx).await;
+        let multi_workspace =
+            cx.add_window(|window, cx| MultiWorkspace::test_new(project_a, window, cx));
+        let workspace_a = multi_workspace
+            .read_with(cx, |multi_workspace, _cx| {
+                multi_workspace.workspace().clone()
+            })
+            .expect("the first project should own a workspace");
+        let workspace_b = multi_workspace
+            .update(cx, |multi_workspace, window, cx| {
+                multi_workspace.test_add_workspace(project_b, window, cx)
+            })
+            .expect("the second project should open in the same window");
+
+        let cx = &mut VisualTestContext::from_window(multi_workspace.clone().into(), cx);
+        let panel_a = workspace_a.update_in(cx, |workspace, window, cx| {
+            let panel = cx.new(|cx| AgentPanel::new(workspace, window, cx));
+            workspace.add_panel(panel.clone(), window, cx);
+            panel
+        });
+        let panel_b = workspace_b.update_in(cx, |workspace, window, cx| {
+            let panel = cx.new(|cx| AgentPanel::new(workspace, window, cx));
+            workspace.add_panel(panel.clone(), window, cx);
+            workspace.focus_panel::<AgentPanel>(window, cx);
+            panel
+        });
+        panel_a.update_in(cx, |panel, window, cx| {
+            panel.force_omega_primary_interface_for_tests = true;
+            panel.new_thread(&NewThread, window, cx);
+        });
+        panel_b.update_in(cx, |panel, window, cx| {
+            panel.force_omega_primary_interface_for_tests = true;
+            panel.new_thread(&NewThread, window, cx);
+        });
+        cx.run_until_parked();
+
+        let (initial_thread_ids, workspace_a_tab_index) = cx.update(|window, cx| {
+            let tabs = panel_b.read(cx).omega_window_thread_tabs(window, cx);
+            let index = tabs
+                .iter()
+                .position(|tab| tab.workspace == workspace_a)
+                .expect("project A's active draft should remain in the window tab strip");
+            (
+                tabs.iter().map(|tab| tab.thread_id).collect::<Vec<_>>(),
+                index,
+            )
+        });
+        assert_eq!(initial_thread_ids.len(), 2);
+
+        let workspace_a_tab_bounds = cx
+            .debug_bounds(&format!("omega.omega.thread-tab.{workspace_a_tab_index}"))
+            .expect("the background project's tab should be visible");
+        cx.simulate_click(workspace_a_tab_bounds.center(), Modifiers::default());
+        cx.run_until_parked();
+        multi_workspace
+            .read_with(cx, |multi_workspace, _cx| {
+                assert_eq!(multi_workspace.workspace(), &workspace_a);
+            })
+            .expect("the project A tab should activate project A's workspace");
+
+        let (thread_ids_after_click, workspace_b_tab_index) = cx.update(|window, cx| {
+            let tabs = panel_a.read(cx).omega_window_thread_tabs(window, cx);
+            let index = tabs
+                .iter()
+                .position(|tab| tab.workspace == workspace_b)
+                .expect("project B's tab should remain after switching to project A");
+            (
+                tabs.iter().map(|tab| tab.thread_id).collect::<Vec<_>>(),
+                index,
+            )
+        });
+        assert_eq!(thread_ids_after_click, initial_thread_ids);
+
+        cx.dispatch_action(ActivateOmegaThreadTab(workspace_b_tab_index));
+        cx.run_until_parked();
+        multi_workspace
+            .read_with(cx, |multi_workspace, _cx| {
+                assert_eq!(multi_workspace.workspace(), &workspace_b);
+            })
+            .expect("the project B shortcut should activate project B's workspace");
+        let final_thread_ids = cx.update(|window, cx| {
+            panel_b
+                .read(cx)
+                .omega_window_thread_tabs(window, cx)
+                .into_iter()
+                .map(|tab| tab.thread_id)
+                .collect::<Vec<_>>()
+        });
+        assert_eq!(final_thread_ids, initial_thread_ids);
     }
 
     #[gpui::test]
