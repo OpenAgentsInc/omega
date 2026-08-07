@@ -6453,6 +6453,27 @@ impl AgentPanel {
             return;
         }
 
+        let target_can_replace_conversation = !matches!(target, ConversationTarget::Sarah)
+            && !(matches!(target, ConversationTarget::DirectAgent { .. })
+                && self.project.read(cx).is_via_collab());
+        let composer_text = target_can_replace_conversation
+            .then(|| self.active_conversation_view())
+            .flatten()
+            .filter(
+                |conversation| match (&target, conversation.read(cx).agent_key()) {
+                    (ConversationTarget::OmegaAgent, Agent::NativeAgent) => false,
+                    (ConversationTarget::DirectAgent { agent_id }, Agent::Custom { id }) => {
+                        agent_id.as_str() != id.as_ref()
+                    }
+                    _ => true,
+                },
+            )
+            .and_then(|conversation| {
+                conversation.update(cx, |conversation, cx| {
+                    conversation.take_composer_text(window, cx)
+                })
+            });
+
         self.set_last_created_entry_kind_from_user_action(AgentPanelEntryKind::Thread, cx);
         match &target {
             ConversationTarget::Sarah => {
@@ -6484,6 +6505,13 @@ impl AgentPanel {
             }
         }
         self.reveal_composer_draft(target, window, cx);
+        if let Some(composer_text) = composer_text
+            && let Some(conversation) = self.active_conversation_view()
+        {
+            conversation.update(cx, |conversation, cx| {
+                conversation.set_composer_text(&composer_text, window, cx);
+            });
+        }
     }
 
     /// Reveal the prepared draft for `target` with the composer focused.
@@ -29583,8 +29611,21 @@ mod tests {
         });
         cx.run_until_parked();
 
+        panel.update_in(&mut cx, |panel, window, cx| {
+            panel
+                .active_conversation_view()
+                .expect("Direct preparation is active")
+                .update(cx, |conversation, cx| {
+                    conversation.set_composer_text_for_tests(
+                        "Keep the connected prompt",
+                        window,
+                        cx,
+                    );
+                });
+        });
+
         // Selection is free until the first send: picking Omega in the
-        // dropdown replaces the blank Direct preparation with an Omega one.
+        // dropdown replaces the Direct preparation with an Omega one.
         panel.update_in(&mut cx, |panel, window, cx| {
             let omega = panel
                 .composer_executor_rows(cx)
@@ -29611,6 +29652,16 @@ mod tests {
                     .agent_key(),
                 Agent::NativeAgent
             ));
+            assert_eq!(
+                panel
+                    .draft_thread
+                    .as_ref()
+                    .expect("Omega selection prepares a replacement")
+                    .read(cx)
+                    .composer_text_for_tests(cx)
+                    .as_deref(),
+                Some("Keep the connected prompt")
+            );
         });
 
         panel.update_in(&mut cx, |panel, window, cx| {
@@ -29631,6 +29682,68 @@ mod tests {
                 panel.active_conversation_view().map(Entity::entity_id),
                 panel.draft_thread.as_ref().map(Entity::entity_id),
                 "each replacement lands in the composer immediately"
+            );
+        });
+    }
+
+    #[gpui::test]
+    async fn switching_executor_moves_loading_composer_text(cx: &mut TestAppContext) {
+        let (panel, mut cx) = setup_visible_panel(cx).await;
+        let direct_id = AgentId::new("grok-build");
+        let direct_agent = Agent::Custom { id: direct_id };
+        let direct_target = ConversationTarget::DirectAgent {
+            agent_id: DirectAgentId::new("grok-build").expect("valid id"),
+        };
+        let direct_draft = panel.update_in(&mut cx, |panel, window, cx| {
+            panel.connection_store.update(cx, |store, cx| {
+                store.restart_connection(
+                    direct_agent,
+                    Rc::new(StubAgentServer::new(
+                        SessionTrackingConnection::new().with_agent_id("grok-build"),
+                    )),
+                    cx,
+                );
+                store.restart_connection(
+                    Agent::NativeAgent,
+                    Rc::new(StubAgentServer::new(SessionTrackingConnection::new())),
+                    cx,
+                );
+            });
+            panel.compose_on_executor(direct_target, window, cx);
+            let direct_draft = panel
+                .draft_thread
+                .clone()
+                .expect("Direct selection creates a draft");
+            direct_draft.update(cx, |conversation, cx| {
+                conversation.set_composer_text_for_tests("Keep this prompt", window, cx);
+            });
+            direct_draft
+        });
+
+        panel.update_in(&mut cx, |panel, window, cx| {
+            panel.compose_on_executor(ConversationTarget::OmegaAgent, window, cx);
+        });
+
+        direct_draft.read_with(&cx, |conversation, cx| {
+            assert_eq!(
+                conversation.composer_text_for_tests(cx).as_deref(),
+                Some(""),
+                "the prompt is moved out of the replaced composer"
+            );
+        });
+        panel.read_with(&cx, |panel, cx| {
+            let omega_draft = panel
+                .draft_thread
+                .as_ref()
+                .expect("Omega selection creates a replacement draft");
+            assert!(matches!(
+                omega_draft.read(cx).agent_key(),
+                Agent::NativeAgent
+            ));
+            assert_eq!(
+                omega_draft.read(cx).composer_text_for_tests(cx).as_deref(),
+                Some("Keep this prompt"),
+                "the replacement composer displays the prompt before connecting"
             );
         });
     }
@@ -29673,16 +29786,16 @@ mod tests {
                 .expect("the Direct draft has a thread id")
         });
 
-        // Give the conversation content, which binds it for the dropdown.
-        let thread_view = panel.read_with(&cx, |panel, cx| {
+        panel.update_in(&mut cx, |panel, window, cx| {
             panel
-                .active_thread_view(cx)
-                .expect("the Direct draft renders a thread view")
+                .active_conversation_view()
+                .expect("the Direct draft is active")
+                .update(cx, |conversation, cx| {
+                    conversation.set_composer_text_for_tests("bound to grok-build", window, cx);
+                    conversation.send_for_tests(window, cx);
+                });
         });
-        let message_editor = thread_view.read_with(&cx, |view, _cx| view.message_editor.clone());
-        message_editor.update_in(&mut cx, |editor, window, cx| {
-            editor.set_text("bound to grok-build", window, cx);
-        });
+        cx.run_until_parked();
 
         panel.update_in(&mut cx, |panel, window, cx| {
             panel.compose_on_executor(ConversationTarget::OmegaAgent, window, cx);
@@ -33414,8 +33527,14 @@ mod tests {
         );
 
         // The new active draft starts empty — no carry-over.
-        let active_thread_id = panel.read_with(cx, |panel, cx| panel.active_thread_id(cx).unwrap());
-        let active_text = panel.read_with(cx, |panel, cx| panel.editor_text(active_thread_id, cx));
+        let active_text = panel.read_with(cx, |panel, cx| {
+            panel
+                .draft_thread
+                .as_ref()
+                .expect("the new agent draft exists")
+                .read(cx)
+                .composer_text_for_tests(cx)
+        });
         assert_eq!(
             active_text, None,
             "fresh ephemeral draft should start empty, not carry the parked draft's prompt"

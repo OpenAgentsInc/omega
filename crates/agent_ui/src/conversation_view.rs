@@ -1046,8 +1046,7 @@ impl ConversationView {
         &self.project
     }
 
-    #[cfg(any(test, feature = "test-support"))]
-    pub fn set_composer_text_for_tests(
+    pub(crate) fn set_composer_text(
         &mut self,
         text: &str,
         window: &mut Window,
@@ -1059,6 +1058,51 @@ impl ConversationView {
         } else {
             let loading_composer = self.loading_composer(window, cx);
             loading_composer.update(cx, |editor, cx| editor.set_text(text, window, cx));
+        }
+    }
+
+    pub(crate) fn take_composer_text(
+        &mut self,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> Option<String> {
+        if let Some(thread_view) = self.root_thread_view() {
+            let message_editor = thread_view.read(cx).message_editor.clone();
+            let text = message_editor.read(cx).text(cx);
+            if text.is_empty() {
+                return None;
+            }
+            message_editor.update(cx, |editor, cx| editor.clear(window, cx));
+            Some(text)
+        } else {
+            let loading_composer = self.loading_composer.as_ref()?.clone();
+            let text = loading_composer.read(cx).text(cx);
+            if text.is_empty() {
+                return None;
+            }
+            loading_composer.update(cx, |editor, cx| editor.set_text("", window, cx));
+            Some(text)
+        }
+    }
+
+    #[cfg(any(test, feature = "test-support"))]
+    pub fn set_composer_text_for_tests(
+        &mut self,
+        text: &str,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.set_composer_text(text, window, cx);
+    }
+
+    #[cfg(any(test, feature = "test-support"))]
+    pub fn composer_text_for_tests(&self, cx: &App) -> Option<String> {
+        if let Some(thread_view) = self.root_thread_view() {
+            Some(thread_view.read(cx).message_editor.read(cx).text(cx))
+        } else {
+            self.loading_composer
+                .as_ref()
+                .map(|editor| editor.read(cx).text(cx))
         }
     }
 
