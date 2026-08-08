@@ -369,14 +369,24 @@ pub const ADMITTED_ACTIONS: &[&str] = &[
     "omega::ResetBufferFontSize",
     "omega::ResetUiFontSize",
     "omega::ToggleFullScreen",
+    // OMEGA-DELTA-0234. The Workbench Search surface and the thread search
+    // bar draw controls that dispatch these; a drawn control the gate refuses
+    // is a defect, so the full drawn set is admitted.
+    "search::FocusSearch",
+    "search::ReplaceAll",
+    "search::ReplaceNext",
     "search::SelectNextMatch",
     "search::SelectPreviousMatch",
+    "search::ToggleCaseSensitive",
+    "search::ToggleIncludeIgnored",
+    "search::ToggleRegex",
+    "search::ToggleReplace",
+    "search::ToggleWholeWord",
     "terminal::Clear",
     "terminal::Copy",
     "terminal::Paste",
     "terminal::PasteText",
     "terminal::RenameTerminal",
-    "terminal::RerunTask",
     "terminal::ScrollLineDown",
     "terminal::ScrollLineUp",
     "terminal::ScrollPageDown",
@@ -416,7 +426,6 @@ pub const ADMITTED_ACTIONS: &[&str] = &[
     // the ordinary editable centre pane. Admit its standard save action
     // without admitting the rest of the workspace namespace.
     "workspace::Save",
-    "workroom::PrepareVoiceAdmission",
     "workroom::PrepareVoiceAdmission",
     "workroom::StartVoice",
     // OMEGA-DELTA-0211. The composer microphone's own start path: it opens
@@ -623,7 +632,6 @@ mod tests {
             "omega::OpenLegacySettings",
             "omega::OpenSettingsAt",
             "omega::OpenSettingsPage",
-            "workroom::PrepareVoiceAdmission",
             "workroom::PrepareVoiceAdmission",
             "workroom::StartVoice",
             "workroom::ApproveSarahVoiceCommand",

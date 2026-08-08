@@ -20,7 +20,49 @@ use omega_zero_base::{ADMITTED_ACTIONS, ADMITTED_NAMESPACES};
 /// Omega has one application surface, so every process installs this gate.
 pub fn init(cx: &mut App) {
     restrict_command_palette(cx);
+    hide_descoped_surface_actions(cx);
     install_action_gate(cx);
+}
+
+/// OMEGA-DELTA-0234. Hide palette entries whose surfaces this build no longer
+/// draws.
+///
+/// The admitted `agent`, `editor`, and `omega_workbench` namespaces are
+/// coarse: they also admit actions whose targets were descoped — deleted
+/// diagnostics/debugger/task crates, center-pane splits and multibuffers the
+/// sealed shell never shows, the center-pane duplicates of workbench
+/// surfaces, and Forensics, whose menu row and keybinding the owner withdrew.
+/// These stay dispatchable (`admits_action` is unchanged, so menus, keymaps,
+/// and delta contracts keep passing); they just stop being advertised in the
+/// palette.
+fn hide_descoped_surface_actions(cx: &mut App) {
+    use std::any::TypeId;
+    command_palette_hooks::CommandPaletteFilter::update_global(cx, |filter, _| {
+        filter.hide_action_types(&[
+            // Center-pane duplicates of workbench surfaces.
+            TypeId::of::<agent_ui::Follow>(),
+            TypeId::of::<agent_ui::ChatWithFollow>(),
+            TypeId::of::<agent_ui::OpenAgentDiff>(),
+            // The owner withdrew Forensics' menu row and keybinding on
+            // 2026-08-04; the palette was the last advertised entry point.
+            TypeId::of::<agent_ui::workbench_shell::SelectForensics>(),
+            // Splits and multibuffers open panes the sealed shell never draws.
+            TypeId::of::<editor::actions::OpenExcerptsSplit>(),
+            TypeId::of::<editor::actions::OpenSelectionsInMultibuffer>(),
+            TypeId::of::<editor::actions::OpenProposedChangesEditor>(),
+            // The task, diagnostics, and debugger crates are deleted.
+            TypeId::of::<editor::actions::SpawnNearestTask>(),
+            TypeId::of::<editor::actions::ToggleDiagnostics>(),
+            TypeId::of::<editor::actions::ToggleInlineDiagnostics>(),
+            TypeId::of::<editor::actions::GoToDiagnostic>(),
+            TypeId::of::<editor::actions::GoToPreviousDiagnostic>(),
+            TypeId::of::<editor::actions::ToggleBreakpoint>(),
+            TypeId::of::<editor::actions::EnableBreakpoint>(),
+            TypeId::of::<editor::actions::DisableBreakpoint>(),
+            TypeId::of::<editor::actions::EditLogBreakpoint>(),
+            TypeId::of::<editor::actions::ToggleInlineValues>(),
+        ]);
+    });
 }
 
 /// Restrict the palette to the admitted set.

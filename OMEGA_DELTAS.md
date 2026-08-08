@@ -9978,3 +9978,38 @@ registry entries; this entry takes 0233 to avoid colliding with them.
 - **Enforced by:**
   `component_library_returns_only_as_a_gated_development_surface` in
   `omega_deltas`, and the gate unit tests in `crates/component_library`.
+
+### OMEGA-DELTA-0234 — The palette advertises only the drawn surface
+
+The zero-base gate admits whole namespaces (`agent`, `editor`,
+`omega_workbench`), which is coarser than the sealed interface it protects.
+An audit of the command palette found the mismatch runs in both directions.
+
+**Outward: descoped surfaces stayed advertised.** The palette listed actions
+whose targets this build does not draw: the deleted diagnostics, debugger, and
+task crates (`editor::ToggleDiagnostics`, breakpoints, `SpawnNearestTask`),
+center-pane splits and multibuffers the sealed shell never shows
+(`editor::OpenExcerptsSplit`, `OpenSelectionsInMultibuffer`,
+`OpenProposedChangesEditor`), center-pane duplicates of workbench surfaces
+(`agent::Follow`, `agent::ChatWithFollow`, `agent::OpenAgentDiff`), and
+`omega_workbench::SelectForensics`, whose menu row and keybinding the owner
+withdrew on 2026-08-04 — the palette was its last advertised entry point.
+These are now hidden from the palette by action type. `admits_action` is
+unchanged, so menus, keymaps, and every existing delta contract keep passing;
+`hide_action_types` composes with the restriction rather than replacing it.
+`terminal::RerunTask` is removed from the admitted set outright: its handler
+dispatches `task::Rerun`, which the gate already refuses, over task
+infrastructure that was deleted. The duplicated
+`workroom::PrepareVoiceAdmission` entry is collapsed to one.
+
+**Inward: drawn controls were refused.** The Workbench Search surface and the
+thread search bar draw controls that dispatch `search::FocusSearch`,
+`ToggleRegex`, `ToggleCaseSensitive`, `ToggleWholeWord`, `ToggleReplace`,
+`ReplaceNext`, `ReplaceAll`, and `ToggleIncludeIgnored` — none of which were
+admitted, so clicking them logged refusals in the real binary while passing
+the visual lane (which installs no gate). The full drawn set is now admitted.
+
+- **Enforced by:**
+  `the_palette_matches_the_drawn_surface_in_both_directions` in
+  `omega_deltas`, and `the_admitted_set_is_the_exo_surface_and_nothing_else`
+  in `omega_zero_base`.

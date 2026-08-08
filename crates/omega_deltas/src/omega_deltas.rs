@@ -212,6 +212,7 @@ pub const ENFORCED_DELTAS: &[&str] = &[
     "OMEGA-DELTA-0221",
     "OMEGA-DELTA-0222",
     "OMEGA-DELTA-0233",
+    "OMEGA-DELTA-0234",
 ];
 
 /// OMEGA-DELTA-0204. Every control the composer's bar offers, written twice:
@@ -28886,5 +28887,67 @@ mod tests {
             !library.contains("OpenComponentPreview"),
             "OMEGA-DELTA-0233: the removed OpenComponentPreview action name must not be revived"
         );
+    }
+
+    /// OMEGA-DELTA-0234. The palette advertises only surfaces this build
+    /// draws, and drawn search controls are dispatchable.
+    ///
+    /// Two directions of the same rule. Outward: admitted namespaces are
+    /// coarse, so descoped surfaces (deleted diagnostics/debugger/task
+    /// crates, center-pane splits, the withdrawn Forensics entry points) are
+    /// hidden from the palette by type while staying dispatchable for menus
+    /// and keymaps. Inward: the Workbench Search surface and thread search
+    /// bar draw controls whose actions the gate previously refused; the full
+    /// drawn set is admitted.
+    #[test]
+    fn the_palette_matches_the_drawn_surface_in_both_directions() {
+        let admitted = read_repository_file("crates/omega_zero_base/src/omega_zero_base.rs");
+        for drawn in [
+            "\"search::FocusSearch\",",
+            "\"search::ReplaceAll\",",
+            "\"search::ReplaceNext\",",
+            "\"search::ToggleCaseSensitive\",",
+            "\"search::ToggleIncludeIgnored\",",
+            "\"search::ToggleRegex\",",
+            "\"search::ToggleReplace\",",
+            "\"search::ToggleWholeWord\",",
+        ] {
+            assert!(
+                admitted.contains(drawn),
+                "OMEGA-DELTA-0234: drawn search control lost admission `{drawn}`"
+            );
+        }
+        assert!(
+            !admitted.contains("\"terminal::RerunTask\""),
+            "OMEGA-DELTA-0234: terminal::RerunTask dispatches the refused task::Rerun \
+             over deleted task infrastructure and must stay out of the admitted set"
+        );
+        assert_eq!(
+            admitted
+                .matches("\"workroom::PrepareVoiceAdmission\",")
+                .count(),
+            2,
+            "OMEGA-DELTA-0234: one list entry and one test expectation, no duplicates"
+        );
+
+        let palette = read_repository_file("crates/omega/src/omega_zero_base_ui.rs");
+        for hidden in [
+            "hide_action_types",
+            "agent_ui::Follow",
+            "agent_ui::ChatWithFollow",
+            "agent_ui::OpenAgentDiff",
+            "workbench_shell::SelectForensics",
+            "editor::actions::OpenExcerptsSplit",
+            "editor::actions::OpenSelectionsInMultibuffer",
+            "editor::actions::OpenProposedChangesEditor",
+            "editor::actions::SpawnNearestTask",
+            "editor::actions::ToggleDiagnostics",
+            "editor::actions::ToggleBreakpoint",
+        ] {
+            assert!(
+                palette.contains(hidden),
+                "OMEGA-DELTA-0234: the palette hide list lost `{hidden}`"
+            );
+        }
     }
 }
