@@ -239,3 +239,156 @@ mod tests {
         assert!(arc_head(&VizAnchor::rect(0.0, 0.0, 10.0, 10.0), 0.0, 2.5, 42.0).is_none());
     }
 }
+
+/// Flattens a circle into a closed polyline (the last point repeats the
+/// first), for code paths that must avoid arc geometry.
+pub fn flatten_circle(
+    center_x: f32,
+    center_y: f32,
+    radius: f32,
+    segments: usize,
+) -> Vec<(f32, f32)> {
+    let segments = segments.max(8);
+    (0..=segments)
+        .map(|index| {
+            let angle = index as f32 / segments as f32 * 360.0;
+            polar(center_x, center_y, radius, angle)
+        })
+        .collect()
+}
+
+/// Flattens a rounded rectangle outline into a closed polyline, with
+/// `corner_segments` line segments per corner arc.
+pub fn flatten_rounded_rect(
+    x: f32,
+    y: f32,
+    width: f32,
+    height: f32,
+    corner_radius: f32,
+    corner_segments: usize,
+) -> Vec<(f32, f32)> {
+    let radius = corner_radius.min(width / 2.0).min(height / 2.0).max(0.0);
+    let corner_segments = corner_segments.max(1);
+    let mut points = Vec::new();
+    // Corner centers and the start angle of each 90° arc, walked clockwise
+    // from the top edge (y grows downward, angles per `polar`).
+    let corners = [
+        (x + width - radius, y + radius, 270.0),
+        (x + width - radius, y + height - radius, 0.0),
+        (x + radius, y + height - radius, 90.0),
+        (x + radius, y + radius, 180.0),
+    ];
+    for (corner_x, corner_y, start_angle) in corners {
+        for index in 0..=corner_segments {
+            let angle = start_angle + index as f32 / corner_segments as f32 * 90.0;
+            points.push(polar(corner_x, corner_y, radius, angle));
+        }
+    }
+    if let Some(first) = points.first().copied() {
+        points.push(first);
+    }
+    points
+}
+
+/// Splits a polyline into dash runs, each a polyline to stroke solid.
+///
+/// This exists because dashing via the tessellator's own dash support panics
+/// on closed curved paths (lyon's normalized sampler emits NaN when a path's
+/// end coincides with its start), so curved outlines are flattened and dashed
+/// explicitly. Every emitted coordinate is a finite interpolation of inputs.
+pub fn dash_polyline(points: &[(f32, f32)], dash: f32, gap: f32) -> Vec<Vec<(f32, f32)>> {
+    if points.len() < 2 {
+        return Vec::new();
+    }
+    if dash <= 0.0 || gap <= 0.0 {
+        return vec![points.to_vec()];
+    }
+    let mut runs = Vec::new();
+    let mut current: Vec<(f32, f32)> = Vec::new();
+    let mut drawing = true;
+    let mut remaining = dash;
+    for window in points.windows(2) {
+        let (x0, y0) = window[0];
+        let (x1, y1) = window[1];
+        let segment_length = ((x1 - x0).powi(2) + (y1 - y0).powi(2)).sqrt();
+        if segment_length <= f32::EPSILON {
+            continue;
+        }
+        let mut travelled = 0.0;
+        while travelled < segment_length {
+            let step = remaining.min(segment_length - travelled);
+            let start_fraction = travelled / segment_length;
+            let end_fraction = (travelled + step) / segment_length;
+            if drawing {
+                let start = (
+                    x0 + (x1 - x0) * start_fraction,
+                    y0 + (y1 - y0) * start_fraction,
+                );
+                let end = (x0 + (x1 - x0) * end_fraction, y0 + (y1 - y0) * end_fraction);
+                if current.is_empty() {
+                    current.push(start);
+                }
+                current.push(end);
+            }
+            travelled += step;
+            remaining -= step;
+            if remaining <= f32::EPSILON {
+                if drawing && !current.is_empty() {
+                    runs.push(std::mem::take(&mut current));
+                }
+                drawing = !drawing;
+                remaining = if drawing { dash } else { gap };
+            }
+        }
+    }
+    if drawing && !current.is_empty() {
+        runs.push(current);
+    }
+    runs
+}
+
+#[cfg(test)]
+mod dash_tests {
+    use super::*;
+
+    #[test]
+    fn dashed_circles_stay_finite_and_cover_the_circumference() {
+        let circumference = 2.0 * std::f32::consts::PI * 24.0;
+        let (dash, gap) = even_dash(circumference, 3.0, 3.0);
+        let points = flatten_circle(100.0, 100.0, 24.0, 64);
+        let runs = dash_polyline(&points, dash, gap);
+        assert!(!runs.is_empty());
+        let mut drawn = 0.0;
+        for run in &runs {
+            assert!(run.len() >= 2);
+            for (x, y) in run {
+                assert!(x.is_finite() && y.is_finite());
+            }
+            for window in run.windows(2) {
+                let (x0, y0) = window[0];
+                let (x1, y1) = window[1];
+                drawn += ((x1 - x0).powi(2) + (y1 - y0).powi(2)).sqrt();
+            }
+        }
+        // Half the perimeter is dashes (dash == gap), drawn as chords of the
+        // flattened polygon, so allow a small flattening deficit.
+        assert!((drawn - circumference / 2.0).abs() < circumference * 0.05);
+    }
+
+    #[test]
+    fn dashed_rounded_rects_stay_finite() {
+        let points = flatten_rounded_rect(10.0, 10.0, 190.0, 90.0, 10.0, 6);
+        for run in dash_polyline(&points, 3.0, 3.0) {
+            for (x, y) in run {
+                assert!(x.is_finite() && y.is_finite());
+            }
+        }
+    }
+
+    #[test]
+    fn non_positive_dash_falls_back_to_a_solid_run() {
+        let points = vec![(0.0, 0.0), (10.0, 0.0)];
+        let runs = dash_polyline(&points, 0.0, 3.0);
+        assert_eq!(runs, vec![points]);
+    }
+}

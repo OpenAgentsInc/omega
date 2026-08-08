@@ -123,10 +123,29 @@ pub(crate) fn stroke_circle(
     dash: Option<(Pixels, Pixels)>,
     color: Hsla,
 ) {
-    let mut builder = PathBuilder::stroke(width);
+    // Dashed strokes must not go through `dash_array` here: lyon's dash
+    // sampler panics on NaN for closed curved paths, so dashed circles are
+    // flattened and dashed explicitly (see `dash_polyline`).
     if let Some((dash, gap)) = dash {
-        builder = builder.dash_array(&[dash, gap]);
+        let circumference = 2.0 * std::f32::consts::PI * f32::from(radius);
+        let segments = ((circumference / 3.0) as usize).clamp(24, 128);
+        let points = flatten_circle(
+            f32::from(center.x),
+            f32::from(center.y),
+            f32::from(radius),
+            segments,
+        );
+        stroke_dash_runs(
+            window,
+            &points,
+            f32::from(dash),
+            f32::from(gap),
+            width,
+            color,
+        );
+        return;
     }
+    let mut builder = PathBuilder::stroke(width);
     builder.move_to(point(center.x + radius, center.y));
     builder.arc_to(
         point(radius, radius),
@@ -142,6 +161,33 @@ pub(crate) fn stroke_circle(
         true,
         point(center.x + radius, center.y),
     );
+    if let Ok(path) = builder.build() {
+        window.paint_path(path, color);
+    }
+}
+
+fn stroke_dash_runs(
+    window: &mut Window,
+    points: &[(f32, f32)],
+    dash: f32,
+    gap: f32,
+    width: Pixels,
+    color: Hsla,
+) {
+    let runs = dash_polyline(points, dash, gap);
+    if runs.is_empty() {
+        return;
+    }
+    let mut builder = PathBuilder::stroke(width);
+    for run in runs {
+        let mut segments = run.iter();
+        if let Some((x, y)) = segments.next() {
+            builder.move_to(point(px(*x), px(*y)));
+        }
+        for (x, y) in segments {
+            builder.line_to(point(px(*x), px(*y)));
+        }
+    }
     if let Ok(path) = builder.build() {
         window.paint_path(path, color);
     }
@@ -179,13 +225,31 @@ pub(crate) fn stroke_rounded_rect(
     dash: Option<(Pixels, Pixels)>,
     color: Hsla,
 ) {
+    // Same constraint as `stroke_circle`: dashed curved outlines are
+    // flattened and dashed explicitly instead of using `dash_array`.
+    if let Some((dash, gap)) = dash {
+        let points = flatten_rounded_rect(
+            f32::from(origin.x),
+            f32::from(origin.y),
+            f32::from(size.width),
+            f32::from(size.height),
+            f32::from(corner_radius),
+            6,
+        );
+        stroke_dash_runs(
+            window,
+            &points,
+            f32::from(dash),
+            f32::from(gap),
+            width,
+            color,
+        );
+        return;
+    }
     let radius = corner_radius.min(size.width / 2.).min(size.height / 2.);
     let (x0, y0) = (origin.x, origin.y);
     let (x1, y1) = (origin.x + size.width, origin.y + size.height);
     let mut builder = PathBuilder::stroke(width);
-    if let Some((dash, gap)) = dash {
-        builder = builder.dash_array(&[dash, gap]);
-    }
     builder.move_to(point(x0 + radius, y0));
     builder.line_to(point(x1 - radius, y0));
     builder.arc_to(
@@ -291,5 +355,48 @@ impl SceneText {
         {
             log::warn!("viz scene text failed to paint");
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::prelude::*;
+    use component::Component as _;
+    use gpui::TestAppContext;
+
+    struct AllVizPreviews;
+
+    impl gpui::Render for AllVizPreviews {
+        fn render(
+            &mut self,
+            window: &mut Window,
+            cx: &mut gpui::Context<Self>,
+        ) -> impl gpui::IntoElement {
+            crate::v_flex()
+                .size_full()
+                .child(VizNode::preview(window, cx))
+                .child(VizEdge::preview(window, cx))
+                .child(VizPort::preview(window, cx))
+                .child(VizChip::preview(window, cx))
+                .child(VizZone::preview(window, cx))
+                .child(VizProgressRail::preview(window, cx))
+        }
+    }
+
+    /// Paints every viz preview gallery in a real test window, so the full
+    /// tessellation path runs. Dashed circles and rounded rects once panicked
+    /// inside lyon's dash sampler on exactly this path (omega#247).
+    #[gpui::test]
+    async fn every_viz_preview_paints_without_panicking(cx: &mut TestAppContext) {
+        cx.update(|cx| {
+            let settings_store = settings::SettingsStore::test(cx);
+            cx.set_global(settings_store);
+            theme_settings::init(theme::LoadThemes::JustBase, cx);
+        });
+        let (_view, cx) = cx.add_window_view(|_, _| AllVizPreviews);
+        cx.run_until_parked();
+        cx.update(|window, _| window.refresh());
+        cx.run_until_parked();
     }
 }
