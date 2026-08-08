@@ -40,7 +40,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, Instant};
 
 use acp_thread::AgentConnection as _;
-use agent::{NativeAgent, NativeAgentConnection, Templates, ThreadStore};
+use agent::{NativeAgent, NativeAgentConnection, Templates, Thread, ThreadStore};
 use agent_client_protocol::schema::v1 as acp;
 use anyhow::{Context, Result};
 use clap::{Parser, ValueEnum};
@@ -52,7 +52,7 @@ use language_model::{
     ANTHROPIC_PROVIDER_ID, LanguageModel, LanguageModelId, LanguageModelProviderId,
     LanguageModelRegistry, SelectedModel,
 };
-use project::Project;
+use project::{Project, context_server_store::ContextServerStatus};
 use settings::SettingsStore;
 use util::path_list::PathList;
 
@@ -109,12 +109,17 @@ struct Args {
     /// Enable or disable extended thinking. Defaults to model auto-detection if omitted.
     #[arg(long)]
     thinking: Option<bool>,
+
+    /// Use the local OpenAgents WebSocket API for the openagents/omega-agent model.
+    #[arg(long)]
+    openagents_development_api: bool,
 }
 
 #[derive(Clone, Copy, Debug, ValueEnum, serde::Serialize)]
 #[serde(rename_all = "snake_case")]
 enum EvalProfile {
     Basic,
+    Market,
     Wide,
 }
 
@@ -170,6 +175,10 @@ const EXIT_TIMEOUT: i32 = 2;
 const EXIT_INTERRUPTED: i32 = 3;
 const MODEL_DISCOVERY_TIMEOUT: Duration = Duration::from_secs(30);
 const MODEL_DISCOVERY_POLL_INTERVAL: Duration = Duration::from_millis(100);
+const CONTEXT_SERVER_READY_TIMEOUT: Duration = Duration::from_secs(30);
+const CONTEXT_SERVER_READY_POLL_INTERVAL: Duration = Duration::from_millis(100);
+const MARKET_CONTEXT_SERVER_ID: &str = "market-demo";
+const MARKET_READY_TOOL: &str = "market_network_status";
 
 static TERMINATED: AtomicBool = AtomicBool::new(false);
 
@@ -286,6 +295,7 @@ fn main() {
                 timeout,
                 thinking_override,
                 reasoning_effort.as_deref(),
+                args.openagents_development_api,
                 Some(&output_dir),
                 openai_compatible_providers_json.as_deref(),
                 anthropic_available_models_json.as_deref(),
@@ -614,8 +624,18 @@ mod tests {
             r#","default_profile": "basic""#
         );
         assert_eq!(
+            eval_profile_settings(EvalProfile::Market, "")?,
+            r#","default_profile": "eval-market", "profiles": {"eval-market": {"name": "Market", "enable_all_context_servers": true, "tools": {"skill": true}}}"#
+        );
+        assert_eq!(
             eval_profile_settings(EvalProfile::Wide, "")?,
             r#","default_profile": "write""#
+        );
+        assert!(eval_context_servers_settings(EvalProfile::Basic).is_empty());
+        assert!(eval_context_servers_settings(EvalProfile::Wide).is_empty());
+        assert!(
+            eval_context_servers_settings(EvalProfile::Market)
+                .contains("scripts/market-demo-mcp.mjs")
         );
         Ok(())
     }
@@ -630,6 +650,17 @@ mod tests {
                 .contains("cannot alter the closed basic profile")
         );
     }
+
+    #[test]
+    fn the_market_eval_surface_cannot_be_partially_disabled() {
+        let error = eval_profile_settings(EvalProfile::Market, "market_execute_swap")
+            .expect_err("the market profile must stay closed");
+        assert!(
+            error
+                .to_string()
+                .contains("cannot alter the market profile")
+        );
+    }
 }
 
 async fn run_agent(
@@ -641,6 +672,7 @@ async fn run_agent(
     timeout: Option<u64>,
     thinking_override: Option<bool>,
     reasoning_effort: Option<&str>,
+    openagents_development_api: bool,
     output_dir: Option<&std::path::Path>,
     openai_compatible_providers_json: Option<&str>,
     anthropic_available_models_json: Option<&str>,
@@ -697,16 +729,22 @@ async fn run_agent(
                 r#""anthropic": {{"available_models": {models_json}}}"#
             ));
         }
+        if openagents_development_api {
+            language_models_fields
+                .push(r#""openagents": {"use_development_api": true}"#.to_string());
+        }
         let language_models_settings = format!("{{{}}}", language_models_fields.join(","));
         // The explicit basic profile must remain the admitted five-tool
         // surface. Wide evals use the inherited write profile, or a complete
         // custom copy when an air-gapped benchmark disables tools.
         let disabled_tools = std::env::var("ZED_EVAL_DISABLE_TOOLS").unwrap_or_default();
         let profile_field = eval_profile_settings(profile, &disabled_tools)?;
+        let context_servers_field = eval_context_servers_settings(profile);
         SettingsStore::update_global(cx, |store, cx| {
             let settings = format!(
                 r#"{{
                     "language_models": {language_models_settings},
+                    {context_servers_field}
                     "agent": {{
                         "tool_permissions": {{"default": "allow"}},
                         "default_model": {{
@@ -794,6 +832,12 @@ async fn run_agent(
         };
     }
 
+    if matches!(profile, EvalProfile::Market)
+        && let Err(error) = wait_for_context_server(&project, MARKET_CONTEXT_SERVER_ID, cx).await
+    {
+        return (Err(error), RunStats::default());
+    }
+
     let agent = cx.update(|cx| {
         let thread_store = cx.new(|cx| ThreadStore::new(cx));
         NativeAgent::new(thread_store, Templates::new(), app_state.fs.clone(), cx)
@@ -811,6 +855,25 @@ async fn run_agent(
         Ok(t) => t,
         Err(e) => return (Err(e).context("creating ACP session"), RunStats::default()),
     };
+
+    let thread = cx.update(|cx| {
+        let session_id = acp_thread.read(cx).session_id().clone();
+        connection.thread(&session_id, cx)
+    });
+    let Some(thread) = thread else {
+        return (
+            Err(anyhow::anyhow!(
+                "new ACP session did not create an agent thread"
+            )),
+            RunStats::default(),
+        );
+    };
+
+    if matches!(profile, EvalProfile::Market)
+        && let Err(error) = wait_for_enabled_tool(&thread, MARKET_READY_TOOL, cx).await
+    {
+        return (Err(error), RunStats::default());
+    }
 
     let _subscription = cx.subscribe(&acp_thread, |acp_thread, event, cx| {
         log_acp_thread_event(&acp_thread, event, cx);
@@ -950,6 +1013,89 @@ async fn run_agent(
     )
 }
 
+async fn wait_for_context_server(
+    project: &Entity<Project>,
+    server_id: &str,
+    cx: &mut AsyncApp,
+) -> Result<()> {
+    let server_store = cx.update(|cx| project.read(cx).context_server_store());
+    let started_at = Instant::now();
+
+    loop {
+        let (is_configured, status) = cx.update(|cx| {
+            let server_store = server_store.read(cx);
+            let configured_server = server_store
+                .configured_server_ids()
+                .into_iter()
+                .find(|configured_id| configured_id.0.as_ref() == server_id);
+            let status = configured_server
+                .as_ref()
+                .and_then(|configured_id| server_store.status_for_server(configured_id));
+            (configured_server.is_some(), status)
+        });
+
+        match status {
+            Some(ContextServerStatus::Running) => {
+                eprintln!("[eval-cli] context server ready: {server_id}");
+                return Ok(());
+            }
+            Some(ContextServerStatus::Error(error)) => {
+                anyhow::bail!("context server {server_id} failed to start: {error}");
+            }
+            Some(ContextServerStatus::Stopped) => {
+                anyhow::bail!("context server {server_id} stopped before the agent started");
+            }
+            Some(ContextServerStatus::AuthRequired) => {
+                anyhow::bail!("context server {server_id} requires authentication");
+            }
+            Some(ContextServerStatus::ClientSecretRequired { error }) => {
+                anyhow::bail!(
+                    "context server {server_id} requires a client secret{}",
+                    error.map_or_else(String::new, |error| format!(": {error}"))
+                );
+            }
+            Some(ContextServerStatus::Starting | ContextServerStatus::Authenticating) | None => {}
+        }
+
+        if started_at.elapsed() >= CONTEXT_SERVER_READY_TIMEOUT {
+            anyhow::bail!(
+                "timed out waiting for context server {server_id}; configured: {is_configured}"
+            );
+        }
+        cx.background_executor()
+            .timer(CONTEXT_SERVER_READY_POLL_INTERVAL)
+            .await;
+    }
+}
+
+async fn wait_for_enabled_tool(
+    thread: &Entity<Thread>,
+    tool_name: &str,
+    cx: &mut AsyncApp,
+) -> Result<()> {
+    let started_at = Instant::now();
+    loop {
+        if cx.update(|cx| thread.read(cx).has_enabled_tool(tool_name, cx)) {
+            eprintln!("[eval-cli] agent tool ready: {tool_name}");
+            return Ok(());
+        }
+        if started_at.elapsed() >= CONTEXT_SERVER_READY_TIMEOUT {
+            anyhow::bail!("timed out waiting for enabled agent tool {tool_name}");
+        }
+        cx.background_executor()
+            .timer(CONTEXT_SERVER_READY_POLL_INTERVAL)
+            .await;
+    }
+}
+
+fn eval_context_servers_settings(profile: EvalProfile) -> &'static str {
+    if matches!(profile, EvalProfile::Market) {
+        r#""context_servers": {"market-demo": {"enabled": true, "command": "node", "args": ["scripts/market-demo-mcp.mjs"]}},"#
+    } else {
+        ""
+    }
+}
+
 fn eval_profile_settings(profile: EvalProfile, disabled_tools: &str) -> Result<String> {
     let disabled = disabled_tools
         .split(',')
@@ -963,6 +1109,17 @@ fn eval_profile_settings(profile: EvalProfile, disabled_tools: &str) -> Result<S
             "ZED_EVAL_DISABLE_TOOLS cannot alter the closed basic profile"
         );
         return Ok(r#","default_profile": "basic""#.to_string());
+    }
+
+    if matches!(profile, EvalProfile::Market) {
+        anyhow::ensure!(
+            disabled.is_empty(),
+            "ZED_EVAL_DISABLE_TOOLS cannot alter the market profile"
+        );
+        return Ok(
+            r#","default_profile": "eval-market", "profiles": {"eval-market": {"name": "Market", "enable_all_context_servers": true, "tools": {"skill": true}}}"#
+                .to_string(),
+        );
     }
 
     if disabled.is_empty() {

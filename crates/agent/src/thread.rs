@@ -4911,6 +4911,10 @@ impl Thread {
         ordered
     }
 
+    pub fn has_enabled_tool(&self, tool_name: &str, cx: &App) -> bool {
+        self.enabled_tools(cx).contains_key(tool_name)
+    }
+
     fn enabled_tools(&self, cx: &App) -> BTreeMap<SharedString, Arc<dyn AnyAgentTool>> {
         let Some(model) = self.model() else {
             return BTreeMap::new();

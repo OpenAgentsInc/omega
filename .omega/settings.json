@@ -14,5 +14,32 @@
       "command": "node",
       "args": ["scripts/market-demo-mcp.mjs"]
     }
+  },
+  // Omega Agent uses the Basic profile. Offer this project's market tools to
+  // that profile without enabling unrelated context servers. Swap execution
+  // still requires a person to approve the tool call.
+  "agent": {
+    "profiles": {
+      "basic": {
+        "name": "Basic",
+        "context_servers": {
+          "market-demo": {
+            "tools": {
+              "market_network_status": true,
+              "market_swap_quote": true,
+              "market_execute_swap": true,
+              "market_swap_status": true
+            }
+          }
+        }
+      }
+    },
+    "tool_permissions": {
+      "tools": {
+        "mcp:market-demo:market_execute_swap": {
+          "default": "confirm"
+        }
+      }
+    }
   }
 }

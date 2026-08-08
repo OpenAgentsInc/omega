@@ -55,8 +55,27 @@ eval-cli \
 and `thread.json` to the output directory.
 
 `--profile basic` selects the closed Omega five-tool profile.
+`--profile market` enables project context servers with only the skill tool from
+the built-in set. Use it to test an agent and its MCP tools without a GUI.
 `--profile wide` selects the inherited write profile and is the default for
 backward-compatible benchmark runs. `result.json` records the selected profile.
+
+To test Omega Agent against the local OpenAgents API and this repository's
+market server, start the API on port 8080, then run:
+
+```sh
+cargo run -p eval_cli -- \
+  --workdir . \
+  --model openagents/omega-agent \
+  --profile market \
+  --openagents-development-api \
+  --instruction "Use market_network_status and summarize the live demo network." \
+  --timeout 120 \
+  --output-dir /tmp/omega-market-agent
+```
+
+The command writes the full thread and a tool-call count to the output
+directory. Swap execution still needs user approval.
 
 ### Exit codes
 
