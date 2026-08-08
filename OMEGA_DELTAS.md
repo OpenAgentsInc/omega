@@ -10002,7 +10002,13 @@ dispatches `task::Rerun`, which the gate already refuses, over task
 infrastructure that was deleted. The duplicated
 `workroom::PrepareVoiceAdmission` entry is collapsed to one.
 
-**Inward: drawn controls were refused.** The Workbench Search surface and the
+**Inward: drawn controls were refused.** The Markets dock panel
+(omega#244, loaded only behind `OMEGA_MARKET_PANEL=1`) had no reachable
+entry point at all: the sealed interface renders no status-bar panel
+buttons, so `market::ToggleFocus`/`market::Reconnect` are admitted as the
+panel's palette entry point.
+
+ The Workbench Search surface and the
 thread search bar draw controls that dispatch `search::FocusSearch`,
 `ToggleRegex`, `ToggleCaseSensitive`, `ToggleWholeWord`, `ToggleReplace`,
 `ReplaceNext`, `ReplaceAll`, and `ToggleIncludeIgnored` — none of which were

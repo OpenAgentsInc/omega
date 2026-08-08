@@ -369,6 +369,11 @@ pub const ADMITTED_ACTIONS: &[&str] = &[
     "omega::ResetBufferFontSize",
     "omega::ResetUiFontSize",
     "omega::ToggleFullScreen",
+    // omega#244, OMEGA-DELTA-0234. The Markets dock panel loads only behind
+    // OMEGA_MARKET_PANEL=1, and the sealed interface renders no status-bar
+    // panel buttons, so its palette toggle is the panel's only entry point.
+    "market::Reconnect",
+    "market::ToggleFocus",
     // OMEGA-DELTA-0234. The Workbench Search surface and the thread search
     // bar draw controls that dispatch these; a drawn control the gate refuses
     // is a defect, so the full drawn set is admitted.

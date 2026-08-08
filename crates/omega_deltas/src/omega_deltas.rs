@@ -28906,6 +28906,8 @@ mod tests {
     fn the_palette_matches_the_drawn_surface_in_both_directions() {
         let admitted = read_repository_file("crates/omega_zero_base/src/omega_zero_base.rs");
         for drawn in [
+            "\"market::Reconnect\",",
+            "\"market::ToggleFocus\",",
             "\"search::FocusSearch\",",
             "\"search::ReplaceAll\",",
             "\"search::ReplaceNext\",",
