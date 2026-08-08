@@ -54,6 +54,7 @@ use omega_exo_lane::ObservedExoCapabilityState;
 use omega_front_door::ExecutorDisclosure;
 use settings::{update_settings_file, update_settings_file_with_completion};
 use terminal_view::{ContentMode, TerminalView};
+use theme_settings::ThemeSettings;
 use ui::{
     ButtonLike, ButtonSize, CalloutBorderPosition, Checkbox, SpinnerLabel, SpinnerVariant,
     SplitButton, SplitButtonStyle, Tab, ToggleState,
@@ -7250,6 +7251,9 @@ impl ThreadView {
                                 .py(px(10.0))
                                 .rounded(px(16.0))
                                 .bg(cx.theme().colors().elevated_surface_background)
+                                .font_family(
+                                    ThemeSettings::get_global(cx).agent_ui_font_family().clone(),
+                                )
                                 .text_size(px(14.0))
                                 .child(SharedString::from(user_message_text.clone())),
                         )
