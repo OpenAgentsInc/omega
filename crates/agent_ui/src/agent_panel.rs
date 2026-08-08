@@ -4432,6 +4432,10 @@ pub struct AgentPanel {
     /// refusal reached the user as nothing at all.
     omega_unavailable_surface: Option<OmegaUnavailableSurface>,
     omega_settings: Option<Entity<settings_ui::SettingsWindow>>,
+    #[cfg(debug_assertions)]
+    omega_component_library: Option<Entity<component_library::ComponentLibrary>>,
+    #[cfg(debug_assertions)]
+    omega_component_library_subscription: Option<gpui::Subscription>,
     /// omega#217. The destination the accessibility live region last spoke
     /// for, and the sentence it spoke. Held because "renamed" and "opened" are
     /// the same observation — a different title — distinguished only by
@@ -5216,6 +5220,10 @@ impl AgentPanel {
             omega_unavailable_route: None,
             omega_unavailable_surface: None,
             omega_settings: None,
+            #[cfg(debug_assertions)]
+            omega_component_library: None,
+            #[cfg(debug_assertions)]
+            omega_component_library_subscription: None,
             omega_announced_destination: None,
             omega_live_announcement: None,
             #[cfg(any(test, feature = "test-support"))]
@@ -15983,7 +15991,7 @@ impl AgentPanel {
                     if is_complete || dependencies_terminal {
                         break;
                     }
-                    smol::Timer::after(Duration::from_secs(2)).await;
+                    cx.background_executor().timer(Duration::from_secs(2)).await;
                 }
                 log::info!(
                     "Forensics entropy scan opened as a visible Omega task for {} at {}",
@@ -18868,6 +18876,41 @@ impl AgentPanel {
         self.open_omega_history_route(restored_route, window, cx)
     }
 
+    /// Embeds the gated component library as the shell's main pane, the same
+    /// takeover shape as the embedded settings surface. Development builds
+    /// only; the surface never enters persisted navigation history because an
+    /// ungated build could not resolve it.
+    #[cfg(debug_assertions)]
+    fn open_omega_component_library(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if !component_library::ComponentLibraryGate::from_process_environment().enabled() {
+            return;
+        }
+        self.omega_settings = None;
+        if self.omega_component_library.is_none() {
+            let library = cx.new(|cx| component_library::ComponentLibrary::new(window, cx));
+            self.omega_component_library_subscription =
+                Some(
+                    cx.subscribe_in(&library, window, |this, _, event, window, cx| match event {
+                        component_library::ComponentLibraryEvent::Close => {
+                            this.close_omega_component_library(window, cx);
+                        }
+                    }),
+                );
+            let focus_handle = library.focus_handle(cx);
+            window.focus(&focus_handle, cx);
+            self.omega_component_library = Some(library);
+        }
+        cx.notify();
+    }
+
+    #[cfg(debug_assertions)]
+    fn close_omega_component_library(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.omega_component_library = None;
+        self.omega_component_library_subscription = None;
+        window.focus(&self.focus_handle, cx);
+        cx.notify();
+    }
+
     fn open_omega_settings(
         &mut self,
         record_history: bool,
@@ -18877,6 +18920,11 @@ impl AgentPanel {
         self.leave_public_channel_destination(cx);
         self.omega_unavailable_route = None;
         self.omega_unavailable_surface = None;
+        #[cfg(debug_assertions)]
+        {
+            self.omega_component_library = None;
+            self.omega_component_library_subscription = None;
+        }
         if self.omega_settings.is_none() {
             let original_window = window.window_handle().downcast::<MultiWorkspace>();
             let sidebar_open = self.sidebar.open;
@@ -21692,17 +21740,24 @@ impl AgentPanel {
         }
         let active_thread_id = self.active_thread_id(cx);
         let omega_settings_open = self.omega_settings.is_some();
+        #[cfg(debug_assertions)]
+        let omega_library_open = self.omega_component_library.is_some();
+        #[cfg(not(debug_assertions))]
+        let omega_library_open = false;
+        let omega_takeover_open = omega_settings_open || omega_library_open;
         let omega_thread_open = !self.omega_non_thread_route_open();
         let active_title = self
             .active_conversation_view()
             .map(|view| view.read(cx).title(cx))
             .unwrap_or_else(|| "New thread".into());
-        let active_sidebar_title = active_title.clone();
+        let active_sidebar_title = active_title;
         let omega_live_region = {
             let kind: SharedString = if selected_public_channel_label.is_some() {
                 "tester channel".into()
             } else if omega_settings_open {
                 "settings".into()
+            } else if omega_library_open {
+                "component library".into()
             } else if self.omega_unavailable_route.is_some() {
                 "unavailable destination".into()
             } else if self.omega_unavailable_surface.is_some() {
@@ -22067,7 +22122,7 @@ impl AgentPanel {
                     .child(back)
                     .child(forward),
             )
-            .when(!omega_settings_open, |bar| {
+            .when(!omega_takeover_open, |bar| {
                 bar.child(
                     div()
                         .id("omega-thread-tab-strip")
@@ -22864,6 +22919,11 @@ impl AgentPanel {
             .child(main_content);
 
         let settings_surface = self.omega_settings.clone();
+        #[cfg(debug_assertions)]
+        let library_surface: Option<gpui::AnyView> =
+            self.omega_component_library.clone().map(Into::into);
+        #[cfg(not(debug_assertions))]
+        let library_surface: Option<gpui::AnyView> = None;
 
         div()
             .id("omega-frost-shell")
@@ -22876,7 +22936,7 @@ impl AgentPanel {
             .bg(shell_background.opacity(if cfg!(target_os = "macos") { 0.94 } else { 1. }))
             .font_family("Geist")
             .child(omega_live_region)
-            .when(!omega_settings_open, |shell| {
+            .when(!omega_takeover_open, |shell| {
                 shell.child(
                     div()
                         .absolute()
@@ -22890,7 +22950,7 @@ impl AgentPanel {
                 )
             })
             .child(titlebar)
-            .when(!omega_settings_open, |shell| {
+            .when(!omega_takeover_open, |shell| {
                 shell.child(
                     h_flex()
                         .relative()
@@ -22912,6 +22972,9 @@ impl AgentPanel {
             })
             .when_some(settings_surface, |shell, settings| {
                 shell.child(div().flex_1().min_h_0().w_full().child(settings))
+            })
+            .when_some(library_surface, |shell, library| {
+                shell.child(div().flex_1().min_h_0().w_full().child(library))
             })
             .into_any_element()
     }
@@ -22953,6 +23016,18 @@ impl Render for AgentPanel {
             .on_action(cx.listener(|this, action: &NewThread, window, cx| {
                 this.new_thread(action, window, cx);
             }))
+            .when(cfg!(debug_assertions), |content| {
+                #[cfg(debug_assertions)]
+                {
+                    content.on_action(cx.listener(
+                        |this, _: &component_library::OpenComponentLibrary, window, cx| {
+                            this.open_omega_component_library(window, cx);
+                        },
+                    ))
+                }
+                #[cfg(not(debug_assertions))]
+                content
+            })
             .on_action(cx.listener(
                 move |this, _: &workbench_shell::CloseActiveThreadTab, window, cx| {
                     if primary_interface {

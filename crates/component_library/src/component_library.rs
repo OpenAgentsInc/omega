@@ -49,7 +49,7 @@ impl ComponentLibraryGate {
 mod library;
 
 #[cfg(any(debug_assertions, test))]
-pub use library::{ComponentLibrary, OpenComponentLibrary};
+pub use library::{ComponentLibrary, ComponentLibraryEvent, OpenComponentLibrary};
 
 #[cfg(any(debug_assertions, test))]
 pub fn init(cx: &mut App) {

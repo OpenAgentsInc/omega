@@ -65,6 +65,7 @@ client.workspace = true
 cloud_api_types.workspace = true
 collections.workspace = true
 command_palette_hooks.workspace = true
+component_library.workspace = true
 component.workspace = true
 context_server.workspace = true
 db.workspace = true

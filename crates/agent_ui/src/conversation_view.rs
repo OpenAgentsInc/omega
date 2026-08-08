@@ -4575,7 +4575,7 @@ impl ConversationView {
             let set_value_editor = editor.downgrade();
             accessible_composer_input(
                 "omega-workbench-pre-session-composer-input",
-                editor_text.clone(),
+                editor_text,
                 &composer_focus,
                 move |value, window, cx| {
                     let Some(editor) = set_value_editor.upgrade() else {
@@ -9382,7 +9382,7 @@ pub(crate) mod tests {
             );
         });
 
-        add_to_workspace(conversation_view.clone(), cx);
+        add_to_workspace(conversation_view, cx);
         cx.set_debug_accessibility_active(true);
 
         let snapshot = cx.debug_render_snapshot();

@@ -4380,10 +4380,7 @@ mod tests {
             ),
             (
                 "conflict",
-                baseline.retain_after_failure(
-                    DogfoodPlanningSourceState::Error,
-                    conflict_error.clone(),
-                ),
+                baseline.retain_after_failure(DogfoodPlanningSourceState::Error, conflict_error),
                 DogfoodPlanningSourceState::Error,
                 false,
                 true,
@@ -4397,7 +4394,7 @@ mod tests {
             ),
         ];
 
-        let (surface, mut cx) = open_dogfood_surface(cx, baseline.clone());
+        let (surface, mut cx) = open_dogfood_surface(cx, baseline);
 
         for (label, model, expected_state, busy, expects_work) in cases {
             let expected_error = model.last_error.clone();
@@ -4827,7 +4824,7 @@ mod tests {
         let searched_rows = list_rows_for(&surface, &mut first_run);
         assert_eq!(
             searched_rows,
-            vec![target_issue_id.clone()],
+            vec![target_issue_id],
             "searching one Work identifier must leave exactly that Work"
         );
         let painted_rows = painted_list_rows(&mut first_run, &ordered_issue_ids);

@@ -1954,7 +1954,7 @@ impl ForensicsWorkbenchSurface {
                     .into(),
             ],
             occurrence_refs: vec![format!("occurrence.{finding_ref}.1")],
-            root_cause_ref: finding.claim_ref.clone(),
+            root_cause_ref: finding.claim_ref,
             source_bundle_ref: format!("source-bundle.{}", review.run_ref),
             source_bundle_digest: fixture_digest('a'),
             coverage_manifest_ref: format!("coverage.{}", review.run_ref),

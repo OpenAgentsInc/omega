@@ -544,6 +544,7 @@ dependencies = [
  "collections",
  "command_palette_hooks",
  "component",
+ "component_library",
  "context_server",
  "cpal",
  "db",
