@@ -1,0 +1,17 @@
+// Project-local settings for working on the omega repo itself.
+// (Language/formatter settings live in the legacy `.zed/settings.json`,
+// which Omega still reads; both files apply.)
+{
+  // The swap-market DEMO tool surface (omega#247). A dependency-free MCP
+  // server returning deterministic fixture data — no network, no funds.
+  // The `market-demo` skill in `.agents/skills/` teaches agents the flow.
+  // Turn it off here with `"enabled": false` (or via Settings → MCP
+  // Servers), and the tools disappear from every agent in this project.
+  "context_servers": {
+    "market-demo": {
+      "enabled": true,
+      "command": "node",
+      "args": ["scripts/market-demo-mcp.mjs"]
+    }
+  }
+}
