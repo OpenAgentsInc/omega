@@ -4,11 +4,11 @@ use std::collections::BTreeMap;
 use command_palette_hooks::CommandPaletteFilter;
 use component::{ComponentMetadata, ComponentStatus};
 use gpui::{
-    App, Entity, EventEmitter, FocusHandle, Focusable, SharedString, Window, actions, prelude::*,
+    App, Entity, EventEmitter, FocusHandle, Focusable, KeyDownEvent, TitlebarOptions, Window,
+    WindowBounds, WindowOptions, actions, point, prelude::*, px, size,
 };
 use ui::{Divider, Label, LabelSize, prelude::*};
 use ui_input::InputField;
-use workspace::{Item, Workspace};
 
 use crate::ComponentLibraryGate;
 
@@ -28,15 +28,55 @@ pub fn init(cx: &mut App) {
         });
         return;
     }
-    cx.observe_new(
-        |workspace: &mut Workspace, _window, _cx: &mut Context<Workspace>| {
-            workspace.register_action(|workspace, _: &OpenComponentLibrary, window, cx| {
-                let library = Box::new(cx.new(|cx| ComponentLibrary::new(window, cx)));
-                workspace.add_item_to_active_pane(library, None, true, window, cx);
-            });
-        },
-    )
-    .detach();
+    // The sealed zero-base interface does not render the workspace's center
+    // pane, so a pane item would be invisible; the library opens as its own
+    // window instead, like the settings editor.
+    cx.on_action(|_: &OpenComponentLibrary, cx| open_component_library_window(cx));
+}
+
+fn open_component_library_window(cx: &mut App) {
+    let existing_window = cx
+        .windows()
+        .into_iter()
+        .find_map(|window| window.downcast::<ComponentLibrary>());
+    if let Some(existing_window) = existing_window {
+        existing_window
+            .update(cx, |_, window, _| window.activate_window())
+            .ok();
+        return;
+    }
+
+    cx.defer(move |cx| {
+        let bounds = size(px(1080.), px(760.));
+        if cx
+            .open_window(
+                WindowOptions {
+                    titlebar: Some(TitlebarOptions {
+                        title: Some("Component Library".into()),
+                        appears_transparent: false,
+                        traffic_light_position: Some(point(px(12.0), px(12.0))),
+                    }),
+                    focus: true,
+                    show: true,
+                    is_movable: true,
+                    kind: gpui::WindowKind::Normal,
+                    window_background: cx.theme().window_background_appearance(),
+                    window_min_size: Some(size(px(480.), px(320.))),
+                    window_bounds: Some(WindowBounds::centered(bounds, cx)),
+                    ..Default::default()
+                },
+                |window, cx| {
+                    let library = cx.new(|cx| ComponentLibrary::new(window, cx));
+                    let focus_handle = library.focus_handle(cx);
+                    window.focus(&focus_handle, cx);
+                    library
+                },
+            )
+            .is_err()
+        {
+            log::error!("failed to open the component library window");
+        }
+    });
 }
 
 pub struct ComponentLibrary {
@@ -137,6 +177,12 @@ impl Render for ComponentLibrary {
 
         v_flex()
             .track_focus(&self.focus_handle)
+            .key_context("ComponentLibrary")
+            .on_key_down(cx.listener(|_, event: &KeyDownEvent, window, _cx| {
+                if event.keystroke.key == "escape" {
+                    window.remove_window();
+                }
+            }))
             .size_full()
             .bg(cx.theme().colors().editor_background)
             .debug_selector(|| "omega.component_library".into())
@@ -180,15 +226,3 @@ impl Focusable for ComponentLibrary {
 }
 
 impl EventEmitter<ComponentLibraryEvent> for ComponentLibrary {}
-
-impl Item for ComponentLibrary {
-    type Event = ComponentLibraryEvent;
-
-    fn tab_content_text(&self, _detail: usize, _cx: &App) -> SharedString {
-        "Component Library".into()
-    }
-
-    fn tab_icon(&self, _window: &Window, _cx: &App) -> Option<Icon> {
-        Some(Icon::new(IconName::Blocks))
-    }
-}
