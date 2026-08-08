@@ -13,6 +13,7 @@ mod viz_geometry;
 mod viz_node;
 mod viz_port;
 mod viz_progress_rail;
+mod viz_swap;
 mod viz_zone;
 
 pub use viz_chip::*;
@@ -21,6 +22,7 @@ pub use viz_geometry::*;
 pub use viz_node::*;
 pub use viz_port::*;
 pub use viz_progress_rail::*;
+pub use viz_swap::*;
 pub use viz_zone::*;
 
 use gpui::{App, Font, Hsla, PathBuilder, Pixels, Point, TextRun, Window, point, px, rgb};
@@ -381,6 +383,7 @@ mod tests {
                 .child(VizChip::preview(window, cx))
                 .child(VizZone::preview(window, cx))
                 .child(VizProgressRail::preview(window, cx))
+                .child(SwapCard::preview(window, cx))
         }
     }
 
