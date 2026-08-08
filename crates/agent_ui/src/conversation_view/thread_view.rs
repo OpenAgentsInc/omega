@@ -7248,7 +7248,7 @@ impl ThreadView {
                                 .rounded(px(16.0))
                                 .bg(cx.theme().colors().elevated_surface_background)
                                 .text_size(px(14.0))
-                                .child(SharedString::from(user_message_text)),
+                                .child(SharedString::from(user_message_text.clone())),
                         )
                         .into_any()
                 } else {
@@ -7414,6 +7414,30 @@ impl ThreadView {
                     .aria_label(user_message_label)
                     .w_full()
                     .child(user_message_body)
+                    .child(
+                        h_flex()
+                            .w_full()
+                            .py_1p5()
+                            .px_4()
+                            .justify_end()
+                            .opacity(0.4)
+                            .hover(|style| style.opacity(1.0))
+                            .child(
+                                IconButton::new(("copy_user_message", entry_ix), IconName::Copy)
+                                    .icon_size(IconSize::Small)
+                                    .icon_color(Color::Muted)
+                                    .aria_label("Copy this user message")
+                                    .tooltip(Tooltip::text("Copy This User Message"))
+                                    .on_click({
+                                        let user_message_text = user_message_text.clone();
+                                        move |_, _, cx| {
+                                            cx.write_to_clipboard(ClipboardItem::new_string(
+                                                user_message_text.clone(),
+                                            ));
+                                        }
+                                    }),
+                            ),
+                    )
                     .into_any()
             }
             AgentThreadEntry::AssistantMessage(AssistantMessage {
