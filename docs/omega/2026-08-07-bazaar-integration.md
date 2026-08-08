@@ -532,14 +532,196 @@ where every signing request and funding effect passed through an explicit
 approval card, and the exit package is persisted before funding — replaying
 Bazaar's funded-regtest acceptance shape inside Omega.
 
-## 9. Source index
+## 9. Visualization: porting the Bazaar viz language to Omega
+
+Added 2026-08-07, after a survey of Bazaar's viz layer (on its `origin/main`),
+the `unit` reference repo (`~/work/projects/repos/unit`), and Omega's GPUI
+drawing and component-preview infrastructure. Implementation is tracked as
+omega#247.
+
+### 9.1 What Bazaar built
+
+Bazaar's entire viz layer is hand-rolled SVG — no d3, no canvas, no recharts,
+no gradients, no filters. A small primitive layer (`components/viz/core/`)
+carries the whole language:
+
+- `VizScene` — one `<svg>` per scene with a fixed authored `viewBox`
+  (responsive by CSS width, no measurement loops), a reduced-motion context,
+  and a two-level CSS-variable theme bridge (`--viz-*` roles → overridable →
+  semantic tokens).
+- `VizNode` — circle/rect, six roles (requester/relay/provider/rail/service/
+  neutral) × four states (ready/starting/degraded/offline). State is encoded
+  redundantly on three channels at once: stroke dash pattern, a label glyph
+  suffix (`…` / `!` / `×`), and opacity (0.55 for offline).
+- `VizEdge` — five classes, each a shape difference plus a color difference:
+  socket (solid, width 1.5), giftwrap (long dash `7 4`), channel (double
+  parallel stroke, ±1.4 offset), rpc (dotted `2 3`), evidence (fine dotted
+  `1 4`). Every edge carries an invisible ≥20px hit path, surface-anchored
+  endpoints (never center-to-center), labels riding the path and kept upright
+  by inverting the path when it points left, and optional arrowheads —
+  including arc heads that hug a circular node's rim.
+- `VizPort` — rim dots where fill encodes direction (output filled, input
+  hollow) and nothing else.
+- `VizChip` — a monospace pill for protocol records with a muted kind-number
+  prefix (`39605 Quote`), four tones; data travels edges as chips, not
+  tooltips.
+- `VizZone` / `VizBoundary` — dashed zone rects and the custody boundary as a
+  first-class drawn divider that money-colored edges never cross.
+- `VizProgressRail` plus instruments: evidence rungs (stepped fill + strength
+  bar), timeout ladder (annotated block-height axis with a cursor and
+  brackets), state rail (spine + always-drawn recovery ladder), session lanes
+  (per-author `seq` order, gaps rendered as visible holes, forks retained
+  side-by-side, causal gates as cross-lane curves).
+- The network panorama: deterministic concentric-ring layout (circular-mean
+  provider placement, half-slot stagger, seeded mulberry32 client cloud —
+  force layout is banned by spec because it would visually privilege one
+  relay), volume-scaled edge widths and √-area node sizes, rAF particles
+  bounded by an activity scalar, and a HUD where unknown stats render `null`,
+  never fabricated zeros.
+
+The portable spec is the vocabulary: the dash-pattern table (`1 4` evidence,
+`2 3` rpc, `3 3` rings/zones, `5 2` degraded, `6 4` custody boundary, `7 4`
+giftwrap, …), stroke widths 0.4–1.5, a mono type scale of 6.5–10 viewBox
+units, and `evenDash` — dash cycles computed from the shape's perimeter so a
+ring never ends mid-dash. Rules stated in
+`docs/network-visualization-spec.md` and worth quoting in any port review:
+"status never rides on color alone"; "offline infrastructure stops pulsing
+instead of being hidden"; forks are "retained and displayed, never
+collapsed"; recovery ladders are "always drawn"; "meaningful motion only…
+no ambient/idle animation"; dark-only tokens with "no hardcoded hex"; every
+scene carries its regtest badge; reduced motion renders stepped frames and
+"interactive stepping is always available regardless of the motion setting";
+every scene has a screen-reader data mirror driven by the same data object.
+
+Eight Storybook catalogs demonstrate it (`stories/immortal/*.stories.tsx`),
+including `Immortal Viz/Primitives` with a `GrayscaleAudit` story that proves
+the shape/dash redundancy under `filter: grayscale(1)`.
+
+### 9.2 What `unit` adds
+
+Unit (the visual programming environment) is the acknowledged source of
+several patterns Bazaar already borrowed — surface-anchored straight edges,
+perimeter-derived dash selection rings, fat invisible hit paths, upright
+textPath labels, zero-size anchors, data-as-satellite chips. Its remaining
+lessons for a native port:
+
+- One base color plus a lightness ladder yields the whole role palette
+  (node/text/selected/link/hovered at fixed deltas, direction flipped by
+  theme) — a testable `fn palette(base, theme) -> Roles` instead of a token
+  sheet.
+- Log-scaled, integer-rounded radii keep 1px strokes crisp while absorbing
+  large ranges in content size.
+- A tiny arrowhead/cap enum (filled triangle, open chevron, arc, bar) times
+  two stroke weights times dashed/solid encodes a lot without color or labels.
+- Fill is reserved for exactly one semantic (direction); everything else is
+  line work.
+- Continuous animation as exponential approach toward a live-recomputed
+  target with per-property epsilons — interruption-proof by construction,
+  which suits live-updating network data better than fixed-duration tweens.
+- Its DOM/SVG dual-layer architecture exists only because the web forces it;
+  a retained-scene-graph UI framework gets the alignment for free. Decide
+  non-scaling strokes deliberately if zoom is ever added (unit scales stroke
+  weight with zoom as a "physical object" choice).
+
+### 9.3 The rendering decision: native GPUI vector drawing, not SVG
+
+Omega should port the visual language, not the technology. Three facts decide
+it:
+
+1. GPUI's `svg()` element is not a viz renderer: it rasterizes a static asset
+   to an alpha mask tinted by a single color — no runtime markup, no
+   multi-color artwork, no interaction.
+2. The existing runtime SVG path (`SvgRenderer::render_single_frame`, used by
+   the mermaid pipeline in `crates/markdown/src/mermaid.rs`) produces async
+   raster images — no hitboxes, no per-frame animation. Right for exported
+   diagrams, wrong for interactive scenes.
+3. `PathBuilder` (lyon-backed) already covers everything the language needs:
+   stroke/fill styles, `dash_array` with SVG dasharray semantics, `arc_to`,
+   quadratic/cubic beziers, polygons, transforms. `paint_path` accepts
+   `Background` (two-stop linear gradients if ever wanted); `paint_quad` is
+   the cheap primitive for pills, bars, and dots; `window.text_system()
+   .shape_line` paints in-scene labels; `insert_hitbox` in the prepaint phase
+   gives nodes and fat edge hit areas real interaction.
+
+In-tree precedents:
+`crates/ui/src/components/progress/circular_progress.rs` (canvas + arcs +
+`Component` preview — the model file), `crates/git_ui/src/git_graph.rs`
+(accent-indexed lanes, `paint_path` circles),
+`crates/ui/src/components/divider.rs` (dashed path), and the editor's
+selection outlines. Notably, no product crate (`agent_ui`, `market_ui`,
+`workroom_ui`) contains any `canvas`/`paint_path` usage today — the
+primitives are all new construction, which justifies a small shared viz
+foundation in `crates/ui` rather than one-off drawing inside `market_ui`.
+
+Coordinate model: keep Bazaar's authored-viewBox idea — each scene draws in a
+fixed logical space and maps to element bounds with one scale factor computed
+in prepaint. All Bazaar constants (dash patterns, stroke widths, type scale)
+then port unchanged as logical units.
+
+### 9.4 Proposed shape
+
+- `viz_geometry` in `crates/ui`: pure ports of `geometry.ts`
+  (`surface_point`, `edge_geometry`, `polar` with 0° = east / 90° = south,
+  `describe_arc`, `arc_head`, `even_dash`, `perimeter`), unit-tested against
+  values from the TS implementation so the two stay verifiably equivalent.
+- Primitives as `RegisterComponent`-derived components under
+  `ComponentScope::DataDisplay`: `VizNode`, `VizEdge`, `VizPort`, `VizChip`,
+  `VizZone`/`VizBoundary`, `VizProgressRail`; instruments and the panorama
+  follow once the primitives are approved.
+- Theme mapping: structure from `cx.theme().colors()` (border, surface, text,
+  text_muted), semantics from `cx.theme().status()` (success/warning/error),
+  and one resolved market-palette struct for the asset/protocol accents
+  (socket, giftwrap, bitcoin, lightning, liquid) mirroring Bazaar's two-level
+  indirection — a single definition point, no hex scattered through drawing
+  code. Omega's own `omega_status_cue` rule ("color repeats the meaning; it
+  never carries it alone") is the same law as Bazaar's spec, so the shape+
+  color redundancy ports as a requirement.
+- Motion: the `OmegaSidebarTween` pattern (phase state held on the view,
+  `cx.reduce_motion()` checked, `request_animation_frame` only while
+  animating) for one-shot transitions, plus one shared scene clock for
+  particles as in Bazaar's `useSceneTime`; reduced motion freezes the clock
+  at a seeded phase so scenes still read as alive. `pulsating_between`
+  remains fine for element-level opacity pulses outside canvases.
+
+### 9.5 Where it gets reviewed: the component library screen (omega#247)
+
+Omega's component registry is alive but orphaned: `component::init()` runs at
+startup (`crates/workspace/src/workspace.rs:765`), 62 components register via
+`#[derive(RegisterComponent)]`, and nothing reads the registry — the
+`component_preview` crate was deleted in omega#162 after the OMEGA-DELTA-0022
+incident (an ungated dev surface shipped in a release command palette and
+rendered Zed artwork). Three mechanical gates in `crates/omega_deltas` now
+block the old crate name, the old `workspace::OpenComponentPreview` action,
+and keymap references to it.
+
+The path back is a new surface, not a revert: a new crate and action name
+(`omega_workbench::OpenComponentLibrary` — the `omega_workbench` namespace is
+already admitted in `omega_zero_base`, so the action is palette-visible and
+not refused at dispatch), a dual dev gate in the `DogfoodFixtureGate` style
+(`debug_assertions` && `OMEGA_COMPONENT_LIBRARY=1` at runtime plus
+compile-time omission so release binaries carry nothing), an on-screen
+non-production label per PRODUCT.md's capability-derived-navigation rule, and
+a new OMEGA-DELTA entry with its enforcement test. The viz primitives'
+`preview()` galleries mirror the Bazaar Storybook catalogs — including the
+grayscale audit — so the two implementations can be reviewed side by side.
+
+## 10. Source index
 
 Bazaar (read on `origin/main`): `PRODUCT.md`,
 `docs/network-map-and-onboarding.md` (§5 client wiring, §6.4 acceptance),
 `docs/public-regtest-manifest.md`, `packages/immortal-mcp/README.md`,
 `packages/immortal-mcp/src/{server,boundaries}.ts`,
 `.agents/skills/{join-immortal-network,read-the-network-map}/SKILL.md`,
-`lib/immortal/{market,transport,store,public-session}.ts`.
+`lib/immortal/{market,transport,store,public-session}.ts`; for viz:
+`components/viz/core/{geometry.ts,scene.tsx,node.tsx,edge.tsx,port.tsx,chip.tsx,zone.tsx,use-pulse.ts,progress-rail.tsx}`,
+`components/viz/immortal/*`, `docs/network-visualization-spec.md`,
+`stories/immortal/*.stories.tsx`, `lib/viz/panorama-network.ts`,
+`hooks/use-panorama-network.ts`.
+
+Unit reference: `~/work/projects/repos/unit` —
+`src/client/{simulation.ts,zoom.ts,theme.ts,complexity.ts,glob.ts,animation/}`,
+`src/system/platform/component/app/Class/Component.ts`,
+`src/boot/style.ts`.
 
 Immortal: `README.md`, `AGENTS.md`, `docs/MONOREPO.md`,
 `nips/openagents/{MKT,MKT-SWP}.md`, `docs/protocol/{nip-mkt-validation,mkt-swp-client,provider-contract}.md`,
@@ -556,4 +738,10 @@ Omega: `crates/context_server/` (client, OAuth, listener),
 `crates/agent_skills/` (`BUILTIN_SKILL_ENTRIES`, `builtin/public-nostr-chat/`),
 `crates/market_ui/` (`discovery.rs`, `session_flow.rs`),
 `assets/settings/default.json`, `OMEGA_DELTAS.md`, `crates/omega_deltas/`,
-`crates/app_identity/fixtures/endpoint_allowlist.json`, omega#244.
+`crates/app_identity/fixtures/endpoint_allowlist.json`, omega#244; for viz:
+`crates/gpui/src/{path_builder.rs,elements/canvas.rs,elements/animation.rs,color.rs}`,
+`crates/ui/src/components/progress/circular_progress.rs`,
+`crates/git_ui/src/git_graph.rs`, `crates/component/src/component.rs`,
+`crates/omega_work_index/src/dogfood_fixture.rs`,
+`crates/omega_zero_base/src/omega_zero_base.rs`, OMEGA-DELTA-0022/0186 in
+`OMEGA_DELTAS.md`, omega#247.
