@@ -19,6 +19,9 @@ local `main` on 2026-08-08
 Deployed Pro Convex pin in the latest platform record:
 `get-convex/convex-backend@38abb4627`
 
+T3 Code teardown corpus reviewed: all 22 documents under
+`OpenAgentsInc/openagents@594b75b4:docs/teardowns/` that mention T3 Code
+
 ## Purpose
 
 This note assesses what a Pro account could add to Omega by using the
@@ -79,6 +82,42 @@ first release. My recommendation is:
 9. use Convex Agent concepts selectively, without replacing Pro's current
    thread contract;
 10. keep a Convex backend fork outside the near-term plan.
+
+### What the T3 Code teardown corpus changes
+
+The T3 Code reports do not change the authority split or add a Convex fork to
+the plan. They add concrete synchronization, admission, and runtime laws that
+should be explicit in the first implementation.
+
+| T3 Code finding                                                                      | Consequence for Omega and Pro                                                                                                                                        |
+| ------------------------------------------------------------------------------------ | -------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| One environment owns work while desktop, web, and mobile consume projections         | Give each cloud thread one declared environment authority. Pro owns managed cloud threads; Omega owns local threads even when it publishes a bounded awareness view. |
+| Accepted events, primary projections, and the command receipt commit together        | Keep Pro's message detail, shell update, receipt, durable turn, and `thread.turn` effect in one Convex transaction.                                                  |
+| Provider reactors consume a hot stream and can lose committed intent on restart      | Do not copy the reactor gap. The leased effect outbox remains the only dispatch source for cloud turns and cleanup work.                                             |
+| Connection health and projection synchronization are separate states                 | Omega must distinguish cached, synchronizing, and live thread data from token or WebSocket health, and must repair a stale subscription on foreground/reconnect.     |
+| Mobile uses a durable message path with stable IDs, but has payload and storage gaps | Use one Omega outbox path online and offline, fingerprint the complete normalized payload, write it atomically, and quarantine corruption visibly.                   |
+| Draft-ahead, steering, queued follow-up, and interrupt have different semantics      | Name each behavior. Do not let a second send during a running turn inherit accidental provider behavior.                                                             |
+| Provider session IDs and generated protocol coverage are not portable support        | Keep v1 native-only. Later ACP support needs an Omega-owned transcript, replay/live barrier, capability matrix, and explicit projection-loss accounting.             |
+
+T3 Code's shell/detail split also validates Pro's current `workShells` and
+`workDetails` shape. The shell should behave as an agent-work inbox: human
+blocking approvals and input, fresh failures, and unseen completion remain
+prominent; high-frequency progress should not reorder rows under the user;
+full transcript and tool detail load only for the selected thread.
+
+T3 Connect demonstrates a useful distinction between local reachability and a
+managed environment. Its hosted service provides discovery and bounded
+awareness while the user's environment remains authoritative. Omega and Pro
+should retain both modes as separate products:
+
+- an owner-hosted local thread may publish an optional redacted awareness
+  projection while Omega remains the content and execution authority;
+- a Pro-managed cloud thread stores its semantic transcript in Pro and runs on
+  the admitted cloud computer, so Pro is the environment authority.
+
+The placement disclosure must say which mode applies before thread creation.
+An endpoint URL or a connected account is not sufficient evidence of the
+thread's authority mode.
 
 ## What exists now
 
@@ -390,6 +429,8 @@ platform inference broker rather than a long-lived secret in the guest.
 Add a stable cloud thread reference independent of any one device, process, or
 Omega SQLite row. A runtime binding can name:
 
+- authority mode: owner-hosted local or Pro-managed cloud;
+- stable environment identity, separate from any access endpoint;
 - execution target: local device or cloud computer;
 - account and computer reference;
 - workspace reference;
@@ -437,6 +478,27 @@ command ID -> message detail ID -> turn ID -> effect ID -> run ID
 Replaying a command returns the same chain. A new payload under an old command
 ID conflicts.
 
+### Turn concurrency and composer semantics
+
+T3 Code exposes the risk of treating every composer submission as the same
+operation. It lets the user keep editing a draft while a turn runs, but one
+keyboard path can issue another start request. Codex may interpret that as
+same-turn steering, while another provider may reject, serialize, or race it.
+
+The first cloud-thread runtime should be single-flight:
+
+- the user may keep one local draft while a turn runs;
+- ordinary send is unavailable until the turn reaches quiescence;
+- interrupt targets the exact active turn and lease generation;
+- no command is inferred from draft timing or a second press of Enter.
+
+A later queued-follow-up feature must admit a stable queue item with an order,
+payload fingerprint, cancel state, and receipt, then let one thread-owned
+scheduler promote the queue head after quiescence. Same-turn steering is a
+different live command: it requires runtime capability and the expected active
+turn ID. The UI should render draft, queued follow-up, steering submission,
+and interrupt as distinct states.
+
 ### First continuity model
 
 The first cloud-thread canary can reconstruct bounded conversation context
@@ -457,6 +519,15 @@ current in-memory projection contains entity references that do not survive a
 restart. Cloud sync for those agents needs an Omega-owned transcript store, a
 registered data-format change, and an explicit adapter for provider resume.
 The first cloud-thread release should not imply that support.
+
+When that project begins, treat the ACP session ID as an opaque provider
+attachment to the cloud thread, not as the thread identity. Track connection
+and session generations separately. Preserve bounded decoded native updates in
+a private plane before portable projection, with an explicit unsupported or
+loss record for every event family that the cloud transcript omits. Restore
+should distinguish load accepted, replay in progress, projection caught up,
+and live-ready. Each peer needs a versioned method/capability matrix; generated
+schema coverage alone does not establish working cloud resume.
 
 Workspace isolation is needed before more than one thread uses the machine.
 Reasonable early choices are one worktree per cloud thread or one repository
@@ -483,6 +554,37 @@ semantic rows so cleanup does not rewrite the durable transcript. Enforce:
 
 The current Cloud Run singleton makes write amplification a capacity concern.
 Measure mutation rate and subscription fan-out before tuning the throttle.
+
+Terminal settlement must fence later progress for the same turn generation.
+The worker should drain accepted progress through a known sequence before it
+records completion so a delayed callback cannot append activity after a
+terminal row.
+
+### Client synchronization and cache
+
+T3 Code's strongest client lesson is that a healthy connection does not prove
+that shell or thread data is current. Omega should track authentication,
+transport, shell synchronization, and selected-thread synchronization as
+separate states.
+
+Convex already supplies the reactive query protocol, so Omega should not build
+a second event store or custom WebSocket replay protocol. It should still
+enforce these product laws around the subscription:
+
+- key cached data by account/tenant, projection contract revision, query, and
+  stable thread identity;
+- show cached rows with their age while reconnecting;
+- call a projection `live` only after the current authenticated subscription
+  has delivered a complete successfully decoded result;
+- resubscribe shell and selected-thread queries after foreground activation or
+  token/session replacement even when the underlying socket appears healthy;
+- replace shell rows from authoritative query results instead of rebuilding
+  their summaries from token-level events;
+- fail and repair a subscription when a required row cannot decode, rather
+  than advancing while silently dropping part of the projection.
+
+These rules adapt T3's cached/synchronizing/live and snapshot-handoff model to
+Convex without duplicating Convex internals.
 
 ### Interrupt and steering
 
@@ -745,18 +847,23 @@ agents, and per-account computers follow after that loop works.
    integration or gate the spike out of release builds.
 2. Add the required OpenAgents and Convex hosts to Omega's endpoint allowlist
    with purpose, owner, and review metadata.
-3. Freeze the cloud thread, transcript row, command, acknowledgement, turn,
-   effect, progress, retention, and funding-disclosure contracts.
+3. Freeze the cloud thread, environment authority mode, access endpoint,
+   transcript row, command, acknowledgement, turn, effect, progress,
+   retention, and funding-disclosure contracts.
 4. Register any required change to the closed `ExecutorDisclosure` surface as
    a deliberate delta, while keeping cloud placement out of `ExecutorClass`.
 5. Bind cloud placement to `Reach::Shared`, selected before the first message;
    retain `Reach::ThisComputer` as the default.
 6. Declare native Omega agent threads as the v1 scope. Record external ACP
    transcript and resume support as a separate compatibility milestone.
+7. Declare v1 turn concurrency as single-flight. Specify draft, future queue,
+   steering, and interrupt as separate operations before the composer can send
+   during a running turn.
 
 Exit gate: Omega has no unregistered release behavior or undisclosed network
 destination in this path, the contracts have fixtures, and a thread cannot be
-published without the existing audience gate.
+published without the existing audience gate. Every cloud row names its
+authority mode without deriving it from an endpoint URL.
 
 ### Phase 1: read-only cloud threads in Omega
 
@@ -766,12 +873,21 @@ published without the existing audience gate.
    projection.
 3. Render cloud threads and their portable semantic rows in the normal Agent
    Panel, not a fixture-shaped standalone window.
-4. Implement connecting, synchronizing, cached, live, expired-token, and error
-   states while preserving the proven reconnect and token-refresh behavior.
+4. Implement separate authentication, transport, shell-sync, and
+   selected-thread-sync states. Show cached data with age and do not claim
+   `live` before a complete decoded result arrives on the current
+   authenticated subscription.
+5. Treat the shell list as a stable work inbox. Keep approvals, input, fresh
+   failure, and unseen completion prominent, and keep high-frequency progress
+   from reordering rows.
+6. Resubscribe shell and detail after foreground activation or session/token
+   replacement while preserving the proven reconnect and token-refresh
+   behavior.
 
 Exit gate: a native cloud thread created through Pro is visible in Omega,
 updates on Pro web or mobile appear after reconnect, and Omega still has no
-write capability.
+write capability. A healthy socket with a stale or failed domain subscription
+cannot be shown as live.
 
 ### Phase 2: prove the Pro thread runtime from web and mobile
 
@@ -782,9 +898,13 @@ write capability.
    and stale-generation paths to the existing effect worker.
 3. Run `eval-cli` in an isolated worktree for the thread, reconstructing
    bounded semantic context for each turn and labeling that behavior.
-4. Route interrupt to the exact turn and process group. Record terminal,
+4. Enforce one active turn per thread. Refuse an ordinary second send while it
+   runs; do not let runtime-specific behavior become implicit steering.
+5. Drain accepted progress before terminal settlement and fence later callbacks
+   by turn generation.
+6. Route interrupt to the exact turn and process group. Record terminal,
    quiescence, usage, artifact, and trace receipts.
-5. Prove the complete path from Pro web and mobile before enabling Omega
+7. Prove the complete path from Pro web and mobile before enabling Omega
    desktop writes.
 
 Exit gate: a prompt admitted from Pro creates one turn/effect chain despite
@@ -796,16 +916,24 @@ accepting a stale completion.
 
 1. Add a typed client for Pro's HTTPS command broker. Do not grant the native
    client direct Convex write authority.
-2. Add a durable local outbox with the same command classes as web and mobile:
-   durable message/input/approval commands and live-only runtime control.
-3. Reconcile optimistic local state against admission, effect, turn,
+2. Route every durable Omega command through one local outbox whether the
+   client is online or offline. Do not add a direct online send path.
+3. Persist the stable command ID, account, thread, target generation, expiry,
+   complete normalized payload, attachment and context digests, and command
+   fingerprint before clearing the composer.
+4. Write outbox entries with an atomic replacement protocol. Quarantine a
+   corrupt or incompatible entry visibly instead of dropping it from memory.
+5. Use the same operation classes as web and mobile: durable
+   message/input/approval commands and live-only runtime control.
+6. Reconcile optimistic local state against admission, effect, turn,
    quiescence, and verification acknowledgements.
-4. Surface offline, queued, synchronizing, replayed, conflicted, expired, and
-   terminal states in the existing thread UI.
+7. Surface offline, queued, synchronizing, replayed, conflicted, expired,
+   quarantined, and terminal states in the existing thread UI.
 
 Exit gate: an offline message survives an Omega restart and is admitted at
 most once after reconnect; stale approvals and inputs fail closed; live
-interrupt is never queued for later delivery.
+interrupt is never queued for later delivery. Online and offline delivery of
+the same command produce the same fingerprint and receipt chain.
 
 At this point Omega has the first cloud-synced agent loop: create or open a
 native shared thread, observe it on every Pro client, admit work from Omega,
@@ -839,10 +967,13 @@ silently rebind an existing thread.
    process-tree interruption tests.
 3. Design an Omega-owned portable transcript and registered data migration for
    external ACP agents before promising their cloud sync or resume.
-4. Move from the owner computer to per-account computers only after the owner
+4. For each ACP peer, define a pinned capability matrix, opaque provider
+   session attachment, separate connection/session generations, replay/live
+   barrier, private native-event retention, and explicit projection loss.
+5. Move from the owner computer to per-account computers only after the owner
    canary establishes resource, credential, egress, budget, deletion, and
    support requirements.
-5. Add higher-level Convex components for bounded memory, retrieval,
+6. Add higher-level Convex components for bounded memory, retrieval,
    summarization, schedules, and work pools behind the existing Pro authority
    contracts.
 
@@ -857,12 +988,21 @@ receipts prove:
   external ACP threads are labeled and cannot enter the cloud placement flow;
 - `Reach::ThisComputer` remains the default and `may_publish()` prevents local
   thread state from crossing the machine boundary;
+- every thread names an authority mode and stable environment identity that do
+  not change when its access endpoint changes;
+- cached, synchronizing, and live states remain distinct, and reconnect or
+  foreground activation repairs domain subscriptions independently of socket
+  health;
 - one admitted message produces one turn and one effect under replay;
+- an ordinary second send during a running turn is refused or admitted as an
+  explicit durable queue item; it cannot become provider-dependent steering;
 - a worker crash and lease expiry cannot apply a stale completion;
 - closing every client does not cancel admitted cloud work;
 - reconnect refreshes the five-minute read token and resumes subscriptions;
 - progress is ordered, bounded, coalesced, and recoverable from a durable
   cursor;
+- no progress callback can append after terminal settlement for its turn
+  generation;
 - interrupt kills the exact process tree and reaches quiescence;
 - approvals and inputs fail closed when stale, expired, or for another turn;
 - each thread has an isolated workspace and branch policy;
@@ -871,6 +1011,9 @@ receipts prove:
   workspace, logs, transcript, artifacts, or client cache;
 - cross-account reads, commands, claims, artifacts, and resume handles are
   denied;
+- every durable Omega command takes the same outbox path online and offline,
+  retains a byte-stable normalized fingerprint, and exposes corrupt entries as
+  quarantined instead of losing them;
 - a stopped computer retains the promised disk state;
 - delete proves removal of compute, disk, grants, processes, and scratch data;
 - final output is not labeled verified until an independent verifier accepts
@@ -913,6 +1056,15 @@ isolation, and the one-computer-per-account lifecycle. Use Convex's agent
 ecosystem for bounded orchestration, memory, files, usage, and scheduled work.
 Keep the coding runtime on an isolated supervisor and keep a Convex backend
 fork outside the near-term plan.
+
+The T3 Code corpus strengthens the implementation detail around this sequence:
+separate environment authority from access endpoints; separate connection
+health from synchronized projections; use one durable send path online and
+offline; and keep draft, queue, steer, and interrupt semantics explicit. Its
+best-effort provider reactor is evidence for retaining Pro's leased durable
+effect lane, while its multi-client environment model is evidence that the
+same semantic thread can support desktop, web, and mobile without sharing UI
+code.
 
 ## Source map
 
@@ -959,3 +1111,20 @@ Convex backend at `7caed949c`:
 - `self-hosted/advanced/knobs.md`
 - `crates/common/src/knobs.rs`
 - `LICENSE.md`
+
+OpenAgents T3 Code teardown corpus at `594b75b4`:
+
+- all 22 documents under `docs/teardowns/` containing `T3 Code` were reviewed;
+- `2026-07-13-t3-code-teardown.md`
+- `2026-07-15-codex-app-server-client-support-analysis.md`
+- `2026-07-16-t3-code-agent-client-protocol-implementation-teardown.md`
+- `2026-07-17-t3-code-mobile-app-teardown.md`
+- `2026-07-27-omega-t3-code-desktop-mobile-gap-analysis.md`
+- `2026-07-27-t3-code-desktop-mobile-component-cloud-architecture-audit.md`
+- `2026-07-27-t3-code-server-projection-consistency-architecture.md`
+- `2026-07-27-t3-code-sidebar-v2-replication-analysis.md`
+- `README.md`
+
+The newer Omega/T3 gap, component/cloud, server-consistency, and sidebar
+reports supersede older implementation comparisons where their findings
+conflict.
