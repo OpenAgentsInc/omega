@@ -21841,10 +21841,11 @@ impl AgentPanel {
                 && Some(tab.thread_id) == active_thread_id;
             omega_thread_tab(div().id(("omega-thread-tab", index)), &title, is_active)
                 .debug_selector(move || format!("omega.omega.thread-tab.{index}"))
+                .border_1()
+                .border_color(colors.border_selected.opacity(0.))
                 .when(is_active, |tab| {
                     tab.debug_selector(|| "omega.omega.thread-tab.active".into())
                         .bg(selected_background)
-                        .border_1()
                         .border_color(colors.border_selected)
                         .text_color(text)
                 })
@@ -25038,6 +25039,13 @@ mod tests {
                 assert_eq!(multi_workspace.workspace(), &workspace_a);
             })
             .expect("the project A tab should activate project A's workspace");
+        let active_workspace_a_tab_bounds = cx
+            .debug_bounds("omega.omega.thread-tab.active")
+            .expect("the active project's tab should remain visible");
+        assert_eq!(
+            active_workspace_a_tab_bounds.size, workspace_a_tab_bounds.size,
+            "activating a thread tab must not change its outer size"
+        );
 
         let (thread_ids_after_click, workspace_b_tab_index) = cx.update(|window, cx| {
             let tabs = panel_a.read(cx).omega_window_thread_tabs(window, cx);
