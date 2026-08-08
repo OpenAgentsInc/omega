@@ -3,32 +3,60 @@ use std::time::Duration;
 use documented::Documented;
 use gpui::{Animation, AnimationExt as _, px, relative};
 
+use crate::CopyButton;
 use crate::components::viz::{NetworkCard, VizPalette, demo_card, demo_stage, live_shape_fixture};
 use crate::prelude::*;
 
-/// The primary-interface user bubble, verbatim from the transcript renderer.
-fn user_bubble(text: &'static str, cx: &App) -> gpui::AnyElement {
+/// The primary-interface user bubble, verbatim from the transcript renderer,
+/// with the hover copy affordance messages carry in the real chat.
+fn user_message(index: usize, text: &'static str, cx: &App) -> gpui::AnyElement {
+    let group = SharedString::from(format!("market-demo-user-{index}"));
     h_flex()
+        .id(("market-demo-user", index))
+        .group(group.clone())
         .w_full()
+        .pt(px(7.0))
+        .pb(px(7.0))
         .justify_end()
+        .gap_1()
+        .child(
+            CopyButton::new(("market-demo-user-copy", index), text)
+                .icon_size(IconSize::Small)
+                .tooltip_label("Copy Message")
+                .visible_on_hover(group),
+        )
         .child(
             div()
                 .flex_none()
                 .max_w(relative(0.8))
-                .px(px(16.))
-                .py(px(10.))
-                .rounded(px(16.))
+                .px(px(16.0))
+                .py(px(10.0))
+                .rounded(px(16.0))
                 .bg(cx.theme().colors().elevated_surface_background)
-                .text_size(px(14.))
+                .text_size(px(14.0))
                 .child(text),
         )
         .into_any_element()
 }
 
-fn agent_line(text: &'static str) -> gpui::AnyElement {
-    Label::new(text)
-        .size(LabelSize::Small)
-        .color(Color::Muted)
+/// Agent prose at the transcript's text size — no bubble, no border — with
+/// the hover copy affordance.
+fn agent_message(index: usize, text: &'static str, cx: &App) -> gpui::AnyElement {
+    let group = SharedString::from(format!("market-demo-agent-{index}"));
+    h_flex()
+        .id(("market-demo-agent", index))
+        .group(group.clone())
+        .w_full()
+        .py(px(7.0))
+        .gap_1()
+        .items_start()
+        .child(div().flex_1().min_w_0().text_ui(cx).child(text))
+        .child(
+            CopyButton::new(("market-demo-agent-copy", index), text)
+                .icon_size(IconSize::Small)
+                .tooltip_label("Copy Message")
+                .visible_on_hover(group),
+        )
         .into_any_element()
 }
 
@@ -80,22 +108,28 @@ impl RenderOnce for MarketChatDemo {
         }
 
         v_flex()
-            .gap_2()
+            .gap_1()
             .max_w(px(560.))
-            .child(user_bubble(
+            .child(user_message(
+                0,
                 "What does the swap network look like right now?",
                 cx,
             ))
-            .child(agent_line(
+            .child(agent_message(
+                0,
                 "Two pinned relays and three providers are live. Here is the map.",
+                cx,
             ))
             .child(network_card)
-            .child(user_bubble(
+            .child(user_message(
+                1,
                 "Nice. Swap 50,000 sats from Lightning to on-chain BTC.",
                 cx,
             ))
-            .child(agent_line(
+            .child(agent_message(
+                1,
                 "Best firm quote is provider-b at 22 bps. Approving runs the swap below.",
+                cx,
             ))
             .child(swap_card)
     }

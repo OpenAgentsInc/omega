@@ -82,9 +82,16 @@ impl Mulberry32 {
 }
 
 const SCENE_WIDTH: f32 = 900.0;
-const SCENE_HEIGHT: f32 = 700.0;
+const SCENE_HEIGHT: f32 = 460.0;
 const CENTER_X: f32 = 470.0;
-const CENTER_Y: f32 = 348.0;
+const CENTER_Y: f32 = 230.0;
+/// The rings are ellipses — the map reads as a wide panorama, not a square.
+const RING_Y_SQUASH: f32 = 0.62;
+
+fn place(radius: f32, angle_deg: f32) -> (f32, f32) {
+    let (x, y) = polar(CENTER_X, CENTER_Y, radius, angle_deg);
+    (x, CENTER_Y + (y - CENTER_Y) * RING_Y_SQUASH)
+}
 
 struct Placed {
     x: f32,
@@ -128,7 +135,7 @@ fn ring_layout(network: &PanoramaNetwork) -> (Vec<Placed>, Vec<Placed>, Vec<(f32
     let mut providers: Vec<Option<Placed>> = network.providers.iter().map(|_| None).collect();
     for (slot, (provider_index, _)) in desired.iter().enumerate() {
         let angle = -90.0 + (slot as f32 + 0.5) / provider_count as f32 * 360.0;
-        let (x, y) = polar(CENTER_X, CENTER_Y, provider_radius, angle);
+        let (x, y) = place(provider_radius, angle);
         providers[*provider_index] = Some(Placed { x, y, angle });
     }
     let providers: Vec<Placed> = providers
@@ -151,7 +158,7 @@ fn ring_layout(network: &PanoramaNetwork) -> (Vec<Placed>, Vec<Placed>, Vec<(f32
             let spread = 0.55 + random.next() * 0.5;
             let angle = home_angle + (random.next() - 0.5) * (180.0 / relay_count as f32) * 1.6;
             let radius = relay_radius * (1.0 - spread * 0.72) + random.next() * 18.0;
-            let (x, y) = polar(CENTER_X, CENTER_Y, radius, angle);
+            let (x, y) = place(radius, angle);
             (x, y, home)
         })
         .collect();
@@ -567,7 +574,11 @@ pub fn live_shape_fixture() -> PanoramaNetwork {
             },
         ],
         client_count: 9,
-        stats: PanoramaStats::default(),
+        stats: PanoramaStats {
+            swaps_24h: Some(128),
+            volume_sat_24h: Some(7_650_000),
+            operator_fee_sat_24h: Some(16_830),
+        },
         activity: 0.25,
     }
 }
@@ -575,6 +586,9 @@ pub fn live_shape_fixture() -> PanoramaNetwork {
 fn outage_fixture() -> PanoramaNetwork {
     let mut network = live_shape_fixture();
     network.name = "public regtest · outage drill".into();
+    // Receipts stop aggregating during the drill; unknown renders as a dash,
+    // never as a fabricated zero.
+    network.stats = PanoramaStats::default();
     if let Some(relay) = network.relays.get_mut(1) {
         relay.state = VizNodeState::Offline;
     }
