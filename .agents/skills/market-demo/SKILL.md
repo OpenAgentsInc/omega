@@ -5,6 +5,15 @@ description: Answer questions about the swap network and run demo asset swaps (L
 
 # Swap market
 
+**Always use the MCP tools themselves** (`market_network_status`,
+`market_swap_quote`, `market_execute_swap`, `market_swap_status`) — in this
+app their results render as inline cards (the network map and the swap
+lifecycle card). Never run `scripts/market-demo-mcp.mjs` through the shell
+when the tools are available: shell output renders as plain text and the
+cards are lost. If the tools are missing from your session, say so instead
+of working around it. "Test the market components" means: call each tool
+and let the cards render.
+
 The `market-demo` MCP server exposes the swap-market flow.
 `market_network_status` reads the LIVE public regtest network (read-only:
 manifest, relay health, provider profiles and offerings). The swap tools are
