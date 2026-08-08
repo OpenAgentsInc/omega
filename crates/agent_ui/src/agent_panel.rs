@@ -491,6 +491,10 @@ fn grok_session_directory_name(working_directory: &Path) -> String {
         })
 }
 
+fn omega_session_path() -> PathBuf {
+    paths::data_dir().join("threads/threads.db")
+}
+
 fn find_local_agent_session_path(
     executor: omega_executor_selector::SelectableExecutor,
     session_id: &str,
@@ -503,7 +507,8 @@ fn find_local_agent_session_path(
         SelectableExecutor::Codex => find_codex_session_path(session_id, created_at),
         SelectableExecutor::Claude => find_claude_session_path(session_id, working_directories),
         SelectableExecutor::Grok => find_grok_session_path(session_id, working_directories),
-        SelectableExecutor::Omega | SelectableExecutor::Exo => Ok(None),
+        SelectableExecutor::Omega => Ok(Some(omega_session_path())),
+        SelectableExecutor::Exo => Ok(None),
     }
 }
 
@@ -8732,7 +8737,8 @@ impl AgentPanel {
             && executor.is_some_and(|executor| {
                 matches!(
                     executor,
-                    omega_executor_selector::SelectableExecutor::Codex
+                    omega_executor_selector::SelectableExecutor::Omega
+                        | omega_executor_selector::SelectableExecutor::Codex
                         | omega_executor_selector::SelectableExecutor::Claude
                         | omega_executor_selector::SelectableExecutor::Grok
                 )
@@ -23945,6 +23951,10 @@ mod omega_sidebar_motion_tests {
         assert_eq!(
             grok_session_directory_name(working_directory),
             "%2FUsers%2Fowner%2FMy%20Project"
+        );
+        assert_eq!(
+            omega_session_path(),
+            paths::data_dir().join("threads/threads.db")
         );
     }
 
