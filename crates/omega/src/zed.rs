@@ -6025,6 +6025,49 @@ mod tests {
         assert_eq!(item_count, 1);
     }
 
+    /// omega#244. The Markets panel's only entry point is its palette
+    /// toggle (the sealed interface renders no status-bar panel buttons), so
+    /// the handler must be registered on the workspace and the production
+    /// init path must actually install it — the original wiring lived only
+    /// in this file's test harness, which is exactly why the panel shipped
+    /// unreachable.
+    #[gpui::test]
+    async fn the_markets_panel_toggle_is_available_when_enabled(cx: &mut TestAppContext) {
+        // The gate reads the environment once per init call; other tests do
+        // not consult this variable.
+        unsafe { std::env::set_var(market_ui::MARKET_PANEL_ENVIRONMENT_VARIABLE, "1") };
+        let app_state = init_test(cx);
+        let project = Project::test(app_state.fs.clone(), [], cx).await;
+        let window = cx.add_window(|window, cx| MultiWorkspace::test_new(project, window, cx));
+        cx.run_until_parked();
+
+        let available = window
+            .update(cx, |_, window, cx| {
+                window
+                    .available_actions(cx)
+                    .iter()
+                    .map(|action| action.name().to_string())
+                    .collect::<Vec<_>>()
+            })
+            .unwrap();
+        assert!(
+            available.iter().any(|name| name == "market::ToggleFocus"),
+            "market::ToggleFocus is not available on the workspace; available market actions: {:?}",
+            available
+                .iter()
+                .filter(|name| name.starts_with("market"))
+                .collect::<Vec<_>>()
+        );
+
+        // The handler above came from this module's test harness; production
+        // must install the same registration.
+        let main_rs = include_str!("main.rs");
+        assert!(
+            main_rs.contains("market_ui::init(cx);"),
+            "the production init path lost market_ui::init"
+        );
+    }
+
     #[gpui::test]
     async fn test_bundled_languages(cx: &mut TestAppContext) {
         let fs = fs::FakeFs::new(cx.background_executor.clone());

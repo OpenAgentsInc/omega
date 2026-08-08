@@ -31,5 +31,7 @@ ui.workspace = true
 workspace.workspace = true
 
 [dev-dependencies]
+command_palette_hooks.workspace = true
 gpui = { workspace = true, features = ["test-support"] }
+omega_zero_base.workspace = true
 smol.workspace = true
