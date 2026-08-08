@@ -1349,10 +1349,12 @@ pub struct OmegaRouterServer {
     /// configuration or attempt to attach it. `OMEGA-DELTA-0144`.
     exo_lane_path: Option<PathBuf>,
     /// The coding agents found on this machine, in preference order.
-    /// `OMEGA-DELTA-0095`, omega#106. Passed in rather than read here, for the
-    /// two reasons the paths above are: this file may not read the
-    /// environment, and a rendering harness must be able to attach nothing
-    /// without the router knowing what a harness is.
+    ///
+    /// This inventory keeps an exact legacy route visibly unavailable when its
+    /// local executor was detected but was not started. The OpenAgents provider
+    /// reads the same detection inventory when it configures the cloud session.
+    /// Keeping detection separate from attachment prevents an optional local
+    /// adapter from delaying this connection.
     installed_agents: Vec<omega_agent_detect::DetectedAgent>,
 }
 
@@ -1391,18 +1393,11 @@ impl agent_servers::AgentServer for OmegaRouterServer {
 
     fn connect(
         &self,
-        mut delegate: agent_servers::AgentServerDelegate,
+        delegate: agent_servers::AgentServerDelegate,
         project: Entity<Project>,
         cx: &mut App,
     ) -> Task<Result<Rc<dyn AgentConnection>>> {
         let agent_server_store = delegate.store().downgrade();
-        // `OMEGA-DELTA-0114`, omega#106. The panel's loading-status channel,
-        // taken before the delegate goes to the native server. The native loop
-        // downloads nothing and ignores the delegate entirely, while the
-        // detected agent's ACP adapter is an npm package resolved on every
-        // connect — so the only part of this sequence a person can be left
-        // waiting on was also the only part with no way to say so.
-        let loading_status = delegate.take_loading_status();
         let native = self.native.connect(delegate, project.clone(), cx);
         let journal_path = self.journal_path.clone();
         let exo_lane_path = self.exo_lane_path.clone();
@@ -1418,7 +1413,11 @@ impl agent_servers::AgentServer for OmegaRouterServer {
                 &installed_agents,
                 exo_lane_path.is_some(),
             );
-            let installed_agents = plan.agents;
+            let unavailable_external_acps =
+                crate::omega_agent_attach::drivable_agents(&plan.agents)
+                    .into_iter()
+                    .map(|agent| agent.id.to_owned())
+                    .collect::<Vec<_>>();
             let exo_lane = if let (true, Some(exo_lane_path)) = (plan.exo, exo_lane_path) {
                 crate::omega_exo_connection::connect_configured_lane(
                     &exo_lane_path,
@@ -1447,32 +1446,11 @@ impl agent_servers::AgentServer for OmegaRouterServer {
             if let Some(exo) = exo_lane {
                 router = router.with_external_acp(exo);
             }
-            let attached = crate::omega_agent_attach::connect_detected_executors(
-                &installed_agents,
-                project.clone(),
-                agent_server_store,
-                loading_status,
-                cx,
-            )
-            .await;
-            let unavailable_external_acps = attached
-                .unavailable
-                .iter()
-                .map(|failure| failure.agent.id.to_owned())
-                .collect::<Vec<_>>();
-            for failure in attached.unavailable {
-                log::warn!(
-                    "OMEGA-DELTA-0153: `{}` is installed but unavailable for exact routing: {}",
-                    failure.agent.id,
-                    failure.reason
-                );
-            }
-            router = router.with_external_acps(
-                attached
-                    .ready
-                    .into_iter()
-                    .map(|attached| attached.connection),
-            );
+            // Local ACP agents are direct executor choices and capability
+            // context for the cloud service. Starting them here made an
+            // unrelated adapter handshake part of Omega Agent's connection
+            // deadline. Exact legacy routes remain visibly unavailable instead
+            // of silently changing executor.
             router = router.with_unavailable_external_acps(unavailable_external_acps);
             let router = Rc::new(router);
             publish_active_router(&router);

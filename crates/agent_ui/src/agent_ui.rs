@@ -687,9 +687,10 @@ impl Agent {
                         crate::omega_exo_connection::ExoLaneConfig::data_dir_path()
                     }
                 }),
-                // OMEGA-DELTA-0095, omega#106. The coding agents actually
-                // installed on this machine, which the router attaches one of
-                // as its external ACP executor.
+                // The coding agents installed on this machine. The router uses
+                // the inventory to keep legacy exact routes honest, but opening
+                // Omega Agent does not start any of these executors. The cloud
+                // provider reads the same inventory for its session context.
                 //
                 // The read happens here rather than inside the router because
                 // the router is not allowed to read the environment — see

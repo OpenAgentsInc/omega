@@ -13619,22 +13619,19 @@ mod tests {
             .unwrap_or_else(|error| panic!("cannot read {}: {error}", path.display()))
     }
 
-    /// OMEGA-DELTA-0095. The coding agent that is installed runs the turn.
+    /// OMEGA-DELTA-0095. Detected coding agents do not block Omega Agent.
     ///
-    /// omega#106. Detection, the onboarding grid, ACP hosting for `codex-acp`
-    /// and `claude-acp`, and auto-routing to the attached external agent all
-    /// existed already. Nothing attached one, so a machine with Codex on
-    /// `PATH` ran every turn on the native loop and the disclosure named
-    /// `native_loop`. This is the same failure shape as `OMEGA-DELTA-0035` and
-    /// `OMEGA-DELTA-0042`: a complete mechanism reachable by nobody, which
-    /// compiles, passes its own tests, and does nothing.
+    /// omega#106 originally put every detected ACP adapter in the router's
+    /// connection path. Omega Agent is now cloud-native, while Codex, Claude,
+    /// and Grok remain direct local executor choices. Detection is sent as
+    /// cloud session context without starting those executors.
     ///
-    /// The four parts checked here are the four ways it can revert to that:
-    /// the attach can stop being called, the choice can stop being made from
-    /// presence, the failure can start degrading to the native loop, or the
-    /// ACP servers can stop being configured so nothing can be hosted.
+    /// The attach path remains complete for an explicit local choice. The
+    /// router must not call it while Omega Agent connects, and it must retain
+    /// unavailable identities so an old exact route does not silently change
+    /// executors.
     #[test]
-    fn the_installed_coding_agent_is_attached_as_the_thread_executor() {
+    fn detected_coding_agents_do_not_block_omega_agent() {
         let attach_path = repository_path(DETECTED_EXECUTOR_ATTACH_PATH);
         let attach = std::fs::read_to_string(&attach_path)
             .unwrap_or_else(|error| panic!("cannot read {}: {error}", attach_path.display()));
@@ -13715,13 +13712,11 @@ mod tests {
         let router = std::fs::read_to_string(&router_path)
             .unwrap_or_else(|error| panic!("cannot read {}: {error}", router_path.display()));
         assert!(
-            router.contains("omega_agent_attach::connect_detected_executors")
-                && router.contains("with_external_acps(")
+            !router.contains("omega_agent_attach::connect_detected_executors")
                 && router.contains("with_unavailable_external_acps("),
-            "OMEGA-DELTA-0095: {} no longer registers every exact ready coding \
-             agent and every exact unavailable identity behind Omega's router. \
-             A one-slot attach cannot implement deterministic selection among \
-             the installed inventory.",
+            "OMEGA-DELTA-0095: {} starts detected coding agents while Omega \
+             Agent connects. Detection is capability context; an optional ACP \
+             adapter must not delay the native cloud connection.",
             router_path.display()
         );
 
@@ -13739,11 +13734,10 @@ mod tests {
                 },"
             )),
             "OMEGA-DELTA-0095: {} no longer hands the router the detected \
-             agents, or no longer empties that set for a run that is not a \
-             person's session. The first leaves the attach unreachable; the \
-             second lets a rendering harness or a test spawn somebody's real \
-             Codex, which is the rule the Exo lane path beside it already \
-             follows.",
+             identities, or no longer empties that set for a run that is not a \
+             person's session. The first lets an old exact route silently lose \
+             its unavailable executor identity; the second makes a harness \
+             describe executors from somebody's real machine.",
             factory_path.display()
         );
 
@@ -13879,8 +13873,8 @@ mod tests {
 
     // ------------------------------------------------------ OMEGA-DELTA-0114
 
-    /// OMEGA-DELTA-0114. The npx install a person waits on is bounded, and says
-    /// how long it has been.
+    /// OMEGA-DELTA-0114. A requested npx install is bounded, and Omega Agent
+    /// does not request one while its own connection opens.
     ///
     /// What the attach spends its time on is not the `codex` binary detection
     /// found. It is `npm exec --yes` resolving an npx package, plus Zed's Node
@@ -13900,7 +13894,7 @@ mod tests {
     /// unable to: a bound with no tick is a wait nobody can read, and a tick
     /// with no bound is a wait nobody can outlast.
     #[test]
-    fn the_adapters_npm_start_is_bounded_and_says_how_long_it_has_taken() {
+    fn an_adapter_start_is_bounded_and_outside_omega_agent_connection() {
         let path = repository_path(DETECTED_EXECUTOR_ATTACH_PATH);
         let attach = read_repository_file(DETECTED_EXECUTOR_ATTACH_PATH);
         let production = code_of(
@@ -13949,25 +13943,11 @@ mod tests {
         let router_path = repository_path(ROUTER_DISPATCH_PATH);
         let router = without_whitespace(&code_of(&read_repository_file(ROUTER_DISPATCH_PATH)));
         assert!(
-            router.contains(&without_whitespace("delegate.take_loading_status()")),
-            "OMEGA-DELTA-0114: {} no longer takes the panel's loading-status \
-             channel off its delegate before handing it to the native server, \
-             so the attach connects silently again.",
-            router_path.display()
-        );
-        assert!(
-            router.contains(&without_whitespace(
-                "crate::omega_agent_attach::connect_detected_executors(
-                    &installed_agents,
-                    project.clone(),
-                    agent_server_store,
-                    loading_status,
-                    cx,
-                ).await"
-            )),
-            "OMEGA-DELTA-0114: {} takes the loading-status channel and does not \
-             give it to the attach. A channel taken and dropped is worse than \
-             one never taken: the adapter loses its own voice too.",
+            !router.contains(&without_whitespace("delegate.take_loading_status()"))
+                && !router.contains("connect_detected_executors("),
+            "OMEGA-DELTA-0114: {} makes a detected adapter start part of Omega \
+             Agent's connection path. Optional local executors must not hold \
+             the native cloud connection open.",
             router_path.display()
         );
     }
@@ -14246,8 +14226,7 @@ mod tests {
         );
     }
 
-    /// OMEGA-DELTA-0117. Selection inventory attachment replaces speculative
-    /// post-connect warming.
+    /// OMEGA-DELTA-0117. Omega Agent does not preload local ACP agents.
     ///
     /// The owner's first condition on this feature was *when*: "after the window
     /// is usable, not before — a preload that delays first paint has moved the
@@ -14295,10 +14274,10 @@ mod tests {
         );
         let router = code_of(&read_repository_file(WARM_TRIGGER_CALLER_PATH));
         assert!(
-            router.contains("connect_detected_executors(")
-                && router.contains("with_external_acps("),
-            "OMEGA-DELTA-0117: the old warm trigger is gone but the router does \
-             not replace it with complete exact-inventory attachment."
+            !router.contains("connect_detected_executors("),
+            "OMEGA-DELTA-0117: Omega Agent eagerly starts detected ACP agents. \
+             Detection may describe capabilities, but startup belongs to an \
+             explicit local executor choice."
         );
     }
 

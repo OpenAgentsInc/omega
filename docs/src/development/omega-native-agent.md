@@ -30,9 +30,10 @@ does not select an inference model or reasoning level. The OpenAgents API owns
 provider credentials, model selection, and routing.
 
 Open **Settings** and enable **Use Development API** to use
-`http://127.0.0.1:8080/v1`. Disable it to use
-`https://api.openagents.com/v1`. Both endpoints accept the same Responses API
-request and the same OpenAgents session token.
+`ws://127.0.0.1:8080/v1/responses` for response streams. Other development API
+requests use `http://127.0.0.1:8080/v1`. Disable it to use
+`https://api.openagents.com/v1`. Omega signs both endpoints with the active
+Nostr identity.
 
 An External Agent such as Codex ACP is a different mode in the same
 new-conversation front door. It does not supply a model to Omega Agent. The

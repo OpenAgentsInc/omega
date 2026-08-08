@@ -5,6 +5,7 @@
 //! and tool loop. Each request uses the active Omega Nostr identity.
 
 use anyhow::Result;
+use async_tungstenite::tungstenite::{Message as WebSocketMessage, client::IntoClientRequest};
 use futures::{FutureExt, StreamExt, future::BoxFuture};
 use gpui::{App, AppContext, AsyncApp, Entity, SharedString, Task};
 use http_client::{CustomHeaders, HttpClient};
@@ -30,6 +31,7 @@ const PROVIDER_NAME: LanguageModelProviderName = LanguageModelProviderName::new(
 
 pub const OMEGA_AGENT_MODEL_ID: &str = "omega-agent";
 pub const DEVELOPMENT_API_URL: &str = "http://127.0.0.1:8080/v1";
+pub const DEVELOPMENT_WEBSOCKET_URL: &str = "ws://127.0.0.1:8080/v1/responses";
 pub const PRODUCTION_API_URL: &str = "https://api.openagents.com/v1";
 
 const MAX_TOKENS: u64 = 1_050_000;
@@ -51,6 +53,11 @@ impl OpenAgentsSettings {
 
     pub fn authentication_url(&self) -> &'static str {
         PRODUCTION_API_URL
+    }
+
+    pub fn websocket_url(&self) -> Option<&'static str> {
+        self.use_development_api
+            .then_some(DEVELOPMENT_WEBSOCKET_URL)
     }
 }
 
@@ -190,6 +197,149 @@ impl OpenAgentsLanguageModel {
 
         async move { Ok(future.await?.boxed()) }.boxed()
     }
+
+    fn stream_websocket_responses(
+        &self,
+        request: ResponseRequest,
+        cx: &AsyncApp,
+    ) -> BoxFuture<
+        'static,
+        Result<
+            futures::stream::BoxStream<'static, Result<ResponsesStreamEvent>>,
+            LanguageModelCompletionError,
+        >,
+    > {
+        let request_limiter = self.request_limiter.clone();
+        let (websocket_url, authentication_url) = cx.update(|cx| {
+            let settings = &crate::settings::AllLanguageModelSettings::get_global(cx).openagents;
+            (
+                settings.websocket_url().map(str::to_owned),
+                settings.authentication_url().to_owned(),
+            )
+        });
+
+        async move {
+            let websocket_url = websocket_url.ok_or_else(|| {
+                LanguageModelCompletionError::Other(anyhow::anyhow!(
+                    "The OpenAgents development WebSocket is not configured."
+                ))
+            })?;
+            let future = request_limiter.stream(async move {
+                let signed_url = format!("{authentication_url}/responses");
+                let authorization =
+                    omega_effectd::sign_nip98_request(&signed_url, "GET", &[], None)
+                        .await
+                        .map_err(nostr_signing_error)?;
+                let mut websocket_request = websocket_url
+                    .into_client_request()
+                    .map_err(|error| LanguageModelCompletionError::Other(error.into()))?;
+                websocket_request.headers_mut().insert(
+                    "Authorization",
+                    authorization.parse().map_err(|error| {
+                        LanguageModelCompletionError::Other(anyhow::anyhow!(
+                            "The OpenAgents authorization header is invalid: {error}"
+                        ))
+                    })?,
+                );
+
+                let (mut socket, _) = async_tungstenite::tokio::connect_async(websocket_request)
+                    .await
+                    .map_err(|error| LanguageModelCompletionError::Other(error.into()))?;
+                socket
+                    .send(WebSocketMessage::Text(
+                        websocket_session_configuration().to_string().into(),
+                    ))
+                    .await
+                    .map_err(|error| LanguageModelCompletionError::Other(error.into()))?;
+                socket
+                    .send(WebSocketMessage::Text(
+                        websocket_response_request(request)?.into(),
+                    ))
+                    .await
+                    .map_err(|error| LanguageModelCompletionError::Other(error.into()))?;
+
+                Ok(socket
+                    .filter_map(|message| async move {
+                        match message {
+                            Ok(WebSocketMessage::Text(text)) => {
+                                Some(websocket_response_event(text.as_str())).filter(|event| {
+                                    !matches!(event, Ok(ResponsesStreamEvent::Unknown))
+                                })
+                            }
+                            Ok(WebSocketMessage::Close(_)) => None,
+                            Ok(WebSocketMessage::Ping(_))
+                            | Ok(WebSocketMessage::Pong(_))
+                            | Ok(WebSocketMessage::Frame(_)) => None,
+                            Ok(WebSocketMessage::Binary(_)) => Some(Err(anyhow::anyhow!(
+                                "The OpenAgents WebSocket returned a binary message."
+                            ))),
+                            Err(error) => Some(Err(error.into())),
+                        }
+                    })
+                    .boxed())
+            });
+            Ok(future.await?.boxed())
+        }
+        .boxed()
+    }
+}
+
+fn websocket_session_configuration() -> serde_json::Value {
+    let detected_agents = omega_agent_detect::detected()
+        .iter()
+        .map(|agent| {
+            serde_json::json!({
+                "id": agent.id,
+                "name": agent.name
+            })
+        })
+        .collect::<Vec<_>>();
+    serde_json::json!({
+        "type": "openagents:session.configure",
+        "system": {
+            "os": std::env::consts::OS,
+            "architecture": std::env::consts::ARCH,
+            "detected_agents": detected_agents
+        }
+    })
+}
+
+fn websocket_response_request(request: ResponseRequest) -> Result<String> {
+    let mut value = serde_json::to_value(request)?;
+    let object = value
+        .as_object_mut()
+        .ok_or_else(|| anyhow::anyhow!("The OpenAgents response request must be an object."))?;
+    object.insert(
+        "type".to_owned(),
+        serde_json::Value::String("response.create".to_owned()),
+    );
+    object.remove("stream");
+    Ok(serde_json::to_string(&value)?)
+}
+
+fn websocket_response_event(text: &str) -> Result<ResponsesStreamEvent> {
+    let value = serde_json::from_str::<serde_json::Value>(text)?;
+    if value.get("type").and_then(serde_json::Value::as_str) == Some("openagents:response.status") {
+        let message = value
+            .get("message")
+            .and_then(serde_json::Value::as_str)
+            .unwrap_or_default();
+        let classification = value
+            .get("classification")
+            .and_then(serde_json::Value::as_str);
+        let delta = if classification == Some("greeting") {
+            message.to_owned()
+        } else {
+            format!("{message}\n\n")
+        };
+        return Ok(ResponsesStreamEvent::OutputTextDelta {
+            item_id: "openagents-status".to_owned(),
+            output_index: 0,
+            content_index: Some(0),
+            delta,
+        });
+    }
+    Ok(serde_json::from_value(value)?)
 }
 
 fn nostr_signing_error(
@@ -291,7 +441,16 @@ impl LanguageModel for OpenAgentsLanguageModel {
             Ok(request) => request,
             Err(error) => return async move { Err(error.into()) }.boxed(),
         };
-        let responses = self.stream_responses(request, cx);
+        let use_development_websocket = cx.update(|cx| {
+            crate::settings::AllLanguageModelSettings::get_global(cx)
+                .openagents
+                .use_development_api
+        });
+        let responses = if use_development_websocket {
+            self.stream_websocket_responses(request, cx)
+        } else {
+            self.stream_responses(request, cx)
+        };
         async move {
             let mapper = OpenAiResponseEventMapper::new(PROVIDER_ID);
             Ok(mapper.map_stream(responses.await?).boxed())
@@ -321,6 +480,14 @@ mod tests {
             .authentication_url(),
             PRODUCTION_API_URL
         );
+        assert_eq!(
+            OpenAgentsSettings {
+                use_development_api: true,
+            }
+            .websocket_url(),
+            Some(DEVELOPMENT_WEBSOCKET_URL)
+        );
+        assert_eq!(OpenAgentsSettings::default().websocket_url(), None);
     }
 
     #[test]
@@ -342,5 +509,38 @@ mod tests {
     #[test]
     fn provider_id_is_openagents() {
         assert_eq!(PROVIDER_ID.0.as_ref(), "openagents");
+    }
+
+    #[test]
+    fn websocket_request_uses_the_response_create_event() {
+        let request = response_request(LanguageModelRequest::default())
+            .expect("Omega Agent request should convert");
+        let value = serde_json::from_str::<serde_json::Value>(
+            &websocket_response_request(request).expect("request should serialize"),
+        )
+        .expect("request should be JSON");
+
+        assert_eq!(value["type"], "response.create");
+        assert_eq!(value["model"], OMEGA_AGENT_MODEL_ID);
+        assert!(value.get("stream").is_none());
+    }
+
+    #[test]
+    fn websocket_status_becomes_response_text() {
+        let event = websocket_response_event(
+            &serde_json::json!({
+                "type": "openagents:response.status",
+                "classification": "request",
+                "message": "Checking on that."
+            })
+            .to_string(),
+        )
+        .expect("status should parse");
+
+        assert!(matches!(
+            event,
+            ResponsesStreamEvent::OutputTextDelta { delta, .. }
+                if delta == "Checking on that.\n\n"
+        ));
     }
 }

@@ -12,17 +12,17 @@ Agent has no client model selector. The service owns its provider model and
 routing policy.
 
 The new-conversation front door prepares one Omega Agent conversation and
-shows it as Ready once its router has a live, recorded executor inventory.
+shows it as Ready once its native connection is live. Detected local agents
+are session context for the OpenAgents service. Omega does not start their ACP
+adapters while Omega Agent connects.
 Selecting the row reveals that same prepared conversation. The first submitted
-request supplies the task requirements for one deterministic route; only then
-does the selected executor create its session. Its persisted owner remains
-Omega Agent even when the route receipt names a different concrete executor.
+request creates the native session and records its route. Its persisted owner
+remains Omega Agent.
 
-An automatic route may select Omega's native loop or a ready ordinary ACP
-agent. Full Auto engine lanes still require their own explicit human authority
-and are not automatic chat candidates. A new-conversation override wins over
-automatic routing, is consumed by that conversation, and cannot retarget an
-existing transcript.
+Codex, Claude, and Grok are separate local agent choices in the
+new-conversation front door. Selecting Omega Agent does not launch them. Full
+Auto engine lanes still require their own explicit human authority and are not
+automatic chat candidates.
 
 Before the first request is dispatched, Omega durably records the normalized
 task requirements, the exact readiness snapshot, the policy version, the
@@ -56,7 +56,8 @@ Use Omega Agent when you want the agent to:
 ## API Environment {#api-environment}
 
 Open **Settings**, then enable **Use Development API** to send Omega Agent
-requests to `http://127.0.0.1:8080/v1`. Disable it to use
+response streams to `ws://127.0.0.1:8080/v1/responses`. Other development API
+requests use `http://127.0.0.1:8080/v1`. Disable it to use
 `https://api.openagents.com/v1`.
 
 Or add this to your settings.json:
@@ -72,8 +73,7 @@ Or add this to your settings.json:
 ```
 
 The development endpoint must serve the same Open Responses profile as the
-production endpoint. Omega sends your OpenAgents session token to either
-endpoint.
+production endpoint. Omega signs each request with the active Nostr identity.
 
 ## How It Differs from Other Agent Paths {#other-agent-paths}
 
