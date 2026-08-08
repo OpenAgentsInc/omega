@@ -905,6 +905,7 @@ impl AgentDiffPane {
             | AcpThreadEvent::ElicitationResponded(_)
             | AcpThreadEvent::Retry(_)
             | AcpThreadEvent::SubagentSpawned(_)
+            | AcpThreadEvent::SubagentActivity(_)
             | AcpThreadEvent::PromptCapabilitiesUpdated
             | AcpThreadEvent::AvailableCommandsUpdated(_)
             | AcpThreadEvent::ModeUpdated(_)
@@ -2362,6 +2363,7 @@ impl AgentDiff {
             | AcpThreadEvent::StatusChanged
             | AcpThreadEvent::TokenUsageUpdated
             | AcpThreadEvent::SubagentSpawned(_)
+            | AcpThreadEvent::SubagentActivity(_)
             | AcpThreadEvent::EntriesRemoved(_)
             | AcpThreadEvent::ToolAuthorizationRequested(_)
             | AcpThreadEvent::ToolAuthorizationReceived(_)

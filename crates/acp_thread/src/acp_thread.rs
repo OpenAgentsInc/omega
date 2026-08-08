@@ -289,6 +289,139 @@ pub fn subagent_session_info_from_meta(meta: &Option<acp::Meta>) -> Option<Subag
         .and_then(|v| serde_json::from_value(v.clone()).ok())
 }
 
+/// Namespace `claude-code-acp` uses for its own metadata on session updates.
+pub const CLAUDE_CODE_META_KEY: &str = "claudeCode";
+
+/// Key inside [`CLAUDE_CODE_META_KEY`] naming the `Agent`/`Task` tool call a
+/// session update originated under.
+pub const PARENT_TOOL_USE_ID_META_KEY: &str = "parentToolUseId";
+
+/// Capability Omega advertises so `claude-code-acp` forwards subagent text and
+/// thinking instead of keeping it internal to the spawning tool call.
+pub const SUBAGENT_TRANSCRIPT_CAPABILITY_META_KEY: &str = "subagent-transcript";
+
+/// A Claude Code subagent has no ACP session of its own — the adapter stamps
+/// every update it produces with the id of the `Agent`/`Task` tool call that
+/// spawned it, and that stamp is the only thing distinguishing subagent output
+/// from the parent's. Native Omega subagents take the separate-session path
+/// (see [`SubagentSessionInfo`]) and never carry this.
+pub fn parent_tool_use_id_from_meta(meta: &Option<acp::Meta>) -> Option<acp::ToolCallId> {
+    meta.as_ref()
+        .and_then(|m| m.get(CLAUDE_CODE_META_KEY))
+        .and_then(|claude_code| claude_code.get(PARENT_TOOL_USE_ID_META_KEY))
+        .and_then(|value| value.as_str())
+        .map(acp::ToolCallId::new)
+}
+
+fn parent_tool_use_id_from_session_update(update: &acp::SessionUpdate) -> Option<acp::ToolCallId> {
+    let meta = match update {
+        acp::SessionUpdate::AgentMessageChunk(chunk)
+        | acp::SessionUpdate::AgentThoughtChunk(chunk)
+        | acp::SessionUpdate::UserMessageChunk(chunk) => &chunk.meta,
+        acp::SessionUpdate::ToolCall(tool_call) => &tool_call.meta,
+        acp::SessionUpdate::ToolCallUpdate(update) => &update.meta,
+        _ => return None,
+    };
+    parent_tool_use_id_from_meta(meta)
+}
+
+/// One subagent's stream, keyed by the tool call that spawned it. The run's
+/// title and status are not stored here: they live on that tool call, which
+/// the thread already keeps up to date.
+#[derive(Debug)]
+pub struct SubagentRun {
+    pub tool_call_id: acp::ToolCallId,
+    pub events: Vec<SubagentEvent>,
+}
+
+#[derive(Debug)]
+pub enum SubagentEvent {
+    Message {
+        text: String,
+        kind: SubagentMessageKind,
+    },
+    ToolCall(SubagentToolCall),
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SubagentMessageKind {
+    Text,
+    Thought,
+    /// Content fed back into the subagent — a tool result, or a follow-up the
+    /// orchestrating model sent it. Never the person's own input: a subagent
+    /// takes no direct user turns.
+    Input,
+}
+
+#[derive(Debug)]
+pub struct SubagentToolCall {
+    pub id: acp::ToolCallId,
+    pub title: SharedString,
+    pub kind: acp::ToolKind,
+    pub status: acp::ToolCallStatus,
+}
+
+impl SubagentRun {
+    fn record(&mut self, update: &acp::SessionUpdate) {
+        match update {
+            acp::SessionUpdate::AgentMessageChunk(chunk)
+            | acp::SessionUpdate::AgentThoughtChunk(chunk)
+            | acp::SessionUpdate::UserMessageChunk(chunk) => {
+                let kind = match update {
+                    acp::SessionUpdate::AgentThoughtChunk(_) => SubagentMessageKind::Thought,
+                    acp::SessionUpdate::UserMessageChunk(_) => SubagentMessageKind::Input,
+                    _ => SubagentMessageKind::Text,
+                };
+                let acp::ContentBlock::Text(text) = &chunk.content else {
+                    return;
+                };
+                match self.events.last_mut() {
+                    Some(SubagentEvent::Message {
+                        text: existing,
+                        kind: existing_kind,
+                    }) if *existing_kind == kind => existing.push_str(&text.text),
+                    _ => self.events.push(SubagentEvent::Message {
+                        text: text.text.clone(),
+                        kind,
+                    }),
+                }
+            }
+            acp::SessionUpdate::ToolCall(tool_call) => {
+                self.events.push(SubagentEvent::ToolCall(SubagentToolCall {
+                    id: tool_call.tool_call_id.clone(),
+                    title: tool_call.title.clone().into(),
+                    kind: tool_call.kind,
+                    status: tool_call.status,
+                }));
+            }
+            acp::SessionUpdate::ToolCallUpdate(update) => {
+                let Some(SubagentToolCall {
+                    title,
+                    kind,
+                    status,
+                    ..
+                }) = self.events.iter_mut().rev().find_map(|event| match event {
+                    SubagentEvent::ToolCall(call) if call.id == update.tool_call_id => Some(call),
+                    _ => None,
+                })
+                else {
+                    return;
+                };
+                if let Some(new_title) = &update.fields.title {
+                    *title = new_title.clone().into();
+                }
+                if let Some(new_kind) = update.fields.kind {
+                    *kind = new_kind;
+                }
+                if let Some(new_status) = update.fields.status {
+                    *status = new_status;
+                }
+            }
+            _ => {}
+        }
+    }
+}
+
 #[derive(Debug)]
 pub struct UserMessage {
     pub protocol_id: Option<acp::MessageId>,
@@ -2154,6 +2287,7 @@ pub struct AcpThread {
     title: Option<SharedString>,
     provisional_title: Option<SharedString>,
     entries: Vec<AgentThreadEntry>,
+    subagent_runs: Vec<SubagentRun>,
     entry_projection_states: Vec<ThreadEntryProjectionState>,
     entry_projection_bindings: Vec<ThreadProjectionBinding>,
     entry_projection_fingerprints: Vec<u64>,
@@ -2242,6 +2376,8 @@ pub enum AcpThreadEvent {
     ElicitationResponded(ElicitationEntryId),
     Retry(RetryStatus),
     SubagentSpawned(acp::SessionId),
+    /// A session-less subagent (see [`SubagentRun`]) produced output.
+    SubagentActivity(acp::ToolCallId),
     Stopped(acp::StopReason),
     Error,
     LoadError(LoadError),
@@ -2406,6 +2542,7 @@ impl AcpThread {
             update_last_checkpoint_if_changed_task: None,
             shared_buffers: Default::default(),
             entries: Default::default(),
+            subagent_runs: Default::default(),
             entry_projection_states: Default::default(),
             entry_projection_bindings: Default::default(),
             entry_projection_fingerprints: Default::default(),
@@ -2546,6 +2683,39 @@ impl AcpThread {
 
     pub fn entries(&self) -> &[AgentThreadEntry] {
         &self.entries
+    }
+
+    /// Session-less subagents seen on this thread, oldest first.
+    pub fn subagent_runs(&self) -> &[SubagentRun] {
+        &self.subagent_runs
+    }
+
+    fn record_subagent_update(
+        &mut self,
+        parent_tool_call_id: acp::ToolCallId,
+        update: &acp::SessionUpdate,
+        cx: &mut Context<Self>,
+    ) {
+        let run = match self
+            .subagent_runs
+            .iter_mut()
+            .find(|run| run.tool_call_id == parent_tool_call_id)
+        {
+            Some(run) => run,
+            None => {
+                self.subagent_runs.push(SubagentRun {
+                    tool_call_id: parent_tool_call_id.clone(),
+                    events: Vec::new(),
+                });
+                // The push above cannot leave the vector empty.
+                match self.subagent_runs.last_mut() {
+                    Some(run) => run,
+                    None => return,
+                }
+            }
+        };
+        run.record(update);
+        cx.emit(AcpThreadEvent::SubagentActivity(parent_tool_call_id));
     }
 
     fn projection_binding(&self) -> ThreadProjectionBinding {
@@ -2801,6 +2971,25 @@ impl AcpThread {
         update: acp::SessionUpdate,
         cx: &mut Context<Self>,
     ) -> Result<(), acp::Error> {
+        if let Some(parent_tool_call_id) = parent_tool_use_id_from_session_update(&update) {
+            self.record_subagent_update(parent_tool_call_id, &update, cx);
+
+            // Tool calls keep flowing to the main transcript — they carry
+            // permission requests and file edits the parent thread owns. The
+            // subagent's own prose does not: it only reaches us because Omega
+            // advertises `subagent-transcript`, and letting it into the
+            // top-level feed would interleave every subagent's narration with
+            // the parent's answer.
+            if matches!(
+                update,
+                acp::SessionUpdate::AgentMessageChunk(_)
+                    | acp::SessionUpdate::AgentThoughtChunk(_)
+                    | acp::SessionUpdate::UserMessageChunk(_)
+            ) {
+                return Ok(());
+            }
+        }
+
         match update {
             acp::SessionUpdate::UserMessageChunk(acp::ContentChunk {
                 content,
@@ -6356,6 +6545,112 @@ mod tests {
             }
         }
         panic!("the thread has no thought block");
+    }
+
+    fn subagent_stamp(parent_tool_call_id: &str) -> acp::Meta {
+        acp::Meta::from_iter([(
+            CLAUDE_CODE_META_KEY.into(),
+            serde_json::json!({ PARENT_TOOL_USE_ID_META_KEY: parent_tool_call_id }),
+        )])
+    }
+
+    /// A Claude Code subagent's prose belongs to the tool call that spawned it,
+    /// not to the parent's answer. Omega only receives it at all because it
+    /// advertises `subagent-transcript`, so letting it fall through to
+    /// `entries` would make enabling the capability a regression.
+    #[gpui::test]
+    async fn subagent_output_is_kept_out_of_the_parent_transcript(cx: &mut gpui::TestAppContext) {
+        init_test(cx);
+
+        let fs = FakeFs::new(cx.executor());
+        let project = Project::test(fs, [], cx).await;
+        let connection = Rc::new(FakeAgentConnection::new());
+        let thread = cx
+            .update(|cx| {
+                connection.new_session(project, PathList::new(&[Path::new(path!("/test"))]), cx)
+            })
+            .await
+            .unwrap();
+
+        thread.update(cx, |thread, cx| {
+            thread
+                .handle_session_update(
+                    acp::SessionUpdate::ToolCall(
+                        acp::ToolCall::new("task-1", "Audit the ACP surface")
+                            .kind(acp::ToolKind::Think)
+                            .status(acp::ToolCallStatus::InProgress),
+                    ),
+                    cx,
+                )
+                .unwrap();
+
+            for chunk in ["Reading ", "acp.rs"] {
+                thread
+                    .handle_session_update(
+                        acp::SessionUpdate::AgentMessageChunk(
+                            acp::ContentChunk::new(acp::ContentBlock::from(chunk))
+                                .meta(subagent_stamp("task-1")),
+                        ),
+                        cx,
+                    )
+                    .unwrap();
+            }
+
+            thread
+                .handle_session_update(
+                    acp::SessionUpdate::ToolCall(
+                        acp::ToolCall::new("grep-1", "grep parentToolUseId")
+                            .status(acp::ToolCallStatus::Completed)
+                            .meta(subagent_stamp("task-1")),
+                    ),
+                    cx,
+                )
+                .unwrap();
+
+            thread
+                .handle_session_update(
+                    acp::SessionUpdate::AgentMessageChunk(acp::ContentChunk::new(
+                        acp::ContentBlock::from("Here is what the subagent found."),
+                    )),
+                    cx,
+                )
+                .unwrap();
+
+            // The parent's own answer is the only assistant message on the
+            // thread; the subagent's narration never reached it.
+            let assistant_messages = thread
+                .entries
+                .iter()
+                .filter_map(|entry| match entry {
+                    AgentThreadEntry::AssistantMessage(message) => Some(message.to_markdown(cx)),
+                    _ => None,
+                })
+                .collect::<Vec<_>>();
+            assert_eq!(
+                assistant_messages,
+                vec!["## Assistant\n\nHere is what the subagent found.\n\n".to_string()]
+            );
+
+            let runs = thread.subagent_runs();
+            assert_eq!(runs.len(), 1);
+            assert_eq!(runs[0].tool_call_id, acp::ToolCallId::new("task-1"));
+            match runs[0].events.as_slice() {
+                [
+                    SubagentEvent::Message { text, kind },
+                    SubagentEvent::ToolCall(call),
+                ] => {
+                    assert_eq!(text, "Reading acp.rs");
+                    assert_eq!(*kind, SubagentMessageKind::Text);
+                    assert_eq!(call.title, "grep parentToolUseId");
+                    assert_eq!(call.status, acp::ToolCallStatus::Completed);
+                }
+                other => panic!("unexpected subagent stream: {other:?}"),
+            }
+
+            // The subagent's tool call still reaches the parent transcript —
+            // that is where its permission prompts and edits are answered.
+            assert!(thread.tool_call(&acp::ToolCallId::new("grep-1")).is_some());
+        });
     }
 
     #[gpui::test]
