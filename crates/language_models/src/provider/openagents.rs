@@ -6,7 +6,7 @@
 
 use anyhow::Result;
 use async_tungstenite::tungstenite::{Message as WebSocketMessage, client::IntoClientRequest};
-use futures::{FutureExt, StreamExt, future::BoxFuture};
+use futures::{FutureExt, Stream, StreamExt, future::BoxFuture, stream};
 use gpui::{App, AppContext, AsyncApp, Entity, SharedString, Task};
 use http_client::{CustomHeaders, HttpClient};
 use language_model::{
@@ -259,30 +259,66 @@ impl OpenAgentsLanguageModel {
                     .await
                     .map_err(|error| LanguageModelCompletionError::Other(error.into()))?;
 
-                Ok(socket
-                    .filter_map(|message| async move {
-                        match message {
-                            Ok(WebSocketMessage::Text(text)) => {
-                                Some(websocket_response_event(text.as_str())).filter(|event| {
-                                    !matches!(event, Ok(ResponsesStreamEvent::Unknown))
-                                })
-                            }
-                            Ok(WebSocketMessage::Close(_)) => None,
-                            Ok(WebSocketMessage::Ping(_))
-                            | Ok(WebSocketMessage::Pong(_))
-                            | Ok(WebSocketMessage::Frame(_)) => None,
-                            Ok(WebSocketMessage::Binary(_)) => Some(Err(anyhow::anyhow!(
-                                "The OpenAgents WebSocket returned a binary message."
-                            ))),
-                            Err(error) => Some(Err(error.into())),
-                        }
-                    })
-                    .boxed())
+                Ok(websocket_response_stream(socket))
             });
             Ok(future.await?.boxed())
         }
         .boxed()
     }
+}
+
+fn websocket_response_stream<S, E>(
+    socket: S,
+) -> futures::stream::BoxStream<'static, Result<ResponsesStreamEvent>>
+where
+    S: Stream<Item = std::result::Result<WebSocketMessage, E>> + Send + Unpin + 'static,
+    E: std::error::Error + Send + Sync + 'static,
+{
+    stream::unfold(Some(socket), |socket| async move {
+        let mut socket = socket?;
+        loop {
+            let message = socket.next().await?;
+            match message {
+                Ok(WebSocketMessage::Text(text)) => match websocket_response_event(text.as_str()) {
+                    Ok(ResponsesStreamEvent::Unknown) => continue,
+                    Ok(event) => {
+                        let next_socket = if websocket_response_is_terminal(&event) {
+                            None
+                        } else {
+                            Some(socket)
+                        };
+                        return Some((Ok(event), next_socket));
+                    }
+                    Err(error) => return Some((Err(error), None)),
+                },
+                Ok(WebSocketMessage::Close(_)) => return None,
+                Ok(WebSocketMessage::Ping(_))
+                | Ok(WebSocketMessage::Pong(_))
+                | Ok(WebSocketMessage::Frame(_)) => continue,
+                Ok(WebSocketMessage::Binary(_)) => {
+                    return Some((
+                        Err(anyhow::anyhow!(
+                            "The OpenAgents WebSocket returned a binary message."
+                        )),
+                        None,
+                    ));
+                }
+                Err(error) => return Some((Err(anyhow::Error::new(error)), None)),
+            }
+        }
+    })
+    .boxed()
+}
+
+fn websocket_response_is_terminal(event: &ResponsesStreamEvent) -> bool {
+    matches!(
+        event,
+        ResponsesStreamEvent::Completed { .. }
+            | ResponsesStreamEvent::Incomplete { .. }
+            | ResponsesStreamEvent::Failed { .. }
+            | ResponsesStreamEvent::Error { .. }
+            | ResponsesStreamEvent::GenericError { .. }
+    )
 }
 
 fn websocket_session_configuration() -> serde_json::Value {
@@ -543,6 +579,42 @@ mod tests {
             ResponsesStreamEvent::OutputTextDelta { delta, .. }
                 if delta == "Checking on that.\n\n"
         ));
+    }
+
+    #[test]
+    fn websocket_stream_ends_after_the_response_terminal_event() {
+        async_std::task::block_on(async {
+            let completed = serde_json::json!({
+                "type": "response.completed",
+                "response": {
+                    "id": "response-1",
+                    "status": "completed",
+                    "output": []
+                }
+            })
+            .to_string();
+            let late_delta = serde_json::json!({
+                "type": "response.output_text.delta",
+                "item_id": "message-1",
+                "output_index": 0,
+                "content_index": 0,
+                "delta": "late"
+            })
+            .to_string();
+            let socket = stream::iter([
+                Ok::<_, async_tungstenite::tungstenite::Error>(WebSocketMessage::Text(
+                    completed.into(),
+                )),
+                Ok(WebSocketMessage::Text(late_delta.into())),
+            ]);
+            let mut responses = websocket_response_stream(socket);
+
+            assert!(matches!(
+                responses.next().await,
+                Some(Ok(ResponsesStreamEvent::Completed { .. }))
+            ));
+            assert!(responses.next().await.is_none());
+        });
     }
 
     #[test]

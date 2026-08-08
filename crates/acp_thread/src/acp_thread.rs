@@ -4516,24 +4516,23 @@ impl AcpThread {
             .as_ref()
             .map(|client_user_message_ids| client_user_message_ids.new_id());
 
+        if push_user_message {
+            self.push_entry(
+                AgentThreadEntry::UserMessage(UserMessage {
+                    protocol_id: None,
+                    client_id: client_id.clone(),
+                    is_optimistic: true,
+                    content: block,
+                    chunks: message,
+                    checkpoint: None,
+                    indented: false,
+                }),
+                cx,
+            );
+        }
+
         self.run_turn(cx, async move |this, cx| {
             if push_user_message {
-                this.update(cx, |this, cx| {
-                    this.push_entry(
-                        AgentThreadEntry::UserMessage(UserMessage {
-                            protocol_id: None,
-                            client_id: client_id.clone(),
-                            is_optimistic: true,
-                            content: block,
-                            chunks: message,
-                            checkpoint: None,
-                            indented: false,
-                        }),
-                        cx,
-                    );
-                })
-                .ok();
-
                 let old_checkpoint = git_store
                     .update(cx, |git, cx| git.checkpoint(cx))
                     .await
@@ -7266,6 +7265,45 @@ mod tests {
             assert_eq!(message.client_id, None);
             assert!(message.is_optimistic);
         });
+    }
+
+    #[gpui::test]
+    async fn test_send_pushes_the_optimistic_user_message_before_the_prompt_runs(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        init_test(cx);
+
+        let fs = FakeFs::new(cx.executor());
+        let project = Project::test(fs, [], cx).await;
+        let (complete_tx, complete_rx) = async_channel::bounded(1);
+        let connection = Rc::new(FakeAgentConnection::new().on_user_message(
+            move |_request, _thread, _cx| {
+                let complete_rx = complete_rx.clone();
+                async move {
+                    complete_rx.recv().await?;
+                    Ok(acp::PromptResponse::new(acp::StopReason::EndTurn))
+                }
+                .boxed_local()
+            },
+        ));
+        let thread = cx
+            .update(|cx| {
+                connection.new_session(project, PathList::new(&[Path::new(path!("/test"))]), cx)
+            })
+            .await
+            .unwrap();
+
+        let request = thread.update(cx, |thread, cx| thread.send_raw("Visible now", cx));
+        thread.read_with(cx, |thread, cx| {
+            let Some(AgentThreadEntry::UserMessage(message)) = thread.entries.first() else {
+                panic!("expected optimistic user message");
+            };
+            assert!(message.is_optimistic);
+            assert_eq!(message.content.to_markdown(cx), "Visible now");
+        });
+
+        complete_tx.send(()).await.unwrap();
+        request.await.unwrap();
     }
 
     #[gpui::test]
