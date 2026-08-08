@@ -750,17 +750,41 @@ pub async fn stream_response(
     request: Request,
     extra_headers: &CustomHeaders,
 ) -> Result<BoxStream<'static, Result<StreamEvent>>, RequestError> {
-    let uri = format!("{api_url}/responses");
     let is_streaming = request.stream;
+    let body = serialize_response_request(&request).map_err(RequestError::Other)?;
+    stream_response_with_authorization(
+        client,
+        provider_name,
+        api_url,
+        &format!("Bearer {}", api_key.trim()),
+        body,
+        is_streaming,
+        extra_headers,
+    )
+    .await
+}
+
+pub fn serialize_response_request(request: &Request) -> Result<String> {
+    serde_json::to_string(request).map_err(Into::into)
+}
+
+pub async fn stream_response_with_authorization(
+    client: &dyn HttpClient,
+    provider_name: &str,
+    api_url: &str,
+    authorization: &str,
+    body: String,
+    is_streaming: bool,
+    extra_headers: &CustomHeaders,
+) -> Result<BoxStream<'static, Result<StreamEvent>>, RequestError> {
+    let uri = format!("{api_url}/responses");
     let request = HttpRequest::builder()
         .method(Method::POST)
         .uri(uri)
         .header("Content-Type", "application/json")
-        .header("Authorization", format!("Bearer {}", api_key.trim()))
+        .header("Authorization", authorization)
         .extra_headers(extra_headers)
-        .body(AsyncBody::from(
-            serde_json::to_string(&request).map_err(|e| RequestError::Other(e.into()))?,
-        ))
+        .body(AsyncBody::from(body))
         .map_err(|e| RequestError::Other(e.into()))?;
 
     let mut response = client.send(request).await?;

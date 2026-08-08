@@ -21499,8 +21499,8 @@ mod tests {
             provider.contains("OMEGA_AGENT_MODEL_ID")
                 && provider.contains("omega-agent")
                 && provider.contains("https://api.openagents.com/v1")
-                && provider.contains("openagents_session")
-                && provider.contains("stream_response")
+                && provider.contains("sign_nip98_request")
+                && provider.contains("stream_response_with_authorization")
                 && provider.contains("into_open_ai_response"),
             "OMEGA-DELTA-0172: {} no longer sends the logical Omega Agent \
              through the authenticated OpenAgents Responses API.",
@@ -26600,7 +26600,8 @@ mod tests {
         assert!(
             provider.contains("pub const OMEGA_AGENT_MODEL_ID: &str = \"omega-agent\"")
                 && provider.contains("vec![self.create_language_model()]")
-                && provider.contains("stream_response(")
+                && provider.contains("stream_response_with_authorization(")
+                && provider.contains("sign_nip98_request(")
                 && provider.contains("request.thinking_allowed = false")
                 && provider.contains("request.thinking_effort = None"),
             "OMEGA-DELTA-0201: {} no longer exposes one logical, server-routed \
@@ -26629,7 +26630,8 @@ mod tests {
             provider.contains("OMEGA_AGENT_MODEL_ID")
                 && provider.contains("PRODUCTION_API_URL")
                 && provider.contains("DEVELOPMENT_API_URL")
-                && provider.contains("stream_response(")
+                && provider.contains("stream_response_with_authorization(")
+                && provider.contains("sign_nip98_request(")
                 && !provider.contains("HostedModel"),
             "OMEGA-DELTA-0202: {} restored client-visible provider routing \
              instead of sending one logical agent to the OpenAgents API.",
@@ -28812,6 +28814,91 @@ mod tests {
             assert!(
                 palette.contains(hidden),
                 "OMEGA-DELTA-0234: the palette hide list lost `{hidden}`"
+            );
+        }
+    }
+
+    /// OMEGA-DELTA-0239. The compact composer presents the agent, voice,
+    /// context, and send controls as one aligned row. Each control is 28
+    /// pixels high, the row does not wrap, and the message inset beside the
+    /// controls stays at one spacing unit.
+    #[test]
+    fn compact_composer_controls_are_one_tight_aligned_row() {
+        let menu = without_comments(&read_repository_file(
+            "crates/agent_ui/src/omega_composer_executor_menu.rs",
+        ));
+        assert!(
+            menu.contains(".height(px(28.).into())"),
+            "OMEGA-DELTA-0239: the agent control lost its 28 pixel height"
+        );
+        assert!(
+            !menu.contains(".height(px(32.).into())"),
+            "OMEGA-DELTA-0239: the agent control is taller than the icon controls"
+        );
+
+        let voice = without_comments(&read_repository_file(
+            "crates/agent_ui/src/composer_voice.rs",
+        ));
+        let voice_controls = body_of(&voice, "render_composer_voice_controls");
+        for required in [
+            ".h(px(28.))",
+            ".items_center()",
+            ".size(ButtonSize::Medium)",
+            ".width(rems_from_px(28.))",
+        ] {
+            assert!(
+                voice_controls.contains(required),
+                "OMEGA-DELTA-0239: the voice control row lost `{required}`"
+            );
+        }
+
+        let connecting = without_comments(&read_repository_file(
+            "crates/agent_ui/src/conversation_view.rs",
+        ));
+        let connecting = body_of(&connecting, "render_loading_composer");
+        let active = without_comments(&read_repository_file(
+            "crates/agent_ui/src/conversation_view/thread_view.rs",
+        ));
+        let active = body_of(&active, "render_message_editor");
+        for (name, composer) in [("connecting", connecting), ("active", active)] {
+            for required in [".items_center()", ".gap_0p5()", ".pr_1()"] {
+                assert!(
+                    composer.contains(required),
+                    "OMEGA-DELTA-0239: the {name} composer lost `{required}`"
+                );
+            }
+        }
+    }
+
+    /// OMEGA-DELTA-0240. Omega Agent authenticates a Responses request with
+    /// the active Omega Nostr account. The request body is serialized once,
+    /// signed as NIP-98, and sent without an OpenAuth session exchange.
+    #[test]
+    fn omega_agent_signs_the_exact_responses_body_with_the_active_nostr_account() {
+        let provider = without_comments(&read_repository_file(
+            "crates/language_models/src/provider/openagents.rs",
+        ));
+        for required in [
+            "serialize_response_request",
+            "sign_nip98_request",
+            "stream_response_with_authorization",
+            "authentication_url",
+            "PRODUCTION_API_URL",
+        ] {
+            assert!(
+                provider.contains(required),
+                "OMEGA-DELTA-0240: direct Nostr request authentication lost `{required}`"
+            );
+        }
+        for removed in [
+            "openagents_session_if_initialized",
+            "OpenAgentsSessionPhase",
+            ".access_token",
+            "OpenAgents sign-in",
+        ] {
+            assert!(
+                !provider.contains(removed),
+                "OMEGA-DELTA-0240: Omega Agent restored the session exchange `{removed}`"
             );
         }
     }

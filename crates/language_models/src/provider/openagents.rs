@@ -2,7 +2,7 @@
 //!
 //! Omega exposes one logical agent to the client. The OpenAgents API owns the
 //! provider model and routing decisions, while Omega keeps its native thread
-//! and tool loop. Authentication reuses the verified OpenAgents session.
+//! and tool loop. Each request uses the active Omega Nostr identity.
 
 use anyhow::Result;
 use futures::{FutureExt, StreamExt, future::BoxFuture};
@@ -16,7 +16,10 @@ use language_model::{
 };
 use open_ai::{
     completion::{OpenAiResponseEventMapper, into_open_ai_response},
-    responses::{Request as ResponseRequest, StreamEvent as ResponsesStreamEvent, stream_response},
+    responses::{
+        Request as ResponseRequest, StreamEvent as ResponsesStreamEvent,
+        serialize_response_request, stream_response_with_authorization,
+    },
 };
 use settings::Settings as _;
 use std::sync::Arc;
@@ -44,6 +47,10 @@ impl OpenAgentsSettings {
         } else {
             PRODUCTION_API_URL
         }
+    }
+
+    pub fn authentication_url(&self) -> &'static str {
+        PRODUCTION_API_URL
     }
 }
 
@@ -123,8 +130,7 @@ impl LanguageModelProvider for OpenAgentsLanguageModelProvider {
     }
 
     fn authentication_error_message(&self) -> SharedString {
-        "Omega Agent needs a signed-in OpenAgents account. Sign in from the agent panel, then try again."
-            .into()
+        "Omega could not sign this request with your Nostr identity.".into()
     }
 
     fn missing_credentials_error_message(&self) -> SharedString {
@@ -152,71 +158,49 @@ impl OpenAgentsLanguageModel {
         >,
     > {
         let http_client = self.http_client.clone();
-        let api_url = cx.update(|cx| {
-            crate::settings::AllLanguageModelSettings::get_global(cx)
-                .openagents
-                .api_url()
-                .to_owned()
+        let (api_url, authentication_url) = cx.update(|cx| {
+            let settings = &crate::settings::AllLanguageModelSettings::get_global(cx).openagents;
+            (
+                settings.api_url().to_owned(),
+                settings.authentication_url().to_owned(),
+            )
         });
-        let session_task = cx
-            .update(|cx| omega_effectd::openagents_session_if_initialized(cx))
-            .map(|session| {
-                cx.spawn(async move |cx| {
-                    if let Some(verified) = session.resolve_verified(cx).await {
-                        return (Some(verified), None);
-                    }
-                    if session.connect(cx).await == omega_effectd::OpenAgentsSessionPhase::Ready {
-                        let verified = session.resolve_verified(cx).await;
-                        let blocker = verified.is_none().then(|| session.blocker()).flatten();
-                        (verified, blocker)
-                    } else {
-                        (None, session.blocker())
-                    }
-                })
-            });
 
         let future = self.request_limiter.stream(async move {
-            let mut blocker = None;
-            if let Some(session_task) = session_task {
-                let (session, session_blocker) = session_task.await;
-                blocker = session_blocker;
-                if let Some(session) = session {
-                    let response = stream_response(
-                        http_client.as_ref(),
-                        PROVIDER_NAME.0.as_str(),
-                        &api_url,
-                        &session.access_token,
-                        request,
-                        &CustomHeaders::default(),
-                    )
+            let is_streaming = request.stream;
+            let body =
+                serialize_response_request(&request).map_err(LanguageModelCompletionError::from)?;
+            let signed_url = format!("{authentication_url}/responses");
+            let authorization =
+                omega_effectd::sign_nip98_request(&signed_url, "POST", body.as_bytes(), None)
                     .await
-                    .map_err(LanguageModelCompletionError::from)?;
-                    return Ok(response);
-                }
-            }
-
-            Err(match blocker.as_ref() {
-                Some(blocker) if !blocker.is_retryable() => {
-                    LanguageModelCompletionError::PermissionError {
-                        provider: PROVIDER_NAME,
-                        message: hosted_sign_in_failure_message(Some(blocker)),
-                    }
-                }
-                blocker => LanguageModelCompletionError::Other(anyhow::anyhow!(
-                    "{}",
-                    hosted_sign_in_failure_message(blocker)
-                )),
-            })
+                    .map_err(nostr_signing_error)?;
+            stream_response_with_authorization(
+                http_client.as_ref(),
+                PROVIDER_NAME.0.as_str(),
+                &api_url,
+                &authorization,
+                body,
+                is_streaming,
+                &CustomHeaders::default(),
+            )
+            .await
+            .map_err(LanguageModelCompletionError::from)
         });
 
         async move { Ok(future.await?.boxed()) }.boxed()
     }
 }
 
-fn hosted_sign_in_failure_message(blocker: Option<&omega_effectd::HostedSessionBlocker>) -> String {
-    match blocker {
-        Some(blocker) => format!("OpenAgents sign-in failed. {}", blocker.summary()),
-        None => "OpenAgents sign-in is not ready.".to_string(),
+fn nostr_signing_error(
+    blocker: omega_effectd::HostedSessionBlocker,
+) -> LanguageModelCompletionError {
+    LanguageModelCompletionError::AuthenticationError {
+        provider: PROVIDER_NAME,
+        message: format!(
+            "Omega could not sign this request with your Nostr identity. {}",
+            blocker.summary()
+        ),
     }
 }
 
@@ -329,6 +313,13 @@ mod tests {
             }
             .api_url(),
             DEVELOPMENT_API_URL
+        );
+        assert_eq!(
+            OpenAgentsSettings {
+                use_development_api: true,
+            }
+            .authentication_url(),
+            PRODUCTION_API_URL
         );
     }
 

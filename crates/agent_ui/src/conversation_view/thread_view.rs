@@ -5404,7 +5404,7 @@ impl ThreadView {
                                     .h_full()
                                     .overflow_hidden()
                                     .pl(px(COMPOSER_TEXT_INSET))
-                                    .pr_2()
+                                    .pr_1()
                                     .py_3()
                                     .child(render_accessible_editor()),
                             )
@@ -5412,8 +5412,9 @@ impl ThreadView {
                                 h_flex()
                                     .flex_none()
                                     .min_w_0()
-                                    .gap_1()
-                                    .pr_2()
+                                    .items_center()
+                                    .gap_0p5()
+                                    .pr_1()
                                     .child(controls),
                             ),
                     )
@@ -6534,6 +6535,8 @@ impl ThreadView {
                 IconButton::new("add-context", IconName::Paperclip)
                     .icon_size(IconSize::Small)
                     .icon_color(Color::Muted)
+                    .size(ButtonSize::Medium)
+                    .width(rems_from_px(28.))
                     .aria_label("Add context"),
                 {
                     move |_window, cx| {
@@ -12829,12 +12832,22 @@ impl ThreadView {
                 let message = Self::provider_by_name(provider, cx)
                     .map(|provider| provider.authentication_error_message())
                     .unwrap_or_else(|| format!("Could not authenticate with {provider}.").into());
-                self.render_provider_configuration_error(
-                    "Authentication Failed",
-                    message,
-                    provider,
-                    cx,
-                )
+                if provider.as_ref() == "OpenAgents" {
+                    self.render_error_callout(
+                        "Nostr Identity Unavailable",
+                        message,
+                        true,
+                        false,
+                        cx,
+                    )
+                } else {
+                    self.render_provider_configuration_error(
+                        "Authentication Failed",
+                        message,
+                        provider,
+                        cx,
+                    )
+                }
             }
             ThreadError::PermissionDenied { provider, message } => {
                 let message: SharedString = message.clone().unwrap_or_else(|| {
@@ -14707,7 +14720,8 @@ impl ThreadView {
             .min_w_0()
             .flex_none()
             .when(!compact, |this| this.flex_wrap())
-            .gap_1()
+            .items_center()
+            .gap_0p5()
             .when(!compact, |this| this.justify_between())
             .when(compact && self.owns_shared_vim_indicator(cx), |this| {
                 this.child(self.vim_mode_indicator.clone())
@@ -14759,8 +14773,9 @@ impl ThreadView {
             .child(
                 h_flex()
                     .min_w_0()
-                    .when(!compact, |this| this.flex_wrap())
-                    .gap_1()
+                    .h(px(28.))
+                    .items_center()
+                    .gap_0p5()
                     .when(!compact, |this| {
                         this.children(self.render_zero_base_provider_notice(cx))
                     })

@@ -534,6 +534,8 @@ pub fn render_composer_voice_controls(workspace_id: EntityId, cx: &mut App) -> A
     h_flex()
         .id("agent-composer-voice-controls")
         .debug_selector(|| "agent.composer.voice-controls".into())
+        .h(px(28.))
+        .items_center()
         .gap_0p5()
         .when(
             phase.is_active()
@@ -549,6 +551,8 @@ pub fn render_composer_voice_controls(workspace_id: EntityId, cx: &mut App) -> A
         .child(
             IconButton::new("agent-composer-voice", primary_icon)
                 .debug_selector(|| "agent.composer.voice".into())
+                .size(ButtonSize::Medium)
+                .width(rems_from_px(28.))
                 .icon_size(IconSize::Small)
                 .icon_color(label_color)
                 .style(if phase.is_active() {
@@ -602,6 +606,8 @@ pub fn render_composer_voice_controls(workspace_id: EntityId, cx: &mut App) -> A
                 this.child(
                     IconButton::new("agent-composer-end-voice", IconName::Stop)
                         .debug_selector(|| "agent.composer.end-voice".into())
+                        .size(ButtonSize::Medium)
+                        .width(rems_from_px(28.))
                         .icon_size(IconSize::Small)
                         .icon_color(Color::Error)
                         .aria_label("End voice")

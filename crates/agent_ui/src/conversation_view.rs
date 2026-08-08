@@ -4632,8 +4632,9 @@ impl ConversationView {
             cx.theme().window_background_appearance() == gpui::WindowBackgroundAppearance::Opaque;
         let action_controls = h_flex()
             .min_w_0()
-            .when(!compact, |this| this.flex_wrap())
-            .gap_1()
+            .h(px(28.))
+            .items_center()
+            .gap_0p5()
             .children(executor_menu)
             .when(omega_zero_base::is_primary_interface(), |this| {
                 this.child(crate::composer_voice::render_composer_voice_controls(
@@ -4732,7 +4733,7 @@ impl ConversationView {
                                                     .h_full()
                                                     .overflow_hidden()
                                                     .pl(px(COMPOSER_TEXT_INSET))
-                                                    .pr_2()
+                                                    .pr_1()
                                                     .py_3()
                                                     .child(accessible_editor),
                                             )
@@ -4740,8 +4741,9 @@ impl ConversationView {
                                                 h_flex()
                                                     .flex_none()
                                                     .min_w_0()
-                                                    .gap_1()
-                                                    .pr_2()
+                                                    .items_center()
+                                                    .gap_0p5()
+                                                    .pr_1()
                                                     .when(omega_zero_base::is_active(), |this| {
                                                         this.child(self.vim_mode_indicator.clone())
                                                     })
