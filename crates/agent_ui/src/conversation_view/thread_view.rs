@@ -8574,8 +8574,6 @@ impl ThreadView {
             })
             .flatten();
 
-        let is_blocked_on_terminal_command =
-            !confirmation && self.is_blocked_on_terminal_command(cx);
         let is_waiting = confirmation || self.thread.read(cx).has_in_progress_tool_calls();
 
         let turn_tokens_label = elapsed_label
@@ -8614,9 +8612,9 @@ impl ThreadView {
                                 .color(Color::Muted),
                         ),
                     )
-                } else if is_blocked_on_terminal_command {
-                    this
                 } else {
+                    // A running terminal can be hidden inside a collapsed Omega
+                    // tool group, so the end-of-chain indicator must remain.
                     this.child(
                         h_flex()
                             .w_2()
@@ -9049,41 +9047,6 @@ impl ThreadView {
 
         let text = parts.join("\n\n");
         if text.is_empty() { None } else { Some(text) }
-    }
-
-    fn is_blocked_on_terminal_command(&self, cx: &App) -> bool {
-        let thread = self.thread.read(cx);
-        if !matches!(thread.status(), ThreadStatus::Generating) {
-            return false;
-        }
-
-        let mut has_running_terminal_call = false;
-
-        for entry in thread.entries().iter().rev() {
-            match entry {
-                AgentThreadEntry::UserMessage(_) => break,
-                AgentThreadEntry::ToolCall(tool_call)
-                    if matches!(
-                        tool_call.status,
-                        ToolCallStatus::InProgress | ToolCallStatus::Pending
-                    ) =>
-                {
-                    if matches!(tool_call.kind, acp::ToolKind::Execute) {
-                        has_running_terminal_call = true;
-                    } else {
-                        return false;
-                    }
-                }
-                AgentThreadEntry::ToolCall(_)
-                | AgentThreadEntry::Elicitation(_)
-                | AgentThreadEntry::AssistantMessage(_)
-                | AgentThreadEntry::CompletedPlan(_)
-                | AgentThreadEntry::ContextCompaction(_)
-                | AgentThreadEntry::SystemNote(_) => {}
-            }
-        }
-
-        has_running_terminal_call
     }
 
     fn render_collapsible_command(
@@ -9597,6 +9560,23 @@ impl ThreadView {
         }
     }
 
+    fn omega_tool_group_preview_indices(kinds: &[acp::ToolKind]) -> Vec<usize> {
+        let mut command_indices = kinds
+            .iter()
+            .enumerate()
+            .rev()
+            .filter_map(|(index, kind)| (*kind == acp::ToolKind::Execute).then_some(index))
+            .take(3)
+            .collect::<Vec<_>>();
+
+        if command_indices.is_empty() {
+            command_indices.extend((0..kinds.len()).rev().take(3));
+        }
+
+        command_indices.reverse();
+        command_indices
+    }
+
     fn omega_tool_group_summary(tool_calls: &[&ToolCall]) -> String {
         let count = |kind| {
             tool_calls
@@ -9695,12 +9675,23 @@ impl ThreadView {
             .iter()
             .map(|(_, tool_call)| *tool_call)
             .collect::<Vec<_>>();
+        let preview_indices = Self::omega_tool_group_preview_indices(
+            &summary_calls
+                .iter()
+                .map(|tool_call| tool_call.kind)
+                .collect::<Vec<_>>(),
+        );
+        let preview_calls = preview_indices
+            .into_iter()
+            .filter_map(|index| tool_calls.get(index).copied())
+            .collect::<Vec<_>>();
         let summary = Self::omega_tool_group_summary(&summary_calls);
         let session_id = thread.session_id();
         let focus_handle = self.focus_handle(cx);
         let border = cx.theme().colors().text.opacity(0.07);
         let wash = cx.theme().colors().text.opacity(0.03);
         let icon_wash = cx.theme().colors().text.opacity(0.08);
+        let header_group_id = first_tool_call_id;
 
         v_flex()
             .w_full()
@@ -9738,13 +9729,85 @@ impl ThreadView {
                             .buffer_font(cx),
                     )
                     .on_click(cx.listener(move |this, _, _, cx| {
-                        if !this.expanded_omega_tool_groups.remove(&first_tool_call_id) {
+                        if !this.expanded_omega_tool_groups.remove(&header_group_id) {
                             this.expanded_omega_tool_groups
-                                .insert(first_tool_call_id.clone());
+                                .insert(header_group_id.clone());
                         }
                         cx.notify();
                     })),
             )
+            .when(!expanded && !preview_calls.is_empty(), |group| {
+                group.child(
+                    v_flex()
+                        .id(("omega-tool-group-preview", first_entry_ix))
+                        .ml(px(30.0))
+                        .mr(px(4.0))
+                        .max_h(px(72.0))
+                        .overflow_hidden()
+                        .rounded(px(7.0))
+                        .border_1()
+                        .border_color(border)
+                        .bg(wash)
+                        .children(preview_calls.into_iter().enumerate().map(
+                            |(preview_index, (entry_ix, tool_call))| {
+                                let failed = matches!(
+                                    tool_call.status,
+                                    ToolCallStatus::Failed
+                                        | ToolCallStatus::Rejected
+                                        | ToolCallStatus::Canceled
+                                );
+                                let running = matches!(
+                                    tool_call.status,
+                                    ToolCallStatus::Pending | ToolCallStatus::InProgress
+                                );
+                                let detail = Self::omega_tool_detail(
+                                    tool_call.kind,
+                                    tool_call.label.read(cx).source(),
+                                );
+
+                                h_flex()
+                                    .id(("omega-tool-preview-row", entry_ix))
+                                    .h(px(24.0))
+                                    .min_w_0()
+                                    .px(px(8.0))
+                                    .gap(px(7.0))
+                                    .when(preview_index > 0, |row| {
+                                        row.border_t_1().border_color(border)
+                                    })
+                                    .child(
+                                        Icon::new(Self::omega_tool_kind_icon(tool_call.kind))
+                                            .size(IconSize::XSmall)
+                                            .color(if failed {
+                                                Color::Error
+                                            } else {
+                                                Color::Muted
+                                            }),
+                                    )
+                                    .child(
+                                        div().min_w_0().flex_1().child(
+                                            Label::new(detail)
+                                                .size(LabelSize::Custom(rems_from_px(11.0)))
+                                                .color(if failed {
+                                                    Color::Error
+                                                } else {
+                                                    Color::Default
+                                                })
+                                                .buffer_font(cx)
+                                                .truncate(),
+                                        ),
+                                    )
+                                    .when(running, |row| {
+                                        row.child(
+                                            h_flex()
+                                                .ml_auto()
+                                                .flex_none()
+                                                .child(SpinnerLabel::new().size(LabelSize::XSmall)),
+                                        )
+                                    })
+                            },
+                        )),
+                )
+            })
             .when(expanded, |group| {
                 group.child(v_flex().pt(px(2.0)).children(tool_calls.into_iter().map(
                     |(entry_ix, tool_call)| {
@@ -16066,6 +16129,38 @@ mod tests {
         assert_eq!(
             ThreadView::omega_tool_detail(acp::ToolKind::Read, "Inspect project files"),
             "Inspect project files"
+        );
+    }
+
+    #[test]
+    fn omega_tool_group_preview_uses_the_three_most_recent_commands() {
+        let kinds = [
+            acp::ToolKind::Execute,
+            acp::ToolKind::Read,
+            acp::ToolKind::Execute,
+            acp::ToolKind::Edit,
+            acp::ToolKind::Execute,
+            acp::ToolKind::Execute,
+        ];
+
+        assert_eq!(
+            ThreadView::omega_tool_group_preview_indices(&kinds),
+            vec![2, 4, 5]
+        );
+    }
+
+    #[test]
+    fn omega_tool_group_preview_falls_back_to_recent_actions() {
+        let kinds = [
+            acp::ToolKind::Read,
+            acp::ToolKind::Search,
+            acp::ToolKind::Edit,
+            acp::ToolKind::Read,
+        ];
+
+        assert_eq!(
+            ThreadView::omega_tool_group_preview_indices(&kinds),
+            vec![1, 2, 3]
         );
     }
 
