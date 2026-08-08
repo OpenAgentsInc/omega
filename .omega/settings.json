@@ -2,8 +2,9 @@
 // (Language/formatter settings live in the legacy `.zed/settings.json`,
 // which Omega still reads; both files apply.)
 {
-  // The swap-market DEMO tool surface (omega#247). A dependency-free MCP
-  // server returning deterministic fixture data — no network, no funds.
+  // The swap-market tool surface (omega#247). A dependency-free MCP server:
+  // network status reads the LIVE public regtest network (read-only, NIP-42
+  // with an ephemeral key); the swap tools stay demo fixtures — no funds.
   // The `market-demo` skill in `.agents/skills/` teaches agents the flow.
   // Turn it off here with `"enabled": false` (or via Settings → MCP
   // Servers), and the tools disappear from every agent in this project.

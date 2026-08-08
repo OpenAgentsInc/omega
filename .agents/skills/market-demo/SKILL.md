@@ -1,18 +1,24 @@
 ---
 name: market-demo
-description: Answer questions about the swap network and run demo asset swaps (LN, BTC, L-BTC) using the market-demo MCP tools. Use when the person asks what the network looks like, wants provider or fee information, or asks to swap sats between rails. Demo data only — no real funds.
+description: Answer questions about the swap network and run demo asset swaps (LN, BTC, L-BTC) using the market-demo MCP tools. Use when the person asks what the network looks like, wants provider or fee information, or asks to swap sats between rails. Network status reads the live public regtest network (read-only); swaps are demo only — no real funds.
 ---
 
-# Swap market (demo data)
+# Swap market
 
-The `market-demo` MCP server exposes the swap-market flow with deterministic
-fixture data. Nothing touches the live network and no funds move. Say so when
-you present results: one short "demo data" note per conversation is enough.
+The `market-demo` MCP server exposes the swap-market flow.
+`market_network_status` reads the LIVE public regtest network (read-only:
+manifest, relay health, provider profiles and offerings). The swap tools are
+demo fixtures — live quoting requires the verified requester engine and is
+not wired yet. Present it that way: network facts are live coordination
+data whose provider claims stay unverified; swaps are a demo, said once per
+conversation.
 
 ## Tools
 
-- `market_network_status` — relays, providers, trust tiers (`pinned` vs
-  `discovered`), and 24h aggregates.
+- `market_network_status` — LIVE: relay health, providers with real fees,
+  trust tiers (`pinned` from the signed manifest vs `discovered`), and 24h
+  aggregates (unknown until receipt aggregation deploys — report unknown,
+  never zero).
 - `market_swap_quote` — best firm quote for a swap between `LN`, `BTC`, and
   `L-BTC` (1,000–10,000,000 sats). Returns a `quote_id`.
 - `market_execute_swap` — runs a quoted swap. Treat as effectful: ask the
