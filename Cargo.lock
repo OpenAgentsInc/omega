@@ -3382,6 +3382,18 @@ dependencies = [
 ]
 
 [[package]]
+name = "component_library"
+version = "0.1.0"
+dependencies = [
+ "command_palette_hooks",
+ "component",
+ "gpui",
+ "ui",
+ "ui_input",
+ "workspace",
+]
+
+[[package]]
 name = "compression-codecs"
 version = "0.4.31"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -11129,6 +11141,7 @@ dependencies = [
  "command_palette",
  "command_palette_hooks",
  "component",
+ "component_library",
  "copilot",
  "copilot_chat",
  "copilot_ui",

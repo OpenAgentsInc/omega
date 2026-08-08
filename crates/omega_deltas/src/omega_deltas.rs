@@ -211,6 +211,7 @@ pub const ENFORCED_DELTAS: &[&str] = &[
     "OMEGA-DELTA-0220",
     "OMEGA-DELTA-0221",
     "OMEGA-DELTA-0222",
+    "OMEGA-DELTA-0233",
 ];
 
 /// OMEGA-DELTA-0204. Every control the composer's bar offers, written twice:
@@ -22816,9 +22817,7 @@ mod tests {
                 .collect::<Vec<_>>();
 
             assert!(
-                !actions
-                    .iter()
-                    .any(|action| *action == "omega_workbench::SelectForensics"),
+                !actions.contains(&"omega_workbench::SelectForensics"),
                 "{keymap_path} still binds cmd-shift-f to Forensics while the \
                  Forensics entry points are hidden: {actions:?}"
             );
@@ -28846,5 +28845,46 @@ mod tests {
                 "OAW-008: named planning View boundary lost `{required}`"
             );
         }
+    }
+
+    /// OMEGA-DELTA-0233. The component library returns as a gated development
+    /// surface with new names.
+    ///
+    /// OMEGA-DELTA-0022/0186 removed `component_preview` because an ungated
+    /// dev surface shipped in a release command palette and rendered
+    /// unreviewed artwork. The successor is admitted only with the failure's
+    /// two halves fixed: new crate and action names (the removed names stay
+    /// mechanically blocked by the checks above), and a dual gate — runtime
+    /// (`debug_assertions` plus `OMEGA_COMPONENT_LIBRARY=1`) and compile-time
+    /// omission of the screen module from release builds.
+    #[test]
+    fn component_library_returns_only_as_a_gated_development_surface() {
+        let root = read_repository_file("crates/component_library/src/component_library.rs");
+        assert!(
+            root.contains("#[cfg(any(debug_assertions, test))]\nmod library;"),
+            "OMEGA-DELTA-0233: the screen module must be compiled out of release builds"
+        );
+        assert!(
+            root.contains("OMEGA_COMPONENT_LIBRARY"),
+            "OMEGA-DELTA-0233: the runtime gate lost its environment variable"
+        );
+
+        let library = read_repository_file("crates/component_library/src/library.rs");
+        for required in [
+            "omega_workbench",
+            "OpenComponentLibrary",
+            "from_process_environment().enabled()",
+            "hide_action_types",
+            "not production UI",
+        ] {
+            assert!(
+                library.contains(required),
+                "OMEGA-DELTA-0233: the gated component library lost `{required}`"
+            );
+        }
+        assert!(
+            !library.contains("OpenComponentPreview"),
+            "OMEGA-DELTA-0233: the removed OpenComponentPreview action name must not be revived"
+        );
     }
 }

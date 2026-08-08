@@ -9948,3 +9948,33 @@ hand-set pass value or a capture from another candidate cannot promote a row.
   `script/omega-release-gate --self-test`, and
   `sarah_livekit_candidate_run_binds_profiles_and_forced_transports` in
   `omega_deltas`.
+
+### OMEGA-DELTA-0233 — The component library returns as a gated development surface
+
+OMEGA-DELTA-0022 and OMEGA-DELTA-0186 deleted the inherited `component_preview`
+crate and its `workspace::OpenComponentPreview` action after that ungated dev
+surface shipped in a release command palette and rendered unreviewed artwork.
+The removal left `crates/component`'s registry populated at startup with no
+reader, and omega#247 needs an in-app gallery to review the market viz
+primitives against the Bazaar Storybook.
+
+This delta admits a successor with the original failure's two halves fixed
+rather than reverted. New names throughout: the crate is
+`crates/component_library` and the action is
+`omega_workbench::OpenComponentLibrary` (an already-admitted namespace in
+`omega_zero_base`); the removed names stay mechanically blocked. The surface is
+doubly gated: at runtime it requires `debug_assertions` plus
+`OMEGA_COMPONENT_LIBRARY=1` (otherwise the action is hidden from the palette
+and no handler is registered), and at compile time the screen module is
+omitted from release builds entirely, following the omega#220 rule that a
+runtime gate alone does not keep a development payload out of a shipped
+binary. On screen the surface labels itself a development surface, satisfying
+PRODUCT.md's requirement that development-gated destinations identify their
+state as non-production.
+
+IDs 0223–0232 are referenced by in-flight checks that have not registered
+registry entries; this entry takes 0233 to avoid colliding with them.
+
+- **Enforced by:**
+  `component_library_returns_only_as_a_gated_development_surface` in
+  `omega_deltas`, and the gate unit tests in `crates/component_library`.
