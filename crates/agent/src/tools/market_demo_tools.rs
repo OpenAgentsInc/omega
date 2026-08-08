@@ -13,7 +13,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use ui::SharedString;
 
-use crate::{AgentTool, ToolCallEventStream, ToolInput, ToolPermissionContext};
+use crate::{AgentTool, ToolCallEventStream, ToolInput};
 
 const MANIFEST_URL: &str = "https://bazaar.openagents.com/bazaar-public-regtest.json";
 const FALLBACK_RELAYS: &[&str] = &[
@@ -192,7 +192,7 @@ impl AgentTool for MarketSwapQuoteTool {
 }
 
 #[derive(Debug, Serialize, Deserialize, JsonSchema)]
-/// Execute a demo quote after the person approves it. No real funds move.
+/// Execute a demo quote requested by the person. No real funds move.
 pub struct MarketExecuteSwapInput {
     quote_id: String,
 }
@@ -221,22 +221,12 @@ impl AgentTool for MarketExecuteSwapTool {
     fn run(
         self: Arc<Self>,
         input: ToolInput<Self::Input>,
-        event_stream: ToolCallEventStream,
+        _event_stream: ToolCallEventStream,
         cx: &mut App,
     ) -> Task<Result<Self::Output, Self::Output>> {
-        cx.spawn(async move |cx| {
+        cx.spawn(async move |_cx| {
             let input = input
                 .recv()
-                .await
-                .map_err(|error| MarketToolOutput::error(error.to_string()))?;
-            let authorize = cx.update(|cx| {
-                event_stream.authorize_always_prompt(
-                    format!("Execute demo swap for {}", input.quote_id),
-                    ToolPermissionContext::new(Self::NAME, vec![input.quote_id.clone()]),
-                    cx,
-                )
-            });
-            authorize
                 .await
                 .map_err(|error| MarketToolOutput::error(error.to_string()))?;
             execute_swap(&self.state, input).map_err(MarketToolOutput::error)
@@ -630,6 +620,8 @@ fn relay_label(url: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use futures::StreamExt as _;
+    use gpui::TestAppContext;
 
     #[test]
     fn demo_swap_flow_uses_shared_state() {
@@ -651,6 +643,40 @@ mod tests {
         let swap_id = swap.0["swap_id"].as_str().expect("swap id").to_string();
         let status = swap_status(&state, MarketSwapStatusInput { swap_id }).expect("status");
         assert_eq!(status.0["stage"], "funding");
+    }
+
+    #[gpui::test]
+    async fn explicit_swap_request_does_not_require_second_authorization(cx: &mut TestAppContext) {
+        let state = Arc::new(Mutex::new(MarketDemoState::default()));
+        let quote = quote_swap(
+            &state,
+            MarketSwapQuoteInput {
+                from: MarketAsset::Lightning,
+                to: MarketAsset::Bitcoin,
+                amount_sats: 50_000,
+            },
+        )
+        .expect("quote");
+        let quote_id = quote.0["quote_id"].as_str().expect("quote id").to_string();
+        let tool = Arc::new(MarketExecuteSwapTool { state });
+        let (event_stream, mut events) = ToolCallEventStream::test();
+
+        let result = cx
+            .update(|cx| {
+                tool.run(
+                    ToolInput::resolved(MarketExecuteSwapInput { quote_id }),
+                    event_stream,
+                    cx,
+                )
+            })
+            .await
+            .expect("swap should execute from the person's request");
+
+        assert_eq!(result.0["stage"], "contract");
+        assert!(
+            events.next().await.is_none(),
+            "swap execution must not emit a second authorization request"
+        );
     }
 
     #[test]

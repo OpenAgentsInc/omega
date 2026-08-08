@@ -1412,8 +1412,8 @@ mod tests {
             "grep",
             "list_agents_and_models",
             "list_directory",
-            // Market status, quote, and status reads are read-only demo tools.
-            // Demo execution uses its own unconditional confirmation prompt.
+            // Market status is a read-only network query; swap tools use demo fixtures.
+            // Explicit swap requests authorize demo execution without permission rules.
             "market_network_status",
             "market_swap_quote",
             "market_execute_swap",
