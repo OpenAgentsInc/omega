@@ -242,9 +242,10 @@ impl OpenAgentsLanguageModel {
                     })?,
                 );
 
-                let (mut socket, _) = async_tungstenite::tokio::connect_async(websocket_request)
-                    .await
-                    .map_err(|error| LanguageModelCompletionError::Other(error.into()))?;
+                let (mut socket, _) =
+                    async_tungstenite::async_std::connect_async(websocket_request)
+                        .await
+                        .map_err(|error| LanguageModelCompletionError::Other(error.into()))?;
                 socket
                     .send(WebSocketMessage::Text(
                         websocket_session_configuration().to_string().into(),
@@ -542,5 +543,31 @@ mod tests {
             ResponsesStreamEvent::OutputTextDelta { delta, .. }
                 if delta == "Checking on that.\n\n"
         ));
+    }
+
+    #[test]
+    fn development_websocket_connects_without_a_tokio_runtime() {
+        async_std::task::block_on(async {
+            let listener = async_std::net::TcpListener::bind(("127.0.0.1", 0))
+                .await
+                .expect("test WebSocket listener should bind");
+            let address = listener
+                .local_addr()
+                .expect("test WebSocket listener should have an address");
+            let server = async_std::task::spawn(async move {
+                let (stream, _) = listener
+                    .accept()
+                    .await
+                    .expect("test WebSocket listener should accept a connection");
+                async_tungstenite::accept_async(stream)
+                    .await
+                    .expect("test WebSocket server should complete the handshake");
+            });
+
+            async_tungstenite::async_std::connect_async(format!("ws://{address}"))
+                .await
+                .expect("Omega WebSocket client should connect without Tokio");
+            server.await;
+        });
     }
 }

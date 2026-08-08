@@ -8791,6 +8791,7 @@ dependencies = [
  "anyhow",
  "app_identity",
  "async-lock",
+ "async-std",
  "async-tungstenite",
  "aws-config",
  "aws-credential-types",
