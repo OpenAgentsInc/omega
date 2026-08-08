@@ -777,6 +777,14 @@ fn client_capabilities_for_agent(agent_id: &AgentId) -> acp::ClientCapabilities 
     let mut meta = acp::Meta::from_iter([
         ("terminal_output".into(), true.into()),
         ("terminal-auth".into(), true.into()),
+        // Without this `claude-code-acp` strips subagent text and thinking
+        // rather than leaking it into the top-level feed. Omega routes it into
+        // the spawning tool call's own stream instead (see `SubagentRun`), so
+        // it can ask for the transcript.
+        (
+            acp_thread::SUBAGENT_TRANSCRIPT_CAPABILITY_META_KEY.into(),
+            true.into(),
+        ),
     ]);
 
     if agent_id.as_ref() == CURSOR_ID {
@@ -3255,6 +3263,25 @@ mod tests {
         );
         assert_eq!(meta.get("terminal_output"), Some(&serde_json::json!(true)));
         assert_eq!(meta.get("terminal-auth"), Some(&serde_json::json!(true)));
+    }
+
+    /// `claude-code-acp` withholds subagent text and thinking unless the client
+    /// asks for it, and Omega's subagent sidebar has nothing to show without
+    /// it. Every agent is asked: an agent that does not know the key ignores it.
+    #[test]
+    fn client_capabilities_request_the_subagent_transcript() {
+        for agent_id in [CURSOR_ID, "claude-acp", "codex-acp"] {
+            let capabilities = client_capabilities_for_agent(&AgentId::new(agent_id));
+            let meta = capabilities
+                .meta
+                .expect("expected client capabilities meta");
+
+            assert_eq!(
+                meta.get(acp_thread::SUBAGENT_TRANSCRIPT_CAPABILITY_META_KEY),
+                Some(&serde_json::json!(true)),
+                "{agent_id}"
+            );
+        }
     }
 
     #[test]

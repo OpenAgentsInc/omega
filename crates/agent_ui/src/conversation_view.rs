@@ -2,8 +2,8 @@ use acp_thread::{
     AcpThread, AcpThreadEvent, AgentThreadEntry, AssistantMessage, AssistantMessageChunk,
     AuthRequired, ClientUserMessageId, ElicitationEntryId, ElicitationStatus, ElicitationStore,
     LoadError, MaxOutputTokensError, MentionUri, PermissionOptionChoice, PermissionOptions,
-    PermissionPattern, RetryStatus, SelectedPermissionOutcome, ThreadStatus, ToolCall,
-    ToolCallContent, ToolCallStatus,
+    PermissionPattern, RetryStatus, SelectedPermissionOutcome, SubagentEvent, SubagentMessageKind,
+    ThreadStatus, ToolCall, ToolCallContent, ToolCallStatus,
 };
 use acp_thread::{AgentConnection, Plan};
 use action_log::{ActionLog, ActionLogTelemetry, DiffStats};
@@ -522,6 +522,7 @@ impl Conversation {
                     | AcpThreadEvent::EntriesRemoved(_)
                     | AcpThreadEvent::Retry(_)
                     | AcpThreadEvent::SubagentSpawned(_)
+                    | AcpThreadEvent::SubagentActivity(_)
                     | AcpThreadEvent::Stopped(_)
                     | AcpThreadEvent::Error
                     | AcpThreadEvent::LoadError(_)
@@ -787,6 +788,7 @@ fn affects_thread_metadata(event: &AcpThreadEvent) -> bool {
         | AcpThreadEvent::ModeUpdated(_)
         | AcpThreadEvent::ConfigOptionsUpdated(_)
         | AcpThreadEvent::SubagentSpawned(_)
+        | AcpThreadEvent::SubagentActivity(_)
         | AcpThreadEvent::PlanUpdated(_)
         | AcpThreadEvent::ProjectionUpdated(_)
         | AcpThreadEvent::PromptUpdated => false,
@@ -886,6 +888,9 @@ pub struct ConversationView {
     /// Shared with the child [`ThreadView`] when one is constructed.
     pub(crate) code_span_resolver: AgentCodeSpanResolver,
     request_elicitation_form_states: HashMap<ElicitationEntryId, ElicitationFormState>,
+    /// The session-less subagent whose stream the sidebar is showing, if any.
+    /// Identified by the tool call that spawned it (see [`acp_thread::SubagentRun`]).
+    selected_subagent: Option<acp::ToolCallId>,
     _subscriptions: Vec<Subscription>,
 }
 
@@ -1382,6 +1387,44 @@ struct LoadingView {
     _load_task: Task<()>,
 }
 
+struct SubagentRow {
+    tool_call_id: acp::ToolCallId,
+    title: SharedString,
+    status: Option<SubagentRowStatus>,
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum SubagentRowStatus {
+    Running,
+    Completed,
+    Failed,
+    Stopped,
+}
+
+impl From<&ToolCallStatus> for SubagentRowStatus {
+    fn from(status: &ToolCallStatus) -> Self {
+        match status {
+            ToolCallStatus::Pending
+            | ToolCallStatus::InProgress
+            | ToolCallStatus::WaitingForConfirmation { .. } => Self::Running,
+            ToolCallStatus::Completed => Self::Completed,
+            ToolCallStatus::Failed => Self::Failed,
+            ToolCallStatus::Rejected | ToolCallStatus::Canceled => Self::Stopped,
+        }
+    }
+}
+
+enum SubagentStreamItem {
+    Message {
+        text: SharedString,
+        kind: SubagentMessageKind,
+    },
+    ToolCall {
+        title: SharedString,
+        status: acp::ToolCallStatus,
+    },
+}
+
 impl ConnectedServerState {
     pub fn active_view(&self) -> Option<&Entity<ThreadView>> {
         self.active_id.as_ref().and_then(|id| self.threads.get(id))
@@ -1598,6 +1641,7 @@ impl ConversationView {
             send_queue_journal,
             code_span_resolver,
             request_elicitation_form_states: HashMap::default(),
+            selected_subagent: None,
             _subscriptions: subscriptions,
             focus_handle: cx.focus_handle(),
         }
@@ -3223,6 +3267,11 @@ impl ConversationView {
             }
             AcpThreadEvent::SubagentSpawned(subagent_session_id) => {
                 self.load_subagent_session(subagent_session_id.clone(), session_id, window, cx)
+            }
+            AcpThreadEvent::SubagentActivity(_) => {
+                if !is_subagent {
+                    cx.notify();
+                }
             }
             AcpThreadEvent::ToolAuthorizationRequested(_) => {
                 self.notify_with_sound("Waiting for tool confirmation", IconName::Info, window, cx);
@@ -4879,6 +4928,201 @@ impl ConversationView {
         )
     }
 
+    /// The sidebar listing this thread's session-less subagents.
+    ///
+    /// A Claude Code subagent has no ACP session, so it cannot be shown as a
+    /// thread the way [`Self::open_subagent_in_right_pane`] shows one. Its
+    /// identity is the `Agent`/`Task` tool call that spawned it: the title and
+    /// status are read back off that call, and the stream is what the adapter
+    /// stamped with its id (see [`acp_thread::SubagentRun`]).
+    fn render_subagent_sidebar(
+        &self,
+        thread: &Entity<AcpThread>,
+        cx: &mut Context<Self>,
+    ) -> Option<AnyElement> {
+        // Snapshot what the sidebar draws before any listener is built: reading
+        // the thread borrows `cx`, and `cx.listener` needs it back mutably.
+        let (rows, stream) = {
+            let thread = thread.read(cx);
+            if thread.subagent_runs().is_empty() {
+                return None;
+            }
+
+            let rows = thread
+                .subagent_runs()
+                .iter()
+                .map(|run| {
+                    let tool_call = thread.tool_call(&run.tool_call_id).map(|(_, call)| call);
+                    SubagentRow {
+                        tool_call_id: run.tool_call_id.clone(),
+                        title: tool_call
+                            .map(|call| call.label.read(cx).source().clone())
+                            .unwrap_or_else(|| SharedString::from("Subagent")),
+                        status: tool_call.map(|call| SubagentRowStatus::from(&call.status)),
+                    }
+                })
+                .collect::<Vec<_>>();
+
+            let stream = self.selected_subagent.as_ref().and_then(|selected| {
+                let run = thread
+                    .subagent_runs()
+                    .iter()
+                    .find(|run| &run.tool_call_id == selected)?;
+                Some(
+                    run.events
+                        .iter()
+                        .map(|event| match event {
+                            SubagentEvent::Message { text, kind } => SubagentStreamItem::Message {
+                                text: SharedString::from(text.clone()),
+                                kind: *kind,
+                            },
+                            SubagentEvent::ToolCall(call) => SubagentStreamItem::ToolCall {
+                                title: call.title.clone(),
+                                status: call.status,
+                            },
+                        })
+                        .collect::<Vec<_>>(),
+                )
+            });
+
+            (rows, stream)
+        };
+
+        let selected = self.selected_subagent.clone();
+        let count = rows.len();
+
+        Some(
+            v_flex()
+                .w(px(280.))
+                .h_full()
+                .flex_none()
+                .border_l_1()
+                .border_color(cx.theme().colors().border)
+                .bg(cx.theme().colors().panel_background)
+                .child(
+                    h_flex()
+                        .w_full()
+                        .px_2()
+                        .py_1p5()
+                        .justify_between()
+                        .child(
+                            Label::new("Subagents")
+                                .size(LabelSize::Small)
+                                .color(Color::Muted),
+                        )
+                        .child(
+                            Label::new(count.to_string())
+                                .size(LabelSize::Small)
+                                .color(Color::Muted),
+                        ),
+                )
+                .child(Divider::horizontal())
+                .child(
+                    v_flex()
+                        .id("subagent-list")
+                        .p_1()
+                        .gap_px()
+                        .max_h(px(240.))
+                        .overflow_y_scroll()
+                        .children(rows.into_iter().map(|row| {
+                            let is_selected = selected.as_ref() == Some(&row.tool_call_id);
+                            let is_running = row
+                                .status
+                                .map_or(true, |status| status == SubagentRowStatus::Running);
+                            let (icon, icon_color) = match row.status {
+                                Some(SubagentRowStatus::Completed) => {
+                                    (IconName::Check, Color::Success)
+                                }
+                                Some(SubagentRowStatus::Failed) => (IconName::Close, Color::Error),
+                                Some(SubagentRowStatus::Stopped) => {
+                                    (IconName::Circle, Color::Muted)
+                                }
+                                Some(SubagentRowStatus::Running) | None => {
+                                    (IconName::LoadCircle, Color::Accent)
+                                }
+                            };
+                            let tool_call_id = row.tool_call_id.clone();
+
+                            h_flex()
+                                .id(SharedString::from(format!("subagent-{}", row.tool_call_id)))
+                                .w_full()
+                                .px_2()
+                                .py_1()
+                                .gap_1p5()
+                                .rounded_sm()
+                                .cursor_pointer()
+                                .when(is_selected, |this| {
+                                    this.bg(cx.theme().colors().element_selected)
+                                })
+                                .hover(|this| this.bg(cx.theme().colors().element_hover))
+                                .child(
+                                    Icon::new(icon)
+                                        .size(IconSize::XSmall)
+                                        .color(icon_color)
+                                        .map(|icon| {
+                                            if is_running {
+                                                icon.with_rotate_animation(2).into_any_element()
+                                            } else {
+                                                icon.into_any_element()
+                                            }
+                                        }),
+                                )
+                                .child(Label::new(row.title).size(LabelSize::Small).truncate())
+                                .on_click(cx.listener(move |this, _, _window, cx| {
+                                    if this.selected_subagent.as_ref() == Some(&tool_call_id) {
+                                        this.selected_subagent = None;
+                                    } else {
+                                        this.selected_subagent = Some(tool_call_id.clone());
+                                    }
+                                    cx.notify();
+                                }))
+                        })),
+                )
+                .when_some(stream, |this, stream| {
+                    this.child(Divider::horizontal()).child(
+                        v_flex()
+                            .id("subagent-stream")
+                            .flex_1()
+                            .min_h_0()
+                            .p_2()
+                            .gap_1p5()
+                            .overflow_y_scroll()
+                            .children(stream.into_iter().map(|item| {
+                                match item {
+                                    SubagentStreamItem::Message { text, kind } => Label::new(text)
+                                        .size(LabelSize::Small)
+                                        .color(match kind {
+                                            SubagentMessageKind::Text => Color::Default,
+                                            SubagentMessageKind::Thought => Color::Muted,
+                                            SubagentMessageKind::Input => Color::Info,
+                                        })
+                                        .into_any_element(),
+                                    SubagentStreamItem::ToolCall { title, status } => h_flex()
+                                        .gap_1p5()
+                                        .child(
+                                            Icon::new(match status {
+                                                acp::ToolCallStatus::Completed => IconName::Check,
+                                                acp::ToolCallStatus::Failed => IconName::Close,
+                                                _ => IconName::LoadCircle,
+                                            })
+                                            .size(IconSize::XSmall)
+                                            .color(Color::Muted),
+                                        )
+                                        .child(
+                                            Label::new(title)
+                                                .size(LabelSize::Small)
+                                                .color(Color::Muted)
+                                                .truncate(),
+                                        )
+                                        .into_any_element(),
+                                }
+                            })),
+                    )
+                })
+                .into_any_element(),
+        )
+    }
+
     fn render_load_error(
         &self,
         e: &LoadError,
@@ -5737,25 +5981,28 @@ impl Render for ConversationView {
                 .into_any_element(),
             ServerState::Connected(connected) => {
                 if let Some(view) = connected.active_view() {
-                    if let Some(right_pane_view) = connected
+                    let right_pane_view = connected
                         .right_pane_session_id
                         .as_ref()
                         .and_then(|session_id| connected.threads.get(session_id))
-                    {
+                        .cloned();
+                    let active_thread = view.read(cx).thread.clone();
+                    let view = view.clone();
+                    let subagent_sidebar = self.render_subagent_sidebar(&active_thread, cx);
+
+                    if right_pane_view.is_none() && subagent_sidebar.is_none() {
+                        view.into_any_element()
+                    } else {
                         h_flex()
                             .size_full()
-                            .child(div().flex_1().min_w_0().size_full().child(view.clone()))
-                            .child(Divider::vertical())
-                            .child(
-                                div()
-                                    .flex_1()
-                                    .min_w_0()
-                                    .size_full()
-                                    .child(right_pane_view.clone()),
-                            )
+                            .child(div().flex_1().min_w_0().size_full().child(view))
+                            .when_some(right_pane_view, |this, right_pane_view| {
+                                this.child(Divider::vertical()).child(
+                                    div().flex_1().min_w_0().size_full().child(right_pane_view),
+                                )
+                            })
+                            .children(subagent_sidebar)
                             .into_any_element()
-                    } else {
-                        view.clone().into_any_element()
                     }
                 } else {
                     if router_ready {
@@ -15026,6 +15273,86 @@ pub(crate) mod tests {
             "a subagent's turn ending spent the root thread's queued message"
         );
         assert_eq!(text.as_deref(), Some("queued message"));
+    }
+
+    /// A Claude Code subagent has no session to open in the right pane, so the
+    /// only place it can be seen is the sidebar. It must appear from the
+    /// `parentToolUseId` stamp alone, with no session, no `tool_name`, and no
+    /// `subagent_session_info` to go on.
+    #[gpui::test]
+    async fn a_stamped_subagent_appears_in_the_sidebar_and_opens_its_stream(
+        cx: &mut TestAppContext,
+    ) {
+        init_test(cx);
+
+        let (conversation_view, cx) =
+            setup_conversation_view(StubAgentServer::default_response(), cx).await;
+        add_to_workspace(conversation_view.clone(), cx);
+
+        let thread = conversation_view.read_with(cx, |view, _cx| {
+            view.active_thread()
+                .expect("conversation should have an active thread")
+                .read(_cx)
+                .thread
+                .clone()
+        });
+
+        let stamp = acp::Meta::from_iter([(
+            acp_thread::CLAUDE_CODE_META_KEY.into(),
+            serde_json::json!({ acp_thread::PARENT_TOOL_USE_ID_META_KEY: "task-1" }),
+        )]);
+
+        conversation_view.update(cx, |view, cx| {
+            assert!(
+                view.render_subagent_sidebar(&thread, cx).is_none(),
+                "a thread with no subagents has no sidebar"
+            );
+        });
+
+        thread.update(cx, |thread, cx| {
+            thread
+                .handle_session_update(
+                    acp::SessionUpdate::ToolCall(
+                        acp::ToolCall::new("task-1", "Audit the ACP surface")
+                            .kind(acp::ToolKind::Think)
+                            .status(acp::ToolCallStatus::InProgress),
+                    ),
+                    cx,
+                )
+                .unwrap();
+            thread
+                .handle_session_update(
+                    acp::SessionUpdate::AgentMessageChunk(
+                        acp::ContentChunk::new(acp::ContentBlock::from("Reading acp.rs"))
+                            .meta(stamp.clone()),
+                    ),
+                    cx,
+                )
+                .unwrap();
+        });
+
+        let tool_call_id = acp::ToolCallId::new("task-1");
+        conversation_view.update(cx, |view, cx| {
+            assert!(
+                view.render_subagent_sidebar(&thread, cx).is_some(),
+                "the stamped subagent should be listed"
+            );
+            assert!(view.selected_subagent.is_none());
+
+            // What the row's click handler does.
+            view.selected_subagent = Some(tool_call_id.clone());
+            assert!(view.render_subagent_sidebar(&thread, cx).is_some());
+        });
+
+        thread.read_with(cx, |thread, _cx| {
+            let runs = thread.subagent_runs();
+            assert_eq!(runs.len(), 1);
+            assert_eq!(runs[0].tool_call_id, tool_call_id);
+            assert!(matches!(
+                runs[0].events.as_slice(),
+                [SubagentEvent::Message { .. }]
+            ));
+        });
     }
 
     #[gpui::test]
