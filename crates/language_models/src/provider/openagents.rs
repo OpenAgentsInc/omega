@@ -179,7 +179,7 @@ impl OpenAgentsLanguageModel {
                 serialize_response_request(&request).map_err(LanguageModelCompletionError::from)?;
             let signed_url = format!("{authentication_url}/responses");
             let authorization =
-                omega_effectd::sign_nip98_request(&signed_url, "POST", body.as_bytes(), None)
+                omega_effectd::sign_nip98_request(&signed_url, "POST", Some(body.as_bytes()), None)
                     .await
                     .map_err(nostr_signing_error)?;
             stream_response_with_authorization(
@@ -227,7 +227,7 @@ impl OpenAgentsLanguageModel {
             let future = request_limiter.stream(async move {
                 let signed_url = format!("{authentication_url}/responses");
                 let authorization =
-                    omega_effectd::sign_nip98_request(&signed_url, "GET", &[], None)
+                    omega_effectd::sign_nip98_request(&signed_url, "GET", None, None)
                         .await
                         .map_err(nostr_signing_error)?;
                 let mut websocket_request = websocket_url

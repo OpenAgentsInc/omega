@@ -318,7 +318,7 @@ pub(crate) async fn sign_nip98_post(
     sign_nip98_request(
         url,
         "POST",
-        payload,
+        Some(payload),
         Some(identity.public_key_hex().as_str()),
     )
     .await
@@ -327,7 +327,7 @@ pub(crate) async fn sign_nip98_post(
 pub async fn sign_nip98_request(
     url: &str,
     method: &str,
-    payload: &[u8],
+    payload: Option<&[u8]>,
     expected_public_key_hex: Option<&str>,
 ) -> Result<String, HostedSessionBlocker> {
     if !valid_nip98_url(url) || !valid_http_method(method) {
@@ -361,7 +361,7 @@ const STALE_SELECTION_REASON: &str = "the active account selection changed";
 async fn sign_nip98_request_once(
     url: &str,
     method: &str,
-    payload: &[u8],
+    payload: Option<&[u8]>,
     expected_public_key_hex: Option<&str>,
 ) -> Result<String, HostedSessionBlocker> {
     let registry = AccountRegistryService::for_channel(*app_identity::CHANNEL);
@@ -391,7 +391,7 @@ async fn sign_nip98_request_once(
         selection.identity.public_key_hex().as_str()
     );
     let created_at = next_nip98_created_at(&issuer_ref, wall_clock)?;
-    let payload_hash = format!("{:x}", Sha256::digest(payload));
+    let payload_hash = payload.map(|payload| format!("{:x}", Sha256::digest(payload)));
     let event = nip98_event(url, method, payload_hash.clone(), created_at);
     let semantic_binding = serde_json::to_vec(&serde_json::json!({
         "url": url,
@@ -500,17 +500,20 @@ fn next_nip98_created_at(issuer_ref: &str, wall_clock: u64) -> Result<u64, Hoste
 fn nip98_event(
     url: &str,
     method: &str,
-    payload_hash: String,
+    payload_hash: Option<String>,
     created_at: u64,
 ) -> UnsignedEventTemplate {
+    let mut tags = vec![
+        vec!["u".to_string(), url.to_string()],
+        vec!["method".to_string(), method.to_uppercase()],
+    ];
+    if let Some(payload_hash) = payload_hash {
+        tags.push(vec!["payload".to_string(), payload_hash]);
+    }
     UnsignedEventTemplate {
         created_at,
         kind: NIP98_KIND,
-        tags: vec![
-            vec!["u".to_string(), url.to_string()],
-            vec!["method".to_string(), method.to_uppercase()],
-            vec!["payload".to_string(), payload_hash],
-        ],
+        tags,
         content: String::new(),
     }
 }
@@ -881,7 +884,7 @@ mod tests {
         let event = nip98_event(
             "https://openagents.com/api/omega/sarah/voice/session",
             "POST",
-            payload_hash.clone(),
+            Some(payload_hash.clone()),
             1_700_000_000,
         );
         assert_eq!(event.kind, 27_235);
@@ -896,6 +899,26 @@ mod tests {
                 ],
                 vec!["method".to_string(), "POST".to_string()],
                 vec!["payload".to_string(), payload_hash],
+            ]
+        );
+    }
+
+    #[test]
+    fn nip98_get_without_a_body_omits_the_payload_tag() {
+        let event = nip98_event(
+            "https://api.openagents.com/v1/responses",
+            "GET",
+            None,
+            1_700_000_000,
+        );
+        assert_eq!(
+            event.tags,
+            vec![
+                vec![
+                    "u".to_string(),
+                    "https://api.openagents.com/v1/responses".to_string()
+                ],
+                vec!["method".to_string(), "GET".to_string()],
             ]
         );
     }
