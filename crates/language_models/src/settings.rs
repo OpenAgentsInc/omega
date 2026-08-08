@@ -9,7 +9,7 @@ use crate::provider::{
     google::GoogleSettings, llama_cpp::LlamaCppSettings, lmstudio::LmStudioSettings, mistral,
     mistral::MistralSettings, ollama::OllamaSettings, open_ai::OpenAiSettings,
     open_ai_compatible::OpenAiCompatibleSettings, open_router, open_router::OpenRouterSettings,
-    opencode, opencode::OpenCodeSettings, resolve_custom_headers,
+    openagents::OpenAgentsSettings, opencode, opencode::OpenCodeSettings, resolve_custom_headers,
     vercel_ai_gateway::VercelAiGatewaySettings, x_ai::XAiSettings,
 };
 
@@ -25,6 +25,7 @@ pub struct AllLanguageModelSettings {
     pub mistral: MistralSettings,
     pub ollama: OllamaSettings,
     pub opencode: OpenCodeSettings,
+    pub openagents: OpenAgentsSettings,
     pub open_router: OpenRouterSettings,
     pub openai: OpenAiSettings,
     pub openai_compatible: HashMap<Arc<str>, OpenAiCompatibleSettings>,
@@ -59,6 +60,7 @@ impl settings::Settings for AllLanguageModelSettings {
         let mistral = language_models.mistral.unwrap();
         let ollama = language_models.ollama.unwrap();
         let opencode = language_models.opencode.unwrap();
+        let openagents = language_models.openagents.unwrap();
         let open_router = language_models.open_router.unwrap();
         let openai = language_models.openai.unwrap();
         let openai_compatible = language_models.openai_compatible.unwrap();
@@ -159,6 +161,9 @@ impl settings::Settings for AllLanguageModelSettings {
                 show_zen_models: opencode.show_zen_models.unwrap_or(true),
                 show_go_models: opencode.show_go_models.unwrap_or(true),
                 show_free_models: opencode.show_free_models.unwrap_or(true),
+            },
+            openagents: OpenAgentsSettings {
+                use_development_api: openagents.use_development_api.unwrap_or(false),
             },
             open_router: OpenRouterSettings {
                 api_url: open_router.api_url.unwrap(),

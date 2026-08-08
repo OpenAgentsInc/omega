@@ -14674,8 +14674,8 @@ impl ThreadView {
     /// control: changing a route after a conversation starts would retarget an
     /// existing thread.
     ///
-    /// Flash / Pro is the model-tier dropdown for Omega's hosted lanes:
-    /// Flash → `google/gemini-3.6-flash`, Pro → `openagents/kimi-k3`.
+    /// Omega Agent has no model selector. Its model routing is owned by the
+    /// OpenAgents API. External agents can still expose their own controls.
     ///
     /// **Nothing here pins, and nothing here offers to.** `OMEGA-DELTA-0055`
     /// removed the pin control from this row. It read `pin: none ⌄` and opened
@@ -14848,99 +14848,17 @@ impl ThreadView {
         )
     }
 
-    /// Luna / Flash / Pro dropdown for Omega's hosted inference lanes.
-    ///
-    /// `OMEGA-DELTA-0202`. The face is the routed decision, read through the one
-    /// authority in `crate::omega_routed_model`, so it cannot name a different
-    /// model from the disclosure line and status line beside it. The standing
-    /// choice speaks only for a thread that has not routed anything yet.
+    /// Agent and model controls for the active executor.
     fn composer_model_picker(
         &self,
         enabled: bool,
         cx: &mut Context<Self>,
     ) -> crate::omega_composer_executor_menu::ComposerModelPicker {
-        use crate::omega_model_tier::{select, selected};
-        use crate::omega_routed_model::{RoutedModel, face_for_next_turn};
         use acp_thread::AgentModelId;
         use std::rc::Rc;
 
         if self.agent_id.as_ref() == agent::OMEGA_AGENT_ID.as_ref() {
-            let routed = RoutedModel::from_disclosure(&self.executor_disclosure(cx));
-            let face = face_for_next_turn(routed.as_ref(), selected(), cx);
-            let model_selector = self.model_selector.clone();
-            let mut picker = crate::omega_composer_executor_menu::ComposerModelPicker::omega(
-                face,
-                enabled,
-                Rc::new(move |model_id, _window, cx| {
-                    if let Some(tier) = crate::omega_model_tier::ModelTier::ALL
-                        .iter()
-                        .copied()
-                        .find(|tier| tier.agent_model_id() == model_id.as_str())
-                    {
-                        select(tier);
-                    }
-                    if let Some(entity) = model_selector.as_ref() {
-                        let agent = entity.read(cx).agent_selector();
-                        agent.select_model(model_id, cx).detach_and_log_err(cx);
-                    } else {
-                        log::warn!(
-                            "omega_model_tier: chose a model but this thread has no model selector"
-                        );
-                    }
-                }),
-                cx,
-            );
-            if let Some(thread) = self.as_native_thread(cx) {
-                let (supports_disabling, thinking_enabled, selected_effort, effort_levels) = {
-                    let thread = thread.read(cx);
-                    let Some(model) = thread.model() else {
-                        return picker;
-                    };
-                    (
-                        model.supports_disabling_thinking(),
-                        thread.thinking_enabled(),
-                        thread.thinking_effort().cloned(),
-                        model.supported_effort_levels(),
-                    )
-                };
-                if !effort_levels.is_empty() {
-                    let mut options = Vec::new();
-                    if supports_disabling {
-                        options.push(crate::omega_composer_executor_menu::ComposerTraitOption {
-                            id: "__off".into(),
-                            label: "Off".into(),
-                            selected: !thinking_enabled,
-                        });
-                    }
-                    options.extend(effort_levels.into_iter().map(|level| {
-                        let selected = thinking_enabled
-                            && selected_effort.as_deref() == Some(level.value.as_ref());
-                        crate::omega_composer_executor_menu::ComposerTraitOption {
-                            id: level.value,
-                            label: level.name,
-                            selected,
-                        }
-                    }));
-                    picker
-                        .traits
-                        .push(crate::omega_composer_executor_menu::ComposerTraitGroup {
-                            id: "reasoning".into(),
-                            label: "Reasoning".into(),
-                            options,
-                            on_select: Rc::new(move |effort, _window, cx| {
-                                thread.update(cx, |thread, cx| {
-                                    if effort.as_ref() == "__off" {
-                                        thread.set_thinking_enabled(false, cx);
-                                    } else {
-                                        thread.set_thinking_enabled(true, cx);
-                                        thread.set_thinking_effort(Some(effort.to_string()), cx);
-                                    }
-                                });
-                            }),
-                        });
-                }
-            }
-            picker
+            crate::omega_composer_executor_menu::ComposerModelPicker::omega_agent()
         } else if let Some(config_options) = self.config_options_view.clone() {
             let models = config_options.read(cx).composer_models();
             let traits = config_options

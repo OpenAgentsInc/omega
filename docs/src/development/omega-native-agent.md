@@ -23,25 +23,16 @@ settings-file and panel controls are not advertised by its application menu.
 If a project has `"disable_ai": true` in its project settings, that setting
 also disables the Agent Panel and removes its actions.
 
-## Configure a Model {#configure-a-model}
+## Configure the API Environment {#configure-api-environment}
 
-Omega Agent is an agent runtime, not a model. It needs a language model configured
-through Omega's inherited LLM provider support.
+Omega Agent exposes one logical model identifier, `omega-agent`. The client
+does not select an inference model or reasoning level. The OpenAgents API owns
+provider credentials, model selection, and routing.
 
-Omega's default native-agent selection is `google/gemini-3.6-flash`, reached
-through OpenAgents hosted compute when an authenticated account is available.
-A locally configured Google key is an optional fallback, not a prerequisite.
-You can instead configure another direct provider, an OpenAI-compatible
-endpoint, or a local provider such as Ollama in Agent Settings.
-
-Omega deliberately does not provide Zed-hosted models:
-
-- `services.openagents.invalid` is the default hosted-service endpoint.
-- The Zed cloud model provider is gated.
-- Zed account, plan, trial, and subscription paths are not Omega product
-  surfaces.
-- Provider credentials remain with the selected provider and use the existing
-  credential storage path.
+Open **Settings** and enable **Use Development API** to use
+`http://127.0.0.1:8080/v1`. Disable it to use
+`https://api.openagents.com/v1`. Both endpoints accept the same Responses API
+request and the same OpenAgents session token.
 
 An External Agent such as Codex ACP is a different mode in the same
 new-conversation front door. It does not supply a model to Omega Agent. The
@@ -53,7 +44,7 @@ and sessions.
 Omega Agent is the in-process, project-aware coding-agent engine inherited from
 Zed. It combines:
 
-- a selected `LanguageModel`
+- the `omega-agent` Responses API adapter
 - a native conversation `Thread`
 - project and worktree context
 - instructions and skills
@@ -84,9 +75,10 @@ A native turn follows this path:
    instructions, and available skills.
 4. The selected profile determines which built-in and MCP tools the model can
    see.
-5. `Thread` builds a language-model request from the system prompt, project
+5. `Thread` builds a Responses API request from the system prompt, project
    context, conversation history, and current message.
-6. The selected model streams text, reasoning, and tool calls.
+6. The OpenAgents API streams text, reasoning, and tool calls. Server-side
+   routing stays outside the client request.
 7. Tool calls pass through Omega's permission policy and execute against the
    project, editor, language servers, filesystem, terminal, or MCP server.
 8. Tool results are appended to the thread and sent back to the model.
@@ -171,14 +163,14 @@ systems without owning their durable state.
 
 ## Runtime Boundaries in Omega {#runtime-boundaries}
 
-| Path               | Runtime owner                                             | Configuration owner                                           | Durable authority                                  | Omega UI role                               |
-| ------------------ | --------------------------------------------------------- | ------------------------------------------------------------- | -------------------------------------------------- | ------------------------------------------- |
-| Omega Agent         | Omega's in-process Rust runtime                           | Omega provider, profile, skill, instruction, and MCP settings | Local native thread history only                   | Execute and review local coding turns       |
-| External ACP agent | The external agent process or endpoint                    | The external agent                                            | The external agent, where supported                | Project an ACP session                      |
-| Terminal Thread    | The selected CLI or TUI                                   | The CLI or TUI                                                | The CLI or its service                             | Host a terminal-backed session              |
-| Full Auto          | Released OpenAgents engine under `omega-effectd`          | OpenAgents Full Auto contracts and provider bindings          | OpenAgents work, run, outcome, and receipt records | Launch, observe, review, and intervene      |
-| Agent Computer     | OpenAgents cloud capacity reached through `omega-effectd` | OpenAgents placement and harness environment                  | OpenAgents cloud-session and receipt records       | Start and observe a bounded cloud turn      |
-| Sarah workroom     | Sarah services and the admitted Nostr record              | Sarah and workroom contracts                                  | Signed conversation, decision, and receipt records | Project the owner-private or community room |
+| Path               | Runtime owner                                             | Configuration owner                                                           | Durable authority                                  | Omega UI role                               |
+| ------------------ | --------------------------------------------------------- | ----------------------------------------------------------------------------- | -------------------------------------------------- | ------------------------------------------- |
+| Omega Agent        | Omega's local tool loop and the OpenAgents Responses API  | OpenAgents model routing; Omega profile, skill, instruction, and MCP settings | Local native thread history only                   | Execute and review coding turns             |
+| External ACP agent | The external agent process or endpoint                    | The external agent                                                            | The external agent, where supported                | Project an ACP session                      |
+| Terminal Thread    | The selected CLI or TUI                                   | The CLI or TUI                                                                | The CLI or its service                             | Host a terminal-backed session              |
+| Full Auto          | Released OpenAgents engine under `omega-effectd`          | OpenAgents Full Auto contracts and provider bindings                          | OpenAgents work, run, outcome, and receipt records | Launch, observe, review, and intervene      |
+| Agent Computer     | OpenAgents cloud capacity reached through `omega-effectd` | OpenAgents placement and harness environment                                  | OpenAgents cloud-session and receipt records       | Start and observe a bounded cloud turn      |
+| Sarah workroom     | Sarah services and the admitted Nostr record              | Sarah and workroom contracts                                                  | Signed conversation, decision, and receipt records | Project the owner-private or community room |
 
 Zed remains authoritative for editor, project, buffer, language, terminal, and
 worktree state. OpenAgents remains authoritative for work, agent, policy,
@@ -226,8 +218,7 @@ Omega should not:
 - infer capabilities from an agent or provider name
 - claim hosted Zed AI support
 - present the inherited `telemetry_id` as an OpenAgents service identity
-- silently substitute another provider or model when the selected one is
-  unavailable
+- expose the server's provider model as a client selection
 
 Full Auto should continue through `omega-effectd` and its typed protocol.
 Agent Computer should remain one execution environment behind that service.
@@ -239,40 +230,40 @@ it does not absorb the system that assigned the work.
 
 The implementation exists, but its Omega product contract is unfinished.
 
-1. Add an Omega-owned enablement and provider setup flow. Do not require a
-   JSON-only switch.
+1. Add endpoint health and environment status to the Settings surface.
 2. Complete the admitted router and typed-disclosure packets. The identity
    rename does not by itself implement routing, receipts, or a public claim.
 3. Keep remaining Zed-specific copy out of the native-agent journey.
-4. Show the exact runtime, provider, model, profile, and effective permission
-   policy in each thread.
+4. Show the exact runtime, API environment, profile, and effective permission
+   policy in each thread. Treat provider routing as server metadata.
 5. Keep hosted Zed plans, trials, account state, feedback upload, and service
    assumptions out of Omega.
 6. Define typed links from a local agent thread to OpenAgents work, runs,
    decisions, and receipts without duplicating their storage.
-7. Test local provider failure, missing model, restart, cancellation, dirty
-   worktree, wrong project, revoked grant, and external-agent handoff paths.
+7. Test API failure, restart, cancellation, dirty worktree, wrong project,
+   revoked grant, and external-agent handoff paths.
 8. Bind any release claim to an installed Omega candidate. A source test or
    fixture pass does not prove the packaged journey.
 
-Until the router packets land, **Omega Agent** in the reachable UI selects the
-inherited local native executor. It does not claim an OpenAgents-hosted agent
-service or change the native thread's authority boundary.
+**Omega Agent** in the reachable UI selects the native Omega tool loop backed
+by the OpenAgents Responses API. The local thread remains the authority for
+local transcript and editor state.
 
 ## Implementation Map {#implementation-map}
 
-| Responsibility                                             | Current source                            |
-| ---------------------------------------------------------- | ----------------------------------------- |
-| Native runtime, project context, skills, and UI connection | `crates/agent/src/agent.rs`               |
-| Model/tool loop and thread events                          | `crates/agent/src/thread.rs`              |
-| Local native thread storage                                | `crates/agent/src/thread_store.rs`        |
-| In-process server construction                             | `crates/agent/src/native_agent_server.rs` |
-| Tool implementations                                       | `crates/agent/src/tools/`                 |
-| Tool permission evaluation                                 | `crates/agent/src/tool_permissions.rs`    |
-| Agent defaults and Omega permission delta                  | `assets/settings/default.json`            |
-| Agent Panel and new-thread selection                       | `crates/agent_ui/src/agent_panel.rs`      |
-| Native/external agent registration                         | `crates/agent_ui/src/agent_ui.rs`         |
-| Durable Omega product boundaries                           | `PRODUCT.md` and `OMEGA_DELTAS.md`        |
+| Responsibility                                             | Current source                                      |
+| ---------------------------------------------------------- | --------------------------------------------------- |
+| Native runtime, project context, skills, and UI connection | `crates/agent/src/agent.rs`                         |
+| Model/tool loop and thread events                          | `crates/agent/src/thread.rs`                        |
+| Local native thread storage                                | `crates/agent/src/thread_store.rs`                  |
+| In-process server construction                             | `crates/agent/src/native_agent_server.rs`           |
+| Tool implementations                                       | `crates/agent/src/tools/`                           |
+| Tool permission evaluation                                 | `crates/agent/src/tool_permissions.rs`              |
+| Agent defaults and Omega permission delta                  | `assets/settings/default.json`                      |
+| OpenAgents Responses API adapter                           | `crates/language_models/src/provider/openagents.rs` |
+| Agent Panel and new-thread selection                       | `crates/agent_ui/src/agent_panel.rs`                |
+| Native/external agent registration                         | `crates/agent_ui/src/agent_ui.rs`                   |
+| Durable Omega product boundaries                           | `PRODUCT.md` and `OMEGA_DELTAS.md`                  |
 
 The product guidance on this page is derived from the complete
 `openagents/docs/omega/` planning corpus, especially its permanent design laws,

@@ -4821,46 +4821,13 @@ impl ConversationView {
             .into_any()
     }
 
-    /// The Luna / Flash / Pro dropdown, before a session exists.
-    ///
-    /// `OMEGA-DELTA-0204`. Nothing here names a model as *serving* a turn,
-    /// because no turn has run.
-    ///
-    /// `OMEGA-DELTA-0207`. It names the model the next turn will start on, and
-    /// it gets that from the registry rather than from the standing choice.
-    /// The standing choice claimed to be "a truthful statement about what the
-    /// next turn will start on" and was not one: it is a process-wide static
-    /// that begins every launch at `Luna` and is never seeded from settings, so
-    /// this composer said **Luna** on a thread whose send went to
-    /// `openagents/gemini-3.6-flash`.
+    /// The agent picker before a session exists.
     fn pre_session_model_picker(
         &self,
-        cx: &mut Context<Self>,
+        _cx: &mut Context<Self>,
     ) -> crate::omega_composer_executor_menu::ComposerModelPicker {
-        use crate::omega_model_tier::selected;
-        use crate::omega_routed_model::face_for_next_turn;
-
         if matches!(self.agent_key(), Agent::NativeAgent) {
-            let fs = self.project.read(cx).fs().clone();
-            crate::omega_composer_executor_menu::ComposerModelPicker::omega(
-                face_for_next_turn(None, selected(), cx),
-                true,
-                Rc::new(move |model_id, _window, cx| {
-                    if let Some(tier) = crate::omega_model_tier::ModelTier::ALL
-                        .iter()
-                        .copied()
-                        .find(|tier| tier.agent_model_id() == model_id.as_str())
-                    {
-                        crate::omega_model_tier::select(tier);
-                    }
-                    crate::omega_model_tier::select_model_before_session(
-                        model_id.as_str(),
-                        fs.clone(),
-                        cx,
-                    );
-                }),
-                cx,
-            )
+            crate::omega_composer_executor_menu::ComposerModelPicker::omega_agent()
         } else {
             crate::omega_composer_executor_menu::ComposerModelPicker {
                 label: "Loading models…".into(),

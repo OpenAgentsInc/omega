@@ -1131,9 +1131,14 @@ fn update_active_language_model_from_settings(cx: &mut App) {
     let settings = AgentSettings::get_global(cx);
 
     fn to_selected_model(selection: &LanguageModelSelection) -> language_model::SelectedModel {
+        let model = if selection.provider.0 == "openagents" {
+            "omega-agent".to_string()
+        } else {
+            selection.model.clone()
+        };
         language_model::SelectedModel {
             provider: LanguageModelProviderId::from(selection.provider.0.clone()),
-            model: LanguageModelId::from(selection.model.clone()),
+            model: LanguageModelId::from(model),
         }
     }
 

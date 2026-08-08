@@ -43,11 +43,6 @@ use ui::{ButtonLike, PopoverMenu, PopoverMenuHandle, prelude::*};
 use workspace::Workspace;
 
 use crate::agent_panel::{AgentPanel, ComposerExecutorRow};
-use crate::omega_model_tier::{ModelTier, RoutedFace};
-
-const DEEPSEEK_PROVIDER_ID: &str = "deepseek";
-const DEEPSEEK_V4_FLASH_AGENT_MODEL_ID: &str = "deepseek/deepseek-v4-flash";
-
 #[derive(Clone)]
 pub struct ComposerModelOption {
     pub id: acp_thread::AgentModelId,
@@ -83,56 +78,17 @@ pub struct ComposerModelPicker {
 }
 
 impl ComposerModelPicker {
-    pub fn omega(
-        face: RoutedFace,
-        enabled: bool,
-        on_select: Rc<dyn Fn(acp_thread::AgentModelId, &mut Window, &mut App)>,
-        cx: &App,
-    ) -> Self {
-        let current_model = Some(acp_thread::AgentModelId::new(face.agent_model_id));
-        let models = omega_model_options(deepseek_is_authenticated(cx));
+    pub fn omega_agent() -> Self {
         Self {
-            label: face.label,
-            current_model,
-            models,
+            label: "Omega Agent".into(),
+            current_model: None,
+            models: Vec::new(),
             traits: Vec::new(),
-            enabled,
-            empty_message: "Choose a model for the next turn.".into(),
-            on_select,
+            enabled: false,
+            empty_message: "Omega Agent selects its model on the server.".into(),
+            on_select: Rc::new(|_, _, _| {}),
         }
     }
-}
-
-fn deepseek_is_authenticated(cx: &App) -> bool {
-    use language_model::{LanguageModelProviderId, LanguageModelRegistry};
-
-    let provider_id = LanguageModelProviderId::from(DEEPSEEK_PROVIDER_ID.to_owned());
-    LanguageModelRegistry::try_global(cx)
-        .and_then(|registry| registry.read(cx).provider(&provider_id))
-        .is_some_and(|provider| provider.is_authenticated(cx))
-}
-
-fn omega_model_options(include_deepseek: bool) -> Vec<ComposerModelOption> {
-    let mut models = Vec::new();
-    for tier in ModelTier::ALL.iter().copied() {
-        models.push(ComposerModelOption {
-            id: acp_thread::AgentModelId::new(tier.agent_model_id()),
-            name: tier.model_name().into(),
-            description: Some(tier.description().into()),
-            disabled: false,
-        });
-        if tier == ModelTier::Luna && include_deepseek {
-            models.push(ComposerModelOption {
-                id: acp_thread::AgentModelId::new(DEEPSEEK_V4_FLASH_AGENT_MODEL_ID),
-                name: "DeepSeek V4 Flash".into(),
-                description: Some(
-                    "DeepSeek V4 Flash — uses your DeepSeek API key directly.".into(),
-                ),
-                disabled: false,
-            });
-        }
-    }
-    models
 }
 
 /// The popover handles behind every composer executor dropdown, one per
@@ -282,17 +238,25 @@ pub fn render_composer_executor_menu(
         }
     }
 
+    let has_model_controls = !model_picker.models.is_empty() || !model_picker.traits.is_empty();
     let model_label = model_picker.label.clone();
+    let aria_label = if has_model_controls {
+        "Choose agent and model"
+    } else {
+        "Choose agent"
+    };
+    let aria_value = if has_model_controls {
+        SharedString::from(format!("{} {}", current_label, model_label))
+    } else {
+        current_label.clone()
+    };
     let trigger_icon = executor_icon(&current_label);
     let trigger = ButtonLike::new("omega-composer-executor-trigger")
         .style(ButtonStyle::Transparent)
         .size(ButtonSize::None)
         .height(px(32.).into())
-        .aria_label("Choose agent and model")
-        .aria_value(SharedString::from(format!(
-            "{} {}",
-            current_label, model_label
-        )))
+        .aria_label(aria_label)
+        .aria_value(aria_value)
         .child(
             h_flex()
                 .debug_selector(|| "omega.composer.executor-menu".into())
@@ -649,6 +613,7 @@ impl Render for OmegaComposerModelMenu {
         } else {
             UNBOUND_MENU_HEADER
         };
+        let has_model_controls = !self.models.is_empty() || !self.traits.is_empty();
 
         let agents = self
             .rows
@@ -827,8 +792,16 @@ impl Render for OmegaComposerModelMenu {
             .on_action(cx.listener(Self::confirm))
             .on_action(cx.listener(Self::cancel))
             .occlude()
-            .w(px(460.))
-            .h(px(420.))
+            .w(if has_model_controls {
+                px(460.)
+            } else {
+                px(224.)
+            })
+            .h(if has_model_controls {
+                px(420.)
+            } else {
+                px(360.)
+            })
             .overflow_hidden()
             .rounded(px(12.))
             .border_1()
@@ -843,12 +816,17 @@ impl Render for OmegaComposerModelMenu {
                     .items_stretch()
                     .child(
                         v_flex()
-                            .w(px(148.))
-                            .flex_none()
+                            .w(if has_model_controls {
+                                px(148.)
+                            } else {
+                                px(224.)
+                            })
+                            .when(has_model_controls, |this| this.flex_none())
                             .gap_0p5()
                             .p_1()
-                            .border_r_1()
-                            .border_color(divider)
+                            .when(has_model_controls, |this| {
+                                this.border_r_1().border_color(divider)
+                            })
                             .child(
                                 Label::new("Agents")
                                     .size(LabelSize::XSmall)
@@ -885,55 +863,57 @@ impl Render for OmegaComposerModelMenu {
                                     .child("Add More Agents…"),
                             ),
                     )
-                    .child(
-                        v_flex()
-                            .flex_1()
-                            .min_w_0()
-                            .min_h_0()
-                            .child(
-                                v_flex()
-                                    .flex_1()
-                                    .min_h_0()
-                                    .p_1()
-                                    .child(
-                                        Label::new("Models")
-                                            .size(LabelSize::XSmall)
-                                            .color(Color::Muted),
-                                    )
-                                    .child(
-                                        v_flex()
-                                            .id("omega-model-scroll")
-                                            .flex_1()
-                                            .min_h_0()
-                                            .gap_0p5()
-                                            .overflow_y_scroll()
-                                            .children(models),
-                                    ),
-                            )
-                            .child(
-                                v_flex()
-                                    .id("omega-traits-scroll")
-                                    .flex_none()
-                                    .max_h(px(190.))
-                                    .overflow_y_scroll()
-                                    .gap_1()
-                                    .border_t_1()
-                                    .border_color(divider)
-                                    .p_2()
-                                    .when(self.traits.is_empty(), |this| {
-                                        this.child(
-                                            Label::new("Selection")
+                    .when(has_model_controls, |this| {
+                        this.child(
+                            v_flex()
+                                .flex_1()
+                                .min_w_0()
+                                .min_h_0()
+                                .child(
+                                    v_flex()
+                                        .flex_1()
+                                        .min_h_0()
+                                        .p_1()
+                                        .child(
+                                            Label::new("Models")
                                                 .size(LabelSize::XSmall)
                                                 .color(Color::Muted),
                                         )
                                         .child(
-                                            Label::new(self.empty_message.clone())
-                                                .size(LabelSize::Small),
-                                        )
-                                    })
-                                    .children(trait_groups),
-                            ),
-                    ),
+                                            v_flex()
+                                                .id("omega-model-scroll")
+                                                .flex_1()
+                                                .min_h_0()
+                                                .gap_0p5()
+                                                .overflow_y_scroll()
+                                                .children(models),
+                                        ),
+                                )
+                                .child(
+                                    v_flex()
+                                        .id("omega-traits-scroll")
+                                        .flex_none()
+                                        .max_h(px(190.))
+                                        .overflow_y_scroll()
+                                        .gap_1()
+                                        .border_t_1()
+                                        .border_color(divider)
+                                        .p_2()
+                                        .when(self.traits.is_empty(), |this| {
+                                            this.child(
+                                                Label::new("Selection")
+                                                    .size(LabelSize::XSmall)
+                                                    .color(Color::Muted),
+                                            )
+                                            .child(
+                                                Label::new(self.empty_message.clone())
+                                                    .size(LabelSize::Small),
+                                            )
+                                        })
+                                        .children(trait_groups),
+                                ),
+                        )
+                    }),
             )
             .child(
                 h_flex()
@@ -968,32 +948,14 @@ mod tests {
     use super::*;
 
     #[test]
-    fn deepseek_v4_flash_is_only_curated_for_authenticated_users() {
-        let models_without_deepseek = omega_model_options(false);
-        assert!(
-            models_without_deepseek
-                .iter()
-                .all(|model| model.id.as_str() != DEEPSEEK_V4_FLASH_AGENT_MODEL_ID)
-        );
+    fn omega_agent_picker_has_no_client_model_controls() {
+        let picker = ComposerModelPicker::omega_agent();
 
-        let models_with_deepseek = omega_model_options(true);
-        assert_eq!(
-            models_with_deepseek
-                .iter()
-                .map(|model| model.id.as_str())
-                .collect::<Vec<_>>(),
-            vec![
-                ModelTier::Luna.agent_model_id(),
-                DEEPSEEK_V4_FLASH_AGENT_MODEL_ID,
-                ModelTier::Flash.agent_model_id(),
-                ModelTier::Pro.agent_model_id(),
-            ]
-        );
-        let deepseek = models_with_deepseek
-            .iter()
-            .find(|model| model.id.as_str() == DEEPSEEK_V4_FLASH_AGENT_MODEL_ID)
-            .expect("the authenticated DeepSeek option is present");
-        assert_eq!(deepseek.name.as_ref(), "DeepSeek V4 Flash");
+        assert_eq!(picker.label.as_ref(), "Omega Agent");
+        assert!(picker.current_model.is_none());
+        assert!(picker.models.is_empty());
+        assert!(picker.traits.is_empty());
+        assert!(!picker.enabled);
     }
 
     /// The two headers say different things because they do different

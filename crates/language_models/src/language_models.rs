@@ -291,8 +291,8 @@ fn register_language_model_providers(
         )),
         cx,
     );
-    // Hosted Pro lane (Kimi K3 via OpenAgents / Fireworks). Flash stays on the
-    // Google provider; this provider only exposes kimi-k3 for the tier control.
+    // Omega Agent exposes one logical model. Provider selection and routing
+    // happen behind the OpenAgents Responses API.
     registry.register_provider(
         Arc::new(OpenAgentsLanguageModelProvider::new(
             client.http_client(),

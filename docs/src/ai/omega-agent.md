@@ -1,14 +1,15 @@
 ---
 title: Omega Agent
-description: Use Omega's first-party agent with Omega-configured models, tools, profiles, skills, instructions, and MCP servers.
+description: Use Omega's first-party cloud agent with native editor tools, profiles, skills, instructions, and MCP servers.
 ---
 
 # Omega Agent
 
-Omega Agent is Omega's first-party agent path. Its current native executor runs
-in the [Agent Panel](./agent-panel.md) and [Threads Sidebar](./parallel-agents.md#threads-sidebar),
-uses models configured through [LLM Providers](./llm-providers.md), and
-integrates with Omega's project, editor, terminal, and review surfaces.
+Omega Agent is Omega's first-party cloud agent. It runs its project and tool
+loop in Omega, sends inference requests to the OpenAgents Responses API, and
+integrates with Omega's project, editor, terminal, and review surfaces. Omega
+Agent has no client model selector. The service owns its provider model and
+routing policy.
 
 The new-conversation front door prepares one Omega Agent conversation and
 shows it as Ready once its router has a live, recorded executor inventory.
@@ -41,23 +42,45 @@ Use Omega Agent when you want the agent to:
 
 ## What Omega Agent Uses {#what-omega-agent-uses}
 
-| Capability                 | Source of truth                           |
-| -------------------------- | ----------------------------------------- |
-| Model access               | [LLM Providers](./llm-providers.md)       |
-| Panel workflow             | [Agent Panel](./agent-panel.md)           |
-| Tool availability          | [Agent Profiles](./agent-profiles.md)     |
-| Tool approval behavior     | [Tool Permissions](./tool-permissions.md) |
-| Built-in tools             | [Tools](./tools.md)                       |
-| External tools             | [MCP](./mcp.md)                           |
-| Reusable task instructions | [Skills](./skills.md)                     |
-| Always-on instructions     | [Instructions](./instructions.md)         |
+| Capability                  | Source of truth                           |
+| --------------------------- | ----------------------------------------- |
+| Inference and model routing | OpenAgents Responses API                  |
+| Panel workflow              | [Agent Panel](./agent-panel.md)           |
+| Tool availability           | [Agent Profiles](./agent-profiles.md)     |
+| Tool approval behavior      | [Tool Permissions](./tool-permissions.md) |
+| Built-in tools              | [Tools](./tools.md)                       |
+| External tools              | [MCP](./mcp.md)                           |
+| Reusable task instructions  | [Skills](./skills.md)                     |
+| Always-on instructions      | [Instructions](./instructions.md)         |
+
+## API Environment {#api-environment}
+
+Open **Settings**, then enable **Use Development API** to send Omega Agent
+requests to `http://127.0.0.1:8080/v1`. Disable it to use
+`https://api.openagents.com/v1`.
+
+Or add this to your settings.json:
+
+```json [settings]
+{
+  "language_models": {
+    "openagents": {
+      "use_development_api": true
+    }
+  }
+}
+```
+
+The development endpoint must serve the same Open Responses profile as the
+production endpoint. Omega sends your OpenAgents session token to either
+endpoint.
 
 ## How It Differs from Other Agent Paths {#other-agent-paths}
 
-| Agent path                                | Main difference                                                                              |
-| ----------------------------------------- | -------------------------------------------------------------------------------------------- |
-| [Omega Agent](./omega-agent.md)             | Uses Omega's model, tool, profile, skill, instruction, and MCP configuration                 |
-| [External Agents](./external-agents.md)   | Use an ACP integration and often own auth, model, tool, and native instruction configuration |
-| [Terminal Threads](./terminal-threads.md) | Run a CLI/TUI in a terminal-backed thread; the CLI owns auth and configuration               |
+| Agent path                                | Main difference                                                                                     |
+| ----------------------------------------- | --------------------------------------------------------------------------------------------------- |
+| [Omega Agent](./omega-agent.md)           | Uses OpenAgents model routing with Omega's tool, profile, skill, instruction, and MCP configuration |
+| [External Agents](./external-agents.md)   | Use an ACP integration and often own auth, model, tool, and native instruction configuration        |
+| [Terminal Threads](./terminal-threads.md) | Run a CLI/TUI in a terminal-backed thread; the CLI owns auth and configuration                      |
 
 See [Agents](./agents.md) for the full comparison.

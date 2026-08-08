@@ -21,6 +21,7 @@ pub struct AllLanguageModelSettingsContent {
     pub mistral: Option<MistralSettingsContent>,
     pub ollama: Option<OllamaSettingsContent>,
     pub opencode: Option<OpenCodeSettingsContent>,
+    pub openagents: Option<OpenAgentsSettingsContent>,
     pub open_router: Option<OpenRouterSettingsContent>,
     pub openai: Option<OpenAiSettingsContent>,
     pub openai_compatible: Option<HashMap<Arc<str>, OpenAiCompatibleSettingsContent>>,
@@ -28,6 +29,17 @@ pub struct AllLanguageModelSettingsContent {
     pub x_ai: Option<XAiSettingsContent>,
     #[serde(rename = "zed.dev")]
     pub zed_dot_dev: Option<ZedDotDevSettingsContent>,
+}
+
+#[with_fallible_options]
+#[derive(Default, Clone, Debug, Serialize, Deserialize, PartialEq, JsonSchema, MergeFrom)]
+pub struct OpenAgentsSettingsContent {
+    /// Use the Omega Agent API at `http://127.0.0.1:8080/v1`.
+    ///
+    /// When this is false, Omega uses `https://api.openagents.com/v1`.
+    ///
+    /// Default: false
+    pub use_development_api: Option<bool>,
 }
 
 #[with_fallible_options]

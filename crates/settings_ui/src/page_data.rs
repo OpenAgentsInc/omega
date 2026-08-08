@@ -97,7 +97,35 @@ pub(crate) fn omega_settings_data(cx: &App) -> Vec<SettingsPage> {
         )
     });
 
-    let mut items = vec![SettingsPageItem::SectionHeader("Providers")];
+    let mut items = vec![
+        SettingsPageItem::SectionHeader("Omega Agent"),
+        SettingsPageItem::SettingItem(SettingItem {
+            title: "Use Development API",
+            description: "Send Omega Agent requests to http://127.0.0.1:8080/v1. When disabled, Omega uses https://api.openagents.com/v1.",
+            field: Box::new(SettingField {
+                organization_override: None,
+                json_path: Some("language_models.openagents.use_development_api"),
+                pick: |settings_content| {
+                    settings_content
+                        .language_models
+                        .as_ref()
+                        .and_then(|language_models| language_models.openagents.as_ref())
+                        .and_then(|openagents| openagents.use_development_api.as_ref())
+                },
+                write: |settings_content, value, _| {
+                    settings_content
+                        .language_models
+                        .get_or_insert_default()
+                        .openagents
+                        .get_or_insert_default()
+                        .use_development_api = value;
+                },
+            }),
+            metadata: None,
+            files: USER,
+        }),
+        SettingsPageItem::SectionHeader("Providers"),
+    ];
     items.extend(provider_items);
     vec![SettingsPage {
         title: "API Keys",

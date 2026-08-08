@@ -1395,6 +1395,18 @@ pub enum ThreadModel {
     Unset,
 }
 
+fn normalized_selected_model(provider: String, model: String) -> SelectedModel {
+    let model = if provider == "openagents" {
+        "omega-agent".to_string()
+    } else {
+        model
+    };
+    SelectedModel {
+        provider: LanguageModelProviderId::from(provider),
+        model: LanguageModelId::from(model),
+    }
+}
+
 impl ThreadModel {
     fn as_model(&self) -> Option<&Arc<dyn LanguageModel>> {
         match self {
@@ -1973,10 +1985,9 @@ impl Thread {
             .profile
             .unwrap_or_else(|| settings.default_profile.clone());
 
-        let saved_selection = db_thread.model.map(|model| SelectedModel {
-            provider: model.provider.into(),
-            model: model.model.into(),
-        });
+        let saved_selection = db_thread
+            .model
+            .map(|model| normalized_selected_model(model.provider, model.model));
 
         let resolved_saved_model = LanguageModelRegistry::global(cx).update(cx, |registry, cx| {
             saved_selection
@@ -2880,10 +2891,10 @@ impl Thread {
             .as_ref()?
             .default_model
             .as_ref()?;
-        Some(SelectedModel {
-            provider: LanguageModelProviderId::from(selection.provider.0.clone()),
-            model: LanguageModelId::from(selection.model.clone()),
-        })
+        Some(normalized_selected_model(
+            selection.provider.0.to_string(),
+            selection.model.clone(),
+        ))
     }
 
     /// Translate a stored model selection into the configured model from the registry.
@@ -2891,10 +2902,8 @@ impl Thread {
         selection: &LanguageModelSelection,
         cx: &mut Context<Self>,
     ) -> Option<Arc<dyn LanguageModel>> {
-        let selected = SelectedModel {
-            provider: LanguageModelProviderId::from(selection.provider.0.clone()),
-            model: LanguageModelId::from(selection.model.clone()),
-        };
+        let selected =
+            normalized_selected_model(selection.provider.0.to_string(), selection.model.clone());
         LanguageModelRegistry::global(cx).update(cx, |registry, cx| {
             registry
                 .select_model(&selected, cx)
@@ -3648,6 +3657,9 @@ impl Thread {
 
     /// The next model the turn should try after its current lane dead-ends.
     ///
+    /// `openagents/omega-agent` owns provider routing and fallback on the
+    /// server, so a failed Omega Agent request never moves to a client model.
+    ///
     /// Owner mandate 2026-07-30 ("CORE OMEGA AGENT MUST ALWAYS HIT OUR API AND
     /// WORK"): the ordered chain is the hosted OpenAgents Luna lane, the hosted
     /// Gemini lane, the direct-key Gemini lane, the hosted Kimi K3 lane, and
@@ -3678,8 +3690,12 @@ impl Thread {
             failed_model.provider_id().0.to_string(),
             failed_model.id().0.to_string(),
         );
+        let is_omega_agent = failed_key.0 == "openagents" && failed_key.1 == "omega-agent";
         if !attempted.contains(&failed_key) {
             attempted.push(failed_key);
+        }
+        if is_omega_agent {
+            return None;
         }
         // Absent in some harnesses; a missing registry means no fallback, not
         // a panic in the error path.
@@ -9599,6 +9615,42 @@ mod tests {
             }
         });
         (codex, openai)
+    }
+
+    #[test]
+    fn legacy_openagents_models_normalize_to_omega_agent() {
+        let selected =
+            normalized_selected_model("openagents".to_string(), "gpt-5.6-luna".to_string());
+
+        assert_eq!(selected.provider.0.as_ref(), "openagents");
+        assert_eq!(selected.model.0.as_ref(), "omega-agent");
+    }
+
+    #[gpui::test]
+    async fn omega_agent_does_not_fall_back_to_a_client_provider(cx: &mut TestAppContext) {
+        let (_thread, _event_stream) = setup_thread_for_test(cx).await;
+        let omega_agent: Arc<dyn LanguageModel> =
+            Arc::new(FakeLanguageModel::with_id_and_thinking(
+                "openagents",
+                "omega-agent",
+                "Omega Agent",
+                false,
+            ));
+        let failure = anyhow!(LanguageModelCompletionError::ServerOverloaded {
+            provider: language_model::LanguageModelProviderName::from("OpenAgents".to_string()),
+            retry_after: None,
+        });
+        let mut attempted = Vec::new();
+
+        let fallback = cx.update(|cx| {
+            Thread::next_turn_fallback_model(&omega_agent, &failure, &mut attempted, cx)
+        });
+
+        assert!(fallback.is_none());
+        assert_eq!(
+            attempted,
+            vec![("openagents".to_string(), "omega-agent".to_string())]
+        );
     }
 
     #[gpui::test]
