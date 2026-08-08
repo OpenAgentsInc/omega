@@ -845,7 +845,7 @@ pub struct ThreadView {
     pub list_state: ListState,
     pub session_capabilities: SharedSessionCapabilities,
     pub expanded_tool_call_raw_inputs: HashSet<acp::ToolCallId>,
-    collapsed_omega_tool_groups: HashSet<acp::ToolCallId>,
+    expanded_omega_tool_groups: HashSet<acp::ToolCallId>,
     omega_streaming_markdown_veils:
         RefCell<HashMap<gpui::EntityId, Rc<RefCell<markdown::StreamingMarkdownVeil>>>>,
     collapsed_sandbox_authorization_details: HashSet<acp::ToolCallId>,
@@ -1404,7 +1404,7 @@ impl ThreadView {
             last_token_limit_telemetry: None,
             thread_feedback: Default::default(),
             expanded_tool_call_raw_inputs: HashSet::default(),
-            collapsed_omega_tool_groups: HashSet::default(),
+            expanded_omega_tool_groups: HashSet::default(),
             omega_streaming_markdown_veils: RefCell::new(omega_streaming_markdown_veils),
             collapsed_sandbox_authorization_details: HashSet::default(),
             collapsed_sandbox_network_details: HashSet::default(),
@@ -9563,6 +9563,23 @@ impl ThreadView {
         }
     }
 
+    fn omega_tool_detail(kind: acp::ToolKind, detail: &str) -> String {
+        let detail = detail.trim();
+        let label = Self::omega_tool_kind_label(kind);
+        let Some(stripped) = detail
+            .strip_prefix(label)
+            .and_then(|rest| rest.strip_prefix(' '))
+        else {
+            return detail.to_owned();
+        };
+        let stripped = stripped.trim();
+        if stripped.is_empty() {
+            detail.to_owned()
+        } else {
+            stripped.to_owned()
+        }
+    }
+
     fn omega_tool_kind_icon(kind: acp::ToolKind) -> IconName {
         match kind {
             acp::ToolKind::Read | acp::ToolKind::Search => IconName::ToolSearch,
@@ -9667,8 +9684,8 @@ impl ThreadView {
             return Empty.into_any_element();
         };
         let first_tool_call_id = first_tool_call.id.clone();
-        let collapsed = self
-            .collapsed_omega_tool_groups
+        let expanded = self
+            .expanded_omega_tool_groups
             .contains(&first_tool_call_id);
         let summary_calls = tool_calls
             .iter()
@@ -9701,10 +9718,10 @@ impl ThreadView {
                             .rounded(px(5.0))
                             .bg(cx.theme().colors().text.opacity(0.06))
                             .child(
-                                Icon::new(if collapsed {
-                                    IconName::ChevronRight
-                                } else {
+                                Icon::new(if expanded {
                                     IconName::ChevronDown
+                                } else {
+                                    IconName::ChevronRight
                                 })
                                 .size(IconSize::XSmall)
                                 .color(Color::Muted),
@@ -9717,14 +9734,14 @@ impl ThreadView {
                             .buffer_font(cx),
                     )
                     .on_click(cx.listener(move |this, _, _, cx| {
-                        if !this.collapsed_omega_tool_groups.remove(&first_tool_call_id) {
-                            this.collapsed_omega_tool_groups
+                        if !this.expanded_omega_tool_groups.remove(&first_tool_call_id) {
+                            this.expanded_omega_tool_groups
                                 .insert(first_tool_call_id.clone());
                         }
                         cx.notify();
                     })),
             )
-            .when(!collapsed, |group| {
+            .when(expanded, |group| {
                 group.child(v_flex().pt(px(2.0)).children(tool_calls.into_iter().map(
                     |(entry_ix, tool_call)| {
                         let failed = matches!(
@@ -9738,8 +9755,11 @@ impl ThreadView {
                             .read(cx)
                             .is_tool_call_expanded(&tool_call.id);
                         let tool_call_id = tool_call.id.clone();
-                        let detail = tool_call.label.read(cx).source().trim().to_string();
                         let label = Self::omega_tool_kind_label(tool_call.kind);
+                        let detail = Self::omega_tool_detail(
+                            tool_call.kind,
+                            tool_call.label.read(cx).source(),
+                        );
                         let icon = Self::omega_tool_kind_icon(tool_call.kind);
                         let chip = h_flex()
                             .id(("omega-tool-chip", entry_ix))
@@ -16032,6 +16052,18 @@ mod tests {
     use std::path::Path;
     use util::path;
     use workspace::MultiWorkspace;
+
+    #[test]
+    fn omega_tool_detail_removes_the_repeated_kind_label() {
+        assert_eq!(
+            ThreadView::omega_tool_detail(acp::ToolKind::Read, "Read `/tmp/file.md`"),
+            "`/tmp/file.md`"
+        );
+        assert_eq!(
+            ThreadView::omega_tool_detail(acp::ToolKind::Read, "Inspect project files"),
+            "Inspect project files"
+        );
+    }
 
     #[test]
     fn message_info_uses_only_usage_recorded_for_that_turn() {

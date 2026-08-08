@@ -357,24 +357,23 @@ fn websocket_response_request(request: ResponseRequest) -> Result<String> {
 fn websocket_response_event(text: &str) -> Result<ResponsesStreamEvent> {
     let value = serde_json::from_str::<serde_json::Value>(text)?;
     if value.get("type").and_then(serde_json::Value::as_str) == Some("openagents:response.status") {
-        let message = value
-            .get("message")
-            .and_then(serde_json::Value::as_str)
-            .unwrap_or_default();
         let classification = value
             .get("classification")
             .and_then(serde_json::Value::as_str);
-        let delta = if classification == Some("greeting") {
-            message.to_owned()
-        } else {
-            format!("{message}\n\n")
-        };
-        return Ok(ResponsesStreamEvent::OutputTextDelta {
-            item_id: "openagents-status".to_owned(),
-            output_index: 0,
-            content_index: Some(0),
-            delta,
-        });
+        if matches!(classification, Some("greeting" | "identity")) {
+            let delta = value
+                .get("message")
+                .and_then(serde_json::Value::as_str)
+                .unwrap_or_default()
+                .to_owned();
+            return Ok(ResponsesStreamEvent::OutputTextDelta {
+                item_id: "openagents-status".to_owned(),
+                output_index: 0,
+                content_index: Some(0),
+                delta,
+            });
+        }
+        return Ok(ResponsesStreamEvent::Unknown);
     }
     Ok(serde_json::from_value(value)?)
 }
@@ -563,12 +562,12 @@ mod tests {
     }
 
     #[test]
-    fn websocket_status_becomes_response_text() {
+    fn websocket_greeting_status_becomes_response_text() {
         let event = websocket_response_event(
             &serde_json::json!({
                 "type": "openagents:response.status",
-                "classification": "request",
-                "message": "Checking on that."
+                "classification": "greeting",
+                "message": "System ready."
             })
             .to_string(),
         )
@@ -577,8 +576,23 @@ mod tests {
         assert!(matches!(
             event,
             ResponsesStreamEvent::OutputTextDelta { delta, .. }
-                if delta == "Checking on that.\n\n"
+                if delta == "System ready."
         ));
+    }
+
+    #[test]
+    fn websocket_trade_status_stays_out_of_response_text() {
+        let event = websocket_response_event(
+            &serde_json::json!({
+                "type": "openagents:response.status",
+                "classification": "trade",
+                "message": "Initializing trade."
+            })
+            .to_string(),
+        )
+        .expect("status should parse");
+
+        assert!(matches!(event, ResponsesStreamEvent::Unknown));
     }
 
     #[test]
