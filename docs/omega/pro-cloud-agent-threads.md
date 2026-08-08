@@ -9,6 +9,10 @@ Omega source surveyed: `OpenAgentsInc/omega@aa3f47c2ae`
 Pro source surveyed: `OpenAgentsInc/pro@e9282c6` and deployed platform records
 dated 2026-08-06
 
+Final Pro seam audit reviewed:
+`OpenAgentsInc/pro@cbfd96e:docs/convex/omega-cloud-threads.md`, auditing Pro at
+`c6ad928`
+
 Convex source surveyed: `get-convex/convex-backend@7caed949c` after updating
 local `main` on 2026-08-08
 
@@ -52,21 +56,29 @@ The first useful hosted feature therefore does not require a new cloud stack.
 It requires a thread-turn execution adapter between Pro's existing command
 plane and its existing Omega worker.
 
-My recommendation is:
+The final seam audit confirms the authority split in this note and narrows the
+first release. My recommendation is:
 
 1. keep Pro/Convex authoritative for shared semantic thread state, commands,
    receipts, attention, and durable execution intent;
 2. keep Omega or an Omega-derived supervisor authoritative for coding-agent
    process execution, workspaces, tools, and run artifacts;
-3. add cloud thread turns to the leased machine-effect lane;
-4. add Omega's typed command client and durable local outbox before presenting
+3. regularize Omega's existing Convex spike and network disclosures, then ship
+   a read-only cloud-thread projection before adding desktop writes;
+4. add cloud thread turns to the leased machine-effect lane and prove the
+   runtime from Pro web or mobile;
+5. add Omega's typed command client and durable local outbox before presenting
    a shared thread as writable in the desktop app;
-5. add true conversation resume and one private computer per account after the
+6. target native Omega agent threads first; external ACP agents need a separate
+   Omega-owned portable transcript before they can offer the same guarantees;
+7. express cloud placement through the existing `Reach::Shared` policy seam,
+   selected before the first message, while keeping local placement the
+   default;
+8. add true conversation resume and one private computer per account after the
    owner-only turn canary works;
-6. use Convex Agent concepts selectively, without replacing Pro's current
+9. use Convex Agent concepts selectively, without replacing Pro's current
    thread contract;
-7. fork the Convex backend only after an application-level implementation
-   demonstrates a backend limitation that matters to the product.
+10. keep a Convex backend fork outside the near-term plan.
 
 ## What exists now
 
@@ -128,6 +140,46 @@ This is a compatibility spike and a small inbox window. Omega does not yet
 subscribe to the selected shell's semantic transcript, submit controller
 commands, persist a Pro command outbox, or present cloud threads in the normal
 Agent Panel.
+
+The final seam audit identifies several release constraints around this spike:
+
+- `omega_convex` is not registered in `OMEGA_DELTAS` and currently opens a
+  standalone, query-specific window. It should either become a registered
+  product integration or remain gated as development-only code.
+- The OpenAgents and Convex hosts used by this flow are absent from Omega's
+  endpoint allowlist. Shipping cloud synchronization requires deliberate
+  entries with purpose, owner, and review policy.
+- Native Omega agent threads persist their full transcript in the agent store,
+  while the sidebar metadata lives in a separate metadata store. External ACP
+  threads depend on the provider's `session/load` and do not give Omega an
+  equivalent durable transcript.
+- `acp_thread` provides a useful in-memory projection across native and
+  external agents, but some entity references, including diff and image IDs,
+  do not survive process restart and are not a portable cloud record.
+
+These constraints make the native Omega agent the right first scope. External
+Claude Code, Codex, and other ACP sessions should join the cloud contract only
+after Omega owns a registered, portable transcript for them.
+
+### Existing placement and publication seams
+
+Omega already has an audience policy for each thread:
+`Reach::{ThisComputer, Shared}`. The reach is bound when a thread is created,
+cannot be rebound later, and is checked through `may_publish()`. Cloud
+placement should become the first transport behind `Reach::Shared`. It should
+not become another `ExecutorClass`; Omega remains the executor while reach
+decides whether the thread may cross the local-machine boundary.
+
+The existing device and host bridge projections also establish the disclosure
+pattern for optional local-thread mirroring. They publish bounded state while
+omitting reasoning, tool arguments, tool output, and diffs, and they apply a
+safety gate and truncation marker. A future local mirror should reuse that
+policy shape rather than copying the local transcript by default.
+
+All Work already models cloud control as generation-fenced commands such as
+`StartAgentSession`, `RecordActivity`, and `ControlSession`, using references
+instead of embedding sensitive payloads. The cloud-thread command vocabulary
+should follow that boundary.
 
 ### Omega execution in the cloud
 
@@ -291,26 +343,19 @@ Costs:
 This is the likely product architecture after the owner canary, not a
 prerequisite for proving cloud thread turns.
 
-### Option F: fork the Convex backend
+### Explicit non-goal: a Convex backend fork
 
-A fork can change function limits, scheduling, worker protocols, query
-behavior, or deployment topology. The current code already exposes many
-self-hosting knobs and most proposed product behavior belongs in Pro
-functions, components, workers, or infrastructure. A fork would add a second
-upgrade and security burden to the existing exact backend/Rust-client pin.
+Omega and Pro should not plan to fork Convex in the near future. The current
+product gap is an application/runtime gap: Pro does not dispatch admitted
+thread messages into its existing machine-effect lane, and Omega does not yet
+have a productized read/write cloud-thread client. Neither problem requires a
+database fork.
 
-A fork is justified only when a measured need cannot be met by:
-
-- a Convex application function or component;
-- the existing effect outbox and an adjacent worker;
-- a documented self-hosted environment knob;
-- an external indexing, telemetry, or artifact service;
-- an infrastructure change around the stock backend.
-
-The backend is licensed under FSL-1.1-Apache-2.0, with Apache 2.0 applying to a
-version after two years. Internal modification is listed as a permitted use.
-Any plan to expose a modified Convex-like service to customers should receive
-license review before implementation.
+Keep the deployed backend on a reviewed upstream pin, use Pro functions and
+components for state behavior, and use adjacent workers for filesystem and
+process execution. If a backend limitation appears, record it and test the
+application-level or upstream path; do not place a fork on the cloud-thread
+roadmap.
 
 ## Recommended hosted thread architecture
 
@@ -353,6 +398,12 @@ Omega SQLite row. A runtime binding can name:
 - optional resume handle and runtime version;
 - model, profile, funding mode, and budget policy revisions.
 
+In Omega, the thread's placement is the existing audience reach. A cloud
+thread is created with `Reach::Shared` before its first message and remains
+shared for its lifetime. A local thread remains `Reach::ThisComputer` unless a
+future, separately designed migration flow creates a new shared thread. Reach
+is a publication and placement decision, not an executor selection.
+
 Do not put this execution state into `workShells`. The shell should stay a
 bounded presentation projection. A dedicated turn or runtime table can carry
 lease-sensitive fields, while `workDetails` carries semantic transcript rows.
@@ -369,7 +420,7 @@ For a cloud-bound thread, `sendMessage` should atomically:
    current turn policy;
 2. insert the queued user detail;
 3. create a durable turn record with a stable turn ID;
-4. enqueue a machine effect such as `omega.thread.turn.run`;
+4. enqueue a generation-fenced `thread.turn` machine effect;
 5. update the shell projection;
 6. write the event and command receipt.
 
@@ -393,11 +444,19 @@ from the semantic transcript and start a fresh `eval-cli` process for each
 turn. This provides conversational usefulness without claiming process
 continuity. The persistent workspace carries files between turns.
 
-True resume should follow as a separate runtime feature. A resident supervisor
-can hold or restore Omega's `AcpThread` state from an explicit resume artifact.
-The resume contract must bind the thread, workspace, runtime version, model,
-profile, and generation. A stale or incompatible resume handle should fall
-back to disclosed context reconstruction or fail with a visible receipt.
+True resume should follow as a separate runtime feature for the native Omega
+agent. A resident supervisor can hold or restore its state from an explicit
+resume artifact. The resume contract must bind the thread, workspace, runtime
+version, model, profile, and generation. A stale or incompatible resume handle
+should fall back to disclosed context reconstruction or fail with a visible
+receipt.
+
+External ACP agents are a separate continuity project. Their provider session
+IDs and `session/load` behavior are not a portable Omega transcript, and the
+current in-memory projection contains entity references that do not survive a
+restart. Cloud sync for those agents needs an Omega-owned transcript store, a
+registered data-format change, and an explicit adapter for provider resume.
+The first cloud-thread release should not imply that support.
 
 Workspace isolation is needed before more than one thread uses the machine.
 Reasonable early choices are one worktree per cloud thread or one repository
@@ -476,6 +535,11 @@ and computer projection that can answer:
 - its generation, software version, and last activity;
 - whether the next turn is locally funded, user-credential funded, or paid by
   OpenAgents credits.
+
+The missing device identity does not block the owner-only canary: every
+signed-in client belongs to the same tenant and the cloud computer is fixed.
+The product should name this as an owner-v1 constraint and avoid promising
+per-device runtime ownership or routing until that projection exists.
 
 The client must display execution target and funding before admission. Usage
 and cost receipts should bind the account, thread, turn, model, provider,
@@ -626,69 +690,18 @@ that does not turn a function runtime into a secure coding sandbox. Increasing
 limits also increases pressure on the same singleton that serves mutations and
 subscriptions.
 
-### Fork candidates with a plausible product payoff
+### Near-term backend policy
 
-The following ideas could justify a fork after measurement:
+Keep self-hosted Convex close to upstream and make cloud-thread changes in Pro
+application functions, components, effect workers, and surrounding
+infrastructure. Preserve the exact backend/client compatibility pin, test
+upgrades in a canary, and retain rollback receipts.
 
-#### External execution adapter
-
-Add a supported backend protocol for leased external actions. A deployed
-function could schedule an action for an Omega supervisor, and the backend
-would own lease generation, heartbeats, cancellation, and result admission.
-This could replace application-specific polling and make external runtimes a
-first-class Convex execution target.
-
-Pro's effect outbox already implements these semantics. A fork pays off only
-if several applications need the same adapter or polling becomes a measured
-latency or load problem.
-
-#### Push changefeed for workers
-
-Expose a bounded authenticated worker feed for new eligible effects, with
-cursor replay and lease claim. This could reduce two-second polling and improve
-turn start latency. A stock reactive query or a small broker may provide the
-same benefit first.
-
-#### Stream compaction primitive
-
-Add an append-optimized, throttled delta stream with server-side compaction and
-subscription cursors. This could reduce write amplification for many concurrent
-agent streams. Implement and measure the data model in Pro before moving the
-primitive into the database.
-
-#### Tenant resource governance
-
-Enforce per-tenant query, mutation, action, storage, and subscription budgets
-below the application layer. Pro can record and admit quotas now, but backend
-enforcement could protect a multi-tenant service from a defective application
-function or abusive tenant.
-
-#### Deployment cloning and branch environments
-
-Build a managed snapshot-and-clone path for a temporary Convex deployment per
-agent branch, test, or customer preview. This could give coding agents an
-isolated backend, schema, scheduler, and data fixture. Much of this can begin as
-infrastructure around stock export, import, and deployment APIs.
-
-#### Multi-replica or tenant-sharded topology
-
-The deployed backend is a singleton and upstream self-hosting docs emphasize
-that the cloud service is the scale-optimized product. A fork or upstream
-collaboration may become necessary for horizontal routing, failover, or tenant
-shards. This is a large database project and should be driven by capacity and
-availability evidence.
-
-### Fork ideas to reject for now
-
-- embedding the Omega executable and arbitrary workspaces in the Convex
-  backend container;
-- adding a Rust UDF runtime to run Omega in-process;
-- storing complete working trees or raw terminal streams in Convex documents;
-- bypassing Pro's command broker with direct writable native tokens;
-- increasing action limits as a substitute for isolation and durable leases.
-
-These approaches couple process failures and untrusted repository behavior to
-the shared state plane.
+Useful experiments such as coalesced streams, tenant budgets, worker wakeups,
+snapshot-based environments, and deployment restore drills can all begin
+outside the database engine. A limitation discovered during those experiments
+belongs in an upstream issue or a product backlog with measurements. It is not
+a reason to add a backend fork to the short-term roadmap.
 
 ## Pro account experiences this could enable
 
@@ -719,66 +732,131 @@ The architecture can support more than remote chat:
 Each item needs its own product and authority decision. The list describes
 possibilities, not a committed Pro plan.
 
-## Proposed sequence
+## Short-term roadmap
 
-### Phase 0: freeze the cloud thread contract
+The shortest credible path is read-only Omega sync, a Pro-owned runtime proof,
+and then durable Omega writes. The first shippable scope should be native Omega
+agent threads on the owner cloud computer. Resident resume, external ACP
+agents, and per-account computers follow after that loop works.
 
-Decide thread identity, execution target, runtime binding, turn and effect IDs,
-progress bounds, retention, funding disclosure, and local/cloud migration
-behavior. Add contract fixtures before a UI depends on them.
+### Phase 0: regularize the release boundary and freeze contracts
 
-### Phase 1: finish the Omega controller client
+1. Either register `omega_convex` in `OMEGA_DELTAS` as a deliberate product
+   integration or gate the spike out of release builds.
+2. Add the required OpenAgents and Convex hosts to Omega's endpoint allowlist
+   with purpose, owner, and review metadata.
+3. Freeze the cloud thread, transcript row, command, acknowledgement, turn,
+   effect, progress, retention, and funding-disclosure contracts.
+4. Register any required change to the closed `ExecutorDisclosure` surface as
+   a deliberate delta, while keeping cloud placement out of `ExecutorClass`.
+5. Bind cloud placement to `Reach::Shared`, selected before the first message;
+   retain `Reach::ThisComputer` as the default.
+6. Declare native Omega agent threads as the v1 scope. Record external ACP
+   transcript and resume support as a separate compatibility milestone.
 
-Add:
+Exit gate: Omega has no unregistered release behavior or undisclosed network
+destination in this path, the contracts have fixtures, and a thread cannot be
+published without the existing audience gate.
 
-- selected-shell and transcript subscriptions;
-- typed Pro command broker calls;
-- a durable local command outbox with the same operation classes as web and
-  mobile;
-- cached, synchronizing, and live observation states;
-- GPUI rendering for the portable semantic rows and five acknowledgements.
+### Phase 1: read-only cloud threads in Omega
 
-This phase is useful even if cloud execution remains disabled.
+1. Generalize the Convex worker beyond `workShells:attentionInbox` with typed
+   query and decoder boundaries.
+2. Subscribe to the shell list and the selected shell's `listTranscript`
+   projection.
+3. Render cloud threads and their portable semantic rows in the normal Agent
+   Panel, not a fixture-shaped standalone window.
+4. Implement connecting, synchronizing, cached, live, expired-token, and error
+   states while preserving the proven reconnect and token-refresh behavior.
 
-### Phase 2: owner-only hosted turn canary
+Exit gate: a native cloud thread created through Pro is visible in Omega,
+updates on Pro web or mobile appear after reconnect, and Omega still has no
+write capability.
 
-Extend Pro so a cloud-thread message atomically enqueues
-`omega.thread.turn.run`. Add claim, status, progress, complete, and interrupt
-broker paths. Reuse the current owner machine and run one turn at a time.
+### Phase 2: prove the Pro thread runtime from web and mobile
 
-The first canary may reconstruct context for a fresh `eval-cli` process. Label
-that behavior as reconstructed context, not resumed process state.
+1. Make an admitted cloud-thread message atomically create the user detail,
+   durable turn, command receipt, and a generation-fenced `thread.turn` machine
+   effect.
+2. Add claim, running, coalesced progress, completion, failure, cancellation,
+   and stale-generation paths to the existing effect worker.
+3. Run `eval-cli` in an isolated worktree for the thread, reconstructing
+   bounded semantic context for each turn and labeling that behavior.
+4. Route interrupt to the exact turn and process group. Record terminal,
+   quiescence, usage, artifact, and trace receipts.
+5. Prove the complete path from Pro web and mobile before enabling Omega
+   desktop writes.
 
-### Phase 3: resident resume and workspace isolation
+Exit gate: a prompt admitted from Pro creates one turn/effect chain despite
+replay or reconnect, continues after all clients close, streams bounded
+progress, survives worker lease recovery, and can be interrupted without
+accepting a stale completion.
 
-Add an Omega supervisor with explicit resume artifacts, one workspace or
-worktree per thread, attachment staging, coalesced streaming, and cleanup. Prove
-restart, supervisor upgrade, stale generation, and process-tree interruption.
+### Phase 3: add durable Omega writes
 
-### Phase 4: one computer per account
+1. Add a typed client for Pro's HTTPS command broker. Do not grant the native
+   client direct Convex write authority.
+2. Add a durable local outbox with the same command classes as web and mobile:
+   durable message/input/approval commands and live-only runtime control.
+3. Reconcile optimistic local state against admission, effect, turn,
+   quiescence, and verification acknowledgements.
+4. Surface offline, queued, synchronizing, replayed, conflicted, expired, and
+   terminal states in the existing thread UI.
 
-Move to the managed-sandbox lifecycle. Add per-account provisioning,
-concurrency, idle stop, egress, budgets, funding, metering, deletion, and
-support receipts. Keep the owner canary allowlist until the isolation gates
-pass.
+Exit gate: an offline message survives an Omega restart and is admitted at
+most once after reconnect; stale approvals and inputs fail closed; live
+interrupt is never queued for later delivery.
 
-### Phase 5: higher-level agents and memory
+At this point Omega has the first cloud-synced agent loop: create or open a
+native shared thread, observe it on every Pro client, admit work from Omega,
+let the cloud computer continue after the desktop closes, and reconnect to the
+same semantic transcript and receipts.
 
-Experiment with Convex components for retrieval, summarization, scheduled
-programs, work pools, and bounded server-native agents. Keep their output
-behind the Pro command and semantic projection contracts.
+### Phase 4: productize placement and optional local mirroring
 
-### Phase 6: consider a backend fork
+1. Add an explicit `This Computer` or `OpenAgents Cloud` choice at native
+   thread creation, backed by `Reach::ThisComputer` or `Reach::Shared`.
+2. Keep reach immutable after the first message. Treat migration as an export
+   and new-thread flow until a portable handoff contract is proven.
+3. Disclose execution target, model/provider, funding mode, retention,
+   workspace, network, and capability changes before admission.
+4. Add a per-profile default only after the explicit choice is understood;
+   keep the default local.
+5. If local-thread mirroring is offered, pass every publication through
+   `may_publish()` and use the device-bridge redaction pattern: bounded state,
+   no reasoning, tool arguments, tool output, or diffs, plus truncation and
+   safety markers.
 
-Review metrics for polling, stream write amplification, singleton capacity,
-tenant isolation, and deployment cloning. Fork or propose upstream changes only
-for limits that remain after application and infrastructure work.
+Exit gate: tests prove no local thread data crosses the machine boundary
+without `Reach::Shared` and disclosure, and changing a preference cannot
+silently rebind an existing thread.
+
+### Phase 5: continuity and broader account infrastructure
+
+1. Replace per-turn context reconstruction with a versioned native Omega
+   resume artifact and resident supervisor.
+2. Add restart, upgrade, stale-generation, workspace cleanup, and exact
+   process-tree interruption tests.
+3. Design an Omega-owned portable transcript and registered data migration for
+   external ACP agents before promising their cloud sync or resume.
+4. Move from the owner computer to per-account computers only after the owner
+   canary establishes resource, credential, egress, budget, deletion, and
+   support requirements.
+5. Add higher-level Convex components for bounded memory, retrieval,
+   summarization, schedules, and work pools behind the existing Pro authority
+   contracts.
 
 ## Acceptance gates
 
 A hosted thread should not leave owner-only canary status until tests and live
 receipts prove:
 
+- the Omega integration is registered in `OMEGA_DELTAS` and every contacted
+  OpenAgents or Convex host has a deliberate endpoint-allowlist entry;
+- the first supported thread kind is the native Omega agent, while unsupported
+  external ACP threads are labeled and cannot enter the cloud placement flow;
+- `Reach::ThisComputer` remains the default and `may_publish()` prevents local
+  thread state from crossing the machine boundary;
 - one admitted message produces one turn and one effect under replay;
 - a worker crash and lease expiry cannot apply a stale completion;
 - closing every client does not cancel admitted cloud work;
@@ -798,54 +876,62 @@ receipts prove:
 - final output is not labeled verified until an independent verifier accepts
   the exact artifact or commit.
 
-## Decisions still needed
+## Product decisions still needed
 
 1. Is cloud execution included with Pro, usage-billed, credit-funded, or
    available in several tiers?
-2. Does a new Pro thread default to local or cloud execution?
-3. Can a thread move between local and cloud after creation, and what context
-   is portable?
-4. Is the first cloud workspace a repository worktree, a persistent computer
+2. When should the product offer an explicit migration from a local thread to
+   a new shared thread, and which context is portable?
+3. Is the first cloud workspace a repository worktree, a persistent computer
    home, or an ephemeral sandbox with exported artifacts?
-5. Which models may run with user credentials and which use OpenAgents credits?
-6. How long are semantic transcripts, raw traces, workspaces, files, and
+4. Which models may run with user credentials and which use OpenAgents credits?
+5. How long are semantic transcripts, raw traces, workspaces, files, and
    derived memories retained?
-7. Which Pro capabilities are available to Sarah, browser clients, mobile,
+6. Which Pro capabilities are available to Sarah, browser clients, mobile,
    Omega, and third-party MCP clients?
-8. Is tenant identity still one user, or does Pro need organization and shared
+7. Is tenant identity still one user, or does Pro need organization and shared
    workspace indirection before launch?
-9. Which turns require approval before cloud dispatch, network use, Git push,
+8. Which turns require approval before cloud dispatch, network use, Git push,
    deployment, or spending?
-10. What capacity or availability threshold triggers sharding or a Convex fork?
 
 ## Recommendation
 
-Build the owner-only hosted turn canary on the current Pro contracts. The
-implementation should be a new machine effect and thread runtime adapter, not a
-new state plane. In parallel, finish Omega's typed Pro controller client and
-durable outbox so the desktop can participate without receiving write
-authority.
+Build the first cloud-synced agent loop in three proofs: read-only cloud threads
+inside Omega, an owner-only Pro thread runtime exercised from web or mobile,
+and durable Omega writes through the command broker. Use the current Pro
+contracts and add a machine effect plus thread runtime adapter; no new state
+plane is needed.
 
-After that canary, prioritize resident resume, per-thread workspace isolation,
-and the one-computer-per-account lifecycle. Use Convex's agent ecosystem for
-bounded orchestration, memory, files, usage, and scheduled work where it fits.
-Keep the full Omega coding loop on an isolated supervisor.
+Limit v1 to native Omega agent threads. Bind cloud placement to
+`Reach::Shared`, chosen before the first message, and keep local placement as
+the default. Regularize the existing Convex spike and endpoint disclosures
+before adding UI that can publish data. External ACP agents should wait for an
+Omega-owned portable transcript and registered migration.
 
-Defer a Convex backend fork. The current application and worker architecture
-can test the product with less coupling, and the resulting measurements will
-show whether the backend needs an external execution protocol, stream
-primitive, tenant governance, deployment cloning, or horizontal topology.
+After the loop works, prioritize resident resume, per-thread workspace
+isolation, and the one-computer-per-account lifecycle. Use Convex's agent
+ecosystem for bounded orchestration, memory, files, usage, and scheduled work.
+Keep the coding runtime on an isolated supervisor and keep a Convex backend
+fork outside the near-term plan.
 
 ## Source map
 
 Omega:
 
+- `crates/acp_thread/src/thread_projection.rs`
+- `crates/agent/src/db.rs`
+- `crates/agent_ui/src/thread_metadata_store.rs`
+- `crates/app_identity/fixtures/endpoint_allowlist.json`
+- `crates/omega_audience/`
 - `crates/omega_convex/`
+- `crates/omega_device_bridge/`
 - `crates/omega_effectd/src/openagents_session.rs`
+- `crates/omega_host_bridge/`
 - `crates/eval_cli/`
 
 Pro:
 
+- `docs/convex/omega-cloud-threads.md` at `OpenAgentsInc/pro@cbfd96e`
 - `docs/convex/omega-rust-client.md`
 - `docs/convex/command-envelope.md`
 - `docs/convex/client-command-outbox.md`
