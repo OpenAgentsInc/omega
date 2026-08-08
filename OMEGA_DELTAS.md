@@ -304,20 +304,20 @@ cargo test -p omega_deltas
   stale restoration. New Thread also performs the complete transcript-route
   transition, clearing Settings, Work detail, unavailable-route, and workbench
   surface state before focusing the composer.
-- **The default model is `openagents/gpt-5.6-luna`** (owner direction
-  2026-07-30: the core Omega Agent always hits the OpenAgents hosted API
-  first; Gemini is the backup — see `OMEGA-DELTA-0201`). Earlier revisions of
-  this entry recorded `ollama/llama3.1` and then `google/gemini-3.6-flash`;
-  each correction is recorded rather than left to mislead. The hosted default
-  authenticates with the signed-in OpenAgents session, so a fresh install
-  needs no local API key or model server.
+- **The default is `openagents/omega-agent`** (owner direction 2026-08-08:
+  Omega Agent is one cloud-native agent and the OpenAgents API owns its model
+  selection and routing — see `OMEGA-DELTA-0201`). Earlier revisions of this
+  entry recorded `ollama/llama3.1`, `google/gemini-3.6-flash`, and
+  `openagents/gpt-5.6-luna`; each correction is recorded rather than left to
+  mislead. The hosted default authenticates with the signed-in OpenAgents
+  session, so a fresh install needs no local API key or model server.
 - **Why the isolation test alone was not enough.** The service-isolation test
   asserts only that the default provider is `openagents`
   (`crates/app_identity/src/service_isolation.rs`), because what it protects is
   that the default never points at a *Zed* service. That is the right scope for
-  that test, but it leaves the model string unpinned: a rebase could change
-  `gpt-5.6-luna` to any other hosted model and every check would stay
-  green.
+  that test, but it leaves the model string unpinned: a rebase could replace
+  the logical `omega-agent` id with a provider model and every isolation check
+  would stay green.
 - **Enforced by:** `the_agent_ships_enabled`, `the_default_model_is_pinned`,
   `the_primary_new_thread_chord_reaches_the_workspace`,
   `the_new_thread_chord_is_window_global`, and
@@ -7709,7 +7709,7 @@ current image build does not decode it inline.
   `live_tailnet_is_parsed_from_tailscale_status_json` in `agent_ui`, plus
   `phone_pairing_prefers_the_live_tailnet` in `crates/omega_deltas`.
 
-### OMEGA-DELTA-0172 — Model tier control in the zero-base input bar (amended 2026-07-30)
+### OMEGA-DELTA-0172 — One cloud-native Omega Agent in the zero-base input bar
 
 - **Upstream Zed:** full model picker with every provider model.
 - **Omega before:** zero base hid the model picker; the default stayed
@@ -7725,18 +7725,19 @@ current image build does not decode it inline.
   Flash stays reachable as the Gemini backup. Pro stays `openagents/kimi-k3`.
   OpenAgents cloud accepts the user bearer for those exact hosted lanes
   (gemini-3.6-flash, kimi-k3, gpt-5.6-luna).
-- **Amended 2026-07-31 by `OMEGA-DELTA-0202`:** Flash selects
-  `openagents/gemini-3.6-flash`, not `google/gemini-3.6-flash`. It had been
-  pointing at the *direct* Google provider, which needs the person's own Google
-  AI credential — so the middle tier, and the middle rung of the always-work
-  chain, reported "Gemini 3.6 Flash is unavailable" on a machine whose hosted
-  Gemini lane was healthy and serving the other two tiers on the same session.
-  All three tiers are hosted lanes now, which is what this control's own
-  documentation had claimed throughout. A configured direct Google key still
-  has a lane: it sits behind the hosted rung in the fallback chain.
-- **Enforced by:** `omega_model_tier` unit tests, `language_models` openagents
-  provider tests, the OpenAgents chat-completions dual-auth path, and
-  `zero_base_input_bar_offers_flash_and_pro_hosted_lanes` in
+- **Amended 2026-07-31 by `OMEGA-DELTA-0202`:** Flash selected
+  `openagents/gemini-3.6-flash`, not `google/gemini-3.6-flash`, so all three
+  tiers used hosted lanes.
+- **Amended 2026-08-08:** the input bar now presents one **Omega Agent** and no
+  model or reasoning selector. The client sends the logical
+  `openagents/omega-agent` id to the OpenAgents Responses API. The API owns the
+  provider model, reasoning policy, routing, and fallback. This lets routing
+  change without an IDE release and prevents the UI from promising a provider
+  model before the server has made its decision. External agents can still
+  expose their own model and configuration controls.
+- **Enforced by:** `language_models` OpenAgents provider tests,
+  `omega_agent_picker_has_no_client_model_controls` in `agent_ui`, and
+  `zero_base_input_bar_offers_one_cloud_native_omega_agent` in
   `crates/omega_deltas`.
 
 ### OMEGA-DELTA-0173 — One flag-free surface creates three kinds of conversation
@@ -8858,7 +8859,7 @@ startup recheck — survives unchanged behind that dropdown.
   host matrix; and the `OMEGA-DELTA-0200` source assertions in
   `crates/omega_deltas`.
 
-### OMEGA-DELTA-0201 — Hosted Luna default and the always-work provider fallback chain
+### OMEGA-DELTA-0201 — Server-routed Omega Agent default
 
 - **Origin:** owner directive 2026-07-30, after every Omega Agent turn on a
   fresh dev build died with *"Permission error with Google AI's API: Omega
@@ -8866,25 +8867,19 @@ startup recheck — survives unchanged behind that dropdown.
   changed). Set GEMINI_API_KEY…"*. Verbatim intensity: *"NEVER LET ME SEE THIS
   BULLSHIT AGAIN, ALWAYS WORK — CORE OMEGA AGENT MUST ALWAYS HIT OUR API AND
   WORK."*
-- **Default:** the core Omega Agent defaults to `openagents/gpt-5.6-luna` —
-  GPT-5.6 Luna served through the OpenAgents hosted API
-  (`POST /api/v1/chat/completions`, OpenAI passthrough lane armed by the
-  platform key). Gemini becomes the backup, not the front door. The
-  `OMEGA-DELTA-0013` pin and the service-isolation provider assertion moved
-  with it.
-- **Always-work chain:** when a completion lane dead-ends — a non-retryable
-  hosted-auth/permission refusal, or same-lane retries exhausted — the turn
-  automatically falls down the provider chain instead of surfacing a dead
-  turn: hosted Luna (`openagents/gpt-5.6-luna`), then Gemini
-  (`google/gemini-3.6-flash`), then hosted Kimi K3 (`openagents/kimi-k3`),
-  then the default model of any other authenticated provider (a configured
-  direct key). Each rung is tried at most once per turn; the fallback is a
-  turn-local override that never rewrites the person's configured default
-  model; the turn fails only when every rung has failed, with the last honest
-  one-line error.
-- **Copy:** no hosted failure message offers "Set GEMINI_API_KEY" or "send the
-  message again" as the primary remedy; the fallback owns recovery and a
-  direct key is mentioned only as an optional extra lane.
+- **Amended 2026-08-08:** the core agent defaults to the logical
+  `openagents/omega-agent` id and sends OpenAI Responses requests to the
+  OpenAgents API. The client does not name the provider model, choose reasoning
+  effort, or select fallback rungs.
+- **One routing authority:** provider selection, routing, and fallback happen
+  behind the OpenAgents API. If an Omega Agent request fails, the IDE reports
+  that failure and never moves the turn onto a direct Google, OpenAI, or other
+  client provider. This keeps account policy, observability, metadata, and
+  fallback behavior on the server and lets them change without an IDE release.
+- **Environment selection:** production uses `https://api.openagents.com/v1`.
+  Development uses `http://127.0.0.1:8080/v1`, selected by the
+  `language_models.openagents.use_development_api` setting. Both paths reuse
+  the verified OpenAgents session token; neither asks for a local provider key.
 - **Root cause, fixed alongside:** the multi-account registry migration left
   pre-existing identities `candidate_existing` with `recovery: needed`, and
   the signing gate (`validate_signing_selection`, `record_signer_use`)
@@ -8895,124 +8890,37 @@ startup recheck — survives unchanged behind that dropdown.
   (`SignerBrokerError::AccountNotSignable`), a genuine mid-proof generation
   bump re-resolves and retries once, and startup hydration resolves
   legacy-root custody instead of reporting `Absent`.
-- **Enforced by:** `the_core_agent_defaults_to_hosted_luna_and_always_falls_back`
+- **Enforced by:** `the_core_agent_defaults_to_the_server_routed_omega_agent`
   and the amended `the_default_model_is_pinned` /
-  `zero_base_input_bar_offers_flash_and_pro_hosted_lanes` in
-  `crates/omega_deltas`; `primary_hosted_model_is_gpt_56_luna` in
-  `language_models`; `luna_is_the_default` in `agent_ui`;
-  `migrated_candidate_existing_account_without_recovery_signs` and
+  `zero_base_input_bar_offers_one_cloud_native_omega_agent` in
+  `crates/omega_deltas`; OpenAgents request and endpoint tests in
+  `language_models`; `omega_agent_does_not_fall_back_to_a_client_provider` in
+  `agent`; `migrated_candidate_existing_account_without_recovery_signs` and
   `partition_identity_service_resolves_legacy_root_storage` in
-  `omega_identity`; and
-  `hosted_failure_copy_names_the_automatic_fallback_not_a_key` in
-  `language_models`.
+  `omega_identity`.
 
-### OMEGA-DELTA-0202 — One routed decision behind every model label, and no lane dead-ends
+### OMEGA-DELTA-0202 — One server authority for Omega Agent routing
 
-- **Origin:** owner evidence 2026-07-31, on a build carrying
-  `OMEGA-DELTA-0201`. Three defects in one window, all client-side.
-
-**The label lied.** A pre-existing thread showed **Luna** on the tier control
-while the disclosure line under it read `openagents/kimi-k3` and the status
-line agreed with the disclosure. Kimi is what answered. This is
-`OMEGA-DELTA-0131`'s defect restated on a newer control, and it has the same
-cause it had then: **two selections, not connected to each other.**
-
-- The disclosure read the thread's own model, through
-  `ExecutorDisclosure` — a projection over the thread's durable record.
-- The tier control read `omega_model_tier::selected()`, a process-wide static
-  that is *the standing choice for the next connection* and resets to Luna at
-  every launch. Reopening a Kimi thread in a new process therefore drew
-  **Luna** on the control, with nothing having moved.
-
-A control whose face comes from a different place than the work cannot be kept
-in agreement by care. It is only ever accidentally right, which is why the
-repair is structural rather than a corrected read: `crates/agent_ui/src/omega_routed_model.rs`
-holds `RoutedModel`, derived from the disclosure record, and the tier face, the
-disclosure line and the status line are all functions of it. The standing
-choice still decides what a *new* conversation starts on — that is a truthful
-statement about the next turn — and it is no longer permitted to describe a
-thread that has already resolved a model. An off-chain model (a fallback rung
-on a direct-key provider) is *named*, never dressed in a tier word it is not
-on.
-
-**The rung is part of the answer.** `OMEGA-DELTA-0201`'s fallback lived
-entirely in a local variable of the turn loop, so while a turn ran on Kimi
-after Luna died, every label still said Luna — truthfully reporting the
-configured model, and wrong about what was answering. `Thread::active_turn_model`
-is now the single model-level authority: the configured model at rest, the live
-rung while a turn is on one. It is turn-local and cleared when the turn ends,
-because the fallback still never rewrites the person's default.
-
-**A lane inside the turn dead-ended.** The owner watched a turn retry
-(*"Attempt 2 of 2"*) and then terminate with the chain never consulted, while a
-later turn walked Luna → Flash → Kimi correctly. Compaction is the lane that
-could do that: it runs at the head of every turn iteration, and its
-retry-exhausted arm returned outright instead of walking the chain — so a long
-pre-existing thread, whose first act is a compaction, could exhaust its retries
-and die on its own summary. `advance_to_next_rung` is now one implementation
-shared by both lanes, and compaction moves onto the rung with the rest of the
-turn rather than continuing to stream at a lane the turn just proved dead.
-
-- **The walk could also see nothing.** The named rungs were resolved through
-  `LanguageModelRegistry::available_models`, which filters out every provider
-  the registry has not marked authenticated. The hosted lanes authenticate at
-  *request* time — the session is resolved inside the stream — so a stale
-  readiness flag could empty an "always work" chain without one rung being
-  asked. Named rungs now resolve from the provider directly. A rung that truly
-  cannot serve fails on its own attempt and the walk moves on; that is the
-  honest ordering.
-
-**Flash was pointed at the wrong provider.** `ModelTier::Flash` mapped to
-`google/gemini-3.6-flash`, the *direct* Google provider, which needs the
-person's own Google AI credential — while this module's own documentation
-called Flash a hosted lane, and the hosted Gemini lane was healthy and serving
-the other two tiers on the same session. So *"Gemini 3.6 Flash is unavailable"*
-was the client correctly reporting a missing personal key, and the middle rung
-of the always-work chain was unreachable by design. `HostedModel::Gemini36Flash`
-serves it now and the tier points at `openagents/gemini-3.6-flash`. The direct
-Google rung is kept behind the hosted one rather than deleted: a person who has
-configured a key keeps that lane.
-
-**The status line said too much.** It read
-`Receipt 0 · Route: Omega Agent (general reasoning) · override: automatic ·
-fallback: none` — a dispatch reference, a router summary, an override mode and
-a route-fallback state. None of that is a fact about the person's work, and the
-owner's standing no-exposition law applies to it. It now carries at most the
-model name, from the same routed decision as the other two surfaces. The route
-receipt is still recorded and still reachable; it is not composer copy.
-`OMEGA-DELTA-0179` is amended, not withdrawn: the line is still drawn on both
-the ordinary and zero-base surfaces after the physical session replaces the
-loading composer, which is the property that delta exists for.
-
-- **What this does not claim.** The exact live sequence that produced the
-  terminated Luna turn was not reproduced in a harness. Two dead-ends were
-  found by reading, and both are fixed and covered: the compaction arm and the
-  authenticated-only rung lookup. A non-retryable stream failure and a
-  retry-exhausted stream failure both already advanced correctly, and now have
-  tests that will fail if they stop.
-
-**Amended by `OMEGA-DELTA-0207`.** This delta covered a thread that had already
-resolved a model. Before resolution the routed decision was `None`, every
-surface fell through to the process-wide standing tier, and the composer read
-**Luna** while the send dispatched `openagents/gemini-3.6-flash`. The
-disclosure now reads `Thread::routed_model_pair`, a strict superset of
-`active_turn_model` that still consults the live fallback rung first.
-
-- **Enforced by:** `one_routed_decision_answers_every_label_and_no_lane_dead_ends`
-  and the amended `the_thread_surface_renders_the_executor_line_from_the_record`
-  in `crates/omega_deltas`;
-  `every_surface_reports_the_routed_model_when_the_stored_default_differs`,
-  `no_disclosed_model_produces_two_different_answers`,
-  `an_unrouted_thread_falls_back_to_the_standing_choice` and
-  `an_empty_identifier_is_not_a_routed_model` in `agent_ui`;
-  `the_face_names_the_routed_model_not_the_standing_choice`,
-  `an_off_tier_model_is_named_rather_than_labelled_with_a_tier` and
-  `flash_stays_reachable_as_the_hosted_gemini_backup` in `agent_ui`;
-  `flash_is_served_by_the_hosted_lane` in `language_models`; and
-  `test_a_dead_stream_lane_advances_to_the_next_rung`,
-  `test_a_retry_exhausted_stream_lane_advances_to_the_next_rung`,
-  `test_a_dead_compaction_lane_advances_to_the_next_rung` and
-  `test_the_labels_follow_the_rung_that_is_serving_the_turn` in `agent`.
+- **Origin:** owner evidence 2026-07-31 showed why independent client model
+  state drifts: the input bar said Luna while Kimi answered, and fallback
+  state could change without the label changing.
+- **Amended 2026-08-08:** Omega Agent no longer exposes provider models in the
+  IDE. The client sends one logical `omega-agent` model to the OpenAgents
+  Responses API. The API owns provider selection, reasoning, routing, and
+  fallback.
+- **Input-bar contract:** the composer says **Omega Agent** before and after a
+  session exists. Its agent chooser remains available, but its model and
+  reasoning collections are empty. External agents retain their own controls.
+- **Failure contract:** an Omega Agent request never falls through to another
+  client language-model provider. Such a fallback would bypass server account
+  policy and split observability and routing decisions across two authorities.
+- **Records remain exact:** executor disclosures and receipts may still carry
+  exact provider/model metadata returned by the service. That machine-readable
+  state does not become a client routing control.
+- **Enforced by:** `omega_agent_routing_has_one_server_authority` in
+  `crates/omega_deltas`; request-shape and endpoint tests in `language_models`;
+  `omega_agent_picker_has_no_client_model_controls` in `agent_ui`; and
+  `omega_agent_does_not_fall_back_to_a_client_provider` in `agent`.
 
 ### OMEGA-DELTA-0203 — An agent Omega offers to delegate to is an agent Omega can start
 
@@ -9200,50 +9108,23 @@ normalized copy, so it stays diagnosable.
   `an_unknown_finish_reason_still_ends_the_turn` in
   `crates/open_ai/src/completion.rs`.
 
-### OMEGA-DELTA-0207 — The label names the model the send will dispatch on
+### OMEGA-DELTA-0207 — The input bar names Omega Agent, not a provider model
 
-**A model label is derived from the pair `Thread::send` will actually dispatch
-on, including before that pair has resolved into a live model.** The
-process-wide standing tier choice is the last resort and nothing else: it
-speaks only in a process that has no model registry at all.
-
-**Why.** `OMEGA-DELTA-0202` made every label a function of one routed decision,
-and closed the case where a resolved thread's surfaces disagreed. It left the
-window before resolution open. `Thread::active_turn_model` answers only once
-the thread's model is `Ready`; a thread whose model is `Unresolved` — it knows
-its provider/model pair and is waiting for the provider to register — reported
-"not disclosed", every surface fell through to `face_for(None, …)`, and that
-arm returned the standing tier. That static begins every launch at `Luna` and
-is never seeded from settings, so the composer read **Luna** while the send
-went to `openagents/gemini-3.6-flash`. This is the `OMEGA-DELTA-0131` defect
-exactly, in the one window `OMEGA-DELTA-0202` did not cover.
-
-**Where the guarantee leaked.** `OMEGA-DELTA-0202`'s check is a source-text
-grep over five render-side files. It never names `send_existing`, `ThreadModel`,
-or `ensure_model`, and it never asserts the converse of its own claim — that
-the model dispatched is the model labelled. Its unit test
-`an_unrouted_thread_falls_back_to_the_standing_choice` asserted only that the
-fallback returns the standing choice, never that the standing choice matches
-what will be dispatched, so the test blessed the hole rather than closing it.
-
-**What now holds.** `Thread::routed_model_pair` publishes the dispatch pair in
-dispatch order — the live fallback rung, then the configured model, then the
-pair a resolution is still pending on. The executor disclosure reads it.
-`pending_routed_model` answers the pre-session question from the registry's
-default model, which is what a new thread is handed and what `ensure_model`
-fills an unset thread with. `face_for_next_turn` is what every composer calls.
-
-**The standing choice is not deleted.** It still records what a person picked
-for the next connection, and `select_before_session` still writes that choice
-into settings, which is what the registry then serves. It is simply no longer
-permitted to *describe* a turn.
-
-- **Enforced by:** `the_label_names_the_model_the_send_will_dispatch_on` in
-  `crates/omega_deltas`; and
-  `a_stale_standing_choice_never_outranks_the_model_the_next_turn_starts_on`,
-  `the_label_follows_the_dispatch_when_the_standing_choice_is_launch_fresh`,
-  `without_a_registry_the_standing_choice_is_the_last_resort` in
-  `crates/agent_ui/src/omega_routed_model.rs`.
+- **Origin:** the former provider-model label could disagree before a thread
+  resolved because it guessed from process-wide model-tier state.
+- **Amended 2026-08-08:** the composer no longer predicts or displays the
+  provider model. Both the pre-session and active-thread paths construct the
+  same `ComposerModelPicker::omega_agent()` value and display **Omega Agent**.
+- **Why:** provider routing is a server decision. A provider model shown before
+  the response begins is either an implementation leak or a promise the IDE
+  cannot keep. Exact routing metadata can arrive with response events for
+  receipts, diagnostics, or a later routing-details UI.
+- **Scope:** this applies to Omega Agent. External ACP agents can still name
+  models and expose configuration controls they own.
+- **Enforced by:**
+  `the_input_bar_names_omega_agent_without_guessing_the_provider_model` in
+  `crates/omega_deltas` and
+  `omega_agent_picker_has_no_client_model_controls` in `agent_ui`.
 
 ### OMEGA-DELTA-0208 — One model, named once, by its own name
 

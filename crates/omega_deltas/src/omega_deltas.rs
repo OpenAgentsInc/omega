@@ -4092,16 +4092,15 @@ mod tests {
         }
     }
 
-    /// OMEGA-DELTA-0013. The shipped default model is pinned by name.
+    /// OMEGA-DELTA-0013. The shipped logical agent is pinned by name.
     ///
     /// The service-isolation test asserts only that the default provider is
     /// `openagents`, because what it protects is that the default never
     /// points at a Zed service. That leaves the model string free: a rebase
-    /// could swap `gpt-5.6-luna` for any other hosted model and every
-    /// existing check would still pass. The owner chose this model
-    /// specifically (2026-07-30: the core Omega Agent defaults to GPT-5.6
-    /// Luna through the OpenAgents hosted API; see `OMEGA-DELTA-0201`), so it
-    /// is pinned here by name.
+    /// could swap `omega-agent` for a provider model and every existing check
+    /// would still pass. The owner chose one cloud-native Omega Agent whose
+    /// provider model and routing are owned by the OpenAgents API
+    /// (2026-08-08; see `OMEGA-DELTA-0201`), so the logical id is pinned here.
     ///
     /// Changing the default model is a real decision. Update this constant and
     /// the `OMEGA-DELTA-0013` entry together, so the registry never disagrees
@@ -4109,7 +4108,7 @@ mod tests {
     #[test]
     fn the_default_model_is_pinned() {
         const EXPECTED_PROVIDER: &str = "openagents";
-        const EXPECTED_MODEL: &str = "gpt-5.6-luna";
+        const EXPECTED_MODEL: &str = "omega-agent";
 
         let settings = default_settings().expect("default settings parse");
         let default_model = default_setting(&settings, "agent.default_model")
@@ -21485,46 +21484,41 @@ mod tests {
         );
     }
 
-    /// OMEGA-DELTA-0172 (amended 2026-07-30, again by OMEGA-DELTA-0202). Zero
-    /// base offers the model tier control in the input bar: Luna (default,
-    /// openagents/gpt-5.6-luna), Flash (openagents/gemini-3.6-flash, the
-    /// backup), and Pro (openagents/kimi-k3) — all three via the OpenAgents
-    /// hosted chat-completions provider.
+    /// OMEGA-DELTA-0172 (amended 2026-08-08). Zero base offers one cloud-native
+    /// Omega Agent in the input bar. The client sends the logical
+    /// `openagents/omega-agent` id through the Responses API and offers no
+    /// provider-model tier control.
     #[test]
-    fn zero_base_input_bar_offers_flash_and_pro_hosted_lanes() {
-        let tier = read_repository_file(OMEGA_MODEL_TIER_PATH);
+    fn zero_base_input_bar_offers_one_cloud_native_omega_agent() {
         let provider = read_repository_file(OPENAGENTS_PROVIDER_PATH);
+        let composer = read_repository_file("crates/agent_ui/src/omega_composer_executor_menu.rs");
+        let conversation_view = read_repository_file(CONVERSATION_VIEW_PATH);
         let thread_view = read_repository_file(ZERO_BASE_THREAD_VIEW_PATH);
 
         assert!(
-            tier.contains("enum ModelTier")
-                && tier.contains("Luna")
-                && tier.contains("Flash")
-                && tier.contains("Pro")
-                && tier.contains("openagents/gpt-5.6-luna")
-                && tier.contains("openagents/gemini-3.6-flash")
-                && tier.contains("openagents/kimi-k3")
-                && tier.contains("ModelTier::ALL"),
-            "OMEGA-DELTA-0172: {} lost the Luna/Flash/Pro tier mapping or renderer.",
-            repository_path(OMEGA_MODEL_TIER_PATH).display()
-        );
-        assert!(
-            provider.contains("gpt-5.6-luna")
-                && provider.contains("gemini-3.6-flash")
-                && provider.contains("kimi-k3")
-                && provider.contains("/api/v1")
+            provider.contains("OMEGA_AGENT_MODEL_ID")
+                && provider.contains("omega-agent")
+                && provider.contains("https://api.openagents.com/v1")
                 && provider.contains("openagents_session")
-                && provider.contains("stream_completion"),
-            "OMEGA-DELTA-0172: {} no longer streams the hosted Luna and Kimi \
-             K3 lanes through the OpenAgents chat-completions path.",
+                && provider.contains("stream_response")
+                && provider.contains("into_open_ai_response"),
+            "OMEGA-DELTA-0172: {} no longer sends the logical Omega Agent \
+             through the authenticated OpenAgents Responses API.",
             repository_path(OPENAGENTS_PROVIDER_PATH).display()
         );
         assert!(
-            thread_view.contains("composer_model_picker")
-                && thread_view.contains("render_zero_base_executor_bar"),
-            "OMEGA-DELTA-0172: {} no longer mounts the Flash/Pro control on \
-             the zero-base input bar.",
-            repository_path(ZERO_BASE_THREAD_VIEW_PATH).display()
+            composer.contains("pub fn omega_agent()")
+                && composer.contains("models: Vec::new()")
+                && composer.contains("traits: Vec::new()")
+                && conversation_view.contains("ComposerModelPicker::omega_agent()")
+                && thread_view.contains("ComposerModelPicker::omega_agent()"),
+            "OMEGA-DELTA-0172: the zero-base input bar no longer presents one \
+             Omega Agent without client model or reasoning controls."
+        );
+        assert!(
+            !body_of(&composer, "omega_agent").contains("ModelTier::ALL"),
+            "OMEGA-DELTA-0172: {} restored provider-model tiers to Omega Agent.",
+            repository_path("crates/agent_ui/src/omega_composer_executor_menu.rs").display()
         );
     }
 
@@ -26576,11 +26570,12 @@ mod tests {
         }
     }
 
-    /// OMEGA-DELTA-0201. The core Omega Agent defaults to the hosted
-    /// OpenAgents Luna lane and a dead-ended completion lane falls down the
-    /// provider chain automatically instead of surfacing a dead turn.
+    /// OMEGA-DELTA-0201 (amended 2026-08-08). The core Omega Agent defaults to
+    /// one logical OpenAgents agent. Provider routing and fallback live behind
+    /// the Responses API, so a failed request never falls through to a client
+    /// provider.
     #[test]
-    fn the_core_agent_defaults_to_hosted_luna_and_always_falls_back() {
+    fn the_core_agent_defaults_to_the_server_routed_omega_agent() {
         let settings = default_settings().expect("default settings parse");
         let default_model = default_setting(&settings, "agent.default_model")
             .expect("agent.default_model must be present in the shipped defaults");
@@ -26596,152 +26591,67 @@ mod tests {
             default_model
                 .get("model")
                 .and_then(serde_json::Value::as_str),
-            Some("gpt-5.6-luna"),
-            "OMEGA-DELTA-0201: the shipped default model must be GPT-5.6 Luna \
-             (owner direction 2026-07-30)."
+            Some("omega-agent"),
+            "OMEGA-DELTA-0201: the shipped default must use the logical Omega \
+             Agent id so the server owns model selection."
         );
 
         let provider = read_repository_file(OPENAGENTS_PROVIDER_PATH);
         assert!(
-            provider.contains("Gpt56Luna")
-                && provider.contains("gpt-5.6-luna")
-                && provider.contains("HostedModel::Gpt56Luna))"),
-            "OMEGA-DELTA-0201: {} no longer serves GPT-5.6 Luna as the hosted \
-             provider default.",
+            provider.contains("pub const OMEGA_AGENT_MODEL_ID: &str = \"omega-agent\"")
+                && provider.contains("vec![self.create_language_model()]")
+                && provider.contains("stream_response(")
+                && provider.contains("request.thinking_allowed = false")
+                && provider.contains("request.thinking_effort = None"),
+            "OMEGA-DELTA-0201: {} no longer exposes one logical, server-routed \
+             Omega Agent over the Responses API.",
             repository_path(OPENAGENTS_PROVIDER_PATH).display()
         );
 
         let thread = read_repository_file(AGENT_THREAD_PATH);
         assert!(
-            thread.contains("next_turn_fallback_model"),
-            "OMEGA-DELTA-0201: {} lost the automatic provider fallback walk; \
-             a hosted-auth failure dead-ends the turn again.",
+            thread.contains("let is_omega_agent =")
+                && thread.contains("if is_omega_agent {")
+                && body_of(&thread, "next_turn_fallback_model").contains("return None;"),
+            "OMEGA-DELTA-0201: {} can fall through from Omega Agent to a \
+             client provider, splitting routing policy between client and server.",
             repository_path(AGENT_THREAD_PATH).display()
-        );
-        let luna = thread
-            .find("(\"openagents\", \"gpt-5.6-luna\")")
-            .expect("OMEGA-DELTA-0201: the fallback chain lost the hosted Luna rung");
-        let gemini = thread
-            .find("(\"google\", \"gemini-3.6-flash\")")
-            .expect("OMEGA-DELTA-0201: the fallback chain lost the Gemini backup rung");
-        let kimi = thread
-            .find("(\"openagents\", \"kimi-k3\")")
-            .expect("OMEGA-DELTA-0201: the fallback chain lost the Kimi K3 rung");
-        assert!(
-            luna < gemini && gemini < kimi,
-            "OMEGA-DELTA-0201: the fallback order changed. The owner-directed \
-             order is hosted Luna, then Gemini, then Kimi K3, then any other \
-             authenticated direct-key provider."
-        );
-        assert!(
-            thread.contains("is_authenticated(cx)"),
-            "OMEGA-DELTA-0201: the fallback walk no longer reaches configured \
-             direct-key providers after the hosted rungs."
         );
     }
 
-    /// OMEGA-DELTA-0202. One routed-model authority, and no lane inside a turn
-    /// may dead-end without walking the `OMEGA-DELTA-0201` chain first.
+    /// OMEGA-DELTA-0202 (amended 2026-08-08). The OpenAgents API is the one
+    /// routed-model authority for Omega Agent. The IDE names the agent and
+    /// keeps exact provider routing out of the input bar.
     #[test]
-    fn one_routed_decision_answers_every_label_and_no_lane_dead_ends() {
-        let routed = read_repository_file(OMEGA_ROUTED_MODEL_PATH);
-        for required in [
-            "pub struct RoutedModel",
-            "pub fn from_disclosure(",
-            "pub fn face(&self)",
-            // OMEGA-DELTA-0208 renamed `status_line` to `human_name`: it names
-            // a model, and since 0208 folded the second line away it is a
-            // segment of one line rather than a line. `chrome_line` is the new
-            // half of the same authority — the whole line every surface a
-            // person reads renders.
-            "pub fn human_name(&self)",
-            "pub fn chrome_line(",
-            "pub fn face_for(",
-        ] {
-            assert!(
-                routed.contains(required),
-                "OMEGA-DELTA-0202: {} lost `{required}`. Without one authority \
-                 each label recomputes its own answer and they drift apart, \
-                 which is the `OMEGA-DELTA-0131` defect on a new control.",
-                repository_path(OMEGA_ROUTED_MODEL_PATH).display()
-            );
-        }
-
-        let tier = read_repository_file(OMEGA_MODEL_TIER_PATH);
-        assert!(
-            tier.contains("pub struct RoutedFace") && tier.contains("face: RoutedFace"),
-            "OMEGA-DELTA-0202: {} no longer renders the tier control from the \
-             routed decision. Reading the process-wide standing choice is what \
-             showed `Luna` over a thread Kimi K3 was answering.",
-            repository_path(OMEGA_MODEL_TIER_PATH).display()
-        );
-        assert!(
-            tier.contains("Self::Luna | Self::Flash | Self::Pro => \"openagents\"")
-                && tier.contains("openagents/gemini-3.6-flash"),
-            "OMEGA-DELTA-0202: {} sent the Flash tier back to the direct Google \
-             provider. That rung then needs the person's own Google AI \
-             credential, and the middle of the always-work chain reports \
-             `Gemini 3.6 Flash is unavailable` while the hosted lane is healthy.",
-            repository_path(OMEGA_MODEL_TIER_PATH).display()
-        );
-
+    fn omega_agent_routing_has_one_server_authority() {
         let provider = read_repository_file(OPENAGENTS_PROVIDER_PATH);
         assert!(
-            provider.contains("Gemini36Flash") && provider.contains("gemini-3.6-flash"),
-            "OMEGA-DELTA-0202: {} no longer serves the hosted Gemini lane, so \
-             the Flash tier has nowhere to point.",
+            provider.contains("OMEGA_AGENT_MODEL_ID")
+                && provider.contains("PRODUCTION_API_URL")
+                && provider.contains("DEVELOPMENT_API_URL")
+                && provider.contains("stream_response(")
+                && !provider.contains("HostedModel"),
+            "OMEGA-DELTA-0202: {} restored client-visible provider routing \
+             instead of sending one logical agent to the OpenAgents API.",
             repository_path(OPENAGENTS_PROVIDER_PATH).display()
         );
 
-        // OMEGA-DELTA-0202, amended by OMEGA-DELTA-0207. The disclosure now
-        // reads `routed_model_pair()`, which is a strict superset of
-        // `active_turn_model()`: it consults the live fallback rung *first* and
-        // only then widens to the pair a resolution is still pending on. The
-        // guarantee 0202 bought is unchanged and is asserted where it lives —
-        // inside `routed_model_pair` itself, below — rather than weakened here.
-        let disclosure = read_repository_file(OMEGA_EXECUTOR_DISCLOSURE_PATH);
+        let composer = read_repository_file("crates/agent_ui/src/omega_composer_executor_menu.rs");
         assert!(
-            disclosure.contains("routed_model_pair()")
-                || disclosure.contains("active_turn_model()"),
-            "OMEGA-DELTA-0202 (amended by OMEGA-DELTA-0207): {} reads the \
-             configured model again. While a turn is on a fallback rung, that \
-             names a model which is not answering.",
-            repository_path(OMEGA_EXECUTOR_DISCLOSURE_PATH).display()
+            body_of(&composer, "omega_agent").contains("label: \"Omega Agent\".into()")
+                && body_of(&composer, "omega_agent").contains("models: Vec::new()")
+                && body_of(&composer, "omega_agent").contains("traits: Vec::new()"),
+            "OMEGA-DELTA-0202: {} exposes a provider model or client reasoning \
+             decision for Omega Agent again.",
+            repository_path("crates/agent_ui/src/omega_composer_executor_menu.rs").display()
         );
 
         let thread = read_repository_file(AGENT_THREAD_PATH);
         assert!(
-            body_of(&thread, "routed_model_pair").contains("self.active_turn_model()"),
-            "OMEGA-DELTA-0202 (amended by OMEGA-DELTA-0207): `routed_model_pair` \
-             in {} no longer consults the live fallback rung first, so the \
-             record every label is derived from can name the configured model \
-             while another rung is answering.",
-            repository_path(AGENT_THREAD_PATH).display()
-        );
-        for required in [
-            "fn active_turn_model(",
-            "fn set_turn_fallback_model(",
-            "fn advance_to_next_rung(",
-        ] {
-            assert!(
-                thread.contains(required),
-                "OMEGA-DELTA-0202: {} lost `{required}`.",
-                repository_path(AGENT_THREAD_PATH).display()
-            );
-        }
-        assert!(
-            thread.matches("Self::advance_to_next_rung(").count() >= 2,
-            "OMEGA-DELTA-0202: {} has a lane inside a turn that dead-ends \
-             without walking the chain. Compaction runs at the head of every \
-             iteration, and its retry-exhausted arm used to return outright.",
-            repository_path(AGENT_THREAD_PATH).display()
-        );
-        assert!(
-            thread.contains("provider(&LanguageModelProviderId::from("),
-            "OMEGA-DELTA-0202: {} resolves the named rungs through \
-             `available_models` again, which hides every provider the registry \
-             has not yet marked authenticated — including hosted lanes that \
-             authenticate at request time.",
+            body_of(&thread, "next_turn_fallback_model")
+                .contains("if is_omega_agent {\n            return None;\n        }"),
+            "OMEGA-DELTA-0202: {} can route Omega Agent to another client \
+             provider after the server-routed request fails.",
             repository_path(AGENT_THREAD_PATH).display()
         );
     }
@@ -27080,90 +26990,37 @@ mod tests {
         );
     }
 
-    /// OMEGA-DELTA-0207. The label names the model the send will dispatch on,
-    /// including before that model has resolved.
-    ///
-    /// `OMEGA-DELTA-0202` made every label a function of one routed decision,
-    /// but only once the thread's model was `Ready`. Before that, the routed
-    /// decision was `None` and every surface fell through to the process-wide
-    /// standing tier — a static that begins each launch at `Luna` and is never
-    /// seeded from settings. So the composer said **Luna** while
-    /// `Thread::send` dispatched `openagents/gemini-3.6-flash`.
+    /// OMEGA-DELTA-0207 (amended 2026-08-08). Before and after session
+    /// creation, the input bar names Omega Agent. It does not guess at the
+    /// provider model the server will dispatch.
     #[test]
-    fn the_label_names_the_model_the_send_will_dispatch_on() {
-        // The send path publishes the pair it will dispatch on, including the
-        // `Unresolved` case it used to answer `None` for.
-        let thread_path = repository_path(AGENT_THREAD_PATH);
-        let thread = read_repository_file(AGENT_THREAD_PATH);
-        for required in [
-            "pub fn routed_model_pair(",
-            "ThreadModel::Unresolved(selection) => Some((",
-        ] {
-            assert!(
-                thread.contains(required),
-                "OMEGA-DELTA-0207: {} lost `{required}`. A thread waiting for \
-                 its provider to register already knows the pair \
-                 `send_existing` will dispatch, and answering `None` for it is \
-                 what let the label fall through to the standing choice.",
-                thread_path.display()
-            );
-        }
+    fn the_input_bar_names_omega_agent_without_guessing_the_provider_model() {
+        let conversation_view = without_comments(&read_repository_file(CONVERSATION_VIEW_PATH));
+        let thread_view = without_comments(&read_repository_file(ZERO_BASE_THREAD_VIEW_PATH));
 
-        // The disclosure — the record every label is derived from — reads that
-        // same answer rather than the narrower `Ready`-only one.
-        let disclosure_path = repository_path(OMEGA_EXECUTOR_DISCLOSURE_PATH);
-        let disclosure = read_repository_file(OMEGA_EXECUTOR_DISCLOSURE_PATH);
-        assert!(
-            disclosure.contains("routed_model_pair()"),
-            "OMEGA-DELTA-0207: {} reads a model that only exists once the \
-             thread has resolved one, so a thread that knows its pair still \
-             reports `not disclosed` and the label guesses.",
-            disclosure_path.display()
-        );
-
-        // The pre-session answer comes from the registry the new thread will
-        // actually be handed, not from the standing static.
-        let routed_path = repository_path(OMEGA_ROUTED_MODEL_PATH);
-        let routed = read_repository_file(OMEGA_ROUTED_MODEL_PATH);
-        for required in [
-            "pub fn pending_routed_model(",
-            "pub fn face_for_next_turn(",
-            "LanguageModelRegistry::try_global(cx)",
-            "registry.read(cx).default_model()",
-        ] {
-            assert!(
-                routed.contains(required),
-                "OMEGA-DELTA-0207: {} lost `{required}`. Without asking the \
-                 registry, the only answer available before a thread resolves \
-                 is the standing choice, which is a guess.",
-                routed_path.display()
-            );
-        }
-
-        // And no composer is allowed to reach for the standing choice directly
-        // again. This is the regression that actually shipped.
-        for (path, forbidden) in [
-            (CONVERSATION_VIEW_PATH, "RoutedFace::pending(selected())"),
+        for (path, source) in [
+            (
+                CONVERSATION_VIEW_PATH,
+                body_of(&conversation_view, "pre_session_model_picker"),
+            ),
             (
                 ZERO_BASE_THREAD_VIEW_PATH,
-                "face_for(routed.as_ref(), selected())",
+                body_of(&thread_view, "composer_model_picker"),
             ),
         ] {
-            let source = without_comments(&read_repository_file(path));
             assert!(
-                !source.contains(forbidden),
-                "OMEGA-DELTA-0207: {} names the model with `{forbidden}`. The \
-                 standing choice is a process-wide static that is `Luna` at \
-                 every launch; a composer that reads it is only accidentally \
-                 in agreement with the send.",
+                source.contains("ComposerModelPicker::omega_agent()"),
+                "OMEGA-DELTA-0207: {} no longer names Omega Agent in the input bar.",
                 repository_path(path).display()
             );
-            assert!(
-                source.contains("face_for_next_turn("),
-                "OMEGA-DELTA-0207: {} no longer derives its face from the \
-                 model the next turn will start on.",
-                repository_path(path).display()
-            );
+            for forbidden in ["face_for_next_turn(", "ModelTier::ALL", "selected()"] {
+                assert!(
+                    !source.contains(forbidden),
+                    "OMEGA-DELTA-0207: {} derives the Omega Agent input-bar \
+                     label from client routing state with `{forbidden}`.",
+                    repository_path(path).display()
+                );
+            }
         }
     }
 
@@ -28083,25 +27940,24 @@ mod tests {
         }
     }
 
-    /// OMEGA-DELTA-0229. The Omega composer uses its dedicated harness/model
-    /// picker geometry instead of collapsing model selection into a generic
-    /// context menu.
+    /// OMEGA-DELTA-0229 (amended 2026-08-08). The Omega composer keeps its
+    /// dedicated agent picker, but Omega Agent has no model or reasoning pane.
+    /// External agents can still expose those controls.
     #[test]
-    fn omega_composer_uses_the_omega_model_picker() {
+    fn omega_composer_uses_the_agent_picker_without_omega_model_controls() {
         let menu = without_comments(&read_repository_file(
             "crates/agent_ui/src/omega_composer_executor_menu.rs",
         ));
         for required in [
             "struct OmegaComposerModelMenu",
             "Label::new(model_label)",
-            "w(px(460.))",
-            "h(px(420.))",
-            "w(px(148.))",
+            "pub fn omega_agent()",
+            "let has_model_controls =",
+            "models: Vec::new()",
+            "traits: Vec::new()",
+            "\"Choose agent\"",
+            "px(224.)",
             "Label::new(\"Agents\")",
-            "Label::new(\"Models\")",
-            "ModelTier::ALL",
-            "tier.model_name()",
-            "tier.description()",
             "IconName::Check",
             "on_action(cx.listener(Self::select_next))",
             "on_action(cx.listener(Self::select_previous))",
@@ -28112,13 +27968,17 @@ mod tests {
         ] {
             assert!(
                 menu.contains(required),
-                "OMEGA-DELTA-0229: Omega model picker lost `{required}`"
+                "OMEGA-DELTA-0229: Omega agent picker lost `{required}`"
             );
         }
         assert!(
             !menu.contains("Label::new(current_label)"),
-            "OMEGA-DELTA-0229: the composer trigger regressed to an executor label instead of \
-             Omega's brand-mark plus model face"
+            "OMEGA-DELTA-0229: the composer trigger regressed to an executor \
+             label instead of Omega Agent"
+        );
+        assert!(
+            !body_of(&menu, "omega_agent").contains("ModelTier::ALL"),
+            "OMEGA-DELTA-0229: Omega Agent restored a client model tier control"
         );
     }
 
