@@ -8106,7 +8106,7 @@ checksum = "e7c5cedc30da3a610cac6b4ba17597bdf7152cf974e8aab3afb3d54455e371c8"
 [[package]]
 name = "immortal-client"
 version = "0.0.1"
-source = "git+https://github.com/OpenAgentsInc/immortal?rev=a4fff0985c0236e29a74c2db84f941d54df4d0b9#a4fff0985c0236e29a74c2db84f941d54df4d0b9"
+source = "git+https://github.com/OpenAgentsInc/immortal?rev=5838b23a97fd32d9744ad36f1025275341243077#5838b23a97fd32d9744ad36f1025275341243077"
 dependencies = [
  "immortal-core",
  "secp256k1 0.31.1",
@@ -8118,7 +8118,7 @@ dependencies = [
 [[package]]
 name = "immortal-core"
 version = "0.0.1"
-source = "git+https://github.com/OpenAgentsInc/immortal?rev=a4fff0985c0236e29a74c2db84f941d54df4d0b9#a4fff0985c0236e29a74c2db84f941d54df4d0b9"
+source = "git+https://github.com/OpenAgentsInc/immortal?rev=5838b23a97fd32d9744ad36f1025275341243077#5838b23a97fd32d9744ad36f1025275341243077"
 dependencies = [
  "secp256k1 0.31.1",
  "serde",
@@ -9629,6 +9629,8 @@ dependencies = [
  "http_client",
  "immortal-client",
  "log",
+ "paths",
+ "rand 0.9.4",
  "serde_json",
  "smol",
  "ui",

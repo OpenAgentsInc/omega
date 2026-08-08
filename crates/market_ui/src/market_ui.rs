@@ -9,6 +9,7 @@
 mod discovery;
 mod panel;
 mod session_flow;
+mod session_transport;
 
 use gpui::{App, actions};
 use workspace::Workspace;
@@ -21,8 +22,13 @@ pub use discovery::{
 };
 pub use panel::MarketPanel;
 pub use session_flow::{
-    SESSION_FLOW_TRACKING_ISSUE, SessionFlowAvailability, session_flow_availability,
+    AdmitOutcome, CancelEntry, CloseEntry, MarketSession, QuoteCandidate,
+    SESSION_FLOW_TRACKING_ISSUE, SESSION_STORE_DIRECTORY, SESSION_STORE_SCHEMA,
+    SessionFlowAvailability, SessionPhase, StatusEntry, StatusLane, StatusSlot, fold_status_lanes,
+    load_stored_records, select_quote, session_flow_availability, swp_profile_support,
+    throwaway_session_signer, wrap_for_transport,
 };
+pub use session_transport::{SESSION_SUBSCRIPTION_ID, SessionSocketEvent, run_session_socket};
 
 actions!(
     market,
@@ -36,9 +42,10 @@ actions!(
 
 pub const MARKET_PANEL_ENVIRONMENT_VARIABLE: &str = "OMEGA_MARKET_PANEL";
 
-/// Explicit development gate (PRODUCT.md): the Markets panel is absent from
-/// normal builds until the negotiated session flow behind
-/// `session_flow::session_flow_availability` is implemented.
+/// Explicit development gate (PRODUCT.md): the Markets panel stays absent
+/// from normal builds. The negotiated session flow is implemented, but the
+/// panel targets the local Immortal dev relay and its no-spend provider, so
+/// it remains a development surface.
 pub fn market_panel_enabled() -> bool {
     std::env::var(MARKET_PANEL_ENVIRONMENT_VARIABLE).as_deref() == Ok("1")
 }
