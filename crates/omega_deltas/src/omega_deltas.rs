@@ -18983,10 +18983,10 @@ mod tests {
         );
     }
 
-    /// OMEGA-DELTA-0133. The default agent surface is the closed six-tool
+    /// OMEGA-DELTA-0133. The default agent surface is the closed native-tool
     /// basic profile.
     #[test]
-    fn the_basic_profile_is_the_default_six_tool_surface() {
+    fn the_basic_profile_has_the_closed_native_tool_surface() {
         let settings = default_settings().expect("default settings must parse");
         let agent = settings
             .get("agent")
@@ -19031,13 +19031,24 @@ mod tests {
                 name.as_str()
             })
             .collect::<std::collections::BTreeSet<_>>();
-        let expected = ["bash", "delegate", "edit", "read", "resume_thread", "write"]
-            .into_iter()
-            .collect::<std::collections::BTreeSet<_>>();
+        let expected = [
+            "bash",
+            "delegate",
+            "edit",
+            "market_execute_swap",
+            "market_network_status",
+            "market_swap_quote",
+            "market_swap_status",
+            "read",
+            "resume_thread",
+            "write",
+        ]
+        .into_iter()
+        .collect::<std::collections::BTreeSet<_>>();
         assert_eq!(
             actual, expected,
             "OMEGA-DELTA-0133: the model-visible basic surface must be exactly \
-             read, write, edit, bash, delegate, and resume_thread."
+             the six coding tools plus the four built-in market tools."
         );
         assert!(
             !actual.contains("search_web"),

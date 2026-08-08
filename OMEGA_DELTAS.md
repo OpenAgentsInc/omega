@@ -6528,13 +6528,15 @@ field, which the lane already held for the pin check.
   supported configuration and this suite will not object — what it will not
   allow again is an `exo`-harness lane that cannot find its own runner.
 
-### OMEGA-DELTA-0133 — A fresh Omega Agent has six tools, and the broad editor is explicit
+### OMEGA-DELTA-0133 — A fresh Omega Agent has a closed native tool surface
 
 ProductSpec revision 2 makes the reliable no-harness agent the default. A fresh
-thread now starts on `basic`, whose entire model-visible surface is `read`,
-`write`, `edit`, `bash`, `delegate`, and `resume_thread`. Context-server tools
-are off, so an MCP installation cannot silently add another tool. `search_web`
-is absent; every provider Omega ships refuses it.
+thread now starts on `basic`, whose model-visible surface contains the six
+coding tools (`read`, `write`, `edit`, `bash`, `delegate`, and `resume_thread`)
+and four built-in market tools (`market_network_status`, `market_swap_quote`,
+`market_execute_swap`, and `market_swap_status`). Context-server tools are off,
+so an MCP installation cannot silently add another tool. `search_web` is
+absent; every provider Omega ships refuses it.
 
 The existing implementations and permission identifiers remain intact. The
 basic profile aliases `ReadTool`, `WriteFileTool`, `EditFileTool`,
@@ -6547,10 +6549,10 @@ including its broad built-in and context-server tool sets. No tool was deleted.
 
 `OMEGA-DELTA-0013` already pins the fresh-install model (now
 `openagents/gpt-5.6-luna`, owner direction 2026-07-30); this delta composes
-that provider default with the six-tool profile instead of duplicating the
-model check.
+that provider default with the closed native-tool profile instead of
+duplicating the model check.
 
-- **Enforced by:** `the_basic_profile_is_the_default_six_tool_surface` in
+- **Enforced by:** `the_basic_profile_has_the_closed_native_tool_surface` in
   `crates/omega_deltas`.
 
 ### OMEGA-DELTA-0134 — Destructive Git commands inspect the dirty tree first
@@ -6582,7 +6584,7 @@ terminal output replaces the visible tool-call content.
 
 The `basic` profile renders `basic_system_prompt.hbs`; every other profile keeps
 the inherited broad system prompt. The slim template is ordered as identity,
-communication, six-tool use, work safety, task execution, delegation, system
+communication, native-tool use, work safety, task execution, delegation, system
 information, optional sandbox guidance, optional skills, and instruction
 files. It omits the wide surface's Mermaid essay, grep/find and LSP workflows,
 and editor-specific tool guidance.
@@ -6605,7 +6607,7 @@ continue to hit the provider prompt cache.
 
 ### OMEGA-DELTA-0136 — Basic `read` spends every address the thread can hold
 
-The six-tool profile no longer aliases `read_file` and then leaves artifact,
+The basic profile no longer aliases `read_file` and then leaves artifact,
 delegation, and skill addresses stranded behind hidden canonical tools. Its
 `read` is a dispatcher over the existing readers: project files and images,
 this thread's tool-result registry, thread transcripts resolved from live
@@ -6668,7 +6670,7 @@ created.
 
 The slim-agent proof protocol validates three distinct observations. The
 out-of-box journey binds a candidate, source commit, empty external-executor
-inventory, exact six-tool request surface, direct
+inventory, exact ten-tool request surface, direct
 `google/gemini-3.6-flash` model, coding change, passing verification command,
 completed turn, and content-addressed transcript. The harness journey binds an
 exact installed executor to its successful disclosure and readable session
@@ -6680,7 +6682,7 @@ source commit, and task IDs.
 `result.json`. The `zed-eval` launcher records and forwards the selection to
 both Harbor and Pier agents. The fixed basic surface refuses
 `ZED_EVAL_DISABLE_TOOLS`; a comparison cannot quietly make that profile easier
-by removing one of its six tools. A skipped basic-versus-wide run is a typed
+by removing one of its ten tools. A skipped basic-versus-wide run is a typed
 gap in the proof output, not a passing comparison.
 
 The integrated sweep requires OMEGA-DELTA-0133 through OMEGA-DELTA-0138 in

@@ -26,6 +26,7 @@ use omega_identity::{
     RelayAuthenticationProjection, RelayAuthenticationReceipt, RelayAuthenticationRefusal,
     RelayConnectionAuthenticationState, SigningPurpose, UnsignedEventTemplate,
 };
+use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
 
@@ -151,6 +152,33 @@ pub struct WebSocketRelayAdapter {
     subscription_sequence: u64,
     gap_state: GapState,
     event_cache_truncated: bool,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct PublicRelayEvent {
+    pub id: String,
+    pub public_key: String,
+    pub created_at: u64,
+    pub kind: u16,
+    pub tags: Vec<Vec<String>>,
+    pub content: String,
+}
+
+impl From<Event> for PublicRelayEvent {
+    fn from(event: Event) -> Self {
+        Self {
+            id: event.id.to_hex(),
+            public_key: event.pubkey.to_hex(),
+            created_at: event.created_at.as_secs(),
+            kind: event.kind.as_u16(),
+            tags: event
+                .tags
+                .iter()
+                .map(|tag| tag.as_slice().to_vec())
+                .collect(),
+            content: event.content,
+        }
+    }
 }
 
 enum RelayCustody {
@@ -730,6 +758,83 @@ impl WebSocketRelayAdapter {
                                 .get(2)
                                 .and_then(Value::as_str)
                                 .unwrap_or("relay closed the community subscription");
+                            return Err(SarahConversationError::Relay(reason.to_string()));
+                        }
+                        _ => {}
+                    }
+                }
+            }
+        }
+    }
+
+    fn query_public_once(
+        &mut self,
+        kinds: &[u16],
+        limit: u16,
+    ) -> Result<Vec<Event>, SarahConversationError> {
+        if kinds.is_empty() {
+            return Err(SarahConversationError::InvalidRequest(
+                "at least one event kind is required".into(),
+            ));
+        }
+        self.subscription_sequence = self.subscription_sequence.saturating_add(1);
+        let subscription_id = format!("omega-public-{}", self.subscription_sequence);
+        self.send_json(json!([
+            "REQ",
+            subscription_id,
+            {
+                "kinds": kinds,
+                "limit": limit.clamp(1, 512)
+            }
+        ]))?;
+        let deadline = Instant::now() + QUERY_TIMEOUT;
+        let mut events = BTreeMap::new();
+        loop {
+            match self.next_message_until(deadline)? {
+                IncomingMessage::TimedOut => {
+                    return Err(SarahConversationError::Relay(
+                        "public relay query timed out".into(),
+                    ));
+                }
+                IncomingMessage::Json(value) => {
+                    if self.record_auth_challenge(&value)? {
+                        return Err(SarahConversationError::IdentityRequired);
+                    }
+                    let Some(frame) = value.as_array() else {
+                        continue;
+                    };
+                    match frame.first().and_then(Value::as_str) {
+                        Some("EVENT")
+                            if frame.get(1).and_then(Value::as_str)
+                                == Some(subscription_id.as_str()) =>
+                        {
+                            let Some(event) = frame.get(2) else {
+                                continue;
+                            };
+                            let event = Event::from_json(event.to_string()).map_err(|error| {
+                                SarahConversationError::Relay(format!(
+                                    "public relay returned an invalid event: {error}"
+                                ))
+                            })?;
+                            if event.verify().is_ok() {
+                                events.entry(event.id.to_hex()).or_insert(event);
+                            }
+                        }
+                        Some("EOSE")
+                            if frame.get(1).and_then(Value::as_str)
+                                == Some(subscription_id.as_str()) =>
+                        {
+                            self.send_json(json!(["CLOSE", subscription_id]))?;
+                            return Ok(events.into_values().collect());
+                        }
+                        Some("CLOSED")
+                            if frame.get(1).and_then(Value::as_str)
+                                == Some(subscription_id.as_str()) =>
+                        {
+                            let reason = frame
+                                .get(2)
+                                .and_then(Value::as_str)
+                                .unwrap_or("relay closed the public subscription");
                             return Err(SarahConversationError::Relay(reason.to_string()));
                         }
                         _ => {}
@@ -1726,6 +1831,42 @@ pub fn query_community_events(
                 relay.authenticate(&auth_event)?;
             }
             result => return result,
+        }
+    }
+    Err(SarahConversationError::Relay(
+        "relay authentication did not settle".into(),
+    ))
+}
+
+/// Reads a bounded set of signed public events and completes NIP-42 relay
+/// authentication with the local Omega identity when the relay requires it.
+pub fn query_public_events(
+    relay_urls: Vec<String>,
+    kinds: &[u16],
+    limit: u16,
+) -> Result<Vec<PublicRelayEvent>, SarahConversationError> {
+    let identity_service = Arc::new(IdentityService::system(*app_identity::CHANNEL));
+    let owner_public_key_hex = identity_service
+        .inspect()
+        .map_err(|error| SarahConversationError::Identity(error.to_string()))?
+        .identity
+        .map(|identity| identity.public_key_hex().as_str().to_string())
+        .ok_or(SarahConversationError::IdentityRequired)?;
+    let mut relay = WebSocketRelayAdapter::new(
+        relay_urls.clone(),
+        identity_service,
+        owner_public_key_hex,
+        Vec::new(),
+        Vec::new(),
+    )?;
+    relay.connect()?;
+    for _ in 0..=relay_urls.len() {
+        match relay.query_public_once(kinds, limit) {
+            Err(SarahConversationError::IdentityRequired) => {
+                let auth_event = relay.sign_active_auth_event()?;
+                relay.authenticate(&auth_event)?;
+            }
+            result => return result.map(|events| events.into_iter().map(Into::into).collect()),
         }
     }
     Err(SarahConversationError::Relay(

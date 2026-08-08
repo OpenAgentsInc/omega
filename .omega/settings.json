@@ -1,45 +1,4 @@
 // Project-local settings for working on the omega repo itself.
 // (Language/formatter settings live in the legacy `.zed/settings.json`,
 // which Omega still reads; both files apply.)
-{
-  // The swap-market tool surface (omega#247). A dependency-free MCP server:
-  // network status reads the LIVE public regtest network (read-only, NIP-42
-  // with an ephemeral key); the swap tools stay demo fixtures — no funds.
-  // The `market-demo` skill in `.agents/skills/` teaches agents the flow.
-  // Turn it off here with `"enabled": false` (or via Settings → MCP
-  // Servers), and the tools disappear from every agent in this project.
-  "context_servers": {
-    "market-demo": {
-      "enabled": true,
-      "command": "node",
-      "args": ["scripts/market-demo-mcp.mjs"]
-    }
-  },
-  // Omega Agent uses the Basic profile. Offer this project's market tools to
-  // that profile without enabling unrelated context servers. Swap execution
-  // still requires a person to approve the tool call.
-  "agent": {
-    "profiles": {
-      "basic": {
-        "name": "Basic",
-        "context_servers": {
-          "market-demo": {
-            "tools": {
-              "market_network_status": true,
-              "market_swap_quote": true,
-              "market_execute_swap": true,
-              "market_swap_status": true
-            }
-          }
-        }
-      }
-    },
-    "tool_permissions": {
-      "tools": {
-        "mcp:market-demo:market_execute_swap": {
-          "default": "confirm"
-        }
-      }
-    }
-  }
-}
+{}

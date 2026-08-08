@@ -39,8 +39,8 @@ pub use forensics_cloud::*;
 pub use issue31_nostr::*;
 pub use issue31_provider_handoff::*;
 pub use nostr_websocket_relay::{
-    WebSocketRelayAdapter, publish_community_event, query_community_events,
-    relay_authentication_projection,
+    PublicRelayEvent, WebSocketRelayAdapter, publish_community_event, query_community_events,
+    query_public_events, relay_authentication_projection,
 };
 pub use omega_device_bridge::PROTOCOL as DEVICE_BRIDGE_PROTOCOL;
 pub use omega_device_bridge::{

@@ -12,7 +12,7 @@ use crate::{
     ThreadForkOrigin, ToolPermissionDecision, ToolResultArtifactRegistry, TranscriptBlock,
     TranscriptEntry, TranscriptRole, TranscriptWindowRequest,
     ValidateCandidateDiffApplicabilityTool, WebSearchTool, WriteFileTool,
-    decide_permission_from_settings, tool_result_artifact_source,
+    decide_permission_from_settings, market_demo_tools, tool_result_artifact_source,
 };
 use acp_thread::{ClientUserMessageId, MentionUri, ToolResultArtifactStore};
 use action_log::ActionLog;
@@ -2534,6 +2534,13 @@ impl Thread {
             environment.clone(),
         ));
         self.add_tool(WebSearchTool);
+
+        let (network_status, swap_quote, execute_swap, swap_status) =
+            market_demo_tools(self.project.read(cx).client().http_client());
+        self.add_tool(network_status);
+        self.add_tool(swap_quote);
+        self.add_tool(execute_swap);
+        self.add_tool(swap_status);
 
         self.add_tool(DiagnosticsTool::new(self.project.clone()));
 

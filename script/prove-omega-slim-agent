@@ -17,7 +17,18 @@ from typing import Any
 
 ROOT = Path(__file__).resolve().parent.parent
 DEFAULT_OUTPUT = ROOT / "target/omega-slim-agent-proof"
-BASIC_TOOLS = ["bash", "delegate", "edit", "read", "resume_thread", "write"]
+BASIC_TOOLS = [
+    "bash",
+    "delegate",
+    "edit",
+    "market_execute_swap",
+    "market_network_status",
+    "market_swap_quote",
+    "market_swap_status",
+    "read",
+    "resume_thread",
+    "write",
+]
 SLIM_DELTAS = [
     "OMEGA-DELTA-0133",
     "OMEGA-DELTA-0134",

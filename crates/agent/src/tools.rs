@@ -18,6 +18,7 @@ mod go_to_definition_tool;
 mod grep_tool;
 mod list_agents_and_models_tool;
 mod list_directory_tool;
+mod market_demo_tools;
 mod move_path_tool;
 mod read_file_tool;
 mod read_subagent_transcript_tool;
@@ -92,6 +93,7 @@ pub use go_to_definition_tool::*;
 pub use grep_tool::*;
 pub use list_agents_and_models_tool::*;
 pub use list_directory_tool::*;
+pub use market_demo_tools::*;
 pub use move_path_tool::*;
 pub use read_file_tool::*;
 pub use read_subagent_transcript_tool::*;
@@ -226,6 +228,10 @@ tools! {
     GrepTool,
     ListAgentsAndModelsTool,
     ListDirectoryTool,
+    MarketNetworkStatusTool,
+    MarketSwapQuoteTool,
+    MarketExecuteSwapTool,
+    MarketSwapStatusTool,
     MovePathTool,
     ReadFileTool,
     ReadTool,
@@ -240,8 +246,18 @@ tools! {
     WriteFileTool,
 }
 
-pub const BASIC_TOOL_NAMES: &[&str] =
-    &["read", "write", "edit", "bash", "delegate", "resume_thread"];
+pub const BASIC_TOOL_NAMES: &[&str] = &[
+    "read",
+    "write",
+    "edit",
+    "bash",
+    "delegate",
+    "resume_thread",
+    MarketNetworkStatusTool::NAME,
+    MarketSwapQuoteTool::NAME,
+    MarketExecuteSwapTool::NAME,
+    MarketSwapStatusTool::NAME,
+];
 
 pub fn basic_tool_name(tool_name: &str) -> Option<&'static str> {
     match tool_name {
@@ -251,6 +267,10 @@ pub fn basic_tool_name(tool_name: &str) -> Option<&'static str> {
         TerminalTool::NAME | SandboxedTerminalTool::NAME => Some("bash"),
         SpawnAgentTool::NAME => Some("delegate"),
         ResumeThreadTool::NAME => Some("resume_thread"),
+        MarketNetworkStatusTool::NAME => Some(MarketNetworkStatusTool::NAME),
+        MarketSwapQuoteTool::NAME => Some(MarketSwapQuoteTool::NAME),
+        MarketExecuteSwapTool::NAME => Some(MarketExecuteSwapTool::NAME),
+        MarketSwapStatusTool::NAME => Some(MarketSwapStatusTool::NAME),
         _ => None,
     }
 }

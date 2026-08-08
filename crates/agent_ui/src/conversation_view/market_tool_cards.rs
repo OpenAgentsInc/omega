@@ -1,8 +1,8 @@
 //! Renders market tool results as the inline market cards.
 //!
-//! When a tool call's result carries an `omega.market-demo.*` schema (the
-//! demo MCP server in `scripts/market-demo-mcp.mjs`, and later the live
-//! market lane), the transcript draws the typed card — the network panorama
+//! When a tool call's result carries an `omega.market-demo.*` schema (Omega's
+//! built-in market tools or the external demo MCP server), the transcript
+//! draws the typed card — the network panorama
 //! or the swap lifecycle card — instead of raw JSON prose. Detection is by
 //! payload schema, not tool name alone, so it works identically for the
 //! native agent's MCP tools and for external ACP agents.

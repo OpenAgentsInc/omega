@@ -221,20 +221,30 @@ fn register_language_model_providers(
     credentials_provider: Arc<dyn CredentialsProvider>,
     cx: &mut Context<LanguageModelRegistry>,
 ) {
-    if app_identity::zed_production_services_enabled() {
-        registry.register_provider(
-            Arc::new(CloudLanguageModelProvider::new(
-                user_store,
-                client.clone(),
-                cx,
-            )),
+    // Omega Agent exposes one logical model. Provider selection and routing
+    // happen behind the OpenAgents Responses API.
+    registry.register_provider(
+        Arc::new(OpenAgentsLanguageModelProvider::new(
+            client.http_client(),
             cx,
-        );
-    } else {
+        )),
+        cx,
+    );
+
+    if !app_identity::zed_production_services_enabled() {
         log::info!(
-            "Skipping Zed cloud language model provider; Omega production services isolation is enabled"
+            "Skipping inherited language model providers; Omega uses the OpenAgents Responses API"
         );
+        return;
     }
+    registry.register_provider(
+        Arc::new(CloudLanguageModelProvider::new(
+            user_store,
+            client.clone(),
+            cx,
+        )),
+        cx,
+    );
     registry.register_provider(
         Arc::new(AnthropicLanguageModelProvider::new(
             client.http_client(),
@@ -287,15 +297,6 @@ fn register_language_model_providers(
         Arc::new(GoogleLanguageModelProvider::new(
             client.http_client(),
             credentials_provider.clone(),
-            cx,
-        )),
-        cx,
-    );
-    // Omega Agent exposes one logical model. Provider selection and routing
-    // happen behind the OpenAgents Responses API.
-    registry.register_provider(
-        Arc::new(OpenAgentsLanguageModelProvider::new(
-            client.http_client(),
             cx,
         )),
         cx,

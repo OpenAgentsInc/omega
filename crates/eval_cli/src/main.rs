@@ -52,7 +52,7 @@ use language_model::{
     ANTHROPIC_PROVIDER_ID, LanguageModel, LanguageModelId, LanguageModelProviderId,
     LanguageModelRegistry, SelectedModel,
 };
-use project::{Project, context_server_store::ContextServerStatus};
+use project::Project;
 use settings::SettingsStore;
 use util::path_list::PathList;
 
@@ -175,9 +175,8 @@ const EXIT_TIMEOUT: i32 = 2;
 const EXIT_INTERRUPTED: i32 = 3;
 const MODEL_DISCOVERY_TIMEOUT: Duration = Duration::from_secs(30);
 const MODEL_DISCOVERY_POLL_INTERVAL: Duration = Duration::from_millis(100);
-const CONTEXT_SERVER_READY_TIMEOUT: Duration = Duration::from_secs(30);
-const CONTEXT_SERVER_READY_POLL_INTERVAL: Duration = Duration::from_millis(100);
-const MARKET_CONTEXT_SERVER_ID: &str = "market-demo";
+const TOOL_READY_TIMEOUT: Duration = Duration::from_secs(30);
+const TOOL_READY_POLL_INTERVAL: Duration = Duration::from_millis(100);
 const MARKET_READY_TOOL: &str = "market_network_status";
 
 static TERMINATED: AtomicBool = AtomicBool::new(false);
@@ -625,17 +624,11 @@ mod tests {
         );
         assert_eq!(
             eval_profile_settings(EvalProfile::Market, "")?,
-            r#","default_profile": "eval-market", "profiles": {"eval-market": {"name": "Market", "enable_all_context_servers": true, "tools": {"skill": true}}}"#
+            r#","default_profile": "eval-market", "profiles": {"eval-market": {"name": "Market", "enable_all_context_servers": false, "tools": {"skill": true, "market_network_status": true, "market_swap_quote": true, "market_execute_swap": true, "market_swap_status": true}}}"#
         );
         assert_eq!(
             eval_profile_settings(EvalProfile::Wide, "")?,
             r#","default_profile": "write""#
-        );
-        assert!(eval_context_servers_settings(EvalProfile::Basic).is_empty());
-        assert!(eval_context_servers_settings(EvalProfile::Wide).is_empty());
-        assert!(
-            eval_context_servers_settings(EvalProfile::Market)
-                .contains("scripts/market-demo-mcp.mjs")
         );
         Ok(())
     }
@@ -739,12 +732,10 @@ async fn run_agent(
         // custom copy when an air-gapped benchmark disables tools.
         let disabled_tools = std::env::var("ZED_EVAL_DISABLE_TOOLS").unwrap_or_default();
         let profile_field = eval_profile_settings(profile, &disabled_tools)?;
-        let context_servers_field = eval_context_servers_settings(profile);
         SettingsStore::update_global(cx, |store, cx| {
             let settings = format!(
                 r#"{{
                     "language_models": {language_models_settings},
-                    {context_servers_field}
                     "agent": {{
                         "tool_permissions": {{"default": "allow"}},
                         "default_model": {{
@@ -830,12 +821,6 @@ async fn run_agent(
             Ok(future) => future.await,
             Err(e) => return (Err(e), RunStats::default()),
         };
-    }
-
-    if matches!(profile, EvalProfile::Market)
-        && let Err(error) = wait_for_context_server(&project, MARKET_CONTEXT_SERVER_ID, cx).await
-    {
-        return (Err(error), RunStats::default());
     }
 
     let agent = cx.update(|cx| {
@@ -1013,61 +998,6 @@ async fn run_agent(
     )
 }
 
-async fn wait_for_context_server(
-    project: &Entity<Project>,
-    server_id: &str,
-    cx: &mut AsyncApp,
-) -> Result<()> {
-    let server_store = cx.update(|cx| project.read(cx).context_server_store());
-    let started_at = Instant::now();
-
-    loop {
-        let (is_configured, status) = cx.update(|cx| {
-            let server_store = server_store.read(cx);
-            let configured_server = server_store
-                .configured_server_ids()
-                .into_iter()
-                .find(|configured_id| configured_id.0.as_ref() == server_id);
-            let status = configured_server
-                .as_ref()
-                .and_then(|configured_id| server_store.status_for_server(configured_id));
-            (configured_server.is_some(), status)
-        });
-
-        match status {
-            Some(ContextServerStatus::Running) => {
-                eprintln!("[eval-cli] context server ready: {server_id}");
-                return Ok(());
-            }
-            Some(ContextServerStatus::Error(error)) => {
-                anyhow::bail!("context server {server_id} failed to start: {error}");
-            }
-            Some(ContextServerStatus::Stopped) => {
-                anyhow::bail!("context server {server_id} stopped before the agent started");
-            }
-            Some(ContextServerStatus::AuthRequired) => {
-                anyhow::bail!("context server {server_id} requires authentication");
-            }
-            Some(ContextServerStatus::ClientSecretRequired { error }) => {
-                anyhow::bail!(
-                    "context server {server_id} requires a client secret{}",
-                    error.map_or_else(String::new, |error| format!(": {error}"))
-                );
-            }
-            Some(ContextServerStatus::Starting | ContextServerStatus::Authenticating) | None => {}
-        }
-
-        if started_at.elapsed() >= CONTEXT_SERVER_READY_TIMEOUT {
-            anyhow::bail!(
-                "timed out waiting for context server {server_id}; configured: {is_configured}"
-            );
-        }
-        cx.background_executor()
-            .timer(CONTEXT_SERVER_READY_POLL_INTERVAL)
-            .await;
-    }
-}
-
 async fn wait_for_enabled_tool(
     thread: &Entity<Thread>,
     tool_name: &str,
@@ -1079,20 +1009,12 @@ async fn wait_for_enabled_tool(
             eprintln!("[eval-cli] agent tool ready: {tool_name}");
             return Ok(());
         }
-        if started_at.elapsed() >= CONTEXT_SERVER_READY_TIMEOUT {
+        if started_at.elapsed() >= TOOL_READY_TIMEOUT {
             anyhow::bail!("timed out waiting for enabled agent tool {tool_name}");
         }
         cx.background_executor()
-            .timer(CONTEXT_SERVER_READY_POLL_INTERVAL)
+            .timer(TOOL_READY_POLL_INTERVAL)
             .await;
-    }
-}
-
-fn eval_context_servers_settings(profile: EvalProfile) -> &'static str {
-    if matches!(profile, EvalProfile::Market) {
-        r#""context_servers": {"market-demo": {"enabled": true, "command": "node", "args": ["scripts/market-demo-mcp.mjs"]}},"#
-    } else {
-        ""
     }
 }
 
@@ -1117,7 +1039,7 @@ fn eval_profile_settings(profile: EvalProfile, disabled_tools: &str) -> Result<S
             "ZED_EVAL_DISABLE_TOOLS cannot alter the market profile"
         );
         return Ok(
-            r#","default_profile": "eval-market", "profiles": {"eval-market": {"name": "Market", "enable_all_context_servers": true, "tools": {"skill": true}}}"#
+            r#","default_profile": "eval-market", "profiles": {"eval-market": {"name": "Market", "enable_all_context_servers": false, "tools": {"skill": true, "market_network_status": true, "market_swap_quote": true, "market_execute_swap": true, "market_swap_status": true}}}"#
                 .to_string(),
         );
     }

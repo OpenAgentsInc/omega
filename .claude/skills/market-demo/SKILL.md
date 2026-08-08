@@ -1,11 +1,11 @@
 ---
 name: market-demo
-description: Answer questions about the swap network and run demo asset swaps (LN, BTC, L-BTC) using the market-demo MCP tools. Use when the person asks what the network looks like, wants provider or fee information, or asks to swap sats between rails. Network status reads the live public regtest network (read-only); swaps are demo only — no real funds.
+description: Answer questions about the swap network and run demo asset swaps (LN, BTC, L-BTC) using Omega's market tools. Use when the person asks what the network looks like, wants provider or fee information, or asks to swap sats between rails. Network status reads the live public regtest network (read-only); swaps are demo only — no real funds.
 ---
 
 # Swap market
 
-**Always use the MCP tools themselves** (`market_network_status`,
+**Always use the market tools themselves** (`market_network_status`,
 `market_swap_quote`, `market_execute_swap`, `market_swap_status`) — in this
 app their results render as inline cards (the network map and the swap
 lifecycle card). Never run `scripts/market-demo-mcp.mjs` through the shell
@@ -14,7 +14,8 @@ cards are lost. If the tools are missing from your session, say so instead
 of working around it. "Test the market components" means: call each tool
 and let the cards render.
 
-The `market-demo` MCP server exposes the swap-market flow.
+Omega Agent receives these as built-in tools. The optional `market-demo` MCP
+server exposes the same contract to external clients.
 `market_network_status` reads the LIVE public regtest network (read-only:
 manifest, relay health, provider profiles and offerings). The swap tools are
 demo fixtures — live quoting requires the verified requester engine and is
@@ -61,7 +62,6 @@ conversation.
 
 ## Turning this off
 
-Set `context_servers.market-demo.enabled` to `false` in
-`.omega/settings.json` (or Settings → MCP Servers) to remove the tools;
-delete `.agents/skills/market-demo/` and `.claude/skills/market-demo/` to
-remove this skill.
+Set each `market_*` tool to `false` in the active agent profile to remove the
+tools. Delete `.agents/skills/market-demo/` and `.claude/skills/market-demo/`
+to remove this skill.

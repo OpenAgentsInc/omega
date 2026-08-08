@@ -320,6 +320,7 @@ dependencies = [
  "log",
  "lsp",
  "omega_agent_detect",
+ "omega_effectd",
  "omega_exo_lane",
  "omega_front_door",
  "parking_lot",

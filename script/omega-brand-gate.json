@@ -419,10 +419,6 @@
         "class": "fork_seam",
         "reason": "Companion of Zed Plex Sans, same reason."
       },
-      "Skipping Zed cloud language model provider; Omega production services isolation is enabled": {
-        "class": "omega_contrast",
-        "reason": "Omega-authored log line naming the provider Omega declines to register."
-      },
       "Failed to sign in with your Zed account (401).": {
         "class": "zed_service",
         "reason": "The Zed Cloud provider's own authentication error. Substituting Omega would claim an account Omega does not issue."
