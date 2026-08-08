@@ -293,7 +293,7 @@ impl RenderOnce for SwapCard {
     }
 }
 
-fn demo_stage(delta: f32) -> SwapStage {
+pub(crate) fn demo_stage(delta: f32) -> SwapStage {
     // Six equal beats with a settled hold at the end of the loop.
     match (delta * 6.0) as u32 {
         0 => SwapStage::Quote,
@@ -304,7 +304,7 @@ fn demo_stage(delta: f32) -> SwapStage {
     }
 }
 
-fn demo_card() -> SwapCard {
+pub(crate) fn demo_card() -> SwapCard {
     SwapCard::new(
         SwapAsset::Lightning,
         SwapAsset::Bitcoin,

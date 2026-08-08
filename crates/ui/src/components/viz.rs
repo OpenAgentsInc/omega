@@ -10,7 +10,9 @@
 mod viz_chip;
 mod viz_edge;
 mod viz_geometry;
+mod viz_market_chat_demo;
 mod viz_node;
+mod viz_panorama;
 mod viz_port;
 mod viz_progress_rail;
 mod viz_swap;
@@ -19,7 +21,9 @@ mod viz_zone;
 pub use viz_chip::*;
 pub use viz_edge::*;
 pub use viz_geometry::*;
+pub use viz_market_chat_demo::*;
 pub use viz_node::*;
+pub use viz_panorama::*;
 pub use viz_port::*;
 pub use viz_progress_rail::*;
 pub use viz_swap::*;
@@ -384,6 +388,9 @@ mod tests {
                 .child(VizZone::preview(window, cx))
                 .child(VizProgressRail::preview(window, cx))
                 .child(SwapCard::preview(window, cx))
+                .child(NetworkPanorama::preview(window, cx))
+                .child(NetworkCard::preview(window, cx))
+                .child(MarketChatDemo::preview(window, cx))
         }
     }
 
