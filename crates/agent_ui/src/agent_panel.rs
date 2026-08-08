@@ -108,9 +108,10 @@ use git_ui::git_panel::{
 };
 use gpui::{
     Action, Anchor, Animation, AnimationExt, AnyElement, App, AsyncWindowContext, ClipboardItem,
-    Entity, EventEmitter, ExternalPaths, FocusHandle, Focusable, Hsla, ImageSource, KeyContext,
-    MouseButton, ObjectFit, Pixels, PlatformDisplay, RenderImage, Subscription, Task, TaskExt,
-    WeakEntity, WindowControlArea, WindowHandle, img, prelude::*, pulsating_between,
+    DismissEvent, Entity, EventEmitter, ExternalPaths, FocusHandle, Focusable, Hsla, ImageSource,
+    KeyContext, MouseButton, MouseDownEvent, ObjectFit, Pixels, PlatformDisplay, Point,
+    RenderImage, Subscription, Task, TaskExt, WeakEntity, WindowControlArea, WindowHandle,
+    anchored, deferred, img, prelude::*, pulsating_between,
 };
 use language::LanguageRegistry;
 use language_model::{
@@ -355,6 +356,155 @@ fn omega_executor_icon(
 
 fn omega_thread_icon(row: &omega_threads_sidebar::ThreadRow) -> IconName {
     omega_executor_icon(omega_threads_sidebar::recorded_executor(&row.agent_id))
+}
+
+fn local_agent_data_directory(environment_variable: &str, fallback: &str) -> PathBuf {
+    std::env::var_os(environment_variable)
+        .map(PathBuf::from)
+        .unwrap_or_else(|| util::paths::home_dir().join(fallback))
+}
+
+fn find_file_with_suffix(directory: &Path, suffix: &str) -> Result<Option<PathBuf>> {
+    let entries = match std::fs::read_dir(directory) {
+        Ok(entries) => entries,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+        Err(error) => {
+            return Err(error).with_context(|| format!("failed to read {}", directory.display()));
+        }
+    };
+
+    for entry in entries {
+        let entry = entry.with_context(|| format!("failed to read {}", directory.display()))?;
+        if entry.file_name().to_string_lossy().ends_with(suffix) {
+            return Ok(Some(entry.path()));
+        }
+    }
+    Ok(None)
+}
+
+fn find_codex_session_path(session_id: &str, created_at: DateTime<Utc>) -> Result<Option<PathBuf>> {
+    let codex_home = local_agent_data_directory("CODEX_HOME", ".codex");
+    let suffix = format!("-{session_id}.jsonl");
+    for day_offset in [-1, 0, 1] {
+        let date = created_at + chrono::Duration::days(day_offset);
+        let directory = codex_home.join(date.format("sessions/%Y/%m/%d").to_string());
+        let entries = match std::fs::read_dir(&directory) {
+            Ok(entries) => entries,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => continue,
+            Err(error) => {
+                return Err(error)
+                    .with_context(|| format!("failed to read {}", directory.display()));
+            }
+        };
+        for entry in entries {
+            let entry = entry.with_context(|| format!("failed to read {}", directory.display()))?;
+            if entry
+                .file_name()
+                .to_string_lossy()
+                .ends_with(suffix.as_str())
+            {
+                return Ok(Some(entry.path()));
+            }
+        }
+    }
+
+    find_file_with_suffix(&codex_home.join("archived_sessions"), &suffix)
+}
+
+fn claude_project_directory_name(working_directory: &Path) -> String {
+    working_directory.to_string_lossy().replace('/', "-")
+}
+
+fn find_claude_session_path(
+    session_id: &str,
+    working_directories: &[PathBuf],
+) -> Result<Option<PathBuf>> {
+    let projects_directory =
+        local_agent_data_directory("CLAUDE_CONFIG_DIR", ".claude").join("projects");
+    let file_name = format!("{session_id}.jsonl");
+    for working_directory in working_directories {
+        let encoded_directory = claude_project_directory_name(working_directory);
+        let candidate = projects_directory.join(encoded_directory).join(&file_name);
+        if candidate.is_file() {
+            return Ok(Some(candidate));
+        }
+    }
+
+    let project_entries = match std::fs::read_dir(&projects_directory) {
+        Ok(entries) => entries,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+        Err(error) => {
+            return Err(error)
+                .with_context(|| format!("failed to read {}", projects_directory.display()));
+        }
+    };
+    for entry in project_entries {
+        let entry =
+            entry.with_context(|| format!("failed to read {}", projects_directory.display()))?;
+        let candidate = entry.path().join(&file_name);
+        if candidate.is_file() {
+            return Ok(Some(candidate));
+        }
+    }
+    Ok(None)
+}
+
+fn find_grok_session_path(
+    session_id: &str,
+    working_directories: &[PathBuf],
+) -> Result<Option<PathBuf>> {
+    let sessions_directory = local_agent_data_directory("GROK_HOME", ".grok").join("sessions");
+    for working_directory in working_directories {
+        let encoded_directory = grok_session_directory_name(working_directory);
+        let candidate = sessions_directory.join(encoded_directory).join(session_id);
+        if candidate.is_dir() {
+            return Ok(Some(candidate));
+        }
+    }
+
+    let working_directory_entries = match std::fs::read_dir(&sessions_directory) {
+        Ok(entries) => entries,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+        Err(error) => {
+            return Err(error)
+                .with_context(|| format!("failed to read {}", sessions_directory.display()));
+        }
+    };
+    for entry in working_directory_entries {
+        let entry =
+            entry.with_context(|| format!("failed to read {}", sessions_directory.display()))?;
+        let candidate = entry.path().join(session_id);
+        if candidate.is_dir() {
+            return Ok(Some(candidate));
+        }
+    }
+    Ok(None)
+}
+
+fn grok_session_directory_name(working_directory: &Path) -> String {
+    url::Url::from_file_path(working_directory)
+        .map(|url| url.path().replace('/', "%2F"))
+        .unwrap_or_else(|()| {
+            url::form_urlencoded::byte_serialize(working_directory.to_string_lossy().as_bytes())
+                .collect::<String>()
+                .replace('+', "%20")
+        })
+}
+
+fn find_local_agent_session_path(
+    executor: omega_executor_selector::SelectableExecutor,
+    session_id: &str,
+    created_at: DateTime<Utc>,
+    working_directories: &[PathBuf],
+) -> Result<Option<PathBuf>> {
+    use omega_executor_selector::SelectableExecutor;
+
+    match executor {
+        SelectableExecutor::Codex => find_codex_session_path(session_id, created_at),
+        SelectableExecutor::Claude => find_claude_session_path(session_id, working_directories),
+        SelectableExecutor::Grok => find_grok_session_path(session_id, working_directories),
+        SelectableExecutor::Omega | SelectableExecutor::Exo => Ok(None),
+    }
 }
 
 fn stable_omega_thread_rows(
@@ -4320,6 +4470,7 @@ pub struct AgentPanel {
     /// both the sidebar and a composer draws a rail without touching this, so
     /// widening the window restores what the person asked for.
     sidebar: omega_sidebar::SidebarState,
+    omega_thread_context_menu: Option<(Entity<ContextMenu>, Point<Pixels>, Subscription)>,
     /// Versioned public-channel destinations and their independent snapshots.
     public_channels: crate::omega_public_channels::PublicChannelController,
     /// A bounded in-place registry load failure.
@@ -5167,6 +5318,7 @@ impl AgentPanel {
                     .flatten()
                     .as_deref(),
             ),
+            omega_thread_context_menu: None,
             public_channels,
             public_channels_error,
             _public_channels_load: None,
@@ -8560,6 +8712,108 @@ impl AgentPanel {
             &registered,
             &submitted_drafts,
         )
+    }
+
+    fn deploy_omega_thread_context_menu(
+        &mut self,
+        row: omega_threads_sidebar::ThreadRow,
+        position: Point<Pixels>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let metadata = ThreadMetadataStore::try_global(cx)
+            .and_then(|store| store.read(cx).entry(row.thread_id).cloned());
+        let session_id = metadata
+            .as_ref()
+            .and_then(|metadata| metadata.session_id.as_ref())
+            .map(|session_id| session_id.0.to_string());
+        let executor = omega_threads_sidebar::recorded_executor(&row.agent_id);
+        let path_available = session_id.is_some()
+            && executor.is_some_and(|executor| {
+                matches!(
+                    executor,
+                    omega_executor_selector::SelectableExecutor::Codex
+                        | omega_executor_selector::SelectableExecutor::Claude
+                        | omega_executor_selector::SelectableExecutor::Grok
+                )
+            })
+            && metadata.is_some_and(|metadata| metadata.remote_connection.is_none());
+        let working_directories = row
+            .folder_paths
+            .ordered_paths()
+            .cloned()
+            .collect::<Vec<_>>();
+        let workspace = self.workspace.clone();
+
+        let context_menu = ContextMenu::build(window, cx, move |menu, _window, _cx| {
+            let copy_session_id = session_id.clone();
+            let menu = menu.item(
+                ContextMenuEntry::new("Copy Session ID")
+                    .icon(IconName::Copy)
+                    .disabled(copy_session_id.is_none())
+                    .handler(move |_window, cx| {
+                        if let Some(session_id) = copy_session_id.as_ref() {
+                            cx.write_to_clipboard(ClipboardItem::new_string(session_id.clone()));
+                        }
+                    }),
+            );
+
+            let copy_session_id = session_id.clone();
+            let workspace = workspace.clone();
+            menu.item(
+                ContextMenuEntry::new("Copy Session Path")
+                    .icon(IconName::Copy)
+                    .disabled(!path_available)
+                    .handler(move |_window, cx| {
+                        let (Some(session_id), Some(executor)) =
+                            (copy_session_id.clone(), executor)
+                        else {
+                            return;
+                        };
+                        let working_directories = working_directories.clone();
+                        let workspace = workspace.clone();
+                        let path_task = cx.background_spawn(async move {
+                            find_local_agent_session_path(
+                                executor,
+                                &session_id,
+                                row.created_at,
+                                &working_directories,
+                            )
+                        });
+                        cx.spawn(async move |cx| match path_task.await {
+                            Ok(Some(path)) => cx.update(|cx| {
+                                cx.write_to_clipboard(ClipboardItem::new_string(
+                                    path.to_string_lossy().into_owned(),
+                                ));
+                                Self::show_deferred_toast(&workspace, "Session path copied", cx);
+                            }),
+                            Ok(None) => cx.update(|cx| {
+                                Self::show_deferred_toast(&workspace, "Session path not found", cx);
+                            }),
+                            Err(error) => {
+                                log::warn!("failed to locate agent session path: {error:#}");
+                                cx.update(|cx| {
+                                    Self::show_deferred_toast(
+                                        &workspace,
+                                        "Session path not found",
+                                        cx,
+                                    );
+                                });
+                            }
+                        })
+                        .detach();
+                    }),
+            )
+        });
+
+        let focus_handle = context_menu.focus_handle(cx);
+        window.defer(cx, move |window, cx| window.focus(&focus_handle, cx));
+        let subscription = cx.subscribe(&context_menu, |this, _, _: &DismissEvent, cx| {
+            this.omega_thread_context_menu.take();
+            cx.notify();
+        });
+        self.omega_thread_context_menu = Some((context_menu, position, subscription));
+        cx.notify();
     }
 
     /// Reopen a past conversation from the threads sidebar.
@@ -22201,6 +22455,8 @@ impl AgentPanel {
                 let icon = omega_thread_icon(&row);
                 let is_active = omega_thread_open && Some(row.thread_id) == active_thread_id;
                 let (padding_x, padding_y) = omega_sidebar_row_padding(is_active);
+                let clicked_row = row.clone();
+                let context_menu_row = row;
                 // omega#217. `Role::Button` is not item-like, so macOS never
                 // exposed `AXSelected` for these rows and the selected state
                 // reached nothing. `Role::TreeItem` inside the `Role::Tree`
@@ -22223,9 +22479,21 @@ impl AgentPanel {
                     item.cursor_pointer()
                         .hover(move |style| style.bg(hover_background))
                         .on_click(cx.listener(move |this, _, window, cx| {
-                            this.show_omega_thread_transcript(&row, window, cx);
+                            this.show_omega_thread_transcript(&clicked_row, window, cx);
                         }))
                 })
+                .on_mouse_down(
+                    MouseButton::Right,
+                    cx.listener(move |this, event: &MouseDownEvent, window, cx| {
+                        cx.stop_propagation();
+                        this.deploy_omega_thread_context_menu(
+                            context_menu_row.clone(),
+                            event.position,
+                            window,
+                            cx,
+                        );
+                    }),
+                )
                 .w_full()
                 .px(px(padding_x))
                 .py(px(padding_y))
@@ -23001,6 +23269,19 @@ impl AgentPanel {
             .when_some(library_surface, |shell, library| {
                 shell.child(div().flex_1().min_h_0().w_full().child(library))
             })
+            .children(
+                self.omega_thread_context_menu
+                    .as_ref()
+                    .map(|(menu, position, _)| {
+                        deferred(
+                            anchored()
+                                .position(*position)
+                                .anchor(gpui::Anchor::TopLeft)
+                                .child(menu.clone()),
+                        )
+                        .with_priority(3)
+                    }),
+            )
             .into_any_element()
     }
 }
@@ -23651,6 +23932,20 @@ mod omega_sidebar_motion_tests {
 
         assert_eq!(resting_x * 2., selected_x * 2. + selected_border * 2.);
         assert_eq!(resting_y * 2., selected_y * 2. + selected_border * 2.);
+    }
+
+    #[test]
+    fn omega_session_paths_use_each_executor_storage_encoding() {
+        let working_directory = Path::new("/Users/owner/My Project");
+
+        assert_eq!(
+            claude_project_directory_name(working_directory),
+            "-Users-owner-My Project"
+        );
+        assert_eq!(
+            grok_session_directory_name(working_directory),
+            "%2FUsers%2Fowner%2FMy%20Project"
+        );
     }
 
     #[test]
