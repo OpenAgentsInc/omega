@@ -24481,8 +24481,8 @@ mod tests {
         let creation = body_of(&panel, "new_thread_with_workspace");
         assert!(
             creation.contains("compose_on_executor")
-                && creation.contains("ConversationTarget::OmegaAgent"),
-            "OMEGA-DELTA-0184: New Thread no longer lands on the default \
+                && creation.contains("selected_conversation_target"),
+            "OMEGA-DELTA-0184: New Thread no longer lands on the last selected \
              executor through the one compose path."
         );
         let reveal = body_of(&panel, "reveal_composer_draft");
@@ -24494,9 +24494,12 @@ mod tests {
         );
         let startup = body_of(&panel, "open_startup_front_door");
         assert!(
-            startup.contains("prepare_omega_draft") && startup.contains("reveal_composer_draft"),
+            startup.contains("selected_conversation_target")
+                && startup.contains("prepare_omega_draft")
+                && startup.contains("prepare_direct_draft")
+                && startup.contains("reveal_composer_draft"),
             "OMEGA-DELTA-0184: the startup landing no longer reaches the \
-             focused composer draft."
+             focused composer draft for the last selected executor."
         );
 
         // The row model is the panel's, and its face is the active

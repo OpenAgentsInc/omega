@@ -6319,6 +6319,17 @@ impl AgentPanel {
         }
     }
 
+    fn selected_conversation_target(&self, cx: &App) -> ConversationTarget {
+        match self.selected_agent(cx) {
+            Agent::NativeAgent => ConversationTarget::OmegaAgent,
+            Agent::Custom { id } => DirectAgentId::new(id.as_ref())
+                .map(|agent_id| ConversationTarget::DirectAgent { agent_id })
+                .unwrap_or(ConversationTarget::OmegaAgent),
+            #[cfg(any(test, feature = "test-support"))]
+            Agent::Stub => ConversationTarget::OmegaAgent,
+        }
+    }
+
     pub fn open_thread(
         &mut self,
         session_id: acp::SessionId,
@@ -6428,9 +6439,8 @@ impl AgentPanel {
 
         // `OMEGA-DELTA-0184`, omega#165. `+` and `Thread > New Thread` land in
         // a normal thread with the composer focused — zero interstitial steps.
-        // The default executor is Omega Agent; the composer's executor
-        // dropdown is where a different owner is chosen.
-        self.compose_on_executor(ConversationTarget::OmegaAgent, window, cx);
+        let target = self.selected_conversation_target(cx);
+        self.compose_on_executor(target, window, cx);
 
         // A work surface belongs to the conversation that opened it. If the
         // current blank draft is reused, or if the shell still owns surface
@@ -6570,8 +6580,22 @@ impl AgentPanel {
         // Zero Base's draft is the preparation entity (`OMEGA-DELTA-0177`);
         // starting a second probe here would create a second session and
         // metadata row before the person chose anything.
-        self.prepare_omega_draft(AgentThreadSource::AgentPanel, window, cx);
-        self.reveal_composer_draft(ConversationTarget::OmegaAgent, window, cx);
+        let target = self.selected_conversation_target(cx);
+        match &target {
+            ConversationTarget::OmegaAgent => {
+                self.prepare_omega_draft(AgentThreadSource::AgentPanel, window, cx);
+            }
+            ConversationTarget::DirectAgent { agent_id } => {
+                self.prepare_direct_draft(
+                    AgentId::new(agent_id.as_str()),
+                    AgentThreadSource::AgentPanel,
+                    window,
+                    cx,
+                );
+            }
+            ConversationTarget::Sarah => return,
+        }
+        self.reveal_composer_draft(target, window, cx);
     }
 
     fn open_sarah_admission(&mut self, window: &mut Window, cx: &mut Context<Self>) {
@@ -26063,6 +26087,12 @@ mod tests {
     #[gpui::test]
     async fn test_delayed_startup_front_door_opens_empty_panel(cx: &mut TestAppContext) {
         let (panel, mut cx) = setup_panel(cx).await;
+        let selected_agent = Agent::Custom {
+            id: AgentId::new("my-preferred-agent"),
+        };
+        panel.update(&mut cx, |panel, _cx| {
+            panel.selected_agent = selected_agent.clone();
+        });
         let workspace = panel
             .read_with(&cx, |panel, _cx| panel.workspace.upgrade())
             .expect("test panel should retain its workspace");
@@ -26073,14 +26103,20 @@ mod tests {
         });
         cx.run_until_parked();
 
-        panel.read_with(&cx, |panel, _cx| {
+        panel.read_with(&cx, |panel, cx| {
             assert!(
                 panel.front_door_composer_visible_for_tests(),
                 "an empty startup should land in the focused composer draft"
             );
-            assert!(
-                panel.draft_thread.is_some(),
-                "an empty startup should prepare the Omega conversation"
+            assert_eq!(
+                panel
+                    .draft_thread
+                    .as_ref()
+                    .expect("an empty startup should prepare a conversation")
+                    .read(cx)
+                    .agent_key(),
+                &selected_agent,
+                "startup should prepare the user's last selected agent"
             );
         });
     }
@@ -32584,7 +32620,7 @@ mod tests {
     }
 
     #[gpui::test]
-    async fn test_new_thread_defaults_to_omega_and_syncs_the_selection(cx: &mut TestAppContext) {
+    async fn test_new_thread_uses_last_selected_agent(cx: &mut TestAppContext) {
         init_test(cx);
         let fs = FakeFs::new(cx.executor());
         cx.update(|cx| {
@@ -32631,13 +32667,9 @@ mod tests {
         cx.run_until_parked();
 
         panel.update_in(cx, |panel, window, cx| {
-            // omega#165: `+` lands on the default executor. There is no
-            // hidden second selection store left behind — the dropdown is the
-            // one authority, and it reads the conversation it sits under.
             assert_eq!(
-                panel.selected_agent,
-                Agent::NativeAgent,
-                "NewThread defaults to Omega and syncs the stored selection to it"
+                panel.selected_agent, custom_agent,
+                "NewThread should preserve the user's last selected agent"
             );
             assert!(
                 panel.front_door_composer_visible_for_tests(),
@@ -32648,7 +32680,7 @@ mod tests {
                     .draft_thread
                     .as_ref()
                     .map(|draft| draft.read(cx).agent_key()),
-                Some(Agent::NativeAgent)
+                Some(agent) if agent == &custom_agent
             ));
             let composer_focus = panel
                 .active_conversation_view()
