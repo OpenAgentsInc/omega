@@ -7545,6 +7545,19 @@ impl ThreadView {
                     }
                 }
 
+                // Market tool results draw their typed cards instead of the
+                // generic tool chrome, in every interface mode.
+                if let Some(card) =
+                    crate::conversation_view::market_tool_cards::market_tool_card(tool_call, cx)
+                {
+                    return v_flex()
+                        .w_full()
+                        .px_5()
+                        .id(("market-tool-card", entry_ix))
+                        .child(card)
+                        .into_any();
+                }
+
                 if omega_zero_base::is_primary_interface()
                     && Self::omega_tool_call_is_groupable(tool_call)
                 {
@@ -9504,6 +9517,9 @@ impl ThreadView {
                 tool_call.status,
                 ToolCallStatus::WaitingForConfirmation { .. }
             )
+            // Market results render their own inline cards; folding one into
+            // a chip group would swallow the card.
+            && !crate::conversation_view::market_tool_cards::is_market_tool_call(tool_call)
     }
 
     fn omega_tool_kind_label(kind: acp::ToolKind) -> &'static str {

@@ -1,0 +1,329 @@
+//! Renders market tool results as the inline market cards.
+//!
+//! When a tool call's result carries an `omega.market-demo.*` schema (the
+//! demo MCP server in `scripts/market-demo-mcp.mjs`, and later the live
+//! market lane), the transcript draws the typed card — the network panorama
+//! or the swap lifecycle card — instead of raw JSON prose. Detection is by
+//! payload schema, not tool name alone, so it works identically for the
+//! native agent's MCP tools and for external ACP agents.
+
+use acp_thread::{ToolCall, ToolCallContent, ToolCallStatus};
+use gpui::{AnyElement, App};
+use serde_json::Value;
+use ui::prelude::*;
+use ui::{
+    NetworkCard, PanoramaNetwork, PanoramaProvider, PanoramaRelay, PanoramaStats, PanoramaTrust,
+    SwapAsset, SwapCard, SwapStage, VizNodeState,
+};
+
+pub(crate) const MARKET_SCHEMA_PREFIX: &str = "omega.market-demo.";
+
+const MARKET_TOOL_NAMES: [&str; 4] = [
+    "market_network_status",
+    "market_swap_quote",
+    "market_execute_swap",
+    "market_swap_status",
+];
+
+/// Cheap, context-free check used to keep market tool calls out of the
+/// collapsed tool-chip groups so their cards render standalone.
+pub(crate) fn is_market_tool_call(tool_call: &ToolCall) -> bool {
+    if let Some(name) = &tool_call.tool_name
+        && MARKET_TOOL_NAMES.iter().any(|tool| name.contains(tool))
+    {
+        return true;
+    }
+    tool_call.raw_output.as_ref().and_then(schema_of).is_some()
+}
+
+/// The card for a completed market tool call, or `None` to fall through to
+/// the ordinary tool-call rendering (running, failed, or unparseable calls).
+pub(crate) fn market_tool_card(tool_call: &ToolCall, cx: &App) -> Option<AnyElement> {
+    if !matches!(tool_call.status, ToolCallStatus::Completed) {
+        return None;
+    }
+    let payload = market_payload(tool_call, cx)?;
+    match payload.get("schema")?.as_str()? {
+        "omega.market-demo.network-status.v1" => {
+            Some(NetworkCard::new(parse_network(&payload)?).into_any_element())
+        }
+        "omega.market-demo.quote.v1" | "omega.market-demo.swap.v1" => {
+            Some(parse_swap_card(&payload)?.into_any_element())
+        }
+        _ => None,
+    }
+}
+
+fn schema_of(value: &Value) -> Option<String> {
+    let schema = value.get("schema")?.as_str()?;
+    schema
+        .starts_with(MARKET_SCHEMA_PREFIX)
+        .then(|| schema.to_string())
+}
+
+/// Digs the market payload out of a tool result. MCP hosts differ in where
+/// the result lands: the payload itself, an MCP `content` envelope, or only
+/// the rendered text content — all three are tried.
+fn market_payload(tool_call: &ToolCall, cx: &App) -> Option<Value> {
+    if let Some(raw) = &tool_call.raw_output {
+        if schema_of(raw).is_some() {
+            return Some(raw.clone());
+        }
+        if let Some(text) = raw
+            .get("content")
+            .and_then(Value::as_array)
+            .and_then(|content| content.first())
+            .and_then(|first| first.get("text"))
+            .and_then(Value::as_str)
+            && let Some(value) = parse_json_text(text)
+        {
+            return Some(value);
+        }
+        if let Some(value) = raw.as_str().and_then(parse_json_text) {
+            return Some(value);
+        }
+    }
+    for content in &tool_call.content {
+        if let ToolCallContent::ContentBlock(block) = content
+            && let Some(value) = parse_json_text(&block.to_markdown(cx))
+        {
+            return Some(value);
+        }
+    }
+    None
+}
+
+fn parse_json_text(text: &str) -> Option<Value> {
+    let trimmed = text.trim();
+    let trimmed = trimmed
+        .strip_prefix("```json")
+        .or_else(|| trimmed.strip_prefix("```"))
+        .map(|rest| rest.trim_end_matches("```"))
+        .unwrap_or(trimmed);
+    let value: Value = serde_json::from_str(trimmed.trim()).ok()?;
+    schema_of(&value)?;
+    Some(value)
+}
+
+fn parse_state(value: &Value) -> VizNodeState {
+    match value.as_str().unwrap_or_default() {
+        "starting" => VizNodeState::Starting,
+        "degraded" => VizNodeState::Degraded,
+        "offline" => VizNodeState::Offline,
+        _ => VizNodeState::Ready,
+    }
+}
+
+fn parse_trust(value: &Value) -> PanoramaTrust {
+    match value.as_str().unwrap_or_default() {
+        "discovered" => PanoramaTrust::Discovered,
+        _ => PanoramaTrust::Pinned,
+    }
+}
+
+fn parse_network(payload: &Value) -> Option<PanoramaNetwork> {
+    let relay_values = payload.get("relays")?.as_array()?;
+    let relay_labels: Vec<&str> = relay_values
+        .iter()
+        .map(|relay| relay.get("label").and_then(Value::as_str).unwrap_or(""))
+        .collect();
+    let relays: Vec<PanoramaRelay> = relay_values
+        .iter()
+        .map(|relay| PanoramaRelay {
+            label: relay
+                .get("label")
+                .and_then(Value::as_str)
+                .unwrap_or("relay")
+                .to_string()
+                .into(),
+            state: parse_state(relay.get("state").unwrap_or(&Value::Null)),
+            trust: parse_trust(relay.get("trust").unwrap_or(&Value::Null)),
+        })
+        .collect();
+
+    let providers: Vec<PanoramaProvider> = payload
+        .get("providers")?
+        .as_array()?
+        .iter()
+        .map(|provider| {
+            let relay_indices = provider
+                .get("relays")
+                .and_then(Value::as_array)
+                .map(|homes| {
+                    homes
+                        .iter()
+                        .filter_map(Value::as_str)
+                        .filter_map(|home| relay_labels.iter().position(|label| *label == home))
+                        .collect()
+                })
+                .unwrap_or_default();
+            PanoramaProvider {
+                label: provider
+                    .get("label")
+                    .and_then(Value::as_str)
+                    .unwrap_or("provider")
+                    .to_string()
+                    .into(),
+                state: parse_state(provider.get("state").unwrap_or(&Value::Null)),
+                trust: parse_trust(provider.get("trust").unwrap_or(&Value::Null)),
+                relay_indices,
+                fee_bps: provider.get("fee_bps").and_then(Value::as_u64).unwrap_or(0) as u32,
+                volume_sat_24h: provider
+                    .get("volume_sat_24h")
+                    .and_then(Value::as_u64)
+                    .unwrap_or(0),
+            }
+        })
+        .collect();
+
+    let stats = payload.get("stats").cloned().unwrap_or(Value::Null);
+    let swaps_24h = stats.get("swaps_24h").and_then(Value::as_u64);
+    let any_relay_ready = relays
+        .iter()
+        .any(|relay| relay.state == VizNodeState::Ready);
+    let activity = if any_relay_ready {
+        (0.1 + swaps_24h.unwrap_or(0) as f32 / 400.0).min(1.0)
+    } else {
+        0.0
+    };
+
+    Some(PanoramaNetwork {
+        name: payload
+            .get("name")
+            .and_then(Value::as_str)
+            .unwrap_or("market")
+            .to_string()
+            .into(),
+        relays,
+        providers,
+        // The one client this snapshot can vouch for is the caller's own
+        // session; a crowd is never invented.
+        client_count: 1,
+        stats: PanoramaStats {
+            swaps_24h,
+            volume_sat_24h: stats.get("volume_sat_24h").and_then(Value::as_u64),
+            operator_fee_sat_24h: stats.get("operator_fee_sat_24h").and_then(Value::as_u64),
+        },
+        activity,
+    })
+}
+
+fn parse_asset(value: &Value) -> Option<SwapAsset> {
+    match value.as_str()? {
+        "LN" => Some(SwapAsset::Lightning),
+        "BTC" => Some(SwapAsset::Bitcoin),
+        "L-BTC" => Some(SwapAsset::Liquid),
+        _ => None,
+    }
+}
+
+fn parse_swap_card(payload: &Value) -> Option<SwapCard> {
+    let stage = if payload.get("schema")?.as_str()? == "omega.market-demo.quote.v1" {
+        SwapStage::Quote
+    } else {
+        match payload.get("stage").and_then(Value::as_str).unwrap_or("") {
+            "contract" => SwapStage::Contract,
+            "funding" => SwapStage::Funding,
+            "executing" => SwapStage::Executing,
+            "settled" => SwapStage::Settled,
+            "refunded" => SwapStage::Refunded,
+            _ => return None,
+        }
+    };
+    Some(
+        SwapCard::new(
+            parse_asset(payload.get("from")?)?,
+            parse_asset(payload.get("to")?)?,
+            payload.get("amount_sats")?.as_u64()?,
+            payload
+                .get("provider")
+                .and_then(Value::as_str)
+                .unwrap_or("provider")
+                .to_string(),
+            payload.get("fee_bps").and_then(Value::as_u64).unwrap_or(0) as u32,
+        )
+        .stage(stage),
+    )
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn demo_network_json() -> Value {
+        serde_json::json!({
+            "schema": "omega.market-demo.network-status.v1",
+            "name": "public regtest (demo)",
+            "relays": [
+                {"label": "relay-a", "state": "ready", "trust": "pinned"},
+                {"label": "relay-b", "state": "offline", "trust": "pinned"},
+            ],
+            "providers": [
+                {
+                    "label": "provider-b",
+                    "state": "ready",
+                    "trust": "pinned",
+                    "relays": ["relay-a", "relay-b"],
+                    "fee_bps": 22,
+                    "volume_sat_24h": 5100000,
+                },
+                {
+                    "label": "joiner",
+                    "state": "degraded",
+                    "trust": "discovered",
+                    "relays": ["relay-b"],
+                    "fee_bps": 30,
+                    "volume_sat_24h": 150000,
+                },
+            ],
+            "stats": {"swaps_24h": 128, "volume_sat_24h": 7650000},
+        })
+    }
+
+    #[test]
+    fn the_network_payload_parses_into_the_panorama_shape() {
+        let network = parse_network(&demo_network_json()).expect("network parses");
+        assert_eq!(network.relays.len(), 2);
+        assert_eq!(network.relays[1].state, VizNodeState::Offline);
+        assert_eq!(network.providers.len(), 2);
+        assert_eq!(network.providers[0].relay_indices, vec![0, 1]);
+        assert_eq!(network.providers[1].trust, PanoramaTrust::Discovered);
+        assert_eq!(network.stats.swaps_24h, Some(128));
+        assert_eq!(network.stats.operator_fee_sat_24h, None);
+        assert!(network.activity > 0.4 && network.activity <= 1.0);
+    }
+
+    #[test]
+    fn swap_payloads_parse_for_quotes_and_every_stage() {
+        let quote = serde_json::json!({
+            "schema": "omega.market-demo.quote.v1",
+            "from": "LN", "to": "BTC", "amount_sats": 50000,
+            "provider": "provider-b", "fee_bps": 22,
+        });
+        assert!(parse_swap_card(&quote).is_some());
+        for stage in ["contract", "funding", "executing", "settled", "refunded"] {
+            let swap = serde_json::json!({
+                "schema": "omega.market-demo.swap.v1",
+                "from": "LN", "to": "BTC", "amount_sats": 50000,
+                "provider": "provider-b", "fee_bps": 22, "stage": stage,
+            });
+            assert!(parse_swap_card(&swap).is_some(), "stage {stage} parses");
+        }
+        let unknown_stage = serde_json::json!({
+            "schema": "omega.market-demo.swap.v1",
+            "from": "LN", "to": "BTC", "amount_sats": 50000, "stage": "melted",
+        });
+        assert!(parse_swap_card(&unknown_stage).is_none());
+    }
+
+    #[test]
+    fn fenced_and_enveloped_payloads_are_recognized() {
+        let text = format!("```json\n{}\n```", demo_network_json());
+        assert!(parse_json_text(&text).is_some());
+        assert!(parse_json_text("not json").is_none());
+        assert!(
+            parse_json_text("{\"schema\": \"other.thing.v1\"}").is_none(),
+            "foreign schemas are not claimed"
+        );
+    }
+}
