@@ -1911,7 +1911,7 @@ impl ConversationView {
             let paths = match paths_receiver.await {
                 Ok(Ok(Some(paths))) => paths,
                 Ok(Ok(None)) => return Ok(()),
-                Ok(Err(error)) => return Err(error.into()),
+                Ok(Err(error)) => return Err(error),
                 Err(error) => return Err(error.into()),
             };
 

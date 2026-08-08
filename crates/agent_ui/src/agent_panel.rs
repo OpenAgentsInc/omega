@@ -19699,7 +19699,7 @@ impl AgentPanel {
                                 guard
                                     .read_planning_graph(
                                         omega_effectd::all_work_contract::PlanningGraphReadRequest {
-                                            after_revision: after_revision.clone(),
+                                            after_revision,
                                         },
                                     )
                                     .await
@@ -20242,7 +20242,7 @@ impl AgentPanel {
                         .context("The canonical Work has no active Agent Delegate.")?;
                     omega_effectd::all_work_contract::WorkCommand::Revoke {
                         grant_ref: delegate.delegation_grant_ref.clone(),
-                        expected_generation: delegate.generation.clone(),
+                        expected_generation: delegate.generation,
                         reason: omega_effectd::all_work_contract::ShortText::try_from(
                             "The accountable human revoked the Omega delegation.".to_string(),
                         )?,
@@ -20282,7 +20282,7 @@ impl AgentPanel {
                             "run:omega-ui:{work_key}:g{generation}"
                         ))?,
                         grant_ref: delegate.delegation_grant_ref.clone(),
-                        expected_generation: delegate.generation.clone(),
+                        expected_generation: delegate.generation,
                         host_ref: candidate.host_ref,
                     }
                 }
@@ -20343,7 +20343,7 @@ impl AgentPanel {
                         )?,
                         session_ref,
                         run_ref,
-                        expected_generation: delegate.generation.clone(),
+                        expected_generation: delegate.generation,
                         kind,
                         summary,
                         provider_event_ref,
@@ -20366,7 +20366,7 @@ impl AgentPanel {
                     omega_effectd::all_work_contract::WorkCommand::ControlSession {
                         control: omega_effectd::all_work_contract::WorkCommandControlKind::Stop,
                         session_ref,
-                        expected_generation: delegate.generation.clone(),
+                        expected_generation: delegate.generation,
                         body: omega_effectd::all_work_contract::Nullable(Some(
                             omega_effectd::all_work_contract::LongText::try_from(
                                 "Omega canceled the exact linked local ACP Thread before recording this stopped state."
@@ -25299,7 +25299,7 @@ mod tests {
             })
             .expect("the second project should open in the same window");
 
-        let cx = &mut VisualTestContext::from_window(multi_workspace.clone().into(), cx);
+        let cx = &mut VisualTestContext::from_window(multi_workspace.into(), cx);
         let panel_a = workspace_a.update_in(cx, |workspace, window, cx| {
             let panel = cx.new(|cx| AgentPanel::new(workspace, window, cx));
             workspace.add_panel(panel.clone(), window, cx);
@@ -28336,7 +28336,6 @@ mod tests {
         key: String,
         element_id: Option<String>,
         role: String,
-        label: String,
         selected: Option<bool>,
         value: Option<String>,
         live: Option<String>,
@@ -28368,7 +28367,6 @@ mod tests {
                         .and_then(serde_json::Value::as_str)
                         .map(str::to_owned),
                     role: string("role").unwrap_or_default(),
-                    label: string("label").unwrap_or_default(),
                     selected: aria
                         .and_then(|aria| aria.get("selected"))
                         .and_then(serde_json::Value::as_bool),

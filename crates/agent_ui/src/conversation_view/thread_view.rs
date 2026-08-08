@@ -7432,7 +7432,6 @@ impl ThreadView {
                                     .aria_label("Copy this user message")
                                     .tooltip(Tooltip::text("Copy This User Message"))
                                     .on_click({
-                                        let user_message_text = user_message_text.clone();
                                         move |_, _, cx| {
                                             cx.write_to_clipboard(ClipboardItem::new_string(
                                                 user_message_text.clone(),

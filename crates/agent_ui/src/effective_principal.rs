@@ -26,6 +26,7 @@ pub(crate) enum EffectivePrincipalState {
 }
 
 impl EffectivePrincipalState {
+    #[cfg(test)]
     pub(crate) const ALL: [Self; 6] = [
         Self::LocalOnly,
         Self::Enrolled,

@@ -4037,7 +4037,7 @@ mod tests {
         let surface = window
             .read_with(cx, |window, _cx| window.0.clone())
             .expect("dogfood test window");
-        let mut cx = VisualTestContext::from_window(window.clone().into(), cx);
+        let mut cx = VisualTestContext::from_window(window.into(), cx);
         cx.set_debug_accessibility_active(true);
 
         for (scene, required_name) in [
@@ -4185,7 +4185,7 @@ mod tests {
                     )
             })
             .map(|(index, issue_id)| (index, issue_id.clone()))
-            .last()
+            .next_back()
     }
 
     #[gpui::test]
