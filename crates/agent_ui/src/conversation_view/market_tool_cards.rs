@@ -28,12 +28,41 @@ const MARKET_TOOL_NAMES: [&str; 4] = [
 /// Cheap, context-free check used to keep market tool calls out of the
 /// collapsed tool-chip groups so their cards render standalone.
 pub(crate) fn is_market_tool_call(tool_call: &ToolCall) -> bool {
-    if let Some(name) = &tool_call.tool_name
+    market_signals(
+        tool_call.tool_name.as_deref(),
+        tool_call.raw_input.as_ref(),
+        tool_call.raw_output.as_ref(),
+    )
+}
+
+/// Detection from the context-free fields alone. Adapters differ: the native
+/// agent sets `tool_name`; codex-acp sets neither name nor a flat payload but
+/// wraps the call as `raw_input: {server, tool, arguments}` and
+/// `raw_output: {result, error}`.
+fn market_signals(
+    tool_name: Option<&str>,
+    raw_input: Option<&Value>,
+    raw_output: Option<&Value>,
+) -> bool {
+    if let Some(name) = tool_name
         && MARKET_TOOL_NAMES.iter().any(|tool| name.contains(tool))
     {
         return true;
     }
-    tool_call.raw_output.as_ref().and_then(schema_of).is_some()
+    if let Some(input) = raw_input {
+        let named = [input.get("tool"), input.get("server")]
+            .into_iter()
+            .flatten()
+            .filter_map(Value::as_str)
+            .any(|name| {
+                name.contains("market-demo")
+                    || MARKET_TOOL_NAMES.iter().any(|tool| name.contains(tool))
+            });
+        if named {
+            return true;
+        }
+    }
+    raw_output.is_some_and(|raw| extract_market_payload(raw).is_some())
 }
 
 /// The card for a completed market tool call, or `None` to fall through to
@@ -61,27 +90,43 @@ fn schema_of(value: &Value) -> Option<String> {
         .then(|| schema.to_string())
 }
 
-/// Digs the market payload out of a tool result. MCP hosts differ in where
-/// the result lands: the payload itself, an MCP `content` envelope, or only
-/// the rendered text content — all three are tried.
-fn market_payload(tool_call: &ToolCall, cx: &App) -> Option<Value> {
-    if let Some(raw) = &tool_call.raw_output {
-        if schema_of(raw).is_some() {
-            return Some(raw.clone());
-        }
-        if let Some(text) = raw
-            .get("content")
-            .and_then(Value::as_array)
-            .and_then(|content| content.first())
-            .and_then(|first| first.get("text"))
-            .and_then(Value::as_str)
-            && let Some(value) = parse_json_text(text)
+/// Digs the market payload out of an arbitrary tool-result value. Hosts nest
+/// it differently: the payload itself, codex-acp's `{result, error}` wrapper,
+/// an MCP `content`/`structuredContent` envelope, or a JSON string — each
+/// layer is peeled recursively.
+fn extract_market_payload(value: &Value) -> Option<Value> {
+    if schema_of(value).is_some() {
+        return Some(value.clone());
+    }
+    if let Some(text) = value.as_str() {
+        return parse_json_text(text);
+    }
+    for key in ["result", "structuredContent", "structured_content"] {
+        if let Some(inner) = value.get(key)
+            && let Some(found) = extract_market_payload(inner)
         {
-            return Some(value);
+            return Some(found);
         }
-        if let Some(value) = raw.as_str().and_then(parse_json_text) {
-            return Some(value);
+    }
+    if let Some(content) = value.get("content").and_then(Value::as_array) {
+        for entry in content {
+            if let Some(text) = entry.get("text").and_then(Value::as_str)
+                && let Some(found) = parse_json_text(text)
+            {
+                return Some(found);
+            }
         }
+    }
+    None
+}
+
+/// The payload for rendering: the structured output when present, else the
+/// rendered text content.
+fn market_payload(tool_call: &ToolCall, cx: &App) -> Option<Value> {
+    if let Some(raw) = &tool_call.raw_output
+        && let Some(value) = extract_market_payload(raw)
+    {
+        return Some(value);
     }
     for content in &tool_call.content {
         if let ToolCallContent::ContentBlock(block) = content
@@ -314,6 +359,47 @@ mod tests {
             "from": "LN", "to": "BTC", "amount_sats": 50000, "stage": "melted",
         });
         assert!(parse_swap_card(&unknown_stage).is_none());
+    }
+
+    /// codex-acp wraps MCP calls as `raw_input: {server, tool, arguments}`
+    /// and `raw_output: {result: <MCP result>, error}` with no `tool_name`;
+    /// the first shipped detector missed both, so codex tool calls rendered
+    /// as generic chips instead of cards.
+    #[test]
+    fn codex_acp_wrapped_payloads_are_recognized() {
+        let raw_input = serde_json::json!({
+            "server": "market-demo",
+            "tool": "market_network_status",
+            "arguments": {},
+        });
+        assert!(market_signals(None, Some(&raw_input), None));
+
+        let raw_output = serde_json::json!({
+            "result": {
+                "content": [
+                    {"type": "text", "text": demo_network_json().to_string()},
+                ],
+            },
+            "error": null,
+        });
+        assert!(market_signals(None, None, Some(&raw_output)));
+        let payload = extract_market_payload(&raw_output).expect("payload extracted");
+        assert!(parse_network(&payload).is_some());
+
+        let structured = serde_json::json!({
+            "result": {"structuredContent": demo_network_json()},
+        });
+        assert!(extract_market_payload(&structured).is_some());
+
+        let foreign = serde_json::json!({
+            "result": {"content": [{"type": "text", "text": "{\"schema\": \"other.v1\"}"}]},
+        });
+        assert!(!market_signals(None, None, Some(&foreign)));
+        assert!(!market_signals(
+            Some("shell_command"),
+            Some(&serde_json::json!({"command": "ls"})),
+            None
+        ));
     }
 
     #[test]
