@@ -65,10 +65,10 @@ fn market_signals(
     raw_output.is_some_and(|raw| extract_market_payload(raw).is_some())
 }
 
-/// The card for a completed market tool call, or `None` to fall through to
-/// the ordinary tool-call rendering (running, failed, or unparseable calls).
+/// The card for a market tool call with a renderable snapshot, or `None` to
+/// fall through to the ordinary tool-call rendering.
 pub(crate) fn market_tool_card(tool_call: &ToolCall, cx: &App) -> Option<AnyElement> {
-    if !matches!(tool_call.status, ToolCallStatus::Completed) {
+    if !market_card_status_is_renderable(&tool_call.status) {
         return None;
     }
     let payload = market_payload(tool_call, cx)?;
@@ -81,6 +81,13 @@ pub(crate) fn market_tool_card(tool_call: &ToolCall, cx: &App) -> Option<AnyElem
         }
         _ => None,
     }
+}
+
+fn market_card_status_is_renderable(status: &ToolCallStatus) -> bool {
+    matches!(
+        status,
+        ToolCallStatus::Pending | ToolCallStatus::InProgress | ToolCallStatus::Completed
+    )
 }
 
 fn schema_of(value: &Value) -> Option<String> {
@@ -266,14 +273,7 @@ fn parse_swap_card(payload: &Value) -> Option<SwapCard> {
     let stage = if payload.get("schema")?.as_str()? == "omega.market-demo.quote.v1" {
         SwapStage::Quote
     } else {
-        match payload.get("stage").and_then(Value::as_str).unwrap_or("") {
-            "contract" => SwapStage::Contract,
-            "funding" => SwapStage::Funding,
-            "executing" => SwapStage::Executing,
-            "settled" => SwapStage::Settled,
-            "refunded" => SwapStage::Refunded,
-            _ => return None,
-        }
+        parse_swap_stage(payload)?
     };
     Some(
         SwapCard::new(
@@ -289,6 +289,66 @@ fn parse_swap_card(payload: &Value) -> Option<SwapCard> {
         )
         .stage(stage),
     )
+}
+
+fn parse_swap_stage(payload: &Value) -> Option<SwapStage> {
+    if let Some(history) = payload.get("status_history").and_then(Value::as_array) {
+        let stage = project_swap_stage(history)?;
+        if payload.get("stage").and_then(Value::as_str) != Some(stage.label()) {
+            return None;
+        }
+        return Some(stage);
+    }
+    swap_stage(payload.get("stage")?.as_str()?)
+}
+
+fn project_swap_stage(history: &[Value]) -> Option<SwapStage> {
+    const EXPECTED_STAGES: [&str; 4] = ["contract", "funding", "executing", "settled"];
+    if history.is_empty() || history.len() > EXPECTED_STAGES.len() {
+        return None;
+    }
+    let mut previous_status_id: Option<&str> = None;
+    let mut status_ids = Vec::with_capacity(history.len());
+    for (sequence, status) in history.iter().enumerate() {
+        let status_id = status.get("status_id")?.as_str()?;
+        if status_ids.contains(&status_id) {
+            return None;
+        }
+        let previous = status.get("previous")?;
+        let previous = if previous.is_null() {
+            None
+        } else {
+            Some(previous.as_str()?)
+        };
+        if status.get("sequence")?.as_u64()? != u64::try_from(sequence).ok()?
+            || status.get("stage")?.as_str()? != *EXPECTED_STAGES.get(sequence)?
+            || previous != previous_status_id
+        {
+            return None;
+        }
+        let expected_authority = if matches!(sequence, 1 | 2) {
+            "provider_claim"
+        } else {
+            "requester_local"
+        };
+        if status.get("authority")?.as_str()? != expected_authority {
+            return None;
+        }
+        status_ids.push(status_id);
+        previous_status_id = Some(status_id);
+    }
+    swap_stage(history.last()?.get("stage")?.as_str()?)
+}
+
+fn swap_stage(stage: &str) -> Option<SwapStage> {
+    match stage {
+        "contract" => Some(SwapStage::Contract),
+        "funding" => Some(SwapStage::Funding),
+        "executing" => Some(SwapStage::Executing),
+        "settled" => Some(SwapStage::Settled),
+        "refunded" => Some(SwapStage::Refunded),
+        _ => None,
+    }
 }
 
 #[cfg(test)]
@@ -359,6 +419,42 @@ mod tests {
             "from": "LN", "to": "BTC", "amount_sats": 50000, "stage": "melted",
         });
         assert!(parse_swap_card(&unknown_stage).is_none());
+    }
+
+    #[test]
+    fn swap_stage_is_projected_from_contiguous_status_history() {
+        let mut swap = serde_json::json!({
+            "schema": "omega.market-demo.swap.v1",
+            "from": "LN", "to": "BTC", "amount_sats": 50000,
+            "provider": "provider-b", "fee_bps": 22, "stage": "executing",
+            "status_history": [
+                {
+                    "status_id": "status-0", "sequence": 0, "previous": null,
+                    "stage": "contract", "authority": "requester_local"
+                },
+                {
+                    "status_id": "status-1", "sequence": 1, "previous": "status-0",
+                    "stage": "funding", "authority": "provider_claim"
+                },
+                {
+                    "status_id": "status-2", "sequence": 2, "previous": "status-1",
+                    "stage": "executing", "authority": "provider_claim"
+                }
+            ]
+        });
+        assert_eq!(parse_swap_stage(&swap), Some(SwapStage::Executing));
+
+        swap["status_history"][2]["previous"] = Value::String("status-0".to_string());
+        assert!(parse_swap_stage(&swap).is_none());
+    }
+
+    #[test]
+    fn in_progress_market_calls_can_render_streamed_cards() {
+        assert!(market_card_status_is_renderable(
+            &ToolCallStatus::InProgress
+        ));
+        assert!(market_card_status_is_renderable(&ToolCallStatus::Completed));
+        assert!(!market_card_status_is_renderable(&ToolCallStatus::Failed));
     }
 
     /// codex-acp wraps MCP calls as `raw_input: {server, tool, arguments}`

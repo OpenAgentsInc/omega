@@ -1,5 +1,6 @@
 use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::sync::Arc;
+use std::time::Duration;
 
 use agent_client_protocol::schema::v1 as acp;
 use futures::AsyncReadExt as _;
@@ -24,6 +25,7 @@ const LIVE_DISCLOSURE: &str = "LIVE public regtest coordination data, read-only;
 const DEMO_DISCLOSURE: &str =
     "DEMO DATA: deterministic fixture, not the live network; no real funds move.";
 const SWAP_STAGES: &[&str] = &["contract", "funding", "executing", "settled"];
+const SWAP_STAGE_DELAY: Duration = Duration::from_millis(450);
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(transparent)]
@@ -68,7 +70,15 @@ struct Swap {
     from: MarketAsset,
     to: MarketAsset,
     amount_sats: u64,
-    stage_index: usize,
+    status_history: Vec<SwapStatusRecord>,
+}
+
+#[derive(Clone)]
+struct SwapStatusRecord {
+    id: String,
+    sequence: usize,
+    previous: Option<String>,
+    stage: &'static str,
 }
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
@@ -199,6 +209,7 @@ pub struct MarketExecuteSwapInput {
 
 pub struct MarketExecuteSwapTool {
     state: Arc<Mutex<MarketDemoState>>,
+    stage_delay: Duration,
 }
 
 impl AgentTool for MarketExecuteSwapTool {
@@ -221,21 +232,34 @@ impl AgentTool for MarketExecuteSwapTool {
     fn run(
         self: Arc<Self>,
         input: ToolInput<Self::Input>,
-        _event_stream: ToolCallEventStream,
+        event_stream: ToolCallEventStream,
         cx: &mut App,
     ) -> Task<Result<Self::Output, Self::Output>> {
-        cx.spawn(async move |_cx| {
+        cx.spawn(async move |cx| {
             let input = input
                 .recv()
                 .await
                 .map_err(|error| MarketToolOutput::error(error.to_string()))?;
-            execute_swap(&self.state, input).map_err(MarketToolOutput::error)
+            let mut output = execute_swap(&self.state, input).map_err(MarketToolOutput::error)?;
+            emit_swap_update(&event_stream, &output);
+
+            for _ in 1..SWAP_STAGES.len() {
+                cx.background_executor().timer(self.stage_delay).await;
+                if event_stream.was_cancelled_by_user() {
+                    return Err(MarketToolOutput::error("demo swap was canceled"));
+                }
+                output = advance_swap(&self.state, output.swap_id()?)
+                    .map_err(MarketToolOutput::error)?;
+                emit_swap_update(&event_stream, &output);
+            }
+
+            Ok(output)
         })
     }
 }
 
 #[derive(Debug, Serialize, Deserialize, JsonSchema)]
-/// Read the current stage of a demo swap. Each read advances the fixture by one stage.
+/// Read the current stage of a demo swap without changing its lifecycle.
 pub struct MarketSwapStatusInput {
     swap_id: String,
 }
@@ -293,6 +317,7 @@ pub fn market_demo_tools(
         },
         MarketExecuteSwapTool {
             state: state.clone(),
+            stage_delay: SWAP_STAGE_DELAY,
         },
         MarketSwapStatusTool { state },
     )
@@ -535,38 +560,113 @@ fn execute_swap(
         from: quote.from,
         to: quote.to,
         amount_sats: quote.amount_sats,
-        stage_index: 0,
+        status_history: Vec::new(),
     };
-    state.swaps.insert(swap.id.clone(), swap.clone());
-    Ok(MarketToolOutput::success(swap_view(&swap)))
+    let swap_id = swap.id.clone();
+    state.swaps.insert(swap_id.clone(), swap);
+    let swap = state
+        .swaps
+        .get_mut(&swap_id)
+        .ok_or_else(|| "new demo swap disappeared".to_string())?;
+    append_next_status(swap)?;
+    Ok(MarketToolOutput::success(swap_view(swap)?))
 }
 
 fn swap_status(
     state: &Mutex<MarketDemoState>,
     input: MarketSwapStatusInput,
 ) -> Result<MarketToolOutput, String> {
+    let state = state.lock();
+    let swap = state
+        .swaps
+        .get(&input.swap_id)
+        .ok_or_else(|| format!("unknown swap_id {}", input.swap_id))?;
+    Ok(MarketToolOutput::success(swap_view(swap)?))
+}
+
+fn advance_swap(
+    state: &Mutex<MarketDemoState>,
+    swap_id: String,
+) -> Result<MarketToolOutput, String> {
     let mut state = state.lock();
     let swap = state
         .swaps
-        .get_mut(&input.swap_id)
-        .ok_or_else(|| format!("unknown swap_id {}", input.swap_id))?;
-    if swap.stage_index < SWAP_STAGES.len().saturating_sub(1) {
-        swap.stage_index += 1;
-    }
-    Ok(MarketToolOutput::success(swap_view(swap)))
+        .get_mut(&swap_id)
+        .ok_or_else(|| format!("unknown swap_id {swap_id}"))?;
+    append_next_status(swap)?;
+    Ok(MarketToolOutput::success(swap_view(swap)?))
 }
 
-fn swap_view(swap: &Swap) -> Value {
-    let stage = SWAP_STAGES
-        .get(swap.stage_index)
-        .copied()
-        .unwrap_or("settled");
+fn append_next_status(swap: &mut Swap) -> Result<(), String> {
+    let sequence = swap.status_history.len();
+    let Some(stage) = SWAP_STAGES.get(sequence).copied() else {
+        return Ok(());
+    };
+    let previous = swap.status_history.last().map(|status| status.id.clone());
+    swap.status_history.push(SwapStatusRecord {
+        id: format!("{}-status-{sequence}", swap.id),
+        sequence,
+        previous,
+        stage,
+    });
+    project_swap(swap)?;
+    Ok(())
+}
+
+fn project_swap(swap: &Swap) -> Result<&SwapStatusRecord, String> {
+    if swap.status_history.is_empty() || swap.status_history.len() > SWAP_STAGES.len() {
+        return Err(format!("swap {} has an invalid status history", swap.id));
+    }
+    for (index, status) in swap.status_history.iter().enumerate() {
+        let expected_stage = SWAP_STAGES
+            .get(index)
+            .copied()
+            .ok_or_else(|| format!("swap {} has an unknown status sequence", swap.id))?;
+        let expected_previous = index
+            .checked_sub(1)
+            .and_then(|previous| swap.status_history.get(previous))
+            .map(|previous| previous.id.as_str());
+        if status.sequence != index
+            || status.stage != expected_stage
+            || status.previous.as_deref() != expected_previous
+        {
+            return Err(format!(
+                "swap {} has a status gap, fork, or regression",
+                swap.id
+            ));
+        }
+    }
+    swap.status_history
+        .last()
+        .ok_or_else(|| format!("swap {} has no current status", swap.id))
+}
+
+fn swap_view(swap: &Swap) -> Result<Value, String> {
+    let current = project_swap(swap)?;
+    let stage_index = current.sequence;
+    let stage = current.stage;
     let verification = match stage {
         "contract" => "exit package persisted before any funding",
         "funding" | "executing" => "provider status is a claim · verifying locally",
         _ => "verified locally · zero-loss close",
     };
-    json!({
+    let status_history = swap
+        .status_history
+        .iter()
+        .map(|status| {
+            json!({
+                "status_id": status.id,
+                "sequence": status.sequence,
+                "previous": status.previous,
+                "stage": status.stage,
+                "authority": match status.stage {
+                    "funding" | "executing" => "provider_claim",
+                    _ => "requester_local",
+                }
+            })
+        })
+        .collect::<Vec<_>>();
+    Ok(json!({
         "schema": "omega.market-demo.swap.v1",
         "disclosure": DEMO_DISCLOSURE,
         "swap_id": swap.id,
@@ -577,9 +677,48 @@ fn swap_view(swap: &Swap) -> Value {
         "fee_bps": 22,
         "stage": stage,
         "verification": verification,
-        "stages_completed": SWAP_STAGES.iter().take(swap.stage_index).copied().collect::<Vec<_>>(),
-        "stages_remaining": SWAP_STAGES.iter().skip(swap.stage_index.saturating_add(1)).copied().collect::<Vec<_>>()
-    })
+        "status_history": status_history,
+        "projection": {
+            "last_valid_status": current.id,
+            "status_gaps": [],
+            "status_forks": [],
+            "local_effects_verified": stage == "settled"
+        },
+        "stages_completed": SWAP_STAGES.iter().take(stage_index).copied().collect::<Vec<_>>(),
+        "stages_remaining": SWAP_STAGES.iter().skip(stage_index.saturating_add(1)).copied().collect::<Vec<_>>()
+    }))
+}
+
+fn emit_swap_update(event_stream: &ToolCallEventStream, output: &MarketToolOutput) {
+    let stage = output
+        .0
+        .get("stage")
+        .and_then(Value::as_str)
+        .unwrap_or("running");
+    let swap_id = output
+        .0
+        .get("swap_id")
+        .and_then(Value::as_str)
+        .unwrap_or("demo swap");
+    let content = serde_json::to_string_pretty(&output.0)
+        .unwrap_or_else(|error| format!("Failed to serialize market tool update: {error}"));
+    event_stream.update_fields(
+        acp::ToolCallUpdateFields::new()
+            .title(format!("{swap_id}: {stage}"))
+            .content(vec![acp::ToolCallContent::Content(acp::Content::new(
+                content,
+            ))]),
+    );
+}
+
+impl MarketToolOutput {
+    fn swap_id(&self) -> Result<String, MarketToolOutput> {
+        self.0
+            .get("swap_id")
+            .and_then(Value::as_str)
+            .map(ToOwned::to_owned)
+            .ok_or_else(|| MarketToolOutput::error("demo swap output has no swap_id"))
+    }
 }
 
 fn tag_value<'a>(event: &'a PublicRelayEvent, name: &str) -> Option<&'a str> {
@@ -641,12 +780,36 @@ mod tests {
         let swap = execute_swap(&state, MarketExecuteSwapInput { quote_id }).expect("swap");
         assert_eq!(swap.0["stage"], "contract");
         let swap_id = swap.0["swap_id"].as_str().expect("swap id").to_string();
-        let status = swap_status(&state, MarketSwapStatusInput { swap_id }).expect("status");
+        let status = swap_status(
+            &state,
+            MarketSwapStatusInput {
+                swap_id: swap_id.clone(),
+            },
+        )
+        .expect("status");
+        assert_eq!(status.0["stage"], "contract");
+
+        let status = advance_swap(&state, swap_id.clone()).expect("advance");
         assert_eq!(status.0["stage"], "funding");
+        let status = advance_swap(&state, swap_id.clone()).expect("advance");
+        assert_eq!(status.0["stage"], "executing");
+        let status = advance_swap(&state, swap_id.clone()).expect("advance");
+        assert_eq!(status.0["stage"], "settled");
+
+        let settled = swap_status(&state, MarketSwapStatusInput { swap_id }).expect("status");
+        assert_eq!(settled.0["stage"], "settled");
+        assert_eq!(
+            settled.0["status_history"].as_array().map(Vec::len),
+            Some(4)
+        );
+        assert_eq!(settled.0["projection"]["status_gaps"], json!([]));
+        assert_eq!(settled.0["projection"]["status_forks"], json!([]));
     }
 
     #[gpui::test]
-    async fn explicit_swap_request_does_not_require_second_authorization(cx: &mut TestAppContext) {
+    async fn explicit_swap_streams_contiguous_lifecycle_without_second_authorization(
+        cx: &mut TestAppContext,
+    ) {
         let state = Arc::new(Mutex::new(MarketDemoState::default()));
         let quote = quote_swap(
             &state,
@@ -658,7 +821,10 @@ mod tests {
         )
         .expect("quote");
         let quote_id = quote.0["quote_id"].as_str().expect("quote id").to_string();
-        let tool = Arc::new(MarketExecuteSwapTool { state });
+        let tool = Arc::new(MarketExecuteSwapTool {
+            state,
+            stage_delay: Duration::ZERO,
+        });
         let (event_stream, mut events) = ToolCallEventStream::test();
 
         let result = cx
@@ -672,11 +838,40 @@ mod tests {
             .await
             .expect("swap should execute from the person's request");
 
-        assert_eq!(result.0["stage"], "contract");
-        assert!(
-            events.next().await.is_none(),
-            "swap execution must not emit a second authorization request"
-        );
+        assert_eq!(result.0["stage"], "settled");
+        for expected_stage in SWAP_STAGES {
+            let update = events.expect_update_fields().await;
+            assert!(
+                update
+                    .title
+                    .as_deref()
+                    .is_some_and(|title| title.ends_with(expected_stage)),
+                "expected a streamed {expected_stage} update, got {:?}",
+                update.title
+            );
+        }
+        assert!(events.next().await.is_none());
+    }
+
+    #[test]
+    fn status_projection_rejects_a_gap_or_regression() {
+        let mut swap = Swap {
+            id: "demo-swap-gap".to_string(),
+            from: MarketAsset::Lightning,
+            to: MarketAsset::Bitcoin,
+            amount_sats: 50_000,
+            status_history: vec![SwapStatusRecord {
+                id: "demo-swap-gap-status-1".to_string(),
+                sequence: 1,
+                previous: None,
+                stage: "funding",
+            }],
+        };
+        assert!(project_swap(&swap).is_err());
+
+        swap.status_history[0].sequence = 0;
+        swap.status_history[0].stage = "funding";
+        assert!(project_swap(&swap).is_err());
     }
 
     #[test]

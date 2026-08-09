@@ -33,9 +33,10 @@ conversation.
   `L-BTC` (1,000–10,000,000 sats). Returns a `quote_id`.
 - `market_execute_swap` — runs a quoted swap. An explicit swap request from
   the person is authorization; do not ask for a second approval after quoting.
-  Returns a `swap_id` at the `contract` stage.
-- `market_swap_status` — poll with the `swap_id`; the swap advances one stage
-  per poll: `contract → funding → executing → settled`.
+  Streams one contiguous lifecycle for its `swap_id` through
+  `contract → funding → executing → settled` and returns after settlement.
+- `market_swap_status` — reads the latest projected state for a `swap_id`.
+  Reads never advance the swap.
 
 ## The flow
 
@@ -48,8 +49,9 @@ conversation.
    request itself as authorization. Call `market_swap_quote`, present the quote
    briefly, then call `market_execute_swap` with the `quote_id` without asking
    for another approval. A quote-only request stops after the quote.
-3. Poll `market_swap_status` until the stage is `settled`, narrating each stage
-   transition briefly as it happens.
+3. Let `market_execute_swap` stream its lifecycle. Do not drive progress by
+   repeatedly calling `market_swap_status`; use that tool only to inspect an
+   existing swap after execution.
 4. Relay each stage's `verification` caption faithfully: provider claims stay
    labeled unverified until the settled stage reports local verification.
 

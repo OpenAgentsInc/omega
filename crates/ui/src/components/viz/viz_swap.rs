@@ -39,7 +39,7 @@ impl SwapAsset {
 /// the recovery exit that is always drawn.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum SwapStage {
-    /// A firm quote is on the table, awaiting the person's approval.
+    /// A firm quote is on the table with exact execution terms.
     Quote,
     /// Both sides signed the bilateral swap contract.
     Contract,
@@ -81,7 +81,7 @@ impl SwapStage {
     /// labeled unverified until local verification passes.
     fn verification(&self) -> &'static str {
         match self {
-            Self::Quote => "firm quote · reserves capacity on approval",
+            Self::Quote => "firm quote · exact terms awaiting execution",
             Self::Contract => "exit package persisted before any funding",
             Self::Funding | Self::Executing => "provider status is a claim · verifying locally",
             Self::Settled => "verified locally · zero-loss close",
