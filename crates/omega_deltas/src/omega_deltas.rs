@@ -233,6 +233,7 @@ pub const ENFORCED_DELTAS: &[&str] = &[
     "OMEGA-DELTA-0260",
     "OMEGA-DELTA-0261",
     "OMEGA-DELTA-0262",
+    "OMEGA-DELTA-0263",
 ];
 
 /// OMEGA-DELTA-0204. Every control the composer's bar offers, written twice:
@@ -30218,7 +30219,7 @@ mod tests {
         ));
         for required in [
             "pub struct AssetId",
-            "pub const LEDGER_SCHEMA_VERSION: i64 = 2",
+            "pub const LEDGER_SCHEMA_VERSION: i64 = 3",
             "fn migrate_legacy_sats_postings",
             "ledger postings do not balance: {sum} {asset}",
             "must not repeat an account within one asset",
@@ -30562,6 +30563,69 @@ mod tests {
         assert!(
             operator.contains("review_cost_summary") && operator.contains("false event wakeups"),
             "OMEGA-DELTA-0262: operator review cost summary disappeared"
+        );
+    }
+
+    /// Counterparty exposure remains a recorded read-only derivation rather
+    /// than a new mandate or enforcement dimension.
+    #[test]
+    fn counterparty_exposure_is_derived_recorded_and_visible() {
+        let ledger = without_comments(&read_repository_file(
+            "crates/trading_ledger/src/trading_ledger.rs",
+        ));
+        for required in [
+            "pub struct CounterpartySnapshot",
+            "pub struct CounterpartyExposure",
+            "pub fn record_counterparty_exposure(",
+            "pub fn latest_counterparty_exposures(",
+            "counterparty_exposure_observations_no_update",
+            "counterparty_exposure_observations_no_delete",
+            "unrealized_claims_swell_derived_counterparty_exposure",
+            "pending_withdrawal_is_counted_as_in_flight_exposure",
+        ] {
+            assert!(
+                ledger.contains(required),
+                "OMEGA-DELTA-0263: the ledger exposure contract lost `{required}`"
+            );
+        }
+
+        let measurement = without_comments(&read_repository_file(
+            "crates/lnmarkets/src/counterparty_exposure.rs",
+        ));
+        for required in [
+            "snapshot_from_account_surfaces",
+            "snapshot_from_collector",
+            "cross_position.total_pl",
+            "withdrawal_is_in_flight",
+            "in_flight_transfers",
+        ] {
+            assert!(
+                measurement.contains(required),
+                "OMEGA-DELTA-0263: LN Markets measurement lost `{required}`"
+            );
+        }
+
+        let tools = without_comments(&read_repository_file("crates/lnmarkets/src/agent_tools.rs"));
+        let operator = without_comments(&read_repository_file(
+            "crates/lnmarkets_ui/src/operator_panel.rs",
+        ));
+        assert!(
+            tools.contains("counterparty_exposure") && tools.contains("account_exposure_section"),
+            "OMEGA-DELTA-0263: venue account tools lost counterparty exposure"
+        );
+        assert!(
+            operator.contains("counterparty_exposure_summary")
+                && operator.contains("measurement only"),
+            "OMEGA-DELTA-0263: operator exposure evidence disappeared"
+        );
+
+        let runtime = without_comments(&read_repository_file(
+            "crates/lnmarkets/src/trading_runtime.rs",
+        ));
+        assert!(
+            runtime.contains("measurement only")
+                && !runtime.contains("CounterpartyExposureMandate"),
+            "OMEGA-DELTA-0263: exposure became an enforcement or mandate dimension"
         );
     }
 }

@@ -17,6 +17,7 @@ use plugin_api::{
 };
 
 mod agent_tools;
+mod counterparty_exposure;
 mod review_driver;
 mod review_turn;
 mod signet_soak;
@@ -52,7 +53,10 @@ pub use lnmarkets_trading::{
     ThresholdSwingConfig, ThresholdSwingPosition, ThresholdSwingState, ThresholdSwingWindow,
 };
 pub use lnmarkets_ui::LnMarketsSettingsPage;
-pub use trading_ledger::{AssetId, LedgerEntry, LedgerQuery, LedgerStore, ProfitReport};
+pub use trading_ledger::{
+    AssetId, Counterparty, CounterpartyExposure, CounterpartyExposureDivergence,
+    CounterpartySnapshot, LedgerEntry, LedgerQuery, LedgerStore, ProfitReport,
+};
 pub use trading_mandate::{
     MandateDecision, MandateRefusal, MandateRevision, MandateSnapshot, MandateStore, ReviewCadence,
     TradingInstruction, TradingMandate, TradingNetwork,
@@ -136,7 +140,7 @@ impl plugin_api::OmegaPlugin for LnMarketsPlugin {
         registry.add_settings_page(settings_page_registration());
         registry.add_extension(operator_panel_loader());
         for schema in [
-            "omega.lnmarkets.account.v1",
+            "omega.lnmarkets.account.v2",
             "omega.lnmarkets.market-data.v2",
             "omega.lnmarkets.market-data.v3",
             "omega.lnmarkets.features.v1",
@@ -312,6 +316,21 @@ fn start_market_data_service(
                 };
                 if let Err(error) = refresh_venue_capabilities(&venue_capabilities, at_ms) {
                     log::warn!("could not refresh LN Markets venue capabilities: {error}");
+                }
+                if collector.health().network == Network::Signet {
+                    match counterparty_exposure::snapshot_from_collector(&collector, at_ms) {
+                        Ok(Some(snapshot)) => {
+                            if let Err(error) = runtime.record_counterparty_exposure(snapshot) {
+                                log::warn!(
+                                    "could not record LN Markets counterparty exposure: {error:#}"
+                                );
+                            }
+                        }
+                        Ok(None) => {}
+                        Err(error) => log::warn!(
+                            "could not derive LN Markets counterparty exposure: {error:#}"
+                        ),
+                    }
                 }
                 if let Err(error) = runtime.process_collected_tick(&collector, at_ms).await {
                     log::warn!("LN Markets strategy tick was not processed: {error:#}");

@@ -117,6 +117,7 @@ impl AgentTool for LnMarketsAccountTool {
         _event_stream: ToolCallEventStream,
         cx: &mut App,
     ) -> Task<Result<Self::Output, Self::Output>> {
+        let trading_runtime = crate::trading_runtime(cx);
         cx.spawn(async move |cx| {
             input
                 .recv()
@@ -131,10 +132,44 @@ impl AgentTool for LnMarketsAccountTool {
                 .account()
                 .await
                 .map_err(|error| LnMarketsToolOutput::error(error.to_string()))?;
+            let pagination = Pagination {
+                limit: Some(100),
+                ..Pagination::default()
+            };
+            let cross_position = client.cross_position().await;
+            let isolated_open_trades = client.isolated_open_trades().await;
+            let isolated_running_trades = client.isolated_running_trades().await;
+            let lightning_withdrawals = client
+                .lightning_withdrawals(&AccountHistoryQuery {
+                    pagination: pagination.clone(),
+                    status: None,
+                })
+                .await;
+            let on_chain_withdrawals = client
+                .on_chain_withdrawals(&AccountHistoryQuery {
+                    pagination,
+                    status: None,
+                })
+                .await;
+            let counterparty_exposure = account_exposure_section(
+                &trading_runtime,
+                network,
+                unix_timestamp_ms(),
+                cross_position.as_ref(),
+                isolated_open_trades.as_ref(),
+                isolated_running_trades.as_ref(),
+                lightning_withdrawals
+                    .as_ref()
+                    .map(|page| page.data.as_slice()),
+                on_chain_withdrawals
+                    .as_ref()
+                    .map(|page| page.data.as_slice()),
+            );
             Ok(LnMarketsToolOutput::success(json!({
-                "schema": "omega.lnmarkets.account.v1",
+                "schema": "omega.lnmarkets.account.v2",
                 "network": network,
                 "account": account,
+                "counterparty_exposure": counterparty_exposure,
             })))
         })
     }
@@ -322,6 +357,7 @@ impl AgentTool for LnMarketsMarketDataTool {
         cx: &mut App,
     ) -> Task<Result<Self::Output, Self::Output>> {
         let collector = crate::collector(cx);
+        let trading_runtime = crate::trading_runtime(cx);
         cx.spawn(async move |cx| {
             let input = input
                 .recv()
@@ -448,14 +484,12 @@ impl AgentTool for LnMarketsMarketDataTool {
                             })
                             .await,
                     );
-                    let lightning_withdrawals = tool_section(
-                        client
-                            .lightning_withdrawals(&AccountHistoryQuery {
-                                pagination: pagination.clone(),
-                                status: None,
-                            })
-                            .await,
-                    );
+                    let lightning_withdrawals_result = client
+                        .lightning_withdrawals(&AccountHistoryQuery {
+                            pagination: pagination.clone(),
+                            status: None,
+                        })
+                        .await;
                     let on_chain_deposits = tool_section(
                         client
                             .on_chain_deposits(&AccountHistoryQuery {
@@ -464,14 +498,12 @@ impl AgentTool for LnMarketsMarketDataTool {
                             })
                             .await,
                     );
-                    let on_chain_withdrawals = tool_section(
-                        client
-                            .on_chain_withdrawals(&AccountHistoryQuery {
-                                pagination: pagination.clone(),
-                                status: None,
-                            })
-                            .await,
-                    );
+                    let on_chain_withdrawals_result = client
+                        .on_chain_withdrawals(&AccountHistoryQuery {
+                            pagination: pagination.clone(),
+                            status: None,
+                        })
+                        .await;
                     let notifications = tool_section(
                         client
                             .notifications(&NotificationsQuery {
@@ -480,16 +512,15 @@ impl AgentTool for LnMarketsMarketDataTool {
                             })
                             .await,
                     );
-                    let cross_position = tool_section(client.cross_position().await);
+                    let cross_position_result = client.cross_position().await;
                     let cross_open_orders = tool_section(client.cross_open_orders().await);
                     let cross_filled_orders =
                         tool_section(client.cross_filled_orders(&pagination).await);
                     let cross_funding_fees =
                         tool_section(client.cross_funding_fees(&pagination).await);
                     let cross_transfers = tool_section(client.cross_transfers(&pagination).await);
-                    let isolated_open_trades = tool_section(client.isolated_open_trades().await);
-                    let isolated_running_trades =
-                        tool_section(client.isolated_running_trades().await);
+                    let isolated_open_trades_result = client.isolated_open_trades().await;
+                    let isolated_running_trades_result = client.isolated_running_trades().await;
                     let isolated_closed_trades =
                         tool_section(client.isolated_closed_trades(&pagination).await);
                     let isolated_canceled_trades =
@@ -497,11 +528,31 @@ impl AgentTool for LnMarketsMarketDataTool {
                     let isolated_funding_fees =
                         tool_section(client.isolated_funding_fees(&pagination, None).await);
                     let swaps = tool_section(client.swaps(&pagination).await);
+                    let counterparty_exposure = account_exposure_section(
+                        &trading_runtime,
+                        configured_network,
+                        unix_timestamp_ms(),
+                        cross_position_result.as_ref(),
+                        isolated_open_trades_result.as_ref(),
+                        isolated_running_trades_result.as_ref(),
+                        lightning_withdrawals_result
+                            .as_ref()
+                            .map(|page| page.data.as_slice()),
+                        on_chain_withdrawals_result
+                            .as_ref()
+                            .map(|page| page.data.as_slice()),
+                    );
+                    let lightning_withdrawals = tool_section(lightning_withdrawals_result);
+                    let on_chain_withdrawals = tool_section(on_chain_withdrawals_result);
+                    let cross_position = tool_section(cross_position_result);
+                    let isolated_open_trades = tool_section(isolated_open_trades_result);
+                    let isolated_running_trades = tool_section(isolated_running_trades_result);
                     Ok(LnMarketsToolOutput::success(json!({
-                        "schema": "omega.lnmarkets.market-data.v2",
+                        "schema": "omega.lnmarkets.market-data.v3",
                         "view": "portfolio",
                         "network": configured_network,
                         "account": account,
+                        "counterparty_exposure": counterparty_exposure,
                         "wallet": {
                             "bitcoin_address": bitcoin_address,
                             "lightning_deposits": lightning_deposits,
@@ -1491,6 +1542,49 @@ fn tool_section<T: Serialize>(result: Result<T, crate::Error>) -> Value {
             Err(error) => json!({ "ok": false, "error": error.to_string() }),
         },
         Err(error) => json!({ "ok": false, "error": error.to_string() }),
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
+fn account_exposure_section(
+    trading_runtime: &Result<Arc<crate::TradingRuntime>, String>,
+    network: Network,
+    observed_at_ms: Result<i64, String>,
+    cross_position: Result<&crate::FuturesCrossPosition, &crate::Error>,
+    isolated_open_trades: Result<&Vec<crate::FuturesIsolatedTrade>, &crate::Error>,
+    isolated_running_trades: Result<&Vec<crate::FuturesIsolatedTrade>, &crate::Error>,
+    lightning_withdrawals: Result<&[crate::LightningWithdrawal], &crate::Error>,
+    on_chain_withdrawals: Result<&[crate::OnChainWithdrawal], &crate::Error>,
+) -> Value {
+    if network != Network::Signet {
+        return json!({
+            "ok": false,
+            "error": "counterparty exposure is recorded only against the signet trading ledger",
+        });
+    }
+    let result = (|| -> Result<crate::CounterpartyExposure, String> {
+        let snapshot = crate::counterparty_exposure::snapshot_from_account_surfaces(
+            observed_at_ms?,
+            cross_position.map_err(|error| error.to_string())?,
+            isolated_open_trades
+                .map_err(|error| error.to_string())?
+                .as_slice(),
+            isolated_running_trades
+                .map_err(|error| error.to_string())?
+                .as_slice(),
+            lightning_withdrawals.map_err(|error| error.to_string())?,
+            on_chain_withdrawals.map_err(|error| error.to_string())?,
+        )
+        .map_err(|error| error.to_string())?;
+        trading_runtime
+            .as_ref()
+            .map_err(Clone::clone)?
+            .record_counterparty_exposure(snapshot)
+            .map_err(|error| error.to_string())
+    })();
+    match result {
+        Ok(exposure) => json!({ "ok": true, "data": exposure }),
+        Err(error) => json!({ "ok": false, "error": error }),
     }
 }
 

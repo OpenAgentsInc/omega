@@ -427,6 +427,19 @@ impl LnMarketsOperatorPanel {
                             .color(Color::Muted),
                     )
                 })
+                .child(
+                    v_flex()
+                        .debug_selector(|| "lnmarkets.operator.counterparty-exposures".into())
+                        .children(report.counterparty_exposures.iter().map(|exposure| {
+                            Label::new(counterparty_exposure_summary(exposure))
+                                .size(LabelSize::Small)
+                                .color(if exposure.divergence_event.is_some() {
+                                    Color::Warning
+                                } else {
+                                    Color::Muted
+                                })
+                        })),
+                )
                 .children(report.strategies.iter().map(|strategy| {
                     h_flex()
                         .justify_between()
@@ -793,6 +806,38 @@ fn review_cadence_label(cadence: &ReviewCadence) -> String {
     }
 }
 
+fn counterparty_exposure_summary(exposure: &trading_ledger::CounterpartyExposure) -> String {
+    let counterparty = match &exposure.counterparty {
+        trading_ledger::Counterparty::Venue { venue } => format!("venue {venue}"),
+        trading_ledger::Counterparty::Provider { provider } => format!("provider {provider}"),
+    };
+    let cap = exposure
+        .mandate_venue_balance_cap
+        .map(|cap| format!(" · mandate cap {cap}"))
+        .unwrap_or_default();
+    let headroom = exposure
+        .mandate_cap_headroom
+        .map(|headroom| format!(" · headroom {headroom}"))
+        .unwrap_or_default();
+    let divergence = exposure.divergence_event.as_ref().map_or_else(
+        || format!(" · divergence {}", exposure.balance_divergence),
+        |event| {
+            format!(
+                " · divergence {} exceeds {} (measurement only)",
+                event.balance_divergence, event.threshold
+            )
+        },
+    );
+    format!(
+        "Exposure {counterparty} · {}: {} = balance {} + claims {} + in-flight {}{cap}{headroom}{divergence}",
+        exposure.asset,
+        exposure.counterparty_exposure,
+        exposure.balance_held,
+        exposure.unrealized_claims,
+        exposure.in_flight_transfers,
+    )
+}
+
 fn format_duration(milliseconds: i64) -> String {
     if milliseconds < 1_000 {
         return format!("{milliseconds} ms");
@@ -824,7 +869,10 @@ mod tests {
 
     use gpui::TestAppContext;
     use lnmarkets_client::Network;
-    use trading_ledger::{ProfitReport, StrategyProfit};
+    use trading_ledger::{
+        Counterparty, CounterpartyExposure, CounterpartyExposureDivergence, ProfitReport,
+        StrategyProfit,
+    };
     use trading_mandate::{AssetId, ReviewCadence, TradingMandate, TradingNetwork};
 
     use super::*;
@@ -896,6 +944,25 @@ mod tests {
                         ..Default::default()
                     }],
                     total_profit_sats: 125,
+                    counterparty_exposures: vec![CounterpartyExposure {
+                        observed_at_ms: 9_500,
+                        counterparty: Counterparty::Venue {
+                            venue: "lnmarkets".into(),
+                        },
+                        asset: trading_ledger::AssetId::sats(),
+                        balance_held: 100,
+                        unrealized_claims: 60,
+                        in_flight_transfers: 20,
+                        counterparty_exposure: 180,
+                        balance_divergence: 80,
+                        mandate_venue_balance_cap: Some(1_000),
+                        mandate_cap_headroom: Some(820),
+                        divergence_threshold: 50,
+                        divergence_event: Some(CounterpartyExposureDivergence {
+                            balance_divergence: 80,
+                            threshold: 50,
+                        }),
+                    }],
                     ..Default::default()
                 }),
                 mandate: Some(MandateSnapshot {
@@ -970,6 +1037,7 @@ mod tests {
             "lnmarkets.operator.strategy.funding_carry",
             "lnmarkets.operator.backtests",
             "lnmarkets.operator.ledger",
+            "lnmarkets.operator.counterparty-exposures",
             "lnmarkets.operator.mandate",
             "lnmarkets.operator.wakeups",
         ] {

@@ -19,7 +19,9 @@ use plugin_api::VenueCapabilityGuard;
 use review_accounting::{ReviewAccountingStore, ReviewCostRecord, ReviewCostSummary};
 use serde::Serialize;
 use serde_json::Value;
-use trading_ledger::{LedgerQuery, LedgerStore, ProfitReport};
+use trading_ledger::{
+    CounterpartyExposure, CounterpartySnapshot, LedgerQuery, LedgerStore, ProfitReport,
+};
 use trading_mandate::{
     MandateRevision, MandateSnapshot, MandateStore, ReviewCadence, TradingNetwork,
 };
@@ -116,6 +118,42 @@ impl TradingRuntime {
 
     pub fn venue_balance(&self, venue: &str) -> Result<i64> {
         self.ledger.venue_balance(venue)
+    }
+
+    pub fn record_counterparty_exposure(
+        &self,
+        snapshot: CounterpartySnapshot,
+    ) -> Result<CounterpartyExposure> {
+        let mandate = self
+            .mandate
+            .snapshot()?
+            .mandate_for(LNMARKETS_VENUE, TradingNetwork::Signet)
+            .cloned();
+        let mandate_cap = mandate
+            .filter(|mandate| mandate.collateral_asset == snapshot.asset)
+            .map(|mandate| {
+                i64::try_from(mandate.max_venue_balance)
+                    .context("mandate venue-balance cap exceeds the ledger integer range")
+            })
+            .transpose()?;
+        let (exposure, appended) = self
+            .ledger
+            .record_counterparty_exposure(snapshot, mandate_cap)?;
+        if appended && exposure.divergence_event.is_some() {
+            log::warn!(
+                "LN Markets counterparty exposure diverged from its ledger balance: balance={}, claims={}, in_flight={}, exposure={}, threshold={}; measurement only",
+                exposure.balance_held,
+                exposure.unrealized_claims,
+                exposure.in_flight_transfers,
+                exposure.counterparty_exposure,
+                exposure.divergence_threshold,
+            );
+        }
+        Ok(exposure)
+    }
+
+    pub fn latest_counterparty_exposures(&self) -> Result<Vec<CounterpartyExposure>> {
+        self.ledger.latest_counterparty_exposures()
     }
 
     pub fn backtest_reports(

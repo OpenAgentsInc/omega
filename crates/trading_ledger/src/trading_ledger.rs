@@ -17,8 +17,10 @@ const MAX_IDENTIFIER_LENGTH: usize = 200;
 const MAX_ASSET_ID_LENGTH: usize = 32;
 
 /// Ledger schema version stored in SQLite `user_version`. Version 1 databases
-/// hard-coded sats; version 2 postings carry an explicit asset.
-pub const LEDGER_SCHEMA_VERSION: i64 = 2;
+/// hard-coded sats; version 2 postings carry an explicit asset; version 3 adds
+/// append-only derived counterparty-exposure observations.
+pub const LEDGER_SCHEMA_VERSION: i64 = 3;
+pub const COUNTERPARTY_EXPOSURE_DIVERGENCE_THRESHOLD_BPS: u32 = 500;
 
 /// A validated asset identifier. Amounts in this ledger are integers in the
 /// asset's smallest venue-native unit (satoshis for `sats`, micro-USDC style
@@ -497,12 +499,84 @@ pub struct ProfitReport {
     pub worst_drawdown_sats: i64,
     #[serde(default)]
     pub assets: Vec<AssetProfit>,
+    #[serde(default)]
+    pub counterparty_exposures: Vec<CounterpartyExposure>,
 }
 
 impl ProfitReport {
     pub fn asset_totals(&self, asset: &AssetId) -> Option<&AssetProfit> {
         self.assets.iter().find(|totals| &totals.asset == asset)
     }
+}
+
+#[derive(Clone, Debug, Eq, Ord, PartialEq, PartialOrd, Serialize, Deserialize)]
+#[serde(tag = "type", rename_all = "snake_case")]
+pub enum Counterparty {
+    Venue { venue: String },
+    Provider { provider: String },
+}
+
+impl Counterparty {
+    fn validate(&self) -> Result<()> {
+        match self {
+            Self::Venue { venue } => validate_identifier("venue", venue),
+            Self::Provider { provider } => validate_identifier("provider", provider),
+        }
+    }
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+pub struct CounterpartySnapshot {
+    pub observed_at_ms: i64,
+    pub counterparty: Counterparty,
+    pub asset: AssetId,
+    pub provider_balance_held: Option<i64>,
+    pub unrealized_claims: i64,
+    pub in_flight_transfers: i64,
+}
+
+impl CounterpartySnapshot {
+    fn validate(&self) -> Result<()> {
+        if self.observed_at_ms < 0 {
+            bail!("counterparty snapshot timestamp must not be negative");
+        }
+        self.counterparty.validate()?;
+        match (&self.counterparty, self.provider_balance_held) {
+            (Counterparty::Venue { .. }, Some(_)) => {
+                bail!("a venue snapshot must use its ledger balance")
+            }
+            (Counterparty::Provider { .. }, None) => {
+                bail!("a provider snapshot must supply its held balance")
+            }
+            _ => {}
+        }
+        if self.in_flight_transfers < 0 {
+            bail!("in-flight counterparty transfers must not be negative");
+        }
+        Ok(())
+    }
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+pub struct CounterpartyExposureDivergence {
+    pub balance_divergence: i64,
+    pub threshold: i64,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+pub struct CounterpartyExposure {
+    pub observed_at_ms: i64,
+    pub counterparty: Counterparty,
+    pub asset: AssetId,
+    pub balance_held: i64,
+    pub unrealized_claims: i64,
+    pub in_flight_transfers: i64,
+    pub counterparty_exposure: i64,
+    pub balance_divergence: i64,
+    pub mandate_venue_balance_cap: Option<i64>,
+    pub mandate_cap_headroom: Option<i64>,
+    pub divergence_threshold: i64,
+    pub divergence_event: Option<CounterpartyExposureDivergence>,
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
@@ -588,6 +662,22 @@ impl LedgerStore {
              CREATE TRIGGER IF NOT EXISTS trading_ledger_postings_no_delete
              BEFORE DELETE ON trading_ledger_postings BEGIN
                  SELECT RAISE(ABORT, 'trading ledger postings are append-only');
+             END;
+             CREATE TABLE IF NOT EXISTS counterparty_exposure_observations (
+                 sequence INTEGER PRIMARY KEY CHECK (sequence > 0),
+                 observation_id TEXT NOT NULL UNIQUE,
+                 observed_at_ms INTEGER NOT NULL CHECK (observed_at_ms >= 0),
+                 counterparty_json TEXT NOT NULL,
+                 asset TEXT NOT NULL CHECK (length(asset) > 0),
+                 exposure_json TEXT NOT NULL
+             ) STRICT;
+             CREATE TRIGGER IF NOT EXISTS counterparty_exposure_observations_no_update
+             BEFORE UPDATE ON counterparty_exposure_observations BEGIN
+                 SELECT RAISE(ABORT, 'counterparty exposure observations are append-only');
+             END;
+             CREATE TRIGGER IF NOT EXISTS counterparty_exposure_observations_no_delete
+             BEFORE DELETE ON counterparty_exposure_observations BEGIN
+                 SELECT RAISE(ABORT, 'counterparty exposure observations are append-only');
              END;",
         )?;
         connection.pragma_update(None, "user_version", LEDGER_SCHEMA_VERSION)?;
@@ -610,7 +700,8 @@ impl LedgerStore {
     }
 
     pub fn verify(&self) -> Result<()> {
-        verify_entries(&load_entries(&self.connection.lock())?)
+        verify_entries(&load_entries(&self.connection.lock())?)?;
+        self.latest_counterparty_exposures().map(|_| ())
     }
 
     pub fn entries(&self, query: &LedgerQuery) -> Result<Vec<LedgerEntry>> {
@@ -732,8 +823,156 @@ impl LedgerStore {
             total_funding_collected_sats: sats_totals.funding_collected,
             worst_drawdown_sats: sats_totals.worst_drawdown,
             assets: total_assets,
+            counterparty_exposures: self.latest_counterparty_exposures()?,
         })
     }
+
+    pub fn record_counterparty_exposure(
+        &self,
+        snapshot: CounterpartySnapshot,
+        mandate_venue_balance_cap: Option<i64>,
+    ) -> Result<(CounterpartyExposure, bool)> {
+        snapshot.validate()?;
+        if mandate_venue_balance_cap.is_some_and(|cap| cap < 0) {
+            bail!("mandate venue-balance cap must not be negative");
+        }
+        let balance_held = match &snapshot.counterparty {
+            Counterparty::Venue { venue } => self.venue_asset_balance(venue, &snapshot.asset)?,
+            Counterparty::Provider { .. } => snapshot
+                .provider_balance_held
+                .context("provider counterparty snapshot lost its held balance")?,
+        };
+        let counterparty_exposure = balance_held
+            .checked_add(snapshot.unrealized_claims)
+            .and_then(|value| value.checked_add(snapshot.in_flight_transfers))
+            .context("counterparty exposure overflowed")?;
+        let balance_divergence = counterparty_exposure
+            .checked_sub(balance_held)
+            .context("counterparty balance divergence overflowed")?;
+        let divergence_threshold =
+            counterparty_divergence_threshold(balance_held, mandate_venue_balance_cap)?;
+        let divergence_event = (balance_divergence.unsigned_abs()
+            > divergence_threshold.unsigned_abs())
+        .then_some(CounterpartyExposureDivergence {
+            balance_divergence,
+            threshold: divergence_threshold,
+        });
+        let mandate_cap_headroom = mandate_venue_balance_cap
+            .map(|cap| {
+                cap.checked_sub(counterparty_exposure)
+                    .context("mandate-cap headroom overflowed")
+            })
+            .transpose()?;
+        let exposure = CounterpartyExposure {
+            observed_at_ms: snapshot.observed_at_ms,
+            counterparty: snapshot.counterparty,
+            asset: snapshot.asset,
+            balance_held,
+            unrealized_claims: snapshot.unrealized_claims,
+            in_flight_transfers: snapshot.in_flight_transfers,
+            counterparty_exposure,
+            balance_divergence,
+            mandate_venue_balance_cap,
+            mandate_cap_headroom,
+            divergence_threshold,
+            divergence_event,
+        };
+        let exposure_json = serde_json::to_string(&exposure)?;
+        let observation_id = content_digest(exposure_json.as_bytes());
+        let mut connection = self.connection.lock();
+        let transaction = connection.transaction()?;
+        let exists = transaction
+            .prepare("SELECT 1 FROM counterparty_exposure_observations WHERE observation_id = ?1")?
+            .exists(params![&observation_id])?;
+        if exists {
+            transaction.commit()?;
+            return Ok((exposure, false));
+        }
+        let next_sequence: i64 = transaction.query_row(
+            "SELECT COALESCE(MAX(sequence), 0) + 1 FROM counterparty_exposure_observations",
+            [],
+            |row| row.get(0),
+        )?;
+        transaction.execute(
+            "INSERT INTO counterparty_exposure_observations (
+                 sequence, observation_id, observed_at_ms, counterparty_json, asset, exposure_json
+             ) VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+            params![
+                next_sequence,
+                observation_id,
+                exposure.observed_at_ms,
+                serde_json::to_string(&exposure.counterparty)?,
+                exposure.asset.as_str(),
+                exposure_json,
+            ],
+        )?;
+        transaction.commit()?;
+        Ok((exposure, true))
+    }
+
+    pub fn latest_counterparty_exposures(&self) -> Result<Vec<CounterpartyExposure>> {
+        let connection = self.connection.lock();
+        let mut statement = connection.prepare(
+            "SELECT sequence, observation_id, counterparty_json, asset, exposure_json
+             FROM counterparty_exposure_observations ORDER BY sequence",
+        )?;
+        let rows = statement.query_map([], |row| {
+            Ok((
+                row.get::<_, i64>(0)?,
+                row.get::<_, String>(1)?,
+                row.get::<_, String>(2)?,
+                row.get::<_, String>(3)?,
+                row.get::<_, String>(4)?,
+            ))
+        })?;
+        let mut expected_sequence = 1_i64;
+        let mut latest = BTreeMap::<(Counterparty, AssetId), CounterpartyExposure>::new();
+        for row in rows {
+            let (sequence, observation_id, counterparty_json, asset, exposure_json) = row?;
+            if sequence != expected_sequence {
+                bail!(
+                    "counterparty exposure sequence gap: expected {expected_sequence}, found {sequence}"
+                );
+            }
+            if observation_id != content_digest(exposure_json.as_bytes()) {
+                bail!("counterparty exposure observation {sequence} failed its content digest");
+            }
+            let exposure: CounterpartyExposure = serde_json::from_str(&exposure_json)?;
+            exposure.counterparty.validate()?;
+            if counterparty_json != serde_json::to_string(&exposure.counterparty)?
+                || asset != exposure.asset.as_str()
+            {
+                bail!("counterparty exposure observation {sequence} has mismatched key columns");
+            }
+            latest.insert(
+                (exposure.counterparty.clone(), exposure.asset.clone()),
+                exposure,
+            );
+            expected_sequence = expected_sequence
+                .checked_add(1)
+                .context("counterparty exposure sequence overflowed")?;
+        }
+        Ok(latest.into_values().collect())
+    }
+}
+
+fn counterparty_divergence_threshold(
+    balance_held: i64,
+    mandate_venue_balance_cap: Option<i64>,
+) -> Result<i64> {
+    let basis = balance_held.unsigned_abs().max(
+        mandate_venue_balance_cap
+            .map(|cap| cap.unsigned_abs())
+            .unwrap_or_default(),
+    );
+    let threshold = u128::from(basis)
+        .saturating_mul(u128::from(COUNTERPARTY_EXPOSURE_DIVERGENCE_THRESHOLD_BPS))
+        .div_ceil(10_000);
+    i64::try_from(threshold).context("counterparty divergence threshold overflowed")
+}
+
+fn content_digest(content: &[u8]) -> String {
+    format!("{:x}", Sha256::digest(content))
 }
 
 // Version 1 stored postings in an `amount_sats` column with no asset. The
@@ -1814,6 +2053,136 @@ mod tests {
             reopened.entries(&LedgerQuery::default()).expect("entries"),
             vec![entry]
         );
+    }
+
+    #[test]
+    fn unrealized_claims_swell_derived_counterparty_exposure() {
+        let store = LedgerStore::in_memory().expect("store");
+        store
+            .append(draft(
+                "opening",
+                1,
+                "system",
+                LedgerEntryKind::Deposit,
+                vec![
+                    posting(venue(), 100),
+                    posting(LedgerAccount::External, -100),
+                ],
+            ))
+            .expect("opening balance");
+        let snapshot = CounterpartySnapshot {
+            observed_at_ms: 2,
+            counterparty: Counterparty::Venue {
+                venue: "lnmarkets".into(),
+            },
+            asset: AssetId::sats(),
+            provider_balance_held: None,
+            unrealized_claims: 60,
+            in_flight_transfers: 0,
+        };
+
+        let (exposure, appended) = store
+            .record_counterparty_exposure(snapshot.clone(), Some(1_000))
+            .expect("exposure");
+        assert!(appended);
+        assert_eq!(exposure.balance_held, 100);
+        assert_eq!(exposure.counterparty_exposure, 160);
+        assert_eq!(exposure.balance_divergence, 60);
+        assert_eq!(exposure.divergence_threshold, 50);
+        assert!(exposure.divergence_event.is_some());
+        assert_eq!(exposure.mandate_cap_headroom, Some(840));
+
+        let (_, replay_appended) = store
+            .record_counterparty_exposure(snapshot, Some(1_000))
+            .expect("idempotent replay");
+        assert!(!replay_appended);
+        assert_eq!(
+            store
+                .profit_report(&LedgerQuery::default())
+                .expect("report")
+                .counterparty_exposures,
+            vec![exposure]
+        );
+    }
+
+    #[test]
+    fn pending_withdrawal_is_counted_as_in_flight_exposure() {
+        let store = LedgerStore::in_memory().expect("store");
+        for entry in [
+            draft(
+                "opening",
+                1,
+                "system",
+                LedgerEntryKind::Deposit,
+                vec![
+                    posting(venue(), 100),
+                    posting(LedgerAccount::External, -100),
+                ],
+            ),
+            draft(
+                "withdrawal",
+                2,
+                "system",
+                LedgerEntryKind::Withdrawal,
+                vec![posting(venue(), -20), posting(LedgerAccount::External, 20)],
+            ),
+        ] {
+            store.append(entry).expect("ledger entry");
+        }
+
+        let (exposure, _) = store
+            .record_counterparty_exposure(
+                CounterpartySnapshot {
+                    observed_at_ms: 3,
+                    counterparty: Counterparty::Venue {
+                        venue: "lnmarkets".into(),
+                    },
+                    asset: AssetId::sats(),
+                    provider_balance_held: None,
+                    unrealized_claims: 0,
+                    in_flight_transfers: 20,
+                },
+                Some(100),
+            )
+            .expect("exposure");
+        assert_eq!(exposure.balance_held, 80);
+        assert_eq!(exposure.in_flight_transfers, 20);
+        assert_eq!(exposure.counterparty_exposure, 100);
+        assert_eq!(exposure.divergence_threshold, 5);
+        assert!(exposure.divergence_event.is_some());
+    }
+
+    #[test]
+    fn counterparty_exposure_observations_are_append_only() {
+        let store = LedgerStore::in_memory().expect("store");
+        store
+            .record_counterparty_exposure(
+                CounterpartySnapshot {
+                    observed_at_ms: 1,
+                    counterparty: Counterparty::Provider {
+                        provider: "custodian".into(),
+                    },
+                    asset: AssetId::usdc(),
+                    provider_balance_held: Some(25),
+                    unrealized_claims: 5,
+                    in_flight_transfers: 1,
+                },
+                None,
+            )
+            .expect("provider exposure");
+        let connection = store.connection.lock();
+        for statement in [
+            "UPDATE counterparty_exposure_observations SET observed_at_ms = 2",
+            "DELETE FROM counterparty_exposure_observations",
+        ] {
+            assert!(
+                connection
+                    .execute(statement, [])
+                    .expect_err("append-only refusal")
+                    .to_string()
+                    .contains("append-only")
+            );
+        }
     }
 
     #[test]

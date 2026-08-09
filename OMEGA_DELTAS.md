@@ -10379,3 +10379,26 @@ or strategy policy changes in response to them.
   `lnmarkets_ui` unit tests and
   `review_turn_costs_are_append_only_queryable_and_visible` in
   `omega_deltas`.
+
+### OMEGA-DELTA-0263 — Counterparty exposure is derived, recorded, and observational
+
+The trading ledger derives counterparty exposure per (venue or provider,
+asset) without adding a mandate dimension. A venue observation joins the
+ledger's held balance to venue-snapshot unrealized claims and in-flight
+transfers; provider observations supply their held balance explicitly. The
+sum, its divergence from held balance, and the applicable venue-balance cap
+and headroom are recorded in a strict append-only observation log. Repeated
+identical observations are idempotent, and ledger reports expose the latest
+record for each counterparty and asset.
+
+LN Markets measures cross and isolated unrealized P&L plus pending Lightning
+and on-chain withdrawals from authenticated account responses and its local
+private-stream history. The account and portfolio tools, ledger report, and
+operator panel show the derived value and its components. A divergence beyond
+five percent of the larger held-balance or mandate-cap basis emits a recorded
+event and warning. It never changes a mandate, blocks an instruction, wakes an
+agent, or otherwise enforces policy.
+
+- **Enforced by:** `trading_ledger`, `lnmarkets`, and `lnmarkets_ui` unit tests
+  and `counterparty_exposure_is_derived_recorded_and_visible` in
+  `omega_deltas`.
