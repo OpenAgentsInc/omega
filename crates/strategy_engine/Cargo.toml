@@ -18,6 +18,7 @@ agent_wakeup.workspace = true
 anyhow.workspace = true
 async-trait.workspace = true
 futures.workspace = true
+log.workspace = true
 parking_lot.workspace = true
 paths.workspace = true
 rusqlite.workspace = true

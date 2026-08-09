@@ -3,7 +3,10 @@ use std::sync::Arc;
 use agent_wakeup::WakeupSource;
 use anyhow::{Context as _, Result, anyhow, bail};
 use async_trait::async_trait;
-use futures::{StreamExt as _, channel::mpsc};
+use futures::{
+    StreamExt as _,
+    channel::{mpsc, oneshot},
+};
 use parking_lot::Mutex;
 use serde::{Deserialize, Serialize, de::DeserializeOwned};
 use serde_json::{Value, json};
@@ -377,6 +380,9 @@ where
 
     pub fn start(&mut self, config: Program::Config, at_ms: i64) -> Result<()> {
         validate_timestamp(at_ms)?;
+        if matches!(self.status, StrategyStatus::Running { .. }) {
+            bail!("strategy is already running");
+        }
         self.program.validate_config(&config)?;
         let approval = self.require_backtest(&config)?;
         let state = self.program.initial_state(&config)?;
@@ -750,14 +756,36 @@ pub enum StrategyCommand<Config, Features> {
 
 #[derive(Clone)]
 pub struct StrategyServiceHandle<Config, Features> {
-    sender: mpsc::UnboundedSender<StrategyCommand<Config, Features>>,
+    sender: mpsc::UnboundedSender<StrategyServiceMessage<Config, Features>>,
+}
+
+struct StrategyServiceMessage<Config, Features> {
+    command: StrategyCommand<Config, Features>,
+    response: Option<oneshot::Sender<Result<(), String>>>,
 }
 
 impl<Config, Features> StrategyServiceHandle<Config, Features> {
     pub fn send(&mut self, command: StrategyCommand<Config, Features>) -> Result<()> {
         self.sender
-            .start_send(command)
+            .start_send(StrategyServiceMessage {
+                command,
+                response: None,
+            })
             .map_err(|error| anyhow!("strategy service is unavailable: {error}"))
+    }
+
+    pub async fn request(&mut self, command: StrategyCommand<Config, Features>) -> Result<()> {
+        let (sender, receiver) = oneshot::channel();
+        self.sender
+            .start_send(StrategyServiceMessage {
+                command,
+                response: Some(sender),
+            })
+            .map_err(|error| anyhow!("strategy service is unavailable: {error}"))?;
+        receiver
+            .await
+            .map_err(|_| anyhow!("strategy service stopped before acknowledging the command"))?
+            .map_err(anyhow::Error::msg)
     }
 }
 
@@ -774,17 +802,30 @@ where
     let (sender, mut receiver) = mpsc::unbounded();
     let handle = StrategyServiceHandle { sender };
     let service = async move {
-        while let Some(command) = receiver.next().await {
-            match command {
-                StrategyCommand::Start { config, at_ms } => engine.start(config, at_ms)?,
-                StrategyCommand::Adjust { config } => engine.adjust(config)?,
-                StrategyCommand::Tick(tick) => {
-                    engine.handle_tick(tick).await?;
-                }
+        while let Some(message) = receiver.next().await {
+            let should_shutdown = matches!(message.command, StrategyCommand::Shutdown);
+            let result = match message.command {
+                StrategyCommand::Start { config, at_ms } => engine.start(config, at_ms),
+                StrategyCommand::Adjust { config } => engine.adjust(config),
+                StrategyCommand::Tick(tick) => engine.handle_tick(tick).await.map(|_| ()),
                 StrategyCommand::Halt { at_ms, reason } => {
-                    engine.halt(at_ms, StrategyHaltReason::Manual { reason })?;
+                    engine.halt(at_ms, StrategyHaltReason::Manual { reason })
                 }
-                StrategyCommand::Shutdown => break,
+                StrategyCommand::Shutdown => Ok(()),
+            };
+            if let Some(response) = message.response {
+                let response_result = match &result {
+                    Ok(()) => Ok(()),
+                    Err(error) => Err(error.to_string()),
+                };
+                if response.send(response_result).is_err() {
+                    log::debug!("strategy command requester stopped before receiving its response");
+                }
+            } else {
+                result?;
+            }
+            if should_shutdown {
+                break;
             }
         }
         Ok(engine)
@@ -1281,6 +1322,46 @@ mod tests {
             let engine = service.await.expect("service");
             assert_eq!(engine.state().expect("state").ticks, 1);
             assert_eq!(executor.calls(), 1);
+        });
+    }
+
+    #[test]
+    fn requested_commands_are_acknowledged_and_rejections_do_not_stop_the_service() {
+        block_on(async {
+            let executor = TestExecutor::successful();
+            let (mut handle, service) = background_service(engine(
+                2,
+                executor,
+                LedgerStore::in_memory().expect("ledger"),
+                MemoryLifecycleSink::default(),
+                MemoryWakeupSink::default(),
+            ));
+            let commands = async move {
+                let error = handle
+                    .request(StrategyCommand::Start {
+                        config: TestConfig { protected: true },
+                        at_ms: -1,
+                    })
+                    .await
+                    .expect_err("negative timestamp");
+                assert!(error.to_string().contains("must not be negative"));
+                handle
+                    .request(StrategyCommand::Start {
+                        config: TestConfig { protected: true },
+                        at_ms: 1,
+                    })
+                    .await
+                    .expect("valid start");
+                handle
+                    .request(StrategyCommand::Shutdown)
+                    .await
+                    .expect("shutdown");
+            };
+            let ((), engine) = futures::join!(commands, service);
+            assert!(matches!(
+                engine.expect("service").status(),
+                StrategyStatus::Running { started_at_ms: 1 }
+            ));
         });
     }
 }

@@ -5474,7 +5474,11 @@ async fn test_basic_profile_exposes_named_tools(cx: &mut TestAppContext) {
     #[cfg(feature = "lnmarkets")]
     expected_tool_names.extend([
         "lnmarkets_account",
+        "lnmarkets_features",
+        "lnmarkets_ledger",
+        "lnmarkets_mandate",
         "lnmarkets_market_data",
+        "lnmarkets_strategy",
         "lnmarkets_swap",
     ]);
     expected_tool_names.sort_unstable();

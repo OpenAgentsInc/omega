@@ -10110,3 +10110,27 @@ settled funding, and most recent action through a versioned projection.
 
 - **Enforced by:** `lnmarkets_trading` and `strategy_engine` unit tests and
   `funding_carry_is_cost_gated_protected_and_attributed` in `omega_deltas`.
+
+### OMEGA-DELTA-0251 — LN Markets agent controls are typed and card-backed
+
+Omega Agent can read the local derived feature snapshot, inspect attributed
+strategy profit, read the active trading mandate, and control the two bounded
+LN Markets strategies. Every output has a versioned `omega.lnmarkets.*`
+schema. The mandate tool is read-only; widening authority remains exclusive to
+the settings approval flow. Strategy start and adjustment still require the
+exact stored backtest and active mandate, and automated execution remains
+restricted to signet.
+
+Strategy commands receive an acknowledgement from the durable background
+service. A refused command returns its reason without killing that service.
+Start, adjust, halt, and status updates stream through one tool call so the
+transcript updates one lifecycle card. Features, ledger profit and drawdown,
+strategy lifecycle states, and mandate states each have component-library
+coverage and render outside generic collapsed tool groups.
+
+The four tools are part of the closed Basic profile alongside the account,
+market-data, and direct-swap tools. Raw LN Markets tools remain available for
+inspection and one-off actions.
+
+- **Enforced by:** `strategy_engine`, `agent`, and `agent_ui` unit tests and
+  `lnmarkets_agent_tools_are_versioned_bounded_and_visible` in `omega_deltas`.

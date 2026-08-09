@@ -6,15 +6,24 @@ use http_client::{AsyncBody, HttpClient};
 use lnmarkets_data::{Collector, CollectorConfig, CollectorHandle, MarketDataStore};
 use parking_lot::Mutex;
 
+mod trading_runtime;
+
+pub use trading_runtime::{StrategyRuntimeSnapshot, TradingRuntime};
+
 pub use lnmarkets_client::*;
 pub use lnmarkets_data::{
     AccountAllocation, AccountDriftFeatures, CANDLE_TOPIC, CollectorHealth, CollectorHistory,
     CollectorStatus, FUNDING_SETTLEMENT_TOPIC, FeatureSnapshot, FundingFeatures, FundingSign,
     LiquidityFeatures, ORACLE_INDEX_TOPIC, StoredMarketEvent, VolatilityFeatures,
 };
+pub use lnmarkets_trading::{
+    FundingCarryConfig, FundingCarryInstrument, RebalanceCostMeasurement, RebalanceToTargetConfig,
+    StrategyLifecycleEvent,
+};
 pub use lnmarkets_ui::LnMarketsSettingsPage;
+pub use trading_ledger::{LedgerEntry, LedgerQuery, LedgerStore, ProfitReport};
 pub use trading_mandate::{
-    MandateDecision, MandateRefusal, MandateSnapshot, MandateStore, ReviewCadence,
+    MandateDecision, MandateRefusal, MandateRevision, MandateSnapshot, MandateStore, ReviewCadence,
     TradingInstruction, TradingMandate, TradingNetwork,
 };
 
@@ -38,6 +47,7 @@ pub const MANIFEST: PluginManifest = PluginManifest {
 
 pub struct LnMarketsPlugin {
     collector: Arc<Mutex<Option<CollectorHandle>>>,
+    trading_runtime: Result<Arc<TradingRuntime>, String>,
     _collector_task: Task<()>,
 }
 
@@ -107,8 +117,15 @@ pub fn init(http_client: Arc<dyn HttpClient>, cx: &mut App) {
             _cx.background_spawn(service.run()).await;
         }
     });
+    let trading_runtime = TradingRuntime::open_default()
+        .map(Arc::new)
+        .map_err(|error| format!("could not open the LN Markets trading runtime: {error:#}"));
+    if let Err(error) = &trading_runtime {
+        log::error!("{error}");
+    }
     cx.set_global(LnMarketsPlugin {
         collector,
+        trading_runtime,
         _collector_task: collector_task,
     });
 }
@@ -116,6 +133,13 @@ pub fn init(http_client: Arc<dyn HttpClient>, cx: &mut App) {
 pub fn collector(cx: &App) -> Option<CollectorHandle> {
     cx.try_global::<LnMarketsPlugin>()
         .and_then(|plugin| plugin.collector.lock().clone())
+}
+
+pub fn trading_runtime(cx: &App) -> Result<Arc<TradingRuntime>, String> {
+    cx.try_global::<LnMarketsPlugin>()
+        .ok_or_else(|| "LN Markets is not initialized".to_string())?
+        .trading_runtime
+        .clone()
 }
 
 struct OmegaHttpTransport {

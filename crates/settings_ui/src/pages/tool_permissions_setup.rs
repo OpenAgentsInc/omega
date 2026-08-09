@@ -1419,12 +1419,21 @@ mod tests {
             "market_swap_quote",
             "market_execute_swap",
             "market_swap_status",
-            // Account and market data are read-only. An explicit swap request
-            // authorizes the configured LN Markets network.
+            // Account, features, ledger, mandate, and market data are read-only.
+            // Strategy requests remain bounded by the approved mandate and backtest.
+            // An explicit swap request authorizes the configured LN Markets network.
             #[cfg(feature = "lnmarkets")]
             "lnmarkets_account",
             #[cfg(feature = "lnmarkets")]
+            "lnmarkets_features",
+            #[cfg(feature = "lnmarkets")]
+            "lnmarkets_ledger",
+            #[cfg(feature = "lnmarkets")]
+            "lnmarkets_mandate",
+            #[cfg(feature = "lnmarkets")]
             "lnmarkets_market_data",
+            #[cfg(feature = "lnmarkets")]
+            "lnmarkets_strategy",
             #[cfg(feature = "lnmarkets")]
             "lnmarkets_swap",
             "open",

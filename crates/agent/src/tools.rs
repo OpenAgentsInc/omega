@@ -238,7 +238,15 @@ tools! {
     #[cfg(feature = "lnmarkets")]
     LnMarketsAccountTool,
     #[cfg(feature = "lnmarkets")]
+    LnMarketsFeaturesTool,
+    #[cfg(feature = "lnmarkets")]
+    LnMarketsLedgerTool,
+    #[cfg(feature = "lnmarkets")]
+    LnMarketsMandateTool,
+    #[cfg(feature = "lnmarkets")]
     LnMarketsMarketDataTool,
+    #[cfg(feature = "lnmarkets")]
+    LnMarketsStrategyTool,
     #[cfg(feature = "lnmarkets")]
     LnMarketsSwapTool,
     MarketNetworkStatusTool,
@@ -275,7 +283,15 @@ pub const BASIC_TOOL_NAMES: &[&str] = &[
     #[cfg(feature = "lnmarkets")]
     LnMarketsAccountTool::NAME,
     #[cfg(feature = "lnmarkets")]
+    LnMarketsFeaturesTool::NAME,
+    #[cfg(feature = "lnmarkets")]
+    LnMarketsLedgerTool::NAME,
+    #[cfg(feature = "lnmarkets")]
+    LnMarketsMandateTool::NAME,
+    #[cfg(feature = "lnmarkets")]
     LnMarketsMarketDataTool::NAME,
+    #[cfg(feature = "lnmarkets")]
+    LnMarketsStrategyTool::NAME,
     #[cfg(feature = "lnmarkets")]
     LnMarketsSwapTool::NAME,
 ];
@@ -296,7 +312,15 @@ pub fn basic_tool_name(tool_name: &str) -> Option<&'static str> {
         #[cfg(feature = "lnmarkets")]
         LnMarketsAccountTool::NAME => Some(LnMarketsAccountTool::NAME),
         #[cfg(feature = "lnmarkets")]
+        LnMarketsFeaturesTool::NAME => Some(LnMarketsFeaturesTool::NAME),
+        #[cfg(feature = "lnmarkets")]
+        LnMarketsLedgerTool::NAME => Some(LnMarketsLedgerTool::NAME),
+        #[cfg(feature = "lnmarkets")]
+        LnMarketsMandateTool::NAME => Some(LnMarketsMandateTool::NAME),
+        #[cfg(feature = "lnmarkets")]
         LnMarketsMarketDataTool::NAME => Some(LnMarketsMarketDataTool::NAME),
+        #[cfg(feature = "lnmarkets")]
+        LnMarketsStrategyTool::NAME => Some(LnMarketsStrategyTool::NAME),
         #[cfg(feature = "lnmarkets")]
         LnMarketsSwapTool::NAME => Some(LnMarketsSwapTool::NAME),
         _ => None,

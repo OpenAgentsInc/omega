@@ -221,6 +221,7 @@ pub const ENFORCED_DELTAS: &[&str] = &[
     "OMEGA-DELTA-0248",
     "OMEGA-DELTA-0249",
     "OMEGA-DELTA-0250",
+    "OMEGA-DELTA-0251",
 ];
 
 /// OMEGA-DELTA-0204. Every control the composer's bar offers, written twice:
@@ -19044,7 +19045,11 @@ mod tests {
             "delegate",
             "edit",
             "lnmarkets_account",
+            "lnmarkets_features",
+            "lnmarkets_ledger",
+            "lnmarkets_mandate",
             "lnmarkets_market_data",
+            "lnmarkets_strategy",
             "lnmarkets_swap",
             "market_execute_swap",
             "market_network_status",
@@ -19061,7 +19066,7 @@ mod tests {
             actual, expected,
             "OMEGA-DELTA-0133: the model-visible basic surface must be exactly \
              the six coding tools plus the five built-in market tools and the \
-             three LN Markets tools."
+             seven LN Markets tools."
         );
         assert!(
             !actual.contains("search_web"),
@@ -29636,6 +29641,71 @@ mod tests {
             assert!(
                 engine.contains(required),
                 "OMEGA-DELTA-0250: funding-carry backtest gate lost `{required}`"
+            );
+        }
+    }
+
+    /// LN Markets feature, ledger, strategy, and mandate projections remain
+    /// typed, card-backed, and available to the default agent surface.
+    #[test]
+    fn lnmarkets_agent_tools_are_versioned_bounded_and_visible() {
+        let tools = without_comments(&read_repository_file(
+            "crates/agent/src/tools/lnmarkets_tools.rs",
+        ));
+        for required in [
+            "const NAME: &'static str = \"lnmarkets_features\"",
+            "const NAME: &'static str = \"lnmarkets_ledger\"",
+            "const NAME: &'static str = \"lnmarkets_strategy\"",
+            "const NAME: &'static str = \"lnmarkets_mandate\"",
+            "omega.lnmarkets.features.v1",
+            "omega.lnmarkets.ledger.v1",
+            "omega.lnmarkets.strategy.v1",
+            "omega.lnmarkets.mandate.v1",
+            "read_only\": true",
+            "entry_limit: u16",
+            "event_stream.update_fields(",
+            "automated LN Markets strategies are restricted to signet",
+        ] {
+            assert!(
+                tools.contains(required),
+                "OMEGA-DELTA-0251: the LN Markets agent surface lost `{required}`"
+            );
+        }
+
+        let runtime = without_comments(&read_repository_file(
+            "crates/lnmarkets/src/trading_runtime.rs",
+        ));
+        for required in [
+            "MandateStore::open_default()",
+            "LedgerStore::open_default()",
+            "BacktestStore::open_default()",
+            ".request(StrategyCommand::Start",
+            ".request(StrategyCommand::Adjust",
+            ".request(StrategyCommand::Halt",
+        ] {
+            assert!(
+                runtime.contains(required),
+                "OMEGA-DELTA-0251: durable strategy control lost `{required}`"
+            );
+        }
+
+        let cards = without_comments(&read_repository_file(
+            "crates/agent_ui/src/conversation_view/lnmarkets_tool_cards.rs",
+        ));
+        for required in [
+            "omega.lnmarkets.features.v1",
+            "omega.lnmarkets.ledger.v1",
+            "omega.lnmarkets.strategy.v1",
+            "omega.lnmarkets.mandate.v1",
+            "#[derive(RegisterComponent)]",
+            "[\"collecting\", \"ready\", \"degraded\"]",
+            "[\"empty\", \"profit\", \"drawdown\"]",
+            "[\"idle\", \"starting\", \"running\", \"adjusting\", \"halted\", \"error\"]",
+            "[\"missing\", \"active\", \"expired\"]",
+        ] {
+            assert!(
+                cards.contains(required),
+                "OMEGA-DELTA-0251: the LN Markets component gallery lost `{required}`"
             );
         }
     }

@@ -2548,11 +2548,22 @@ impl Thread {
         #[cfg(feature = "lnmarkets")]
         {
             let http_client = self.project.read(cx).client().http_client();
-            let (lnmarkets_account, lnmarkets_market_data, lnmarkets_swap) =
-                lnmarkets_tools(http_client, zed_credentials_provider::global(cx));
+            let (
+                lnmarkets_account,
+                lnmarkets_market_data,
+                lnmarkets_swap,
+                lnmarkets_features,
+                lnmarkets_ledger,
+                lnmarkets_strategy,
+                lnmarkets_mandate,
+            ) = lnmarkets_tools(http_client, zed_credentials_provider::global(cx));
             self.add_tool(lnmarkets_account);
             self.add_tool(lnmarkets_market_data);
             self.add_tool(lnmarkets_swap);
+            self.add_tool(lnmarkets_features);
+            self.add_tool(lnmarkets_ledger);
+            self.add_tool(lnmarkets_strategy);
+            self.add_tool(lnmarkets_mandate);
         }
 
         self.add_tool(DiagnosticsTool::new(self.project.clone()));

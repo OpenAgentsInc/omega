@@ -1,4 +1,7 @@
-use std::{sync::Arc, time::Duration};
+use std::{
+    sync::Arc,
+    time::{Duration, SystemTime, UNIX_EPOCH},
+};
 
 use agent_client_protocol::schema::v1 as acp;
 use credentials_provider::CredentialsProvider;
@@ -39,6 +42,7 @@ impl From<LnMarketsToolOutput> for LanguageModelToolResultContent {
     }
 }
 
+#[derive(Clone)]
 struct ToolClient {
     http_client: Arc<dyn HttpClient>,
     credentials_provider: Arc<dyn CredentialsProvider>,
@@ -599,6 +603,460 @@ pub struct LnMarketsSwapTool {
     client: ToolClient,
 }
 
+pub struct LnMarketsFeaturesTool;
+
+#[derive(Debug, Serialize, Deserialize, JsonSchema)]
+pub struct LnMarketsFeaturesInput {}
+
+impl AgentTool for LnMarketsFeaturesTool {
+    type Input = LnMarketsFeaturesInput;
+    type Output = LnMarketsToolOutput;
+
+    const NAME: &'static str = "lnmarkets_features";
+
+    fn kind() -> acp::ToolKind {
+        acp::ToolKind::Fetch
+    }
+
+    fn initial_title(&self, _input: Result<Self::Input, Value>, _cx: &mut App) -> SharedString {
+        "Read LN Markets derived features".into()
+    }
+
+    fn run(
+        self: Arc<Self>,
+        input: ToolInput<Self::Input>,
+        _event_stream: ToolCallEventStream,
+        cx: &mut App,
+    ) -> Task<Result<Self::Output, Self::Output>> {
+        let collector = lnmarkets::collector(cx);
+        cx.spawn(async move |_cx| {
+            input
+                .recv()
+                .await
+                .map_err(|error| LnMarketsToolOutput::error(error.to_string()))?;
+            let collector = collector.ok_or_else(|| {
+                LnMarketsToolOutput::error("LN Markets feature collection has not started")
+            })?;
+            let health = collector.health();
+            let features = collector
+                .features()
+                .map_err(|error| LnMarketsToolOutput::error(error.to_string()))?;
+            let status = if features.is_some() {
+                "ready"
+            } else if health.last_error.is_some() {
+                "degraded"
+            } else {
+                "collecting"
+            };
+            Ok(LnMarketsToolOutput::success(json!({
+                "schema": "omega.lnmarkets.features.v1",
+                "status": status,
+                "collector": health,
+                "features": features,
+            })))
+        })
+    }
+}
+
+pub struct LnMarketsLedgerTool;
+
+#[derive(Debug, Serialize, Deserialize, JsonSchema)]
+pub struct LnMarketsLedgerInput {
+    /// Inclusive start timestamp in Unix milliseconds.
+    #[serde(default)]
+    from_ms: Option<i64>,
+    /// Inclusive end timestamp in Unix milliseconds.
+    #[serde(default)]
+    to_ms: Option<i64>,
+    /// Limit attribution to one strategy ID.
+    #[serde(default)]
+    strategy_id: Option<String>,
+    /// Maximum ledger entries to include, from 0 through 100.
+    #[serde(default = "default_ledger_entry_limit")]
+    entry_limit: u16,
+}
+
+fn default_ledger_entry_limit() -> u16 {
+    25
+}
+
+impl AgentTool for LnMarketsLedgerTool {
+    type Input = LnMarketsLedgerInput;
+    type Output = LnMarketsToolOutput;
+
+    const NAME: &'static str = "lnmarkets_ledger";
+
+    fn kind() -> acp::ToolKind {
+        acp::ToolKind::Fetch
+    }
+
+    fn initial_title(&self, _input: Result<Self::Input, Value>, _cx: &mut App) -> SharedString {
+        "Read LN Markets trading ledger".into()
+    }
+
+    fn run(
+        self: Arc<Self>,
+        input: ToolInput<Self::Input>,
+        _event_stream: ToolCallEventStream,
+        cx: &mut App,
+    ) -> Task<Result<Self::Output, Self::Output>> {
+        let runtime = lnmarkets::trading_runtime(cx);
+        cx.spawn(async move |_cx| {
+            let input = input
+                .recv()
+                .await
+                .map_err(|error| LnMarketsToolOutput::error(error.to_string()))?;
+            require_limit("ledger entry count", input.entry_limit, 0, 100)
+                .map_err(LnMarketsToolOutput::error)?;
+            let runtime = runtime.map_err(LnMarketsToolOutput::error)?;
+            let query = lnmarkets::LedgerQuery {
+                from_ms: input.from_ms,
+                to_ms: input.to_ms,
+                strategy_id: input.strategy_id,
+            };
+            let report = runtime
+                .profit_report(&query)
+                .map_err(|error| LnMarketsToolOutput::error(error.to_string()))?;
+            let mut entries = runtime
+                .ledger_entries(&query)
+                .map_err(|error| LnMarketsToolOutput::error(error.to_string()))?;
+            let total_entry_count = entries.len();
+            entries.reverse();
+            entries.truncate(usize::from(input.entry_limit));
+            Ok(LnMarketsToolOutput::success(json!({
+                "schema": "omega.lnmarkets.ledger.v1",
+                "status": if total_entry_count == 0 { "empty" } else { "ready" },
+                "report": report,
+                "total_entry_count": total_entry_count,
+                "entries": entries,
+            })))
+        })
+    }
+}
+
+pub struct LnMarketsMandateTool;
+
+#[derive(Debug, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct LnMarketsMandateInput {
+    /// Include the append-only revision history.
+    #[serde(default)]
+    include_history: bool,
+}
+
+impl AgentTool for LnMarketsMandateTool {
+    type Input = LnMarketsMandateInput;
+    type Output = LnMarketsToolOutput;
+
+    const NAME: &'static str = "lnmarkets_mandate";
+
+    fn kind() -> acp::ToolKind {
+        acp::ToolKind::Fetch
+    }
+
+    fn initial_title(&self, _input: Result<Self::Input, Value>, _cx: &mut App) -> SharedString {
+        "Read LN Markets trading mandate".into()
+    }
+
+    fn run(
+        self: Arc<Self>,
+        input: ToolInput<Self::Input>,
+        _event_stream: ToolCallEventStream,
+        cx: &mut App,
+    ) -> Task<Result<Self::Output, Self::Output>> {
+        let runtime = lnmarkets::trading_runtime(cx);
+        cx.spawn(async move |_cx| {
+            let input = input
+                .recv()
+                .await
+                .map_err(|error| LnMarketsToolOutput::error(error.to_string()))?;
+            let runtime = runtime.map_err(LnMarketsToolOutput::error)?;
+            let snapshot = runtime
+                .mandate_snapshot()
+                .map_err(|error| LnMarketsToolOutput::error(error.to_string()))?;
+            let now_ms = unix_timestamp_ms().map_err(LnMarketsToolOutput::error)?;
+            let status = match &snapshot.mandate {
+                None => "missing",
+                Some(mandate) if mandate.expires_at_ms <= now_ms => "expired",
+                Some(_) => "active",
+            };
+            let history = if input.include_history {
+                Some(
+                    runtime
+                        .mandate_history()
+                        .map_err(|error| LnMarketsToolOutput::error(error.to_string()))?,
+                )
+            } else {
+                None
+            };
+            Ok(LnMarketsToolOutput::success(json!({
+                "schema": "omega.lnmarkets.mandate.v1",
+                "status": status,
+                "read_only": true,
+                "snapshot": snapshot,
+                "history": history,
+            })))
+        })
+    }
+}
+
+pub struct LnMarketsStrategyTool {
+    client: ToolClient,
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum LnMarketsStrategyName {
+    RebalanceToTarget,
+    FundingCarry,
+}
+
+impl LnMarketsStrategyName {
+    fn label(self) -> &'static str {
+        match self {
+            Self::RebalanceToTarget => "rebalance_to_target",
+            Self::FundingCarry => "funding_carry",
+        }
+    }
+}
+
+#[derive(Debug, Serialize, Deserialize, JsonSchema)]
+#[serde(tag = "action", rename_all = "snake_case")]
+pub enum LnMarketsStrategyInput {
+    /// Read both strategy lifecycle states.
+    Status,
+    /// Start a strategy after its stored backtest and mandate gates pass.
+    Start {
+        strategy: LnMarketsStrategyName,
+        /// Strategy-specific configuration.
+        config: Value,
+    },
+    /// Replace the configuration of a running strategy after its backtest gate passes.
+    Adjust {
+        strategy: LnMarketsStrategyName,
+        /// Strategy-specific configuration.
+        config: Value,
+    },
+    /// Halt a strategy immediately.
+    Halt {
+        strategy: LnMarketsStrategyName,
+        reason: String,
+    },
+}
+
+impl AgentTool for LnMarketsStrategyTool {
+    type Input = LnMarketsStrategyInput;
+    type Output = LnMarketsToolOutput;
+
+    const NAME: &'static str = "lnmarkets_strategy";
+
+    fn kind() -> acp::ToolKind {
+        acp::ToolKind::Other
+    }
+
+    fn initial_title(&self, input: Result<Self::Input, Value>, _cx: &mut App) -> SharedString {
+        match input {
+            Ok(LnMarketsStrategyInput::Status) => "Read LN Markets strategies".into(),
+            Ok(LnMarketsStrategyInput::Start { strategy, .. }) => {
+                format!("Start LN Markets {}", strategy.label()).into()
+            }
+            Ok(LnMarketsStrategyInput::Adjust { strategy, .. }) => {
+                format!("Adjust LN Markets {}", strategy.label()).into()
+            }
+            Ok(LnMarketsStrategyInput::Halt { strategy, .. }) => {
+                format!("Halt LN Markets {}", strategy.label()).into()
+            }
+            Err(_) => "Control LN Markets strategy".into(),
+        }
+    }
+
+    fn run(
+        self: Arc<Self>,
+        input: ToolInput<Self::Input>,
+        event_stream: ToolCallEventStream,
+        cx: &mut App,
+    ) -> Task<Result<Self::Output, Self::Output>> {
+        let runtime = lnmarkets::trading_runtime(cx);
+        cx.spawn(async move |cx| {
+            let input = input
+                .recv()
+                .await
+                .map_err(|error| LnMarketsToolOutput::error(error.to_string()))?;
+            let runtime = runtime.map_err(LnMarketsToolOutput::error)?;
+            let (action, strategy) = strategy_action_labels(&input);
+            emit_lnmarkets_strategy_update(
+                &event_stream,
+                &json!({
+                    "schema": "omega.lnmarkets.strategy.v1",
+                    "status": pending_strategy_status(action),
+                    "phase": "in_progress",
+                    "action": action,
+                    "strategy": strategy,
+                    "strategies": runtime.strategy_snapshots(),
+                }),
+            );
+            let result = match input {
+                LnMarketsStrategyInput::Status => Ok(()),
+                LnMarketsStrategyInput::Start { strategy, config } => {
+                    let (client, network) = self
+                        .client
+                        .authenticated(cx)
+                        .await
+                        .map_err(LnMarketsToolOutput::error)?;
+                    if network != Network::Signet {
+                        return Err(LnMarketsToolOutput::error(
+                            "automated LN Markets strategies are restricted to signet",
+                        ));
+                    }
+                    let at_ms = unix_timestamp_ms().map_err(LnMarketsToolOutput::error)?;
+                    match strategy {
+                        LnMarketsStrategyName::RebalanceToTarget => {
+                            let config = serde_json::from_value(config).map_err(|error| {
+                                LnMarketsToolOutput::error(format!(
+                                    "invalid rebalance_to_target configuration: {error}"
+                                ))
+                            })?;
+                            runtime.start_rebalance(client, config, at_ms, cx).await
+                        }
+                        LnMarketsStrategyName::FundingCarry => {
+                            let config = serde_json::from_value(config).map_err(|error| {
+                                LnMarketsToolOutput::error(format!(
+                                    "invalid funding_carry configuration: {error}"
+                                ))
+                            })?;
+                            runtime.start_funding(client, config, at_ms, cx).await
+                        }
+                    }
+                }
+                LnMarketsStrategyInput::Adjust { strategy, config } => {
+                    let at_ms = unix_timestamp_ms().map_err(LnMarketsToolOutput::error)?;
+                    match strategy {
+                        LnMarketsStrategyName::RebalanceToTarget => {
+                            let config = serde_json::from_value(config).map_err(|error| {
+                                LnMarketsToolOutput::error(format!(
+                                    "invalid rebalance_to_target configuration: {error}"
+                                ))
+                            })?;
+                            runtime.adjust_rebalance(config, at_ms).await
+                        }
+                        LnMarketsStrategyName::FundingCarry => {
+                            let config = serde_json::from_value(config).map_err(|error| {
+                                LnMarketsToolOutput::error(format!(
+                                    "invalid funding_carry configuration: {error}"
+                                ))
+                            })?;
+                            runtime.adjust_funding(config, at_ms).await
+                        }
+                    }
+                }
+                LnMarketsStrategyInput::Halt { strategy, reason } => {
+                    let at_ms = unix_timestamp_ms().map_err(LnMarketsToolOutput::error)?;
+                    match strategy {
+                        LnMarketsStrategyName::RebalanceToTarget => {
+                            runtime.halt_rebalance(at_ms, reason).await
+                        }
+                        LnMarketsStrategyName::FundingCarry => {
+                            runtime.halt_funding(at_ms, reason).await
+                        }
+                    }
+                }
+            };
+            if let Err(error) = result {
+                let output = LnMarketsToolOutput::error(error.to_string());
+                emit_lnmarkets_strategy_update(
+                    &event_stream,
+                    &json!({
+                    "schema": "omega.lnmarkets.strategy.v1",
+                    "status": "error",
+                    "phase": "failed",
+                        "action": action,
+                        "strategy": strategy,
+                        "error": error.to_string(),
+                        "strategies": runtime.strategy_snapshots(),
+                    }),
+                );
+                return Err(output);
+            }
+            let strategies = runtime.strategy_snapshots();
+            let status = completed_strategy_status(action, &strategies);
+            let output = LnMarketsToolOutput::success(json!({
+                "schema": "omega.lnmarkets.strategy.v1",
+                "status": status,
+                "phase": "completed",
+                "action": action,
+                "strategy": strategy,
+                "strategies": strategies,
+            }));
+            emit_lnmarkets_strategy_update(&event_stream, &output.0);
+            Ok(output)
+        })
+    }
+}
+
+fn strategy_action_labels(input: &LnMarketsStrategyInput) -> (&'static str, Option<&'static str>) {
+    match input {
+        LnMarketsStrategyInput::Status => ("status", None),
+        LnMarketsStrategyInput::Start { strategy, .. } => ("start", Some(strategy.label())),
+        LnMarketsStrategyInput::Adjust { strategy, .. } => ("adjust", Some(strategy.label())),
+        LnMarketsStrategyInput::Halt { strategy, .. } => ("halt", Some(strategy.label())),
+    }
+}
+
+fn pending_strategy_status(action: &str) -> &'static str {
+    match action {
+        "start" => "starting",
+        "adjust" => "adjusting",
+        "halt" => "halting",
+        _ => "reading",
+    }
+}
+
+fn completed_strategy_status(
+    action: &str,
+    strategies: &[lnmarkets::StrategyRuntimeSnapshot],
+) -> &'static str {
+    match action {
+        "start" | "adjust" => "running",
+        "halt" => "halted",
+        _ if strategies
+            .iter()
+            .any(|strategy| strategy.status == "running") =>
+        {
+            "running"
+        }
+        _ if strategies
+            .iter()
+            .any(|strategy| strategy.status == "halted") =>
+        {
+            "halted"
+        }
+        _ => "idle",
+    }
+}
+
+fn emit_lnmarkets_strategy_update(event_stream: &ToolCallEventStream, value: &Value) {
+    let status = value
+        .get("status")
+        .and_then(Value::as_str)
+        .unwrap_or("running");
+    let content = serde_json::to_string_pretty(value)
+        .unwrap_or_else(|error| format!("Failed to serialize LN Markets strategy update: {error}"));
+    event_stream.update_fields(
+        acp::ToolCallUpdateFields::new()
+            .title(format!("LN Markets strategy: {status}"))
+            .content(vec![acp::ToolCallContent::Content(acp::Content::new(
+                content,
+            ))]),
+    );
+}
+
+fn unix_timestamp_ms() -> Result<i64, String> {
+    let elapsed = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map_err(|error| format!("system clock is before the Unix epoch: {error}"))?;
+    i64::try_from(elapsed.as_millis()).map_err(|_| "system timestamp overflowed i64".to_string())
+}
+
 #[derive(Debug, Serialize, Deserialize, JsonSchema)]
 pub struct LnMarketsSwapInput {
     /// LN Markets environment that will execute the swap. It must match the configured account.
@@ -688,6 +1146,10 @@ pub fn lnmarkets_tools(
     LnMarketsAccountTool,
     LnMarketsMarketDataTool,
     LnMarketsSwapTool,
+    LnMarketsFeaturesTool,
+    LnMarketsLedgerTool,
+    LnMarketsStrategyTool,
+    LnMarketsMandateTool,
 ) {
     (
         LnMarketsAccountTool {
@@ -704,10 +1166,19 @@ pub fn lnmarkets_tools(
         },
         LnMarketsSwapTool {
             client: ToolClient {
+                http_client: http_client.clone(),
+                credentials_provider: credentials_provider.clone(),
+            },
+        },
+        LnMarketsFeaturesTool,
+        LnMarketsLedgerTool,
+        LnMarketsStrategyTool {
+            client: ToolClient {
                 http_client,
                 credentials_provider,
             },
         },
+        LnMarketsMandateTool,
     )
 }
 
@@ -777,5 +1248,52 @@ mod tests {
         let error = require_matching_network(Network::Mainnet, Network::Signet, "swap")
             .expect_err("a signet request must not use a mainnet account");
         assert!(error.contains("No swap request was sent"));
+    }
+
+    #[test]
+    fn mandate_tool_has_no_mutating_input_shape() {
+        let error = serde_json::from_value::<LnMarketsMandateInput>(json!({
+            "action": "widen",
+            "include_history": false,
+        }));
+        assert!(error.is_err());
+        let schema = schemars::schema_for!(LnMarketsMandateInput);
+        let schema = serde_json::to_value(schema).expect("schema");
+        assert!(!schema.to_string().contains("widen"));
+        assert!(!schema.to_string().contains("mutate"));
+    }
+
+    #[test]
+    fn strategy_input_names_the_strategy_and_keeps_configuration_typed_at_runtime() {
+        let input = serde_json::from_value::<LnMarketsStrategyInput>(json!({
+            "action": "start",
+            "strategy": "funding_carry",
+            "config": { "network": "signet" },
+        }))
+        .expect("strategy input");
+        assert!(matches!(
+            input,
+            LnMarketsStrategyInput::Start {
+                strategy: LnMarketsStrategyName::FundingCarry,
+                ..
+            }
+        ));
+    }
+
+    #[test]
+    fn strategy_card_status_tracks_the_command_lifecycle() {
+        let strategies = vec![lnmarkets::StrategyRuntimeSnapshot {
+            strategy_id: "funding_carry".to_string(),
+            status: "running".to_string(),
+            started_at_ms: Some(1),
+            halted_at_ms: None,
+            halt_reason: None,
+            state: None,
+            lifecycle_event_count: 2,
+        }];
+        assert_eq!(pending_strategy_status("start"), "starting");
+        assert_eq!(pending_strategy_status("adjust"), "adjusting");
+        assert_eq!(completed_strategy_status("start", &strategies), "running");
+        assert_eq!(completed_strategy_status("halt", &strategies), "halted");
     }
 }
