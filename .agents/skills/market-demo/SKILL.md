@@ -29,12 +29,13 @@ conversation.
   trust tiers (`pinned` from the signed manifest vs `discovered`), and 24h
   aggregates (unknown until receipt aggregation deploys — report unknown,
   never zero).
-- `market_swap_quote` — best firm quote for a swap between `LN`, `BTC`, and
-  `L-BTC` (1,000–10,000,000 sats). Returns a `quote_id`.
-- `market_execute_swap` — runs a quoted swap. An explicit swap request from
-  the person is authorization; do not ask for a second approval after quoting.
-  Streams one contiguous lifecycle for its `swap_id` through
-  `contract → funding → executing → settled` and returns after settlement.
+- `market_swap_quote` — returns a firm quote for a quote-only request between
+  `LN`, `BTC`, and `L-BTC` (1,000–10,000,000 sats). Returns a `quote_id`.
+- `market_execute_swap` — creates and runs an authorized swap directly from
+  `from`, `to`, and `amount_sats`, or runs a prior `quote_id`. The person's
+  swap request is authorization. Streams one card through
+  `quote → contract → funding → executing → settled` and returns after
+  settlement.
 - `market_swap_status` — reads the latest projected state for a `swap_id`.
   Reads never advance the swap.
 
@@ -46,13 +47,16 @@ conversation.
    fees in bps, and the 24h aggregates. If a stat is missing, say it is
    unknown; never present a missing stat as zero.
 2. **Swap request** ("swap 50,000 sats from Lightning to BTC"): treat the
-   request itself as authorization. Call `market_swap_quote`, present the quote
-   briefly, then call `market_execute_swap` with the `quote_id` without asking
-   for another approval. A quote-only request stops after the quote.
-3. Let `market_execute_swap` stream its lifecycle. Do not drive progress by
+   request itself as authorization. Call `market_execute_swap` directly with
+   `from`, `to`, and `amount_sats`. Do not call `market_swap_quote` first and
+   do not ask for another approval.
+3. **Quote-only request**: call `market_swap_quote` and stop. If the person
+   later asks to execute that quote, call `market_execute_swap` with its
+   `quote_id`.
+4. Let `market_execute_swap` stream its lifecycle. Do not drive progress by
    repeatedly calling `market_swap_status`; use that tool only to inspect an
    existing swap after execution.
-4. Relay each stage's `verification` caption faithfully: provider claims stay
+5. Relay each stage's `verification` caption faithfully: provider claims stay
    labeled unverified until the settled stage reports local verification.
 
 ## Honesty rules

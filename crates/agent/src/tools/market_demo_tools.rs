@@ -67,6 +67,7 @@ struct Quote {
 #[derive(Clone)]
 struct Swap {
     id: String,
+    quote_id: String,
     from: MarketAsset,
     to: MarketAsset,
     amount_sats: u64,
@@ -202,9 +203,18 @@ impl AgentTool for MarketSwapQuoteTool {
 }
 
 #[derive(Debug, Serialize, Deserialize, JsonSchema)]
-/// Execute a demo quote requested by the person. No real funds move.
-pub struct MarketExecuteSwapInput {
-    quote_id: String,
+#[serde(untagged)]
+/// Quote and execute an authorized demo swap, or execute a prior demo quote. No real funds move.
+pub enum MarketExecuteSwapInput {
+    Quoted {
+        quote_id: String,
+    },
+    Direct {
+        from: MarketAsset,
+        to: MarketAsset,
+        /// Swap amount in sats, from 1,000 through 10,000,000.
+        amount_sats: u64,
+    },
 }
 
 pub struct MarketExecuteSwapTool {
@@ -224,7 +234,20 @@ impl AgentTool for MarketExecuteSwapTool {
 
     fn initial_title(&self, input: Result<Self::Input, Value>, _cx: &mut App) -> SharedString {
         match input {
-            Ok(input) => format!("Execute demo swap for {}", input.quote_id).into(),
+            Ok(MarketExecuteSwapInput::Quoted { quote_id }) => {
+                format!("Execute demo swap for {quote_id}").into()
+            }
+            Ok(MarketExecuteSwapInput::Direct {
+                from,
+                to,
+                amount_sats,
+            }) => format!(
+                "Swap {} sats {} → {}",
+                amount_sats,
+                from.as_str(),
+                to.as_str()
+            )
+            .into(),
             Err(_) => "Execute demo swap".into(),
         }
     }
@@ -240,8 +263,19 @@ impl AgentTool for MarketExecuteSwapTool {
                 .recv()
                 .await
                 .map_err(|error| MarketToolOutput::error(error.to_string()))?;
-            let mut output = execute_swap(&self.state, input).map_err(MarketToolOutput::error)?;
-            emit_swap_update(&event_stream, &output);
+            let (quote_id, quote_output) =
+                prepare_execution(&self.state, input).map_err(MarketToolOutput::error)?;
+            if let Some(quote_output) = quote_output {
+                emit_market_update(&event_stream, &quote_output);
+                cx.background_executor().timer(self.stage_delay).await;
+                if event_stream.was_cancelled_by_user() {
+                    return Err(MarketToolOutput::error("demo swap was canceled"));
+                }
+            }
+
+            let mut output =
+                execute_swap(&self.state, &quote_id).map_err(MarketToolOutput::error)?;
+            emit_market_update(&event_stream, &output);
 
             for _ in 1..SWAP_STAGES.len() {
                 cx.background_executor().timer(self.stage_delay).await;
@@ -250,7 +284,7 @@ impl AgentTool for MarketExecuteSwapTool {
                 }
                 output = advance_swap(&self.state, output.swap_id()?)
                     .map_err(MarketToolOutput::error)?;
-                emit_swap_update(&event_stream, &output);
+                emit_market_update(&event_stream, &output);
             }
 
             Ok(output)
@@ -543,20 +577,50 @@ fn quote_swap(
     })))
 }
 
-fn execute_swap(
+fn prepare_execution(
     state: &Mutex<MarketDemoState>,
     input: MarketExecuteSwapInput,
+) -> Result<(String, Option<MarketToolOutput>), String> {
+    match input {
+        MarketExecuteSwapInput::Quoted { quote_id } => Ok((quote_id, None)),
+        MarketExecuteSwapInput::Direct {
+            from,
+            to,
+            amount_sats,
+        } => {
+            let quote = quote_swap(
+                state,
+                MarketSwapQuoteInput {
+                    from,
+                    to,
+                    amount_sats,
+                },
+            )?;
+            let quote_id = quote
+                .0
+                .get("quote_id")
+                .and_then(Value::as_str)
+                .map(ToOwned::to_owned)
+                .ok_or_else(|| "new demo quote has no quote_id".to_string())?;
+            Ok((quote_id, Some(quote)))
+        }
+    }
+}
+
+fn execute_swap(
+    state: &Mutex<MarketDemoState>,
+    quote_id: &str,
 ) -> Result<MarketToolOutput, String> {
     let mut state = state.lock();
-    let quote = state.quotes.get(&input.quote_id).cloned().ok_or_else(|| {
-        format!(
-            "unknown quote_id {}; request a fresh quote first",
-            input.quote_id
-        )
-    })?;
+    let quote = state
+        .quotes
+        .get(quote_id)
+        .cloned()
+        .ok_or_else(|| format!("unknown quote_id {quote_id}; request a fresh quote first"))?;
     state.swap_counter = state.swap_counter.saturating_add(1);
     let swap = Swap {
         id: format!("demo-swap-{}", state.swap_counter),
+        quote_id: quote_id.to_string(),
         from: quote.from,
         to: quote.to,
         amount_sats: quote.amount_sats,
@@ -670,6 +734,7 @@ fn swap_view(swap: &Swap) -> Result<Value, String> {
         "schema": "omega.market-demo.swap.v1",
         "disclosure": DEMO_DISCLOSURE,
         "swap_id": swap.id,
+        "quote_id": swap.quote_id,
         "from": swap.from.as_str(),
         "to": swap.to.as_str(),
         "amount_sats": swap.amount_sats,
@@ -689,22 +754,29 @@ fn swap_view(swap: &Swap) -> Result<Value, String> {
     }))
 }
 
-fn emit_swap_update(event_stream: &ToolCallEventStream, output: &MarketToolOutput) {
-    let stage = output
-        .0
-        .get("stage")
-        .and_then(Value::as_str)
-        .unwrap_or("running");
-    let swap_id = output
+fn emit_market_update(event_stream: &ToolCallEventStream, output: &MarketToolOutput) {
+    let is_quote =
+        output.0.get("schema").and_then(Value::as_str) == Some("omega.market-demo.quote.v1");
+    let stage = if is_quote {
+        "quote"
+    } else {
+        output
+            .0
+            .get("stage")
+            .and_then(Value::as_str)
+            .unwrap_or("running")
+    };
+    let execution_id = output
         .0
         .get("swap_id")
+        .or_else(|| output.0.get("quote_id"))
         .and_then(Value::as_str)
         .unwrap_or("demo swap");
     let content = serde_json::to_string_pretty(&output.0)
         .unwrap_or_else(|error| format!("Failed to serialize market tool update: {error}"));
     event_stream.update_fields(
         acp::ToolCallUpdateFields::new()
-            .title(format!("{swap_id}: {stage}"))
+            .title(format!("{execution_id}: {stage}"))
             .content(vec![acp::ToolCallContent::Content(acp::Content::new(
                 content,
             ))]),
@@ -777,7 +849,7 @@ mod tests {
         assert_eq!(quote.0["schema"], "omega.market-demo.quote.v1");
         let quote_id = quote.0["quote_id"].as_str().expect("quote id").to_string();
 
-        let swap = execute_swap(&state, MarketExecuteSwapInput { quote_id }).expect("swap");
+        let swap = execute_swap(&state, &quote_id).expect("swap");
         assert_eq!(swap.0["stage"], "contract");
         let swap_id = swap.0["swap_id"].as_str().expect("swap id").to_string();
         let status = swap_status(
@@ -811,16 +883,6 @@ mod tests {
         cx: &mut TestAppContext,
     ) {
         let state = Arc::new(Mutex::new(MarketDemoState::default()));
-        let quote = quote_swap(
-            &state,
-            MarketSwapQuoteInput {
-                from: MarketAsset::Lightning,
-                to: MarketAsset::Bitcoin,
-                amount_sats: 50_000,
-            },
-        )
-        .expect("quote");
-        let quote_id = quote.0["quote_id"].as_str().expect("quote id").to_string();
         let tool = Arc::new(MarketExecuteSwapTool {
             state,
             stage_delay: Duration::ZERO,
@@ -830,7 +892,11 @@ mod tests {
         let result = cx
             .update(|cx| {
                 tool.run(
-                    ToolInput::resolved(MarketExecuteSwapInput { quote_id }),
+                    ToolInput::resolved(MarketExecuteSwapInput::Direct {
+                        from: MarketAsset::Lightning,
+                        to: MarketAsset::Bitcoin,
+                        amount_sats: 50_000,
+                    }),
                     event_stream,
                     cx,
                 )
@@ -839,7 +905,8 @@ mod tests {
             .expect("swap should execute from the person's request");
 
         assert_eq!(result.0["stage"], "settled");
-        for expected_stage in SWAP_STAGES {
+        assert_eq!(result.0["quote_id"], "demo-quote-1");
+        for expected_stage in ["quote", "contract", "funding", "executing", "settled"] {
             let update = events.expect_update_fields().await;
             assert!(
                 update
@@ -857,6 +924,7 @@ mod tests {
     fn status_projection_rejects_a_gap_or_regression() {
         let mut swap = Swap {
             id: "demo-swap-gap".to_string(),
+            quote_id: "demo-quote-gap".to_string(),
             from: MarketAsset::Lightning,
             to: MarketAsset::Bitcoin,
             amount_sats: 50_000,

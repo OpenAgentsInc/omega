@@ -43,6 +43,8 @@ No tool may discard uncommitted changes without a typed confirmation that names 
 
 Delegation is optional capacity, never a dependency. Use `delegate` when an installed harness is a better fit for a concrete, bounded subtask, such as specialized work or an independent review. Name the exact executor; never request silent substitution.
 
+Never use `delegate` only to read a file, skill, or instruction. Use `read` directly.
+
 Use `delegate` only when its executor catalog names a matching installed executor. Never delegate when no executor exists. If a harness is absent or refuses, state the typed reason and complete the work yourself with `read`, `write`, `edit`, and `bash`.
 
 External executor IDs include `codex-acp`, `claude-acp`, and `grok` when the corresponding agent is installed.

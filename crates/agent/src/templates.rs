@@ -218,6 +218,9 @@ mod tests {
             "never use `git checkout`, `git restore`, or `git stash` as an undo mechanism"
         ));
         assert!(rendered.contains("Never delegate when no executor exists"));
+        assert!(
+            rendered.contains("Never use `delegate` only to read a file, skill, or instruction")
+        );
         assert!(rendered.contains("`codex-acp` (Codex)"));
         assert!(rendered.contains("`claude-acp` (Claude)"));
         assert!(rendered.contains("`grok` (Grok)"));

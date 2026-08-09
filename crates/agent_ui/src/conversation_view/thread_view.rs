@@ -7577,6 +7577,29 @@ impl ThreadView {
 
                 // Market tool results draw their typed cards instead of the
                 // generic tool chrome, in every interface mode.
+                if let Some(quote_id) =
+                    crate::conversation_view::market_tool_cards::market_quote_id(tool_call, cx)
+                {
+                    let quote_was_consumed = self
+                        .thread
+                        .read(cx)
+                        .entries()
+                        .iter()
+                        .skip(entry_ix.saturating_add(1))
+                        .any(|entry| {
+                            matches!(
+                                entry,
+                                AgentThreadEntry::ToolCall(later_tool_call)
+                                    if crate::conversation_view::market_tool_cards::market_execution_consumes_quote(
+                                        later_tool_call,
+                                        &quote_id,
+                                    )
+                            )
+                        });
+                    if quote_was_consumed {
+                        return Empty.into_any();
+                    }
+                }
                 if let Some(card) =
                     crate::conversation_view::market_tool_cards::market_tool_card(tool_call, cx)
                 {

@@ -83,6 +83,62 @@ pub(crate) fn market_tool_card(tool_call: &ToolCall, cx: &App) -> Option<AnyElem
     }
 }
 
+pub(crate) fn market_quote_id(tool_call: &ToolCall, cx: &App) -> Option<String> {
+    let payload = market_payload(tool_call, cx)?;
+    (payload.get("schema")?.as_str()? == "omega.market-demo.quote.v1")
+        .then(|| payload.get("quote_id")?.as_str().map(ToOwned::to_owned))?
+}
+
+pub(crate) fn market_execution_consumes_quote(tool_call: &ToolCall, quote_id: &str) -> bool {
+    market_execution_consumes_quote_parts(
+        &tool_call.status,
+        tool_call.tool_name.as_deref(),
+        tool_call.raw_input.as_ref(),
+        quote_id,
+    )
+}
+
+fn market_execution_consumes_quote_parts(
+    status: &ToolCallStatus,
+    tool_name: Option<&str>,
+    raw_input: Option<&Value>,
+    quote_id: &str,
+) -> bool {
+    if !market_card_status_is_renderable(status) {
+        return false;
+    }
+    let is_execution = tool_name.is_some_and(|name| name.contains("market_execute_swap"))
+        || raw_input.is_some_and(|input| {
+            [input.get("tool"), input.get("name")]
+                .into_iter()
+                .flatten()
+                .filter_map(Value::as_str)
+                .any(|name| name.contains("market_execute_swap"))
+        });
+    is_execution && raw_input.is_some_and(|input| market_input_contains_quote(input, quote_id))
+}
+
+fn market_input_contains_quote(input: &Value, quote_id: &str) -> bool {
+    if input.get("quote_id").and_then(Value::as_str) == Some(quote_id) {
+        return true;
+    }
+    for key in ["arguments", "input"] {
+        let Some(nested) = input.get(key) else {
+            continue;
+        };
+        if market_input_contains_quote(nested, quote_id) {
+            return true;
+        }
+        if let Some(text) = nested.as_str()
+            && let Ok(parsed) = serde_json::from_str::<Value>(text)
+            && market_input_contains_quote(&parsed, quote_id)
+        {
+            return true;
+        }
+    }
+    false
+}
+
 fn market_card_status_is_renderable(status: &ToolCallStatus) -> bool {
     matches!(
         status,
@@ -402,6 +458,7 @@ mod tests {
     fn swap_payloads_parse_for_quotes_and_every_stage() {
         let quote = serde_json::json!({
             "schema": "omega.market-demo.quote.v1",
+            "quote_id": "demo-quote-1",
             "from": "LN", "to": "BTC", "amount_sats": 50000,
             "provider": "provider-b", "fee_bps": 22,
         });
@@ -507,5 +564,46 @@ mod tests {
             parse_json_text("{\"schema\": \"other.thing.v1\"}").is_none(),
             "foreign schemas are not claimed"
         );
+    }
+
+    #[test]
+    fn execution_inputs_match_the_quote_they_consume() {
+        let flat = serde_json::json!({"quote_id": "demo-quote-1"});
+        assert!(market_input_contains_quote(&flat, "demo-quote-1"));
+        assert!(!market_input_contains_quote(&flat, "demo-quote-2"));
+
+        let wrapped = serde_json::json!({
+            "tool": "market_execute_swap",
+            "arguments": {"quote_id": "demo-quote-1"},
+        });
+        assert!(market_input_contains_quote(&wrapped, "demo-quote-1"));
+
+        let string_arguments = serde_json::json!({
+            "tool": "market_execute_swap",
+            "arguments": "{\"quote_id\":\"demo-quote-1\"}",
+        });
+        assert!(market_input_contains_quote(
+            &string_arguments,
+            "demo-quote-1"
+        ));
+
+        assert!(market_execution_consumes_quote_parts(
+            &ToolCallStatus::Completed,
+            None,
+            Some(&wrapped),
+            "demo-quote-1",
+        ));
+        assert!(!market_execution_consumes_quote_parts(
+            &ToolCallStatus::Failed,
+            None,
+            Some(&wrapped),
+            "demo-quote-1",
+        ));
+        assert!(!market_execution_consumes_quote_parts(
+            &ToolCallStatus::Completed,
+            Some("read"),
+            Some(&flat),
+            "demo-quote-1",
+        ));
     }
 }
