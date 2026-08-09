@@ -205,6 +205,12 @@ pub enum Error {
     AuthenticationRequired,
     #[error("invalid LN Markets amount: {0}")]
     InvalidAmount(String),
+    #[error("LN Markets Lightning deposits require a 64-character lowercase hex description hash")]
+    InvalidDescriptionHash,
+    #[error("LN Markets Lightning withdrawals require a BOLT11 invoice")]
+    InvalidLightningInvoice,
+    #[error("LN Markets on-chain operations require a Bitcoin address")]
+    InvalidBitcoinAddress,
     #[error("LN Markets leverage must be between 1 and 100")]
     InvalidLeverage,
     #[error("invalid LN Markets trade ID: {0}")]
@@ -319,6 +325,131 @@ impl<'de> Deserialize<'de> for DecimalAmount {
     }
 }
 
+#[derive(Clone, PartialEq, Eq, Serialize)]
+#[serde(transparent)]
+pub struct DescriptionHash(String);
+
+impl DescriptionHash {
+    pub fn new(value: impl Into<String>) -> Result<Self, Error> {
+        let value = value.into();
+        if value.len() != 64
+            || !value
+                .bytes()
+                .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
+        {
+            return Err(Error::InvalidDescriptionHash);
+        }
+        Ok(Self(value))
+    }
+
+    pub fn as_str(&self) -> &str {
+        &self.0
+    }
+}
+
+impl fmt::Debug for DescriptionHash {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str("DescriptionHash([REDACTED])")
+    }
+}
+
+#[derive(Clone, PartialEq, Eq, Serialize)]
+#[serde(transparent)]
+pub struct LightningInvoice(String);
+
+impl LightningInvoice {
+    pub fn new(value: impl Into<String>) -> Result<Self, Error> {
+        let value = value.into();
+        let lowercase = value.to_ascii_lowercase();
+        if value.trim() != value
+            || value.chars().any(char::is_whitespace)
+            || !matches_bolt11_prefix(&lowercase)
+        {
+            return Err(Error::InvalidLightningInvoice);
+        }
+        Ok(Self(value))
+    }
+
+    pub fn expose(&self) -> &str {
+        &self.0
+    }
+}
+
+impl fmt::Debug for LightningInvoice {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str("LightningInvoice([REDACTED])")
+    }
+}
+
+impl<'de> Deserialize<'de> for LightningInvoice {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        let value = String::deserialize(deserializer)?;
+        Self::new(value).map_err(serde::de::Error::custom)
+    }
+}
+
+#[derive(Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(transparent)]
+pub struct LightningDestination(String);
+
+impl LightningDestination {
+    pub fn expose(&self) -> &str {
+        &self.0
+    }
+}
+
+impl fmt::Debug for LightningDestination {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str("LightningDestination([REDACTED])")
+    }
+}
+
+fn matches_bolt11_prefix(value: &str) -> bool {
+    ["lnbc1", "lntb1", "lntbs1", "lnbcrt1"]
+        .iter()
+        .any(|prefix| value.starts_with(prefix))
+}
+
+#[derive(Clone, PartialEq, Eq, Serialize)]
+#[serde(transparent)]
+pub struct BitcoinAddressValue(String);
+
+impl BitcoinAddressValue {
+    pub fn new(value: impl Into<String>) -> Result<Self, Error> {
+        let value = value.into();
+        if value.trim().is_empty()
+            || value.trim() != value
+            || value.chars().any(char::is_whitespace)
+        {
+            return Err(Error::InvalidBitcoinAddress);
+        }
+        Ok(Self(value))
+    }
+
+    pub fn expose(&self) -> &str {
+        &self.0
+    }
+}
+
+impl fmt::Debug for BitcoinAddressValue {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str("BitcoinAddressValue([REDACTED])")
+    }
+}
+
+impl<'de> Deserialize<'de> for BitcoinAddressValue {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        let value = String::deserialize(deserializer)?;
+        Self::new(value).map_err(serde::de::Error::custom)
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct Account {
@@ -338,7 +469,7 @@ pub struct ServerTime {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct BitcoinAddress {
-    pub address: String,
+    pub address: BitcoinAddressValue,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -357,7 +488,7 @@ pub struct LightningDeposit {
 pub struct LightningWithdrawal {
     pub amount: DecimalAmount,
     pub created_at: String,
-    pub destination: Option<String>,
+    pub destination: Option<LightningDestination>,
     pub fee: DecimalAmount,
     pub id: String,
     pub payment_hash: String,
@@ -379,13 +510,126 @@ pub struct OnChainDeposit {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct OnChainWithdrawal {
-    pub address: String,
+    pub address: BitcoinAddressValue,
     pub amount: DecimalAmount,
     pub created_at: String,
     pub fee: Option<DecimalAmount>,
     pub id: String,
     pub status: String,
     pub tx_id: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct LightningDepositRequest {
+    amount: NonZeroU64,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    comment: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    description_hash: Option<DescriptionHash>,
+}
+
+impl LightningDepositRequest {
+    pub fn new(amount_sats: u64) -> Result<Self, Error> {
+        let amount = NonZeroU64::new(amount_sats).ok_or_else(|| {
+            Error::InvalidAmount("Lightning deposit amount must be greater than zero".into())
+        })?;
+        Ok(Self {
+            amount,
+            comment: None,
+            description_hash: None,
+        })
+    }
+
+    pub fn with_comment(mut self, comment: impl Into<String>) -> Self {
+        self.comment = Some(comment.into());
+        self
+    }
+
+    pub fn with_description_hash(mut self, description_hash: DescriptionHash) -> Self {
+        self.description_hash = Some(description_hash);
+        self
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct LightningDepositInvoice {
+    pub deposit_id: String,
+    pub payment_request: LightningInvoice,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct LightningWithdrawalRequest {
+    invoice: LightningInvoice,
+}
+
+impl LightningWithdrawalRequest {
+    pub fn new(invoice: LightningInvoice) -> Self {
+        Self { invoice }
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct LightningWithdrawalResult {
+    pub amount: DecimalAmount,
+    pub id: String,
+    pub max_fees: DecimalAmount,
+    pub payment_hash: String,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct OnChainWithdrawalRequest {
+    address: BitcoinAddressValue,
+    amount: DecimalAmount,
+}
+
+impl OnChainWithdrawalRequest {
+    pub fn new(address: BitcoinAddressValue, amount: DecimalAmount) -> Self {
+        Self { address, amount }
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct OnChainWithdrawalResult {
+    pub address: BitcoinAddressValue,
+    pub amount: DecimalAmount,
+    pub block_id: Option<String>,
+    pub confirmation_height: Option<u64>,
+    pub created_at: String,
+    pub fee: Option<DecimalAmount>,
+    pub id: String,
+    pub status: String,
+    pub tx_id: Option<String>,
+    pub uid: String,
+    pub updated_at: String,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum BitcoinAddressFormat {
+    P2tr,
+    P2wpkh,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct BitcoinAddressRequest {
+    format: BitcoinAddressFormat,
+}
+
+impl BitcoinAddressRequest {
+    pub fn new(format: BitcoinAddressFormat) -> Self {
+        Self { format }
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AddedBitcoinAddress {
+    pub address: BitcoinAddressValue,
+    pub created_at: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -1313,6 +1557,48 @@ impl LnMarketsClient {
         self.get_authenticated("/account/address/bitcoin", "").await
     }
 
+    pub async fn deposit_lightning(
+        &self,
+        network: Network,
+        request: &LightningDepositRequest,
+    ) -> Result<LightningDepositInvoice, Error> {
+        self.account_post(network, "/account/deposit/lightning", request)
+            .await
+    }
+
+    pub async fn withdraw_lightning(
+        &self,
+        network: Network,
+        request: &LightningWithdrawalRequest,
+    ) -> Result<LightningWithdrawalResult, Error> {
+        self.account_post(network, "/account/withdraw/lightning", request)
+            .await
+    }
+
+    pub async fn withdraw_on_chain(
+        &self,
+        network: Network,
+        request: &OnChainWithdrawalRequest,
+    ) -> Result<OnChainWithdrawalResult, Error> {
+        self.account_post(network, "/account/withdraw/on-chain", request)
+            .await
+    }
+
+    pub async fn add_bitcoin_address(
+        &self,
+        network: Network,
+        request: &BitcoinAddressRequest,
+    ) -> Result<AddedBitcoinAddress, Error> {
+        self.account_post(network, "/account/address/bitcoin", request)
+            .await
+    }
+
+    pub async fn mark_notifications_read(&self, network: Network) -> Result<(), Error> {
+        self.require_network(network)?;
+        self.request_empty(Method::PUT, "/account/notifications", "", Vec::new(), true)
+            .await
+    }
+
     pub async fn lightning_deposits(
         &self,
         query: &LightningDepositsQuery,
@@ -1711,6 +1997,17 @@ impl LnMarketsClient {
         self.request_json(Method::POST, path, "", body, true).await
     }
 
+    async fn account_post<T: Serialize, R: DeserializeOwned>(
+        &self,
+        network: Network,
+        path: &str,
+        request: &T,
+    ) -> Result<R, Error> {
+        self.require_network(network)?;
+        let body = serde_json::to_vec(request).map_err(Error::Serialize)?;
+        self.request_json(Method::POST, path, "", body, true).await
+    }
+
     async fn isolated_trade_delete<T: Serialize>(
         &self,
         network: Network,
@@ -1756,6 +2053,34 @@ impl LnMarketsClient {
         body: Vec<u8>,
         authenticated: bool,
     ) -> Result<T, Error> {
+        let response = self
+            .request(method, path, query, body, authenticated)
+            .await?;
+        parse_success_response(response).await
+    }
+
+    async fn request_empty(
+        &self,
+        method: Method,
+        path: &str,
+        query: &str,
+        body: Vec<u8>,
+        authenticated: bool,
+    ) -> Result<(), Error> {
+        let response = self
+            .request(method, path, query, body, authenticated)
+            .await?;
+        drain_response(response).await
+    }
+
+    async fn request(
+        &self,
+        method: Method,
+        path: &str,
+        query: &str,
+        body: Vec<u8>,
+        authenticated: bool,
+    ) -> Result<Response<Vec<u8>>, Error> {
         let may_retry = method == Method::GET;
         let credentials = if authenticated {
             Some(
@@ -1780,7 +2105,7 @@ impl LnMarketsClient {
             match self.http_transport.send(request).await {
                 Ok(response) => {
                     if response.status().is_success() {
-                        return parse_success_response(response).await;
+                        return Ok(response);
                     }
                     if may_retry
                         && is_retryable_status(response.status())
@@ -2899,6 +3224,233 @@ mod tests {
 
             let unavailable = client
                 .cross_new_order(Network::Signet, &order)
+                .await
+                .expect_err("503");
+            assert!(matches!(unavailable, Error::Api { status, .. } if status.as_u16() == 503));
+            assert_eq!(*requests.lock().expect("request count"), 1);
+        });
+    }
+
+    #[test]
+    fn wallet_inputs_validate_amounts_hashes_invoices_and_addresses() {
+        assert!(LightningDepositRequest::new(0).is_err());
+        assert!(DescriptionHash::new("a".repeat(63)).is_err());
+        assert!(DescriptionHash::new("A".repeat(64)).is_err());
+        assert!(LightningInvoice::new("not-an-invoice").is_err());
+        assert!(LightningInvoice::new("lntbs1 invoice").is_err());
+        assert!(BitcoinAddressValue::new(" ").is_err());
+
+        let request = LightningDepositRequest::new(1_000)
+            .expect("deposit")
+            .with_comment("test")
+            .with_description_hash(DescriptionHash::new("a".repeat(64)).expect("hash"));
+        assert_eq!(
+            serde_json::to_string(&request).expect("deposit JSON"),
+            format!(
+                r#"{{"amount":1000,"comment":"test","descriptionHash":"{}"}}"#,
+                "a".repeat(64)
+            )
+        );
+    }
+
+    #[test]
+    fn wallet_values_are_redacted_from_debug_output() {
+        let invoice_text = "lntbs1invoicecontents";
+        let address_text = "tb1qaddresscontents";
+        let invoice = LightningInvoice::new(invoice_text).expect("invoice");
+        let address = BitcoinAddressValue::new(address_text).expect("address");
+        let invoice_request = LightningWithdrawalRequest::new(invoice.clone());
+        let address_request = OnChainWithdrawalRequest::new(
+            address.clone(),
+            "1000".parse().expect("withdrawal amount"),
+        );
+        let bitcoin_address = BitcoinAddress {
+            address: address.clone(),
+        };
+
+        for debug_output in [
+            format!("{invoice:?}"),
+            format!("{address:?}"),
+            format!("{invoice_request:?}"),
+            format!("{address_request:?}"),
+            format!("{bitcoin_address:?}"),
+        ] {
+            assert!(!debug_output.contains(invoice_text));
+            assert!(!debug_output.contains(address_text));
+            assert!(debug_output.contains("REDACTED"));
+        }
+        assert_eq!(invoice.expose(), invoice_text);
+        assert_eq!(address.expose(), address_text);
+    }
+
+    #[test]
+    fn wallet_mutation_signature_vectors_cover_post_and_put_bodies() {
+        assert_eq!(
+            rest_signature(
+                "test-secret",
+                "1700000000000",
+                &Method::POST,
+                "/v3/account/deposit/lightning",
+                r#"{"amount":1000,"comment":"test","descriptionHash":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"}"#,
+            )
+            .expect("deposit signature"),
+            "a92uKrIluqou/aiohpHtfvfebYD+LrBcxYmG4JQqdEo="
+        );
+        assert_eq!(
+            rest_signature(
+                "test-secret",
+                "1700000000000",
+                &Method::POST,
+                "/v3/account/withdraw/lightning",
+                r#"{"invoice":"lntbs1exampleinvoice"}"#,
+            )
+            .expect("withdrawal signature"),
+            "LVoGBGkoOLLhNPiWts35TMefk2UKzBV/SKbA/ZHGPro="
+        );
+        assert_eq!(
+            rest_signature(
+                "test-secret",
+                "1700000000000",
+                &Method::PUT,
+                "/v3/account/notifications",
+                "",
+            )
+            .expect("notifications signature"),
+            "9vHdFYyotpYMCckHFwiBIvLVRl5HpLJ5RJUuORhjJ+U="
+        );
+    }
+
+    #[test]
+    fn wallet_mutations_use_documented_method_shapes() {
+        smol::block_on(async {
+            let requests = Arc::new(StdMutex::new(Vec::new()));
+            let transport = FakeTransport::create({
+                let requests = requests.clone();
+                move |request| {
+                    let requests = requests.clone();
+                    async move {
+                        let path = request.uri().path().to_owned();
+                        requests.lock().expect("requests").push((
+                            request.method().clone(),
+                            path.clone(),
+                            String::from_utf8(request.body().clone()).expect("UTF-8 body"),
+                        ));
+                        match path.as_str() {
+                            "/v3/account/deposit/lightning" => response(
+                                200,
+                                r#"{"depositId":"deposit-1","paymentRequest":"lntbs1depositinvoice"}"#,
+                            ),
+                            "/v3/account/withdraw/lightning" => response(
+                                200,
+                                r#"{"amount":1000,"id":"withdrawal-1","maxFees":10,"paymentHash":"hash-1"}"#,
+                            ),
+                            "/v3/account/withdraw/on-chain" => response(
+                                200,
+                                r#"{"address":"tb1qdestination","amount":2000,"createdAt":"2026-01-01T00:00:00Z","fee":null,"id":"withdrawal-2","status":"pending","txId":null,"uid":"user-1","updatedAt":"2026-01-01T00:00:00Z"}"#,
+                            ),
+                            "/v3/account/address/bitcoin" => response(
+                                200,
+                                r#"{"address":"tb1qdeposit","createdAt":"2026-01-01T00:00:00Z"}"#,
+                            ),
+                            "/v3/account/notifications" => response(204, ""),
+                            _ => response(404, r#"{"message":"unexpected path"}"#),
+                        }
+                    }
+                }
+            });
+            let client = authenticated_client(transport);
+            client
+                .deposit_lightning(
+                    Network::Signet,
+                    &LightningDepositRequest::new(1_000)
+                        .expect("deposit")
+                        .with_comment("test"),
+                )
+                .await
+                .expect("deposit invoice");
+            client
+                .withdraw_lightning(
+                    Network::Signet,
+                    &LightningWithdrawalRequest::new(
+                        LightningInvoice::new("lntbs1withdrawinvoice").expect("invoice"),
+                    ),
+                )
+                .await
+                .expect("Lightning withdrawal");
+            client
+                .withdraw_on_chain(
+                    Network::Signet,
+                    &OnChainWithdrawalRequest::new(
+                        BitcoinAddressValue::new("tb1qdestination").expect("address"),
+                        "2000".parse().expect("amount"),
+                    ),
+                )
+                .await
+                .expect("on-chain withdrawal");
+            client
+                .add_bitcoin_address(
+                    Network::Signet,
+                    &BitcoinAddressRequest::new(BitcoinAddressFormat::P2wpkh),
+                )
+                .await
+                .expect("Bitcoin address");
+            client
+                .mark_notifications_read(Network::Signet)
+                .await
+                .expect("mark notifications read");
+
+            let requests = requests.lock().expect("requests");
+            assert_eq!(
+                requests
+                    .iter()
+                    .map(|(method, path, _)| (method, path.as_str()))
+                    .collect::<Vec<_>>(),
+                vec![
+                    (&Method::POST, "/v3/account/deposit/lightning"),
+                    (&Method::POST, "/v3/account/withdraw/lightning"),
+                    (&Method::POST, "/v3/account/withdraw/on-chain"),
+                    (&Method::POST, "/v3/account/address/bitcoin"),
+                    (&Method::PUT, "/v3/account/notifications"),
+                ]
+            );
+            assert_eq!(requests[0].2, r#"{"amount":1000,"comment":"test"}"#);
+            assert_eq!(requests[1].2, r#"{"invoice":"lntbs1withdrawinvoice"}"#);
+            assert_eq!(
+                requests[2].2,
+                r#"{"address":"tb1qdestination","amount":2000}"#
+            );
+            assert_eq!(requests[3].2, r#"{"format":"p2wpkh"}"#);
+            assert!(requests[4].2.is_empty());
+        });
+    }
+
+    #[test]
+    fn wallet_post_is_single_attempt_and_network_mismatch_sends_nothing() {
+        smol::block_on(async {
+            let requests = Arc::new(StdMutex::new(0));
+            let transport = FakeTransport::create({
+                let requests = requests.clone();
+                move |_| {
+                    let requests = requests.clone();
+                    async move {
+                        *requests.lock().expect("request count") += 1;
+                        response(503, r#"{"message":"Service unavailable"}"#)
+                    }
+                }
+            });
+            let client = authenticated_client(transport);
+            let request = LightningWithdrawalRequest::new(
+                LightningInvoice::new("lntbs1withdrawinvoice").expect("invoice"),
+            );
+            let mismatch = client
+                .withdraw_lightning(Network::Mainnet, &request)
+                .await
+                .expect_err("network mismatch");
+            assert!(matches!(mismatch, Error::NetworkMismatch { .. }));
+            assert_eq!(*requests.lock().expect("request count"), 0);
+
+            let unavailable = client
+                .withdraw_lightning(Network::Signet, &request)
                 .await
                 .expect_err("503");
             assert!(matches!(unavailable, Error::Api { status, .. } if status.as_u16() == 503));

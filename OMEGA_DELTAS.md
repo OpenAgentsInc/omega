@@ -9950,6 +9950,14 @@ network. The client validates order IDs, leverage, prices, quantities, and
 transfer amounts before transport. Cross-margin POST and PUT signatures are
 pinned, and every mutation is single-attempt.
 
+The account mutation surface can create Lightning deposit invoices, pay
+Lightning invoices, withdraw Bitcoin on-chain, create P2TR or P2WPKH deposit
+addresses, and mark notifications read. Positive amounts and lowercase
+64-character description hashes are validated before transport. Every call
+names the credential network, and every POST or PUT is single-attempt.
+Invoice and Bitcoin address values have redacted debug output while explicit
+accessors preserve the values needed by account cards.
+
 - **Enforced by:** signer, retry, request-body, and credential tests in
   `lnmarkets_client`; `ln_markets_uses_one_local_direct_fail_closed_client` in
   `omega_deltas`; the feature-off checks in `script/omega-checks`; and the
