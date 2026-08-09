@@ -5,7 +5,7 @@ use std::time::Duration;
 use agent_client_protocol::schema::v1 as acp;
 use futures::AsyncReadExt as _;
 use gpui::{App, AppContext as _, Task};
-use http_client::{AsyncBody, HttpClient as _, HttpClientWithUrl, Method, Request};
+use http_client::{AsyncBody, HttpClient as _, HttpClientWithUrl, Method, Request, StatusCode};
 use language_model::LanguageModelToolResultContent;
 use language_models::AllLanguageModelSettings;
 use omega_effectd::PublicRelayEvent;
@@ -309,7 +309,8 @@ impl AgentTool for MarketSwapQuoteTool {
 
 #[derive(Debug, Serialize, Deserialize, JsonSchema)]
 #[serde(untagged)]
-/// Execute a demo fixture or a real regtest swap. Mainnet is blocked.
+/// Execute a demo fixture or a real regtest swap. For a user's swap request,
+/// use Direct without requesting a quote first. Mainnet is blocked.
 pub enum MarketExecuteSwapInput {
     Quoted {
         network: MarketNetwork,
@@ -319,7 +320,8 @@ pub enum MarketExecuteSwapInput {
         network: MarketNetwork,
         from: MarketAsset,
         to: MarketAsset,
-        /// Swap amount in sats, from 1,000 through 10,000,000.
+        /// Swap amount in sats. Demo accepts 1,000 through 10,000,000. Regtest
+        /// accepts 100,000 through 1,000,000.
         amount_sats: u64,
     },
 }
@@ -820,18 +822,55 @@ async fn execute_regtest_swap(
         .read_to_end(&mut response_body)
         .await
         .map_err(|error| format!("regtest API response could not be read: {error}"))?;
-    let value: Value = serde_json::from_slice(&response_body)
-        .map_err(|error| format!("regtest API response was invalid JSON: {error}"))?;
+    decode_regtest_api_response(status, &response_body, transport_url, details)
+}
+
+fn decode_regtest_api_response(
+    status: StatusCode,
+    response_body: &[u8],
+    transport_url: &str,
+    details: &ExecutionDetails,
+) -> Result<MarketToolOutput, String> {
     if !status.is_success() {
-        let message = value
-            .pointer("/error/message")
-            .and_then(Value::as_str)
-            .unwrap_or("the regtest API refused the swap");
+        let message = serde_json::from_slice::<Value>(response_body)
+            .ok()
+            .and_then(|value| {
+                value
+                    .pointer("/error/message")
+                    .and_then(Value::as_str)
+                    .map(ToOwned::to_owned)
+            });
+        if let Some(message) = message {
+            return Err(format!(
+                "regtest API returned HTTP {}: {message}",
+                status.as_u16()
+            ));
+        }
+        if response_body.is_empty() && transport_url == DEVELOPMENT_MARKET_API_URL {
+            return Err(format!(
+                "regtest development API returned HTTP {} with an empty response; rebuild and restart the local OpenAgents API because it does not expose the current regtest swap route",
+                status.as_u16()
+            ));
+        }
+        let response_description = if response_body.is_empty() {
+            "an empty response"
+        } else {
+            "a non-JSON response"
+        };
         return Err(format!(
-            "regtest API returned HTTP {}: {message}",
-            status.as_u16()
+            "regtest API returned HTTP {} with {response_description}",
+            status.as_u16(),
         ));
     }
+    if response_body.is_empty() {
+        return Err("regtest API returned HTTP 200 with an empty response".into());
+    }
+    let value: Value = serde_json::from_slice(response_body).map_err(|error| {
+        format!(
+            "regtest API returned HTTP {} with invalid JSON: {error}",
+            status.as_u16()
+        )
+    })?;
     regtest_swap_view(value, details)
 }
 
@@ -1849,6 +1888,57 @@ mod tests {
         assert!(
             validate_regtest_direction(MarketAsset::Lightning, MarketAsset::Bitcoin, 99_999,)
                 .is_err()
+        );
+    }
+
+    #[test]
+    fn empty_development_route_response_reports_the_stale_server() {
+        let details = ExecutionDetails {
+            network: MarketNetwork::Regtest,
+            quote_id: None,
+            from: MarketAsset::Bitcoin,
+            to: MarketAsset::Lightning,
+            amount_sats: 100_000,
+        };
+
+        let error = decode_regtest_api_response(
+            StatusCode::NOT_FOUND,
+            &[],
+            DEVELOPMENT_MARKET_API_URL,
+            &details,
+        )
+        .expect_err("an empty 404 must fail");
+
+        assert!(error.contains("HTTP 404"));
+        assert!(error.contains("rebuild and restart"));
+        assert!(!error.contains("invalid JSON"));
+    }
+
+    #[test]
+    fn structured_regtest_api_error_is_preserved() {
+        let details = ExecutionDetails {
+            network: MarketNetwork::Regtest,
+            quote_id: None,
+            from: MarketAsset::Bitcoin,
+            to: MarketAsset::Lightning,
+            amount_sats: 100_000,
+        };
+        let body = serde_json::to_vec(&json!({
+            "error": {"message": "The gateway is unavailable."}
+        }))
+        .expect("error body");
+
+        let error = decode_regtest_api_response(
+            StatusCode::SERVICE_UNAVAILABLE,
+            &body,
+            PRODUCTION_MARKET_API_URL,
+            &details,
+        )
+        .expect_err("a service error must fail");
+
+        assert_eq!(
+            error,
+            "regtest API returned HTTP 503: The gateway is unavailable."
         );
     }
 }
