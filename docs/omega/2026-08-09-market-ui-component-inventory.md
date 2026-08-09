@@ -145,6 +145,24 @@ market variant needed) · 🔨 build.
 | QR code renderer | Canvas-drawn QR for invoices/addresses | 🔨 |
 | Countdown/relative-time primitives | Funding, expiries, dead-man timers | 🔨 |
 
+## 11. Analytics surface (informed by the NautilusTrader teardown)
+
+NautilusTrader (the most mature open Rust trading engine) ships ~40
+streaming indicators and ~34 portfolio statistics in Rust, but its report
+layer (tearsheets) is Python-only and its roadmap explicitly refuses to
+build UIs — which is exactly the lane a native terminal occupies. The
+analytics component set its engine implies:
+
+| Component | Notes | Status |
+|---|---|---|
+| Indicator overlays | Moving-average family, Bollinger/Keltner/Donchian bands, Ichimoku, VWAP on the price chart; incremental/streaming computation | 🔨 (chart-kernel clients) |
+| Oscillator panes | RSI, MACD, Stochastics, CCI, ATR as stacked sub-panes sharing the time axis | 🔨 |
+| Book-imbalance gauge | Streaming order-book imbalance readout | 🔨 |
+| Statistic tile grid | Sharpe, Sortino, Calmar, max drawdown, VaR, expected shortfall, expectancy, profit factor, win rate, tail/omega ratios, alpha/beta vs benchmark — a dense tile grid per strategy/portfolio | 🔨 |
+| Tearsheet view | Equity curve + drawdown area + rolling Sharpe + PnL histogram + stat tiles as one printable/exportable report — native, where the reference stack only has Python | 🔨 |
+| Fills-on-candles overlay | Entry/exit markers with size/side on the price chart | 🔨 |
+| Trade log table | Per-position realized PnL, duration, costs; links into the ledger browser | 🟡 (`data_table`) |
+
 ## Build-order note
 
 The leverage order is bottom-up: §10 formatting kit + financial tokens and
