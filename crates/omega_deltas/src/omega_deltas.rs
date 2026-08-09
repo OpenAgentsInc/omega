@@ -28900,7 +28900,7 @@ mod tests {
     }
 
     /// OMEGA-DELTA-0241. The owner-held LN Markets credential stays in Omega.
-    /// REST history and portfolio reads plus bounded Stream API subscriptions
+    /// REST v3 and legacy v2 surfaces plus bounded Stream API subscriptions
     /// share the direct client; effects require the configured network.
     #[test]
     fn ln_markets_uses_one_local_direct_fail_closed_client() {
@@ -28910,8 +28910,11 @@ mod tests {
         for required in [
             "api.signet.lnmarkets.com/v3",
             "api.lnmarkets.com/v3",
+            "api.signet.lnmarkets.com/v2",
+            "api.lnmarkets.com/v2",
             "LNM-ACCESS-SIGNATURE",
             "rest_signature",
+            "rest_signature_v2",
             "LnMarketsStreamClient",
             "futures/candles",
             "futures/cross/position",
@@ -28948,13 +28951,26 @@ mod tests {
             "BitcoinAddressValue",
             "wallet_mutation_signature_vectors_cover_post_and_put_bodies",
             "wallet_post_is_single_attempt_and_network_mismatch_sends_nothing",
+            "option_instruments",
+            "option_volatility_index",
+            "option_buy",
+            "option_update_settlement",
+            "option_close_all",
+            "/options/all/close",
+            "legacy_deposit_synthetic_usd",
+            "legacy_withdraw_synthetic_usd",
+            "legacy_internal_transfer",
+            "lnurl_auth_challenge",
+            "lnurl_auth_callback",
+            "v2_signature_vectors_use_uppercase_methods_and_bare_queries",
+            "option_buy_is_single_attempt_and_network_mismatch_sends_nothing",
             "futures/inverse/btc_usd/ohlc/",
             "CREDENTIAL_STORAGE_URL",
             "authentication_failure_is_not_retried",
         ] {
             assert!(
                 client.contains(required),
-                "OMEGA-DELTA-0241: the direct v3 client lost `{required}`"
+                "OMEGA-DELTA-0241: the direct LN Markets client lost `{required}`"
             );
         }
 

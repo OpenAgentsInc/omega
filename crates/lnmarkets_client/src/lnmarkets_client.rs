@@ -54,6 +54,13 @@ impl Network {
         }
     }
 
+    pub const fn legacy_rest_api_url(self) -> &'static str {
+        match self {
+            Self::Signet => "https://api.signet.lnmarkets.com/v2",
+            Self::Mainnet => "https://api.lnmarkets.com/v2",
+        }
+    }
+
     pub const fn stream_api_url(self) -> &'static str {
         match self {
             Self::Signet => "wss://stream.signet.lnmarkets.com/v1",
@@ -217,6 +224,12 @@ pub enum Error {
     InvalidTradeId(#[source] uuid::Error),
     #[error("invalid LN Markets order ID: {0}")]
     InvalidOrderId(#[source] uuid::Error),
+    #[error("invalid LN Markets option trade ID: {0}")]
+    InvalidOptionTradeId(#[source] uuid::Error),
+    #[error("invalid LN Markets option instrument name `{0}`")]
+    InvalidOptionInstrument(String),
+    #[error("invalid LN Markets LNURL-auth parameter `{0}`")]
+    InvalidLnurlAuthParameter(&'static str),
     #[error("LN Markets cross-margin limit price must be positive and use a 0.5 tick")]
     InvalidCrossLimitPrice,
     #[error("invalid LN Markets isolated trade state flags")]
@@ -1507,6 +1520,387 @@ pub struct NewSwapResult {
     pub out_asset: Asset,
 }
 
+#[derive(Clone, PartialEq, Eq, Serialize)]
+#[serde(transparent)]
+pub struct OptionInstrumentName(String);
+
+impl OptionInstrumentName {
+    pub fn new(value: impl Into<String>) -> Result<Self, Error> {
+        let value = value.into();
+        let mut parts = value.split('.');
+        let asset = parts.next();
+        let expiry = parts.next();
+        let strike = parts.next();
+        let kind = parts.next();
+        let valid_expiry = expiry.is_some_and(|expiry| {
+            expiry.len() == 10
+                && expiry.bytes().enumerate().all(|(index, byte)| {
+                    if index == 4 || index == 7 {
+                        byte == b'-'
+                    } else {
+                        byte.is_ascii_digit()
+                    }
+                })
+        });
+        let valid_strike = strike
+            .and_then(|strike| strike.parse::<NonZeroU64>().ok())
+            .is_some();
+        if asset != Some("BTC")
+            || !valid_expiry
+            || !valid_strike
+            || !matches!(kind, Some("C" | "P"))
+            || parts.next().is_some()
+        {
+            return Err(Error::InvalidOptionInstrument(value));
+        }
+        Ok(Self(value))
+    }
+
+    pub fn as_str(&self) -> &str {
+        &self.0
+    }
+}
+
+impl fmt::Debug for OptionInstrumentName {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_tuple("OptionInstrumentName")
+            .field(&self.0)
+            .finish()
+    }
+}
+
+impl fmt::Display for OptionInstrumentName {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        self.0.fmt(formatter)
+    }
+}
+
+impl<'de> Deserialize<'de> for OptionInstrumentName {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        Self::new(String::deserialize(deserializer)?).map_err(serde::de::Error::custom)
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum OptionSettlement {
+    Physical,
+    Cash,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum OptionTradeStatus {
+    Running,
+    Closed,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum OptionSide {
+    #[serde(rename = "b")]
+    Buy,
+    #[serde(rename = "s")]
+    Sell,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum OptionKind {
+    #[serde(rename = "c")]
+    Call,
+    #[serde(rename = "p")]
+    Put,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(transparent)]
+pub struct OptionTradeId(Uuid);
+
+impl FromStr for OptionTradeId {
+    type Err = Error;
+
+    fn from_str(value: &str) -> Result<Self, Self::Err> {
+        Uuid::parse_str(value)
+            .map(Self)
+            .map_err(Error::InvalidOptionTradeId)
+    }
+}
+
+impl fmt::Display for OptionTradeId {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        self.0.fmt(formatter)
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct OptionInstrument {
+    pub volatility: DecimalAmount,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct OptionMarketRange {
+    pub min: DecimalAmount,
+    pub max: DecimalAmount,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct OptionMarketCountLimit {
+    pub max: DecimalAmount,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct OptionMarketLimits {
+    pub margin: OptionMarketRange,
+    pub quantity: OptionMarketRange,
+    pub count: OptionMarketCountLimit,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct OptionMarketFees {
+    pub trading: DecimalAmount,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct OptionMarket {
+    pub active: bool,
+    pub limits: OptionMarketLimits,
+    pub fees: OptionMarketFees,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct OptionVolatilityIndex {
+    pub volatility_index: DecimalAmount,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct OptionTrade {
+    pub id: OptionTradeId,
+    pub uid: Uuid,
+    pub forward: DecimalAmount,
+    pub forward_point: i64,
+    pub domestic: String,
+    pub settlement: OptionSettlement,
+    pub fixing_price: Option<DecimalAmount>,
+    pub creation_ts: DecimalAmount,
+    pub expiry_ts: DecimalAmount,
+    pub closed_ts: Option<DecimalAmount>,
+    pub physical_delivery_id: Option<String>,
+    pub leg_id: Uuid,
+    pub side: OptionSide,
+    #[serde(rename = "type")]
+    pub kind: OptionKind,
+    pub quantity: i64,
+    pub strike: i64,
+    pub volatility: DecimalAmount,
+    pub margin: i64,
+    pub pl: i64,
+    pub maintenance_margin: i64,
+    pub opening_fee: i64,
+    pub closing_fee: i64,
+    pub running: bool,
+    pub closed: bool,
+    pub expired: bool,
+    pub exercised: bool,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct OptionBuyRequest {
+    side: OptionSide,
+    quantity: NonZeroU64,
+    settlement: OptionSettlement,
+    instrument_name: OptionInstrumentName,
+}
+
+impl OptionBuyRequest {
+    pub fn new(
+        instrument_name: OptionInstrumentName,
+        quantity: u64,
+        settlement: OptionSettlement,
+    ) -> Result<Self, Error> {
+        let quantity = NonZeroU64::new(quantity).ok_or_else(|| {
+            Error::InvalidAmount("option quantity must be greater than zero".into())
+        })?;
+        Ok(Self {
+            side: OptionSide::Buy,
+            quantity,
+            settlement,
+            instrument_name,
+        })
+    }
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct OptionSettlementUpdate {
+    id: OptionTradeId,
+    settlement: OptionSettlement,
+}
+
+impl OptionSettlementUpdate {
+    pub fn new(id: OptionTradeId, settlement: OptionSettlement) -> Self {
+        Self { id, settlement }
+    }
+}
+
+#[derive(Debug, Clone, Default, Serialize)]
+pub struct OptionTradesQuery {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    status: Option<OptionTradeStatus>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    from: Option<u64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    to: Option<u64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    limit: Option<u16>,
+}
+
+impl OptionTradesQuery {
+    pub fn new(status: OptionTradeStatus) -> Self {
+        Self {
+            status: Some(status),
+            ..Self::default()
+        }
+    }
+
+    pub fn with_time_range(mut self, from: u64, to: u64) -> Self {
+        self.from = Some(from);
+        self.to = Some(to);
+        self
+    }
+
+    pub fn with_limit(mut self, limit: u16) -> Result<Self, Error> {
+        if limit == 0 || limit > 1_000 {
+            return Err(Error::InvalidAmount(
+                "option trade limit must be between 1 and 1000".into(),
+            ));
+        }
+        self.limit = Some(limit);
+        Ok(self)
+    }
+}
+
+#[derive(Debug, Clone)]
+pub struct OptionCloseAllResult {
+    pub trades: Vec<OptionTrade>,
+}
+
+impl<'de> Deserialize<'de> for OptionCloseAllResult {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        #[derive(Deserialize)]
+        #[serde(untagged)]
+        enum WireResult {
+            Trades(Vec<OptionTrade>),
+            Object { trades: Vec<OptionTrade> },
+        }
+
+        Ok(match WireResult::deserialize(deserializer)? {
+            WireResult::Trades(trades) | WireResult::Object { trades } => Self { trades },
+        })
+    }
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct LegacySyntheticUsdRequest {
+    amount: DecimalAmount,
+}
+
+impl LegacySyntheticUsdRequest {
+    pub fn new(amount: DecimalAmount) -> Self {
+        Self { amount }
+    }
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct LegacyInternalTransferRequest {
+    uid: Uuid,
+    amount: NonZeroU64,
+}
+
+impl LegacyInternalTransferRequest {
+    pub fn new(uid: Uuid, amount_sats: u64) -> Result<Self, Error> {
+        let amount = NonZeroU64::new(amount_sats).ok_or_else(|| {
+            Error::InvalidAmount("internal transfer amount must be greater than zero".into())
+        })?;
+        Ok(Self { uid, amount })
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct LnurlAuthChallenge {
+    pub lnurl: String,
+}
+
+#[derive(Clone, Serialize)]
+pub struct LnurlAuthCallback {
+    tag: &'static str,
+    k1: String,
+    hmac: String,
+    sig: String,
+    key: String,
+    #[serde(rename = "token")]
+    request_token: bool,
+}
+
+impl LnurlAuthCallback {
+    pub fn new(
+        k1: impl Into<String>,
+        hmac: impl Into<String>,
+        signature: impl Into<String>,
+        linking_public_key: impl Into<String>,
+        request_token: bool,
+    ) -> Result<Self, Error> {
+        let k1 = validate_hex_parameter(k1.into(), 64, "k1")?;
+        let hmac = validate_hex_parameter(hmac.into(), 64, "hmac")?;
+        let sig = validate_hex_parameter(signature.into(), 2, "sig")?;
+        let key = validate_hex_parameter(linking_public_key.into(), 66, "key")?;
+        Ok(Self {
+            tag: "login",
+            k1,
+            hmac,
+            sig,
+            key,
+            request_token,
+        })
+    }
+}
+
+impl fmt::Debug for LnurlAuthCallback {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str("LnurlAuthCallback([REDACTED])")
+    }
+}
+
+#[derive(Clone, Serialize, Deserialize)]
+pub struct LnurlAuthToken {
+    pub token: String,
+}
+
+impl fmt::Debug for LnurlAuthToken {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str("LnurlAuthToken([REDACTED])")
+    }
+}
+
+fn validate_hex_parameter(
+    value: String,
+    minimum_length: usize,
+    name: &'static str,
+) -> Result<String, Error> {
+    if value.len() < minimum_length
+        || !value.len().is_multiple_of(2)
+        || !value.bytes().all(|byte| byte.is_ascii_hexdigit())
+    {
+        return Err(Error::InvalidLnurlAuthParameter(name));
+    }
+    Ok(value)
+}
+
 pub struct LnMarketsClient {
     http_transport: Arc<dyn HttpTransport>,
     network: Network,
@@ -1975,6 +2369,124 @@ impl LnMarketsClient {
             .await
     }
 
+    pub async fn option_instruments(&self) -> Result<Vec<OptionInstrumentName>, Error> {
+        self.get_v2_public("/options/instruments", "").await
+    }
+
+    pub async fn option_instrument(
+        &self,
+        instrument_name: &OptionInstrumentName,
+    ) -> Result<OptionInstrument, Error> {
+        #[derive(Serialize)]
+        struct Query<'a> {
+            instrument_name: &'a str,
+        }
+
+        let query = encoded_query(&Query {
+            instrument_name: instrument_name.as_str(),
+        })?;
+        self.get_v2_public("/options/instrument", &query).await
+    }
+
+    pub async fn option_market(&self) -> Result<OptionMarket, Error> {
+        self.get_v2_public("/options/market", "").await
+    }
+
+    pub async fn option_volatility_index(&self) -> Result<OptionVolatilityIndex, Error> {
+        self.get_v2_public("/options/volatility-index", "").await
+    }
+
+    pub async fn option_trades(
+        &self,
+        query: &OptionTradesQuery,
+    ) -> Result<Vec<OptionTrade>, Error> {
+        let query = encoded_query(query)?;
+        self.get_v2_authenticated("/options", &query).await
+    }
+
+    pub async fn option_trade(&self, id: OptionTradeId) -> Result<OptionTrade, Error> {
+        self.get_v2_authenticated(&format!("/options/trades/{id}"), "")
+            .await
+    }
+
+    pub async fn option_buy(
+        &self,
+        network: Network,
+        request: &OptionBuyRequest,
+    ) -> Result<OptionTrade, Error> {
+        self.v2_post(network, "/options", request).await
+    }
+
+    pub async fn option_update_settlement(
+        &self,
+        network: Network,
+        request: &OptionSettlementUpdate,
+    ) -> Result<OptionTrade, Error> {
+        self.require_network(network)?;
+        let body = serde_json::to_vec(request).map_err(Error::Serialize)?;
+        self.request_v2_json(Method::PUT, "/options", "", body, true)
+            .await
+    }
+
+    pub async fn option_close(
+        &self,
+        network: Network,
+        id: OptionTradeId,
+    ) -> Result<OptionTrade, Error> {
+        #[derive(Serialize)]
+        struct Query {
+            id: OptionTradeId,
+        }
+
+        self.require_network(network)?;
+        let query = encoded_query(&Query { id })?;
+        self.request_v2_json(Method::DELETE, "/options", &query, Vec::new(), true)
+            .await
+    }
+
+    pub async fn option_close_all(&self, network: Network) -> Result<OptionCloseAllResult, Error> {
+        self.require_network(network)?;
+        self.request_v2_json(Method::DELETE, "/options/all/close", "", Vec::new(), true)
+            .await
+    }
+
+    pub async fn legacy_deposit_synthetic_usd(
+        &self,
+        network: Network,
+        request: &LegacySyntheticUsdRequest,
+    ) -> Result<serde_json::Value, Error> {
+        self.v2_post(network, "/user/deposit/susd", request).await
+    }
+
+    pub async fn legacy_withdraw_synthetic_usd(
+        &self,
+        network: Network,
+        request: &LegacySyntheticUsdRequest,
+    ) -> Result<serde_json::Value, Error> {
+        self.v2_post(network, "/user/withdraw/susd", request).await
+    }
+
+    pub async fn legacy_internal_transfer(
+        &self,
+        network: Network,
+        request: &LegacyInternalTransferRequest,
+    ) -> Result<serde_json::Value, Error> {
+        self.v2_post(network, "/user/transfer", request).await
+    }
+
+    pub async fn lnurl_auth_challenge(&self) -> Result<LnurlAuthChallenge, Error> {
+        self.request_v2_json(Method::POST, "/lnurl/auth", "", Vec::new(), false)
+            .await
+    }
+
+    pub async fn lnurl_auth_callback(
+        &self,
+        callback: &LnurlAuthCallback,
+    ) -> Result<LnurlAuthToken, Error> {
+        let query = encoded_query(callback)?;
+        self.get_v2_public("/lnurl/auth", &query).await
+    }
+
     async fn isolated_trade_post<T: Serialize>(
         &self,
         network: Network,
@@ -2006,6 +2518,18 @@ impl LnMarketsClient {
         self.require_network(network)?;
         let body = serde_json::to_vec(request).map_err(Error::Serialize)?;
         self.request_json(Method::POST, path, "", body, true).await
+    }
+
+    async fn v2_post<T: Serialize, R: DeserializeOwned>(
+        &self,
+        network: Network,
+        path: &str,
+        request: &T,
+    ) -> Result<R, Error> {
+        self.require_network(network)?;
+        let body = serde_json::to_vec(request).map_err(Error::Serialize)?;
+        self.request_v2_json(Method::POST, path, "", body, true)
+            .await
     }
 
     async fn isolated_trade_delete<T: Serialize>(
@@ -2045,6 +2569,24 @@ impl LnMarketsClient {
             .await
     }
 
+    async fn get_v2_public<T: DeserializeOwned>(
+        &self,
+        path: &str,
+        query: &str,
+    ) -> Result<T, Error> {
+        self.request_v2_json(Method::GET, path, query, Vec::new(), false)
+            .await
+    }
+
+    async fn get_v2_authenticated<T: DeserializeOwned>(
+        &self,
+        path: &str,
+        query: &str,
+    ) -> Result<T, Error> {
+        self.request_v2_json(Method::GET, path, query, Vec::new(), true)
+            .await
+    }
+
     async fn request_json<T: DeserializeOwned>(
         &self,
         method: Method,
@@ -2073,8 +2615,35 @@ impl LnMarketsClient {
         drain_response(response).await
     }
 
+    async fn request_v2_json<T: DeserializeOwned>(
+        &self,
+        method: Method,
+        path: &str,
+        query: &str,
+        body: Vec<u8>,
+        authenticated: bool,
+    ) -> Result<T, Error> {
+        let response = self
+            .request_with_version(RestApiVersion::V2, method, path, query, body, authenticated)
+            .await?;
+        parse_success_response(response).await
+    }
+
     async fn request(
         &self,
+        method: Method,
+        path: &str,
+        query: &str,
+        body: Vec<u8>,
+        authenticated: bool,
+    ) -> Result<Response<Vec<u8>>, Error> {
+        self.request_with_version(RestApiVersion::V3, method, path, query, body, authenticated)
+            .await
+    }
+
+    async fn request_with_version(
+        &self,
+        version: RestApiVersion,
         method: Method,
         path: &str,
         query: &str,
@@ -2094,7 +2663,8 @@ impl LnMarketsClient {
 
         for attempt in 0..MAX_ATTEMPTS {
             self.wait_for_request_slot(authenticated).await;
-            let request = build_request(
+            let request = build_versioned_request(
+                version,
                 self.network,
                 method.clone(),
                 path,
@@ -2550,6 +3120,20 @@ pub fn rest_signature(
     Ok(BASE64_STANDARD.encode(hmac.finalize().into_bytes()))
 }
 
+pub fn rest_signature_v2(
+    secret: &str,
+    timestamp: &str,
+    method: &Method,
+    path: &str,
+    data: &str,
+) -> Result<String, Error> {
+    let payload = format!("{}{}{}{}", timestamp, method.as_str(), path, data);
+    let mut hmac =
+        HmacSha256::new_from_slice(secret.as_bytes()).map_err(|_| Error::InvalidSigningKey)?;
+    hmac.update(payload.as_bytes());
+    Ok(BASE64_STANDARD.encode(hmac.finalize().into_bytes()))
+}
+
 pub fn stream_signature(secret: &str, timestamp: &str, nonce: &str) -> Result<String, Error> {
     let mut hmac =
         HmacSha256::new_from_slice(secret.as_bytes()).map_err(|_| Error::InvalidSigningKey)?;
@@ -2557,7 +3141,14 @@ pub fn stream_signature(secret: &str, timestamp: &str, nonce: &str) -> Result<St
     Ok(BASE64_STANDARD.encode(hmac.finalize().into_bytes()))
 }
 
-fn build_request(
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum RestApiVersion {
+    V2,
+    V3,
+}
+
+fn build_versioned_request(
+    version: RestApiVersion,
     network: Network,
     method: Method,
     path: &str,
@@ -2565,8 +3156,11 @@ fn build_request(
     body: &[u8],
     credentials: Option<&Credentials>,
 ) -> Result<Request<Vec<u8>>, Error> {
-    let canonical_path = format!("/v3{path}");
-    let uri = format!("{}{}{}", network.rest_api_url(), path, query);
+    let (base_url, canonical_path) = match version {
+        RestApiVersion::V2 => (network.legacy_rest_api_url(), format!("/v2{path}")),
+        RestApiVersion::V3 => (network.rest_api_url(), format!("/v3{path}")),
+    };
+    let uri = format!("{base_url}{path}{query}");
     let mut builder = Request::builder()
         .method(method.clone())
         .uri(uri)
@@ -2577,17 +3171,29 @@ fn build_request(
     if let Some(credentials) = credentials {
         let timestamp = current_timestamp_millis()?;
         let data = if method == Method::GET || method == Method::DELETE {
-            query
+            match version {
+                RestApiVersion::V2 => query.strip_prefix('?').unwrap_or(query),
+                RestApiVersion::V3 => query,
+            }
         } else {
             std::str::from_utf8(body).map_err(|_| Error::InvalidRequestBody)?
         };
-        let signature = rest_signature(
-            credentials.secret(),
-            &timestamp,
-            &method,
-            &canonical_path,
-            data,
-        )?;
+        let signature = match version {
+            RestApiVersion::V2 => rest_signature_v2(
+                credentials.secret(),
+                &timestamp,
+                &method,
+                &canonical_path,
+                data,
+            )?,
+            RestApiVersion::V3 => rest_signature(
+                credentials.secret(),
+                &timestamp,
+                &method,
+                &canonical_path,
+                data,
+            )?,
+        };
         builder = builder
             .header("LNM-ACCESS-KEY", credentials.access_key())
             .header("LNM-ACCESS-PASSPHRASE", credentials.passphrase())
@@ -2774,6 +3380,10 @@ mod tests {
         )
     }
 
+    fn option_trade_body() -> String {
+        r#"{"id":"49d4f418-5190-40b9-9c32-856381dc8aa2","uid":"c6c1a624-f2b4-48c9-b07a-7fd037770bd2","forward":29840,"forward_point":0,"domestic":"BTC","settlement":"cash","fixing_price":29840,"creation_ts":1689695082638,"expiry_ts":1689753600000,"closed_ts":1689695087302,"physical_delivery_id":null,"leg_id":"a6a05452-d445-4d08-a39a-c73126faa098","side":"b","type":"c","quantity":100,"strike":29000,"volatility":1.1670000553131104,"margin":12744,"pl":-2,"maintenance_margin":0,"opening_fee":172,"closing_fee":172,"running":false,"closed":true,"expired":false,"exercised":false}"#.into()
+    }
+
     fn authenticated_client(http_transport: Arc<dyn HttpTransport>) -> LnMarketsClient {
         let credentials = Credentials::new("key", "secret", "passphrase").expect("credentials");
         LnMarketsClient::authenticated(http_transport, Network::Signet, credentials)
@@ -2787,6 +3397,305 @@ mod tests {
             BASE64_STANDARD.encode(hmac.finalize().into_bytes()),
             "JJ8q7bXc7Kkj7cjj1EgBqA9pn70I9b2B8iLeDwDtQ2Y="
         );
+    }
+
+    #[test]
+    fn v2_signature_vectors_use_uppercase_methods_and_bare_queries() {
+        assert_eq!(
+            rest_signature_v2(
+                "test-secret",
+                "1700000000000",
+                &Method::GET,
+                "/v2/options",
+                "status=running&limit=25",
+            )
+            .expect("GET signature"),
+            "s47KWgnjaEKf/CXWR+sxQU6FTJVASRAiKzySdl5C1ek="
+        );
+        assert_eq!(
+            rest_signature_v2(
+                "test-secret",
+                "1700000000000",
+                &Method::POST,
+                "/v2/options",
+                r#"{"side":"b","quantity":10,"settlement":"physical","instrument_name":"BTC.2026-01-05.43000.C"}"#,
+            )
+            .expect("POST signature"),
+            "HrByDZaaqTeAphr/F/csaj3qh471y3vYOwb+Qevbz+s="
+        );
+        assert_ne!(
+            rest_signature_v2(
+                "test-secret",
+                "1700000000000",
+                &Method::GET,
+                "/v2/options",
+                "?status=running&limit=25",
+            )
+            .expect("signature with leading question mark"),
+            "s47KWgnjaEKf/CXWR+sxQU6FTJVASRAiKzySdl5C1ek="
+        );
+    }
+
+    #[test]
+    fn option_inputs_and_models_follow_the_legacy_contract() {
+        assert!(OptionInstrumentName::new("ETH.2026-01-05.43000.C").is_err());
+        assert!(OptionInstrumentName::new("BTC.20260105.43000.C").is_err());
+        assert!(OptionInstrumentName::new("BTC.2026-01-05.0.C").is_err());
+        assert!(OptionInstrumentName::new("BTC.2026-01-05.43000.X").is_err());
+        let instrument = OptionInstrumentName::new("BTC.2026-01-05.43000.C").expect("instrument");
+        let request =
+            OptionBuyRequest::new(instrument, 10, OptionSettlement::Physical).expect("buy");
+        assert_eq!(
+            serde_json::to_string(&request).expect("body"),
+            r#"{"side":"b","quantity":10,"settlement":"physical","instrument_name":"BTC.2026-01-05.43000.C"}"#
+        );
+        assert!(
+            OptionBuyRequest::new(
+                OptionInstrumentName::new("BTC.2026-01-05.43000.P").expect("instrument"),
+                0,
+                OptionSettlement::Cash,
+            )
+            .is_err()
+        );
+
+        let trade: OptionTrade =
+            serde_json::from_str(&option_trade_body()).expect("option trade fixture");
+        assert_eq!(trade.side, OptionSide::Buy);
+        assert_eq!(trade.kind, OptionKind::Call);
+        assert_eq!(trade.settlement, OptionSettlement::Cash);
+        assert_eq!(trade.pl, -2);
+
+        let array: OptionCloseAllResult = serde_json::from_str("[]").expect("array result");
+        let object: OptionCloseAllResult =
+            serde_json::from_str(r#"{"trades":[]}"#).expect("object result");
+        assert!(array.trades.is_empty());
+        assert!(object.trades.is_empty());
+    }
+
+    #[test]
+    fn v2_surfaces_use_documented_routes_and_authentication_shapes() {
+        smol::block_on(async {
+            #[derive(Debug)]
+            struct RecordedRequest {
+                method: Method,
+                path: String,
+                query: Option<String>,
+                body: String,
+                authenticated: bool,
+            }
+
+            let requests = Arc::new(StdMutex::new(Vec::new()));
+            let transport = FakeTransport::create({
+                let requests = requests.clone();
+                move |request| {
+                    let requests = requests.clone();
+                    async move {
+                        let path = request.uri().path().to_owned();
+                        let method = request.method().clone();
+                        requests.lock().expect("requests").push(RecordedRequest {
+                            method: method.clone(),
+                            path: path.clone(),
+                            query: request.uri().query().map(str::to_owned),
+                            body: String::from_utf8(request.body().clone()).expect("UTF-8 body"),
+                            authenticated: request.headers().contains_key("LNM-ACCESS-SIGNATURE"),
+                        });
+                        match (method, path.as_str()) {
+                            (Method::GET, "/v2/options/instruments") => {
+                                response(200, r#"["BTC.2026-01-05.43000.C"]"#)
+                            }
+                            (Method::GET, "/v2/options/instrument") => {
+                                response(200, r#"{"volatility":0.88}"#)
+                            }
+                            (Method::GET, "/v2/options/market") => response(
+                                200,
+                                r#"{"active":true,"limits":{"margin":{"min":0,"max":500000},"quantity":{"min":1,"max":200000},"count":{"max":50}},"fees":{"trading":0.0005}}"#,
+                            ),
+                            (Method::GET, "/v2/options/volatility-index") => {
+                                response(200, r#"{"volatilityIndex":0.75}"#)
+                            }
+                            (Method::GET, "/v2/options") => response(200, "[]"),
+                            (Method::DELETE, "/v2/options/all/close") => {
+                                response(200, r#"{"trades":[]}"#)
+                            }
+                            (Method::POST, "/v2/lnurl/auth") => {
+                                response(200, r#"{"lnurl":"LNURL1TEST"}"#)
+                            }
+                            (Method::GET, "/v2/lnurl/auth") => {
+                                response(200, r#"{"token":"opaque-token"}"#)
+                            }
+                            (Method::POST, path) if path.starts_with("/v2/user/") => {
+                                response(200, "{}")
+                            }
+                            (_, "/v2/options")
+                            | (
+                                Method::GET,
+                                "/v2/options/trades/49d4f418-5190-40b9-9c32-856381dc8aa2",
+                            ) => response(200, &option_trade_body()),
+                            _ => response(404, r#"{"message":"unexpected route"}"#),
+                        }
+                    }
+                }
+            });
+            let client = authenticated_client(transport);
+            let instrument =
+                OptionInstrumentName::new("BTC.2026-01-05.43000.C").expect("instrument");
+            client.option_instruments().await.expect("instruments");
+            client
+                .option_instrument(&instrument)
+                .await
+                .expect("instrument data");
+            client.option_market().await.expect("market");
+            client
+                .option_volatility_index()
+                .await
+                .expect("volatility index");
+            client
+                .option_trades(
+                    &OptionTradesQuery::new(OptionTradeStatus::Running)
+                        .with_limit(25)
+                        .expect("limit"),
+                )
+                .await
+                .expect("trades");
+            let trade_id = || {
+                "49d4f418-5190-40b9-9c32-856381dc8aa2"
+                    .parse()
+                    .expect("option trade ID")
+            };
+            client.option_trade(trade_id()).await.expect("trade");
+            client
+                .option_buy(
+                    Network::Signet,
+                    &OptionBuyRequest::new(instrument, 10, OptionSettlement::Physical)
+                        .expect("buy"),
+                )
+                .await
+                .expect("buy option");
+            client
+                .option_update_settlement(
+                    Network::Signet,
+                    &OptionSettlementUpdate::new(trade_id(), OptionSettlement::Cash),
+                )
+                .await
+                .expect("update settlement");
+            client
+                .option_close(Network::Signet, trade_id())
+                .await
+                .expect("close option");
+            client
+                .option_close_all(Network::Signet)
+                .await
+                .expect("close all options");
+            let legacy_amount = LegacySyntheticUsdRequest::new("10.50".parse().expect("amount"));
+            client
+                .legacy_deposit_synthetic_usd(Network::Signet, &legacy_amount)
+                .await
+                .expect("deposit sUSD");
+            client
+                .legacy_withdraw_synthetic_usd(Network::Signet, &legacy_amount)
+                .await
+                .expect("withdraw sUSD");
+            client
+                .legacy_internal_transfer(
+                    Network::Signet,
+                    &LegacyInternalTransferRequest::new(
+                        Uuid::parse_str("c6c1a624-f2b4-48c9-b07a-7fd037770bd2").expect("recipient"),
+                        1_000,
+                    )
+                    .expect("transfer"),
+                )
+                .await
+                .expect("internal transfer");
+            client
+                .lnurl_auth_challenge()
+                .await
+                .expect("LNURL challenge");
+            client
+                .lnurl_auth_callback(
+                    &LnurlAuthCallback::new(
+                        "00".repeat(32),
+                        "11".repeat(32),
+                        "22".repeat(70),
+                        format!("02{}", "33".repeat(32)),
+                        true,
+                    )
+                    .expect("callback"),
+                )
+                .await
+                .expect("LNURL callback");
+
+            let requests = requests.lock().expect("requests");
+            assert_eq!(requests.len(), 15);
+            assert_eq!(requests[0].path, "/v2/options/instruments");
+            assert!(!requests[0].authenticated);
+            assert_eq!(
+                requests[1].query.as_deref(),
+                Some("instrument_name=BTC.2026-01-05.43000.C")
+            );
+            assert_eq!(
+                requests[4].query.as_deref(),
+                Some("status=running&limit=25")
+            );
+            assert!(requests[4].authenticated);
+            assert_eq!(requests[6].method, Method::POST);
+            assert_eq!(requests[6].path, "/v2/options");
+            assert_eq!(
+                requests[6].body,
+                r#"{"side":"b","quantity":10,"settlement":"physical","instrument_name":"BTC.2026-01-05.43000.C"}"#
+            );
+            assert_eq!(requests[8].method, Method::DELETE);
+            assert_eq!(
+                requests[8].query.as_deref(),
+                Some("id=49d4f418-5190-40b9-9c32-856381dc8aa2")
+            );
+            assert_eq!(requests[9].path, "/v2/options/all/close");
+            assert_eq!(requests[13].method, Method::POST);
+            assert_eq!(requests[13].path, "/v2/lnurl/auth");
+            assert!(!requests[13].authenticated);
+            assert_eq!(requests[14].method, Method::GET);
+            assert!(
+                requests[14].query.as_deref().is_some_and(
+                    |query| query.contains("tag=login") && query.contains("token=true")
+                )
+            );
+        });
+    }
+
+    #[test]
+    fn option_buy_is_single_attempt_and_network_mismatch_sends_nothing() {
+        smol::block_on(async {
+            let request_count = Arc::new(StdMutex::new(0));
+            let transport = FakeTransport::create({
+                let request_count = request_count.clone();
+                move |_| {
+                    let request_count = request_count.clone();
+                    async move {
+                        *request_count.lock().expect("request count") += 1;
+                        response(503, r#"{"message":"Service unavailable"}"#)
+                    }
+                }
+            });
+            let client = authenticated_client(transport);
+            let request = OptionBuyRequest::new(
+                OptionInstrumentName::new("BTC.2026-01-05.43000.C").expect("instrument"),
+                10,
+                OptionSettlement::Cash,
+            )
+            .expect("buy request");
+            let mismatch = client
+                .option_buy(Network::Mainnet, &request)
+                .await
+                .expect_err("network mismatch");
+            assert!(matches!(mismatch, Error::NetworkMismatch { .. }));
+            assert_eq!(*request_count.lock().expect("request count"), 0);
+
+            let unavailable = client
+                .option_buy(Network::Signet, &request)
+                .await
+                .expect_err("503");
+            assert!(matches!(unavailable, Error::Api { status, .. } if status.as_u16() == 503));
+            assert_eq!(*request_count.lock().expect("request count"), 1);
+        });
     }
 
     #[test]
