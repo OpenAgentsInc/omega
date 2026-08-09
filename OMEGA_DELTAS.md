@@ -9942,6 +9942,14 @@ transport if it differs from the configured credential. Trade responses decode
 the venue's four state booleans into one checked state enum. POST, PUT, and
 DELETE signature shapes are pinned, and mutations are single-attempt.
 
+The cross-margin mutation surface follows the same boundary. Market and limit
+orders use positive integer USD quantities; limit prices use positive 0.5
+ticks. Order cancellation, cancel-all, position close, leverage changes, and
+wallet-to-margin transfers all require the caller to name the configured
+network. The client validates order IDs, leverage, prices, quantities, and
+transfer amounts before transport. Cross-margin POST and PUT signatures are
+pinned, and every mutation is single-attempt.
+
 - **Enforced by:** signer, retry, request-body, and credential tests in
   `lnmarkets_client`; `ln_markets_uses_one_local_direct_fail_closed_client` in
   `omega_deltas`; the feature-off checks in `script/omega-checks`; and the

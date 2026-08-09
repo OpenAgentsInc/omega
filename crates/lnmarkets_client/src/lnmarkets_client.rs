@@ -209,6 +209,10 @@ pub enum Error {
     InvalidLeverage,
     #[error("invalid LN Markets trade ID: {0}")]
     InvalidTradeId(#[source] uuid::Error),
+    #[error("invalid LN Markets order ID: {0}")]
+    InvalidOrderId(#[source] uuid::Error),
+    #[error("LN Markets cross-margin limit price must be positive and use a 0.5 tick")]
+    InvalidCrossLimitPrice,
     #[error("invalid LN Markets isolated trade state flags")]
     InvalidTradeState,
     #[error("trailing stop distance must be between 0.001 and 10")]
@@ -570,6 +574,149 @@ pub struct FuturesCrossTransfer {
     pub amount: DecimalAmount,
     pub id: String,
     pub time: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[serde(transparent)]
+pub struct FuturesCrossOrderId(Uuid);
+
+impl FromStr for FuturesCrossOrderId {
+    type Err = Error;
+
+    fn from_str(value: &str) -> Result<Self, Self::Err> {
+        Uuid::parse_str(value)
+            .map(Self)
+            .map_err(Error::InvalidOrderId)
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(transparent)]
+pub struct FuturesCrossOrderQuantity(NonZeroU64);
+
+impl FuturesCrossOrderQuantity {
+    pub fn new(quantity_usd: u64) -> Result<Self, Error> {
+        NonZeroU64::new(quantity_usd)
+            .map(Self)
+            .ok_or_else(|| Error::InvalidAmount("quantity must be greater than zero".into()))
+    }
+
+    pub const fn get(self) -> u64 {
+        self.0.get()
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[serde(transparent)]
+pub struct FuturesCrossLimitPrice(DecimalAmount);
+
+impl FuturesCrossLimitPrice {
+    pub fn new(price: DecimalAmount) -> Result<Self, Error> {
+        let doubled_price = price.as_number().as_f64().map(|price| price * 2.0);
+        if doubled_price.is_some_and(|price| price > 0.0 && price.fract() == 0.0) {
+            Ok(Self(price))
+        } else {
+            Err(Error::InvalidCrossLimitPrice)
+        }
+    }
+
+    pub fn as_amount(&self) -> &DecimalAmount {
+        &self.0
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum FuturesCrossOrderKind {
+    Market,
+    Limit { price: FuturesCrossLimitPrice },
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct FuturesCrossNewOrderRequest {
+    side: FuturesTradeSide,
+    quantity: FuturesCrossOrderQuantity,
+    kind: FuturesCrossOrderKind,
+    client_id: String,
+}
+
+impl FuturesCrossNewOrderRequest {
+    pub fn market(
+        side: FuturesTradeSide,
+        quantity: FuturesCrossOrderQuantity,
+        client_id: impl Into<String>,
+    ) -> Self {
+        Self {
+            side,
+            quantity,
+            kind: FuturesCrossOrderKind::Market,
+            client_id: client_id.into(),
+        }
+    }
+
+    pub fn limit(
+        side: FuturesTradeSide,
+        quantity: FuturesCrossOrderQuantity,
+        price: FuturesCrossLimitPrice,
+        client_id: impl Into<String>,
+    ) -> Self {
+        Self {
+            side,
+            quantity,
+            kind: FuturesCrossOrderKind::Limit { price },
+            client_id: client_id.into(),
+        }
+    }
+
+    fn body(&self) -> Result<Vec<u8>, Error> {
+        #[derive(Serialize)]
+        #[serde(rename_all = "camelCase")]
+        struct Body<'a> {
+            side: FuturesTradeSide,
+            quantity: u64,
+            #[serde(rename = "type")]
+            order_type: &'static str,
+            #[serde(skip_serializing_if = "Option::is_none")]
+            price: Option<&'a DecimalAmount>,
+            client_id: &'a str,
+        }
+
+        let (order_type, price) = match &self.kind {
+            FuturesCrossOrderKind::Market => ("market", None),
+            FuturesCrossOrderKind::Limit { price } => ("limit", Some(price.as_amount())),
+        };
+        serde_json::to_vec(&Body {
+            side: self.side,
+            quantity: self.quantity.get(),
+            order_type,
+            price,
+            client_id: &self.client_id,
+        })
+        .map_err(Error::Serialize)
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct FuturesCrossCancelOrderRequest {
+    pub id: FuturesCrossOrderId,
+}
+
+impl FuturesCrossCancelOrderRequest {
+    pub fn new(id: FuturesCrossOrderId) -> Self {
+        Self { id }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+pub struct FuturesCrossTransferRequest {
+    pub amount: NonZeroU64,
+}
+
+impl FuturesCrossTransferRequest {
+    pub fn new(amount_sats: u64) -> Result<Self, Error> {
+        let amount = NonZeroU64::new(amount_sats)
+            .ok_or_else(|| Error::InvalidAmount("amount must be greater than zero".into()))?;
+        Ok(Self { amount })
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -1278,6 +1425,95 @@ impl LnMarketsClient {
             .await
     }
 
+    pub async fn cross_new_order(
+        &self,
+        network: Network,
+        order: &FuturesCrossNewOrderRequest,
+    ) -> Result<FuturesCrossOrder, Error> {
+        self.require_network(network)?;
+        self.request_json(
+            Method::POST,
+            "/futures/cross/order",
+            "",
+            order.body()?,
+            true,
+        )
+        .await
+    }
+
+    pub async fn cross_cancel_order(
+        &self,
+        network: Network,
+        order: &FuturesCrossCancelOrderRequest,
+    ) -> Result<FuturesCrossOrder, Error> {
+        self.cross_post(network, "/futures/cross/order/cancel", order)
+            .await
+    }
+
+    pub async fn cross_cancel_all_orders(
+        &self,
+        network: Network,
+    ) -> Result<Vec<FuturesCrossOrder>, Error> {
+        self.require_network(network)?;
+        self.request_json(
+            Method::POST,
+            "/futures/cross/orders/cancel-all",
+            "",
+            Vec::new(),
+            true,
+        )
+        .await
+    }
+
+    pub async fn cross_close_position(&self, network: Network) -> Result<FuturesCrossOrder, Error> {
+        self.require_network(network)?;
+        self.request_json(
+            Method::POST,
+            "/futures/cross/position/close",
+            "",
+            Vec::new(),
+            true,
+        )
+        .await
+    }
+
+    pub async fn cross_set_leverage(
+        &self,
+        network: Network,
+        leverage: FuturesLeverage,
+    ) -> Result<FuturesCrossPosition, Error> {
+        #[derive(Serialize)]
+        struct Request {
+            leverage: u8,
+        }
+
+        self.require_network(network)?;
+        let body = serde_json::to_vec(&Request {
+            leverage: leverage.get(),
+        })
+        .map_err(Error::Serialize)?;
+        self.request_json(Method::PUT, "/futures/cross/leverage", "", body, true)
+            .await
+    }
+
+    pub async fn cross_deposit(
+        &self,
+        network: Network,
+        transfer: &FuturesCrossTransferRequest,
+    ) -> Result<FuturesCrossPosition, Error> {
+        self.cross_post(network, "/futures/cross/deposit", transfer)
+            .await
+    }
+
+    pub async fn cross_withdraw(
+        &self,
+        network: Network,
+        transfer: &FuturesCrossTransferRequest,
+    ) -> Result<FuturesCrossPosition, Error> {
+        self.cross_post(network, "/futures/cross/withdraw", transfer)
+            .await
+    }
+
     pub async fn isolated_open_trades(&self) -> Result<Vec<FuturesIsolatedTrade>, Error> {
         self.get_authenticated("/futures/isolated/trades/open", "")
             .await
@@ -1459,6 +1695,17 @@ impl LnMarketsClient {
         path: &str,
         request: &T,
     ) -> Result<FuturesIsolatedTrade, Error> {
+        self.require_network(network)?;
+        let body = serde_json::to_vec(request).map_err(Error::Serialize)?;
+        self.request_json(Method::POST, path, "", body, true).await
+    }
+
+    async fn cross_post<T: Serialize, R: DeserializeOwned>(
+        &self,
+        network: Network,
+        path: &str,
+        request: &T,
+    ) -> Result<R, Error> {
         self.require_network(network)?;
         let body = serde_json::to_vec(request).map_err(Error::Serialize)?;
         self.request_json(Method::POST, path, "", body, true).await
@@ -2190,6 +2437,18 @@ mod tests {
         )
     }
 
+    fn cross_order_body() -> String {
+        format!(
+            r#"{{"canceled":false,"canceledAt":null,"createdAt":"2026-01-01T00:00:00.000Z","filled":true,"filledAt":"2026-01-01T00:00:01.000Z","id":"{TRADE_ID}","open":false,"price":64000.5,"quantity":2,"side":"buy","tradingFee":1,"type":"market","clientId":"client-1"}}"#
+        )
+    }
+
+    fn cross_position_body() -> String {
+        format!(
+            r#"{{"deltaPl":0,"entryPrice":64000.5,"fundingFees":0,"id":"{TRADE_ID}","initialMargin":1000,"leverage":25,"liquidation":60000,"maintenanceMargin":100,"margin":1000,"quantity":2,"runningMargin":1000,"totalPl":0,"tradingFees":1,"updatedAt":"2026-01-01T00:00:01.000Z"}}"#
+        )
+    }
+
     fn authenticated_client(http_transport: Arc<dyn HttpTransport>) -> LnMarketsClient {
         let credentials = Credentials::new("key", "secret", "passphrase").expect("credentials");
         LnMarketsClient::authenticated(http_transport, Network::Signet, credentials)
@@ -2464,6 +2723,182 @@ mod tests {
 
             let unavailable = client
                 .isolated_new_trade(Network::Signet, &order)
+                .await
+                .expect_err("503");
+            assert!(matches!(unavailable, Error::Api { status, .. } if status.as_u16() == 503));
+            assert_eq!(*requests.lock().expect("request count"), 1);
+        });
+    }
+
+    #[test]
+    fn cross_margin_inputs_encode_quantity_and_price_constraints() {
+        assert!(FuturesCrossOrderQuantity::new(0).is_err());
+        assert!(FuturesCrossTransferRequest::new(0).is_err());
+        assert!("0".parse::<DecimalAmount>().is_err());
+        assert!(FuturesCrossLimitPrice::new("64000.25".parse().expect("price")).is_err());
+
+        let quantity = FuturesCrossOrderQuantity::new(2).expect("quantity");
+        let market =
+            FuturesCrossNewOrderRequest::market(FuturesTradeSide::Buy, quantity, "client-1");
+        assert_eq!(
+            std::str::from_utf8(&market.body().expect("body")).expect("UTF-8"),
+            r#"{"side":"buy","quantity":2,"type":"market","clientId":"client-1"}"#
+        );
+
+        let limit = FuturesCrossNewOrderRequest::limit(
+            FuturesTradeSide::Buy,
+            quantity,
+            FuturesCrossLimitPrice::new("64000.5".parse().expect("price")).expect("tick"),
+            "client-1",
+        );
+        assert_eq!(
+            std::str::from_utf8(&limit.body().expect("body")).expect("UTF-8"),
+            r#"{"side":"buy","quantity":2,"type":"limit","price":64000.5,"clientId":"client-1"}"#
+        );
+    }
+
+    #[test]
+    fn cross_margin_signature_vectors_cover_post_and_put_bodies() {
+        assert_eq!(
+            rest_signature(
+                "test-secret",
+                "1700000000000",
+                &Method::POST,
+                "/v3/futures/cross/order",
+                r#"{"side":"buy","quantity":2,"type":"limit","price":64000.5,"clientId":"client-1"}"#,
+            )
+            .expect("POST signature"),
+            "6eoYpyU6hRWJ5mebpuxh4d/Hx9++27toVFQaTHVAmOM="
+        );
+        assert_eq!(
+            rest_signature(
+                "test-secret",
+                "1700000000000",
+                &Method::PUT,
+                "/v3/futures/cross/leverage",
+                r#"{"leverage":25}"#,
+            )
+            .expect("PUT signature"),
+            "wtyVqDOxnBZN/Qhd2OPgs0extyzSzigKxM83LKKMkGQ="
+        );
+    }
+
+    #[test]
+    fn cross_margin_mutations_use_documented_method_shapes() {
+        smol::block_on(async {
+            let requests = Arc::new(StdMutex::new(Vec::new()));
+            let transport = FakeTransport::create({
+                let requests = requests.clone();
+                move |request| {
+                    let requests = requests.clone();
+                    async move {
+                        let path = request.uri().path().to_owned();
+                        requests.lock().expect("requests").push((
+                            request.method().clone(),
+                            path.clone(),
+                            String::from_utf8(request.body().clone()).expect("UTF-8 body"),
+                        ));
+                        if path.ends_with("cancel-all") {
+                            response(200, "[]")
+                        } else if path.ends_with("leverage")
+                            || path.ends_with("deposit")
+                            || path.ends_with("withdraw")
+                        {
+                            response(200, &cross_position_body())
+                        } else {
+                            response(200, &cross_order_body())
+                        }
+                    }
+                }
+            });
+            let client = authenticated_client(transport);
+            let quantity = FuturesCrossOrderQuantity::new(2).expect("quantity");
+            let order =
+                FuturesCrossNewOrderRequest::market(FuturesTradeSide::Buy, quantity, "client-1");
+            client
+                .cross_new_order(Network::Signet, &order)
+                .await
+                .expect("new order");
+            client
+                .cross_cancel_order(
+                    Network::Signet,
+                    &FuturesCrossCancelOrderRequest::new(TRADE_ID.parse().expect("order ID")),
+                )
+                .await
+                .expect("cancel order");
+            client
+                .cross_cancel_all_orders(Network::Signet)
+                .await
+                .expect("cancel all");
+            client
+                .cross_close_position(Network::Signet)
+                .await
+                .expect("close position");
+            client
+                .cross_set_leverage(Network::Signet, FuturesLeverage::new(25).expect("leverage"))
+                .await
+                .expect("set leverage");
+            let transfer = FuturesCrossTransferRequest::new(1_000).expect("transfer");
+            client
+                .cross_deposit(Network::Signet, &transfer)
+                .await
+                .expect("deposit");
+            client
+                .cross_withdraw(Network::Signet, &transfer)
+                .await
+                .expect("withdraw");
+
+            let requests = requests.lock().expect("requests");
+            assert_eq!(
+                requests
+                    .iter()
+                    .map(|(method, path, _)| (method, path.as_str()))
+                    .collect::<Vec<_>>(),
+                vec![
+                    (&Method::POST, "/v3/futures/cross/order"),
+                    (&Method::POST, "/v3/futures/cross/order/cancel"),
+                    (&Method::POST, "/v3/futures/cross/orders/cancel-all"),
+                    (&Method::POST, "/v3/futures/cross/position/close"),
+                    (&Method::PUT, "/v3/futures/cross/leverage"),
+                    (&Method::POST, "/v3/futures/cross/deposit"),
+                    (&Method::POST, "/v3/futures/cross/withdraw"),
+                ]
+            );
+            assert_eq!(requests[1].2, format!(r#"{{"id":"{TRADE_ID}"}}"#));
+            assert_eq!(requests[4].2, r#"{"leverage":25}"#);
+            assert_eq!(requests[5].2, r#"{"amount":1000}"#);
+        });
+    }
+
+    #[test]
+    fn cross_margin_post_is_single_attempt_and_network_mismatch_sends_nothing() {
+        smol::block_on(async {
+            let requests = Arc::new(StdMutex::new(0));
+            let transport = FakeTransport::create({
+                let requests = requests.clone();
+                move |_| {
+                    let requests = requests.clone();
+                    async move {
+                        *requests.lock().expect("request count") += 1;
+                        response(503, r#"{"message":"Service unavailable"}"#)
+                    }
+                }
+            });
+            let client = authenticated_client(transport);
+            let order = FuturesCrossNewOrderRequest::market(
+                FuturesTradeSide::Buy,
+                FuturesCrossOrderQuantity::new(2).expect("quantity"),
+                "client-1",
+            );
+            let mismatch = client
+                .cross_new_order(Network::Mainnet, &order)
+                .await
+                .expect_err("network mismatch");
+            assert!(matches!(mismatch, Error::NetworkMismatch { .. }));
+            assert_eq!(*requests.lock().expect("request count"), 0);
+
+            let unavailable = client
+                .cross_new_order(Network::Signet, &order)
                 .await
                 .expect_err("503");
             assert!(matches!(unavailable, Error::Api { status, .. } if status.as_u16() == 503));
