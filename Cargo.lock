@@ -9337,6 +9337,7 @@ dependencies = [
  "log",
  "parking_lot",
  "paths",
+ "reqwest_client",
  "serde",
  "serde_json",
  "tempfile",

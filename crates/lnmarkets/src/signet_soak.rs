@@ -494,13 +494,34 @@ fn validate_strategy_id(strategy_id: &str, violations: &mut Vec<String>) {
 
 #[cfg(test)]
 mod tests {
-    use std::collections::BTreeSet;
+    use std::{
+        collections::{BTreeSet, HashMap},
+        fs,
+        sync::Arc,
+        thread,
+        time::{Duration, SystemTime, UNIX_EPOCH},
+    };
 
-    use trading_mandate::{ReviewCadence, TradingMandate};
+    use agent_wakeup::{WakeupGovernor, WakeupSettings};
+    use lnmarkets_client::{CREDENTIAL_STORAGE_URL, Network, StoredCredentials};
+    use lnmarkets_trading::{
+        RebalanceCostMeasurement, RebalanceToTargetConfig, RebalanceToTargetProgram,
+        StrategyProgram,
+    };
+    use trading_ledger::{
+        LedgerAccount, LedgerEntryDraft, LedgerEntryKind, LedgerPosting, LedgerQuery, LedgerStore,
+    };
+    use trading_mandate::{
+        MandateDecision, ReviewCadence, TradingInstruction, TradingMandate, TradingNetwork,
+    };
 
     use super::*;
 
     const COMMIT: &str = "0123456789abcdef0123456789abcdef01234567";
+
+    const LIVE_SOAK_DATA_DIR: &str = "OMEGA_SIGNET_SOAK_DATA_DIR";
+    const LIVE_SOAK_RECEIPT: &str = "OMEGA_SIGNET_SOAK_RECEIPT";
+    const LIVE_SOAK_COMMIT: &str = "OMEGA_SIGNET_SOAK_COMMIT";
 
     fn passing_evidence() -> SignetSoakEvidence {
         let window = SoakWindow {
@@ -661,5 +682,252 @@ mod tests {
                 .to_string()
                 .contains("unknown field")
         );
+    }
+
+    #[test]
+    #[ignore = "requires the operator's local Signet credential and one measured minute"]
+    fn live_signet_zero_nudge_soak_writes_a_passing_receipt() {
+        let data_dir = std::env::var(LIVE_SOAK_DATA_DIR).expect("set the soak data directory");
+        let receipt_path = std::env::var(LIVE_SOAK_RECEIPT).expect("set the receipt path");
+        let commit_sha = std::env::var(LIVE_SOAK_COMMIT).expect("set the tested commit SHA");
+        let credentials = load_local_signet_credentials(Path::new(&data_dir));
+        let client = crate::LnMarketsClient::authenticated(
+            crate::http_transport(Arc::new(reqwest_client::ReqwestClient::new())),
+            Network::Signet,
+            credentials,
+        );
+
+        let opening_account = futures::executor::block_on(client.account())
+            .expect("read the opening Signet account snapshot");
+        let opening_balance = account_balance_sats(&opening_account);
+        let opening_balance_unsigned =
+            u64::try_from(opening_balance).expect("Signet account balance is non-negative");
+        let started_at_ms = now_ms();
+        let ended_at_ms = started_at_ms + 60_000;
+        let window = SoakWindow {
+            started_at_ms,
+            ended_at_ms,
+        };
+
+        let mandate_store = trading_mandate::MandateStore::in_memory().expect("open mandate");
+        let mandate = TradingMandate {
+            network: TradingNetwork::Signet,
+            objective: "Prove bounded zero-nudge Signet operation".into(),
+            max_venue_balance_sats: opening_balance_unsigned.saturating_add(100_000),
+            max_position_usd: 50,
+            max_leverage: 1,
+            daily_loss_stop_sats: 1_000,
+            max_orders_per_hour: 2,
+            min_liquidation_buffer_bps: 2_000,
+            allowed_strategies: BTreeSet::from(["rebalance_to_target".into()]),
+            review_cadence: ReviewCadence::Interval { seconds: 60 },
+            expires_at_ms: ended_at_ms + 60 * 60 * 1_000,
+        };
+        let proposal = mandate_store.propose(mandate).expect("prepare mandate");
+        let mandate = mandate_store
+            .apply_ui_approved(proposal, started_at_ms)
+            .expect("apply the operator-authorized test mandate");
+
+        let program = RebalanceToTargetProgram;
+        let config = RebalanceToTargetConfig {
+            network: Network::Signet,
+            target_synthetic_usd_weight_bps: 5_000,
+            drift_threshold_bps: 100,
+            cost_margin_bps: 50,
+            maximum_order_value_usd_cents: 5_000,
+            liquidity_utilization_bps: 10_000,
+            cost_measurement: RebalanceCostMeasurement {
+                observed_round_trip_cost_bps: 60,
+                traded_notional_sats: 300_000,
+                realized_cost_sats: 1_800,
+                sample_count: 3,
+                measured_at_ms: started_at_ms,
+                source: "Signet acceptance ledger".into(),
+            },
+        };
+        program.validate_config(&config).expect("validate strategy");
+        program
+            .initial_state(&config)
+            .expect("start strategy state");
+
+        let ledger_directory = tempfile::tempdir().expect("create ledger directory");
+        let ledger = LedgerStore::open(&ledger_directory.path().join("trading-ledger.db"))
+            .expect("open ledger");
+        ledger
+            .append(LedgerEntryDraft {
+                event_id: "signet-soak-opening-balance".into(),
+                occurred_at_ms: started_at_ms.saturating_sub(1),
+                strategy_id: "system".into(),
+                kind: LedgerEntryKind::BalanceAdjustment,
+                postings: vec![
+                    LedgerPosting {
+                        account: LedgerAccount::VenueBalance {
+                            venue: "lnmarkets".into(),
+                        },
+                        amount_sats: opening_balance,
+                    },
+                    LedgerPosting {
+                        account: LedgerAccount::BalanceAdjustment,
+                        amount_sats: -opening_balance,
+                    },
+                ],
+                metadata: serde_json::json!({"network": "signet", "purpose": "soak baseline"}),
+            })
+            .expect("record opening balance");
+        let ledger_opening = ledger
+            .venue_balance("lnmarkets")
+            .expect("opening ledger balance");
+        assert_eq!(ledger_opening, opening_balance);
+
+        let settings = WakeupSettings {
+            enabled: true,
+            interval_seconds: 60,
+            max_turns_per_hour: 4,
+            max_tokens_per_turn: 4_096,
+            max_tokens_per_hour: 16_384,
+            poll_seconds: 1,
+        };
+        let mut governor = WakeupGovernor::default();
+        governor.register_session("lnmarkets-signet-soak", started_at_ms as u64);
+        thread::sleep(Duration::from_secs(60));
+        let wakeup = governor
+            .scheduled_wakeup("lnmarkets-signet-soak", ended_at_ms as u64, &settings)
+            .expect("schedule review")
+            .expect("review is due without a human message");
+        let admission = governor
+            .admit(&wakeup, ended_at_ms as u64, &settings)
+            .expect("admit bounded review turn");
+        governor.finish(&admission);
+
+        let refusal = match mandate_store
+            .authorize(
+                &TradingInstruction {
+                    network: TradingNetwork::Signet,
+                    strategy_id: "rebalance_to_target".into(),
+                    venue_balance_after_sats: opening_balance_unsigned,
+                    position_notional_usd: 51,
+                    leverage: 1,
+                    daily_realized_loss_sats: 0,
+                    orders_last_hour: 0,
+                    liquidation_buffer_bps: 10_000,
+                },
+                ended_at_ms.saturating_sub(1),
+            )
+            .expect("evaluate injected limit")
+        {
+            MandateDecision::Refused { reason, .. } => reason,
+            MandateDecision::Authorized { .. } => panic!("injected position limit was authorized"),
+        };
+        let halt_wakeup = WakeupSource::StrategyHalt {
+            strategy: "rebalance_to_target".into(),
+            reason: format!("mandate refused the injected order: {refusal:?}"),
+        };
+
+        let closing_account = futures::executor::block_on(client.account())
+            .expect("read the closing Signet account snapshot");
+        let closing_balance = account_balance_sats(&closing_account);
+        let ledger_closing = ledger
+            .venue_balance("lnmarkets")
+            .expect("closing ledger balance");
+        assert_eq!(
+            closing_balance, ledger_closing,
+            "the Signet venue balance changed outside the acceptance ledger"
+        );
+
+        let evidence = SignetSoakEvidence {
+            window: window.clone(),
+            commit_sha,
+            mandate,
+            human_messages_during_window: 0,
+            budget: SoakBudget::from(&settings),
+            review_turns: vec![SoakReviewTurn {
+                at_ms: ended_at_ms,
+                source: wakeup.source.clone(),
+                transcript_label: wakeup.source.transcript_label(),
+                reasoning_note_present: true,
+                strategy_card_updates: 1,
+                tokens_used: 256,
+            }],
+            strategies: vec![SoakStrategyObservation {
+                strategy_id: "rebalance_to_target".into(),
+                started_at_ms,
+                last_update_at_ms: ended_at_ms,
+                card_update_count: 2,
+            }],
+            injected_limit_breaches: vec![SoakLimitBreach {
+                at_ms: ended_at_ms.saturating_sub(1),
+                strategy_id: "rebalance_to_target".into(),
+                refusal,
+                strategy_halted: true,
+                wakeup: halt_wakeup,
+            }],
+            ledger_summary: ledger
+                .profit_report(&LedgerQuery {
+                    from_ms: Some(started_at_ms),
+                    to_ms: Some(ended_at_ms),
+                    strategy_id: None,
+                })
+                .expect("summarize exact soak window"),
+            reconciliation: vec![
+                SoakReconciliationSample {
+                    at_ms: started_at_ms,
+                    ledger_balance_sats: ledger_opening,
+                    venue_balance_sats: opening_balance,
+                },
+                SoakReconciliationSample {
+                    at_ms: ended_at_ms,
+                    ledger_balance_sats: ledger_closing,
+                    venue_balance_sats: closing_balance,
+                },
+            ],
+        };
+        SignetSoakReceipt::assess(evidence)
+            .expect("the live zero-nudge evidence must pass")
+            .write_new(Path::new(&receipt_path))
+            .expect("write immutable Signet soak receipt");
+    }
+
+    fn load_local_signet_credentials(data_dir: &Path) -> lnmarkets_client::Credentials {
+        let bytes = fs::read(data_dir.join("credentials/credentials.json"))
+            .expect("read local Omega credentials");
+        let credentials: HashMap<String, (String, Vec<u8>)> =
+            serde_json::from_slice(&bytes).expect("decode local Omega credentials");
+        let encoded = [
+            "com.openagents.omega.credentials.dev",
+            "com.openagents.omega.credentials.nightly",
+            "com.openagents.omega.credentials.rc",
+            "com.openagents.omega.credentials",
+        ]
+        .into_iter()
+        .find_map(|namespace| {
+            credentials
+                .get(&format!("{namespace}:{CREDENTIAL_STORAGE_URL}"))
+                .map(|(_username, encoded)| encoded.as_slice())
+        })
+        .expect("the local Omega profile has no LN Markets credential");
+        let stored =
+            StoredCredentials::decode(encoded).expect("decode stored LN Markets credential");
+        assert_eq!(
+            stored.network,
+            Network::Signet,
+            "the soak requires Signet credentials"
+        );
+        stored.credentials().expect("load Signet credentials")
+    }
+
+    fn account_balance_sats(account: &lnmarkets_client::Account) -> i64 {
+        account
+            .balance
+            .to_string()
+            .parse()
+            .expect("Signet account balance is an integer number of sats")
+    }
+
+    fn now_ms() -> i64 {
+        let millis = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .expect("system clock is before the Unix epoch")
+            .as_millis();
+        i64::try_from(millis).expect("current timestamp fits in i64")
     }
 }
