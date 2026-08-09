@@ -1,5 +1,12 @@
+mod funding_carry;
 mod rebalance_to_target;
 
+pub use funding_carry::{
+    FUNDING_CARRY_SCHEMA, FundingCarryAction, FundingCarryBacktestModel, FundingCarryConfig,
+    FundingCarryExecutor, FundingCarryFeatures, FundingCarryInstrument, FundingCarryPosition,
+    FundingCarryProgram, FundingCarryState, FundingFeeSyncReport, funding_carry_features,
+    sync_funding_fees,
+};
 pub use rebalance_to_target::{
     REBALANCE_TO_TARGET_SCHEMA, RebalanceAction, RebalanceCostMeasurement, RebalanceToTargetConfig,
     RebalanceToTargetProgram, RebalanceToTargetState, SyntheticUsdExecutor, measure_rebalance_cost,

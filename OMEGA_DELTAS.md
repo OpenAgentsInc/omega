@@ -10086,3 +10086,27 @@ so signet is not a bypass around collected evidence or the active mandate.
 - **Enforced by:** `lnmarkets_trading` and `strategy_engine` unit tests and
   `target_rebalancing_is_measured_ladder_aware_and_signet_only` in
   `omega_deltas`.
+
+### OMEGA-DELTA-0250 — Funding carry is cost-gated, protected, and attributed
+
+The funding-carry strategy opens a delta-neutral short only when positive
+funding over the configured holding horizon exceeds measured round-trip cost
+plus margin. It sizes from funding magnitude within configured notional and
+leverage limits, and uses separate entry and exit thresholds so noise near
+zero does not churn the position. An exact-configuration backtest over
+collected funding history must pass before the strategy can run.
+
+The strategy can hold synthetic USD or an isolated short future. The direct
+future is isolated because the LN Markets v3 cross-future surface does not
+provide venue-side stop, add-margin, or cash-in operations. An isolated short
+opens with its stop in the same single-attempt request. Private position data
+then drives missing-stop repair, margin top-ups as liquidation distance
+shrinks, profit sweeps, and sign-flip exits. Funding settlements are imported
+idempotently into the double-entry ledger with strategy attribution.
+
+The program, executor, and funding synchronizer refuse mainnet. The strategy
+state exposes its funding signal, cost hurdle, instrument, protection, margin,
+settled funding, and most recent action through a versioned projection.
+
+- **Enforced by:** `lnmarkets_trading` and `strategy_engine` unit tests and
+  `funding_carry_is_cost_gated_protected_and_attributed` in `omega_deltas`.

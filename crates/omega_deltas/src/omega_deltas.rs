@@ -220,6 +220,7 @@ pub const ENFORCED_DELTAS: &[&str] = &[
     "OMEGA-DELTA-0247",
     "OMEGA-DELTA-0248",
     "OMEGA-DELTA-0249",
+    "OMEGA-DELTA-0250",
 ];
 
 /// OMEGA-DELTA-0204. Every control the composer's bar offers, written twice:
@@ -29588,6 +29589,53 @@ mod tests {
             assert!(
                 engine.contains(required),
                 "OMEGA-DELTA-0249: streamable strategy state lost `{required}`"
+            );
+        }
+    }
+
+    /// Funding carry enters only from measured positive carry and keeps every
+    /// direct future protected and attributable.
+    #[test]
+    fn funding_carry_is_cost_gated_protected_and_attributed() {
+        let funding_carry = without_comments(&read_repository_file(
+            "crates/lnmarkets_trading/src/funding_carry.rs",
+        ));
+        for required in [
+            "pub const FUNDING_CARRY_SCHEMA",
+            "FundingCarryInstrument::SyntheticUsd",
+            "FundingCarryInstrument::IsolatedFuture",
+            "funding_carry is restricted to signet",
+            "clears_cost_hurdle",
+            "exit_funding_rate_ppm",
+            "isolated_new_trade",
+            "with_stoploss",
+            "isolated_add_margin",
+            "isolated_cash_in",
+            "sync_funding_fees",
+            "LedgerEntryKind::FundingSettlement",
+            "FundingCarryBacktestModel",
+            "positive_funding_opens_protected_short_after_cost_hurdle",
+            "sign_flip_closes_and_hysteresis_holds",
+            "funding_history_backtest_accounts_for_settlements",
+            "executor_opens_short_once_with_stop_and_syncs_funding_idempotently",
+            "mainnet_is_rejected_before_transport",
+        ] {
+            assert!(
+                funding_carry.contains(required),
+                "OMEGA-DELTA-0250: funding carry lost `{required}`"
+            );
+        }
+
+        let engine = without_comments(&read_repository_file(
+            "crates/strategy_engine/src/strategy_engine.rs",
+        ));
+        for required in [
+            "strategy_cannot_start_without_passing_backtest_for_its_config",
+            "StrategyLifecycleEvent::BacktestApproved",
+        ] {
+            assert!(
+                engine.contains(required),
+                "OMEGA-DELTA-0250: funding-carry backtest gate lost `{required}`"
             );
         }
     }
