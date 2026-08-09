@@ -19,6 +19,7 @@ workspace = true
 
 [dependencies]
 acp_thread.workspace = true
+agent_wakeup.workspace = true
 omega_agent_detect.workspace = true
 omega_exo_lane.workspace = true
 omega_front_door.workspace = true

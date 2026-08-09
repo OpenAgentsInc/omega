@@ -222,6 +222,35 @@ pub struct AutoCompactSettingsContent {
 
 #[with_fallible_options]
 #[derive(Clone, PartialEq, Serialize, Deserialize, JsonSchema, MergeFrom, Debug, Default)]
+pub struct AgentWakeupSettingsContent {
+    /// Whether scheduled and event-triggered agent turns are allowed.
+    ///
+    /// Default: false
+    pub enabled: Option<bool>,
+    /// Seconds between scheduled review turns.
+    ///
+    /// Default: 900
+    pub interval_seconds: Option<u64>,
+    /// Maximum wakeup turns admitted for one thread in a rolling hour.
+    ///
+    /// Default: 4
+    pub max_turns_per_hour: Option<u32>,
+    /// Maximum token reservation for one wakeup turn.
+    ///
+    /// Default: 4096
+    pub max_tokens_per_turn: Option<u64>,
+    /// Maximum token reservations admitted for one thread in a rolling hour.
+    ///
+    /// Default: 16384
+    pub max_tokens_per_hour: Option<u64>,
+    /// Seconds between checks for a due scheduled review.
+    ///
+    /// Default: 15
+    pub poll_seconds: Option<u64>,
+}
+
+#[with_fallible_options]
+#[derive(Clone, PartialEq, Serialize, Deserialize, JsonSchema, MergeFrom, Debug, Default)]
 pub struct AgentSettingsContent {
     /// Whether the Agent is enabled.
     ///
@@ -339,6 +368,8 @@ pub struct AgentSettingsContent {
     /// earlier messages to free up room in the model's context window once the
     /// context grows too large.
     pub auto_compact: Option<AutoCompactSettingsContent>,
+    /// Limits for agent turns that start without a new user message.
+    pub wakeups: Option<AgentWakeupSettingsContent>,
     /// Whether to show thumb buttons for feedback in the agent panel.
     ///
     /// Default: true

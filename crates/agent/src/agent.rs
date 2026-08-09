@@ -43,6 +43,8 @@ use agent_skills::{
     SkillSource, SkillSummary, builtin_skills, global_skills_dir, load_skills_from_directory,
     parse_skill_frontmatter, project_skills_relative_path, read_skill_body_from_content,
 };
+use agent_wakeup::WakeupGovernor;
+pub use agent_wakeup::{AgentWakeup, WakeupAdmission, WakeupRefusal, WakeupSettings, WakeupSource};
 use anyhow::{Context as _, Result, anyhow};
 use chrono::{DateTime, Utc};
 use collections::{HashMap, HashSet, IndexMap};
@@ -84,6 +86,13 @@ pub struct ProjectSnapshot {
 
 pub struct RulesLoadingError {
     pub message: SharedString,
+}
+
+fn current_unix_ms() -> Result<u64> {
+    Utc::now()
+        .timestamp_millis()
+        .try_into()
+        .context("system clock is before the Unix epoch")
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
@@ -213,6 +222,7 @@ struct Session {
     acp_thread: Entity<acp_thread::AcpThread>,
     project_id: EntityId,
     pending_save: Task<Result<()>>,
+    _wakeup_scheduler: Task<()>,
     _subscriptions: Vec<Subscription>,
     ref_count: usize,
 }
@@ -430,6 +440,7 @@ pub struct NativeAgent {
     /// three agent-panel interaction points: input box focus, slash
     /// autocomplete, and conversation submit.
     skills_state: SkillsState,
+    wakeup_governor: WakeupGovernor,
 }
 
 #[derive(Default)]
@@ -596,6 +607,7 @@ impl NativeAgent {
                 fs,
                 _subscriptions: subscriptions,
                 skills_state: SkillsState::default(),
+                wakeup_governor: WakeupGovernor::default(),
             }
         })
     }
@@ -831,6 +843,67 @@ impl NativeAgent {
             }),
         ];
 
+        let registered_at_ms = current_unix_ms().unwrap_or_else(|error| {
+            log::error!("failed to read time while registering agent wakeups: {error:#}");
+            0
+        });
+        self.wakeup_governor
+            .register_session(session_id.to_string(), registered_at_ms);
+        let wakeup_scheduler = cx.spawn({
+            let session_id = session_id.clone();
+            async move |this, cx| loop {
+                let poll_seconds = cx.update(|cx| {
+                    agent_settings::AgentSettings::get_global(cx)
+                        .wakeups
+                        .poll_seconds
+                        .max(1)
+                });
+                cx.background_executor()
+                    .timer(std::time::Duration::from_secs(poll_seconds))
+                    .await;
+
+                let Some(agent) = this.upgrade() else {
+                    break;
+                };
+                if !agent.read_with(cx, |agent, _cx| agent.sessions.contains_key(&session_id)) {
+                    break;
+                }
+                let now_ms = match current_unix_ms() {
+                    Ok(now_ms) => now_ms,
+                    Err(error) => {
+                        log::error!("failed to read time for scheduled agent wakeup: {error:#}");
+                        continue;
+                    }
+                };
+                let settings = cx.update(|cx| {
+                    agent_settings::AgentSettings::get_global(cx)
+                        .wakeups
+                        .clone()
+                });
+                let wakeup = match agent.update(cx, |agent, _cx| {
+                    agent.wakeup_governor.scheduled_wakeup(
+                        &session_id.to_string(),
+                        now_ms,
+                        &settings,
+                    )
+                }) {
+                    Ok(wakeup) => wakeup,
+                    Err(error) => {
+                        log::error!("scheduled agent wakeup was rejected: {error}");
+                        continue;
+                    }
+                };
+                let Some(wakeup) = wakeup else {
+                    continue;
+                };
+                let connection = NativeAgentConnection(agent);
+                let turn = cx.update(|cx| connection.publish_wakeup(wakeup, cx));
+                if let Err(error) = turn.await {
+                    log::error!("scheduled agent wakeup turn failed: {error:#}");
+                }
+            }
+        });
+
         self.sessions.insert(
             session_id,
             Session {
@@ -839,6 +912,7 @@ impl NativeAgent {
                 project_id,
                 _subscriptions: subscriptions,
                 pending_save: Task::ready(Ok(())),
+                _wakeup_scheduler: wakeup_scheduler,
                 ref_count,
             },
         );
@@ -1726,6 +1800,7 @@ impl NativeAgent {
             return Task::ready(Ok(()));
         };
         let project_id = session.project_id;
+        self.wakeup_governor.remove_session(&session_id.to_string());
 
         let has_remaining = self.sessions.values().any(|s| s.project_id == project_id);
         if !has_remaining {
@@ -2121,6 +2196,107 @@ impl NativeAgentConnection {
                     .collect()
             })
             .unwrap_or_default()
+    }
+
+    /// Starts an agent turn from a typed schedule or background event without
+    /// requiring a new user message. The labeled wakeup is persisted through
+    /// the same thread path as a user prompt, so desktop and cloud-originated
+    /// turns produce the same audit trail.
+    pub fn publish_wakeup(
+        &self,
+        wakeup: AgentWakeup,
+        cx: &mut App,
+    ) -> Task<Result<acp::PromptResponse>> {
+        let settings = agent_settings::AgentSettings::get_global(cx)
+            .wakeups
+            .clone();
+        let now_ms = match current_unix_ms() {
+            Ok(now_ms) => now_ms,
+            Err(error) => return Task::ready(Err(error)),
+        };
+        let session = self.0.read_with(cx, |agent, _cx| {
+            agent
+                .sessions
+                .iter()
+                .find(|(session_id, _session)| session_id.to_string() == wakeup.session_id)
+                .map(|(session_id, session)| (session_id.clone(), session.acp_thread.clone()))
+        });
+        let Some((session_id, acp_thread)) = session else {
+            return Task::ready(Err(anyhow!(
+                "agent wakeup session was not found: {}",
+                wakeup.session_id
+            )));
+        };
+        let turn_is_complete = self.0.read_with(cx, |agent, cx| {
+            agent
+                .sessions
+                .get(&session_id)
+                .is_some_and(|session| session.thread.read(cx).is_turn_complete())
+        });
+        if !turn_is_complete {
+            return Task::ready(Err(WakeupRefusal::TurnInFlight.into()));
+        }
+
+        let admission = match self.0.update(cx, |agent, _cx| {
+            agent.wakeup_governor.admit(&wakeup, now_ms, &settings)
+        }) {
+            Ok(admission) => admission,
+            Err(error) => return Task::ready(Err(error.into())),
+        };
+        let transcript_text = wakeup.transcript_text();
+        let client_user_message_id = ClientUserMessageId::new();
+        acp_thread.update(cx, |thread, cx| {
+            thread.push_user_content_block(
+                Some(client_user_message_id.clone()),
+                transcript_text.clone().into(),
+                cx,
+            );
+        });
+        let turn = self.run_turn(session_id, cx, move |thread, cx| {
+            thread.update(cx, |thread, cx| {
+                if !thread.is_turn_complete() {
+                    return Err(WakeupRefusal::TurnInFlight.into());
+                }
+                thread.send(client_user_message_id, [transcript_text], cx)
+            })
+        });
+        let connection = self.clone();
+        cx.spawn(async move |cx| {
+            let result = turn.await;
+            connection.0.update(cx, |agent, _cx| {
+                agent.wakeup_governor.finish(&admission);
+            });
+            result
+        })
+    }
+
+    /// Convenience entry point for background services. Callers provide a
+    /// typed source and instruction; the configured per-turn token cap becomes
+    /// the reservation carried by the versioned wakeup envelope.
+    pub fn publish_event_wakeup(
+        &self,
+        session_id: &acp::SessionId,
+        source: WakeupSource,
+        instruction: impl Into<String>,
+        cx: &mut App,
+    ) -> Task<Result<acp::PromptResponse>> {
+        let settings = agent_settings::AgentSettings::get_global(cx)
+            .wakeups
+            .clone();
+        let emitted_at_ms = match current_unix_ms() {
+            Ok(emitted_at_ms) => emitted_at_ms,
+            Err(error) => return Task::ready(Err(error)),
+        };
+        self.publish_wakeup(
+            AgentWakeup::new(
+                session_id.to_string(),
+                emitted_at_ms,
+                settings.max_tokens_per_turn,
+                source,
+                instruction,
+            ),
+            cx,
+        )
     }
 
     pub fn load_thread(

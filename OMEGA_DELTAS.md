@@ -9998,3 +9998,24 @@ and production code has one call site for the widening door: the settings UI.
 
 - **Enforced by:** `trading_mandate` unit tests and
   `trading_mandate_has_one_ui_approved_widening_door` in `omega_deltas`.
+
+### OMEGA-DELTA-0246 — Agent turns can start from bounded wakeups
+
+Omega Agent accepts a versioned, venue-neutral wakeup envelope in addition to
+user prompts. A wakeup names its thread, typed schedule or event source,
+instruction, timestamp, and token reservation. The in-process scheduler and
+future cloud durable-turn lane use the same serializable contract. Every
+wakeup is written into the conversation as a labeled message before the model
+runs, so the transcript records why the turn exists.
+
+Each open native session owns one scheduler task. Settings keep wakeups off by
+default and cap the review interval, polling frequency, turns per rolling hour,
+tokens per turn, and tokens per rolling hour. The governor rejects a wakeup
+while another turn is running and reserves the budget before starting the
+turn, which makes a runaway loop impossible even if an event source repeats.
+Background services publish typed funding, drawdown, liquidation-distance,
+volatility, strategy-halt, deposit, or withdrawal events through the same
+entry point.
+
+- **Enforced by:** `agent_wakeup` unit tests and
+  `native_agent_wakeups_are_labeled_typed_and_bounded` in `omega_deltas`.

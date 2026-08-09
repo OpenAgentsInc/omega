@@ -6,6 +6,7 @@ use std::fmt;
 use std::path::{Component, Path, PathBuf};
 use std::sync::{Arc, LazyLock};
 
+use agent_wakeup::WakeupSettings;
 use anyhow::Context as _;
 use collections::{HashSet, IndexMap};
 use fs::Fs;
@@ -236,6 +237,7 @@ pub struct AgentSettings {
     pub single_file_review: bool,
     pub model_parameters: Vec<LanguageModelParameters>,
     pub auto_compact: AutoCompactSettings,
+    pub wakeups: WakeupSettings,
     pub enable_feedback: bool,
     pub expand_edit_card: bool,
     pub expand_terminal_card: bool,
@@ -802,6 +804,17 @@ impl Settings for AgentSettings {
                 AutoCompactSettings {
                     enabled: auto_compact.enabled.unwrap(),
                     threshold,
+                }
+            },
+            wakeups: {
+                let wakeups = agent.wakeups.unwrap();
+                WakeupSettings {
+                    enabled: wakeups.enabled.unwrap(),
+                    interval_seconds: wakeups.interval_seconds.unwrap(),
+                    max_turns_per_hour: wakeups.max_turns_per_hour.unwrap(),
+                    max_tokens_per_turn: wakeups.max_tokens_per_turn.unwrap(),
+                    max_tokens_per_hour: wakeups.max_tokens_per_hour.unwrap(),
+                    poll_seconds: wakeups.poll_seconds.unwrap(),
                 }
             },
             enable_feedback: agent.enable_feedback.unwrap(),

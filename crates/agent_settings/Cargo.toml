@@ -12,6 +12,7 @@ workspace = true
 path = "src/agent_settings.rs"
 
 [dependencies]
+agent_wakeup.workspace = true
 anyhow.workspace = true
 collections.workspace = true
 convert_case.workspace = true

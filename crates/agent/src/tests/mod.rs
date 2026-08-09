@@ -4579,6 +4579,108 @@ async fn test_agent_connection(cx: &mut TestAppContext) {
 }
 
 #[gpui::test]
+async fn test_event_wakeup_starts_and_labels_native_agent_turn(cx: &mut TestAppContext) {
+    cx.update(settings::init);
+    cx.update(|cx| {
+        gpui_tokio::init(cx);
+        let http_client = FakeHttpClient::with_404_response();
+        let clock = Arc::new(clock::FakeSystemClock::new());
+        let client = Client::new(clock, http_client, cx);
+        let user_store = cx.new(|cx| UserStore::new(client.clone(), cx));
+        language_model::init(cx);
+        RefreshLlmTokenListener::register(client.clone(), user_store.clone(), cx);
+        language_models::init(user_store, client, cx);
+        LanguageModelRegistry::test(cx);
+        SettingsStore::update_global(cx, |store, cx| {
+            store.update_user_settings(cx, |content| {
+                let wakeups = content
+                    .agent
+                    .get_or_insert_default()
+                    .wakeups
+                    .get_or_insert_default();
+                wakeups.enabled = Some(true);
+                wakeups.interval_seconds = Some(3_600);
+                wakeups.max_turns_per_hour = Some(2);
+                wakeups.max_tokens_per_turn = Some(256);
+                wakeups.max_tokens_per_hour = Some(512);
+                wakeups.poll_seconds = Some(3_600);
+            });
+        });
+    });
+
+    let fake_fs = cx.update(|cx| fs::FakeFs::new(cx.background_executor().clone()));
+    fake_fs.insert_tree(path!("/test"), json!({})).await;
+    let project = Project::test(fake_fs.clone(), [Path::new("/test")], cx).await;
+    let thread_store = cx.new(|cx| ThreadStore::new(cx));
+    let agent = cx.update(|cx| NativeAgent::new(thread_store, Templates::new(), fake_fs, cx));
+    let connection = NativeAgentConnection(agent);
+    let acp_thread = cx
+        .update(|cx| {
+            Rc::new(connection.clone()).new_session(
+                project,
+                PathList::new(&[Path::new("/test")]),
+                cx,
+            )
+        })
+        .await
+        .expect("create native session");
+    let session_id = acp_thread.read_with(cx, |thread, _| thread.session_id().clone());
+    let selector = connection
+        .model_selector(&session_id)
+        .expect("native model selector");
+    let selected = cx
+        .update(|cx| selector.selected_model(cx))
+        .await
+        .expect("read selected model");
+    let selected_model = cx
+        .update(|cx| connection.0.read(cx).models().model_from_id(&selected.id))
+        .expect("resolve selected model");
+    let model = selected_model.as_fake();
+
+    let turn = cx.update(|cx| {
+        connection.publish_event_wakeup(
+            &session_id,
+            WakeupSource::StrategyHalt {
+                strategy: "carry".to_string(),
+                reason: "drawdown".to_string(),
+            },
+            "Review the halt and reduce risk.",
+            cx,
+        )
+    });
+    cx.run_until_parked();
+    let request = model
+        .pending_completions()
+        .pop()
+        .expect("wakeup should reach the model");
+    let request_text = request
+        .messages
+        .iter()
+        .flat_map(|message| &message.content)
+        .filter_map(|content| match content {
+            MessageContent::Text(text) => Some(text.as_str()),
+            _ => None,
+        })
+        .collect::<Vec<_>>()
+        .join("\n");
+    assert!(request_text.contains("[Agent wakeup · event: carry strategy halt"));
+    assert!(request_text.contains("Review the halt and reduce risk."));
+
+    model.send_last_completion_stream_text_chunk("Risk reviewed.");
+    model.end_last_completion_stream();
+    turn.await.expect("wakeup turn should complete");
+    acp_thread.read_with(cx, |thread, cx| {
+        let transcript = thread.to_markdown(cx);
+        assert!(transcript.contains("Agent wakeup · event: carry strategy halt"));
+        assert!(transcript.contains("Risk reviewed."));
+    });
+
+    cx.update(|cx| Rc::new(connection).close_session(&session_id, cx))
+        .await
+        .expect("close wakeup test session");
+}
+
+#[gpui::test]
 async fn test_tool_updates_to_completion(cx: &mut TestAppContext) {
     let ThreadTest { thread, model, .. } = setup(cx, TestModel::Fake).await;
     thread.update(cx, |thread, _cx| thread.add_tool(EchoTool));

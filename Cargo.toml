@@ -1,6 +1,7 @@
 [workspace]
 resolver = "2"
 members = [
+    "crates/agent_wakeup",
     "crates/account_ui",
     "crates/acp_thread",
     "crates/acp_tools",
@@ -265,6 +266,7 @@ publish = false
 edition = "2024"
 
 [workspace.dependencies]
+agent_wakeup = { path = "crates/agent_wakeup" }
 
 #
 # Workspace member crates

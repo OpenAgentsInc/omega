@@ -216,6 +216,7 @@ pub const ENFORCED_DELTAS: &[&str] = &[
     "OMEGA-DELTA-0241",
     "OMEGA-DELTA-0244",
     "OMEGA-DELTA-0245",
+    "OMEGA-DELTA-0246",
 ];
 
 /// OMEGA-DELTA-0204. Every control the composer's bar offers, written twice:
@@ -29335,5 +29336,73 @@ mod tests {
             forbidden_callers.is_empty(),
             "OMEGA-DELTA-0245: code outside the explicit settings approval path can widen a mandate: {forbidden_callers:?}"
         );
+    }
+
+    /// Turns started without a user prompt share one typed envelope and one
+    /// governor, are labeled in the transcript, and are bounded by settings.
+    #[test]
+    fn native_agent_wakeups_are_labeled_typed_and_bounded() {
+        let wakeup = without_comments(&read_repository_file(
+            "crates/agent_wakeup/src/agent_wakeup.rs",
+        ));
+        for required in [
+            "pub const WAKEUP_SCHEMA_VERSION: u16 = 1",
+            "pub struct AgentWakeup",
+            "pub enum WakeupSource",
+            "ScheduledReview",
+            "FundingSignFlip",
+            "DrawdownLimitApproach",
+            "LiquidationDistanceBreach",
+            "VolatilityRegimeChange",
+            "StrategyHalt",
+            "DepositSeen",
+            "WithdrawalSeen",
+            "pub struct WakeupGovernor",
+            "WakeupRefusal::TurnInFlight",
+            "WakeupRefusal::FrequencyCap",
+            "WakeupRefusal::PerTurnTokenCap",
+            "WakeupRefusal::HourlyTokenCap",
+            "[Agent wakeup · {} · token budget {}]",
+            "envelope_round_trips_for_desktop_and_cloud",
+            "governor_prevents_concurrent_and_runaway_turns",
+        ] {
+            assert!(
+                wakeup.contains(required),
+                "OMEGA-DELTA-0246: the bounded wakeup contract lost `{required}`"
+            );
+        }
+
+        let agent = without_comments(&read_repository_file("crates/agent/src/agent.rs"));
+        for required in [
+            "pub fn publish_wakeup(",
+            "pub fn publish_event_wakeup(",
+            "thread.is_turn_complete()",
+            "wakeup.transcript_text()",
+            "agent.wakeup_governor.admit(&wakeup, now_ms, &settings)",
+            "agent.wakeup_governor.finish(&admission)",
+            "agent.wakeup_governor.scheduled_wakeup(",
+            "_wakeup_scheduler: Task<()>",
+        ] {
+            assert!(
+                agent.contains(required),
+                "OMEGA-DELTA-0246: Native Agent lost wakeup behavior `{required}`"
+            );
+        }
+
+        let defaults = read_repository_file(DEFAULT_SETTINGS_PATH);
+        for required in [
+            "\"wakeups\": {",
+            "\"enabled\": false",
+            "\"interval_seconds\": 900",
+            "\"max_turns_per_hour\": 4",
+            "\"max_tokens_per_turn\": 4096",
+            "\"max_tokens_per_hour\": 16384",
+            "\"poll_seconds\": 15",
+        ] {
+            assert!(
+                defaults.contains(required),
+                "OMEGA-DELTA-0246: shipped wakeup settings lost `{required}`"
+            );
+        }
     }
 }
