@@ -8,8 +8,9 @@ use parking_lot::Mutex;
 
 pub use lnmarkets_client::*;
 pub use lnmarkets_data::{
-    CANDLE_TOPIC, CollectorHealth, CollectorHistory, CollectorStatus, FUNDING_SETTLEMENT_TOPIC,
-    ORACLE_INDEX_TOPIC, StoredMarketEvent,
+    AccountAllocation, AccountDriftFeatures, CANDLE_TOPIC, CollectorHealth, CollectorHistory,
+    CollectorStatus, FUNDING_SETTLEMENT_TOPIC, FeatureSnapshot, FundingFeatures, FundingSign,
+    LiquidityFeatures, ORACLE_INDEX_TOPIC, StoredMarketEvent, VolatilityFeatures,
 };
 pub use lnmarkets_ui::LnMarketsSettingsPage;
 

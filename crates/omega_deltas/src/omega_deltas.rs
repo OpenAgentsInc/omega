@@ -29123,4 +29123,53 @@ mod tests {
             );
         }
     }
+
+    /// LN Markets features are deterministic materialized views over the
+    /// collector history, so live decisions and replay use the same formulas.
+    #[test]
+    fn ln_markets_features_are_local_deterministic_and_materialized_on_write() {
+        let data = without_comments(&read_repository_file(
+            "crates/lnmarkets_data/src/lnmarkets_data.rs",
+        ));
+        for required in [
+            "pub fn derive_features",
+            "sum_squared_log_returns",
+            "FUNDING_EMA_ALPHA",
+            "sign_flipped_at_ms",
+            "spread_bps",
+            "target_btc_weight",
+            "lnmarkets_feature_snapshots",
+            "fn refresh_features",
+            "pub fn feature_snapshot",
+            "pub fn set_account_allocation",
+            "self.refresh_features(network)",
+            "omega.lnmarkets.features.v1",
+            "realized_volatility_uses_log_returns_inside_each_window",
+            "funding_features_pin_ema_sign_and_latest_flip",
+            "liquidity_features_measure_spread_and_available_depth",
+            "account_drift_compares_current_and_target_btc_weights",
+            "store_materializes_feature_snapshot_on_write",
+        ] {
+            assert!(
+                data.contains(required),
+                "OMEGA-DELTA-0243: the deterministic LN Markets feature plane lost `{required}`"
+            );
+        }
+
+        let umbrella = without_comments(&read_repository_file("crates/lnmarkets/src/lnmarkets.rs"));
+        for required in [
+            "AccountAllocation",
+            "AccountDriftFeatures",
+            "FeatureSnapshot",
+            "FundingFeatures",
+            "FundingSign",
+            "LiquidityFeatures",
+            "VolatilityFeatures",
+        ] {
+            assert!(
+                umbrella.contains(required),
+                "OMEGA-DELTA-0243: the LN Markets feature API lost `{required}`"
+            );
+        }
+    }
 }

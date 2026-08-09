@@ -23,10 +23,18 @@ const MAX_BACKFILL_PAGES: usize = 256;
 const STREAM_BATCH_SIZE: usize = 100;
 const STREAM_BATCH_TIMEOUT: Duration = Duration::from_secs(30);
 const STREAM_RESTART_DELAY: Duration = Duration::from_secs(5);
+const FUNDING_EMA_ALPHA: f64 = 0.2;
+const ONE_HOUR_MS: i64 = 60 * 60 * 1_000;
+const SIX_HOURS_MS: i64 = 6 * ONE_HOUR_MS;
+const ONE_DAY_MS: i64 = 24 * ONE_HOUR_MS;
 
 pub const CANDLE_TOPIC: &str = "rest/futures/candles/1h";
 pub const FUNDING_SETTLEMENT_TOPIC: &str = "rest/futures/funding-settlements";
 pub const ORACLE_INDEX_TOPIC: &str = "rest/oracle/index";
+pub const STREAM_BUCKETS_TOPIC: &str = "futures/inverse/btc_usd/buckets";
+pub const STREAM_FUNDING_TOPIC: &str = "futures/inverse/btc_usd/funding";
+pub const STREAM_LAST_PRICE_TOPIC: &str = "futures/inverse/btc_usd/lastPrice";
+pub const STREAM_OHLC_ONE_MINUTE_TOPIC: &str = "futures/inverse/btc_usd/ohlc/1m";
 
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
 pub struct DataRegistration;
@@ -57,6 +65,275 @@ pub struct StoredMarketEvent {
     pub received_at_ms: i64,
     pub source: EventSource,
     pub payload: Value,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Serialize, Deserialize)]
+pub struct TimedValue {
+    pub time_ms: i64,
+    pub value: f64,
+}
+
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct LiquidityTier {
+    pub min_size: f64,
+    pub max_size: f64,
+    pub bid_price: Option<f64>,
+    pub ask_price: Option<f64>,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Serialize, Deserialize)]
+pub struct AccountAllocation {
+    pub btc_sats: f64,
+    pub synthetic_usd: f64,
+    pub target_btc_weight: f64,
+}
+
+impl AccountAllocation {
+    pub fn validate(self) -> Result<Self> {
+        if !self.btc_sats.is_finite() || self.btc_sats < 0.0 {
+            bail!("account BTC balance must be a non-negative finite number");
+        }
+        if !self.synthetic_usd.is_finite() || self.synthetic_usd < 0.0 {
+            bail!("account synthetic USD balance must be a non-negative finite number");
+        }
+        if !self.target_btc_weight.is_finite() || !(0.0..=1.0).contains(&self.target_btc_weight) {
+            bail!("target BTC weight must be between zero and one");
+        }
+        Ok(self)
+    }
+}
+
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
+pub struct FeatureInput {
+    pub prices: Vec<TimedValue>,
+    pub funding_rates: Vec<TimedValue>,
+    pub liquidity_time_ms: Option<i64>,
+    pub liquidity_tiers: Vec<LiquidityTier>,
+    pub account: Option<AccountAllocation>,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum FundingSign {
+    Negative,
+    Neutral,
+    Positive,
+}
+
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct VolatilityFeatures {
+    pub one_hour: Option<f64>,
+    pub six_hours: Option<f64>,
+    pub one_day: Option<f64>,
+    pub price_points: usize,
+}
+
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct FundingFeatures {
+    pub current_rate: Option<f64>,
+    pub ema: Option<f64>,
+    pub sign: FundingSign,
+    pub sign_flipped_at_ms: Option<i64>,
+    pub samples: usize,
+}
+
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct LiquidityFeatures {
+    pub best_bid: Option<f64>,
+    pub best_ask: Option<f64>,
+    pub spread: Option<f64>,
+    pub spread_bps: Option<f64>,
+    pub bid_depth: Option<f64>,
+    pub ask_depth: Option<f64>,
+    pub tier_count: usize,
+}
+
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct AccountDriftFeatures {
+    pub btc_value_usd: f64,
+    pub synthetic_usd: f64,
+    pub current_btc_weight: f64,
+    pub target_btc_weight: f64,
+    pub drift: f64,
+}
+
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct FeatureSnapshot {
+    pub schema: String,
+    pub as_of_ms: Option<i64>,
+    pub volatility: VolatilityFeatures,
+    pub funding: FundingFeatures,
+    pub liquidity: LiquidityFeatures,
+    pub account_drift: Option<AccountDriftFeatures>,
+}
+
+pub fn derive_features(mut input: FeatureInput) -> Result<FeatureSnapshot> {
+    input.prices.retain(valid_price);
+    input.funding_rates.retain(valid_funding_rate);
+    input.prices.sort_by_key(|point| point.time_ms);
+    input.funding_rates.sort_by_key(|point| point.time_ms);
+    input.prices.dedup_by_key(|point| point.time_ms);
+    input.funding_rates.dedup_by_key(|point| point.time_ms);
+    let account = input.account.map(AccountAllocation::validate).transpose()?;
+    let as_of_ms = input
+        .prices
+        .last()
+        .map(|point| point.time_ms)
+        .into_iter()
+        .chain(input.funding_rates.last().map(|point| point.time_ms))
+        .chain(input.liquidity_time_ms)
+        .max();
+    let volatility = VolatilityFeatures {
+        one_hour: realized_volatility(&input.prices, as_of_ms, ONE_HOUR_MS),
+        six_hours: realized_volatility(&input.prices, as_of_ms, SIX_HOURS_MS),
+        one_day: realized_volatility(&input.prices, as_of_ms, ONE_DAY_MS),
+        price_points: input.prices.len(),
+    };
+    let funding = funding_features(&input.funding_rates);
+    let liquidity = liquidity_features(&input.liquidity_tiers);
+    let last_price = input.prices.last().map(|point| point.value);
+    let account_drift = match (account, last_price) {
+        (Some(account), Some(last_price)) => account_drift(account, last_price),
+        _ => None,
+    };
+    Ok(FeatureSnapshot {
+        schema: "omega.lnmarkets.features.v1".into(),
+        as_of_ms,
+        volatility,
+        funding,
+        liquidity,
+        account_drift,
+    })
+}
+
+fn valid_price(point: &TimedValue) -> bool {
+    point.time_ms >= 0 && point.value.is_finite() && point.value > 0.0
+}
+
+fn valid_funding_rate(point: &TimedValue) -> bool {
+    point.time_ms >= 0 && point.value.is_finite()
+}
+
+fn realized_volatility(
+    prices: &[TimedValue],
+    as_of_ms: Option<i64>,
+    window_ms: i64,
+) -> Option<f64> {
+    let cutoff = as_of_ms?.saturating_sub(window_ms);
+    let prices = prices
+        .iter()
+        .filter(|point| point.time_ms >= cutoff)
+        .map(|point| point.value)
+        .collect::<Vec<_>>();
+    if prices.len() < 2 {
+        return None;
+    }
+    let sum_squared_log_returns = prices
+        .windows(2)
+        .map(|window| (window[1] / window[0]).ln().powi(2))
+        .sum::<f64>();
+    Some(sum_squared_log_returns.sqrt())
+}
+
+fn funding_features(rates: &[TimedValue]) -> FundingFeatures {
+    let mut ema: Option<f64> = None;
+    let mut previous_sign = FundingSign::Neutral;
+    let mut sign_flipped_at_ms = None;
+    for rate in rates {
+        ema = Some(match ema {
+            Some(previous) => FUNDING_EMA_ALPHA * rate.value + (1.0 - FUNDING_EMA_ALPHA) * previous,
+            None => rate.value,
+        });
+        let sign = funding_sign(rate.value);
+        if sign != FundingSign::Neutral
+            && previous_sign != FundingSign::Neutral
+            && sign != previous_sign
+        {
+            sign_flipped_at_ms = Some(rate.time_ms);
+        }
+        if sign != FundingSign::Neutral {
+            previous_sign = sign;
+        }
+    }
+    let current_rate = rates.last().map(|rate| rate.value);
+    FundingFeatures {
+        current_rate,
+        ema,
+        sign: current_rate
+            .map(funding_sign)
+            .unwrap_or(FundingSign::Neutral),
+        sign_flipped_at_ms,
+        samples: rates.len(),
+    }
+}
+
+fn funding_sign(rate: f64) -> FundingSign {
+    if rate > 0.0 {
+        FundingSign::Positive
+    } else if rate < 0.0 {
+        FundingSign::Negative
+    } else {
+        FundingSign::Neutral
+    }
+}
+
+fn liquidity_features(tiers: &[LiquidityTier]) -> LiquidityFeatures {
+    let best_bid = tiers
+        .iter()
+        .filter_map(|tier| tier.bid_price)
+        .filter(|price| price.is_finite() && *price > 0.0)
+        .reduce(f64::max);
+    let best_ask = tiers
+        .iter()
+        .filter_map(|tier| tier.ask_price)
+        .filter(|price| price.is_finite() && *price > 0.0)
+        .reduce(f64::min);
+    let spread = best_bid
+        .zip(best_ask)
+        .and_then(|(bid, ask)| (ask >= bid).then_some(ask - bid));
+    let midpoint = best_bid
+        .zip(best_ask)
+        .map(|(bid, ask)| (bid + ask) / 2.0)
+        .filter(|midpoint| *midpoint > 0.0);
+    let bid_depth = tiers
+        .iter()
+        .filter(|tier| tier.bid_price.is_some())
+        .map(|tier| tier.max_size)
+        .filter(|size| size.is_finite() && *size >= 0.0)
+        .reduce(f64::max);
+    let ask_depth = tiers
+        .iter()
+        .filter(|tier| tier.ask_price.is_some())
+        .map(|tier| tier.max_size)
+        .filter(|size| size.is_finite() && *size >= 0.0)
+        .reduce(f64::max);
+    LiquidityFeatures {
+        best_bid,
+        best_ask,
+        spread,
+        spread_bps: spread
+            .zip(midpoint)
+            .map(|(spread, midpoint)| spread / midpoint * 10_000.0),
+        bid_depth,
+        ask_depth,
+        tier_count: tiers.len(),
+    }
+}
+
+fn account_drift(account: AccountAllocation, last_price: f64) -> Option<AccountDriftFeatures> {
+    let btc_value_usd = account.btc_sats / 100_000_000.0 * last_price;
+    let total_value_usd = btc_value_usd + account.synthetic_usd;
+    if !total_value_usd.is_finite() || total_value_usd <= 0.0 {
+        return None;
+    }
+    let current_btc_weight = btc_value_usd / total_value_usd;
+    Some(AccountDriftFeatures {
+        btc_value_usd,
+        synthetic_usd: account.synthetic_usd,
+        current_btc_weight,
+        target_btc_weight: account.target_btc_weight,
+        drift: current_btc_weight - account.target_btc_weight,
+    })
 }
 
 #[derive(Clone)]
@@ -112,6 +389,11 @@ impl MarketDataStore {
                  state_key TEXT NOT NULL,
                  state_value TEXT NOT NULL,
                  PRIMARY KEY (network, state_key)
+             ) STRICT;
+             CREATE TABLE IF NOT EXISTS lnmarkets_feature_snapshots (
+                 network TEXT PRIMARY KEY,
+                 computed_at_ms INTEGER NOT NULL,
+                 snapshot_json TEXT NOT NULL
              ) STRICT;",
         )?;
         Ok(Self {
@@ -145,7 +427,45 @@ impl MarketDataStore {
                 payload_json,
             ],
         )?;
+        self.refresh_features(network)?;
         Ok(changed > 0)
+    }
+
+    pub fn insert_backfill_batch(
+        &self,
+        network: Network,
+        topic: &str,
+        events: &[(i64, Value)],
+    ) -> Result<usize> {
+        let received_at_ms = Utc::now().timestamp_millis();
+        let mut connection = self.connection.lock();
+        let transaction = connection.transaction()?;
+        let mut inserted = 0;
+        {
+            let mut statement = transaction.prepare(
+                "INSERT OR IGNORE INTO lnmarkets_market_events (
+                     network, topic, event_key, event_time_ms, received_at_ms, source, payload_json
+                 ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
+            )?;
+            for (event_time_ms, payload) in events {
+                let event_key =
+                    event_key(topic, *event_time_ms, EventSource::RestBackfill, payload)?;
+                let payload_json = serde_json::to_string(payload)?;
+                inserted += statement.execute(params![
+                    network_name(network),
+                    topic,
+                    event_key,
+                    event_time_ms,
+                    received_at_ms,
+                    EventSource::RestBackfill.as_str(),
+                    payload_json,
+                ])?;
+            }
+        }
+        transaction.commit()?;
+        drop(connection);
+        self.refresh_features(network)?;
+        Ok(inserted)
     }
 
     pub fn insert_stream_batch(&self, network: Network, events: &[StreamEvent]) -> Result<usize> {
@@ -176,6 +496,8 @@ impl MarketDataStore {
             }
         }
         transaction.commit()?;
+        drop(connection);
+        self.refresh_features(network)?;
         Ok(inserted)
     }
 
@@ -330,6 +652,113 @@ impl MarketDataStore {
             .optional()
             .map_err(Into::into)
     }
+
+    pub fn set_account_allocation(
+        &self,
+        network: Network,
+        allocation: AccountAllocation,
+    ) -> Result<()> {
+        let allocation = allocation.validate()?;
+        self.set_state(
+            network,
+            "account_allocation",
+            &serde_json::to_string(&allocation)?,
+        )?;
+        self.refresh_features(network)
+    }
+
+    pub fn feature_snapshot(&self, network: Network) -> Result<Option<FeatureSnapshot>> {
+        let snapshot_json = self
+            .connection
+            .lock()
+            .query_row(
+                "SELECT snapshot_json FROM lnmarkets_feature_snapshots WHERE network = ?1",
+                params![network_name(network)],
+                |row| row.get::<_, String>(0),
+            )
+            .optional()?;
+        snapshot_json
+            .map(|snapshot| serde_json::from_str(&snapshot).map_err(Into::into))
+            .transpose()
+    }
+
+    fn refresh_features(&self, network: Network) -> Result<()> {
+        let snapshot = derive_features(self.feature_input(network)?)?;
+        let computed_at_ms = Utc::now().timestamp_millis();
+        let snapshot_json = serde_json::to_string(&snapshot)?;
+        self.connection.lock().execute(
+            "INSERT INTO lnmarkets_feature_snapshots(network, computed_at_ms, snapshot_json)
+             VALUES (?1, ?2, ?3)
+             ON CONFLICT(network) DO UPDATE SET
+                 computed_at_ms = excluded.computed_at_ms,
+                 snapshot_json = excluded.snapshot_json",
+            params![network_name(network), computed_at_ms, snapshot_json],
+        )?;
+        Ok(())
+    }
+
+    fn feature_input(&self, network: Network) -> Result<FeatureInput> {
+        let mut prices = self
+            .recent(network, STREAM_OHLC_ONE_MINUTE_TOPIC, 2_000)?
+            .into_iter()
+            .chain(self.recent(network, CANDLE_TOPIC, 1_000)?)
+            .filter_map(|event| {
+                event_numeric_value(&event.payload, &["close", "lastPrice", "index"]).map(|value| {
+                    TimedValue {
+                        time_ms: event.event_time_ms,
+                        value,
+                    }
+                })
+            })
+            .collect::<Vec<_>>();
+        for topic in [
+            STREAM_LAST_PRICE_TOPIC,
+            "futures/inverse/btc_usd/index",
+            "futures/inverse/btc_usd/ticker",
+        ] {
+            prices.extend(
+                self.recent(network, topic, 1)?
+                    .into_iter()
+                    .filter_map(|event| {
+                        event_numeric_value(&event.payload, &["lastPrice", "index", "close"]).map(
+                            |value| TimedValue {
+                                time_ms: event.event_time_ms,
+                                value,
+                            },
+                        )
+                    }),
+            );
+        }
+        let funding_rates = self
+            .recent(network, FUNDING_SETTLEMENT_TOPIC, 1_000)?
+            .into_iter()
+            .chain(self.recent(network, STREAM_FUNDING_TOPIC, 1_000)?)
+            .chain(self.recent(network, "futures/inverse/btc_usd/ticker", 1_000)?)
+            .filter_map(|event| {
+                funding_rate(&event.payload).map(|value| TimedValue {
+                    time_ms: event.event_time_ms,
+                    value,
+                })
+            })
+            .collect();
+        let buckets = self.recent(network, STREAM_BUCKETS_TOPIC, 1)?;
+        let liquidity_time_ms = buckets.first().map(|event| event.event_time_ms);
+        let liquidity_tiers = buckets
+            .first()
+            .map(|event| parse_liquidity_tiers(&event.payload))
+            .unwrap_or_default();
+        let account = self
+            .state(network, "account_allocation")?
+            .map(|allocation| serde_json::from_str(&allocation))
+            .transpose()?;
+        Ok(FeatureInput {
+            prices,
+            funding_rates,
+            liquidity_time_ms,
+            liquidity_tiers,
+            account,
+        })
+    }
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
@@ -415,6 +844,16 @@ impl CollectorHandle {
                 .store
                 .range(network, ORACLE_INDEX_TOPIC, from_ms, to_ms, limit)?,
         })
+    }
+
+    pub fn features(&self) -> Result<Option<FeatureSnapshot>> {
+        let network = self.health.lock().network;
+        self.store.feature_snapshot(network)
+    }
+
+    pub fn set_account_allocation(&self, allocation: AccountAllocation) -> Result<()> {
+        let network = self.health.lock().network;
+        self.store.set_account_allocation(network, allocation)
     }
 }
 
@@ -570,10 +1009,14 @@ impl Collector {
         };
         for page_number in 0..MAX_BACKFILL_PAGES {
             let page = self.client.candles(&query).await?;
-            for candle in &page.data {
-                self.store_backfill(CANDLE_TOPIC, &candle.time, candle)?;
-                report.candles = report.candles.saturating_add(1);
-            }
+            let events = page
+                .data
+                .iter()
+                .map(|candle| backfill_event(&candle.time, candle))
+                .collect::<Result<Vec<_>>>()?;
+            self.store
+                .insert_backfill_batch(self.config.network, CANDLE_TOPIC, &events)?;
+            report.candles = report.candles.saturating_add(events.len());
             match query.next_page(&page) {
                 Some(next) => query = next,
                 None => return Ok(()),
@@ -591,10 +1034,17 @@ impl Collector {
             .with_limit(DEFAULT_BACKFILL_LIMIT)?;
         for page_number in 0..MAX_BACKFILL_PAGES {
             let page = self.client.funding_settlements(&pagination).await?;
-            for settlement in &page.data {
-                self.store_backfill(FUNDING_SETTLEMENT_TOPIC, &settlement.time, settlement)?;
-                report.funding_settlements = report.funding_settlements.saturating_add(1);
-            }
+            let events = page
+                .data
+                .iter()
+                .map(|settlement| backfill_event(&settlement.time, settlement))
+                .collect::<Result<Vec<_>>>()?;
+            self.store.insert_backfill_batch(
+                self.config.network,
+                FUNDING_SETTLEMENT_TOPIC,
+                &events,
+            )?;
+            report.funding_settlements = report.funding_settlements.saturating_add(events.len());
             match page.next_page(&pagination) {
                 Some(next) => pagination = next,
                 None => return Ok(()),
@@ -611,23 +1061,13 @@ impl Collector {
             .with_time_range(from.to_owned(), None)
             .with_limit(DEFAULT_BACKFILL_LIMIT)?;
         let indices = self.client.oracle_index(&pagination).await?;
-        for index in &indices {
-            self.store_backfill(ORACLE_INDEX_TOPIC, &index.time, index)?;
-            report.oracle_indices = report.oracle_indices.saturating_add(1);
-        }
-        Ok(())
-    }
-
-    fn store_backfill<T: Serialize>(&self, topic: &str, time: &str, value: &T) -> Result<()> {
-        let payload = serde_json::to_value(value)?;
-        let event_time_ms = parse_iso_timestamp(time)?;
-        self.store.insert(
-            self.config.network,
-            topic,
-            event_time_ms,
-            EventSource::RestBackfill,
-            &payload,
-        )?;
+        let events = indices
+            .iter()
+            .map(|index| backfill_event(&index.time, index))
+            .collect::<Result<Vec<_>>>()?;
+        self.store
+            .insert_backfill_batch(self.config.network, ORACLE_INDEX_TOPIC, &events)?;
+        report.oracle_indices = report.oracle_indices.saturating_add(events.len());
         Ok(())
     }
 
@@ -738,12 +1178,64 @@ fn network_name(network: Network) -> &'static str {
     }
 }
 
+fn backfill_event<T: Serialize>(time: &str, value: &T) -> Result<(i64, Value)> {
+    Ok((parse_iso_timestamp(time)?, serde_json::to_value(value)?))
+}
+
 fn parse_source(source: &str) -> Result<EventSource> {
     match source {
         "rest_backfill" => Ok(EventSource::RestBackfill),
         "stream" => Ok(EventSource::Stream),
         _ => Err(anyhow!("unknown LN Markets event source {source:?}")),
     }
+}
+
+fn event_numeric_value(payload: &Value, fields: &[&str]) -> Option<f64> {
+    fields
+        .iter()
+        .find_map(|field| payload.get(*field).and_then(json_number))
+}
+
+fn funding_rate(payload: &Value) -> Option<f64> {
+    payload
+        .get("fundingRate")
+        .and_then(json_number)
+        .or_else(|| {
+            payload
+                .get("current")
+                .and_then(|current| current.get("rate"))
+                .and_then(json_number)
+        })
+        .or_else(|| {
+            payload
+                .get("funding")
+                .and_then(|funding| funding.get("rate"))
+                .and_then(json_number)
+        })
+}
+
+fn json_number(value: &Value) -> Option<f64> {
+    value
+        .as_f64()
+        .or_else(|| value.as_str().and_then(|value| value.parse().ok()))
+        .filter(|value| value.is_finite())
+}
+
+fn parse_liquidity_tiers(payload: &Value) -> Vec<LiquidityTier> {
+    payload
+        .get("buckets")
+        .and_then(Value::as_array)
+        .into_iter()
+        .flatten()
+        .filter_map(|tier| {
+            Some(LiquidityTier {
+                min_size: tier.get("minSize").and_then(json_number)?,
+                max_size: tier.get("maxSize").and_then(json_number)?,
+                bid_price: tier.get("bidPrice").and_then(json_number),
+                ask_price: tier.get("askPrice").and_then(json_number),
+            })
+        })
+        .collect()
 }
 
 fn event_key(
@@ -899,6 +1391,189 @@ mod tests {
             }
             .boxed()
         }
+    }
+
+    fn assert_close(actual: f64, expected: f64) {
+        assert!(
+            (actual - expected).abs() < 1e-10,
+            "expected {expected}, got {actual}"
+        );
+    }
+
+    #[test]
+    fn realized_volatility_uses_log_returns_inside_each_window() {
+        let snapshot = derive_features(FeatureInput {
+            prices: vec![
+                TimedValue {
+                    time_ms: 0,
+                    value: 100.0,
+                },
+                TimedValue {
+                    time_ms: ONE_HOUR_MS / 2,
+                    value: 110.0,
+                },
+                TimedValue {
+                    time_ms: 2 * ONE_HOUR_MS,
+                    value: 121.0,
+                },
+            ],
+            ..FeatureInput::default()
+        })
+        .expect("features");
+
+        assert_eq!(snapshot.volatility.one_hour, None);
+        let expected = (2.0_f64 * (1.1_f64.ln()).powi(2)).sqrt();
+        assert_close(
+            snapshot.volatility.six_hours.expect("six-hour volatility"),
+            expected,
+        );
+        assert_close(
+            snapshot.volatility.one_day.expect("one-day volatility"),
+            expected,
+        );
+    }
+
+    #[test]
+    fn funding_features_pin_ema_sign_and_latest_flip() {
+        let snapshot = derive_features(FeatureInput {
+            funding_rates: vec![
+                TimedValue {
+                    time_ms: 1,
+                    value: 0.01,
+                },
+                TimedValue {
+                    time_ms: 2,
+                    value: 0.02,
+                },
+                TimedValue {
+                    time_ms: 3,
+                    value: -0.01,
+                },
+            ],
+            ..FeatureInput::default()
+        })
+        .expect("features");
+
+        assert_close(snapshot.funding.ema.expect("funding EMA"), 0.0076);
+        assert_eq!(snapshot.funding.current_rate, Some(-0.01));
+        assert_eq!(snapshot.funding.sign, FundingSign::Negative);
+        assert_eq!(snapshot.funding.sign_flipped_at_ms, Some(3));
+    }
+
+    #[test]
+    fn liquidity_features_measure_spread_and_available_depth() {
+        let snapshot = derive_features(FeatureInput {
+            liquidity_tiers: vec![
+                LiquidityTier {
+                    min_size: 0.0,
+                    max_size: 1_000.0,
+                    bid_price: Some(99.0),
+                    ask_price: Some(101.0),
+                },
+                LiquidityTier {
+                    min_size: 1_000.0,
+                    max_size: 10_000.0,
+                    bid_price: Some(98.0),
+                    ask_price: Some(102.0),
+                },
+            ],
+            ..FeatureInput::default()
+        })
+        .expect("features");
+
+        assert_eq!(snapshot.liquidity.best_bid, Some(99.0));
+        assert_eq!(snapshot.liquidity.best_ask, Some(101.0));
+        assert_eq!(snapshot.liquidity.spread, Some(2.0));
+        assert_eq!(snapshot.liquidity.spread_bps, Some(200.0));
+        assert_eq!(snapshot.liquidity.bid_depth, Some(10_000.0));
+        assert_eq!(snapshot.liquidity.ask_depth, Some(10_000.0));
+        assert_eq!(snapshot.liquidity.tier_count, 2);
+    }
+
+    #[test]
+    fn account_drift_compares_current_and_target_btc_weights() {
+        let snapshot = derive_features(FeatureInput {
+            prices: vec![TimedValue {
+                time_ms: 1,
+                value: 50_000.0,
+            }],
+            account: Some(AccountAllocation {
+                btc_sats: 100_000_000.0,
+                synthetic_usd: 50_000.0,
+                target_btc_weight: 0.6,
+            }),
+            ..FeatureInput::default()
+        })
+        .expect("features");
+        let drift = snapshot.account_drift.expect("account drift");
+
+        assert_eq!(drift.btc_value_usd, 50_000.0);
+        assert_eq!(drift.synthetic_usd, 50_000.0);
+        assert_eq!(drift.current_btc_weight, 0.5);
+        assert_eq!(drift.target_btc_weight, 0.6);
+        assert_close(drift.drift, -0.1);
+    }
+
+    #[test]
+    fn store_materializes_feature_snapshot_on_write() {
+        let store = MarketDataStore::in_memory(Duration::from_secs(60)).expect("store");
+        store
+            .insert_stream_batch(
+                Network::Signet,
+                &[
+                    StreamEvent {
+                        topic: StreamTopic::new(STREAM_OHLC_ONE_MINUTE_TOPIC).expect("topic"),
+                        data: json!({"time": 1_000, "close": 100.0}),
+                    },
+                    StreamEvent {
+                        topic: StreamTopic::new(STREAM_OHLC_ONE_MINUTE_TOPIC).expect("topic"),
+                        data: json!({"time": 2_000, "close": 110.0}),
+                    },
+                    StreamEvent {
+                        topic: StreamTopic::new(STREAM_FUNDING_TOPIC).expect("topic"),
+                        data: json!({"time": 2_000, "current": {"rate": 0.001}}),
+                    },
+                    StreamEvent {
+                        topic: StreamTopic::new(STREAM_BUCKETS_TOPIC).expect("topic"),
+                        data: json!({
+                            "time": 2_000,
+                            "buckets": [{
+                                "minSize": 0,
+                                "maxSize": 10_000,
+                                "bidPrice": 109,
+                                "askPrice": 111
+                            }]
+                        }),
+                    },
+                ],
+            )
+            .expect("stream batch");
+        store
+            .set_account_allocation(
+                Network::Signet,
+                AccountAllocation {
+                    btc_sats: 100_000_000.0,
+                    synthetic_usd: 110.0,
+                    target_btc_weight: 0.6,
+                },
+            )
+            .expect("account allocation");
+
+        let snapshot = store
+            .feature_snapshot(Network::Signet)
+            .expect("snapshot read")
+            .expect("snapshot");
+        assert_eq!(snapshot.schema, "omega.lnmarkets.features.v1");
+        assert_eq!(snapshot.volatility.price_points, 2);
+        assert_eq!(snapshot.funding.sign, FundingSign::Positive);
+        assert_eq!(snapshot.liquidity.spread, Some(2.0));
+        assert_close(
+            snapshot
+                .account_drift
+                .expect("account drift")
+                .current_btc_weight,
+            0.5,
+        );
     }
 
     #[test]
