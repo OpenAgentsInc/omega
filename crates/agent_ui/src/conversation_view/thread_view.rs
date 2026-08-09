@@ -8173,30 +8173,33 @@ impl ThreadView {
             .w_full()
             .py_1p5()
             .px_4()
-            .justify_end()
+            .justify_between()
             .opacity(0.4)
             .hover(|s| s.opacity(1.))
-            .when(
-                last_turn_tokens_label.is_some() || last_turn_clock.is_some(),
-                |this| {
-                    this.child(
-                        h_flex()
-                            .px_1()
-                            .gap_1()
-                            .when_some(last_turn_tokens_label, |this, label| {
-                                this.child(label).child(separator_dots())
-                            })
-                            .when_some(last_turn_clock, |this, label| {
-                                this.child(label).child(separator_dots())
-                            }),
+            .child(h_flex().when_some(copy_response_button, |this, button| this.child(button)))
+            .child(
+                h_flex()
+                    .when(
+                        last_turn_tokens_label.is_some() || last_turn_clock.is_some(),
+                        |this| {
+                            this.child(
+                                h_flex()
+                                    .px_1()
+                                    .gap_1()
+                                    .when_some(last_turn_tokens_label, |this, label| {
+                                        this.child(label).child(separator_dots())
+                                    })
+                                    .when_some(last_turn_clock, |this, label| {
+                                        this.child(label).child(separator_dots())
+                                    }),
+                            )
+                        },
                     )
-                },
+                    .when_some(feedback_buttons, |this, buttons| this.child(buttons))
+                    .when_some(message_info_button, |this, button| this.child(button))
+                    .child(scroll_to_recent_user_prompt)
+                    .when_some(scroll_to_top, |this, button| this.child(button)),
             )
-            .when_some(feedback_buttons, |this, buttons| this.child(buttons))
-            .when_some(message_info_button, |this, button| this.child(button))
-            .when_some(copy_response_button, |this, button| this.child(button))
-            .child(scroll_to_recent_user_prompt)
-            .when_some(scroll_to_top, |this, button| this.child(button))
             .into_any_element()
     }
 
