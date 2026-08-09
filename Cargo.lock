@@ -9306,6 +9306,7 @@ dependencies = [
  "lnmarkets_data",
  "lnmarkets_trading",
  "lnmarkets_ui",
+ "zed-reqwest",
 ]
 
 [[package]]
@@ -9314,6 +9315,7 @@ version = "0.1.0"
 dependencies = [
  "anyhow",
  "async-io",
+ "async-std",
  "async-tungstenite",
  "base64 0.22.1",
  "cargo_metadata 0.19.2",

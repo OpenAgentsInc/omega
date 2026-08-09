@@ -1,8 +1,9 @@
 use std::{
+    collections::{BTreeSet, HashMap},
     fmt, io,
     num::NonZeroU64,
     str::FromStr,
-    sync::Arc,
+    sync::{Arc, LazyLock, Mutex as StdMutex},
     time::{Duration, Instant, SystemTime, UNIX_EPOCH},
 };
 
@@ -17,7 +18,7 @@ use hmac::{Hmac, Mac as _};
 use http::{HeaderMap, Method, Request, Response, StatusCode};
 use serde::{Deserialize, Serialize, de::DeserializeOwned};
 use serde_json::Number;
-use sha2::Sha256;
+use sha2::{Digest as _, Sha256};
 use thiserror::Error;
 use uuid::Uuid;
 use zeroize::Zeroize as _;
@@ -26,19 +27,65 @@ pub const CREDENTIAL_STORAGE_URL: &str = "https://lnmarkets.com/api/v3";
 
 const MAX_RESPONSE_BYTES: u64 = 1_048_576;
 const MAX_ATTEMPTS: usize = 4;
-const AUTHENTICATED_REQUEST_INTERVAL: Duration = Duration::from_millis(50);
-const PUBLIC_REQUEST_INTERVAL: Duration = Duration::from_millis(250);
+const AUTHENTICATED_REQUEST_INTERVAL: Duration = Duration::from_millis(200);
+const PUBLIC_REQUEST_INTERVAL: Duration = Duration::from_secs(1);
 
 type HmacSha256 = Hmac<Sha256>;
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TransportFailureKind {
+    Connect,
+    ConnectTimeout,
+    PoolTimeout,
+    ReadTimeout,
+    WriteTimeout,
+    Other,
+}
+
+impl TransportFailureKind {
+    fn is_connect_phase(self) -> bool {
+        matches!(
+            self,
+            Self::Connect | Self::ConnectTimeout | Self::PoolTimeout
+        )
+    }
+}
+
+#[derive(Debug, Error)]
+#[error("LN Markets transport failed during {kind:?}: {source}")]
+pub struct TransportFailure {
+    kind: TransportFailureKind,
+    #[source]
+    source: anyhow::Error,
+}
+
+impl TransportFailure {
+    pub fn new(kind: TransportFailureKind, source: impl Into<anyhow::Error>) -> Self {
+        Self {
+            kind,
+            source: source.into(),
+        }
+    }
+
+    pub fn kind(&self) -> TransportFailureKind {
+        self.kind
+    }
+}
+
+impl From<http::Error> for TransportFailure {
+    fn from(source: http::Error) -> Self {
+        Self::new(TransportFailureKind::Other, source)
+    }
+}
 
 pub trait HttpTransport: Send + Sync {
     fn send(
         &self,
         request: Request<Vec<u8>>,
-    ) -> BoxFuture<'static, anyhow::Result<Response<Vec<u8>>>>;
+    ) -> BoxFuture<'static, Result<Response<Vec<u8>>, TransportFailure>>;
 }
 
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum Network {
     #[default]
@@ -246,11 +293,16 @@ pub enum Error {
     #[error("failed to build LN Markets request: {0}")]
     BuildRequest(#[source] http::Error),
     #[error("failed to send LN Markets request: {0}")]
-    Send(#[source] anyhow::Error),
+    Send(#[source] TransportFailure),
     #[error("failed to read LN Markets response: {0}")]
     ReadResponse(#[source] io::Error),
     #[error("LN Markets returned HTTP {status}: {message}")]
-    Api { status: StatusCode, message: String },
+    Api {
+        status: StatusCode,
+        code: Option<String>,
+        message: String,
+        details: Option<serde_json::Value>,
+    },
     #[error("failed to serialize LN Markets data: {0}")]
     Serialize(#[source] serde_json::Error),
     #[error("failed to encode LN Markets query: {0}")]
@@ -274,7 +326,11 @@ pub enum Error {
     #[error("LN Markets Stream connection closed: {0}")]
     StreamClosed(String),
     #[error("LN Markets Stream returned JSON-RPC error {code}: {message}")]
-    StreamRpc { code: i64, message: String },
+    StreamRpc {
+        code: i64,
+        message: String,
+        data: Option<serde_json::Value>,
+    },
     #[error("invalid LN Markets Stream frame: {0}")]
     InvalidStreamFrame(#[source] serde_json::Error),
     #[error("unsupported LN Markets Stream topic `{0}`")]
@@ -716,6 +772,19 @@ pub struct Candle {
     pub volume: DecimalAmount,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct OracleIndex {
+    pub index: DecimalAmount,
+    pub time: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct OracleLastPrice {
+    pub last_price: DecimalAmount,
+    pub time: String,
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum CandleResolution {
     #[serde(rename = "1m")]
@@ -775,7 +844,8 @@ impl fmt::Display for CandleResolution {
 
 #[derive(Debug, Clone, Serialize)]
 pub struct CandlesQuery {
-    pub from: String,
+    #[serde(rename = "from")]
+    pub from_: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub to: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -784,6 +854,22 @@ pub struct CandlesQuery {
     pub cursor: Option<String>,
     #[serde(rename = "range")]
     pub resolution: CandleResolution,
+}
+
+impl CandlesQuery {
+    pub fn next_page(&self, page: &Paginated<Candle>) -> Option<Self> {
+        page.next_cursor.as_ref().map(|cursor| Self {
+            from_: self.from_.clone(),
+            to: self.to.clone(),
+            limit: self.limit,
+            cursor: Some(cursor.clone()),
+            resolution: self.resolution,
+        })
+    }
+
+    fn validate(&self) -> Result<(), Error> {
+        validate_limit(self.limit)
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -1413,16 +1499,56 @@ pub struct Paginated<T> {
     pub next_cursor: Option<String>,
 }
 
+impl<T> Paginated<T> {
+    pub fn next_page(&self, pagination: &Pagination) -> Option<Pagination> {
+        self.next_cursor
+            .as_ref()
+            .map(|cursor| pagination.clone().with_cursor(cursor.clone()))
+    }
+}
+
 #[derive(Debug, Clone, Default, Serialize)]
 pub struct Pagination {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub cursor: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub from: Option<String>,
+    #[serde(rename = "from", skip_serializing_if = "Option::is_none")]
+    pub from_: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub limit: Option<u16>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub to: Option<String>,
+}
+
+impl Pagination {
+    pub fn with_cursor(mut self, cursor: impl Into<String>) -> Self {
+        self.cursor = Some(cursor.into());
+        self
+    }
+
+    pub fn with_time_range(mut self, from: impl Into<String>, to: Option<String>) -> Self {
+        self.from_ = Some(from.into());
+        self.to = to;
+        self
+    }
+
+    pub fn with_limit(mut self, limit: u16) -> Result<Self, Error> {
+        validate_limit(Some(limit))?;
+        self.limit = Some(limit);
+        Ok(self)
+    }
+
+    fn validate(&self) -> Result<(), Error> {
+        validate_limit(self.limit)
+    }
+}
+
+fn validate_limit(limit: Option<u16>) -> Result<(), Error> {
+    if limit.is_some_and(|limit| !(1..=1_000).contains(&limit)) {
+        return Err(Error::InvalidAmount(
+            "pagination limit must be between 1 and 1000".into(),
+        ));
+    }
+    Ok(())
 }
 
 #[derive(Debug, Clone, Default, Serialize)]
@@ -1503,8 +1629,9 @@ impl NewSwapRequest {
                 "Synthetic USD swap input must be at least 1 cent".into(),
             ));
         }
+        let amount_dollars = format!("{}.{:02}", amount_cents / 100, amount_cents % 100);
         Ok(Self {
-            in_amount: amount_cents.to_string().parse()?,
+            in_amount: amount_dollars.parse()?,
             in_asset: Asset::USD,
             out_asset: Asset::BTC,
         })
@@ -1909,15 +2036,47 @@ pub struct LnMarketsClient {
     next_public_request: Arc<Mutex<Instant>>,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+enum RestRateLimitKey {
+    Public(Network),
+    Authenticated(Network, [u8; 32]),
+}
+
+static REST_RATE_LIMIT_SLOTS: LazyLock<StdMutex<HashMap<RestRateLimitKey, Arc<Mutex<Instant>>>>> =
+    LazyLock::new(|| StdMutex::new(HashMap::new()));
+
+fn shared_rest_rate_limit_slot(key: RestRateLimitKey) -> Arc<Mutex<Instant>> {
+    let mut slots = REST_RATE_LIMIT_SLOTS
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    slots
+        .entry(key)
+        .or_insert_with(|| Arc::new(Mutex::new(Instant::now())))
+        .clone()
+}
+
+#[cfg(not(test))]
+fn rest_rate_limit_slot(key: RestRateLimitKey) -> Arc<Mutex<Instant>> {
+    shared_rest_rate_limit_slot(key)
+}
+
+#[cfg(test)]
+fn rest_rate_limit_slot(_key: RestRateLimitKey) -> Arc<Mutex<Instant>> {
+    Arc::new(Mutex::new(Instant::now()))
+}
+
+fn authenticated_rate_limit_key(network: Network, access_key: &str) -> RestRateLimitKey {
+    RestRateLimitKey::Authenticated(network, Sha256::digest(access_key.as_bytes()).into())
+}
+
 impl LnMarketsClient {
     pub fn public(http_transport: Arc<dyn HttpTransport>, network: Network) -> Self {
-        let now = Instant::now();
         Self {
             http_transport,
             network,
             credentials: None,
-            next_authenticated_request: Arc::new(Mutex::new(now)),
-            next_public_request: Arc::new(Mutex::new(now)),
+            next_authenticated_request: Arc::new(Mutex::new(Instant::now())),
+            next_public_request: rest_rate_limit_slot(RestRateLimitKey::Public(network)),
         }
     }
 
@@ -1926,9 +2085,17 @@ impl LnMarketsClient {
         network: Network,
         credentials: Credentials,
     ) -> Self {
-        let mut client = Self::public(http_transport, network);
-        client.credentials = Some(credentials);
-        client
+        let next_authenticated_request = rest_rate_limit_slot(authenticated_rate_limit_key(
+            network,
+            credentials.access_key(),
+        ));
+        Self {
+            http_transport,
+            network,
+            credentials: Some(credentials),
+            next_authenticated_request,
+            next_public_request: rest_rate_limit_slot(RestRateLimitKey::Public(network)),
+        }
     }
 
     pub fn network(&self) -> Network {
@@ -1997,6 +2164,7 @@ impl LnMarketsClient {
         &self,
         query: &LightningDepositsQuery,
     ) -> Result<Paginated<LightningDeposit>, Error> {
+        query.pagination.validate()?;
         let query = encoded_query(query)?;
         self.get_authenticated("/account/deposits/lightning", &query)
             .await
@@ -2006,6 +2174,7 @@ impl LnMarketsClient {
         &self,
         query: &AccountHistoryQuery,
     ) -> Result<Paginated<LightningWithdrawal>, Error> {
+        query.pagination.validate()?;
         let query = encoded_query(query)?;
         self.get_authenticated("/account/withdrawals/lightning", &query)
             .await
@@ -2015,6 +2184,7 @@ impl LnMarketsClient {
         &self,
         query: &AccountHistoryQuery,
     ) -> Result<Paginated<OnChainDeposit>, Error> {
+        query.pagination.validate()?;
         let query = encoded_query(query)?;
         self.get_authenticated("/account/deposits/on-chain", &query)
             .await
@@ -2024,6 +2194,7 @@ impl LnMarketsClient {
         &self,
         query: &AccountHistoryQuery,
     ) -> Result<Paginated<OnChainWithdrawal>, Error> {
+        query.pagination.validate()?;
         let query = encoded_query(query)?;
         self.get_authenticated("/account/withdrawals/on-chain", &query)
             .await
@@ -2033,6 +2204,7 @@ impl LnMarketsClient {
         &self,
         query: &NotificationsQuery,
     ) -> Result<Paginated<AccountNotification>, Error> {
+        query.pagination.validate()?;
         let query = encoded_query(query)?;
         self.get_authenticated("/account/notifications", &query)
             .await
@@ -2050,14 +2222,28 @@ impl LnMarketsClient {
         &self,
         pagination: &Pagination,
     ) -> Result<Paginated<FundingSettlement>, Error> {
-        let query = encoded_query(pagination)?;
+        let query = encoded_pagination(pagination)?;
         self.get_public("/futures/funding-settlements", &query)
             .await
     }
 
     pub async fn candles(&self, query: &CandlesQuery) -> Result<Paginated<Candle>, Error> {
+        query.validate()?;
         let query = encoded_query(query)?;
         self.get_public("/futures/candles", &query).await
+    }
+
+    pub async fn oracle_index(&self, pagination: &Pagination) -> Result<Vec<OracleIndex>, Error> {
+        let query = encoded_pagination(pagination)?;
+        self.get_public("/oracle/index", &query).await
+    }
+
+    pub async fn oracle_last_price(
+        &self,
+        pagination: &Pagination,
+    ) -> Result<Vec<OracleLastPrice>, Error> {
+        let query = encoded_pagination(pagination)?;
+        self.get_public("/oracle/last-price", &query).await
     }
 
     pub async fn best_price(&self) -> Result<BestPrice, Error> {
@@ -2065,7 +2251,7 @@ impl LnMarketsClient {
     }
 
     pub async fn swaps(&self, pagination: &Pagination) -> Result<Paginated<Swap>, Error> {
-        let query = encoded_query(pagination)?;
+        let query = encoded_pagination(pagination)?;
         self.get_authenticated("/synthetic-usd/swaps", &query).await
     }
 
@@ -2082,7 +2268,7 @@ impl LnMarketsClient {
         &self,
         pagination: &Pagination,
     ) -> Result<Paginated<FuturesCrossOrder>, Error> {
-        let query = encoded_query(pagination)?;
+        let query = encoded_pagination(pagination)?;
         self.get_authenticated("/futures/cross/orders/filled", &query)
             .await
     }
@@ -2091,7 +2277,7 @@ impl LnMarketsClient {
         &self,
         pagination: &Pagination,
     ) -> Result<Paginated<FuturesFundingFee>, Error> {
-        let query = encoded_query(pagination)?;
+        let query = encoded_pagination(pagination)?;
         self.get_authenticated("/futures/cross/funding-fees", &query)
             .await
     }
@@ -2100,7 +2286,7 @@ impl LnMarketsClient {
         &self,
         pagination: &Pagination,
     ) -> Result<Paginated<FuturesCrossTransfer>, Error> {
-        let query = encoded_query(pagination)?;
+        let query = encoded_pagination(pagination)?;
         self.get_authenticated("/futures/cross/transfers", &query)
             .await
     }
@@ -2208,7 +2394,7 @@ impl LnMarketsClient {
         &self,
         pagination: &Pagination,
     ) -> Result<Paginated<FuturesIsolatedTrade>, Error> {
-        let query = encoded_query(pagination)?;
+        let query = encoded_pagination(pagination)?;
         self.get_authenticated("/futures/isolated/trades/closed", &query)
             .await
     }
@@ -2217,7 +2403,7 @@ impl LnMarketsClient {
         &self,
         pagination: &Pagination,
     ) -> Result<Paginated<FuturesIsolatedTrade>, Error> {
-        let query = encoded_query(pagination)?;
+        let query = encoded_pagination(pagination)?;
         self.get_authenticated("/futures/isolated/trades/canceled", &query)
             .await
     }
@@ -2236,6 +2422,7 @@ impl LnMarketsClient {
             trade_id: Option<&'a str>,
         }
 
+        pagination.validate()?;
         let query = encoded_query(&Query {
             pagination,
             trade_id,
@@ -2650,7 +2837,7 @@ impl LnMarketsClient {
         body: Vec<u8>,
         authenticated: bool,
     ) -> Result<Response<Vec<u8>>, Error> {
-        let may_retry = method == Method::GET;
+        let may_retry = method != Method::POST;
         let credentials = if authenticated {
             Some(
                 self.credentials
@@ -2681,7 +2868,7 @@ impl LnMarketsClient {
                         && is_retryable_status(response.status())
                         && attempt + 1 < MAX_ATTEMPTS
                     {
-                        let delay = retry_delay(attempt, response.headers());
+                        let delay = retry_delay(attempt, response.status(), response.headers());
                         drain_response(response).await?;
                         async_io::Timer::at(Instant::now() + delay).await;
                         continue;
@@ -2689,10 +2876,19 @@ impl LnMarketsClient {
                     return Err(parse_error_response(response).await?);
                 }
                 Err(error)
-                    if may_retry && is_connection_error(&error) && attempt + 1 < MAX_ATTEMPTS =>
+                    if may_retry
+                        && error.kind().is_connect_phase()
+                        && attempt + 1 < MAX_ATTEMPTS =>
                 {
-                    async_io::Timer::at(Instant::now() + retry_delay(attempt, &Default::default()))
-                        .await;
+                    async_io::Timer::at(
+                        Instant::now()
+                            + retry_delay(
+                                attempt,
+                                StatusCode::SERVICE_UNAVAILABLE,
+                                &Default::default(),
+                            ),
+                    )
+                    .await;
                 }
                 Err(error) => return Err(Error::Send(error)),
             }
@@ -2720,8 +2916,11 @@ impl LnMarketsClient {
 
 const STREAM_REQUEST_TIMEOUT: Duration = Duration::from_secs(10);
 const MAX_STREAM_FRAME_BYTES: usize = 65_536;
+const STREAM_MESSAGE_INTERVAL: Duration = Duration::from_millis(100);
+const STREAM_RECONNECT_INTERVAL: Duration = Duration::from_secs(5);
+const MAX_STREAM_RECONNECT_ATTEMPTS: usize = 5;
 
-#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
 #[serde(transparent)]
 pub struct StreamTopic(String);
 
@@ -2808,7 +3007,14 @@ pub struct StreamUnsubscription {
 
 pub struct LnMarketsStreamClient {
     socket: WebSocketStream<ConnectStream>,
+    url: String,
     next_request_id: u64,
+    next_message_at: Instant,
+    hello_identity: Option<(String, String)>,
+    credentials: Option<Credentials>,
+    subscriptions: BTreeSet<StreamTopic>,
+    reconnect_interval: Duration,
+    max_reconnect_attempts: usize,
 }
 
 fn stream_error(error: async_tungstenite::tungstenite::Error) -> Error {
@@ -2817,17 +3023,30 @@ fn stream_error(error: async_tungstenite::tungstenite::Error) -> Error {
 
 impl LnMarketsStreamClient {
     pub async fn connect(network: Network) -> Result<Self, Error> {
-        let connect = connect_async(network.stream_api_url()).fuse();
-        let timeout =
-            futures::FutureExt::fuse(async_io::Timer::at(Instant::now() + STREAM_REQUEST_TIMEOUT));
-        futures::pin_mut!(connect, timeout);
-        let (socket, _response) = select! {
-            result = connect => result.map_err(stream_error)?,
-            _ = timeout => return Err(Error::StreamTimeout),
-        };
+        Self::connect_url(
+            network.stream_api_url().to_owned(),
+            STREAM_RECONNECT_INTERVAL,
+            MAX_STREAM_RECONNECT_ATTEMPTS,
+        )
+        .await
+    }
+
+    async fn connect_url(
+        url: String,
+        reconnect_interval: Duration,
+        max_reconnect_attempts: usize,
+    ) -> Result<Self, Error> {
+        let socket = connect_stream(&url).await?;
         Ok(Self {
             socket,
+            url,
             next_request_id: 1,
+            next_message_at: Instant::now(),
+            hello_identity: None,
+            credentials: None,
+            subscriptions: BTreeSet::new(),
+            reconnect_interval,
+            max_reconnect_attempts,
         })
     }
 
@@ -2836,14 +3055,17 @@ impl LnMarketsStreamClient {
         client_name: &str,
         client_version: &str,
     ) -> Result<StreamHello, Error> {
-        self.request(
-            "hello",
-            Some(serde_json::json!({
-                "clientName": client_name,
-                "clientVersion": client_version,
-            })),
-        )
-        .await
+        let response = self
+            .request(
+                "hello",
+                Some(serde_json::json!({
+                    "clientName": client_name,
+                    "clientVersion": client_version,
+                })),
+            )
+            .await?;
+        self.hello_identity = Some((client_name.to_owned(), client_version.to_owned()));
+        Ok(response)
     }
 
     pub async fn ping(&mut self) -> Result<String, Error> {
@@ -2855,6 +3077,15 @@ impl LnMarketsStreamClient {
     }
 
     pub async fn authenticate(
+        &mut self,
+        credentials: &Credentials,
+    ) -> Result<StreamAuthentication, Error> {
+        let response = self.authenticate_once(credentials).await?;
+        self.credentials = Some(credentials.clone());
+        Ok(response)
+    }
+
+    async fn authenticate_once(
         &mut self,
         credentials: &Credentials,
     ) -> Result<StreamAuthentication, Error> {
@@ -2880,8 +3111,12 @@ impl LnMarketsStreamClient {
                 "at least one topic is required".into(),
             ));
         }
-        self.request("subscribe", Some(serde_json::json!({ "topics": topics })))
-            .await
+        let response: StreamSubscription = self
+            .request("subscribe", Some(serde_json::json!({ "topics": topics })))
+            .await?;
+        self.subscriptions
+            .extend(response.subscribed.iter().cloned());
+        Ok(response)
     }
 
     pub async fn whoami(&mut self) -> Result<StreamIdentity, Error> {
@@ -2892,12 +3127,19 @@ impl LnMarketsStreamClient {
         &mut self,
         topics: &[StreamTopic],
     ) -> Result<StreamUnsubscription, Error> {
-        self.request("unsubscribe", Some(serde_json::json!({ "topics": topics })))
-            .await
+        let response: StreamUnsubscription = self
+            .request("unsubscribe", Some(serde_json::json!({ "topics": topics })))
+            .await?;
+        for topic in &response.unsubscribed {
+            self.subscriptions.remove(topic);
+        }
+        Ok(response)
     }
 
     pub async fn unsubscribe_all(&mut self) -> Result<StreamUnsubscription, Error> {
-        self.request("unsubscribeAll", None).await
+        let response = self.request("unsubscribeAll", None).await?;
+        self.subscriptions.clear();
+        Ok(response)
     }
 
     pub async fn collect_events(
@@ -2913,14 +3155,23 @@ impl LnMarketsStreamClient {
             let timeout = futures::FutureExt::fuse(async_io::Timer::at(deadline));
             futures::pin_mut!(next, timeout);
             let message = select! {
-                message = next => match message {
-                    Some(message) => message.map_err(stream_error)?,
-                    None => return Err(Error::StreamClosed("connection ended".into())),
-                },
+                message = next => message,
                 _ = timeout => break,
             };
-            if let Some(event) = self.handle_event_message(message).await? {
-                events.push(event);
+            let message = match message {
+                Some(Ok(message)) => message,
+                Some(Err(_)) | None => {
+                    self.reconnect_and_replay(deadline).await?;
+                    continue;
+                }
+            };
+            match self.handle_event_message(message).await {
+                Ok(Some(event)) => events.push(event),
+                Ok(None) => {}
+                Err(Error::StreamClosed(_)) | Err(Error::StreamConnect(_)) => {
+                    self.reconnect_and_replay(deadline).await?;
+                }
+                Err(error) => return Err(error),
             }
         }
         Ok(events)
@@ -2930,11 +3181,75 @@ impl LnMarketsStreamClient {
         self.socket.close(None).await.map_err(stream_error)
     }
 
+    async fn reconnect_and_replay(&mut self, deadline: Instant) -> Result<(), Error> {
+        let mut latest_error = None;
+        for attempt in 0..self.max_reconnect_attempts {
+            if Instant::now() >= deadline {
+                return Err(Error::StreamTimeout);
+            }
+            if attempt > 0 {
+                let retry_at = Instant::now() + self.reconnect_interval;
+                if retry_at >= deadline {
+                    return Err(Error::StreamTimeout);
+                }
+                async_io::Timer::at(retry_at).await;
+            }
+            match connect_stream(&self.url).await {
+                Ok(socket) => {
+                    self.socket = socket;
+                    self.next_message_at = Instant::now();
+                    if let Err(error) = self.replay_session().await {
+                        latest_error = Some(error);
+                        continue;
+                    }
+                    return Ok(());
+                }
+                Err(error) => latest_error = Some(error),
+            }
+        }
+        Err(latest_error.unwrap_or(Error::StreamClosed(
+            "reconnect attempts were exhausted".into(),
+        )))
+    }
+
+    async fn replay_session(&mut self) -> Result<(), Error> {
+        if let Some((client_name, client_version)) = self.hello_identity.clone() {
+            let _: StreamHello = self
+                .request(
+                    "hello",
+                    Some(serde_json::json!({
+                        "clientName": client_name,
+                        "clientVersion": client_version,
+                    })),
+                )
+                .await?;
+        }
+        if let Some(credentials) = self.credentials.clone() {
+            self.authenticate_once(&credentials).await?;
+        }
+        if !self.subscriptions.is_empty() {
+            let topics = self.subscriptions.iter().cloned().collect::<Vec<_>>();
+            let _: StreamSubscription = self
+                .request("subscribe", Some(serde_json::json!({ "topics": topics })))
+                .await?;
+        }
+        Ok(())
+    }
+
+    async fn wait_for_message_slot(&mut self) {
+        let now = Instant::now();
+        if self.next_message_at > now {
+            async_io::Timer::at(self.next_message_at).await;
+        }
+        self.next_message_at = Instant::now() + STREAM_MESSAGE_INTERVAL;
+    }
+
     async fn request<T: DeserializeOwned>(
         &mut self,
         method: &str,
         params: Option<serde_json::Value>,
     ) -> Result<T, Error> {
+        self.wait_for_message_slot().await;
         let id = self.next_request_id.to_string();
         self.next_request_id = self.next_request_id.saturating_add(1);
         let mut frame = serde_json::json!({
@@ -2973,6 +3288,7 @@ impl LnMarketsStreamClient {
                 return Err(Error::StreamRpc {
                     code: error.code,
                     message: error.message,
+                    data: error.data,
                 });
             }
             let result = frame.result.ok_or_else(|| {
@@ -3037,6 +3353,18 @@ impl LnMarketsStreamClient {
     }
 }
 
+async fn connect_stream(url: &str) -> Result<WebSocketStream<ConnectStream>, Error> {
+    let connect = connect_async(url).fuse();
+    let timeout =
+        futures::FutureExt::fuse(async_io::Timer::at(Instant::now() + STREAM_REQUEST_TIMEOUT));
+    futures::pin_mut!(connect, timeout);
+    let (socket, _response) = select! {
+        result = connect => result.map_err(stream_error)?,
+        _ = timeout => return Err(Error::StreamTimeout),
+    };
+    Ok(socket)
+}
+
 #[derive(Debug, Deserialize)]
 struct StreamRpcFrame {
     #[serde(default)]
@@ -3055,6 +3383,8 @@ struct StreamRpcFrame {
 struct StreamRpcError {
     code: i64,
     message: String,
+    #[serde(default)]
+    data: Option<serde_json::Value>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -3219,6 +3549,11 @@ fn encoded_query<T: Serialize>(value: &T) -> Result<String, Error> {
     }
 }
 
+fn encoded_pagination(pagination: &Pagination) -> Result<String, Error> {
+    pagination.validate()?;
+    encoded_query(pagination)
+}
+
 async fn parse_success_response<T: DeserializeOwned>(
     response: Response<Vec<u8>>,
 ) -> Result<T, Error> {
@@ -3229,19 +3564,29 @@ async fn parse_success_response<T: DeserializeOwned>(
 async fn parse_error_response(response: Response<Vec<u8>>) -> Result<Error, Error> {
     let status = response.status();
     let bytes = read_bounded_body(response.body())?;
-    let message = serde_json::from_slice::<serde_json::Value>(&bytes)
-        .ok()
-        .and_then(|value| {
-            value
-                .get("message")
-                .or_else(|| value.get("error"))
-                .and_then(|value| value.as_str())
-                .map(str::to_owned)
-        })
+    #[derive(Deserialize)]
+    struct ApiErrorWire {
+        #[serde(default)]
+        code: Option<String>,
+        #[serde(default)]
+        message: Option<String>,
+        #[serde(default)]
+        details: Option<serde_json::Value>,
+        #[serde(default)]
+        error: Option<String>,
+    }
+
+    let parsed = serde_json::from_slice::<ApiErrorWire>(&bytes).ok();
+    let code = parsed.as_ref().and_then(|error| error.code.clone());
+    let details = parsed.as_ref().and_then(|error| error.details.clone());
+    let message = parsed
+        .and_then(|error| error.message.or(error.error))
         .unwrap_or_else(|| String::from_utf8_lossy(&bytes).into_owned());
     Ok(Error::Api {
         status,
+        code,
         message: message.chars().take(512).collect(),
+        details,
     })
 }
 
@@ -3260,31 +3605,17 @@ fn is_retryable_status(status: StatusCode) -> bool {
     matches!(status.as_u16(), 429 | 502 | 503 | 504)
 }
 
-fn retry_delay(attempt: usize, headers: &HeaderMap) -> Duration {
-    if let Some(seconds) = headers
-        .get("retry-after")
-        .and_then(|value| value.to_str().ok())
-        .and_then(|value| value.parse::<u64>().ok())
+fn retry_delay(attempt: usize, status: StatusCode, headers: &HeaderMap) -> Duration {
+    if status == StatusCode::TOO_MANY_REQUESTS
+        && let Some(seconds) = headers
+            .get("retry-after")
+            .and_then(|value| value.to_str().ok())
+            .and_then(|value| value.parse::<u64>().ok())
     {
-        return Duration::from_secs(seconds.min(30));
+        return Duration::from_secs(seconds.clamp(1, 30));
     }
     let exponent = 1_u64 << attempt.min(3);
     Duration::from_secs(exponent) + Duration::from_millis(rand::random_range(0..=250))
-}
-
-fn is_connection_error(error: &anyhow::Error) -> bool {
-    error.chain().any(|cause| {
-        cause.downcast_ref::<io::Error>().is_some_and(|error| {
-            matches!(
-                error.kind(),
-                io::ErrorKind::ConnectionRefused
-                    | io::ErrorKind::ConnectionReset
-                    | io::ErrorKind::ConnectionAborted
-                    | io::ErrorKind::NotConnected
-                    | io::ErrorKind::BrokenPipe
-            )
-        })
-    })
 }
 
 #[cfg(test)]
@@ -3318,7 +3649,7 @@ mod tests {
         );
     }
 
-    type Handler = dyn Fn(Request<Vec<u8>>) -> BoxFuture<'static, anyhow::Result<Response<Vec<u8>>>>
+    type Handler = dyn Fn(Request<Vec<u8>>) -> BoxFuture<'static, Result<Response<Vec<u8>>, TransportFailure>>
         + Send
         + Sync;
 
@@ -3330,7 +3661,8 @@ mod tests {
         fn create<Callback, ResponseFuture>(callback: Callback) -> Arc<Self>
         where
             Callback: Fn(Request<Vec<u8>>) -> ResponseFuture + Send + Sync + 'static,
-            ResponseFuture: Future<Output = anyhow::Result<Response<Vec<u8>>>> + Send + 'static,
+            ResponseFuture:
+                Future<Output = Result<Response<Vec<u8>>, TransportFailure>> + Send + 'static,
         {
             Arc::new(Self {
                 handler: Arc::new(move |request| callback(request).boxed()),
@@ -3342,16 +3674,20 @@ mod tests {
         fn send(
             &self,
             request: Request<Vec<u8>>,
-        ) -> BoxFuture<'static, anyhow::Result<Response<Vec<u8>>>> {
+        ) -> BoxFuture<'static, Result<Response<Vec<u8>>, TransportFailure>> {
             (self.handler)(request)
         }
     }
 
-    fn response(status: u16, body: &str) -> anyhow::Result<Response<Vec<u8>>> {
+    fn response(status: u16, body: &str) -> Result<Response<Vec<u8>>, TransportFailure> {
         Ok(Response::builder()
             .status(status)
             .header("Content-Type", "application/json")
             .body(body.as_bytes().to_vec())?)
+    }
+
+    fn transport_failure(kind: TransportFailureKind) -> TransportFailure {
+        TransportFailure::new(kind, anyhow::anyhow!("test transport failure"))
     }
 
     const TRADE_ID: &str = "d0b9f9a0-4f6e-4a5a-8b7a-7f0f5f9a8a1e";
@@ -4540,7 +4876,7 @@ mod tests {
             let client = LnMarketsClient::public(client, Network::Signet);
             let candles = client
                 .candles(&CandlesQuery {
-                    from: "2026-08-08T00:00:00Z".into(),
+                    from_: "2026-08-08T00:00:00Z".into(),
                     to: None,
                     limit: Some(3),
                     cursor: Some("cursor-1".into()),
@@ -4551,6 +4887,297 @@ mod tests {
             assert_eq!(candles.data.len(), 1);
             assert_eq!(candles.data[0].volume.to_string(), "669418");
         });
+    }
+
+    #[test]
+    fn pagination_validates_bounds_encodes_from_and_advances_cursors() {
+        let pagination = Pagination::default()
+            .with_time_range("2026-08-08T00:00:00Z", Some("2026-08-09T00:00:00Z".into()))
+            .with_limit(100)
+            .expect("valid limit");
+        assert_eq!(
+            encoded_query(&pagination).expect("query"),
+            "?from=2026-08-08T00%3A00%3A00Z&limit=100&to=2026-08-09T00%3A00%3A00Z"
+        );
+        assert!(Pagination::default().with_limit(0).is_err());
+        assert!(Pagination::default().with_limit(1_001).is_err());
+
+        let page = Paginated::<()> {
+            data: Vec::new(),
+            next_cursor: Some("next-1".into()),
+        };
+        let next = page.next_page(&pagination).expect("next page");
+        assert_eq!(next.cursor.as_deref(), Some("next-1"));
+        assert_eq!(next.from_, pagination.from_);
+        assert_eq!(next.to, pagination.to);
+        assert_eq!(next.limit, pagination.limit);
+
+        let candles = CandlesQuery {
+            from_: "2026-08-08T00:00:00Z".into(),
+            to: None,
+            limit: Some(50),
+            cursor: None,
+            resolution: CandleResolution::FiveMinutes,
+        };
+        let candle_page = Paginated::<Candle> {
+            data: Vec::new(),
+            next_cursor: Some("next-candle".into()),
+        };
+        assert_eq!(
+            candles
+                .next_page(&candle_page)
+                .expect("next candle page")
+                .cursor
+                .as_deref(),
+            Some("next-candle")
+        );
+    }
+
+    #[test]
+    fn invalid_pagination_is_rejected_before_transport() {
+        smol::block_on(async {
+            let request_count = Arc::new(StdMutex::new(0));
+            let transport = FakeTransport::create({
+                let request_count = request_count.clone();
+                move |_| {
+                    let request_count = request_count.clone();
+                    async move {
+                        *request_count.lock().expect("request count") += 1;
+                        response(200, r#"{"data":[],"nextCursor":null}"#)
+                    }
+                }
+            });
+            let client = LnMarketsClient::public(transport, Network::Signet);
+            let error = client
+                .funding_settlements(&Pagination {
+                    limit: Some(0),
+                    ..Pagination::default()
+                })
+                .await
+                .expect_err("invalid limit");
+            assert!(matches!(error, Error::InvalidAmount(_)));
+            assert_eq!(*request_count.lock().expect("request count"), 0);
+        });
+    }
+
+    #[test]
+    fn oracle_routes_parse_public_history_without_authentication() {
+        smol::block_on(async {
+            let paths = Arc::new(StdMutex::new(Vec::new()));
+            let transport = FakeTransport::create({
+                let paths = paths.clone();
+                move |request| {
+                    let paths = paths.clone();
+                    async move {
+                        assert!(request.headers().get("LNM-ACCESS-SIGNATURE").is_none());
+                        paths
+                            .lock()
+                            .expect("paths")
+                            .push(request.uri().path().to_owned());
+                        match request.uri().path() {
+                            "/v3/oracle/index" => response(
+                                200,
+                                r#"[{"index":64715.5,"time":"2026-08-09T05:00:00.000Z"}]"#,
+                            ),
+                            "/v3/oracle/last-price" => response(
+                                200,
+                                r#"[{"lastPrice":64710,"time":"2026-08-09T05:00:00.000Z"}]"#,
+                            ),
+                            _ => response(404, r#"{"message":"unexpected route"}"#),
+                        }
+                    }
+                }
+            });
+            let client = LnMarketsClient::public(transport, Network::Signet);
+            let pagination = Pagination::default().with_limit(5).expect("limit");
+            let indexes = client.oracle_index(&pagination).await.expect("index");
+            let prices = client
+                .oracle_last_price(&pagination)
+                .await
+                .expect("last price");
+            assert_eq!(indexes[0].index.to_string(), "64715.5");
+            assert_eq!(prices[0].last_price.to_string(), "64710");
+            assert_eq!(
+                *paths.lock().expect("paths"),
+                vec!["/v3/oracle/index", "/v3/oracle/last-price"]
+            );
+        });
+    }
+
+    #[test]
+    fn wire_serialization_handles_booleans_timestamps_usd_and_sats() {
+        assert_eq!(
+            encoded_query(&LightningDepositsQuery {
+                pagination: Pagination::default(),
+                settled: Some(true),
+            })
+            .expect("query"),
+            "?settled=true"
+        );
+        assert_eq!(
+            serde_json::to_string(
+                &NewSwapRequest::bitcoin_to_synthetic_usd(1_234).expect("Bitcoin swap")
+            )
+            .expect("Bitcoin body"),
+            r#"{"inAmount":1234,"inAsset":"BTC","outAsset":"USD"}"#
+        );
+        assert_eq!(
+            serde_json::to_string(
+                &NewSwapRequest::synthetic_usd_to_bitcoin(123).expect("USD swap")
+            )
+            .expect("USD body"),
+            r#"{"inAmount":1.23,"inAsset":"USD","outAsset":"BTC"}"#
+        );
+        let rest_time: ServerTime =
+            serde_json::from_str(r#"{"time":"2026-08-09T05:00:00.000Z"}"#).expect("REST time");
+        let stream_time: StreamTime =
+            serde_json::from_str(r#"{"time":1786251600000}"#).expect("Stream time");
+        assert_eq!(rest_time.time, "2026-08-09T05:00:00.000Z");
+        assert_eq!(stream_time.time, 1_786_251_600_000);
+    }
+
+    #[test]
+    fn structured_api_errors_preserve_code_message_and_details() {
+        smol::block_on(async {
+            let transport = FakeTransport::create(|_| async move {
+                response(
+                    400,
+                    r#"{"code":"INVALID_REQUEST","message":"bad input","details":{"field":"limit"}}"#,
+                )
+            });
+            let client = LnMarketsClient::public(transport, Network::Signet);
+            let error = client.ticker().await.expect_err("API error");
+            match error {
+                Error::Api {
+                    status,
+                    code,
+                    message,
+                    details,
+                } => {
+                    assert_eq!(status, StatusCode::BAD_REQUEST);
+                    assert_eq!(code.as_deref(), Some("INVALID_REQUEST"));
+                    assert_eq!(message, "bad input");
+                    assert_eq!(details, Some(serde_json::json!({ "field": "limit" })));
+                }
+                error => panic!("unexpected error: {error}"),
+            }
+        });
+    }
+
+    #[test]
+    fn retry_taxonomy_excludes_read_write_timeouts_and_posts() {
+        smol::block_on(async {
+            for kind in [
+                TransportFailureKind::ReadTimeout,
+                TransportFailureKind::WriteTimeout,
+                TransportFailureKind::Other,
+            ] {
+                let request_count = Arc::new(StdMutex::new(0));
+                let transport = FakeTransport::create({
+                    let request_count = request_count.clone();
+                    move |_| {
+                        let request_count = request_count.clone();
+                        async move {
+                            *request_count.lock().expect("request count") += 1;
+                            Err(transport_failure(kind))
+                        }
+                    }
+                });
+                let client = LnMarketsClient::public(transport, Network::Signet);
+                assert!(matches!(client.ticker().await, Err(Error::Send(_))));
+                assert_eq!(*request_count.lock().expect("request count"), 1);
+            }
+
+            let request_count = Arc::new(StdMutex::new(0));
+            let transport = FakeTransport::create({
+                let request_count = request_count.clone();
+                move |_| {
+                    let request_count = request_count.clone();
+                    async move {
+                        *request_count.lock().expect("request count") += 1;
+                        Err(transport_failure(TransportFailureKind::Connect))
+                    }
+                }
+            });
+            let client = authenticated_client(transport);
+            let swap = NewSwapRequest::bitcoin_to_synthetic_usd(1_000).expect("swap");
+            assert!(matches!(client.new_swap(&swap).await, Err(Error::Send(_))));
+            assert_eq!(*request_count.lock().expect("request count"), 1);
+        });
+    }
+
+    #[test]
+    fn connection_and_retryable_status_failures_retry_gets() {
+        smol::block_on(async {
+            let request_count = Arc::new(StdMutex::new(0));
+            let signatures = Arc::new(StdMutex::new(Vec::new()));
+            let transport = FakeTransport::create({
+                let request_count = request_count.clone();
+                let signatures = signatures.clone();
+                move |request| {
+                    let request_count = request_count.clone();
+                    let signatures = signatures.clone();
+                    async move {
+                        signatures.lock().expect("signatures").push((
+                            request.headers()["LNM-ACCESS-TIMESTAMP"]
+                                .to_str()
+                                .expect("timestamp")
+                                .to_owned(),
+                            request.headers()["LNM-ACCESS-SIGNATURE"]
+                                .to_str()
+                                .expect("signature")
+                                .to_owned(),
+                        ));
+                        let mut request_count = request_count.lock().expect("request count");
+                        *request_count += 1;
+                        if *request_count == 1 {
+                            Err(transport_failure(TransportFailureKind::ConnectTimeout))
+                        } else if *request_count == 2 {
+                            response(503, r#"{"code":"UNAVAILABLE","message":"retry"}"#)
+                        } else {
+                            response(
+                                200,
+                                r#"{"balance":1200,"email":null,"feeTier":1,"id":"account-1","linkingPublicKey":null,"syntheticUsdBalance":2.5,"username":"omega"}"#,
+                            )
+                        }
+                    }
+                }
+            });
+            let client = authenticated_client(transport);
+            let account = client.account().await.expect("retried account");
+            assert_eq!(account.username, "omega");
+            assert_eq!(*request_count.lock().expect("request count"), 3);
+            let signatures = signatures.lock().expect("signatures");
+            assert_eq!(signatures.len(), 3);
+            assert!(signatures.windows(2).all(|pair| pair[0].0 != pair[1].0));
+            assert!(signatures.windows(2).all(|pair| pair[0].1 != pair[1].1));
+        });
+    }
+
+    #[test]
+    fn retry_after_and_shared_rate_limit_keys_follow_contract() {
+        let mut headers = HeaderMap::new();
+        headers.insert("retry-after", "3".parse().expect("header"));
+        assert_eq!(
+            retry_delay(0, StatusCode::TOO_MANY_REQUESTS, &headers),
+            Duration::from_secs(3)
+        );
+        assert!(is_retryable_status(StatusCode::BAD_GATEWAY));
+        assert!(is_retryable_status(StatusCode::SERVICE_UNAVAILABLE));
+        assert!(is_retryable_status(StatusCode::GATEWAY_TIMEOUT));
+        assert!(!is_retryable_status(StatusCode::BAD_REQUEST));
+
+        let key = authenticated_rate_limit_key(Network::Signet, "unique-rate-limit-key");
+        let first = shared_rest_rate_limit_slot(key.clone());
+        let second = shared_rest_rate_limit_slot(key);
+        assert!(Arc::ptr_eq(&first, &second));
+        assert!(!Arc::ptr_eq(
+            &first,
+            &shared_rest_rate_limit_slot(RestRateLimitKey::Public(Network::Signet))
+        ));
+        assert_eq!(PUBLIC_REQUEST_INTERVAL, Duration::from_secs(1));
+        assert_eq!(AUTHENTICATED_REQUEST_INTERVAL, Duration::from_millis(200));
+        assert_eq!(STREAM_MESSAGE_INTERVAL, Duration::from_millis(100));
     }
 
     #[test]
@@ -4613,6 +5240,152 @@ mod tests {
             StreamTopic::new("futures/inverse/btc_usd/cross/position").expect("position");
         assert!(position.is_private());
         assert!(StreamTopic::new("futures/inverse/btc_usd/ohlc/2m").is_err());
+    }
+
+    #[test]
+    fn stream_rpc_errors_preserve_server_data() {
+        smol::block_on(async {
+            let listener = async_std::net::TcpListener::bind("127.0.0.1:0")
+                .await
+                .expect("bind server");
+            let address = listener.local_addr().expect("server address");
+            let server = smol::spawn(async move {
+                let (stream, _) = listener.accept().await?;
+                let mut socket = async_tungstenite::accept_async(stream).await?;
+                let request = socket.next().await.ok_or_else(|| {
+                    anyhow::anyhow!("stream client disconnected before request")
+                })??;
+                let request: serde_json::Value = serde_json::from_str(request.to_text()?)?;
+                let response = serde_json::json!({
+                    "jsonrpc": "2.0",
+                    "id": request["id"],
+                    "error": {
+                        "code": -32602,
+                        "message": "invalid params",
+                        "data": { "field": "topic" },
+                    },
+                });
+                socket
+                    .send(WebSocketMessage::Text(response.to_string().into()))
+                    .await?;
+                Ok::<(), anyhow::Error>(())
+            });
+
+            let mut client = LnMarketsStreamClient::connect_url(
+                format!("ws://{address}"),
+                Duration::from_millis(1),
+                1,
+            )
+            .await
+            .expect("connect client");
+            let error = client.ping().await.expect_err("JSON-RPC error");
+            match error {
+                Error::StreamRpc {
+                    code,
+                    message,
+                    data,
+                } => {
+                    assert_eq!(code, -32602);
+                    assert_eq!(message, "invalid params");
+                    assert_eq!(data, Some(serde_json::json!({ "field": "topic" })));
+                }
+                error => panic!("unexpected error: {error}"),
+            }
+            server.await.expect("server");
+        });
+    }
+
+    #[test]
+    fn stream_reconnect_replays_hello_and_subscription_set() {
+        smol::block_on(async {
+            let listener = async_std::net::TcpListener::bind("127.0.0.1:0")
+                .await
+                .expect("bind server");
+            let address = listener.local_addr().expect("server address");
+            let observed = Arc::new(StdMutex::new(Vec::new()));
+            let server = smol::spawn({
+                let observed = observed.clone();
+                async move {
+                    for connection_number in 0..2 {
+                        let (stream, _) = listener.accept().await?;
+                        let mut socket = async_tungstenite::accept_async(stream).await?;
+                        while let Some(message) = socket.next().await {
+                            let message = message?;
+                            if !message.is_text() {
+                                continue;
+                            }
+                            let request: serde_json::Value =
+                                serde_json::from_str(message.to_text()?)?;
+                            let method = request["method"]
+                                .as_str()
+                                .ok_or_else(|| anyhow::anyhow!("request has no method"))?;
+                            observed
+                                .lock()
+                                .expect("observed methods")
+                                .push(format!("{connection_number}:{method}"));
+                            let result = match method {
+                                "hello" => serde_json::json!({ "version": "1.0.0" }),
+                                "subscribe" => serde_json::json!({
+                                    "subscribed": request["params"]["topics"].clone(),
+                                }),
+                                _ => return Err(anyhow::anyhow!("unexpected method {method}")),
+                            };
+                            let response = serde_json::json!({
+                                "jsonrpc": "2.0",
+                                "id": request["id"],
+                                "result": result,
+                            });
+                            socket
+                                .send(WebSocketMessage::Text(response.to_string().into()))
+                                .await?;
+                            if method == "subscribe" {
+                                if connection_number == 1 {
+                                    let event = serde_json::json!({
+                                        "jsonrpc": "2.0",
+                                        "method": "subscription",
+                                        "params": {
+                                            "topic": "futures/inverse/btc_usd/ticker",
+                                            "data": { "lastPrice": 64710 },
+                                        },
+                                    });
+                                    socket
+                                        .send(WebSocketMessage::Text(event.to_string().into()))
+                                        .await?;
+                                }
+                                break;
+                            }
+                        }
+                    }
+                    Ok::<(), anyhow::Error>(())
+                }
+            });
+
+            let mut client = LnMarketsStreamClient::connect_url(
+                format!("ws://{address}"),
+                Duration::from_millis(1),
+                2,
+            )
+            .await
+            .expect("connect client");
+            client.hello("omega-test", "1.0.0").await.expect("hello");
+            let topic = StreamTopic::new("futures/inverse/btc_usd/ticker").expect("ticker topic");
+            client
+                .subscribe(std::slice::from_ref(&topic))
+                .await
+                .expect("subscribe");
+            let events = client
+                .collect_events(1, Duration::from_secs(2))
+                .await
+                .expect("event after reconnect");
+            assert_eq!(events.len(), 1);
+            assert_eq!(events[0].topic, topic);
+            assert_eq!(events[0].data["lastPrice"], 64710);
+            server.await.expect("server");
+            assert_eq!(
+                *observed.lock().expect("observed methods"),
+                vec!["0:hello", "0:subscribe", "1:hello", "1:subscribe"]
+            );
+        });
     }
 
     #[test]

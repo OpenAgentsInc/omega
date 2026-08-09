@@ -30,4 +30,5 @@ uuid.workspace = true
 zeroize.workspace = true
 
 [dev-dependencies]
+async-std.workspace = true
 cargo_metadata.workspace = true

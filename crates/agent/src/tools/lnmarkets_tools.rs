@@ -365,13 +365,13 @@ impl AgentTool for LnMarketsMarketDataTool {
                     );
                     let pagination = Pagination {
                         cursor: cursor.clone(),
-                        from: Some(from.clone()),
+                        from_: Some(from.clone()),
                         limit: Some(limit),
                         to: to.clone(),
                     };
                     let candles = client
                         .candles(&CandlesQuery {
-                            from,
+                            from_: from,
                             to,
                             limit: Some(limit),
                             cursor,

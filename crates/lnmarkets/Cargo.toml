@@ -21,3 +21,4 @@ lnmarkets_client.workspace = true
 lnmarkets_data.workspace = true
 lnmarkets_trading.workspace = true
 lnmarkets_ui.workspace = true
+reqwest.workspace = true
