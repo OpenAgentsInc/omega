@@ -9416,10 +9416,16 @@ dependencies = [
  "editor",
  "gpui",
  "lnmarkets_client",
+ "lnmarkets_data",
  "log",
+ "settings",
+ "theme",
+ "theme_settings",
+ "trading_ledger",
  "trading_mandate",
  "ui",
  "util",
+ "workspace",
 ]
 
 [[package]]

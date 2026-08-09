@@ -1301,6 +1301,7 @@ mod tests {
             halted_at_ms: None,
             halt_reason: None,
             state: None,
+            last_action: None,
             lifecycle_event_count: 2,
         }];
         assert_eq!(pending_strategy_status("start"), "starting");

@@ -10,8 +10,14 @@ mod review_turn;
 mod trading_runtime;
 
 pub use agent_wakeup::WakeupSource;
+pub use lnmarkets_ui::{
+    LnMarketsOperatorPanel, OperatorConsoleSnapshot, OperatorConsoleSource, OperatorReviewTurn,
+    OperatorStrategySnapshot,
+};
 pub use review_turn::{PORTFOLIO_REVIEW_SCHEMA, PORTFOLIO_REVIEW_TOKEN_BUDGET, PortfolioReview};
-pub use trading_runtime::{StrategyRuntimeSnapshot, TradingRuntime};
+pub use trading_runtime::{
+    ReviewTurnHistory, ReviewTurnOutcome, StrategyRuntimeSnapshot, TradingRuntime,
+};
 
 pub use lnmarkets_client::*;
 pub use lnmarkets_data::{
@@ -131,6 +137,7 @@ pub fn init(http_client: Arc<dyn HttpClient>, cx: &mut App) {
         trading_runtime,
         _collector_task: collector_task,
     });
+    lnmarkets_ui::init_operator_panel(cx);
 }
 
 pub fn collector(cx: &App) -> Option<CollectorHandle> {
@@ -198,6 +205,135 @@ pub fn acknowledge_portfolio_wakeup(
 ) -> bool {
     trading_runtime(cx)
         .is_ok_and(|runtime| runtime.acknowledge_review_wakeup(session_id, source, instruction))
+}
+
+pub fn record_portfolio_review_turn(
+    session_id: &str,
+    at_ms: i64,
+    source: WakeupSource,
+    outcome: ReviewTurnOutcome,
+    cx: &App,
+) -> bool {
+    trading_runtime(cx)
+        .is_ok_and(|runtime| runtime.record_review_turn(session_id, at_ms, source, outcome))
+}
+
+pub fn operator_console_source(cx: &App) -> Result<Arc<dyn OperatorConsoleSource>, String> {
+    let plugin = cx
+        .try_global::<LnMarketsPlugin>()
+        .ok_or_else(|| "LN Markets is not initialized".to_string())?;
+    Ok(Arc::new(PluginOperatorConsoleSource {
+        collector: plugin.collector.clone(),
+        trading_runtime: plugin.trading_runtime.clone(),
+    }))
+}
+
+struct PluginOperatorConsoleSource {
+    collector: Arc<Mutex<Option<CollectorHandle>>>,
+    trading_runtime: Result<Arc<TradingRuntime>, String>,
+}
+
+impl OperatorConsoleSource for PluginOperatorConsoleSource {
+    fn snapshot(&self, now_ms: i64) -> OperatorConsoleSnapshot {
+        let collector = self.collector.lock().clone();
+        let collector_health = collector.as_ref().map(CollectorHandle::health);
+        let runtime = match &self.trading_runtime {
+            Ok(runtime) => runtime,
+            Err(error) => {
+                let mut snapshot = OperatorConsoleSnapshot::unavailable(now_ms, error.clone());
+                snapshot.collector = collector_health;
+                return snapshot;
+            }
+        };
+        let (feature_status, features) = match collector.as_ref() {
+            None => ("collector_starting".to_string(), None),
+            Some(collector) => match collector.features() {
+                Ok(Some(features)) => ("ready".to_string(), Some(features)),
+                Ok(None) => ("collecting".to_string(), None),
+                Err(error) => (format!("error: {error:#}"), None),
+            },
+        };
+        let review =
+            match runtime.portfolio_review(now_ms, "operator_panel", feature_status, features) {
+                Ok(review) => review,
+                Err(error) => {
+                    let mut snapshot = OperatorConsoleSnapshot::unavailable(
+                        now_ms,
+                        format!("Could not read the trading runtime: {error:#}"),
+                    );
+                    snapshot.collector = collector_health;
+                    return snapshot;
+                }
+            };
+        let headroom = review
+            .limit_headroom
+            .as_ref()
+            .map(|limits| &limits.by_strategy);
+        let strategies = review
+            .strategies
+            .iter()
+            .map(|strategy| {
+                let limits = headroom.and_then(|limits| {
+                    limits
+                        .iter()
+                        .find(|limits| limits.strategy_id == strategy.strategy_id)
+                });
+                OperatorStrategySnapshot {
+                    strategy_id: strategy.strategy_id.clone(),
+                    status: strategy.status.clone(),
+                    state: strategy.state.as_ref().map(ToString::to_string),
+                    last_action: strategy.last_action.clone(),
+                    daily_loss_headroom_sats: limits.map(|limits| limits.daily_loss_headroom_sats),
+                    order_headroom: limits.map(|limits| limits.order_headroom),
+                }
+            })
+            .collect();
+        let review_cadence = review
+            .mandate
+            .mandate
+            .as_ref()
+            .map(|mandate| mandate.review_cadence.clone());
+        let review_history = runtime
+            .review_turn_history()
+            .into_iter()
+            .map(|turn| OperatorReviewTurn {
+                at_ms: turn.at_ms,
+                trigger: turn.source.transcript_label(),
+                outcome: match turn.outcome {
+                    ReviewTurnOutcome::Completed => "completed",
+                    ReviewTurnOutcome::Failed => "failed",
+                }
+                .to_string(),
+            })
+            .collect();
+        OperatorConsoleSnapshot {
+            generated_at_ms: now_ms,
+            collector: collector_health,
+            strategies,
+            ledger: Some(review.daily_report),
+            mandate: Some(review.mandate),
+            review_cadence,
+            pending_wakeups: runtime.pending_review_wakeup_count(),
+            review_history,
+            runtime_error: None,
+        }
+    }
+
+    fn narrow_mandate(&self, changed_at_ms: i64) -> anyhow::Result<()> {
+        self.trading_runtime
+            .clone()
+            .map_err(anyhow::Error::msg)?
+            .narrow_mandate(changed_at_ms)?;
+        Ok(())
+    }
+
+    fn revoke_mandate(&self, changed_at_ms: i64) -> anyhow::Result<()> {
+        self.trading_runtime
+            .clone()
+            .map_err(anyhow::Error::msg)?
+            .revoke_mandate(changed_at_ms)?;
+        Ok(())
+    }
 }
 
 struct OmegaHttpTransport {

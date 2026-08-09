@@ -10134,3 +10134,38 @@ inspection and one-off actions.
 
 - **Enforced by:** `strategy_engine`, `agent`, and `agent_ui` unit tests and
   `lnmarkets_agent_tools_are_versioned_bounded_and_visible` in `omega_deltas`.
+
+### OMEGA-DELTA-0252 — Portfolio reviews stay local, bounded, and mandate-governed
+
+Omega Agent can run scheduled or event-triggered reviews of the LN Markets
+portfolio. Each review uses only local collector features, strategy lifecycle
+state, ledger history, and the active mandate. The turn cannot fetch remote
+market or account data, place a raw order, or execute a swap. It can issue at
+most one bounded strategy command through the same backtest and mandate gates
+used by a user-started turn.
+
+One claimed thread owns the review schedule. Every review uses a 1,024-token
+ceiling and the shared wakeup governor. Event wakeups remain pending until the
+matching completed turn acknowledges them, so a failed turn can be retried
+without losing its trigger.
+
+- **Enforced by:** `lnmarkets`, `strategy_engine`, and `agent` unit tests and
+  `lnmarkets_portfolio_reviews_are_local_bounded_and_mandate_governed` in
+  `omega_deltas`.
+
+### OMEGA-DELTA-0253 — The trading operator console projects local authority and state
+
+The LN Markets plugin provides a right-dock operator panel. It projects
+collector connection state, every subscribed topic's lag, backfill progress,
+strategy state and limit headroom, attributed profit and costs, the active
+mandate, pending wakeups, and recent review outcomes from local stores and
+in-process services. The transcript remains the narrative agent surface.
+
+The panel can narrow mandate limits by half or revoke the mandate immediately.
+Neither action can create or widen authority, so neither uses the approval
+door. Automatic refresh reads local state on a background executor. The panel
+is loaded only with the LN Markets plugin feature.
+
+- **Enforced by:** `lnmarkets_ui`, `lnmarkets`, and `lnmarkets_data` unit and
+  GPUI paint tests and `lnmarkets_operator_panel_is_local_complete_and_tested`
+  in `omega_deltas`.

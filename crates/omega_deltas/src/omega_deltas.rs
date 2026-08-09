@@ -222,6 +222,8 @@ pub const ENFORCED_DELTAS: &[&str] = &[
     "OMEGA-DELTA-0249",
     "OMEGA-DELTA-0250",
     "OMEGA-DELTA-0251",
+    "OMEGA-DELTA-0252",
+    "OMEGA-DELTA-0253",
 ];
 
 /// OMEGA-DELTA-0204. Every control the composer's bar offers, written twice:
@@ -29795,6 +29797,92 @@ mod tests {
             assert!(
                 skill.contains(required),
                 "OMEGA-DELTA-0252: portfolio review skill lost `{required}`"
+            );
+        }
+    }
+
+    /// The LN Markets operator panel keeps local health, strategy, ledger,
+    /// mandate, and wakeup controls visible behind the trading feature.
+    #[test]
+    fn lnmarkets_operator_panel_is_local_complete_and_tested() {
+        let panel = without_comments(&read_repository_file(
+            "crates/lnmarkets_ui/src/operator_panel.rs",
+        ));
+        for required in [
+            "pub trait OperatorConsoleSource",
+            "lnmarkets.operator.collector",
+            "lnmarkets.operator.strategies",
+            "lnmarkets.operator.ledger",
+            "lnmarkets.operator.mandate",
+            "lnmarkets.operator.wakeups",
+            "Backfill {}/{} surfaces",
+            "State {state}",
+            "Loss headroom {} · order headroom {}",
+            "Narrow limits 50%",
+            "operator_console_paints_every_operational_section",
+            "mandate_reductions_run_without_an_approval_prompt",
+        ] {
+            assert!(
+                panel.contains(required),
+                "OMEGA-DELTA-0253: LN Markets operator panel lost `{required}`"
+            );
+        }
+
+        let runtime = without_comments(&read_repository_file(
+            "crates/lnmarkets/src/trading_runtime.rs",
+        ));
+        for required in [
+            "pub fn narrow_mandate(",
+            "pub fn revoke_mandate(",
+            "pub fn record_review_turn(",
+            "pub fn review_turn_history(",
+            "pub fn pending_review_wakeup_count(",
+            "one_click_narrowing_only_reduces_mandate_authority",
+        ] {
+            assert!(
+                runtime.contains(required),
+                "OMEGA-DELTA-0253: operator runtime projection lost `{required}`"
+            );
+        }
+
+        let data = without_comments(&read_repository_file(
+            "crates/lnmarkets_data/src/lnmarkets_data.rs",
+        ));
+        for required in [
+            "pub backfill_completed_surfaces: usize",
+            "pub backfill_total_surfaces: usize",
+            "pub backfill_rows: usize",
+            "update_backfill_progress",
+        ] {
+            assert!(
+                data.contains(required),
+                "OMEGA-DELTA-0253: collector progress projection lost `{required}`"
+            );
+        }
+
+        let facade = without_comments(&read_repository_file("crates/lnmarkets/src/lnmarkets.rs"));
+        for required in [
+            "lnmarkets_ui::init_operator_panel(cx)",
+            "pub fn operator_console_source(",
+            "impl OperatorConsoleSource for PluginOperatorConsoleSource",
+            "pub fn record_portfolio_review_turn(",
+        ] {
+            assert!(
+                facade.contains(required),
+                "OMEGA-DELTA-0253: operator facade integration lost `{required}`"
+            );
+        }
+
+        let startup = without_comments(&read_repository_file("crates/omega/src/zed.rs"));
+        for required in [
+            "#[cfg(feature = \"lnmarkets\")]",
+            "lnmarkets::operator_console_source(cx)",
+            "lnmarkets::LnMarketsOperatorPanel::load(",
+            "workspace.add_panel(operator_panel, window, cx)",
+        ] {
+            assert!(
+                startup.contains(required),
+                "OMEGA-DELTA-0253: feature-gated operator startup lost `{required}`"
             );
         }
     }

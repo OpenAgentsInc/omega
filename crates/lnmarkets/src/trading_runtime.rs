@@ -1,4 +1,4 @@
-use std::{future::Future, sync::Arc};
+use std::{collections::VecDeque, future::Future, sync::Arc};
 
 use anyhow::{Context as _, Result, bail};
 use gpui::{AppContext as _, AsyncApp, Task};
@@ -34,7 +34,22 @@ pub struct StrategyRuntimeSnapshot {
     pub halted_at_ms: Option<i64>,
     pub halt_reason: Option<Value>,
     pub state: Option<Value>,
+    pub last_action: Option<String>,
     pub lifecycle_event_count: usize,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ReviewTurnOutcome {
+    Completed,
+    Failed,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Serialize)]
+pub struct ReviewTurnHistory {
+    pub at_ms: i64,
+    pub source: agent_wakeup::WakeupSource,
+    pub outcome: ReviewTurnOutcome,
 }
 
 pub struct TradingRuntime {
@@ -43,6 +58,7 @@ pub struct TradingRuntime {
     backtests: BacktestStore,
     lifecycle: MemoryLifecycleSink,
     wakeups: MemoryWakeupSink,
+    review_history: Mutex<VecDeque<ReviewTurnHistory>>,
     review_session_id: Mutex<Option<String>>,
     rebalance: Mutex<Option<RebalanceHandle>>,
     funding: Mutex<Option<FundingHandle>>,
@@ -56,6 +72,7 @@ impl TradingRuntime {
             backtests: BacktestStore::open_default().context("could not open backtest reports")?,
             lifecycle: MemoryLifecycleSink::default(),
             wakeups: MemoryWakeupSink::default(),
+            review_history: Mutex::new(VecDeque::new()),
             review_session_id: Mutex::new(None),
             rebalance: Mutex::new(None),
             funding: Mutex::new(None),
@@ -76,6 +93,19 @@ impl TradingRuntime {
 
     pub fn mandate_history(&self) -> Result<Vec<MandateRevision>> {
         self.mandate.history()
+    }
+
+    pub fn narrow_mandate(&self, changed_at_ms: i64) -> Result<MandateSnapshot> {
+        let snapshot = self.mandate.snapshot()?;
+        let mandate = snapshot
+            .mandate
+            .context("no active mandate is available to narrow")?;
+        let proposal = self.mandate.propose(narrowed_mandate(mandate))?;
+        self.mandate.save_restriction(proposal, changed_at_ms)
+    }
+
+    pub fn revoke_mandate(&self, changed_at_ms: i64) -> Result<MandateSnapshot> {
+        self.mandate.revoke(changed_at_ms)
     }
 
     pub fn strategy_snapshots(&self) -> Vec<StrategyRuntimeSnapshot> {
@@ -128,6 +158,36 @@ impl TradingRuntime {
         instruction: &str,
     ) -> bool {
         self.is_review_session(session_id) && self.wakeups.acknowledge(source, instruction)
+    }
+
+    pub fn record_review_turn(
+        &self,
+        session_id: &str,
+        at_ms: i64,
+        source: agent_wakeup::WakeupSource,
+        outcome: ReviewTurnOutcome,
+    ) -> bool {
+        if !self.is_review_session(session_id) {
+            return false;
+        }
+        let mut history = self.review_history.lock();
+        if history.len() == 20 {
+            history.pop_front();
+        }
+        history.push_back(ReviewTurnHistory {
+            at_ms,
+            source,
+            outcome,
+        });
+        true
+    }
+
+    pub fn review_turn_history(&self) -> Vec<ReviewTurnHistory> {
+        self.review_history.lock().iter().rev().cloned().collect()
+    }
+
+    pub fn pending_review_wakeup_count(&self) -> usize {
+        self.wakeups.wakeups().len()
     }
 
     pub fn portfolio_review(
@@ -337,6 +397,7 @@ impl TradingRuntime {
             halted_at_ms: halted_at_ms.copied(),
             halt_reason,
             state,
+            last_action: events.last().map(lifecycle_summary),
             lifecycle_event_count: events.len(),
         }
     }
@@ -390,6 +451,42 @@ fn lifecycle_strategy_id(event: &StrategyLifecycleEvent) -> &str {
     }
 }
 
+fn lifecycle_summary(event: &StrategyLifecycleEvent) -> String {
+    match event {
+        StrategyLifecycleEvent::Started { at_ms, .. } => format!("started at {at_ms}"),
+        StrategyLifecycleEvent::TickProcessed {
+            at_ms,
+            intent_count,
+            ..
+        } => format!("processed {intent_count} intents at {at_ms}"),
+        StrategyLifecycleEvent::OrderAuthorized { intent_id, .. } => {
+            format!("authorized order {intent_id}")
+        }
+        StrategyLifecycleEvent::OrderSubmitted { venue_order_id, .. } => {
+            format!("submitted venue order {venue_order_id}")
+        }
+        StrategyLifecycleEvent::BacktestApproved { .. } => "backtest approved".to_string(),
+        StrategyLifecycleEvent::StateUpdated { at_ms, .. } => {
+            format!("updated state at {at_ms}")
+        }
+        StrategyLifecycleEvent::LedgerEntryAppended { sequence, .. } => {
+            format!("recorded ledger entry {sequence}")
+        }
+        StrategyLifecycleEvent::Halted { at_ms, .. } => format!("halted at {at_ms}"),
+    }
+}
+
+fn narrowed_mandate(
+    mut mandate: trading_mandate::TradingMandate,
+) -> trading_mandate::TradingMandate {
+    mandate.max_venue_balance_sats = (mandate.max_venue_balance_sats / 2).max(1);
+    mandate.max_position_usd = (mandate.max_position_usd / 2).max(1);
+    mandate.max_leverage = (mandate.max_leverage / 2).max(1);
+    mandate.daily_loss_stop_sats = (mandate.daily_loss_stop_sats / 2).max(1);
+    mandate.max_orders_per_hour /= 2;
+    mandate
+}
+
 fn require_signet(client: &LnMarketsClient, network: Network) -> Result<()> {
     if network != Network::Signet || client.network() != Network::Signet {
         bail!("automated LN Markets strategies are restricted to signet");
@@ -410,4 +507,44 @@ fn spawn_service<Engine>(
         }
     });
     task.detach();
+}
+
+#[cfg(test)]
+mod tests {
+    use std::collections::BTreeSet;
+
+    use trading_mandate::{ReviewCadence, TradingMandate, TradingNetwork};
+
+    use super::narrowed_mandate;
+
+    #[test]
+    fn one_click_narrowing_only_reduces_mandate_authority() {
+        let original = TradingMandate {
+            network: TradingNetwork::Signet,
+            objective: "Keep risk bounded".into(),
+            max_venue_balance_sats: 100_000,
+            max_position_usd: 500,
+            max_leverage: 5,
+            daily_loss_stop_sats: 5_000,
+            max_orders_per_hour: 9,
+            min_liquidation_buffer_bps: 1_500,
+            allowed_strategies: BTreeSet::from(["funding_carry".into()]),
+            review_cadence: ReviewCadence::Interval { seconds: 3_600 },
+            expires_at_ms: 10_000,
+        };
+        let narrowed = narrowed_mandate(original.clone());
+
+        assert_eq!(narrowed.max_venue_balance_sats, 50_000);
+        assert_eq!(narrowed.max_position_usd, 250);
+        assert_eq!(narrowed.max_leverage, 2);
+        assert_eq!(narrowed.daily_loss_stop_sats, 2_500);
+        assert_eq!(narrowed.max_orders_per_hour, 4);
+        assert_eq!(
+            narrowed.min_liquidation_buffer_bps,
+            original.min_liquidation_buffer_bps
+        );
+        assert_eq!(narrowed.allowed_strategies, original.allowed_strategies);
+        assert_eq!(narrowed.review_cadence, original.review_cadence);
+        assert_eq!(narrowed.expires_at_ms, original.expires_at_ms);
+    }
 }

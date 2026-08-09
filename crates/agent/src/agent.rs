@@ -1040,6 +1040,12 @@ impl NativeAgent {
                 let Some(wakeup) = wakeup else {
                     continue;
                 };
+                #[cfg(feature = "lnmarkets")]
+                let review_source = wakeup.source.clone();
+                #[cfg(feature = "lnmarkets")]
+                let review_at_ms = i64::try_from(now_ms).unwrap_or(i64::MAX);
+                #[cfg(feature = "lnmarkets")]
+                let is_portfolio_review = portfolio_cadence.is_some();
                 let connection = NativeAgentConnection(agent);
                 let turn = cx.update(|cx| connection.publish_wakeup(wakeup, cx));
                 match turn.await {
@@ -1060,8 +1066,42 @@ impl NativeAgent {
                                 );
                             }
                         }
+                        #[cfg(feature = "lnmarkets")]
+                        if is_portfolio_review {
+                            let recorded = cx.update(|cx| {
+                                lnmarkets::record_portfolio_review_turn(
+                                    &session_id_text,
+                                    review_at_ms,
+                                    review_source.clone(),
+                                    lnmarkets::ReviewTurnOutcome::Completed,
+                                    cx,
+                                )
+                            });
+                            if !recorded {
+                                log::error!(
+                                    "completed LN Markets review could not be added to operator history"
+                                );
+                            }
+                        }
                     }
                     Err(error) => {
+                        #[cfg(feature = "lnmarkets")]
+                        if is_portfolio_review {
+                            let recorded = cx.update(|cx| {
+                                lnmarkets::record_portfolio_review_turn(
+                                    &session_id_text,
+                                    review_at_ms,
+                                    review_source,
+                                    lnmarkets::ReviewTurnOutcome::Failed,
+                                    cx,
+                                )
+                            });
+                            if !recorded {
+                                log::error!(
+                                    "failed LN Markets review could not be added to operator history"
+                                );
+                            }
+                        }
                         log::error!("scheduled agent wakeup turn failed: {error:#}");
                     }
                 }

@@ -890,6 +890,9 @@ pub struct CollectorHealth {
     pub subscribed_topics: BTreeSet<String>,
     pub last_event_by_topic_ms: BTreeMap<String, i64>,
     pub last_backfill_at_ms: Option<i64>,
+    pub backfill_completed_surfaces: usize,
+    pub backfill_total_surfaces: usize,
+    pub backfill_rows: usize,
     pub last_stream_event_at_ms: Option<i64>,
     pub lag_ms: Option<i64>,
     pub stored_events: u64,
@@ -905,6 +908,9 @@ impl CollectorHealth {
             subscribed_topics: BTreeSet::new(),
             last_event_by_topic_ms: BTreeMap::new(),
             last_backfill_at_ms: None,
+            backfill_completed_surfaces: 0,
+            backfill_total_surfaces: 3,
+            backfill_rows: 0,
             last_stream_event_at_ms: None,
             lag_ms: None,
             stored_events: 0,
@@ -1042,6 +1048,8 @@ impl Collector {
         self.update_health(|health| {
             health.status = CollectorStatus::Backfilling;
             health.last_error = None;
+            health.backfill_completed_surfaces = 0;
+            health.backfill_rows = 0;
         });
         let from = retention_cutoff(self.config.retention);
         let mut report = BackfillReport::default();
@@ -1049,16 +1057,19 @@ impl Collector {
         if let Err(error) = self.backfill_candles(&from, &mut report).await {
             report.errors.insert("candles".into(), error.to_string());
         }
+        self.update_backfill_progress(1, &report);
         if let Err(error) = self.backfill_funding(&from, &mut report).await {
             report
                 .errors
                 .insert("funding_settlements".into(), error.to_string());
         }
+        self.update_backfill_progress(2, &report);
         if let Err(error) = self.backfill_oracle(&from, &mut report).await {
             report
                 .errors
                 .insert("oracle_index".into(), error.to_string());
         }
+        self.update_backfill_progress(3, &report);
         if let Err(error) = self.store.prune(Utc::now().timestamp_millis()) {
             report.errors.insert("retention".into(), error.to_string());
         }
@@ -1252,6 +1263,17 @@ impl Collector {
 
     fn update_health(&self, update: impl FnOnce(&mut CollectorHealth)) {
         update(&mut self.health.lock());
+    }
+
+    fn update_backfill_progress(&self, completed_surfaces: usize, report: &BackfillReport) {
+        let rows = report
+            .candles
+            .saturating_add(report.funding_settlements)
+            .saturating_add(report.oracle_indices);
+        self.update_health(|health| {
+            health.backfill_completed_surfaces = completed_surfaces;
+            health.backfill_rows = rows;
+        });
     }
 }
 

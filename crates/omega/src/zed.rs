@@ -783,6 +783,28 @@ pub(crate) fn initialize_panels(
             }
         }
 
+        #[cfg(feature = "lnmarkets")]
+        if let Some(source) = cx
+            .update(|_window, cx| lnmarkets::operator_console_source(cx))
+            .context("failed to obtain the LN Markets operator source")
+            .and_then(|source| source.map_err(anyhow::Error::msg))
+            .log_err()
+            && let Some(operator_panel) = lnmarkets::LnMarketsOperatorPanel::load(
+                workspace_handle.clone(),
+                source,
+                cx.clone(),
+            )
+            .await
+            .context("failed to load the LN Markets operator panel")
+            .log_err()
+        {
+            workspace_handle
+                .update_in(cx, |workspace, window, cx| {
+                    workspace.add_panel(operator_panel, window, cx);
+                })
+                .log_err();
+        }
+
         workspace_handle
             .update_in(cx, |workspace, window, cx| {
                 workspace.open_panel::<agent_ui::AgentPanel>(window, cx);
