@@ -1,6 +1,6 @@
 ---
 name: market-demo
-description: Answer questions about the swap network and run demo asset swaps (LN, BTC, L-BTC) using Omega's market tools. Use when the person asks what the network looks like, wants provider or fee information, or asks to swap sats between rails. Network status reads the live public regtest network (read-only); swaps are demo only — no real funds.
+description: Answer questions about the swap network and run demo asset swaps (LN, BTC, L-BTC) using Omega's market tools. Answer tool availability questions directly without a tool call or delegation. Use when the person asks what the network looks like, wants provider or fee information, or asks to swap sats between rails. Network status reads the live public regtest network (read-only); swaps are demo only — no real funds.
 ---
 
 # Swap market
