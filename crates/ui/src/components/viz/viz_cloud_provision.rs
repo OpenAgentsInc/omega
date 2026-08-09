@@ -234,8 +234,30 @@ impl Component for CloudProvisionCard {
         v_flex()
             .gap_4()
             .child(example_group_with_title(
-                "In conversation",
+                "Mock provisioning stages",
                 vec![
+                    single_example(
+                        "Paid account check",
+                        CloudProvisionCard::new(
+                            "Northstar",
+                            "us-central1",
+                            "mock-cloud-1-relay",
+                            "mock-cloud-1-provider",
+                        )
+                        .stage(CloudProvisionStage::Payment)
+                        .into_any_element(),
+                    ),
+                    single_example(
+                        "Cloud relay provisioning",
+                        CloudProvisionCard::new(
+                            "Northstar",
+                            "us-central1",
+                            "mock-cloud-1-relay",
+                            "mock-cloud-1-provider",
+                        )
+                        .stage(CloudProvisionStage::Relay)
+                        .into_any_element(),
+                    ),
                     single_example(
                         "Relay ready, provider provisioning",
                         CloudProvisionCard::new(

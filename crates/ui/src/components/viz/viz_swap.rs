@@ -16,6 +16,36 @@ pub enum SwapAsset {
     Liquid,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SwapNetwork {
+    Demo,
+    Regtest,
+}
+
+impl SwapNetwork {
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::Demo => "demo",
+            Self::Regtest => "regtest",
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SwapQuoteKind {
+    Firm,
+    Indicative,
+}
+
+impl SwapQuoteKind {
+    fn verification(self) -> &'static str {
+        match self {
+            Self::Firm => "firm quote · exact terms awaiting execution",
+            Self::Indicative => "indicative route · signed quotes obtained at execution",
+        }
+    }
+}
+
 impl SwapAsset {
     pub fn ticker(&self) -> &'static str {
         match self {
@@ -77,11 +107,9 @@ impl SwapStage {
         }
     }
 
-    /// The truthful settlement caption: relay and provider claims stay
-    /// labeled unverified until local verification passes.
     fn verification(&self) -> &'static str {
         match self {
-            Self::Quote => "firm quote · exact terms awaiting execution",
+            Self::Quote => "quote awaiting execution",
             Self::Contract => "exit package persisted before any funding",
             Self::Funding | Self::Executing => "provider status is a claim · verifying locally",
             Self::Settled => "verified locally · zero-loss close",
@@ -124,6 +152,8 @@ pub struct SwapCard {
     amount_sats: u64,
     provider: SharedString,
     fee_bps: Option<u32>,
+    network: SwapNetwork,
+    quote_kind: SwapQuoteKind,
     stage: SwapStage,
     palette: Option<VizPalette>,
 }
@@ -142,6 +172,8 @@ impl SwapCard {
             amount_sats,
             provider: provider.into(),
             fee_bps: Some(fee_bps),
+            network: SwapNetwork::Demo,
+            quote_kind: SwapQuoteKind::Firm,
             stage: SwapStage::Quote,
             palette: None,
         }
@@ -149,6 +181,16 @@ impl SwapCard {
 
     pub fn stage(mut self, stage: SwapStage) -> Self {
         self.stage = stage;
+        self
+    }
+
+    pub fn network(mut self, network: SwapNetwork) -> Self {
+        self.network = network;
+        self
+    }
+
+    pub fn quote_kind(mut self, quote_kind: SwapQuoteKind) -> Self {
+        self.quote_kind = quote_kind;
         self
     }
 
@@ -185,6 +227,12 @@ impl RenderOnce for SwapCard {
     fn render(self, _window: &mut Window, cx: &mut App) -> impl IntoElement {
         let palette = self.palette.unwrap_or_else(|| VizPalette::from_theme(cx));
         let stage = self.stage;
+        let network = self.network;
+        let verification = if stage == SwapStage::Quote {
+            self.quote_kind.verification()
+        } else {
+            stage.verification()
+        };
         let (completed, active, error) = stage.rail_position();
         let colors = cx.theme().colors();
         // The tool-call card recipe from the transcript renderers.
@@ -269,6 +317,11 @@ impl RenderOnce for SwapCard {
                             .px_1()
                             .gap_1p5()
                             .items_center()
+                            .child(
+                                Label::new(network.label())
+                                    .size(LabelSize::XSmall)
+                                    .color(Color::Muted),
+                            )
                             .child(status_icon)
                             .child(
                                 Label::new(stage.label())
@@ -283,22 +336,26 @@ impl RenderOnce for SwapCard {
                     .w_full()
                     .px_3()
                     .pb_2()
+                    .gap_2()
                     .justify_between()
                     .child(
-                        Label::new(provider_caption)
-                            .size(LabelSize::XSmall)
-                            .color(Color::Muted)
-                            .buffer_font(cx),
+                        div().min_w_0().flex_1().child(
+                            Label::new(provider_caption)
+                                .size(LabelSize::XSmall)
+                                .color(Color::Muted)
+                                .buffer_font(cx)
+                                .truncate(),
+                        ),
                     )
-                    .child(
-                        Label::new(stage.verification())
-                            .size(LabelSize::XSmall)
-                            .color(if stage == SwapStage::Settled {
+                    .child(div().flex_none().child(
+                        Label::new(verification).size(LabelSize::XSmall).color(
+                            if stage == SwapStage::Settled {
                                 Color::Success
                             } else {
                                 Color::Muted
-                            }),
-                    ),
+                            },
+                        ),
+                    )),
             )
     }
 }
@@ -322,6 +379,127 @@ pub(crate) fn demo_card() -> SwapCard {
         "provider-b",
         22,
     )
+}
+
+fn regtest_card(from: SwapAsset, to: SwapAsset, stage: SwapStage) -> SwapCard {
+    SwapCard::new(
+        from,
+        to,
+        100_000,
+        "232aa9c2d3642abf9ba89e4c9f704b018630acfaf3e2c9faa2faa2b708341b18",
+        22,
+    )
+    .network(SwapNetwork::Regtest)
+    .stage(stage)
+}
+
+fn market_operation_label(operation: &str) -> &'static str {
+    match operation {
+        "market_network_status" => "network status",
+        "market_swap_quote" => "quote",
+        "market_execute_swap" => "execute",
+        "market_swap_status" => "swap status",
+        _ => "market operation",
+    }
+}
+
+/// The fail-closed result for a mainnet market tool call.
+#[derive(IntoElement, RegisterComponent, Documented)]
+pub struct MarketWarningCard {
+    operation: SharedString,
+    warning: SharedString,
+}
+
+impl MarketWarningCard {
+    pub fn new(operation: impl Into<SharedString>, warning: impl Into<SharedString>) -> Self {
+        Self {
+            operation: operation.into(),
+            warning: warning.into(),
+        }
+    }
+}
+
+impl RenderOnce for MarketWarningCard {
+    fn render(self, _window: &mut Window, cx: &mut App) -> impl IntoElement {
+        let colors = cx.theme().colors();
+        let operation = market_operation_label(self.operation.as_ref());
+
+        v_flex()
+            .w(px(420.))
+            .my_1p5()
+            .rounded_md()
+            .border_1()
+            .border_color(colors.border.opacity(0.8))
+            .bg(colors.editor_background)
+            .overflow_hidden()
+            .child(
+                h_flex()
+                    .h_8()
+                    .w_full()
+                    .px_2()
+                    .gap_2()
+                    .bg(colors
+                        .element_background
+                        .blend(colors.editor_foreground.opacity(0.025)))
+                    .child(
+                        Icon::new(IconName::Warning)
+                            .size(IconSize::Small)
+                            .color(Color::Warning),
+                    )
+                    .child(Label::new("Mainnet blocked").size(LabelSize::Small))
+                    .child(div().flex_1())
+                    .child(
+                        Label::new(operation)
+                            .size(LabelSize::XSmall)
+                            .color(Color::Muted),
+                    ),
+            )
+            .child(
+                div().px_3().py_2().child(
+                    Label::new(self.warning)
+                        .size(LabelSize::Small)
+                        .color(Color::Muted),
+                ),
+            )
+    }
+}
+
+impl Component for MarketWarningCard {
+    fn scope() -> ComponentScope {
+        ComponentScope::Agent
+    }
+
+    fn description() -> &'static str {
+        Self::DOCS
+    }
+
+    fn preview(_window: &mut Window, _cx: &mut App) -> AnyElement {
+        const WARNING: &str =
+            "Mainnet swap tools are blocked. No mainnet request was sent and no funds moved.";
+
+        v_flex()
+            .gap_4()
+            .child(example_group_with_title(
+                "Blocked mainnet operations",
+                vec![single_example(
+                    "Every market operation fails closed before network or state access",
+                    v_flex()
+                        .gap_2()
+                        .children(
+                            [
+                                "market_network_status",
+                                "market_swap_quote",
+                                "market_execute_swap",
+                                "market_swap_status",
+                            ]
+                            .into_iter()
+                            .map(|operation| MarketWarningCard::new(operation, WARNING)),
+                        )
+                        .into_any_element(),
+                )],
+            ))
+            .into_any_element()
+    }
 }
 
 impl Component for SwapCard {
@@ -384,6 +562,93 @@ impl Component for SwapCard {
                 )],
             ))
             .child(example_group_with_title(
+                "Network modes",
+                vec![single_example(
+                    "Demo fixtures, live regtest routes, and verified regtest settlement",
+                    v_flex()
+                        .gap_2()
+                        .child(demo_card())
+                        .child(
+                            regtest_card(
+                                SwapAsset::Lightning,
+                                SwapAsset::Bitcoin,
+                                SwapStage::Quote,
+                            )
+                            .quote_kind(SwapQuoteKind::Indicative),
+                        )
+                        .child(
+                            regtest_card(
+                                SwapAsset::Lightning,
+                                SwapAsset::Bitcoin,
+                                SwapStage::Contract,
+                            )
+                            .without_fee(),
+                        )
+                        .child(
+                            regtest_card(
+                                SwapAsset::Bitcoin,
+                                SwapAsset::Lightning,
+                                SwapStage::Settled,
+                            )
+                            .without_fee(),
+                        )
+                        .into_any_element(),
+                )],
+            ))
+            .child(example_group_with_title(
+                "Demo asset pairs",
+                vec![single_example(
+                    "Every directed fixture pair across Lightning, Bitcoin, and Liquid Bitcoin",
+                    v_flex()
+                        .gap_2()
+                        .children([
+                            SwapCard::new(
+                                SwapAsset::Lightning,
+                                SwapAsset::Bitcoin,
+                                50_000,
+                                "provider-b",
+                                22,
+                            ),
+                            SwapCard::new(
+                                SwapAsset::Lightning,
+                                SwapAsset::Liquid,
+                                50_000,
+                                "provider-b",
+                                22,
+                            ),
+                            SwapCard::new(
+                                SwapAsset::Bitcoin,
+                                SwapAsset::Lightning,
+                                50_000,
+                                "provider-b",
+                                22,
+                            ),
+                            SwapCard::new(
+                                SwapAsset::Bitcoin,
+                                SwapAsset::Liquid,
+                                50_000,
+                                "provider-b",
+                                22,
+                            ),
+                            SwapCard::new(
+                                SwapAsset::Liquid,
+                                SwapAsset::Lightning,
+                                50_000,
+                                "provider-b",
+                                22,
+                            ),
+                            SwapCard::new(
+                                SwapAsset::Liquid,
+                                SwapAsset::Bitcoin,
+                                50_000,
+                                "provider-b",
+                                22,
+                            ),
+                        ])
+                        .into_any_element(),
+                )],
+            ))
+            .child(example_group_with_title(
                 "Stages",
                 vec![single_example(
                     "Every lifecycle stage, including the always-drawn exit",
@@ -429,6 +694,20 @@ mod tests {
         assert_eq!(format_sats(950), "950 sats");
         assert_eq!(format_sats(50_000), "50,000 sats");
         assert_eq!(format_sats(1_234_567), "1,234,567 sats");
+    }
+
+    #[test]
+    fn network_and_quote_labels_are_explicit() {
+        assert_eq!(SwapNetwork::Demo.label(), "demo");
+        assert_eq!(SwapNetwork::Regtest.label(), "regtest");
+        assert_eq!(
+            SwapQuoteKind::Firm.verification(),
+            "firm quote · exact terms awaiting execution"
+        );
+        assert_eq!(
+            SwapQuoteKind::Indicative.verification(),
+            "indicative route · signed quotes obtained at execution"
+        );
     }
 
     #[test]

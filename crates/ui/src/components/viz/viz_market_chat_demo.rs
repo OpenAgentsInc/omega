@@ -4,7 +4,7 @@ use documented::Documented;
 use gpui::{Animation, AnimationExt as _, px, relative};
 
 use crate::CopyButton;
-use crate::components::viz::{NetworkCard, VizPalette, demo_card, demo_stage, live_shape_fixture};
+use crate::components::viz::{NetworkCard, VizPalette, demo_card, demo_shape_fixture, demo_stage};
 use crate::prelude::*;
 
 /// The primary-interface user bubble, verbatim from the transcript renderer,
@@ -62,8 +62,7 @@ fn agent_message(index: usize, text: &'static str, cx: &App) -> gpui::AnyElement
 
 /// One conversation exercising both market cards: the person asks what the
 /// network looks like and gets the inline map, then requests a swap and
-/// watches the swap card walk its lifecycle. Pure demo data; the second pass
-/// wires both cards to the live network.
+/// watches the swap card walk its lifecycle. Every value is a demo fixture.
 #[derive(IntoElement, RegisterComponent, Documented)]
 pub struct MarketChatDemo {
     /// 0..=1 through the replay loop; drives the network pulses and the swap
@@ -100,7 +99,7 @@ impl Default for MarketChatDemo {
 
 impl RenderOnce for MarketChatDemo {
     fn render(self, _window: &mut Window, cx: &mut App) -> impl IntoElement {
-        let mut network_card = NetworkCard::new(live_shape_fixture()).time(self.phase * 36.0);
+        let mut network_card = NetworkCard::new(demo_shape_fixture()).time(self.phase * 36.0);
         let mut swap_card = demo_card().stage(demo_stage(self.phase));
         if let Some(palette) = self.palette {
             network_card = network_card.palette(palette);

@@ -390,6 +390,7 @@ mod tests {
                 .child(VizZone::preview(window, cx))
                 .child(VizProgressRail::preview(window, cx))
                 .child(SwapCard::preview(window, cx))
+                .child(MarketWarningCard::preview(window, cx))
                 .child(CloudProvisionCard::preview(window, cx))
                 .child(NetworkPanorama::preview(window, cx))
                 .child(NetworkCard::preview(window, cx))
