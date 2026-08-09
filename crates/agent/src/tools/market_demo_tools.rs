@@ -678,8 +678,8 @@ fn validate_regtest_direction(
     to: MarketAsset,
     amount_sats: u64,
 ) -> Result<(), String> {
-    if !(10_000..=1_000_000).contains(&amount_sats) {
-        return Err("regtest amount_sats must be between 10,000 and 1,000,000".into());
+    if !(100_000..=1_000_000).contains(&amount_sats) {
+        return Err("regtest amount_sats must be between 100,000 and 1,000,000".into());
     }
     match (from, to) {
         (MarketAsset::Lightning, MarketAsset::Bitcoin)
@@ -1688,7 +1688,7 @@ mod tests {
     #[test]
     fn regtest_has_a_closed_direction_and_amount_contract() {
         assert!(
-            validate_regtest_direction(MarketAsset::Lightning, MarketAsset::Bitcoin, 10_000,)
+            validate_regtest_direction(MarketAsset::Lightning, MarketAsset::Bitcoin, 100_000,)
                 .is_ok()
         );
         assert!(
@@ -1696,11 +1696,15 @@ mod tests {
                 .is_ok()
         );
         assert!(
-            validate_regtest_direction(MarketAsset::Lightning, MarketAsset::LiquidBitcoin, 10_000,)
+            validate_regtest_direction(
+                MarketAsset::Lightning,
+                MarketAsset::LiquidBitcoin,
+                100_000,
+            )
                 .is_err()
         );
         assert!(
-            validate_regtest_direction(MarketAsset::Lightning, MarketAsset::Bitcoin, 9_999,)
+            validate_regtest_direction(MarketAsset::Lightning, MarketAsset::Bitcoin, 99_999,)
                 .is_err()
         );
     }

@@ -563,7 +563,7 @@ async function callTool(name, args) {
       if (!ASSETS.includes(from) || !ASSETS.includes(to) || from === to) {
         return toolError("from and to must be distinct assets among LN, BTC, L-BTC");
       }
-      const minimum = network === "regtest" ? 10000 : 1000;
+      const minimum = network === "regtest" ? 100000 : 1000;
       const maximum = network === "regtest" ? 1000000 : 10000000;
       if (!Number.isInteger(amount_sats) || amount_sats < minimum || amount_sats > maximum) {
         return toolError(

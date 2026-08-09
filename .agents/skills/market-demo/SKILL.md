@@ -22,7 +22,7 @@ Every swap tool call must specify one `network` value:
 - `demo` returns deterministic representative fixtures. It moves no funds.
 - `regtest` uses live shared providers and valueless Bitcoin regtest funds.
   The requester verifies both settlement rails. The public service currently
-  supports only `LN → BTC` and `BTC → LN` from 10,000 through 1,000,000 sats.
+  supports only `LN → BTC` and `BTC → LN` from 100,000 through 1,000,000 sats.
 - `mainnet` is blocked. The tools return a warning and send no mainnet request.
 
 Use the network the person names. If they do not name one, use `demo` and say
