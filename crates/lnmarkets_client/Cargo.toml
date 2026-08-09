@@ -14,6 +14,7 @@ path = "src/lnmarkets_client.rs"
 [dependencies]
 anyhow.workspace = true
 async-io.workspace = true
+async-tungstenite = { workspace = true, features = ["async-std-runtime", "async-tls"] }
 base64.workspace = true
 futures.workspace = true
 hmac.workspace = true

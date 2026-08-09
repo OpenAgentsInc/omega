@@ -9299,6 +9299,7 @@ version = "0.1.0"
 dependencies = [
  "anyhow",
  "async-io",
+ "async-tungstenite",
  "base64 0.22.1",
  "futures 0.3.32",
  "hmac",

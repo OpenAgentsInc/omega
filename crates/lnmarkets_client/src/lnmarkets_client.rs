@@ -5,8 +5,13 @@ use std::{
     time::{Duration, Instant, SystemTime, UNIX_EPOCH},
 };
 
+use async_tungstenite::{
+    WebSocketStream,
+    async_std::{ConnectStream, connect_async},
+    tungstenite::Message as WebSocketMessage,
+};
 use base64::{Engine as _, engine::general_purpose::STANDARD as BASE64_STANDARD};
-use futures::{AsyncReadExt as _, lock::Mutex};
+use futures::{AsyncReadExt as _, FutureExt as _, StreamExt as _, lock::Mutex, select};
 use hmac::{Hmac, Mac as _};
 use http_client::{AsyncBody, HttpClient, Method, Request, Response, StatusCode};
 use serde::{Deserialize, Serialize, de::DeserializeOwned};
@@ -215,6 +220,18 @@ pub enum Error {
     ResponseTooLarge,
     #[error("LN Markets request exhausted its retry policy")]
     RetryExhausted,
+    #[error("failed to connect to the LN Markets Stream API: {0}")]
+    StreamConnect(#[source] Box<async_tungstenite::tungstenite::Error>),
+    #[error("LN Markets Stream request timed out")]
+    StreamTimeout,
+    #[error("LN Markets Stream connection closed: {0}")]
+    StreamClosed(String),
+    #[error("LN Markets Stream returned JSON-RPC error {code}: {message}")]
+    StreamRpc { code: i64, message: String },
+    #[error("invalid LN Markets Stream frame: {0}")]
+    InvalidStreamFrame(#[source] serde_json::Error),
+    #[error("unsupported LN Markets Stream topic `{0}`")]
+    InvalidStreamTopic(String),
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -281,6 +298,72 @@ pub struct Account {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ServerTime {
+    pub time: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct BitcoinAddress {
+    pub address: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct LightningDeposit {
+    pub id: String,
+    pub created_at: String,
+    pub amount: DecimalAmount,
+    pub payment_hash: String,
+    pub settled_at: Option<String>,
+    pub comment: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct LightningWithdrawal {
+    pub amount: DecimalAmount,
+    pub created_at: String,
+    pub destination: Option<String>,
+    pub fee: DecimalAmount,
+    pub id: String,
+    pub payment_hash: String,
+    pub status: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct OnChainDeposit {
+    pub amount: DecimalAmount,
+    pub block_height: Option<u64>,
+    pub confirmations: u64,
+    pub created_at: String,
+    pub id: String,
+    pub status: String,
+    pub tx_id: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct OnChainWithdrawal {
+    pub address: String,
+    pub amount: DecimalAmount,
+    pub created_at: String,
+    pub fee: Option<DecimalAmount>,
+    pub id: String,
+    pub status: String,
+    pub tx_id: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AccountNotification {
+    pub id: String,
+    pub created_at: String,
+    pub event: String,
+    pub data: serde_json::Value,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct BestPrice {
     pub ask_price: DecimalAmount,
@@ -316,6 +399,198 @@ pub struct FundingSettlement {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct LeaderboardEntry {
+    pub direction: DecimalAmount,
+    pub pl: DecimalAmount,
+    pub username: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct Leaderboard {
+    pub daily: Vec<LeaderboardEntry>,
+    pub weekly: Vec<LeaderboardEntry>,
+    pub monthly: Vec<LeaderboardEntry>,
+    #[serde(rename = "all-time")]
+    pub all_time: Vec<LeaderboardEntry>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct Candle {
+    pub close: DecimalAmount,
+    pub high: DecimalAmount,
+    pub low: DecimalAmount,
+    pub open: DecimalAmount,
+    pub time: String,
+    pub volume: DecimalAmount,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum CandleResolution {
+    #[serde(rename = "1m")]
+    OneMinute,
+    #[serde(rename = "3m")]
+    ThreeMinutes,
+    #[serde(rename = "5m")]
+    FiveMinutes,
+    #[serde(rename = "10m")]
+    TenMinutes,
+    #[serde(rename = "15m")]
+    FifteenMinutes,
+    #[serde(rename = "30m")]
+    ThirtyMinutes,
+    #[serde(rename = "45m")]
+    FortyFiveMinutes,
+    #[serde(rename = "1h")]
+    OneHour,
+    #[serde(rename = "2h")]
+    TwoHours,
+    #[serde(rename = "3h")]
+    ThreeHours,
+    #[serde(rename = "4h")]
+    FourHours,
+    #[serde(rename = "1d")]
+    OneDay,
+    #[serde(rename = "1w")]
+    OneWeek,
+    #[serde(rename = "1month")]
+    OneMonth,
+    #[serde(rename = "3months")]
+    ThreeMonths,
+}
+
+impl fmt::Display for CandleResolution {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        let value = match self {
+            Self::OneMinute => "1m",
+            Self::ThreeMinutes => "3m",
+            Self::FiveMinutes => "5m",
+            Self::TenMinutes => "10m",
+            Self::FifteenMinutes => "15m",
+            Self::ThirtyMinutes => "30m",
+            Self::FortyFiveMinutes => "45m",
+            Self::OneHour => "1h",
+            Self::TwoHours => "2h",
+            Self::ThreeHours => "3h",
+            Self::FourHours => "4h",
+            Self::OneDay => "1d",
+            Self::OneWeek => "1w",
+            Self::OneMonth => "1month",
+            Self::ThreeMonths => "3months",
+        };
+        formatter.write_str(value)
+    }
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct CandlesQuery {
+    pub from: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub to: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub limit: Option<u16>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub cursor: Option<String>,
+    #[serde(rename = "range")]
+    pub resolution: CandleResolution,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct FuturesCrossPosition {
+    pub delta_pl: DecimalAmount,
+    pub entry_price: Option<DecimalAmount>,
+    pub funding_fees: DecimalAmount,
+    pub id: String,
+    pub initial_margin: DecimalAmount,
+    pub leverage: DecimalAmount,
+    pub liquidation: Option<DecimalAmount>,
+    pub maintenance_margin: DecimalAmount,
+    pub margin: DecimalAmount,
+    pub quantity: DecimalAmount,
+    pub running_margin: DecimalAmount,
+    pub total_pl: DecimalAmount,
+    pub trading_fees: DecimalAmount,
+    pub updated_at: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct FuturesCrossOrder {
+    pub canceled: bool,
+    pub canceled_at: Option<String>,
+    pub created_at: String,
+    pub filled: bool,
+    pub filled_at: Option<String>,
+    pub id: String,
+    pub open: bool,
+    pub price: DecimalAmount,
+    pub quantity: DecimalAmount,
+    pub side: String,
+    pub trading_fee: DecimalAmount,
+    #[serde(rename = "type")]
+    pub order_type: String,
+    #[serde(default, alias = "uid")]
+    pub client_id: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct FuturesCrossTransfer {
+    pub amount: DecimalAmount,
+    pub id: String,
+    pub time: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct FuturesFundingFee {
+    pub fee: DecimalAmount,
+    pub settlement_id: String,
+    pub time: String,
+    pub trade_id: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct FuturesIsolatedTrade {
+    pub canceled: bool,
+    pub closed: bool,
+    pub closed_at: Option<String>,
+    pub closing_fee: DecimalAmount,
+    pub created_at: String,
+    pub entry_margin: Option<DecimalAmount>,
+    pub entry_price: Option<DecimalAmount>,
+    pub exit_price: Option<DecimalAmount>,
+    pub filled_at: Option<String>,
+    pub id: String,
+    pub leverage: DecimalAmount,
+    pub liquidation: DecimalAmount,
+    pub maintenance_margin: DecimalAmount,
+    pub margin: DecimalAmount,
+    pub open: bool,
+    pub opening_fee: DecimalAmount,
+    pub pl: DecimalAmount,
+    pub price: DecimalAmount,
+    pub quantity: DecimalAmount,
+    pub running: bool,
+    pub side: String,
+    pub stoploss: DecimalAmount,
+    #[serde(default)]
+    pub stoploss_trailing_distance: Option<DecimalAmount>,
+    #[serde(default)]
+    pub sum_cash_in_margin: Option<DecimalAmount>,
+    #[serde(default)]
+    pub sum_cash_in_pl: Option<DecimalAmount>,
+    pub sum_funding_fees: DecimalAmount,
+    pub takeprofit: DecimalAmount,
+    #[serde(rename = "type")]
+    pub trade_type: String,
+    #[serde(default, alias = "uid")]
+    pub client_id: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct Paginated<T> {
     pub data: Vec<T>,
@@ -332,6 +607,30 @@ pub struct Pagination {
     pub limit: Option<u16>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub to: Option<String>,
+}
+
+#[derive(Debug, Clone, Default, Serialize)]
+pub struct LightningDepositsQuery {
+    #[serde(flatten)]
+    pub pagination: Pagination,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub settled: Option<bool>,
+}
+
+#[derive(Debug, Clone, Default, Serialize)]
+pub struct AccountHistoryQuery {
+    #[serde(flatten)]
+    pub pagination: Pagination,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub status: Option<String>,
+}
+
+#[derive(Debug, Clone, Default, Serialize)]
+pub struct NotificationsQuery {
+    #[serde(flatten)]
+    pub pagination: Pagination,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub read: Option<bool>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -439,12 +738,73 @@ impl LnMarketsClient {
         self.network
     }
 
+    pub async fn ping(&self) -> Result<String, Error> {
+        self.get_public("/ping", "").await
+    }
+
+    pub async fn server_time(&self) -> Result<ServerTime, Error> {
+        self.get_public("/time", "").await
+    }
+
     pub async fn account(&self) -> Result<Account, Error> {
         self.get_authenticated("/account", "").await
     }
 
+    pub async fn bitcoin_address(&self) -> Result<BitcoinAddress, Error> {
+        self.get_authenticated("/account/address/bitcoin", "").await
+    }
+
+    pub async fn lightning_deposits(
+        &self,
+        query: &LightningDepositsQuery,
+    ) -> Result<Paginated<LightningDeposit>, Error> {
+        let query = encoded_query(query)?;
+        self.get_authenticated("/account/deposits/lightning", &query)
+            .await
+    }
+
+    pub async fn lightning_withdrawals(
+        &self,
+        query: &AccountHistoryQuery,
+    ) -> Result<Paginated<LightningWithdrawal>, Error> {
+        let query = encoded_query(query)?;
+        self.get_authenticated("/account/withdrawals/lightning", &query)
+            .await
+    }
+
+    pub async fn on_chain_deposits(
+        &self,
+        query: &AccountHistoryQuery,
+    ) -> Result<Paginated<OnChainDeposit>, Error> {
+        let query = encoded_query(query)?;
+        self.get_authenticated("/account/deposits/on-chain", &query)
+            .await
+    }
+
+    pub async fn on_chain_withdrawals(
+        &self,
+        query: &AccountHistoryQuery,
+    ) -> Result<Paginated<OnChainWithdrawal>, Error> {
+        let query = encoded_query(query)?;
+        self.get_authenticated("/account/withdrawals/on-chain", &query)
+            .await
+    }
+
+    pub async fn notifications(
+        &self,
+        query: &NotificationsQuery,
+    ) -> Result<Paginated<AccountNotification>, Error> {
+        let query = encoded_query(query)?;
+        self.get_authenticated("/account/notifications", &query)
+            .await
+    }
+
     pub async fn ticker(&self) -> Result<Ticker, Error> {
         self.get_public("/futures/ticker", "").await
+    }
+
+    pub async fn leaderboard(&self) -> Result<Leaderboard, Error> {
+        self.get_public("/futures/leaderboard", "").await
     }
 
     pub async fn funding_settlements(
@@ -456,6 +816,11 @@ impl LnMarketsClient {
             .await
     }
 
+    pub async fn candles(&self, query: &CandlesQuery) -> Result<Paginated<Candle>, Error> {
+        let query = encoded_query(query)?;
+        self.get_public("/futures/candles", &query).await
+    }
+
     pub async fn best_price(&self) -> Result<BestPrice, Error> {
         self.get_public("/synthetic-usd/best-price", "").await
     }
@@ -463,6 +828,92 @@ impl LnMarketsClient {
     pub async fn swaps(&self, pagination: &Pagination) -> Result<Paginated<Swap>, Error> {
         let query = encoded_query(pagination)?;
         self.get_authenticated("/synthetic-usd/swaps", &query).await
+    }
+
+    pub async fn cross_position(&self) -> Result<FuturesCrossPosition, Error> {
+        self.get_authenticated("/futures/cross/position", "").await
+    }
+
+    pub async fn cross_open_orders(&self) -> Result<Vec<FuturesCrossOrder>, Error> {
+        self.get_authenticated("/futures/cross/orders/open", "")
+            .await
+    }
+
+    pub async fn cross_filled_orders(
+        &self,
+        pagination: &Pagination,
+    ) -> Result<Paginated<FuturesCrossOrder>, Error> {
+        let query = encoded_query(pagination)?;
+        self.get_authenticated("/futures/cross/orders/filled", &query)
+            .await
+    }
+
+    pub async fn cross_funding_fees(
+        &self,
+        pagination: &Pagination,
+    ) -> Result<Paginated<FuturesFundingFee>, Error> {
+        let query = encoded_query(pagination)?;
+        self.get_authenticated("/futures/cross/funding-fees", &query)
+            .await
+    }
+
+    pub async fn cross_transfers(
+        &self,
+        pagination: &Pagination,
+    ) -> Result<Paginated<FuturesCrossTransfer>, Error> {
+        let query = encoded_query(pagination)?;
+        self.get_authenticated("/futures/cross/transfers", &query)
+            .await
+    }
+
+    pub async fn isolated_open_trades(&self) -> Result<Vec<FuturesIsolatedTrade>, Error> {
+        self.get_authenticated("/futures/isolated/trades/open", "")
+            .await
+    }
+
+    pub async fn isolated_running_trades(&self) -> Result<Vec<FuturesIsolatedTrade>, Error> {
+        self.get_authenticated("/futures/isolated/trades/running", "")
+            .await
+    }
+
+    pub async fn isolated_closed_trades(
+        &self,
+        pagination: &Pagination,
+    ) -> Result<Paginated<FuturesIsolatedTrade>, Error> {
+        let query = encoded_query(pagination)?;
+        self.get_authenticated("/futures/isolated/trades/closed", &query)
+            .await
+    }
+
+    pub async fn isolated_canceled_trades(
+        &self,
+        pagination: &Pagination,
+    ) -> Result<Paginated<FuturesIsolatedTrade>, Error> {
+        let query = encoded_query(pagination)?;
+        self.get_authenticated("/futures/isolated/trades/canceled", &query)
+            .await
+    }
+
+    pub async fn isolated_funding_fees(
+        &self,
+        pagination: &Pagination,
+        trade_id: Option<&str>,
+    ) -> Result<Paginated<FuturesFundingFee>, Error> {
+        #[derive(Serialize)]
+        #[serde(rename_all = "camelCase")]
+        struct Query<'a> {
+            #[serde(flatten)]
+            pagination: &'a Pagination,
+            #[serde(skip_serializing_if = "Option::is_none")]
+            trade_id: Option<&'a str>,
+        }
+
+        let query = encoded_query(&Query {
+            pagination,
+            trade_id,
+        })?;
+        self.get_authenticated("/futures/isolated/funding-fees", &query)
+            .await
     }
 
     pub async fn new_swap(&self, swap: &NewSwapRequest) -> Result<NewSwapResult, Error> {
@@ -558,6 +1009,388 @@ impl LnMarketsClient {
         }
         *next_request = Instant::now() + interval;
     }
+}
+
+const STREAM_REQUEST_TIMEOUT: Duration = Duration::from_secs(10);
+const MAX_STREAM_FRAME_BYTES: usize = 65_536;
+
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(transparent)]
+pub struct StreamTopic(String);
+
+impl StreamTopic {
+    pub fn new(topic: impl Into<String>) -> Result<Self, Error> {
+        let topic = topic.into();
+        if is_supported_stream_topic(&topic) {
+            Ok(Self(topic))
+        } else {
+            Err(Error::InvalidStreamTopic(topic))
+        }
+    }
+
+    pub fn as_str(&self) -> &str {
+        &self.0
+    }
+
+    pub fn is_private(&self) -> bool {
+        matches!(
+            self.0.as_str(),
+            "wallet/deposit"
+                | "wallet/withdrawal"
+                | "futures/inverse/btc_usd/isolated/trades"
+                | "futures/inverse/btc_usd/cross/orders"
+                | "futures/inverse/btc_usd/cross/position"
+        )
+    }
+}
+
+impl fmt::Display for StreamTopic {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str(self.as_str())
+    }
+}
+
+impl FromStr for StreamTopic {
+    type Err = Error;
+
+    fn from_str(value: &str) -> Result<Self, Self::Err> {
+        Self::new(value)
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct StreamEvent {
+    pub topic: StreamTopic,
+    pub data: serde_json::Value,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct StreamAuthentication {
+    pub authenticated: bool,
+    pub permissions: Vec<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct StreamSubscription {
+    pub subscribed: Vec<StreamTopic>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct StreamHello {
+    pub version: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct StreamTime {
+    pub time: u64,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct StreamIdentity {
+    pub api_key: String,
+    pub user_id: String,
+    pub permissions: Vec<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct StreamUnsubscription {
+    pub unsubscribed: Vec<StreamTopic>,
+}
+
+pub struct LnMarketsStreamClient {
+    socket: WebSocketStream<ConnectStream>,
+    next_request_id: u64,
+}
+
+fn stream_error(error: async_tungstenite::tungstenite::Error) -> Error {
+    Error::StreamConnect(Box::new(error))
+}
+
+impl LnMarketsStreamClient {
+    pub async fn connect(network: Network) -> Result<Self, Error> {
+        let connect = connect_async(network.stream_api_url()).fuse();
+        let timeout =
+            futures::FutureExt::fuse(async_io::Timer::at(Instant::now() + STREAM_REQUEST_TIMEOUT));
+        futures::pin_mut!(connect, timeout);
+        let (socket, _response) = select! {
+            result = connect => result.map_err(stream_error)?,
+            _ = timeout => return Err(Error::StreamTimeout),
+        };
+        Ok(Self {
+            socket,
+            next_request_id: 1,
+        })
+    }
+
+    pub async fn hello(
+        &mut self,
+        client_name: &str,
+        client_version: &str,
+    ) -> Result<StreamHello, Error> {
+        self.request(
+            "hello",
+            Some(serde_json::json!({
+                "clientName": client_name,
+                "clientVersion": client_version,
+            })),
+        )
+        .await
+    }
+
+    pub async fn ping(&mut self) -> Result<String, Error> {
+        self.request("ping", None).await
+    }
+
+    pub async fn server_time(&mut self) -> Result<StreamTime, Error> {
+        self.request("time", None).await
+    }
+
+    pub async fn authenticate(
+        &mut self,
+        credentials: &Credentials,
+    ) -> Result<StreamAuthentication, Error> {
+        let timestamp = current_timestamp_millis()?;
+        let nonce = format!("{:032x}", rand::random::<u128>());
+        let signature = stream_signature(credentials.secret(), &timestamp, &nonce)?;
+        self.request(
+            "authenticate",
+            Some(serde_json::json!({
+                "key": credentials.access_key(),
+                "signature": signature,
+                "timestamp": timestamp.parse::<u64>().map_err(|_| Error::InvalidSystemTime)?,
+                "passphrase": credentials.passphrase(),
+                "nonce": nonce,
+            })),
+        )
+        .await
+    }
+
+    pub async fn subscribe(&mut self, topics: &[StreamTopic]) -> Result<StreamSubscription, Error> {
+        if topics.is_empty() {
+            return Err(Error::InvalidStreamTopic(
+                "at least one topic is required".into(),
+            ));
+        }
+        self.request("subscribe", Some(serde_json::json!({ "topics": topics })))
+            .await
+    }
+
+    pub async fn whoami(&mut self) -> Result<StreamIdentity, Error> {
+        self.request("whoami", None).await
+    }
+
+    pub async fn unsubscribe(
+        &mut self,
+        topics: &[StreamTopic],
+    ) -> Result<StreamUnsubscription, Error> {
+        self.request("unsubscribe", Some(serde_json::json!({ "topics": topics })))
+            .await
+    }
+
+    pub async fn unsubscribe_all(&mut self) -> Result<StreamUnsubscription, Error> {
+        self.request("unsubscribeAll", None).await
+    }
+
+    pub async fn collect_events(
+        &mut self,
+        max_events: usize,
+        timeout: Duration,
+    ) -> Result<Vec<StreamEvent>, Error> {
+        let max_events = max_events.clamp(1, 100);
+        let deadline = Instant::now() + timeout.min(Duration::from_secs(30));
+        let mut events = Vec::with_capacity(max_events);
+        while events.len() < max_events {
+            let next = self.socket.next().fuse();
+            let timeout = futures::FutureExt::fuse(async_io::Timer::at(deadline));
+            futures::pin_mut!(next, timeout);
+            let message = select! {
+                message = next => match message {
+                    Some(message) => message.map_err(stream_error)?,
+                    None => return Err(Error::StreamClosed("connection ended".into())),
+                },
+                _ = timeout => break,
+            };
+            if let Some(event) = self.handle_event_message(message).await? {
+                events.push(event);
+            }
+        }
+        Ok(events)
+    }
+
+    pub async fn close(mut self) -> Result<(), Error> {
+        self.socket.close(None).await.map_err(stream_error)
+    }
+
+    async fn request<T: DeserializeOwned>(
+        &mut self,
+        method: &str,
+        params: Option<serde_json::Value>,
+    ) -> Result<T, Error> {
+        let id = self.next_request_id.to_string();
+        self.next_request_id = self.next_request_id.saturating_add(1);
+        let mut frame = serde_json::json!({
+            "jsonrpc": "2.0",
+            "id": id,
+            "method": method,
+        });
+        if let Some(params) = params {
+            frame["params"] = params;
+        }
+        let payload = serde_json::to_string(&frame).map_err(Error::Serialize)?;
+        self.socket
+            .send(WebSocketMessage::Text(payload.into()))
+            .await
+            .map_err(stream_error)?;
+
+        let deadline = Instant::now() + STREAM_REQUEST_TIMEOUT;
+        loop {
+            let next = self.socket.next().fuse();
+            let timeout = futures::FutureExt::fuse(async_io::Timer::at(deadline));
+            futures::pin_mut!(next, timeout);
+            let message = select! {
+                message = next => match message {
+                    Some(message) => message.map_err(stream_error)?,
+                    None => return Err(Error::StreamClosed("connection ended".into())),
+                },
+                _ = timeout => return Err(Error::StreamTimeout),
+            };
+            let Some(frame) = self.decode_json_message(message).await? else {
+                continue;
+            };
+            if frame.id.as_deref() != Some(id.as_str()) {
+                continue;
+            }
+            if let Some(error) = frame.error {
+                return Err(Error::StreamRpc {
+                    code: error.code,
+                    message: error.message,
+                });
+            }
+            let result = frame.result.ok_or_else(|| {
+                Error::InvalidStreamFrame(serde_json::Error::io(io::Error::new(
+                    io::ErrorKind::InvalidData,
+                    "response has no result",
+                )))
+            })?;
+            return serde_json::from_value(result).map_err(Error::InvalidStreamFrame);
+        }
+    }
+
+    async fn handle_event_message(
+        &mut self,
+        message: WebSocketMessage,
+    ) -> Result<Option<StreamEvent>, Error> {
+        let Some(frame) = self.decode_json_message(message).await? else {
+            return Ok(None);
+        };
+        let Some(params) = frame.params else {
+            return Ok(None);
+        };
+        if frame.method.as_deref() != Some("subscription") {
+            return Ok(None);
+        }
+        Ok(Some(StreamEvent {
+            topic: StreamTopic::new(params.topic)?,
+            data: params.data,
+        }))
+    }
+
+    async fn decode_json_message(
+        &mut self,
+        message: WebSocketMessage,
+    ) -> Result<Option<StreamRpcFrame>, Error> {
+        let bytes = match message {
+            WebSocketMessage::Text(text) => text.as_bytes().to_vec(),
+            WebSocketMessage::Binary(bytes) => bytes.to_vec(),
+            WebSocketMessage::Ping(bytes) => {
+                self.socket
+                    .send(WebSocketMessage::Pong(bytes))
+                    .await
+                    .map_err(stream_error)?;
+                return Ok(None);
+            }
+            WebSocketMessage::Pong(_) => return Ok(None),
+            WebSocketMessage::Close(frame) => {
+                return Err(Error::StreamClosed(
+                    frame
+                        .map(|frame| frame.reason.to_string())
+                        .unwrap_or_else(|| "server closed the connection".into()),
+                ));
+            }
+            _ => return Ok(None),
+        };
+        if bytes.len() > MAX_STREAM_FRAME_BYTES {
+            return Err(Error::StreamClosed("frame exceeded 64 KiB".into()));
+        }
+        serde_json::from_slice(&bytes)
+            .map(Some)
+            .map_err(Error::InvalidStreamFrame)
+    }
+}
+
+#[derive(Debug, Deserialize)]
+struct StreamRpcFrame {
+    #[serde(default)]
+    id: Option<String>,
+    #[serde(default)]
+    method: Option<String>,
+    #[serde(default)]
+    result: Option<serde_json::Value>,
+    #[serde(default)]
+    error: Option<StreamRpcError>,
+    #[serde(default)]
+    params: Option<StreamRpcSubscription>,
+}
+
+#[derive(Debug, Deserialize)]
+struct StreamRpcError {
+    code: i64,
+    message: String,
+}
+
+#[derive(Debug, Deserialize)]
+struct StreamRpcSubscription {
+    topic: String,
+    data: serde_json::Value,
+}
+
+fn is_supported_stream_topic(topic: &str) -> bool {
+    matches!(
+        topic,
+        "announcements"
+            | "wallet/deposit"
+            | "wallet/withdrawal"
+            | "futures/inverse/btc_usd/ticker"
+            | "futures/inverse/btc_usd/lastPrice"
+            | "futures/inverse/btc_usd/index"
+            | "futures/inverse/btc_usd/buckets"
+            | "futures/inverse/btc_usd/funding"
+            | "futures/inverse/btc_usd/isolated/trades"
+            | "futures/inverse/btc_usd/cross/orders"
+            | "futures/inverse/btc_usd/cross/position"
+    ) || topic
+        .strip_prefix("futures/inverse/btc_usd/ohlc/")
+        .is_some_and(|resolution| {
+            matches!(
+                resolution,
+                "1m" | "3m"
+                    | "5m"
+                    | "10m"
+                    | "15m"
+                    | "30m"
+                    | "45m"
+                    | "1h"
+                    | "2h"
+                    | "3h"
+                    | "4h"
+                    | "1d"
+                    | "1w"
+                    | "1month"
+                    | "3months"
+            )
+        })
 }
 
 pub fn rest_signature(
@@ -900,6 +1733,142 @@ mod tests {
                 .expect_err("503");
             assert!(matches!(error, Error::Api { status, .. } if status.as_u16() == 503));
             assert_eq!(*requests.lock().expect("request counter"), 1);
+        });
+    }
+
+    #[test]
+    fn candles_send_the_documented_cursor_query_and_parse_ohlcv() {
+        smol::block_on(async {
+            let client = FakeHttpClient::create(|request| async move {
+                assert_eq!(request.method(), Method::GET);
+                assert_eq!(request.uri().path(), "/v3/futures/candles");
+                assert_eq!(
+                    request.uri().query(),
+                    Some("from=2026-08-08T00%3A00%3A00Z&limit=3&cursor=cursor-1&range=1h")
+                );
+                response(
+                    200,
+                    r#"{"data":[{"time":"2026-08-09T05:00:00.000Z","open":64710.5,"high":64714.5,"low":64708.5,"close":64710,"volume":669418}],"nextCursor":"2026-08-09T05:00:00.000Z"}"#,
+                )
+            });
+            let client = LnMarketsClient::public(client, Network::Signet);
+            let candles = client
+                .candles(&CandlesQuery {
+                    from: "2026-08-08T00:00:00Z".into(),
+                    to: None,
+                    limit: Some(3),
+                    cursor: Some("cursor-1".into()),
+                    resolution: CandleResolution::OneHour,
+                })
+                .await
+                .expect("candles");
+            assert_eq!(candles.data.len(), 1);
+            assert_eq!(candles.data[0].volume.to_string(), "669418");
+        });
+    }
+
+    #[test]
+    fn portfolio_reads_use_authenticated_v3_routes() {
+        smol::block_on(async {
+            let client = FakeHttpClient::create(|request| async move {
+                assert_eq!(request.method(), Method::GET);
+                assert_eq!(request.uri().path(), "/v3/futures/cross/position");
+                assert!(request.headers().get("LNM-ACCESS-SIGNATURE").is_some());
+                response(
+                    200,
+                    r#"{"deltaPl":3,"entryPrice":64710.5,"fundingFees":2,"id":"position","initialMargin":1000,"leverage":10,"liquidation":58000,"maintenanceMargin":20,"margin":1200,"quantity":10000,"runningMargin":1000,"totalPl":200,"tradingFees":5,"updatedAt":"2026-08-09T05:00:00.000Z"}"#,
+                )
+            });
+            let credentials = Credentials::new("key", "secret", "passphrase").expect("credentials");
+            let client = LnMarketsClient::authenticated(client, Network::Signet, credentials);
+            let position = client.cross_position().await.expect("position");
+            assert_eq!(position.quantity.to_string(), "10000");
+            assert_eq!(position.total_pl.to_string(), "200");
+        });
+    }
+
+    #[test]
+    fn account_history_reads_send_filters_and_parse_wallet_activity() {
+        smol::block_on(async {
+            let client = FakeHttpClient::create(|request| async move {
+                assert_eq!(request.method(), Method::GET);
+                assert_eq!(request.uri().path(), "/v3/account/withdrawals/lightning");
+                assert_eq!(request.uri().query(), Some("limit=25&status=processed"));
+                assert!(request.headers().get("LNM-ACCESS-SIGNATURE").is_some());
+                response(
+                    200,
+                    r#"{"data":[{"amount":1200,"createdAt":"2026-08-09T05:00:00.000Z","destination":null,"fee":2,"id":"withdrawal","paymentHash":"hash","status":"processed"}],"nextCursor":null}"#,
+                )
+            });
+            let credentials = Credentials::new("key", "secret", "passphrase").expect("credentials");
+            let client = LnMarketsClient::authenticated(client, Network::Signet, credentials);
+            let withdrawals = client
+                .lightning_withdrawals(&AccountHistoryQuery {
+                    pagination: Pagination {
+                        limit: Some(25),
+                        ..Pagination::default()
+                    },
+                    status: Some("processed".into()),
+                })
+                .await
+                .expect("withdrawals");
+            assert_eq!(withdrawals.data.len(), 1);
+            assert_eq!(withdrawals.data[0].amount.to_string(), "1200");
+        });
+    }
+
+    #[test]
+    fn stream_topics_cover_public_and_private_contracts() {
+        let ticker = StreamTopic::new("futures/inverse/btc_usd/ticker").expect("ticker");
+        assert!(!ticker.is_private());
+        let ohlc = StreamTopic::new("futures/inverse/btc_usd/ohlc/1m").expect("ohlc");
+        assert!(!ohlc.is_private());
+        let position =
+            StreamTopic::new("futures/inverse/btc_usd/cross/position").expect("position");
+        assert!(position.is_private());
+        assert!(StreamTopic::new("futures/inverse/btc_usd/ohlc/2m").is_err());
+    }
+
+    #[test]
+    #[ignore = "contacts the public LN Markets Signet Stream API"]
+    fn live_signet_stream_delivers_market_events() {
+        smol::block_on(async {
+            let mut client = LnMarketsStreamClient::connect(Network::Signet)
+                .await
+                .expect("connect");
+            let hello = client
+                .hello("omega-test", env!("CARGO_PKG_VERSION"))
+                .await
+                .expect("hello");
+            assert_eq!(hello.version, "1.0.0");
+            assert_eq!(client.ping().await.expect("ping"), "pong");
+            assert!(client.server_time().await.expect("time").time > 0);
+            let topics = [
+                StreamTopic::new("futures/inverse/btc_usd/ticker").expect("ticker"),
+                StreamTopic::new("futures/inverse/btc_usd/lastPrice").expect("last price"),
+                StreamTopic::new("futures/inverse/btc_usd/index").expect("index"),
+                StreamTopic::new("futures/inverse/btc_usd/buckets").expect("buckets"),
+                StreamTopic::new("futures/inverse/btc_usd/funding").expect("funding"),
+                StreamTopic::new("futures/inverse/btc_usd/ohlc/1m").expect("ohlc"),
+            ];
+            let subscription = client.subscribe(&topics).await.expect("subscribe");
+            assert_eq!(subscription.subscribed.len(), topics.len());
+            let events = client
+                .collect_events(1, Duration::from_secs(10))
+                .await
+                .expect("events");
+            let unsubscription = client.unsubscribe(&topics).await.expect("unsubscribe");
+            assert_eq!(unsubscription.unsubscribed.len(), topics.len());
+            assert!(
+                client
+                    .unsubscribe_all()
+                    .await
+                    .expect("unsubscribe all")
+                    .unsubscribed
+                    .is_empty()
+            );
+            client.close().await.expect("close");
+            assert!(!events.is_empty(), "the Signet stream emitted no events");
         });
     }
 
