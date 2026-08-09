@@ -50,6 +50,34 @@ that the result is a fixture. Do not silently treat `regtest` as `demo`.
   through `payment → relay → provider → connected`. It creates no payment or
   infrastructure. The default region is `us-central1`.
 
+## LN Markets
+
+LN Markets is separate from the OpenAgents swap market. Use the built-in
+`lnmarkets_*` tools directly. Do not delegate an LN Markets question and do not
+substitute a `market_*` fixture.
+
+- `lnmarkets_account` reads the configured Signet or Mainnet account.
+- `lnmarkets_market_data` has four views:
+  - `snapshot` reads the current ticker, index, funding, liquidity price tiers,
+    and synthetic USD quote. This is the default when `request` is omitted.
+  - `history` reads paginated OHLCV candles and funding settlements. Supply an
+    ISO 8601 `from` time, a candle resolution, and a bounded limit.
+  - `portfolio` reads the account, cross position and orders, isolated trades,
+    funding fees, transfers, wallet deposit and withdrawal history,
+    notifications, and synthetic USD swap history. It uses the saved credential
+    and the requested network must match that credential.
+  - `live` opens a bounded LN Markets WebSocket subscription and returns the
+    observed events. Public market topics need no credential. Private
+    position, order, trade, deposit, and withdrawal topics authenticate with
+    the saved credential and require its network and permissions.
+- `lnmarkets_swap` converts between BTC and synthetic USD on the selected LN
+  Markets account. This is separate from futures order placement.
+
+Use REST history for analysis over a time range and the bounded WebSocket view
+for current changes. Never claim a stream is still active after the tool
+returns. Report any per-section `ok: false` result from `portfolio`; it usually
+means the API key lacks that read scope.
+
 ## The flow
 
 1. **Network question** ("what does the network look like?"): call

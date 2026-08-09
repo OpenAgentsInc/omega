@@ -28899,8 +28899,9 @@ mod tests {
         }
     }
 
-    /// OMEGA-DELTA-0241. The owner-held LN Markets credential stays in Omega,
-    /// and only signet swap effects can leave the direct v3 client.
+    /// OMEGA-DELTA-0241. The owner-held LN Markets credential stays in Omega.
+    /// REST history and portfolio reads plus bounded Stream API subscriptions
+    /// share the direct client; effects require the configured network.
     #[test]
     fn ln_markets_uses_one_local_direct_fail_closed_client() {
         let client = without_comments(&read_repository_file(
@@ -28911,6 +28912,11 @@ mod tests {
             "api.lnmarkets.com/v3",
             "LNM-ACCESS-SIGNATURE",
             "rest_signature",
+            "LnMarketsStreamClient",
+            "futures/candles",
+            "futures/cross/position",
+            "futures/isolated/trades/running",
+            "futures/inverse/btc_usd/ohlc/",
             "CREDENTIAL_STORAGE_URL",
             "authentication_failure_is_not_retried",
         ] {
@@ -28927,9 +28933,12 @@ mod tests {
             "lnmarkets_account",
             "lnmarkets_market_data",
             "lnmarkets_swap",
+            "LnMarketsMarketDataRequest::History",
+            "LnMarketsMarketDataRequest::Portfolio",
+            "LnMarketsMarketDataRequest::Live",
             "network: LnMarketsNetworkInput",
-            "require_matching_network(configured_network, requested_network)",
-            "No swap was sent",
+            "require_matching_network(configured_network, requested_network, \"swap\")",
+            "No {request_kind} request was sent",
         ] {
             assert!(
                 tools.contains(required),
