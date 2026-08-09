@@ -9343,6 +9343,7 @@ dependencies = [
  "parking_lot",
  "paths",
  "plugin_api",
+ "prediction_events",
  "reqwest_client",
  "review_accounting",
  "schemars 1.0.4",
@@ -13427,6 +13428,21 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "925383efa346730478fb4838dbe9137d2a47675ad789c546d150a6e1dd4ab31c"
 
 [[package]]
+name = "prediction_events"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "parking_lot",
+ "paths",
+ "rusqlite",
+ "serde",
+ "serde_json",
+ "sha2 0.10.9",
+ "tempfile",
+ "trading_mandate",
+]
+
+[[package]]
 name = "presser"
 version = "0.3.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -16438,6 +16454,7 @@ dependencies = [
  "parking_lot",
  "paths",
  "plugin_api",
+ "prediction_events",
  "rusqlite",
  "serde",
  "serde_json",

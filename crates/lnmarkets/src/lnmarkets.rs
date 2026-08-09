@@ -18,6 +18,7 @@ use plugin_api::{
 
 mod agent_tools;
 mod counterparty_exposure;
+mod prediction_resolution;
 mod review_driver;
 mod review_turn;
 mod signet_soak;
@@ -146,6 +147,8 @@ impl plugin_api::OmegaPlugin for LnMarketsPlugin {
             "omega.lnmarkets.features.v1",
             "omega.lnmarkets.ledger.v1",
             "omega.lnmarkets.mandate.v1",
+            "omega.lnmarkets.prediction.v1",
+            "omega.lnmarkets.prediction_summary.v1",
             "omega.lnmarkets.strategy.v1",
             "omega.lnmarkets.backtest_tool.v1",
             "omega.lnmarkets.backtest_history.v1",
@@ -334,6 +337,9 @@ fn start_market_data_service(
                 }
                 if let Err(error) = runtime.process_collected_tick(&collector, at_ms).await {
                     log::warn!("LN Markets strategy tick was not processed: {error:#}");
+                }
+                if let Err(error) = runtime.resolve_matured_predictions(&collector, at_ms) {
+                    log::warn!("LN Markets predictions were not resolved: {error:#}");
                 }
             }
         }

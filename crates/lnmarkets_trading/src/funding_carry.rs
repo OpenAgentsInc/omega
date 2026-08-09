@@ -14,9 +14,9 @@ use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use sha2::{Digest as _, Sha256};
 use strategy_engine::{
-    BacktestExecutionModel, BacktestTick, OrderIntent, OrderKind, OrderQuantity, OrderSide,
-    QuantityUnit, SimulatedSettlement, SimulatedTrade, StrategyProgram, StrategyStep, StrategyTick,
-    VenueExecution, VenueExecutor, VenueProtection, VenueRiskSnapshot,
+    BacktestExecutionModel, BacktestTick, IntentPrediction, OrderIntent, OrderKind, OrderQuantity,
+    OrderSide, QuantityUnit, SimulatedSettlement, SimulatedTrade, StrategyProgram, StrategyStep,
+    StrategyTick, VenueExecution, VenueExecutor, VenueProtection, VenueRiskSnapshot,
 };
 use trading_ledger::{
     AssetId, LedgerAccount, LedgerEntryDraft, LedgerEntryKind, LedgerPosting, LedgerStore,
@@ -684,6 +684,14 @@ fn strategy_intent(
         limit_price: None,
         reduce_only,
         protection,
+        prediction: (!reduce_only).then(|| IntentPrediction {
+            confidence_micros: 600_000,
+            horizon_ms: 60 * 60 * 1_000,
+            resolution_source: "lnmarkets:stored_last_price".into(),
+            flat_tolerance_bps: 10,
+            observation_refs: vec![format!("lnmarkets:features:{occurred_at_ms}")],
+            private_payload_ref: None,
+        }),
         metadata: Value::Object(metadata),
     };
     intent.validate()?;

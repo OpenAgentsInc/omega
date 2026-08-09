@@ -71,7 +71,7 @@ impl SessionReviewDriver for LnMarketsReviewDriver {
     }
 
     fn evidence_tool_names(&self) -> &'static [&'static str] {
-        &["lnmarkets_strategy"]
+        &["lnmarkets_prediction", "lnmarkets_strategy"]
     }
 
     fn record_review_evidence(
@@ -80,6 +80,9 @@ impl SessionReviewDriver for LnMarketsReviewDriver {
         evidence: ReviewTurnEvidence,
         cx: &App,
     ) -> bool {
+        if !valid_prediction_sequence(&evidence.tool_calls) {
+            return false;
+        }
         let cost_record = ReviewCostRecord {
             schema_version: REVIEW_ACCOUNTING_SCHEMA_VERSION,
             turn_id: format!("{session_id}:{}", evidence.at_ms),
@@ -110,6 +113,64 @@ impl SessionReviewDriver for LnMarketsReviewDriver {
         let cost_recorded = record_portfolio_review_evidence(session_id, cost_record, cx);
         let soak_recorded = record_signet_soak_review_turn(session_id, turn, cx);
         cost_recorded && soak_recorded
+    }
+}
+
+fn valid_prediction_sequence(tool_calls: &[ReviewToolCall]) -> bool {
+    let predictions = tool_calls
+        .iter()
+        .enumerate()
+        .filter(|(_, tool_call)| tool_call.name == "lnmarkets_prediction")
+        .collect::<Vec<_>>();
+    let [(prediction_index, prediction)] = predictions.as_slice() else {
+        return false;
+    };
+    let prediction_input = prediction.input.get("value").unwrap_or(&prediction.input);
+    if prediction_input
+        .get("action")
+        .and_then(serde_json::Value::as_str)
+        != Some("record")
+    {
+        return false;
+    }
+    if tool_calls
+        .iter()
+        .take(*prediction_index)
+        .any(|tool_call| tool_call.name == "lnmarkets_strategy")
+    {
+        return false;
+    }
+    let prediction_decision = prediction_input
+        .get("subsequent_decision_id")
+        .and_then(serde_json::Value::as_str);
+    let mut strategy_changes = Vec::new();
+    for (index, tool_call) in tool_calls.iter().enumerate() {
+        if tool_call.name != "lnmarkets_strategy" {
+            continue;
+        }
+        let input = tool_call.input.get("value").unwrap_or(&tool_call.input);
+        if let Some(action @ ("start" | "adjust" | "halt")) =
+            input.get("action").and_then(serde_json::Value::as_str)
+        {
+            strategy_changes.push((index, action, input));
+        }
+    }
+    match strategy_changes.as_slice() {
+        [(strategy_index, "start" | "adjust", strategy_input)] => {
+            *prediction_index < *strategy_index
+                && prediction_decision
+                    == strategy_input
+                        .get("decision_id")
+                        .and_then(serde_json::Value::as_str)
+        }
+        [(strategy_index, "halt", _)] => *prediction_index < *strategy_index,
+        [] => {
+            prediction_input
+                .get("direction")
+                .and_then(serde_json::Value::as_str)
+                == Some("flat")
+        }
+        _ => false,
     }
 }
 
@@ -176,5 +237,74 @@ mod tests {
             }
         );
         assert_eq!(review_disposition(&calls[..1]), ReviewDisposition::NoChange);
+    }
+
+    #[test]
+    fn review_requires_one_prediction_before_a_linked_parameter_change() {
+        let valid = [
+            ReviewToolCall {
+                name: "lnmarkets_prediction".into(),
+                input: serde_json::json!({
+                    "action": "record",
+                    "direction": "up",
+                    "subsequent_decision_id": "decision-1",
+                }),
+            },
+            ReviewToolCall {
+                name: "lnmarkets_strategy".into(),
+                input: serde_json::json!({
+                    "action": "adjust",
+                    "decision_id": "decision-1",
+                    "prediction_id": "prediction:1",
+                }),
+            },
+        ];
+        assert!(valid_prediction_sequence(&valid));
+
+        let reversed = [
+            valid.last().expect("strategy call").clone(),
+            valid.first().expect("prediction call").clone(),
+        ];
+        assert!(!valid_prediction_sequence(&reversed));
+        assert!(!valid_prediction_sequence(&valid[..1]));
+    }
+
+    #[test]
+    fn no_change_review_requires_a_scored_flat_prediction() {
+        let prediction = ReviewToolCall {
+            name: "lnmarkets_prediction".into(),
+            input: serde_json::json!({
+                "action": "record",
+                "direction": "flat",
+                "subsequent_decision_id": "no-change-1",
+            }),
+        };
+        assert!(valid_prediction_sequence(std::slice::from_ref(&prediction)));
+
+        let mut up = prediction;
+        up.input["direction"] = serde_json::json!("up");
+        assert!(!valid_prediction_sequence(&[up]));
+    }
+
+    #[test]
+    fn emergency_halt_keeps_prediction_order_without_requiring_admission_linkage() {
+        let calls = [
+            ReviewToolCall {
+                name: "lnmarkets_prediction".into(),
+                input: serde_json::json!({
+                    "action": "record",
+                    "direction": "down",
+                    "subsequent_decision_id": "halt-1",
+                }),
+            },
+            ReviewToolCall {
+                name: "lnmarkets_strategy".into(),
+                input: serde_json::json!({
+                    "action": "halt",
+                    "reason": "protective stop",
+                }),
+            },
+        ];
+        assert!(valid_prediction_sequence(&calls));
     }
 }

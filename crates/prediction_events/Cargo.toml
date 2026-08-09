@@ -1,31 +1,27 @@
 [package]
-name = "strategy_engine"
+name = "prediction_events"
 version = "0.1.0"
 edition.workspace = true
 publish.workspace = true
 license = "GPL-3.0-or-later"
-description = "Venue-neutral bounded strategy runtime for Omega"
+description = "Append-only scored pre-action prediction records for Omega"
 
 [lints]
 workspace = true
 
 [lib]
-path = "src/strategy_engine.rs"
+path = "src/prediction_events.rs"
 doctest = false
 
 [dependencies]
-agent_wakeup.workspace = true
 anyhow.workspace = true
-async-trait.workspace = true
-futures.workspace = true
-log.workspace = true
 parking_lot.workspace = true
 paths.workspace = true
-plugin_api.workspace = true
-prediction_events.workspace = true
 rusqlite.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 sha2.workspace = true
-trading_ledger.workspace = true
 trading_mandate.workspace = true
+
+[dev-dependencies]
+tempfile.workspace = true

@@ -5,9 +5,9 @@ use lnmarkets_data::FeatureSnapshot;
 use serde::{Deserialize, Serialize};
 use serde_json::json;
 use strategy_engine::{
-    BacktestExecutionModel, BacktestTick, OrderIntent, OrderKind, OrderQuantity, OrderSide,
-    QuantityUnit, SimulatedTrade, StrategyProgram, StrategyStep, StrategyTick, VenueExecution,
-    VenueExecutor, VenueRiskSnapshot,
+    BacktestExecutionModel, BacktestTick, IntentPrediction, OrderIntent, OrderKind, OrderQuantity,
+    OrderSide, QuantityUnit, SimulatedTrade, StrategyProgram, StrategyStep, StrategyTick,
+    VenueExecution, VenueExecutor, VenueRiskSnapshot,
 };
 
 use crate::SyntheticUsdExecutor;
@@ -606,6 +606,14 @@ fn intent(
         limit_price: None,
         reduce_only,
         protection: None,
+        prediction: (!reduce_only).then(|| IntentPrediction {
+            confidence_micros: 600_000,
+            horizon_ms: 60 * 60 * 1_000,
+            resolution_source: "lnmarkets:stored_last_price".into(),
+            flat_tolerance_bps: 10,
+            observation_refs: vec![format!("lnmarkets:features:{occurred_at_ms}")],
+            private_payload_ref: None,
+        }),
         metadata: json!({
             "schema": THRESHOLD_SWING_SCHEMA,
             "occurred_at_ms": occurred_at_ms,

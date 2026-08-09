@@ -234,6 +234,7 @@ pub const ENFORCED_DELTAS: &[&str] = &[
     "OMEGA-DELTA-0261",
     "OMEGA-DELTA-0262",
     "OMEGA-DELTA-0263",
+    "OMEGA-DELTA-0264",
 ];
 
 /// OMEGA-DELTA-0204. Every control the composer's bar offers, written twice:
@@ -30189,8 +30190,8 @@ mod tests {
         let tools = without_comments(&read_repository_file("crates/lnmarkets/src/agent_tools.rs"));
         for required in [
             "ThresholdSwing",
-            "start_threshold_swing(client, config, at_ms, cx)",
-            "runtime.adjust_threshold_swing(config, at_ms)",
+            "start_threshold_swing(client, config, at_ms, prediction, cx)",
+            "adjust_threshold_swing(config, at_ms, prediction)",
             "runtime.halt_threshold_swing(at_ms, reason)",
         ] {
             assert!(
@@ -30626,6 +30627,71 @@ mod tests {
             runtime.contains("measurement only")
                 && !runtime.contains("CounterpartyExposureMandate"),
             "OMEGA-DELTA-0263: exposure became an enforcement or mandate dimension"
+        );
+    }
+
+    /// Every scheduled review and risk-increasing strategy action retains a
+    /// pre-action forecast that can later be resolved and scored.
+    #[test]
+    fn pre_action_predictions_are_append_only_scored_and_enforced() {
+        let predictions = without_comments(&read_repository_file(
+            "crates/prediction_events/src/prediction_events.rs",
+        ));
+        for required in [
+            "pub struct PredictionEventDraft",
+            "pub struct PredictionStore",
+            "prediction_events_no_update",
+            "prediction_events_no_delete",
+            "prediction_scores_no_update",
+            "pub fn require_admission(",
+            "pub fn resolve_matured(",
+            "pub fn summary(",
+            "admission_requires_exact_pre_action_linkage",
+            "aggregates_report_calibration_sharpness_and_no_change_frequency",
+        ] {
+            assert!(
+                predictions.contains(required),
+                "OMEGA-DELTA-0264: prediction log lost `{required}`"
+            );
+        }
+
+        let engine = without_comments(&read_repository_file(
+            "crates/strategy_engine/src/strategy_engine.rs",
+        ));
+        for required in [
+            "pub prediction: Option<IntentPrediction>",
+            "risk_increasing_intent_without_prediction_halts_before_mutation",
+            "strategy_parameter_change_requires_an_existing_linked_prediction",
+            "risk_reducing_cancel",
+            "venue_side_protective_action",
+        ] {
+            assert!(
+                engine.contains(required),
+                "OMEGA-DELTA-0264: strategy admission lost `{required}`"
+            );
+        }
+
+        let driver = without_comments(&read_repository_file(
+            "crates/lnmarkets/src/review_driver.rs",
+        ));
+        assert!(
+            driver.contains("lnmarkets_prediction")
+                && driver.contains("valid_prediction_sequence")
+                && driver.contains("no_change_review_requires_a_scored_flat_prediction"),
+            "OMEGA-DELTA-0264: scheduled reviews no longer require predictions first"
+        );
+        let agent = without_comments(&read_repository_file("crates/agent/src/agent.rs"));
+        assert!(
+            agent.contains("turn_messages.into_iter().rev()"),
+            "OMEGA-DELTA-0264: review evidence lost chronological tool-call order"
+        );
+        let resolver = without_comments(&read_repository_file(
+            "crates/lnmarkets/src/prediction_resolution.rs",
+        ));
+        assert!(
+            resolver.contains("STORED_LAST_PRICE_SOURCE")
+                && resolver.contains("fixed_horizon_resolves_from_stored_signet_prices"),
+            "OMEGA-DELTA-0264: stored-price resolution disappeared"
         );
     }
 }

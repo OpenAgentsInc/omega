@@ -2500,10 +2500,14 @@ async fn collect_review_turn_evidence(
     let mut reasoning_note_present = false;
     let mut tracked_tool_calls = 0_u32;
     let mut tool_calls = Vec::new();
+    let mut turn_messages = Vec::new();
     for message in db_thread.messages.iter().rev() {
         if message.role() == language_model::Role::User {
             break;
         }
+        turn_messages.push(message);
+    }
+    for message in turn_messages.into_iter().rev() {
         for request in message.to_request() {
             for content in request.content {
                 match content {

@@ -8,14 +8,18 @@ use lnmarkets_trading::{
     BacktestCostModel, BacktestPolicy, BacktestReport, BacktestStore, BacktestTick,
     FundingCarryBacktestModel, FundingCarryConfig, FundingCarryExecutor, FundingCarryFeatures,
     FundingCarryInstrument, FundingCarryProgram, MemoryLifecycleSink, MemoryWakeupSink,
-    RebalanceBacktestModel, RebalanceToTargetConfig, RebalanceToTargetProgram, StrategyCommand,
-    StrategyEngine, StrategyHaltReason, StrategyLifecycleEvent, StrategyServiceHandle,
-    StrategyTick, SyntheticUsdExecutor, ThresholdSwingBacktestModel, ThresholdSwingConfig,
-    ThresholdSwingExecutor, ThresholdSwingProgram, background_service, collected_backtest_replay,
-    funding_carry_features, run_backtest,
+    PredictionAdmission, RebalanceBacktestModel, RebalanceToTargetConfig, RebalanceToTargetProgram,
+    StrategyCommand, StrategyEngine, StrategyHaltReason, StrategyLifecycleEvent,
+    StrategyServiceHandle, StrategyTick, SyntheticUsdExecutor, ThresholdSwingBacktestModel,
+    ThresholdSwingConfig, ThresholdSwingExecutor, ThresholdSwingProgram, background_service,
+    collected_backtest_replay, funding_carry_features, run_backtest,
 };
 use parking_lot::Mutex;
 use plugin_api::VenueCapabilityGuard;
+use prediction_events::{
+    MandateScope, PredictionActor, PredictionEvent, PredictionEventDraft, PredictionScore,
+    PredictionStore, PredictionSummary,
+};
 use review_accounting::{ReviewAccountingStore, ReviewCostRecord, ReviewCostSummary};
 use serde::Serialize;
 use serde_json::Value;
@@ -26,6 +30,7 @@ use trading_mandate::{
     MandateRevision, MandateSnapshot, MandateStore, ReviewCadence, TradingNetwork,
 };
 
+use crate::prediction_resolution::StoredPriceOutcomeSource;
 use crate::review_turn::{PortfolioReview, hourly_start};
 use crate::{SoakLimitBreach, SoakReviewTurn, SoakWindow};
 
@@ -72,6 +77,7 @@ pub struct ReviewTurnHistory {
 
 pub struct TradingRuntime {
     ledger: LedgerStore,
+    predictions: PredictionStore,
     mandate: MandateStore,
     backtests: BacktestStore,
     lifecycle: MemoryLifecycleSink,
@@ -91,6 +97,8 @@ impl TradingRuntime {
     pub fn open_default(venue_capability_guard: VenueCapabilityGuard) -> Result<Self> {
         Ok(Self {
             ledger: LedgerStore::open_default().context("could not open the trading ledger")?,
+            predictions: PredictionStore::open_default()
+                .context("could not open prediction events")?,
             mandate: MandateStore::open_default().context("could not open the trading mandate")?,
             backtests: BacktestStore::open_default().context("could not open backtest reports")?,
             lifecycle: MemoryLifecycleSink::default(),
@@ -114,6 +122,42 @@ impl TradingRuntime {
 
     pub fn ledger_entries(&self, query: &LedgerQuery) -> Result<Vec<trading_ledger::LedgerEntry>> {
         self.ledger.entries(query)
+    }
+
+    pub fn record_prediction(&self, draft: PredictionEventDraft) -> Result<PredictionEvent> {
+        self.predictions.append(draft)
+    }
+
+    pub fn prediction_summary(&self) -> Result<PredictionSummary> {
+        self.predictions.summary()
+    }
+
+    pub fn prediction_admission(
+        &self,
+        session_id: &str,
+        prediction_id: String,
+        decision_id: String,
+    ) -> PredictionAdmission {
+        PredictionAdmission {
+            prediction_id,
+            subsequent_decision_id: decision_id,
+            actor: PredictionActor::Agent {
+                agent_id: session_id.to_string(),
+            },
+            mandate_scope: MandateScope {
+                venue: LNMARKETS_VENUE.to_string(),
+                network: TradingNetwork::Signet,
+            },
+        }
+    }
+
+    pub fn resolve_matured_predictions(
+        &self,
+        collector: &CollectorHandle,
+        now_ms: i64,
+    ) -> Result<Vec<PredictionScore>> {
+        self.predictions
+            .resolve_matured(&StoredPriceOutcomeSource::new(collector), now_ms)
     }
 
     pub fn venue_balance(&self, venue: &str) -> Result<i64> {
@@ -510,6 +554,7 @@ impl TradingRuntime {
         client: LnMarketsClient,
         config: RebalanceToTargetConfig,
         at_ms: i64,
+        prediction: PredictionAdmission,
         cx: &AsyncApp,
     ) -> Result<()> {
         self.require_strategy_capability(at_ms)?;
@@ -532,6 +577,7 @@ impl TradingRuntime {
                     self.mandate.clone(),
                     self.backtests.clone(),
                     self.ledger.clone(),
+                    self.predictions.clone(),
                     Arc::new(self.lifecycle.clone()),
                     Arc::new(self.wakeups.clone()),
                 );
@@ -542,7 +588,11 @@ impl TradingRuntime {
             }
         };
         handle
-            .request(StrategyCommand::Start { config, at_ms })
+            .request(StrategyCommand::Start {
+                config,
+                at_ms,
+                prediction,
+            })
             .await
     }
 
@@ -550,6 +600,7 @@ impl TradingRuntime {
         &self,
         config: RebalanceToTargetConfig,
         at_ms: i64,
+        prediction: PredictionAdmission,
     ) -> Result<()> {
         self.require_strategy_capability(at_ms)?;
         if config.network != Network::Signet {
@@ -566,7 +617,13 @@ impl TradingRuntime {
             .lock()
             .clone()
             .context("rebalance_to_target has not been started")?;
-        handle.request(StrategyCommand::Adjust { config }).await
+        handle
+            .request(StrategyCommand::Adjust {
+                config,
+                at_ms,
+                prediction,
+            })
+            .await
     }
 
     pub async fn halt_rebalance(&self, at_ms: i64, reason: String) -> Result<()> {
@@ -585,6 +642,7 @@ impl TradingRuntime {
         client: LnMarketsClient,
         config: FundingCarryConfig,
         at_ms: i64,
+        prediction: PredictionAdmission,
         cx: &AsyncApp,
     ) -> Result<()> {
         self.require_strategy_capability(at_ms)?;
@@ -607,6 +665,7 @@ impl TradingRuntime {
                     self.mandate.clone(),
                     self.backtests.clone(),
                     self.ledger.clone(),
+                    self.predictions.clone(),
                     Arc::new(self.lifecycle.clone()),
                     Arc::new(self.wakeups.clone()),
                 );
@@ -618,13 +677,22 @@ impl TradingRuntime {
         };
         let instrument = config.instrument;
         handle
-            .request(StrategyCommand::Start { config, at_ms })
+            .request(StrategyCommand::Start {
+                config,
+                at_ms,
+                prediction,
+            })
             .await?;
         *self.funding_instrument.lock() = Some(instrument);
         Ok(())
     }
 
-    pub async fn adjust_funding(&self, config: FundingCarryConfig, at_ms: i64) -> Result<()> {
+    pub async fn adjust_funding(
+        &self,
+        config: FundingCarryConfig,
+        at_ms: i64,
+        prediction: PredictionAdmission,
+    ) -> Result<()> {
         self.require_strategy_capability(at_ms)?;
         if config.network != Network::Signet {
             bail!("automated LN Markets strategies are restricted to signet");
@@ -641,7 +709,13 @@ impl TradingRuntime {
             .clone()
             .context("funding_carry has not been started")?;
         let instrument = config.instrument;
-        handle.request(StrategyCommand::Adjust { config }).await?;
+        handle
+            .request(StrategyCommand::Adjust {
+                config,
+                at_ms,
+                prediction,
+            })
+            .await?;
         *self.funding_instrument.lock() = Some(instrument);
         Ok(())
     }
@@ -662,6 +736,7 @@ impl TradingRuntime {
         client: LnMarketsClient,
         config: ThresholdSwingConfig,
         at_ms: i64,
+        prediction: PredictionAdmission,
         cx: &AsyncApp,
     ) -> Result<()> {
         self.require_strategy_capability(at_ms)?;
@@ -684,6 +759,7 @@ impl TradingRuntime {
                     self.mandate.clone(),
                     self.backtests.clone(),
                     self.ledger.clone(),
+                    self.predictions.clone(),
                     Arc::new(self.lifecycle.clone()),
                     Arc::new(self.wakeups.clone()),
                 );
@@ -694,7 +770,11 @@ impl TradingRuntime {
             }
         };
         handle
-            .request(StrategyCommand::Start { config, at_ms })
+            .request(StrategyCommand::Start {
+                config,
+                at_ms,
+                prediction,
+            })
             .await
     }
 
@@ -702,6 +782,7 @@ impl TradingRuntime {
         &self,
         config: ThresholdSwingConfig,
         at_ms: i64,
+        prediction: PredictionAdmission,
     ) -> Result<()> {
         self.require_strategy_capability(at_ms)?;
         if config.network != Network::Signet {
@@ -718,7 +799,13 @@ impl TradingRuntime {
             .lock()
             .clone()
             .context("threshold_swing has not been started")?;
-        handle.request(StrategyCommand::Adjust { config }).await
+        handle
+            .request(StrategyCommand::Adjust {
+                config,
+                at_ms,
+                prediction,
+            })
+            .await
     }
 
     pub async fn halt_threshold_swing(&self, at_ms: i64, reason: String) -> Result<()> {
@@ -1034,6 +1121,7 @@ mod tests {
             .expect("venue capabilities");
         TradingRuntime {
             ledger: LedgerStore::in_memory().expect("ledger"),
+            predictions: PredictionStore::in_memory().expect("predictions"),
             mandate: MandateStore::in_memory().expect("mandate"),
             backtests,
             lifecycle: MemoryLifecycleSink::default(),

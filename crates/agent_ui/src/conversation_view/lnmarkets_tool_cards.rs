@@ -5,9 +5,10 @@ use serde_json::{Value, json};
 use ui::prelude::*;
 
 const LNM_SCHEMA_PREFIX: &str = "omega.lnmarkets.";
-const LNM_TOOL_NAMES: [&str; 4] = [
+const LNM_TOOL_NAMES: [&str; 5] = [
     "lnmarkets_features",
     "lnmarkets_ledger",
+    "lnmarkets_prediction",
     "lnmarkets_strategy",
     "lnmarkets_mandate",
 ];

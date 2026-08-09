@@ -10,9 +10,9 @@ use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use sha2::{Digest as _, Sha256};
 use strategy_engine::{
-    BacktestExecutionModel, BacktestTick, OrderIntent, OrderKind, OrderQuantity, OrderSide,
-    QuantityUnit, SimulatedTrade, StrategyProgram, StrategyStep, StrategyTick, VenueExecution,
-    VenueExecutor, VenueRiskSnapshot,
+    BacktestExecutionModel, BacktestTick, IntentPrediction, OrderIntent, OrderKind, OrderQuantity,
+    OrderSide, QuantityUnit, SimulatedTrade, StrategyProgram, StrategyStep, StrategyTick,
+    VenueExecution, VenueExecutor, VenueRiskSnapshot,
 };
 use trading_ledger::{
     AssetId, LedgerAccount, LedgerEntryDraft, LedgerEntryKind, LedgerPosting, LedgerQuery,
@@ -335,6 +335,14 @@ impl StrategyProgram for RebalanceToTargetProgram {
             limit_price: None,
             reduce_only: false,
             protection: None,
+            prediction: Some(IntentPrediction {
+                confidence_micros: 600_000,
+                horizon_ms: 60 * 60 * 1_000,
+                resolution_source: "lnmarkets:stored_last_price".into(),
+                flat_tolerance_bps: config.drift_threshold_bps,
+                observation_refs: vec![format!("lnmarkets:features:{}", tick.occurred_at_ms)],
+                private_payload_ref: None,
+            }),
             metadata: json!({
                 "schema": REBALANCE_TO_TARGET_SCHEMA,
                 "occurred_at_ms": tick.occurred_at_ms,
@@ -1032,6 +1040,7 @@ mod tests {
             limit_price: None,
             reduce_only: false,
             protection: None,
+            prediction: None,
             metadata: json!({ "occurred_at_ms": 100 }),
         }
     }

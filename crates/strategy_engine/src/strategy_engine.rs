@@ -9,6 +9,10 @@ use futures::{
 };
 use parking_lot::Mutex;
 use plugin_api::{VenueCapabilityError, VenueCapabilityGuard};
+use prediction_events::{
+    MandateScope, PREDICTION_SCHEMA_VERSION, PredictedDirection, PredictionActor,
+    PredictionEventDraft, PredictionForecast, PredictionStore, ResolutionRule, ScoringRule,
+};
 use serde::{Deserialize, Serialize, de::DeserializeOwned};
 use serde_json::{Value, json};
 use trading_ledger::{AssetId, LedgerEntryDraft, LedgerEntryKind, LedgerQuery, LedgerStore};
@@ -61,6 +65,24 @@ pub struct VenueProtection {
     pub take_profit_price: Option<f64>,
 }
 
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+pub struct IntentPrediction {
+    pub confidence_micros: u32,
+    pub horizon_ms: u64,
+    pub resolution_source: String,
+    pub flat_tolerance_bps: u32,
+    pub observation_refs: Vec<String>,
+    pub private_payload_ref: Option<String>,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+pub struct PredictionAdmission {
+    pub prediction_id: String,
+    pub subsequent_decision_id: String,
+    pub actor: PredictionActor,
+    pub mandate_scope: MandateScope,
+}
+
 impl VenueProtection {
     fn validate(&self) -> Result<()> {
         if !self.stop_loss_price.is_finite() || self.stop_loss_price <= 0.0 {
@@ -85,6 +107,7 @@ pub struct OrderIntent {
     pub limit_price: Option<f64>,
     pub reduce_only: bool,
     pub protection: Option<VenueProtection>,
+    pub prediction: Option<IntentPrediction>,
     pub metadata: Value,
 }
 
@@ -455,6 +478,7 @@ where
     mandate: Arc<dyn MandateAuthority>,
     backtests: Arc<dyn BacktestGate>,
     ledger: LedgerStore,
+    predictions: PredictionStore,
     lifecycle: Arc<dyn LifecycleSink>,
     wakeups: Arc<dyn WakeupSink>,
     venue_capability_guard: VenueCapabilityGuard,
@@ -476,6 +500,7 @@ where
         mandate: impl MandateAuthority,
         backtests: impl BacktestGate,
         ledger: LedgerStore,
+        predictions: PredictionStore,
         lifecycle: Arc<dyn LifecycleSink>,
         wakeups: Arc<dyn WakeupSink>,
     ) -> Self {
@@ -486,6 +511,7 @@ where
             mandate: Arc::new(mandate),
             backtests: Arc::new(backtests),
             ledger,
+            predictions,
             lifecycle,
             wakeups,
             venue_capability_guard,
@@ -508,12 +534,18 @@ where
         self.state.as_ref()
     }
 
-    pub fn start(&mut self, config: Program::Config, at_ms: i64) -> Result<()> {
+    pub fn start(
+        &mut self,
+        config: Program::Config,
+        at_ms: i64,
+        prediction: PredictionAdmission,
+    ) -> Result<()> {
         validate_timestamp(at_ms)?;
         if matches!(self.status, StrategyStatus::Running { .. }) {
             bail!("strategy is already running");
         }
         self.require_venue_capability(at_ms)?;
+        self.require_parameter_prediction(&prediction, at_ms)?;
         self.program.validate_config(&config)?;
         let approval = self.require_backtest(&config)?;
         let state = self.program.initial_state(&config)?;
@@ -541,10 +573,17 @@ where
         Ok(())
     }
 
-    pub fn adjust(&mut self, config: Program::Config) -> Result<()> {
+    pub fn adjust(
+        &mut self,
+        config: Program::Config,
+        at_ms: i64,
+        prediction: PredictionAdmission,
+    ) -> Result<()> {
+        validate_timestamp(at_ms)?;
         if !matches!(self.status, StrategyStatus::Running { .. }) {
             bail!("strategy must be running before its configuration can be adjusted");
         }
+        self.require_parameter_prediction(&prediction, at_ms)?;
         self.program.validate_config(&config)?;
         let approval = self.require_backtest(&config)?;
         self.config = Some(config);
@@ -671,6 +710,10 @@ where
             metadata: json!({
                 "intent_id": cancel.intent_id,
                 "venue_order_id": cancel.venue_order_id,
+                "prediction_admission": {
+                    "type": "safety_exception",
+                    "class": "risk_reducing_cancel",
+                },
             }),
         };
         if let Err(error) = self.append_ledger(cancel_entry) {
@@ -759,6 +802,83 @@ where
             );
         }
 
+        let risk_increasing =
+            preview.position_notional_after_usd > preview.position_notional_before_usd;
+        let prediction_admission = if risk_increasing {
+            let Some(prediction) = &intent.prediction else {
+                return self.fail(
+                    now_ms,
+                    StrategyHaltReason::ProgramError {
+                        message: format!(
+                            "risk-increasing intent {:?} has no pre-action prediction",
+                            intent.intent_id
+                        ),
+                    },
+                );
+            };
+            let resolve_at_ms = now_ms
+                .checked_add(
+                    i64::try_from(prediction.horizon_ms)
+                        .context("prediction horizon exceeds the timestamp range")?,
+                )
+                .context("prediction resolution time overflowed")?;
+            let direction = match intent.side {
+                OrderSide::Buy => PredictedDirection::Up,
+                OrderSide::Sell => PredictedDirection::Down,
+            };
+            let event = match self.predictions.append(PredictionEventDraft {
+                schema_version: PREDICTION_SCHEMA_VERSION,
+                emitted_at_ms: now_ms,
+                actor: PredictionActor::Strategy {
+                    strategy_id: self.program.strategy_id().to_string(),
+                },
+                mandate_scope: MandateScope {
+                    venue: preview.venue.clone(),
+                    network: preview.network,
+                },
+                instrument: intent.instrument.clone(),
+                forecast: PredictionForecast::Directional {
+                    direction,
+                    probability_micros: prediction.confidence_micros,
+                },
+                confidence_micros: prediction.confidence_micros,
+                horizon_ms: prediction.horizon_ms,
+                resolution_rule: ResolutionRule {
+                    source: prediction.resolution_source.clone(),
+                    baseline_at_ms: now_ms,
+                    resolve_at_ms,
+                    flat_tolerance_bps: prediction.flat_tolerance_bps,
+                },
+                scoring_rule: ScoringRule::Brier,
+                observation_refs: prediction.observation_refs.clone(),
+                private_payload_ref: prediction.private_payload_ref.clone(),
+                subsequent_decision_id: intent.intent_id.clone(),
+            }) {
+                Ok(event) => event,
+                Err(error) => {
+                    return self.fail(
+                        now_ms,
+                        StrategyHaltReason::LedgerError {
+                            message: format!("could not record pre-action prediction: {error:#}"),
+                        },
+                    );
+                }
+            };
+            json!({
+                "type": "prediction",
+                "prediction_id": event.prediction_id,
+            })
+        } else {
+            json!({
+                "type": "safety_exception",
+                "class": if intent.reduce_only {
+                    "venue_side_protective_action"
+                } else {
+                    "risk_reducing_order"
+                },
+            })
+        };
+
         let (order_count_last_hour, daily_realized_loss) =
             match self.ledger_risk_totals(now_ms, &preview.collateral_asset) {
                 Ok(totals) => totals,
@@ -817,6 +937,7 @@ where
                 "intent": intent,
                 "venue": preview.venue,
                 "mandate_revision": mandate_revision,
+                "prediction_admission": prediction_admission,
             }),
         };
         if let Err(error) = self.append_ledger(order_entry) {
@@ -942,6 +1063,21 @@ where
         )
     }
 
+    fn require_parameter_prediction(
+        &self,
+        prediction: &PredictionAdmission,
+        at_ms: i64,
+    ) -> Result<()> {
+        self.predictions.require_admission(
+            &prediction.prediction_id,
+            &prediction.actor,
+            &prediction.mandate_scope,
+            &prediction.subsequent_decision_id,
+            at_ms,
+        )?;
+        Ok(())
+    }
+
     fn require_venue_capability(&mut self, at_ms: i64) -> Result<()> {
         if let Err(refusal) = self.venue_capability_guard.require_effectful(at_ms) {
             return self.fail(at_ms, StrategyHaltReason::VenueCapability { refusal });
@@ -980,10 +1116,21 @@ where
 }
 
 pub enum StrategyCommand<Config, Features> {
-    Start { config: Config, at_ms: i64 },
-    Adjust { config: Config },
+    Start {
+        config: Config,
+        at_ms: i64,
+        prediction: PredictionAdmission,
+    },
+    Adjust {
+        config: Config,
+        at_ms: i64,
+        prediction: PredictionAdmission,
+    },
     Tick(StrategyTick<Features>),
-    Halt { at_ms: i64, reason: String },
+    Halt {
+        at_ms: i64,
+        reason: String,
+    },
     Shutdown,
 }
 
@@ -1038,8 +1185,16 @@ where
         while let Some(message) = receiver.next().await {
             let should_shutdown = matches!(message.command, StrategyCommand::Shutdown);
             let result = match message.command {
-                StrategyCommand::Start { config, at_ms } => engine.start(config, at_ms),
-                StrategyCommand::Adjust { config } => engine.adjust(config),
+                StrategyCommand::Start {
+                    config,
+                    at_ms,
+                    prediction,
+                } => engine.start(config, at_ms, prediction),
+                StrategyCommand::Adjust {
+                    config,
+                    at_ms,
+                    prediction,
+                } => engine.adjust(config, at_ms, prediction),
                 StrategyCommand::Tick(tick) => engine.handle_tick(tick).await.map(|_| ()),
                 StrategyCommand::Halt { at_ms, reason } => {
                     engine.halt(at_ms, StrategyHaltReason::Manual { reason })
@@ -1199,6 +1354,14 @@ mod tests {
                     protection: config.protected.then_some(VenueProtection {
                         stop_loss_price: 70_000.0,
                         take_profit_price: Some(60_000.0),
+                    }),
+                    prediction: Some(IntentPrediction {
+                        confidence_micros: 600_000,
+                        horizon_ms: ONE_HOUR_MS as u64,
+                        resolution_source: "test:stored_price".into(),
+                        flat_tolerance_bps: 10,
+                        observation_refs: vec![format!("test-tick:{}", tick.occurred_at_ms)],
+                        private_payload_ref: None,
                     }),
                     metadata: json!({"source": "test"}),
                 }]
@@ -1454,9 +1617,66 @@ mod tests {
             mandate,
             TestBacktestGate { passing: true },
             ledger,
+            PredictionStore::in_memory().expect("predictions"),
             Arc::new(lifecycle),
             Arc::new(wakeups),
         )
+    }
+
+    fn prediction_admission(
+        engine: &StrategyEngine<TestProgram, TestExecutor>,
+        emitted_at_ms: i64,
+        decision_id: &str,
+    ) -> PredictionAdmission {
+        let actor = PredictionActor::Strategy {
+            strategy_id: "test_strategy".into(),
+        };
+        let mandate_scope = MandateScope {
+            venue: "test_venue".into(),
+            network: TradingNetwork::Signet,
+        };
+        let prediction = engine
+            .predictions
+            .append(PredictionEventDraft {
+                schema_version: PREDICTION_SCHEMA_VERSION,
+                emitted_at_ms,
+                actor: actor.clone(),
+                mandate_scope: mandate_scope.clone(),
+                instrument: "btc_usd".into(),
+                forecast: PredictionForecast::Directional {
+                    direction: PredictedDirection::Flat,
+                    probability_micros: 600_000,
+                },
+                confidence_micros: 600_000,
+                horizon_ms: 3_600_000,
+                resolution_rule: ResolutionRule {
+                    source: "test:stored_price".into(),
+                    baseline_at_ms: emitted_at_ms,
+                    resolve_at_ms: emitted_at_ms + 3_600_000,
+                    flat_tolerance_bps: 10,
+                },
+                scoring_rule: ScoringRule::Brier,
+                observation_refs: vec![format!("test:{emitted_at_ms}")],
+                private_payload_ref: None,
+                subsequent_decision_id: decision_id.into(),
+            })
+            .expect("parameter prediction");
+        PredictionAdmission {
+            prediction_id: prediction.prediction_id,
+            subsequent_decision_id: decision_id.into(),
+            actor,
+            mandate_scope,
+        }
+    }
+
+    fn start_test_engine(
+        engine: &mut StrategyEngine<TestProgram, TestExecutor>,
+        config: TestConfig,
+        at_ms: i64,
+    ) -> Result<()> {
+        let decision_id = format!("test-start:{at_ms}");
+        let prediction = prediction_admission(engine, at_ms, &decision_id);
+        engine.start(config, at_ms, prediction)
     }
 
     fn test_capability_guard() -> VenueCapabilityGuard {
@@ -1511,16 +1731,80 @@ mod tests {
             TestMandateAuthority::new(2),
             TestBacktestGate { passing: false },
             LedgerStore::in_memory().expect("ledger"),
+            PredictionStore::in_memory().expect("predictions"),
             Arc::new(MemoryLifecycleSink::default()),
             Arc::new(MemoryWakeupSink::default()),
         );
 
-        let error = engine
-            .start(TestConfig { protected: true }, 1)
+        let error = start_test_engine(&mut engine, TestConfig { protected: true }, 1)
             .expect_err("missing backtest");
         assert!(error.to_string().contains("no passing backtest"));
         assert!(matches!(engine.status(), StrategyStatus::Idle));
         assert_eq!(executor.calls(), 0);
+    }
+
+    #[test]
+    fn strategy_parameter_change_requires_an_existing_linked_prediction() {
+        let mut engine = engine(
+            2,
+            TestExecutor::successful(),
+            LedgerStore::in_memory().expect("ledger"),
+            MemoryLifecycleSink::default(),
+            MemoryWakeupSink::default(),
+        );
+        let error = engine
+            .start(
+                TestConfig { protected: true },
+                1,
+                PredictionAdmission {
+                    prediction_id: "prediction:missing".into(),
+                    subsequent_decision_id: "start-without-forecast".into(),
+                    actor: PredictionActor::Strategy {
+                        strategy_id: "test_strategy".into(),
+                    },
+                    mandate_scope: MandateScope {
+                        venue: "test_venue".into(),
+                        network: TradingNetwork::Signet,
+                    },
+                },
+            )
+            .expect_err("missing prediction");
+        assert!(error.to_string().contains("does not exist"));
+        assert!(matches!(engine.status(), StrategyStatus::Idle));
+    }
+
+    #[test]
+    fn risk_increasing_intent_without_prediction_halts_before_mutation() {
+        block_on(async {
+            let executor = TestExecutor::successful();
+            let mut engine = engine(
+                2,
+                executor.clone(),
+                LedgerStore::in_memory().expect("ledger"),
+                MemoryLifecycleSink::default(),
+                MemoryWakeupSink::default(),
+            );
+            start_test_engine(&mut engine, TestConfig { protected: true }, 1).expect("start");
+            let mut intent = TestProgram
+                .on_tick(
+                    &TestConfig { protected: true },
+                    engine.state().expect("state"),
+                    &tick(100),
+                )
+                .expect("step")
+                .intents
+                .into_iter()
+                .next()
+                .expect("intent");
+            intent.prediction = None;
+
+            let error = engine
+                .execute_intent(&intent, 100)
+                .await
+                .expect_err("missing prediction");
+            assert!(error.to_string().contains("no pre-action prediction"));
+            assert_eq!(executor.calls(), 0);
+        });
     }
 
     #[test]
@@ -1560,8 +1844,7 @@ mod tests {
             1_000,
         ));
 
-        let error = engine
-            .start(TestConfig { protected: true }, 1)
+        let error = start_test_engine(&mut engine, TestConfig { protected: true }, 1)
             .expect_err("unknown capability must fail closed");
         assert!(error.to_string().contains("margin mode is unknown"));
         assert!(matches!(
@@ -1591,9 +1874,7 @@ mod tests {
                 lifecycle.clone(),
                 wakeups.clone(),
             );
-            engine
-                .start(TestConfig { protected: true }, 1)
-                .expect("start");
+            start_test_engine(&mut engine, TestConfig { protected: true }, 1).expect("start");
             let report = engine.handle_tick(tick(100)).await.expect("tick");
             assert_eq!(report.submitted_count, 1);
             assert_eq!(executor.calls(), 1);
@@ -1636,9 +1917,7 @@ mod tests {
             let lifecycle = MemoryLifecycleSink::default();
             let wakeups = MemoryWakeupSink::default();
             let mut engine = engine(1, executor.clone(), ledger, lifecycle, wakeups.clone());
-            engine
-                .start(TestConfig { protected: true }, 1)
-                .expect("start");
+            start_test_engine(&mut engine, TestConfig { protected: true }, 1).expect("start");
             engine.handle_tick(tick(100)).await.expect("first order");
             let error = engine
                 .handle_tick(tick(200))
@@ -1667,9 +1946,7 @@ mod tests {
                 MemoryLifecycleSink::default(),
                 wakeups.clone(),
             );
-            engine
-                .start(TestConfig { protected: true }, 1)
-                .expect("start");
+            start_test_engine(&mut engine, TestConfig { protected: true }, 1).expect("start");
             let error = engine
                 .handle_tick(tick(100))
                 .await
@@ -1706,9 +1983,7 @@ mod tests {
                 lifecycle.clone(),
                 MemoryWakeupSink::default(),
             );
-            engine
-                .start(TestConfig { protected: true }, 1)
-                .expect("start");
+            start_test_engine(&mut engine, TestConfig { protected: true }, 1).expect("start");
             let report = engine
                 .handle_tick(cancel_tick(100, true))
                 .await
@@ -1724,10 +1999,9 @@ mod tests {
                 ]
             );
             assert_eq!(authorize_calls.load(Ordering::SeqCst), 1);
+            let entries = ledger.entries(&LedgerQuery::default()).expect("entries");
             assert_eq!(
-                ledger
-                    .entries(&LedgerQuery::default())
-                    .expect("entries")
+                entries
                     .iter()
                     .map(|entry| entry.kind.clone())
                     .collect::<Vec<_>>(),
@@ -1738,6 +2012,16 @@ mod tests {
                     LedgerEntryKind::Fee,
                     LedgerEntryKind::FundingSettlement,
                 ]
+            );
+            assert_eq!(
+                entries
+                    .first()
+                    .expect("cancel entry")
+                    .metadata
+                    .get("prediction_admission")
+                    .and_then(|admission| admission.get("class"))
+                    .and_then(Value::as_str),
+                Some("risk_reducing_cancel")
             );
             assert!(lifecycle.events().iter().any(|event| matches!(
                 event,
@@ -1762,9 +2046,7 @@ mod tests {
                 MemoryLifecycleSink::default(),
                 MemoryWakeupSink::default(),
             );
-            engine
-                .start(TestConfig { protected: true }, 1)
-                .expect("start");
+            start_test_engine(&mut engine, TestConfig { protected: true }, 1).expect("start");
             engine
                 .handle_tick(cancel_tick(100, false))
                 .await
@@ -1788,9 +2070,7 @@ mod tests {
                 MemoryLifecycleSink::default(),
                 wakeups.clone(),
             );
-            engine
-                .start(TestConfig { protected: true }, 1)
-                .expect("start");
+            start_test_engine(&mut engine, TestConfig { protected: true }, 1).expect("start");
             let error = engine
                 .handle_tick(cancel_tick(100, false))
                 .await
@@ -1857,9 +2137,7 @@ mod tests {
                 MemoryLifecycleSink::default(),
                 MemoryWakeupSink::default(),
             );
-            engine
-                .start(TestConfig { protected: false }, 1)
-                .expect("start");
+            start_test_engine(&mut engine, TestConfig { protected: false }, 1).expect("start");
             let error = engine
                 .handle_tick(tick(100))
                 .await
@@ -1875,17 +2153,20 @@ mod tests {
             let executor = TestExecutor::successful();
             let mut handle;
             let service;
-            (handle, service) = background_service(engine(
+            let engine = engine(
                 2,
                 executor.clone(),
                 LedgerStore::in_memory().expect("ledger"),
                 MemoryLifecycleSink::default(),
                 MemoryWakeupSink::default(),
-            ));
+            );
+            let prediction = prediction_admission(&engine, 1, "service-start");
+            (handle, service) = background_service(engine);
             handle
                 .send(StrategyCommand::Start {
                     config: TestConfig { protected: true },
                     at_ms: 1,
+                    prediction,
                 })
                 .expect("send start");
             handle
@@ -1904,18 +2185,21 @@ mod tests {
     fn requested_commands_are_acknowledged_and_rejections_do_not_stop_the_service() {
         block_on(async {
             let executor = TestExecutor::successful();
-            let (mut handle, service) = background_service(engine(
+            let engine = engine(
                 2,
                 executor,
                 LedgerStore::in_memory().expect("ledger"),
                 MemoryLifecycleSink::default(),
                 MemoryWakeupSink::default(),
-            ));
+            );
+            let prediction = prediction_admission(&engine, 1, "requested-start");
+            let (mut handle, service) = background_service(engine);
             let commands = async move {
                 let error = handle
                     .request(StrategyCommand::Start {
                         config: TestConfig { protected: true },
                         at_ms: -1,
+                        prediction: prediction.clone(),
                     })
                     .await
                     .expect_err("negative timestamp");
@@ -1924,6 +2208,7 @@ mod tests {
                     .request(StrategyCommand::Start {
                         config: TestConfig { protected: true },
                         at_ms: 1,
+                        prediction,
                     })
                     .await
                     .expect("valid start");

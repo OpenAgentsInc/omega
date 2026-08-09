@@ -718,6 +718,7 @@ mod tests {
                         stop_loss_price: 90.0,
                         take_profit_price: Some(110.0),
                     }),
+                    prediction: None,
                     metadata: json!({}),
                 })
                 .into_iter()

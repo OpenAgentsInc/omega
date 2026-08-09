@@ -11,6 +11,10 @@ use language_model::LanguageModelToolResultContent;
 use plugin_api::{
     VenueActionClass, VenueCapabilityError, VenueCapabilityGuard, VenueCapabilityStore,
 };
+use prediction_events::{
+    MandateScope, PREDICTION_SCHEMA_VERSION, PredictedDirection, PredictionActor,
+    PredictionEventDraft, PredictionForecast, ResolutionRule, ScoringRule,
+};
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
@@ -23,6 +27,159 @@ use crate::{
     LightningDepositsQuery, LnMarketsClient, LnMarketsStreamClient, Network, NewSwapRequest,
     NotificationsQuery, Pagination, StoredCredentials, StreamTopic, http_transport,
 };
+
+pub struct LnMarketsPredictionTool {
+    session_id: String,
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum LnMarketsPredictionDirection {
+    Up,
+    Down,
+    Flat,
+}
+
+impl From<LnMarketsPredictionDirection> for PredictedDirection {
+    fn from(direction: LnMarketsPredictionDirection) -> Self {
+        match direction {
+            LnMarketsPredictionDirection::Up => Self::Up,
+            LnMarketsPredictionDirection::Down => Self::Down,
+            LnMarketsPredictionDirection::Flat => Self::Flat,
+        }
+    }
+}
+
+#[derive(Debug, Serialize, Deserialize, JsonSchema)]
+#[serde(tag = "action", rename_all = "snake_case")]
+pub enum LnMarketsPredictionInput {
+    /// Record the review's scored forecast before any linked strategy action.
+    Record {
+        instrument: String,
+        direction: LnMarketsPredictionDirection,
+        /// Forecast confidence from 1 through 1,000,000.
+        confidence_micros: u32,
+        /// Fixed scoring horizon in milliseconds.
+        horizon_ms: u64,
+        /// Price movement inside this tolerance resolves as flat.
+        #[serde(default = "default_flat_tolerance_bps")]
+        flat_tolerance_bps: u32,
+        #[serde(default)]
+        observation_refs: Vec<String>,
+        #[serde(default)]
+        private_payload_ref: Option<String>,
+        /// ID of the later start, adjust, or explicit no-change decision.
+        subsequent_decision_id: String,
+    },
+    /// Read aggregate calibration, sharpness, score, and no-change frequency.
+    Summary,
+}
+
+fn default_flat_tolerance_bps() -> u32 {
+    10
+}
+
+impl AgentTool for LnMarketsPredictionTool {
+    type Input = LnMarketsPredictionInput;
+    type Output = LnMarketsToolOutput;
+
+    const NAME: &'static str = "lnmarkets_prediction";
+
+    fn kind() -> acp::ToolKind {
+        acp::ToolKind::Other
+    }
+
+    fn initial_title(&self, input: Result<Self::Input, Value>, _cx: &mut App) -> SharedString {
+        match input {
+            Ok(LnMarketsPredictionInput::Record { .. }) => "Record LN Markets prediction".into(),
+            Ok(LnMarketsPredictionInput::Summary) => "Read prediction calibration".into(),
+            Err(_) => "Use LN Markets prediction log".into(),
+        }
+    }
+
+    fn run(
+        self: Arc<Self>,
+        input: ToolInput<Self::Input>,
+        _event_stream: ToolCallEventStream,
+        cx: &mut App,
+    ) -> Task<Result<Self::Output, Self::Output>> {
+        let runtime = crate::trading_runtime(cx);
+        cx.spawn(async move |_cx| {
+            let input = input
+                .recv()
+                .await
+                .map_err(|error| LnMarketsToolOutput::error(error.to_string()))?;
+            let runtime = runtime.map_err(LnMarketsToolOutput::error)?;
+            match input {
+                LnMarketsPredictionInput::Record {
+                    instrument,
+                    direction,
+                    confidence_micros,
+                    horizon_ms,
+                    flat_tolerance_bps,
+                    observation_refs,
+                    private_payload_ref,
+                    subsequent_decision_id,
+                } => {
+                    let emitted_at_ms = unix_timestamp_ms().map_err(LnMarketsToolOutput::error)?;
+                    let horizon_ms_i64 = i64::try_from(horizon_ms).map_err(|_| {
+                        LnMarketsToolOutput::error("prediction horizon exceeds the timestamp range")
+                    })?;
+                    let resolve_at_ms =
+                        emitted_at_ms.checked_add(horizon_ms_i64).ok_or_else(|| {
+                            LnMarketsToolOutput::error("prediction resolution time overflowed")
+                        })?;
+                    let event = runtime
+                        .record_prediction(PredictionEventDraft {
+                            schema_version: PREDICTION_SCHEMA_VERSION,
+                            emitted_at_ms,
+                            actor: PredictionActor::Agent {
+                                agent_id: self.session_id.clone(),
+                            },
+                            mandate_scope: MandateScope {
+                                venue: crate::MANIFEST.id.to_string(),
+                                network: crate::TradingNetwork::Signet,
+                            },
+                            instrument,
+                            forecast: PredictionForecast::Directional {
+                                direction: direction.into(),
+                                probability_micros: confidence_micros,
+                            },
+                            confidence_micros,
+                            horizon_ms,
+                            resolution_rule: ResolutionRule {
+                                source: crate::prediction_resolution::STORED_LAST_PRICE_SOURCE
+                                    .into(),
+                                baseline_at_ms: emitted_at_ms,
+                                resolve_at_ms,
+                                flat_tolerance_bps,
+                            },
+                            scoring_rule: ScoringRule::Brier,
+                            observation_refs,
+                            private_payload_ref,
+                            subsequent_decision_id,
+                        })
+                        .map_err(|error| LnMarketsToolOutput::error(error.to_string()))?;
+                    Ok(LnMarketsToolOutput::success(json!({
+                        "schema": "omega.lnmarkets.prediction.v1",
+                        "status": "recorded",
+                        "prediction": event,
+                    })))
+                }
+                LnMarketsPredictionInput::Summary => {
+                    let summary = runtime
+                        .prediction_summary()
+                        .map_err(|error| LnMarketsToolOutput::error(error.to_string()))?;
+                    Ok(LnMarketsToolOutput::success(json!({
+                        "schema": "omega.lnmarkets.prediction_summary.v1",
+                        "status": "available",
+                        "summary": summary,
+                    })))
+                }
+            }
+        })
+    }
+}
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(transparent)]
@@ -923,12 +1080,20 @@ pub enum LnMarketsStrategyInput {
         strategy: LnMarketsStrategyName,
         /// Strategy-specific configuration.
         config: Value,
+        /// Existing pre-action prediction created by lnmarkets_prediction.
+        prediction_id: String,
+        /// Decision ID linked exactly by the pre-action prediction.
+        decision_id: String,
     },
     /// Replace the configuration of a running strategy after its backtest gate passes.
     Adjust {
         strategy: LnMarketsStrategyName,
         /// Strategy-specific configuration.
         config: Value,
+        /// Existing pre-action prediction created by lnmarkets_prediction.
+        prediction_id: String,
+        /// Decision ID linked exactly by the pre-action prediction.
+        decision_id: String,
     },
     /// Halt a strategy immediately.
     Halt {
@@ -1142,7 +1307,12 @@ impl AgentTool for LnMarketsStrategyTool {
                     emit_lnmarkets_strategy_update(&event_stream, &output.0);
                     return Ok(output);
                 }
-                LnMarketsStrategyInput::Start { strategy, config } => {
+                LnMarketsStrategyInput::Start {
+                    strategy,
+                    config,
+                    prediction_id,
+                    decision_id,
+                } => {
                     let (client, network) = self
                         .client
                         .authenticated(cx)
@@ -1157,6 +1327,8 @@ impl AgentTool for LnMarketsStrategyTool {
                         .claim_review_session(self.session_id.clone())
                         .map_err(|error| LnMarketsToolOutput::error(error.to_string()))?;
                     let at_ms = unix_timestamp_ms().map_err(LnMarketsToolOutput::error)?;
+                    let prediction =
+                        runtime.prediction_admission(&self.session_id, prediction_id, decision_id);
                     match strategy {
                         LnMarketsStrategyName::RebalanceToTarget => {
                             let config = serde_json::from_value(config).map_err(|error| {
@@ -1164,7 +1336,9 @@ impl AgentTool for LnMarketsStrategyTool {
                                     "invalid rebalance_to_target configuration: {error}"
                                 ))
                             })?;
-                            runtime.start_rebalance(client, config, at_ms, cx).await
+                            runtime
+                                .start_rebalance(client, config, at_ms, prediction, cx)
+                                .await
                         }
                         LnMarketsStrategyName::FundingCarry => {
                             let config = serde_json::from_value(config).map_err(|error| {
@@ -1172,7 +1346,9 @@ impl AgentTool for LnMarketsStrategyTool {
                                     "invalid funding_carry configuration: {error}"
                                 ))
                             })?;
-                            runtime.start_funding(client, config, at_ms, cx).await
+                            runtime
+                                .start_funding(client, config, at_ms, prediction, cx)
+                                .await
                         }
                         LnMarketsStrategyName::ThresholdSwing => {
                             let config = serde_json::from_value(config).map_err(|error| {
@@ -1181,16 +1357,23 @@ impl AgentTool for LnMarketsStrategyTool {
                                 ))
                             })?;
                             runtime
-                                .start_threshold_swing(client, config, at_ms, cx)
+                                .start_threshold_swing(client, config, at_ms, prediction, cx)
                                 .await
                         }
                     }
                 }
-                LnMarketsStrategyInput::Adjust { strategy, config } => {
+                LnMarketsStrategyInput::Adjust {
+                    strategy,
+                    config,
+                    prediction_id,
+                    decision_id,
+                } => {
                     runtime
                         .claim_review_session(self.session_id.clone())
                         .map_err(|error| LnMarketsToolOutput::error(error.to_string()))?;
                     let at_ms = unix_timestamp_ms().map_err(LnMarketsToolOutput::error)?;
+                    let prediction =
+                        runtime.prediction_admission(&self.session_id, prediction_id, decision_id);
                     match strategy {
                         LnMarketsStrategyName::RebalanceToTarget => {
                             let config = serde_json::from_value(config).map_err(|error| {
@@ -1198,7 +1381,7 @@ impl AgentTool for LnMarketsStrategyTool {
                                     "invalid rebalance_to_target configuration: {error}"
                                 ))
                             })?;
-                            runtime.adjust_rebalance(config, at_ms).await
+                            runtime.adjust_rebalance(config, at_ms, prediction).await
                         }
                         LnMarketsStrategyName::FundingCarry => {
                             let config = serde_json::from_value(config).map_err(|error| {
@@ -1206,7 +1389,7 @@ impl AgentTool for LnMarketsStrategyTool {
                                     "invalid funding_carry configuration: {error}"
                                 ))
                             })?;
-                            runtime.adjust_funding(config, at_ms).await
+                            runtime.adjust_funding(config, at_ms, prediction).await
                         }
                         LnMarketsStrategyName::ThresholdSwing => {
                             let config = serde_json::from_value(config).map_err(|error| {
@@ -1214,7 +1397,9 @@ impl AgentTool for LnMarketsStrategyTool {
                                     "invalid threshold_swing configuration: {error}"
                                 ))
                             })?;
-                            runtime.adjust_threshold_swing(config, at_ms).await
+                            runtime
+                                .adjust_threshold_swing(config, at_ms, prediction)
+                                .await
                         }
                     }
                 }
@@ -1440,23 +1625,26 @@ pub fn agent_tools_registration() -> agent::PluginAgentTools {
             LnMarketsSwapTool::NAME,
             LnMarketsFeaturesTool::NAME,
             LnMarketsLedgerTool::NAME,
+            LnMarketsPredictionTool::NAME,
             LnMarketsStrategyTool::NAME,
             LnMarketsMandateTool::NAME,
         ],
         build: std::rc::Rc::new(|context, cx| {
             let venue_capabilities = crate::venue_capability_store(cx).unwrap_or_default();
-            let (account, market_data, swap, features, ledger, strategy, mandate) = lnmarkets_tools(
-                context.http_client.clone(),
-                context.credentials_provider.clone(),
-                context.session_id.clone(),
-                venue_capabilities,
-            );
+            let (account, market_data, swap, features, ledger, prediction, strategy, mandate) =
+                lnmarkets_tools(
+                    context.http_client.clone(),
+                    context.credentials_provider.clone(),
+                    context.session_id.clone(),
+                    venue_capabilities,
+                );
             vec![
                 account.erase(),
                 market_data.erase(),
                 swap.erase(),
                 features.erase(),
                 ledger.erase(),
+                prediction.erase(),
                 strategy.erase(),
                 mandate.erase(),
             ]
@@ -1475,6 +1663,7 @@ pub fn lnmarkets_tools(
     LnMarketsSwapTool,
     LnMarketsFeaturesTool,
     LnMarketsLedgerTool,
+    LnMarketsPredictionTool,
     LnMarketsStrategyTool,
     LnMarketsMandateTool,
 ) {
@@ -1510,6 +1699,9 @@ pub fn lnmarkets_tools(
             ),
         },
         LnMarketsLedgerTool,
+        LnMarketsPredictionTool {
+            session_id: session_id.clone(),
+        },
         LnMarketsStrategyTool {
             client: ToolClient {
                 http_client,
@@ -1656,6 +1848,8 @@ mod tests {
             "action": "start",
             "strategy": "funding_carry",
             "config": { "network": "signet" },
+            "prediction_id": "prediction:1",
+            "decision_id": "decision-1",
         }))
         .expect("strategy input");
         assert!(matches!(
@@ -1670,6 +1864,8 @@ mod tests {
             "action": "adjust",
             "strategy": "threshold_swing",
             "config": { "network": "signet" },
+            "prediction_id": "prediction:2",
+            "decision_id": "decision-2",
         }))
         .expect("threshold strategy input");
         assert!(matches!(

@@ -10402,3 +10402,33 @@ agent, or otherwise enforces policy.
 - **Enforced by:** `trading_ledger`, `lnmarkets`, and `lnmarkets_ui` unit tests
   and `counterparty_exposure_is_derived_recorded_and_visible` in
   `omega_deltas`.
+
+### OMEGA-DELTA-0264 — Decisions carry pre-action predictions that resolve and score
+
+Omega records forecasts in a strict append-only SQLite log beside thread and
+ledger state. Each event fixes its actor, mandate venue and network,
+instrument, directional or distributed outcome, confidence, horizon,
+resolution source and times, scoring rule, observation references, optional
+opaque private-payload reference, and the exact subsequent decision ID. A
+second append-only hash-chained log records mature outcomes and deterministic
+Brier or logarithmic scores. Queries expose calibration bins, sharpness, mean
+score, and no-change frequency without feeding those measurements back into
+authority or strategy policy.
+
+Every scheduled LN Markets review must record one prediction before reaching
+an action or no-change conclusion. Start and adjust actions reuse the returned
+prediction ID and exact decision ID; a no-change review records a scored flat
+forecast rather than receiving free abstention. The strategy engine applies
+the same boundary to deterministic execution: every risk-increasing intent
+appends its typed forecast before mandate admission or venue mutation.
+Parameter changes require an existing linked prediction.
+
+Emergency halts, risk-reducing cancels, and venue-side protective reductions
+remain immediately available. Their ledger evidence labels the applicable
+safety exception instead of inventing a forecast. LN Markets resolves mature
+events only from its stored signet last-price observations at the fixed
+horizon; mainnet data or effectful behavior is not introduced by this delta.
+
+- **Enforced by:** `prediction_events`, `strategy_engine`, and `lnmarkets`
+  unit tests and `pre_action_predictions_are_append_only_scored_and_enforced`
+  in `omega_deltas`.
