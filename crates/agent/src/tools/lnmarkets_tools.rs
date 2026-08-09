@@ -828,6 +828,26 @@ impl LnMarketsStrategyName {
 pub enum LnMarketsStrategyInput {
     /// Read both strategy lifecycle states.
     Status,
+    /// Replay an exact strategy configuration against collected signet data and store its report.
+    Backtest {
+        strategy: LnMarketsStrategyName,
+        /// Strategy-specific configuration. Its measured round-trip cost must match cost_model.
+        config: Value,
+        /// Inclusive replay start in Unix milliseconds.
+        from_ms: i64,
+        /// Inclusive replay end in Unix milliseconds.
+        to_ms: i64,
+        cost_model: LnMarketsBacktestCostModelInput,
+        policy: LnMarketsBacktestPolicyInput,
+    },
+    /// Read durable backtest reports for the review turn or operator.
+    BacktestReports {
+        #[serde(default)]
+        strategy: Option<LnMarketsStrategyName>,
+        /// Number of newest reports, from 1 through 100.
+        #[serde(default = "default_backtest_report_limit")]
+        limit: u16,
+    },
     /// Start a strategy after its stored backtest and mandate gates pass.
     Start {
         strategy: LnMarketsStrategyName,
@@ -847,6 +867,50 @@ pub enum LnMarketsStrategyInput {
     },
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+pub struct LnMarketsBacktestCostModelInput {
+    /// Measured venue taker fee in basis points.
+    taker_fee_bps: u32,
+    /// Measured round-trip spread and slippage cost in basis points.
+    observed_round_trip_cost_bps: u32,
+    /// Local measurement source, such as a trading-ledger range.
+    measurement_source: String,
+    /// Measurement time in Unix milliseconds.
+    measured_at_ms: i64,
+}
+
+impl From<LnMarketsBacktestCostModelInput> for lnmarkets::BacktestCostModel {
+    fn from(model: LnMarketsBacktestCostModelInput) -> Self {
+        Self {
+            taker_fee_bps: model.taker_fee_bps,
+            observed_round_trip_cost_bps: model.observed_round_trip_cost_bps,
+            measurement_source: model.measurement_source,
+            measured_at_ms: model.measured_at_ms,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+pub struct LnMarketsBacktestPolicyInput {
+    minimum_trade_count: u64,
+    minimum_expectancy_millisats: i64,
+    maximum_drawdown_sats: u64,
+}
+
+impl From<LnMarketsBacktestPolicyInput> for lnmarkets::BacktestPolicy {
+    fn from(policy: LnMarketsBacktestPolicyInput) -> Self {
+        Self {
+            minimum_trade_count: policy.minimum_trade_count,
+            minimum_expectancy_millisats: policy.minimum_expectancy_millisats,
+            maximum_drawdown_sats: policy.maximum_drawdown_sats,
+        }
+    }
+}
+
+fn default_backtest_report_limit() -> u16 {
+    20
+}
+
 impl AgentTool for LnMarketsStrategyTool {
     type Input = LnMarketsStrategyInput;
     type Output = LnMarketsToolOutput;
@@ -860,6 +924,12 @@ impl AgentTool for LnMarketsStrategyTool {
     fn initial_title(&self, input: Result<Self::Input, Value>, _cx: &mut App) -> SharedString {
         match input {
             Ok(LnMarketsStrategyInput::Status) => "Read LN Markets strategies".into(),
+            Ok(LnMarketsStrategyInput::Backtest { strategy, .. }) => {
+                format!("Backtest LN Markets {}", strategy.label()).into()
+            }
+            Ok(LnMarketsStrategyInput::BacktestReports { .. }) => {
+                "Read LN Markets backtests".into()
+            }
             Ok(LnMarketsStrategyInput::Start { strategy, .. }) => {
                 format!("Start LN Markets {}", strategy.label()).into()
             }
@@ -880,6 +950,7 @@ impl AgentTool for LnMarketsStrategyTool {
         cx: &mut App,
     ) -> Task<Result<Self::Output, Self::Output>> {
         let runtime = lnmarkets::trading_runtime(cx);
+        let collector = lnmarkets::collector(cx);
         cx.spawn(async move |cx| {
             let input = input
                 .recv()
@@ -900,6 +971,96 @@ impl AgentTool for LnMarketsStrategyTool {
             );
             let result = match input {
                 LnMarketsStrategyInput::Status => Ok(()),
+                LnMarketsStrategyInput::Backtest {
+                    strategy,
+                    config,
+                    from_ms,
+                    to_ms,
+                    cost_model,
+                    policy,
+                } => {
+                    let collector = collector.as_ref().ok_or_else(|| {
+                        LnMarketsToolOutput::error("LN Markets collector is still starting")
+                    })?;
+                    let created_at_ms = unix_timestamp_ms().map_err(LnMarketsToolOutput::error)?;
+                    let cost_model = cost_model.into();
+                    let policy = policy.into();
+                    let recorded = match strategy {
+                        LnMarketsStrategyName::RebalanceToTarget => {
+                            let config = serde_json::from_value(config).map_err(|error| {
+                                LnMarketsToolOutput::error(format!(
+                                    "invalid rebalance_to_target configuration: {error}"
+                                ))
+                            })?;
+                            runtime.run_rebalance_backtest(
+                                collector,
+                                config,
+                                from_ms,
+                                to_ms,
+                                cost_model,
+                                policy,
+                                created_at_ms,
+                            )
+                        }
+                        LnMarketsStrategyName::FundingCarry => {
+                            let config = serde_json::from_value(config).map_err(|error| {
+                                LnMarketsToolOutput::error(format!(
+                                    "invalid funding_carry configuration: {error}"
+                                ))
+                            })?;
+                            runtime.run_funding_backtest(
+                                collector,
+                                config,
+                                from_ms,
+                                to_ms,
+                                cost_model,
+                                policy,
+                                created_at_ms,
+                            )
+                        }
+                        LnMarketsStrategyName::ThresholdSwing => {
+                            let config = serde_json::from_value(config).map_err(|error| {
+                                LnMarketsToolOutput::error(format!(
+                                    "invalid threshold_swing configuration: {error}"
+                                ))
+                            })?;
+                            runtime.run_threshold_swing_backtest(
+                                collector,
+                                config,
+                                from_ms,
+                                to_ms,
+                                cost_model,
+                                policy,
+                                created_at_ms,
+                            )
+                        }
+                    }
+                    .map_err(|error| LnMarketsToolOutput::error(error.to_string()))?;
+                    let output = LnMarketsToolOutput::success(json!({
+                        "schema": "omega.lnmarkets.backtest_tool.v1",
+                        "phase": "completed",
+                        "status": if recorded.report.passed() { "passed" } else { "failed" },
+                        "report_digest": recorded.report_digest,
+                        "report": recorded.report,
+                    }));
+                    emit_lnmarkets_strategy_update(&event_stream, &output.0);
+                    return Ok(output);
+                }
+                LnMarketsStrategyInput::BacktestReports { strategy, limit } => {
+                    require_limit("backtest report history", limit, 1, 100)
+                        .map_err(LnMarketsToolOutput::error)?;
+                    let reports = runtime
+                        .backtest_reports(strategy.map(LnMarketsStrategyName::label), limit.into())
+                        .map_err(|error| LnMarketsToolOutput::error(error.to_string()))?;
+                    let output = LnMarketsToolOutput::success(json!({
+                        "schema": "omega.lnmarkets.backtest_history.v1",
+                        "phase": "completed",
+                        "status": "available",
+                        "reports": reports,
+                    }));
+                    emit_lnmarkets_strategy_update(&event_stream, &output.0);
+                    return Ok(output);
+                }
                 LnMarketsStrategyInput::Start { strategy, config } => {
                     let (client, network) = self
                         .client
@@ -1029,6 +1190,11 @@ impl AgentTool for LnMarketsStrategyTool {
 fn strategy_action_labels(input: &LnMarketsStrategyInput) -> (&'static str, Option<&'static str>) {
     match input {
         LnMarketsStrategyInput::Status => ("status", None),
+        LnMarketsStrategyInput::Backtest { strategy, .. } => ("backtest", Some(strategy.label())),
+        LnMarketsStrategyInput::BacktestReports { strategy, .. } => (
+            "backtest_reports",
+            strategy.map(LnMarketsStrategyName::label),
+        ),
         LnMarketsStrategyInput::Start { strategy, .. } => ("start", Some(strategy.label())),
         LnMarketsStrategyInput::Adjust { strategy, .. } => ("adjust", Some(strategy.label())),
         LnMarketsStrategyInput::Halt { strategy, .. } => ("halt", Some(strategy.label())),
@@ -1037,6 +1203,8 @@ fn strategy_action_labels(input: &LnMarketsStrategyInput) -> (&'static str, Opti
 
 fn pending_strategy_status(action: &str) -> &'static str {
     match action {
+        "backtest" => "backtesting",
+        "backtest_reports" => "reading",
         "start" => "starting",
         "adjust" => "adjusting",
         "halt" => "halting",
@@ -1049,6 +1217,8 @@ fn completed_strategy_status(
     strategies: &[lnmarkets::StrategyRuntimeSnapshot],
 ) -> &'static str {
     match action {
+        "backtest" => "completed",
+        "backtest_reports" => "completed",
         "start" | "adjust" => "running",
         "halt" => "halted",
         _ if strategies

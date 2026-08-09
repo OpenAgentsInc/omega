@@ -72,6 +72,11 @@ substitute a `market_*` fixture.
     the saved credential and require its network and permissions.
 - `lnmarkets_swap` converts between BTC and synthetic USD on the selected LN
   Markets account. This is separate from futures order placement.
+- `lnmarkets_strategy` can run a collected-data backtest, read durable reports,
+  or start, adjust, halt, and inspect an automated strategy. Run a backtest for
+  the exact configuration before attempting to start or adjust it. The cost
+  model must name its local measurement source and match the configuration's
+  measured round-trip cost.
 
 Use REST history for analysis over a time range and the bounded WebSocket view
 for current changes. Never claim a stream is still active after the tool
@@ -82,7 +87,7 @@ means the API key lacks that read scope.
 
 When a strategy starts, its thread becomes the portfolio-review thread. A
 scheduled or event-triggered review already contains local feature, ledger,
-mandate, strategy-state, opportunity, and limit-headroom data. Do not fetch remote market or account data during that turn, and do not repeat the local
+mandate, strategy-state, backtest-report, opportunity, and limit-headroom data. Do not fetch remote market or account data during that turn, and do not repeat the local
 feature or ledger reads. Rank the supplied opportunity inventory. Use
 `lnmarkets_strategy` at most once to start, adjust, or halt a supported
 strategy inside the active mandate. Never use `lnmarkets_swap` or another raw

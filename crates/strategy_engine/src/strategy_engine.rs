@@ -19,8 +19,8 @@ mod backtest;
 
 pub use backtest::{
     BACKTEST_SCHEMA, BacktestApproval, BacktestCostModel, BacktestExecutionModel, BacktestGate,
-    BacktestOutcome, BacktestPolicy, BacktestReport, BacktestStore, BacktestTick, SimulatedTrade,
-    parameter_digest, run_backtest,
+    BacktestOutcome, BacktestPolicy, BacktestReport, BacktestStore, BacktestTick,
+    SimulatedSettlement, SimulatedTrade, parameter_digest, run_backtest,
 };
 
 const ONE_HOUR_MS: i64 = 60 * 60 * 1_000;

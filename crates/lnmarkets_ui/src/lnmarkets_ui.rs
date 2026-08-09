@@ -23,8 +23,9 @@ use util::ResultExt as _;
 mod operator_panel;
 
 pub use operator_panel::{
-    LnMarketsOperatorPanel, OperatorConsoleSnapshot, OperatorConsoleSource, OperatorReviewTurn,
-    OperatorStrategySnapshot, init as init_operator_panel,
+    LnMarketsOperatorPanel, OperatorBacktestSnapshot, OperatorConsoleSnapshot,
+    OperatorConsoleSource, OperatorReviewTurn, OperatorStrategySnapshot,
+    init as init_operator_panel,
 };
 
 pub struct LnMarketsSettingsPage {

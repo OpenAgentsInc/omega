@@ -909,6 +909,7 @@ impl BacktestExecutionModel<FeatureSnapshot> for ThresholdSwingBacktestModel {
                     gross_profit_sats: 0,
                     notional_sats: amount_sats,
                     funding_sats: 0,
+                    counts_as_trade: true,
                 })
             }
             (OrderSide::Sell, QuantityUnit::Sats) => {
@@ -927,6 +928,7 @@ impl BacktestExecutionModel<FeatureSnapshot> for ThresholdSwingBacktestModel {
                     gross_profit_sats,
                     notional_sats: intent.quantity.amount,
                     funding_sats: 0,
+                    counts_as_trade: true,
                 })
             }
             _ => bail!("threshold swing backtest received an unsupported intent"),

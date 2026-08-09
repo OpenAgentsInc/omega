@@ -238,7 +238,7 @@ pub fn derive_features(mut input: FeatureInput) -> Result<FeatureSnapshot> {
         .or_else(|| input.prices.last())
         .map(|point| point.value);
     let account_drift = match (account, last_price) {
-        (Some(account), Some(last_price)) => account_drift(account, last_price),
+        (Some(account), Some(last_price)) => account_drift_features(account, last_price),
         _ => None,
     };
     Ok(FeatureSnapshot {
@@ -377,7 +377,10 @@ fn liquidity_features(tiers: &[LiquidityTier]) -> LiquidityFeatures {
     }
 }
 
-fn account_drift(account: AccountAllocation, last_price: f64) -> Option<AccountDriftFeatures> {
+pub fn account_drift_features(
+    account: AccountAllocation,
+    last_price: f64,
+) -> Option<AccountDriftFeatures> {
     let btc_value_usd = account.btc_sats / 100_000_000.0 * last_price;
     let total_value_usd = btc_value_usd + account.synthetic_usd;
     if !total_value_usd.is_finite() || total_value_usd <= 0.0 {
@@ -774,7 +777,10 @@ impl MarketDataStore {
             .context("feature replay oracle index count overflowed")?;
         let funding_settlement_count = u64::try_from(funding_settlements.len())
             .context("feature replay funding count overflowed")?;
-        let mut changes = BTreeMap::<i64, (Vec<f64>, Vec<f64>, Vec<f64>)>::new();
+        let liquidity_snapshots =
+            self.range(network, STREAM_BUCKETS_TOPIC, from_ms, Some(to_ms), 10_000)?;
+        let account = self.account_allocation(network)?;
+        let mut changes = BTreeMap::<i64, (Vec<f64>, Vec<f64>, Vec<f64>, Vec<Value>)>::new();
         for candle in candles {
             let close = event_numeric_value(&candle.payload, &["close"]).with_context(|| {
                 format!("candle at {} has no close price", candle.event_time_ms)
@@ -808,10 +814,20 @@ impl MarketDataStore {
                 .2
                 .push(value);
         }
+        for snapshot in liquidity_snapshots {
+            changes
+                .entry(snapshot.event_time_ms)
+                .or_default()
+                .3
+                .push(snapshot.payload);
+        }
 
-        let mut input = FeatureInput::default();
+        let mut input = FeatureInput {
+            account,
+            ..FeatureInput::default()
+        };
         let mut ticks = Vec::with_capacity(changes.len());
-        for (occurred_at_ms, (prices, rates, index_prices)) in changes {
+        for (occurred_at_ms, (prices, rates, index_prices, liquidity_snapshots)) in changes {
             input
                 .prices
                 .extend(prices.into_iter().map(|value| TimedValue {
@@ -830,6 +846,10 @@ impl MarketDataStore {
                     time_ms: occurred_at_ms,
                     value,
                 }));
+            if let Some(snapshot) = liquidity_snapshots.last() {
+                input.liquidity_time_ms = Some(occurred_at_ms);
+                input.liquidity_tiers = parse_liquidity_tiers(snapshot);
+            }
             if input.prices.len() > 1_000 {
                 input.prices.drain(..input.prices.len() - 1_000);
             }
@@ -857,6 +877,12 @@ impl MarketDataStore {
             funding_settlement_count,
             ticks,
         })
+    }
+
+    pub fn account_allocation(&self, network: Network) -> Result<Option<AccountAllocation>> {
+        self.state(network, "account_allocation")?
+            .map(|allocation| serde_json::from_str(&allocation).map_err(Into::into))
+            .transpose()
     }
 
     fn refresh_features(&self, network: Network) -> Result<()> {
@@ -949,10 +975,7 @@ impl MarketDataStore {
             .first()
             .map(|event| parse_liquidity_tiers(&event.payload))
             .unwrap_or_default();
-        let account = self
-            .state(network, "account_allocation")?
-            .map(|allocation| serde_json::from_str(&allocation))
-            .transpose()?;
+        let account = self.account_allocation(network)?;
         Ok(FeatureInput {
             prices,
             index_prices,

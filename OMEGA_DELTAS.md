@@ -10114,8 +10114,9 @@ settled funding, and most recent action through a versioned projection.
 ### OMEGA-DELTA-0251 — LN Markets agent controls are typed and card-backed
 
 Omega Agent can read the local derived feature snapshot, inspect attributed
-strategy profit, read the active trading mandate, and control the two bounded
-LN Markets strategies. Every output has a versioned `omega.lnmarkets.*`
+strategy profit, run and read durable collected-data backtests, read the active
+trading mandate, and control the bounded LN Markets strategies. Every output
+has a versioned `omega.lnmarkets.*`
 schema. The mandate tool is read-only; widening authority remains exclusive to
 the settings approval flow. Strategy start and adjustment still require the
 exact stored backtest and active mandate, and automated execution remains
@@ -10123,10 +10124,11 @@ restricted to signet.
 
 Strategy commands receive an acknowledgement from the durable background
 service. A refused command returns its reason without killing that service.
-Start, adjust, halt, and status updates stream through one tool call so the
-transcript updates one lifecycle card. Features, ledger profit and drawdown,
-strategy lifecycle states, and mandate states each have component-library
-coverage and render outside generic collapsed tool groups.
+Backtest, report, start, adjust, halt, and status updates use one tool call so
+the transcript updates one lifecycle card. Features, ledger profit and
+drawdown, backtest expectancy and drawdown, strategy lifecycle states, and
+mandate states each have component-library coverage and render outside generic
+collapsed tool groups.
 
 The four tools are part of the closed Basic profile alongside the account,
 market-data, and direct-swap tools. Raw LN Markets tools remain available for
@@ -10157,7 +10159,7 @@ without losing its trigger.
 
 The LN Markets plugin provides a right-dock operator panel. It projects
 collector connection state, every subscribed topic's lag, backfill progress,
-strategy state and limit headroom, attributed profit and costs, the active
+strategy state and limit headroom, durable backtest reports, attributed profit and costs, the active
 mandate, pending wakeups, and recent review outcomes from local stores and
 in-process services. The transcript remains the narrative agent surface.
 

@@ -47,11 +47,23 @@ pub struct OperatorReviewTurn {
     pub outcome: String,
 }
 
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct OperatorBacktestSnapshot {
+    pub strategy_id: String,
+    pub outcome: String,
+    pub created_at_ms: i64,
+    pub trade_count: u64,
+    pub expectancy_millisats: i64,
+    pub maximum_drawdown_sats: u64,
+    pub parameter_digest: String,
+}
+
 #[derive(Clone, Debug)]
 pub struct OperatorConsoleSnapshot {
     pub generated_at_ms: i64,
     pub collector: Option<CollectorHealth>,
     pub strategies: Vec<OperatorStrategySnapshot>,
+    pub backtests: Vec<OperatorBacktestSnapshot>,
     pub ledger: Option<ProfitReport>,
     pub mandate: Option<MandateSnapshot>,
     pub review_cadence: Option<ReviewCadence>,
@@ -66,6 +78,7 @@ impl OperatorConsoleSnapshot {
             generated_at_ms,
             collector: None,
             strategies: Vec::new(),
+            backtests: Vec::new(),
             ledger: None,
             mandate: None,
             review_cadence: None,
@@ -345,6 +358,72 @@ impl LnMarketsOperatorPanel {
         )
     }
 
+    fn render_backtests(&self) -> gpui::AnyElement {
+        let reports = self
+            .snapshot
+            .backtests
+            .iter()
+            .enumerate()
+            .map(|(index, report)| {
+                v_flex()
+                    .id(("lnmarkets-operator-backtest", index))
+                    .p_2()
+                    .gap_1()
+                    .border_1()
+                    .rounded_sm()
+                    .child(
+                        h_flex()
+                            .justify_between()
+                            .child(Label::new(report.strategy_id.clone()))
+                            .child(
+                                Label::new(report.outcome.clone())
+                                    .size(LabelSize::Small)
+                                    .color(if report.outcome == "passed" {
+                                        Color::Success
+                                    } else {
+                                        Color::Error
+                                    }),
+                            ),
+                    )
+                    .child(
+                        Label::new(format!(
+                            "{} trades · {} millisats expectancy · {} sats max drawdown",
+                            report.trade_count,
+                            report.expectancy_millisats,
+                            report.maximum_drawdown_sats
+                        ))
+                        .size(LabelSize::Small),
+                    )
+                    .child(
+                        Label::new(format!(
+                            "Created {} · parameters {}",
+                            format_timestamp(report.created_at_ms),
+                            report
+                                .parameter_digest
+                                .get(..12)
+                                .unwrap_or(&report.parameter_digest)
+                        ))
+                        .size(LabelSize::Small)
+                        .color(Color::Muted),
+                    )
+            });
+        section(
+            "lnmarkets.operator.backtests",
+            "Backtest reports",
+            v_flex()
+                .gap_2()
+                .when(self.snapshot.backtests.is_empty(), |this| {
+                    this.child(
+                        Label::new("No backtest reports")
+                            .size(LabelSize::Small)
+                            .color(Color::Muted),
+                    )
+                })
+                .children(reports)
+                .into_any_element(),
+        )
+    }
+
     fn render_mandate(&self, cx: &mut Context<Self>) -> gpui::AnyElement {
         let busy = self.operation.is_some();
         let content = match self
@@ -484,6 +563,7 @@ impl Render for LnMarketsOperatorPanel {
             })
             .child(self.render_collector())
             .child(self.render_strategies())
+            .child(self.render_backtests())
             .child(self.render_ledger())
             .child(self.render_mandate(cx))
             .child(self.render_wakeups())
@@ -679,6 +759,16 @@ mod tests {
                     daily_loss_headroom_sats: Some(4_000),
                     order_headroom: Some(8),
                 }],
+                backtests: vec![OperatorBacktestSnapshot {
+                    strategy_id: "funding_carry".into(),
+                    outcome: "passed".into(),
+                    created_at_ms: 8_000,
+                    trade_count: 12,
+                    expectancy_millisats: 2_500,
+                    maximum_drawdown_sats: 75,
+                    parameter_digest:
+                        "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef".into(),
+                }],
                 ledger: Some(ProfitReport {
                     strategies: vec![StrategyProfit {
                         strategy_id: "funding_carry".into(),
@@ -740,6 +830,7 @@ mod tests {
             "lnmarkets.operator.collector",
             "lnmarkets.operator.strategies",
             "lnmarkets.operator.strategy.funding_carry",
+            "lnmarkets.operator.backtests",
             "lnmarkets.operator.ledger",
             "lnmarkets.operator.mandate",
             "lnmarkets.operator.wakeups",

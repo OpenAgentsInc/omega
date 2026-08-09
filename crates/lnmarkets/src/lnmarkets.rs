@@ -15,8 +15,8 @@ mod trading_runtime;
 
 pub use agent_wakeup::WakeupSource;
 pub use lnmarkets_ui::{
-    LnMarketsOperatorPanel, OperatorConsoleSnapshot, OperatorConsoleSource, OperatorReviewTurn,
-    OperatorStrategySnapshot,
+    LnMarketsOperatorPanel, OperatorBacktestSnapshot, OperatorConsoleSnapshot,
+    OperatorConsoleSource, OperatorReviewTurn, OperatorStrategySnapshot,
 };
 pub use review_turn::{PORTFOLIO_REVIEW_SCHEMA, PORTFOLIO_REVIEW_TOKEN_BUDGET, PortfolioReview};
 pub use signet_soak::{
@@ -25,7 +25,7 @@ pub use signet_soak::{
     SoakWindow,
 };
 pub use trading_runtime::{
-    ReviewTurnHistory, ReviewTurnOutcome, StrategyRuntimeSnapshot, TradingRuntime,
+    RecordedBacktest, ReviewTurnHistory, ReviewTurnOutcome, StrategyRuntimeSnapshot, TradingRuntime,
 };
 
 pub use lnmarkets_client::*;
@@ -35,7 +35,8 @@ pub use lnmarkets_data::{
     IndexFeatures, LiquidityFeatures, ORACLE_INDEX_TOPIC, StoredMarketEvent, VolatilityFeatures,
 };
 pub use lnmarkets_trading::{
-    FundingCarryConfig, FundingCarryInstrument, RebalanceCostMeasurement, RebalanceToTargetConfig,
+    BacktestCostModel, BacktestOutcome, BacktestPolicy, BacktestReport, FundingCarryConfig,
+    FundingCarryInstrument, RebalanceCostMeasurement, RebalanceToTargetConfig,
     StrategyLifecycleEvent, ThresholdSwingAction, ThresholdSwingBacktestModel,
     ThresholdSwingConfig, ThresholdSwingPosition, ThresholdSwingState, ThresholdSwingWindow,
 };
@@ -335,6 +336,19 @@ impl OperatorConsoleSource for PluginOperatorConsoleSource {
             .mandate
             .as_ref()
             .map(|mandate| mandate.review_cadence.clone());
+        let backtests = review
+            .backtests
+            .iter()
+            .map(|report| OperatorBacktestSnapshot {
+                strategy_id: report.strategy_id.clone(),
+                outcome: if report.passed() { "passed" } else { "failed" }.to_string(),
+                created_at_ms: report.created_at_ms,
+                trade_count: report.trade_count,
+                expectancy_millisats: report.expectancy_millisats,
+                maximum_drawdown_sats: report.maximum_drawdown_sats,
+                parameter_digest: report.parameter_digest.clone(),
+            })
+            .collect();
         let review_history = runtime
             .review_turn_history()
             .into_iter()
@@ -352,6 +366,7 @@ impl OperatorConsoleSource for PluginOperatorConsoleSource {
             generated_at_ms: now_ms,
             collector: collector_health,
             strategies,
+            backtests,
             ledger: Some(review.daily_report),
             mandate: Some(review.mandate),
             review_cadence,

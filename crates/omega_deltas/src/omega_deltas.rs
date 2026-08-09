@@ -29665,10 +29665,14 @@ mod tests {
             "omega.lnmarkets.features.v1",
             "omega.lnmarkets.ledger.v1",
             "omega.lnmarkets.strategy.v1",
+            "omega.lnmarkets.backtest_tool.v1",
+            "omega.lnmarkets.backtest_history.v1",
             "omega.lnmarkets.mandate.v1",
             "read_only\": true",
             "entry_limit: u16",
             "event_stream.update_fields(",
+            "LnMarketsStrategyInput::Backtest",
+            "LnMarketsStrategyInput::BacktestReports",
             "automated LN Markets strategies are restricted to signet",
         ] {
             assert!(
@@ -29684,6 +29688,10 @@ mod tests {
             "MandateStore::open_default()",
             "LedgerStore::open_default()",
             "BacktestStore::open_default()",
+            "pub fn run_rebalance_backtest(",
+            "pub fn run_funding_backtest(",
+            "pub fn run_threshold_swing_backtest(",
+            "self.backtests.record(&report)",
             ".request(StrategyCommand::Start",
             ".request(StrategyCommand::Adjust",
             ".request(StrategyCommand::Halt",
@@ -29701,11 +29709,13 @@ mod tests {
             "omega.lnmarkets.features.v1",
             "omega.lnmarkets.ledger.v1",
             "omega.lnmarkets.strategy.v1",
+            "omega.lnmarkets.backtest_tool.v1",
             "omega.lnmarkets.mandate.v1",
             "#[derive(RegisterComponent)]",
             "[\"collecting\", \"ready\", \"degraded\"]",
             "[\"empty\", \"profit\", \"drawdown\"]",
             "[\"idle\", \"starting\", \"running\", \"adjusting\", \"halted\", \"error\"]",
+            "[\"passed\", \"failed\"]",
             "[\"missing\", \"active\", \"expired\"]",
         ] {
             assert!(
@@ -29754,6 +29764,7 @@ mod tests {
             "self.ledger.profit_report(&daily_query)?",
             "self.mandate.snapshot()?",
             "self.strategy_snapshots()",
+            "self.backtests.reports(None, 20)?",
         ] {
             assert!(
                 runtime.contains(required),
@@ -29815,6 +29826,7 @@ mod tests {
             "pub trait OperatorConsoleSource",
             "lnmarkets.operator.collector",
             "lnmarkets.operator.strategies",
+            "lnmarkets.operator.backtests",
             "lnmarkets.operator.ledger",
             "lnmarkets.operator.mandate",
             "lnmarkets.operator.wakeups",

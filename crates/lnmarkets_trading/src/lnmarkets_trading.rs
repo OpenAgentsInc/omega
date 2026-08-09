@@ -9,8 +9,9 @@ pub use funding_carry::{
     sync_funding_fees,
 };
 pub use rebalance_to_target::{
-    REBALANCE_TO_TARGET_SCHEMA, RebalanceAction, RebalanceCostMeasurement, RebalanceToTargetConfig,
-    RebalanceToTargetProgram, RebalanceToTargetState, SyntheticUsdExecutor, measure_rebalance_cost,
+    REBALANCE_TO_TARGET_SCHEMA, RebalanceAction, RebalanceBacktestModel, RebalanceCostMeasurement,
+    RebalanceToTargetConfig, RebalanceToTargetProgram, RebalanceToTargetState,
+    SyntheticUsdExecutor, measure_rebalance_cost,
 };
 pub use threshold_swing::{
     THRESHOLD_SWING_SCHEMA, ThresholdSwingAction, ThresholdSwingBacktestModel,
@@ -26,11 +27,11 @@ pub const REGISTRATION: TradingRegistration = TradingRegistration;
 pub use strategy_engine::{
     BACKTEST_SCHEMA, BacktestApproval, BacktestCostModel, BacktestExecutionModel, BacktestGate,
     BacktestOutcome, BacktestPolicy, BacktestReport, BacktestStore, BacktestTick, LifecycleSink,
-    MandateAuthority, MemoryLifecycleSink, MemoryWakeupSink, OrderIntent, SimulatedTrade,
-    StrategyCommand, StrategyEngine, StrategyHaltReason, StrategyLifecycleEvent, StrategyProgram,
-    StrategyServiceHandle, StrategyStatus, StrategyStep, StrategyTick, VenueExecution,
-    VenueExecutor, VenueRiskSnapshot, WakeupSink, background_service, parameter_digest,
-    run_backtest,
+    MandateAuthority, MemoryLifecycleSink, MemoryWakeupSink, OrderIntent, SimulatedSettlement,
+    SimulatedTrade, StrategyCommand, StrategyEngine, StrategyHaltReason, StrategyLifecycleEvent,
+    StrategyProgram, StrategyServiceHandle, StrategyStatus, StrategyStep, StrategyTick,
+    VenueExecution, VenueExecutor, VenueRiskSnapshot, WakeupSink, background_service,
+    parameter_digest, run_backtest,
 };
 
 pub type LnMarketsStrategyTick = StrategyTick<lnmarkets_data::FeatureSnapshot>;

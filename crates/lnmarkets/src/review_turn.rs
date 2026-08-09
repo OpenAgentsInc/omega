@@ -3,7 +3,7 @@ use serde::Serialize;
 use trading_ledger::{LedgerEntry, LedgerEntryKind, ProfitReport};
 use trading_mandate::MandateSnapshot;
 
-use crate::StrategyRuntimeSnapshot;
+use crate::{BacktestReport, StrategyRuntimeSnapshot};
 
 pub const PORTFOLIO_REVIEW_SCHEMA: &str = "omega.lnmarkets.portfolio_review.v1";
 pub const PORTFOLIO_REVIEW_TOKEN_BUDGET: u64 = 1_024;
@@ -58,6 +58,7 @@ pub struct PortfolioReview {
     pub mandate: MandateSnapshot,
     pub limit_headroom: Option<LimitHeadroom>,
     pub strategies: Vec<StrategyRuntimeSnapshot>,
+    pub backtests: Vec<BacktestReport>,
     pub opportunities: Vec<Opportunity>,
 }
 
@@ -71,6 +72,7 @@ impl PortfolioReview {
         hourly_entries: &[LedgerEntry],
         mandate: MandateSnapshot,
         strategies: Vec<StrategyRuntimeSnapshot>,
+        backtests: Vec<BacktestReport>,
     ) -> Self {
         let limit_headroom = mandate.mandate.as_ref().map(|active| {
             let by_strategy = active
@@ -123,6 +125,7 @@ impl PortfolioReview {
             mandate,
             limit_headroom,
             strategies,
+            backtests,
             opportunities,
         }
     }
@@ -382,6 +385,7 @@ mod tests {
             &[order("funding_carry")],
             mandate(),
             Vec::new(),
+            Vec::new(),
         );
         let headroom = review.limit_headroom.as_ref().expect("limit headroom");
         let funding = headroom
@@ -408,6 +412,7 @@ mod tests {
             ProfitReport::default(),
             &[],
             mandate(),
+            Vec::new(),
             Vec::new(),
         );
         let instruction = review.instruction().expect("serialize review");

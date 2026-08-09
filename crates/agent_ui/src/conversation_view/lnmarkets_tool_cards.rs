@@ -99,6 +99,9 @@ fn render_payload(payload: &Value, cx: &App) -> Option<AnyElement> {
         "omega.lnmarkets.features.v1" => render_features(payload, cx),
         "omega.lnmarkets.ledger.v1" => render_ledger(payload, cx),
         "omega.lnmarkets.strategy.v1" => render_strategy(payload, cx),
+        "omega.lnmarkets.backtest_tool.v1" | "omega.lnmarkets.backtest_history.v1" => {
+            render_backtest(payload, cx)
+        }
         "omega.lnmarkets.mandate.v1" => render_mandate(payload, cx),
         _ => None,
     }
@@ -207,6 +210,69 @@ fn render_strategy(payload: &Value, cx: &App) -> Option<AnyElement> {
     Some(render_card("Trading strategies", &status, rows, cx))
 }
 
+fn render_backtest(payload: &Value, cx: &App) -> Option<AnyElement> {
+    let report = payload.get("report").or_else(|| {
+        payload
+            .get("reports")
+            .and_then(Value::as_array)
+            .and_then(|reports| reports.first())
+    })?;
+    let status = payload
+        .get("status")
+        .and_then(Value::as_str)
+        .map(ToString::to_string)
+        .unwrap_or_else(|| {
+            if report
+                .get("outcome")
+                .and_then(|outcome| outcome.get("status"))
+                == Some(&Value::String("passed".into()))
+            {
+                "passed".into()
+            } else {
+                "failed".into()
+            }
+        });
+    Some(render_card(
+        "Strategy backtest",
+        &status,
+        vec![
+            (
+                "Strategy".into(),
+                string_field(report, "strategy_id", "unknown"),
+            ),
+            (
+                "Trades".into(),
+                report
+                    .get("trade_count")
+                    .and_then(Value::as_u64)
+                    .unwrap_or(0)
+                    .to_string(),
+            ),
+            (
+                "Expectancy".into(),
+                format!(
+                    "{} millisats",
+                    report
+                        .get("expectancy_millisats")
+                        .and_then(Value::as_i64)
+                        .unwrap_or(0)
+                ),
+            ),
+            (
+                "Max drawdown".into(),
+                format!(
+                    "{} sats",
+                    report
+                        .get("maximum_drawdown_sats")
+                        .and_then(Value::as_u64)
+                        .unwrap_or(0)
+                ),
+            ),
+        ],
+        cx,
+    ))
+}
+
 fn render_mandate(payload: &Value, cx: &App) -> Option<AnyElement> {
     let status = string_field(payload, "status", "missing");
     let snapshot = payload.get("snapshot")?;
@@ -249,6 +315,7 @@ fn render_card(title: &str, status: &str, rows: Vec<(String, String)>, cx: &App)
         "Derived market features" => "features",
         "Strategy profit ledger" => "ledger",
         "Trading strategies" => "strategy",
+        "Strategy backtest" => "backtest",
         "Trading mandate" => "mandate",
         _ => "unknown",
     };
@@ -325,7 +392,7 @@ impl Component for LnMarketsToolCardsPreview {
     }
 
     fn description() -> &'static str {
-        "LN Markets feature, ledger, strategy lifecycle, and mandate cards."
+        "LN Markets feature, ledger, backtest, strategy lifecycle, and mandate cards."
     }
 
     fn preview(_window: &mut Window, cx: &mut App) -> AnyElement {
@@ -374,6 +441,19 @@ impl Component for LnMarketsToolCardsPreview {
                     },
                     cx,
                 ),
+                preview_group("Backtest", ["passed", "failed"], |status| {
+                    json!({
+                        "schema": "omega.lnmarkets.backtest_tool.v1",
+                        "status": status,
+                        "report": {
+                            "strategy_id": "threshold_swing",
+                            "trade_count": 18,
+                            "expectancy_millisats": if status == "passed" { 2400 } else { -800 },
+                            "maximum_drawdown_sats": if status == "passed" { 350 } else { 2200 },
+                            "outcome": { "status": status },
+                        },
+                    })
+                }, cx),
                 preview_group("Mandate", ["missing", "active", "expired"], |status| {
                     json!({
                         "schema": "omega.lnmarkets.mandate.v1",
@@ -470,6 +550,8 @@ mod tests {
             "lnmarkets-card-strategy-adjusting",
             "lnmarkets-card-strategy-halted",
             "lnmarkets-card-strategy-error",
+            "lnmarkets-card-backtest-passed",
+            "lnmarkets-card-backtest-failed",
             "lnmarkets-card-mandate-missing",
             "lnmarkets-card-mandate-active",
             "lnmarkets-card-mandate-expired",

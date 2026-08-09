@@ -15,8 +15,8 @@ use serde_json::{Value, json};
 use sha2::{Digest as _, Sha256};
 use strategy_engine::{
     BacktestExecutionModel, BacktestTick, OrderIntent, OrderKind, OrderQuantity, OrderSide,
-    QuantityUnit, SimulatedTrade, StrategyProgram, StrategyStep, StrategyTick, VenueExecution,
-    VenueExecutor, VenueProtection, VenueRiskSnapshot,
+    QuantityUnit, SimulatedSettlement, SimulatedTrade, StrategyProgram, StrategyStep, StrategyTick,
+    VenueExecution, VenueExecutor, VenueProtection, VenueRiskSnapshot,
 };
 use trading_ledger::{
     LedgerAccount, LedgerEntryDraft, LedgerEntryKind, LedgerPosting, LedgerStore,
@@ -1220,44 +1220,181 @@ pub async fn sync_funding_fees(
     Ok(report)
 }
 
-#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
-pub struct FundingCarryBacktestModel;
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct FundingCarryBacktestModel {
+    position: Option<FundingCarryPosition>,
+    entry_price: Option<f64>,
+    position_sats: u64,
+    last_funding_samples: usize,
+    uses_explicit_settlements: bool,
+}
+
+impl FundingCarryBacktestModel {
+    fn price(features: &FundingCarryFeatures) -> Result<f64> {
+        let price = features
+            .market
+            .index
+            .current_price
+            .or(features.market.liquidity.best_ask)
+            .or(features.market.liquidity.best_bid)
+            .context("funding carry backtest has no price")?;
+        validate_price(price, "funding carry backtest price")?;
+        Ok(price)
+    }
+
+    fn projected_funding_sats(&self, features: &FundingCarryFeatures) -> Result<i64> {
+        if self.position.is_none() || features.market.funding.samples <= self.last_funding_samples {
+            return Ok(0);
+        }
+        let rate = features.market.funding.current_rate.unwrap_or_default();
+        if !rate.is_finite() {
+            bail!("funding carry backtest rate must be finite");
+        }
+        signed_floor_i64(self.position_sats as f64 * rate)
+    }
+}
 
 impl BacktestExecutionModel<FundingCarryFeatures> for FundingCarryBacktestModel {
+    fn prepare_tick(
+        &mut self,
+        tick: &BacktestTick<FundingCarryFeatures>,
+    ) -> Result<BacktestTick<FundingCarryFeatures>> {
+        let mut tick = tick.clone();
+        tick.features.position = self.position.clone();
+        self.uses_explicit_settlements |= tick.features.settled_funding_sats != 0;
+        if !self.uses_explicit_settlements {
+            tick.features.settled_funding_sats = self.projected_funding_sats(&tick.features)?;
+        }
+        self.last_funding_samples = tick.features.market.funding.samples;
+        Ok(tick)
+    }
+
+    fn settle_tick(
+        &mut self,
+        tick: &BacktestTick<FundingCarryFeatures>,
+    ) -> Result<SimulatedSettlement> {
+        Ok(SimulatedSettlement {
+            gross_profit_sats: 0,
+            funding_sats: tick.features.settled_funding_sats,
+        })
+    }
+
     fn execute(
         &mut self,
         intent: &OrderIntent,
         tick: &BacktestTick<FundingCarryFeatures>,
     ) -> Result<SimulatedTrade> {
+        let price = Self::price(&tick.features)?;
         let notional_sats = match intent.quantity.unit {
             QuantityUnit::Sats => intent.quantity.amount,
             QuantityUnit::UsdCents => {
-                let price = tick
-                    .features
-                    .market
-                    .liquidity
-                    .best_ask
-                    .or(tick.features.market.liquidity.best_bid)
-                    .context("funding carry backtest has no price")?;
                 floor_u64(intent.quantity.amount as f64 / 100.0 / price * SATOSHIS_PER_BITCOIN)?
             }
             QuantityUnit::UsdNotional => {
-                let price = tick
-                    .features
-                    .market
-                    .liquidity
-                    .best_ask
-                    .or(tick.features.market.liquidity.best_bid)
-                    .context("funding carry backtest has no price")?;
                 floor_u64(intent.quantity.amount as f64 / price * SATOSHIS_PER_BITCOIN)?
             }
         };
+        let operation = intent
+            .metadata
+            .get("operation")
+            .and_then(Value::as_str)
+            .context("funding carry backtest intent has no operation")?;
+        let mut gross_profit_sats = 0;
+        let counts_as_trade = match operation {
+            "increase_synthetic_usd" => {
+                self.entry_price = Some(price);
+                self.position_sats = intent.quantity.amount;
+                self.position = Some(FundingCarryPosition::SyntheticUsd {
+                    notional_usd_cents: floor_u64(
+                        intent.quantity.amount as f64 / SATOSHIS_PER_BITCOIN * price * 100.0,
+                    )?,
+                });
+                true
+            }
+            "reduce_synthetic_usd" => {
+                let entry_price = self
+                    .entry_price
+                    .take()
+                    .context("funding carry backtest synthetic USD exit has no entry")?;
+                gross_profit_sats =
+                    signed_floor_i64(self.position_sats as f64 * (entry_price - price) / price)?;
+                self.position = None;
+                self.position_sats = 0;
+                true
+            }
+            "open_short" => {
+                let leverage = intent
+                    .metadata
+                    .get("leverage")
+                    .and_then(Value::as_u64)
+                    .and_then(|value| u8::try_from(value).ok())
+                    .context("funding carry backtest short has no leverage")?;
+                let notional_usd = intent.quantity.amount;
+                self.entry_price = Some(price);
+                self.position_sats = notional_sats;
+                self.position = Some(FundingCarryPosition::IsolatedFuture {
+                    trade_id: format!("backtest:{}", intent.intent_id),
+                    side: "sell".into(),
+                    notional_usd,
+                    margin_sats: notional_sats / u64::from(leverage),
+                    leverage,
+                    liquidation_price: price * (1.0 + 1.0 / f64::from(leverage)),
+                    liquidation_buffer_bps: 10_000 / u32::from(leverage),
+                    unrealized_profit_sats: 0,
+                    stop_loss_price: None,
+                });
+                true
+            }
+            "close_short" => {
+                let entry_price = self
+                    .entry_price
+                    .take()
+                    .context("funding carry backtest short exit has no entry")?;
+                gross_profit_sats =
+                    signed_floor_i64(self.position_sats as f64 * (entry_price - price) / price)?;
+                self.position = None;
+                self.position_sats = 0;
+                true
+            }
+            "install_stop" => {
+                if let Some(FundingCarryPosition::IsolatedFuture {
+                    stop_loss_price, ..
+                }) = self.position.as_mut()
+                {
+                    *stop_loss_price = intent
+                        .protection
+                        .as_ref()
+                        .map(|protection| protection.stop_loss_price);
+                }
+                false
+            }
+            "add_margin" => {
+                if let Some(FundingCarryPosition::IsolatedFuture { margin_sats, .. }) =
+                    self.position.as_mut()
+                {
+                    *margin_sats = margin_sats
+                        .checked_add(intent.quantity.amount)
+                        .context("funding carry backtest margin overflowed")?;
+                }
+                false
+            }
+            "cash_in" => false,
+            _ => bail!("funding carry backtest received unsupported operation {operation:?}"),
+        };
         Ok(SimulatedTrade {
-            gross_profit_sats: 0,
+            gross_profit_sats,
             notional_sats,
-            funding_sats: tick.features.settled_funding_sats,
+            funding_sats: 0,
+            counts_as_trade,
         })
     }
+}
+
+fn signed_floor_i64(value: f64) -> Result<i64> {
+    if !value.is_finite() || value < i64::MIN as f64 || value > i64::MAX as f64 {
+        bail!("funding carry backtest result is outside the supported range");
+    }
+    Ok(value.floor() as i64)
 }
 
 fn funding_entry(
@@ -1663,6 +1800,7 @@ mod tests {
     #[test]
     fn funding_history_backtest_accounts_for_settlements() {
         let config = config(FundingCarryInstrument::SyntheticUsd);
+        let mut model = FundingCarryBacktestModel::default();
         let ticks = [
             (100, 0.001, 500),
             (200, -0.00002, 0),
@@ -1685,11 +1823,11 @@ mod tests {
             &FundingCarryProgram,
             &config,
             &ticks,
-            &mut FundingCarryBacktestModel,
+            &mut model,
             TradingNetwork::Signet,
             BacktestCostModel {
-                taker_fee_bps: 1,
-                observed_round_trip_cost_bps: 1,
+                taker_fee_bps: 0,
+                observed_round_trip_cost_bps: 0,
                 measurement_source: "signet ledger".into(),
                 measured_at_ms: 1,
             },

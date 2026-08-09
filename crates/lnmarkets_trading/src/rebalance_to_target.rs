@@ -3,13 +3,16 @@ use std::sync::Arc;
 use anyhow::{Context as _, Result, bail};
 use async_trait::async_trait;
 use lnmarkets_client::{Asset, LnMarketsClient, Network, NewSwapRequest, NewSwapResult};
-use lnmarkets_data::{AccountDriftFeatures, FeatureSnapshot};
+use lnmarkets_data::{
+    AccountAllocation, AccountDriftFeatures, FeatureSnapshot, account_drift_features,
+};
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use sha2::{Digest as _, Sha256};
 use strategy_engine::{
-    OrderIntent, OrderKind, OrderQuantity, OrderSide, QuantityUnit, StrategyProgram, StrategyStep,
-    StrategyTick, VenueExecution, VenueExecutor, VenueRiskSnapshot,
+    BacktestExecutionModel, BacktestTick, OrderIntent, OrderKind, OrderQuantity, OrderSide,
+    QuantityUnit, SimulatedTrade, StrategyProgram, StrategyStep, StrategyTick, VenueExecution,
+    VenueExecutor, VenueRiskSnapshot,
 };
 use trading_ledger::{
     LedgerAccount, LedgerEntryDraft, LedgerEntryKind, LedgerPosting, LedgerQuery, LedgerStore,
@@ -377,6 +380,80 @@ fn step_without_order(
             last_action,
         },
         intents: Vec::new(),
+    }
+}
+
+#[derive(Clone, Debug, PartialEq)]
+pub struct RebalanceBacktestModel {
+    allocation: AccountAllocation,
+}
+
+impl RebalanceBacktestModel {
+    pub fn new(allocation: AccountAllocation) -> Result<Self> {
+        Ok(Self {
+            allocation: allocation.validate()?,
+        })
+    }
+
+    fn price(features: &FeatureSnapshot) -> Result<f64> {
+        let price = features
+            .index
+            .current_price
+            .or(features.liquidity.best_ask)
+            .or(features.liquidity.best_bid)
+            .context("rebalance backtest has no price")?;
+        if !price.is_finite() || price <= 0.0 {
+            bail!("rebalance backtest price must be positive and finite");
+        }
+        Ok(price)
+    }
+}
+
+impl BacktestExecutionModel<FeatureSnapshot> for RebalanceBacktestModel {
+    fn prepare_tick(
+        &mut self,
+        tick: &BacktestTick<FeatureSnapshot>,
+    ) -> Result<BacktestTick<FeatureSnapshot>> {
+        let mut tick = tick.clone();
+        let price = Self::price(&tick.features)?;
+        tick.features.account_drift = account_drift_features(self.allocation, price);
+        Ok(tick)
+    }
+
+    fn execute(
+        &mut self,
+        intent: &OrderIntent,
+        tick: &BacktestTick<FeatureSnapshot>,
+    ) -> Result<SimulatedTrade> {
+        let price = Self::price(&tick.features)?;
+        let notional_sats = match (intent.side, intent.quantity.unit) {
+            (OrderSide::Sell, QuantityUnit::Sats) => {
+                if intent.quantity.amount as f64 > self.allocation.btc_sats {
+                    bail!("rebalance backtest sell exceeds its simulated BTC balance");
+                }
+                self.allocation.btc_sats -= intent.quantity.amount as f64;
+                self.allocation.synthetic_usd +=
+                    intent.quantity.amount as f64 / SATOSHIS_PER_BITCOIN * price;
+                intent.quantity.amount
+            }
+            (OrderSide::Buy, QuantityUnit::UsdCents) => {
+                let amount_usd = intent.quantity.amount as f64 / 100.0;
+                if amount_usd > self.allocation.synthetic_usd {
+                    bail!("rebalance backtest buy exceeds its simulated synthetic USD balance");
+                }
+                self.allocation.synthetic_usd -= amount_usd;
+                let amount_sats = floor_u64(amount_usd / price * SATOSHIS_PER_BITCOIN)?;
+                self.allocation.btc_sats += amount_sats as f64;
+                amount_sats
+            }
+            _ => bail!("rebalance backtest received an unsupported intent"),
+        };
+        Ok(SimulatedTrade {
+            gross_profit_sats: 0,
+            notional_sats,
+            funding_sats: 0,
+            counts_as_trade: true,
+        })
     }
 }
 

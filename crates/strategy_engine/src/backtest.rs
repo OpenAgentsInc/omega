@@ -166,9 +166,24 @@ pub struct SimulatedTrade {
     pub gross_profit_sats: i64,
     pub notional_sats: u64,
     pub funding_sats: i64,
+    pub counts_as_trade: bool,
 }
 
-pub trait BacktestExecutionModel<Features> {
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub struct SimulatedSettlement {
+    pub gross_profit_sats: i64,
+    pub funding_sats: i64,
+}
+
+pub trait BacktestExecutionModel<Features: Clone> {
+    fn prepare_tick(&mut self, tick: &BacktestTick<Features>) -> Result<BacktestTick<Features>> {
+        Ok(tick.clone())
+    }
+
+    fn settle_tick(&mut self, _tick: &BacktestTick<Features>) -> Result<SimulatedSettlement> {
+        Ok(SimulatedSettlement::default())
+    }
+
     fn execute(
         &mut self,
         intent: &OrderIntent,
@@ -259,10 +274,28 @@ where
     let mut maximum_drawdown_sats = 0_u64;
     let mut trade_count = 0_u64;
 
-    for tick in ticks {
+    for collected_tick in ticks {
+        let tick = model.prepare_tick(collected_tick)?;
         if tick.occurred_at_ms < 0 {
             bail!("backtest tick timestamp must not be negative");
         }
+        let settlement = model.settle_tick(&tick)?;
+        gross_profit_sats = gross_profit_sats
+            .checked_add(settlement.gross_profit_sats)
+            .context("backtest gross profit overflowed")?;
+        funding_sats = funding_sats
+            .checked_add(settlement.funding_sats)
+            .context("backtest funding overflowed")?;
+        net_profit_sats = net_profit_sats
+            .checked_add(settlement.gross_profit_sats)
+            .and_then(|value| value.checked_add(settlement.funding_sats))
+            .context("backtest net profit overflowed")?;
+        peak_profit_sats = peak_profit_sats.max(net_profit_sats);
+        let settlement_drawdown = peak_profit_sats.saturating_sub(net_profit_sats);
+        maximum_drawdown_sats = maximum_drawdown_sats.max(
+            u64::try_from(settlement_drawdown)
+                .context("backtest drawdown exceeded supported range")?,
+        );
         let live_tick = StrategyTick {
             occurred_at_ms: tick.occurred_at_ms,
             features: tick.features.clone(),
@@ -270,10 +303,17 @@ where
         let step = program.on_tick(config, &state, &live_tick)?;
         for intent in &step.intents {
             intent.validate()?;
-            let trade = model.execute(intent, tick)?;
-            let taker_fee = basis_point_cost(trade.notional_sats, cost_model.taker_fee_bps)?;
-            let round_trip_cost =
-                basis_point_cost(trade.notional_sats, cost_model.observed_round_trip_cost_bps)?;
+            let trade = model.execute(intent, &tick)?;
+            let taker_fee = if trade.counts_as_trade {
+                basis_point_cost(trade.notional_sats, cost_model.taker_fee_bps)?
+            } else {
+                0
+            };
+            let round_trip_cost = if trade.counts_as_trade {
+                basis_point_cost(trade.notional_sats, cost_model.observed_round_trip_cost_bps)?
+            } else {
+                0
+            };
             gross_profit_sats = gross_profit_sats
                 .checked_add(trade.gross_profit_sats)
                 .context("backtest gross profit overflowed")?;
@@ -300,9 +340,11 @@ where
             maximum_drawdown_sats = maximum_drawdown_sats.max(
                 u64::try_from(drawdown).context("backtest drawdown exceeded supported range")?,
             );
-            trade_count = trade_count
-                .checked_add(1)
-                .context("backtest trade count overflowed")?;
+            if trade.counts_as_trade {
+                trade_count = trade_count
+                    .checked_add(1)
+                    .context("backtest trade count overflowed")?;
+            }
         }
         state = step.next_state;
     }
@@ -696,6 +738,7 @@ mod tests {
                 gross_profit_sats: tick.features.gross_profit_sats,
                 notional_sats: 10_000,
                 funding_sats: tick.features.funding_sats,
+                counts_as_trade: true,
             })
         }
     }

@@ -5,12 +5,14 @@ use gpui::{AppContext as _, AsyncApp, Task};
 use lnmarkets_client::{LnMarketsClient, Network};
 use lnmarkets_data::{CollectorHandle, FeatureSnapshot};
 use lnmarkets_trading::{
-    BacktestStore, FundingCarryConfig, FundingCarryExecutor, FundingCarryFeatures,
+    BacktestCostModel, BacktestPolicy, BacktestReport, BacktestStore, BacktestTick,
+    FundingCarryBacktestModel, FundingCarryConfig, FundingCarryExecutor, FundingCarryFeatures,
     FundingCarryInstrument, FundingCarryProgram, MemoryLifecycleSink, MemoryWakeupSink,
-    RebalanceToTargetConfig, RebalanceToTargetProgram, StrategyCommand, StrategyEngine,
-    StrategyHaltReason, StrategyLifecycleEvent, StrategyServiceHandle, StrategyTick,
-    SyntheticUsdExecutor, ThresholdSwingConfig, ThresholdSwingExecutor, ThresholdSwingProgram,
-    background_service, funding_carry_features,
+    RebalanceBacktestModel, RebalanceToTargetConfig, RebalanceToTargetProgram, StrategyCommand,
+    StrategyEngine, StrategyHaltReason, StrategyLifecycleEvent, StrategyServiceHandle,
+    StrategyTick, SyntheticUsdExecutor, ThresholdSwingBacktestModel, ThresholdSwingConfig,
+    ThresholdSwingExecutor, ThresholdSwingProgram, background_service, collected_backtest_replay,
+    funding_carry_features, run_backtest,
 };
 use parking_lot::Mutex;
 use serde::Serialize;
@@ -41,6 +43,12 @@ pub struct StrategyRuntimeSnapshot {
     pub state: Option<Value>,
     pub last_action: Option<String>,
     pub lifecycle_event_count: usize,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Serialize)]
+pub struct RecordedBacktest {
+    pub report_digest: String,
+    pub report: BacktestReport,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize)]
@@ -100,6 +108,131 @@ impl TradingRuntime {
 
     pub fn venue_balance(&self, venue: &str) -> Result<i64> {
         self.ledger.venue_balance(venue)
+    }
+
+    pub fn backtest_reports(
+        &self,
+        strategy_id: Option<&str>,
+        limit: usize,
+    ) -> Result<Vec<BacktestReport>> {
+        self.backtests.reports(strategy_id, limit)
+    }
+
+    pub fn run_rebalance_backtest(
+        &self,
+        collector: &CollectorHandle,
+        config: RebalanceToTargetConfig,
+        from_ms: i64,
+        to_ms: i64,
+        cost_model: BacktestCostModel,
+        policy: BacktestPolicy,
+        created_at_ms: i64,
+    ) -> Result<RecordedBacktest> {
+        require_backtest_collector(collector)?;
+        if cost_model.observed_round_trip_cost_bps
+            != config.cost_measurement.observed_round_trip_cost_bps
+            || cost_model.measurement_source != config.cost_measurement.source
+            || cost_model.measured_at_ms != config.cost_measurement.measured_at_ms
+        {
+            bail!(
+                "rebalance backtest cost model must match the configuration's ledger measurement"
+            );
+        }
+        let replay = collected_backtest_replay(collector.store(), Network::Signet, from_ms, to_ms)?;
+        let allocation = collector
+            .store()
+            .account_allocation(Network::Signet)?
+            .context("rebalance backtest requires a collected account allocation")?;
+        let mut model = RebalanceBacktestModel::new(allocation)?;
+        let report = run_backtest(
+            &RebalanceToTargetProgram,
+            &config,
+            &replay.ticks,
+            &mut model,
+            TradingNetwork::Signet,
+            cost_model,
+            policy,
+            created_at_ms,
+        )?;
+        self.record_backtest(report)
+    }
+
+    pub fn run_funding_backtest(
+        &self,
+        collector: &CollectorHandle,
+        config: FundingCarryConfig,
+        from_ms: i64,
+        to_ms: i64,
+        cost_model: BacktestCostModel,
+        policy: BacktestPolicy,
+        created_at_ms: i64,
+    ) -> Result<RecordedBacktest> {
+        require_backtest_collector(collector)?;
+        if cost_model.observed_round_trip_cost_bps != config.measured_round_trip_cost_bps {
+            bail!("funding carry backtest cost must match the strategy configuration");
+        }
+        let replay = collected_backtest_replay(collector.store(), Network::Signet, from_ms, to_ms)?;
+        let ticks = replay
+            .ticks
+            .into_iter()
+            .map(|tick| BacktestTick {
+                occurred_at_ms: tick.occurred_at_ms,
+                features: FundingCarryFeatures {
+                    market: tick.features,
+                    position: None,
+                    settled_funding_sats: 0,
+                },
+            })
+            .collect::<Vec<_>>();
+        let mut model = FundingCarryBacktestModel::default();
+        let report = run_backtest(
+            &FundingCarryProgram,
+            &config,
+            &ticks,
+            &mut model,
+            TradingNetwork::Signet,
+            cost_model,
+            policy,
+            created_at_ms,
+        )?;
+        self.record_backtest(report)
+    }
+
+    pub fn run_threshold_swing_backtest(
+        &self,
+        collector: &CollectorHandle,
+        config: ThresholdSwingConfig,
+        from_ms: i64,
+        to_ms: i64,
+        cost_model: BacktestCostModel,
+        policy: BacktestPolicy,
+        created_at_ms: i64,
+    ) -> Result<RecordedBacktest> {
+        require_backtest_collector(collector)?;
+        if cost_model.observed_round_trip_cost_bps != config.measured_round_trip_cost_bps {
+            bail!("threshold swing backtest cost must match the strategy configuration");
+        }
+        let replay = collected_backtest_replay(collector.store(), Network::Signet, from_ms, to_ms)?;
+        let mut model = ThresholdSwingBacktestModel::default();
+        let report = run_backtest(
+            &ThresholdSwingProgram,
+            &config,
+            &replay.ticks,
+            &mut model,
+            TradingNetwork::Signet,
+            cost_model,
+            policy,
+            created_at_ms,
+        )?;
+        self.record_backtest(report)
+    }
+
+    fn record_backtest(&self, report: BacktestReport) -> Result<RecordedBacktest> {
+        let report_digest = self.backtests.record(&report)?;
+        Ok(RecordedBacktest {
+            report_digest,
+            report,
+        })
     }
 
     pub fn signet_soak_ledger_summary(&self, window: &SoakWindow) -> Result<ProfitReport> {
@@ -301,6 +434,7 @@ impl TradingRuntime {
             &self.ledger.entries(&hourly_query)?,
             self.mandate.snapshot()?,
             self.strategy_snapshots(),
+            self.backtests.reports(None, 20)?,
         ))
     }
 
@@ -732,6 +866,14 @@ fn require_signet(client: &LnMarketsClient, network: Network) -> Result<()> {
     Ok(())
 }
 
+fn require_backtest_collector(collector: &CollectorHandle) -> Result<()> {
+    let health = collector.health();
+    if health.network != Network::Signet {
+        bail!("automated LN Markets strategy backtests are restricted to signet data");
+    }
+    Ok(())
+}
+
 fn spawn_service<Engine>(
     strategy_id: &'static str,
     service: impl Future<Output = Result<Engine>> + Send + 'static,
@@ -749,11 +891,110 @@ fn spawn_service<Engine>(
 
 #[cfg(test)]
 mod tests {
-    use std::collections::BTreeSet;
+    use std::{collections::BTreeSet, sync::Arc, time::Duration};
 
+    use futures::{FutureExt as _, future::BoxFuture};
+    use http::{Request, Response};
+    use lnmarkets_client::{HttpTransport, TransportFailure};
+    use lnmarkets_data::{
+        AccountAllocation, CANDLE_TOPIC, Collector, CollectorConfig, EventSource,
+        FUNDING_SETTLEMENT_TOPIC, MarketDataStore, ORACLE_INDEX_TOPIC, STREAM_BUCKETS_TOPIC,
+    };
+    use lnmarkets_trading::{BacktestGate as _, RebalanceCostMeasurement};
+    use serde_json::json;
     use trading_mandate::{ReviewCadence, TradingMandate, TradingNetwork};
 
-    use super::narrowed_mandate;
+    use super::*;
+
+    #[derive(Default)]
+    struct NoopTransport;
+
+    impl HttpTransport for NoopTransport {
+        fn send(
+            &self,
+            _request: Request<Vec<u8>>,
+        ) -> BoxFuture<'static, Result<Response<Vec<u8>>, TransportFailure>> {
+            async move { Ok(Response::new(Vec::new())) }.boxed()
+        }
+    }
+
+    fn test_runtime(backtests: BacktestStore) -> TradingRuntime {
+        TradingRuntime {
+            ledger: LedgerStore::in_memory().expect("ledger"),
+            mandate: MandateStore::in_memory().expect("mandate"),
+            backtests,
+            lifecycle: MemoryLifecycleSink::default(),
+            wakeups: MemoryWakeupSink::default(),
+            review_history: Mutex::new(VecDeque::new()),
+            soak_review_turns: Mutex::new(VecDeque::new()),
+            review_session_id: Mutex::new(None),
+            rebalance: Mutex::new(None),
+            funding: Mutex::new(None),
+            funding_instrument: Mutex::new(None),
+            threshold_swing: Mutex::new(None),
+        }
+    }
+
+    fn replay_collector() -> CollectorHandle {
+        let store = MarketDataStore::in_memory(Duration::from_secs(60)).expect("market data");
+        for (topic, events) in [
+            (
+                CANDLE_TOPIC,
+                vec![
+                    (100, json!({"close": 100.0})),
+                    (300, json!({"close": 100.0})),
+                ],
+            ),
+            (
+                FUNDING_SETTLEMENT_TOPIC,
+                vec![
+                    (200, json!({"fundingRate": 0.0})),
+                    (400, json!({"fundingRate": 0.0})),
+                ],
+            ),
+            (
+                ORACLE_INDEX_TOPIC,
+                vec![
+                    (100, json!({"index": 100.0})),
+                    (300, json!({"index": 100.0})),
+                ],
+            ),
+        ] {
+            store
+                .insert_backfill_batch(Network::Signet, topic, &events)
+                .expect("backfill events");
+        }
+        store
+            .insert(
+                Network::Signet,
+                STREAM_BUCKETS_TOPIC,
+                100,
+                EventSource::Stream,
+                &json!({
+                    "buckets": [{
+                        "minSize": 0.0,
+                        "maxSize": 1_000_000.0,
+                        "bidPrice": 100.0,
+                        "askPrice": 100.0
+                    }]
+                }),
+            )
+            .expect("liquidity");
+        let collector = Collector::new(
+            LnMarketsClient::public(Arc::new(NoopTransport), Network::Signet),
+            store,
+            CollectorConfig::public(Network::Signet),
+        );
+        let handle = collector.handle();
+        handle
+            .set_account_allocation(AccountAllocation {
+                btc_sats: 100_000_000.0,
+                synthetic_usd: 0.0,
+                target_btc_weight: 0.5,
+            })
+            .expect("account allocation");
+        handle
+    }
 
     #[test]
     fn one_click_narrowing_only_reduces_mandate_authority() {
@@ -784,5 +1025,65 @@ mod tests {
         assert_eq!(narrowed.allowed_strategies, original.allowed_strategies);
         assert_eq!(narrowed.review_cadence, original.review_cadence);
         assert_eq!(narrowed.expires_at_ms, original.expires_at_ms);
+    }
+
+    #[test]
+    fn collected_rebalance_backtest_is_durable_and_satisfies_the_start_gate() {
+        let backtests = BacktestStore::in_memory().expect("backtests");
+        let runtime = test_runtime(backtests.clone());
+        let collector = replay_collector();
+        let cost_model = BacktestCostModel {
+            taker_fee_bps: 0,
+            observed_round_trip_cost_bps: 0,
+            measurement_source: "signet ledger sample".into(),
+            measured_at_ms: 10,
+        };
+        let config = RebalanceToTargetConfig {
+            network: Network::Signet,
+            target_synthetic_usd_weight_bps: 5_000,
+            drift_threshold_bps: 100,
+            cost_margin_bps: 0,
+            maximum_order_value_usd_cents: 5_000,
+            liquidity_utilization_bps: 10_000,
+            cost_measurement: RebalanceCostMeasurement {
+                observed_round_trip_cost_bps: 0,
+                traded_notional_sats: 100_000,
+                realized_cost_sats: 0,
+                sample_count: 1,
+                measured_at_ms: 10,
+                source: "signet ledger sample".into(),
+            },
+        };
+        let recorded = runtime
+            .run_rebalance_backtest(
+                &collector,
+                config.clone(),
+                0,
+                400,
+                cost_model,
+                BacktestPolicy {
+                    minimum_trade_count: 1,
+                    minimum_expectancy_millisats: 0,
+                    maximum_drawdown_sats: 1,
+                },
+                500,
+            )
+            .expect("run backtest");
+
+        assert!(recorded.report.passed());
+        assert_eq!(recorded.report.trade_count, 1);
+        assert_eq!(
+            runtime.backtest_reports(None, 20).expect("reports").len(),
+            1
+        );
+        let approval = backtests
+            .require_passing(
+                REBALANCE_STRATEGY_ID,
+                "1",
+                TradingNetwork::Signet,
+                &serde_json::to_value(config).expect("config"),
+            )
+            .expect("backtest approval");
+        assert_eq!(approval.report_digest, recorded.report_digest);
     }
 }
