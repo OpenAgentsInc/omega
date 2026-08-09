@@ -6533,10 +6533,12 @@ field, which the lane already held for the pin check.
 ProductSpec revision 2 makes the reliable no-harness agent the default. A fresh
 thread now starts on `basic`, whose model-visible surface contains the six
 coding tools (`read`, `write`, `edit`, `bash`, `delegate`, and `resume_thread`)
-and four built-in market tools (`market_network_status`, `market_swap_quote`,
-`market_execute_swap`, and `market_swap_status`). Context-server tools are off,
-so an MCP installation cannot silently add another tool. `search_web` is
-absent; every provider Omega ships refuses it.
+and five built-in market tools (`market_network_status`, `market_swap_quote`,
+`market_execute_swap`, `market_swap_status`, and `market_provision_cloud`).
+OMEGA-DELTA-0241 adds the three first-party LN Markets tools to this closed
+surface: `lnmarkets_account`, `lnmarkets_market_data`, and `lnmarkets_swap`.
+Context-server tools are off, so an MCP installation cannot silently add
+another tool. `search_web` is absent; every provider Omega ships refuses it.
 
 The existing implementations and permission identifiers remain intact. The
 basic profile aliases `ReadTool`, `WriteFileTool`, `EditFileTool`,
