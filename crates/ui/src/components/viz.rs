@@ -8,6 +8,7 @@
 //! grayscale and color-vision deficiencies. See omega#247.
 
 mod viz_chip;
+mod viz_cloud_provision;
 mod viz_edge;
 mod viz_geometry;
 mod viz_market_chat_demo;
@@ -19,6 +20,7 @@ mod viz_swap;
 mod viz_zone;
 
 pub use viz_chip::*;
+pub use viz_cloud_provision::*;
 pub use viz_edge::*;
 pub use viz_geometry::*;
 pub use viz_market_chat_demo::*;
@@ -388,6 +390,7 @@ mod tests {
                 .child(VizZone::preview(window, cx))
                 .child(VizProgressRail::preview(window, cx))
                 .child(SwapCard::preview(window, cx))
+                .child(CloudProvisionCard::preview(window, cx))
                 .child(NetworkPanorama::preview(window, cx))
                 .child(NetworkCard::preview(window, cx))
                 .child(MarketChatDemo::preview(window, cx))

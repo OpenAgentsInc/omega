@@ -1412,9 +1412,10 @@ mod tests {
             "grep",
             "list_agents_and_models",
             "list_directory",
-            // Market status is a read-only network query; swap tools use demo fixtures.
-            // Explicit swap requests authorize demo execution without permission rules.
+            // Market status is read-only; swap and cloud provisioning tools use fixtures.
+            // Explicit requests authorize fixture execution without permission rules.
             "market_network_status",
+            "market_provision_cloud",
             "market_swap_quote",
             "market_execute_swap",
             "market_swap_status",

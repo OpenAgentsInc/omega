@@ -19037,6 +19037,7 @@ mod tests {
             "edit",
             "market_execute_swap",
             "market_network_status",
+            "market_provision_cloud",
             "market_swap_quote",
             "market_swap_status",
             "read",
@@ -19048,7 +19049,7 @@ mod tests {
         assert_eq!(
             actual, expected,
             "OMEGA-DELTA-0133: the model-visible basic surface must be exactly \
-             the six coding tools plus the four built-in market tools."
+             the six coding tools plus the five built-in market tools."
         );
         assert!(
             !actual.contains("search_web"),

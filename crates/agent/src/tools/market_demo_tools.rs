@@ -24,8 +24,12 @@ const FALLBACK_RELAYS: &[&str] = &[
 const LIVE_DISCLOSURE: &str = "LIVE public regtest coordination data, read-only; relay and provider claims are unverified until a requester verifies locally.";
 const DEMO_DISCLOSURE: &str =
     "DEMO DATA: deterministic fixture, not the live network; no real funds move.";
+const CLOUD_PROVISION_DISCLOSURE: &str =
+    "MOCK CLOUD PROVISIONING: no payment is charged and no infrastructure is created.";
 const SWAP_STAGES: &[&str] = &["contract", "funding", "executing", "settled"];
 const SWAP_STAGE_DELAY: Duration = Duration::from_millis(450);
+const CLOUD_PROVISION_STAGES: &[&str] = &["payment", "relay", "provider", "connected"];
+const CLOUD_PROVISION_STAGE_DELAY: Duration = Duration::from_millis(450);
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(transparent)]
@@ -53,6 +57,7 @@ impl MarketToolOutput {
 struct MarketDemoState {
     quote_counter: u64,
     swap_counter: u64,
+    provision_counter: u64,
     quotes: HashMap<String, Quote>,
     swaps: HashMap<String, Swap>,
 }
@@ -100,6 +105,33 @@ impl MarketAsset {
             Self::LiquidBitcoin => "L-BTC",
         }
     }
+}
+
+#[derive(Debug, Clone, Copy, Default, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
+pub enum MarketCloudRegion {
+    #[default]
+    #[serde(rename = "us-central1")]
+    UsCentral1,
+    #[serde(rename = "us-east1")]
+    UsEast1,
+    #[serde(rename = "europe-west1")]
+    EuropeWest1,
+}
+
+impl MarketCloudRegion {
+    fn as_str(self) -> &'static str {
+        match self {
+            Self::UsCentral1 => "us-central1",
+            Self::UsEast1 => "us-east1",
+            Self::EuropeWest1 => "europe-west1",
+        }
+    }
+}
+
+struct CloudProvision {
+    id: String,
+    provider_name: String,
+    region: MarketCloudRegion,
 }
 
 pub struct MarketNetworkStatusTool {
@@ -335,6 +367,76 @@ impl AgentTool for MarketSwapStatusTool {
     }
 }
 
+#[derive(Debug, Serialize, Deserialize, JsonSchema)]
+/// Provision a mock paid provider node and relay connected to OpenAgents cloud. No payment is charged and no infrastructure is created.
+pub struct MarketProvisionCloudInput {
+    /// Provider label. Defaults to "Omega provider".
+    provider_name: Option<String>,
+    /// Cloud region. Defaults to us-central1.
+    region: Option<MarketCloudRegion>,
+}
+
+pub struct MarketProvisionCloudTool {
+    state: Arc<Mutex<MarketDemoState>>,
+    stage_delay: Duration,
+}
+
+impl AgentTool for MarketProvisionCloudTool {
+    type Input = MarketProvisionCloudInput;
+    type Output = MarketToolOutput;
+
+    const NAME: &'static str = "market_provision_cloud";
+
+    fn kind() -> acp::ToolKind {
+        acp::ToolKind::Execute
+    }
+
+    fn initial_title(&self, input: Result<Self::Input, Value>, _cx: &mut App) -> SharedString {
+        match input {
+            Ok(input) => format!(
+                "Provision {} in {}",
+                input.provider_name.as_deref().unwrap_or("Omega provider"),
+                input.region.unwrap_or_default().as_str(),
+            )
+            .into(),
+            Err(_) => "Provision provider cloud".into(),
+        }
+    }
+
+    fn run(
+        self: Arc<Self>,
+        input: ToolInput<Self::Input>,
+        event_stream: ToolCallEventStream,
+        cx: &mut App,
+    ) -> Task<Result<Self::Output, Self::Output>> {
+        cx.spawn(async move |cx| {
+            let input = input
+                .recv()
+                .await
+                .map_err(|error| MarketToolOutput::error(error.to_string()))?;
+            let provision =
+                start_cloud_provision(&self.state, input).map_err(MarketToolOutput::error)?;
+            let mut output =
+                cloud_provision_view(&provision, 0).map_err(MarketToolOutput::error)?;
+            emit_market_update(&event_stream, &output);
+
+            for stage_index in 1..CLOUD_PROVISION_STAGES.len() {
+                cx.background_executor().timer(self.stage_delay).await;
+                if event_stream.was_cancelled_by_user() {
+                    return Err(MarketToolOutput::error(
+                        "mock cloud provisioning was canceled",
+                    ));
+                }
+                output = cloud_provision_view(&provision, stage_index)
+                    .map_err(MarketToolOutput::error)?;
+                emit_market_update(&event_stream, &output);
+            }
+
+            Ok(output)
+        })
+    }
+}
+
 pub fn market_demo_tools(
     http_client: Arc<HttpClientWithUrl>,
 ) -> (
@@ -342,6 +444,7 @@ pub fn market_demo_tools(
     MarketSwapQuoteTool,
     MarketExecuteSwapTool,
     MarketSwapStatusTool,
+    MarketProvisionCloudTool,
 ) {
     let state = Arc::new(Mutex::new(MarketDemoState::default()));
     (
@@ -353,7 +456,13 @@ pub fn market_demo_tools(
             state: state.clone(),
             stage_delay: SWAP_STAGE_DELAY,
         },
-        MarketSwapStatusTool { state },
+        MarketSwapStatusTool {
+            state: state.clone(),
+        },
+        MarketProvisionCloudTool {
+            state,
+            stage_delay: CLOUD_PROVISION_STAGE_DELAY,
+        },
     )
 }
 
@@ -754,6 +863,90 @@ fn swap_view(swap: &Swap) -> Result<Value, String> {
     }))
 }
 
+fn start_cloud_provision(
+    state: &Mutex<MarketDemoState>,
+    input: MarketProvisionCloudInput,
+) -> Result<CloudProvision, String> {
+    let provider_name = input
+        .provider_name
+        .unwrap_or_else(|| "Omega provider".to_string());
+    let provider_name = provider_name.trim();
+    if provider_name.is_empty() || provider_name.chars().count() > 48 {
+        return Err("provider_name must contain from 1 through 48 characters".to_string());
+    }
+    if !provider_name
+        .chars()
+        .all(|character| character.is_alphanumeric() || " -_.".contains(character))
+    {
+        return Err(
+            "provider_name may contain letters, numbers, spaces, hyphens, underscores, and periods"
+                .to_string(),
+        );
+    }
+
+    let mut state = state.lock();
+    state.provision_counter = state.provision_counter.saturating_add(1);
+    Ok(CloudProvision {
+        id: format!("mock-cloud-{}", state.provision_counter),
+        provider_name: provider_name.to_string(),
+        region: input.region.unwrap_or_default(),
+    })
+}
+
+fn cloud_provision_view(
+    provision: &CloudProvision,
+    stage_index: usize,
+) -> Result<MarketToolOutput, String> {
+    let stage = CLOUD_PROVISION_STAGES
+        .get(stage_index)
+        .copied()
+        .ok_or_else(|| format!("cloud provision {} has an invalid stage", provision.id))?;
+    let relay_ready = stage_index >= 1;
+    let provider_ready = stage_index >= 2;
+    let connected = stage_index >= 3;
+    let completed_count = if connected {
+        CLOUD_PROVISION_STAGES.len()
+    } else {
+        stage_index
+    };
+
+    Ok(MarketToolOutput::success(json!({
+        "schema": "omega.market-demo.cloud-provision.v1",
+        "disclosure": CLOUD_PROVISION_DISCLOSURE,
+        "provision_id": provision.id,
+        "provider_name": provision.provider_name,
+        "region": provision.region.as_str(),
+        "stage": stage,
+        "billing": {
+            "requirement": "paid_account",
+            "status": "mock_paid",
+            "mode": "mock"
+        },
+        "relay": {
+            "id": format!("{}-relay", provision.id),
+            "state": if relay_ready { "ready" } else { "pending" }
+        },
+        "provider": {
+            "id": format!("{}-provider", provision.id),
+            "state": if provider_ready { "ready" } else { "pending" }
+        },
+        "connection": {
+            "cloud": "OpenAgents cloud",
+            "state": if connected { "connected" } else { "pending" }
+        },
+        "stages_completed": CLOUD_PROVISION_STAGES
+            .iter()
+            .take(completed_count)
+            .copied()
+            .collect::<Vec<_>>(),
+        "stages_remaining": CLOUD_PROVISION_STAGES
+            .iter()
+            .skip(stage_index.saturating_add(1))
+            .copied()
+            .collect::<Vec<_>>()
+    })))
+}
+
 fn emit_market_update(event_stream: &ToolCallEventStream, output: &MarketToolOutput) {
     let is_quote =
         output.0.get("schema").and_then(Value::as_str) == Some("omega.market-demo.quote.v1");
@@ -770,6 +963,7 @@ fn emit_market_update(event_stream: &ToolCallEventStream, output: &MarketToolOut
         .0
         .get("swap_id")
         .or_else(|| output.0.get("quote_id"))
+        .or_else(|| output.0.get("provision_id"))
         .and_then(Value::as_str)
         .unwrap_or("demo swap");
     let content = serde_json::to_string_pretty(&output.0)
@@ -918,6 +1112,59 @@ mod tests {
             );
         }
         assert!(events.next().await.is_none());
+    }
+
+    #[gpui::test]
+    async fn paid_mock_provision_streams_relay_and_provider_connection(cx: &mut TestAppContext) {
+        let tool = Arc::new(MarketProvisionCloudTool {
+            state: Arc::new(Mutex::new(MarketDemoState::default())),
+            stage_delay: Duration::ZERO,
+        });
+        let (event_stream, mut events) = ToolCallEventStream::test();
+
+        let result = cx
+            .update(|cx| {
+                tool.run(
+                    ToolInput::resolved(MarketProvisionCloudInput {
+                        provider_name: Some("Northstar".to_string()),
+                        region: Some(MarketCloudRegion::UsCentral1),
+                    }),
+                    event_stream,
+                    cx,
+                )
+            })
+            .await
+            .expect("mock cloud provision should complete");
+
+        assert_eq!(result.0["stage"], "connected");
+        assert_eq!(result.0["billing"]["status"], "mock_paid");
+        assert_eq!(result.0["relay"]["state"], "ready");
+        assert_eq!(result.0["provider"]["state"], "ready");
+        assert_eq!(result.0["connection"]["state"], "connected");
+        for expected_stage in CLOUD_PROVISION_STAGES.iter().copied() {
+            let update = events.expect_update_fields().await;
+            assert!(
+                update
+                    .title
+                    .as_deref()
+                    .is_some_and(|title| title.ends_with(expected_stage)),
+                "expected a streamed {expected_stage} update, got {:?}",
+                update.title
+            );
+        }
+        assert!(events.next().await.is_none());
+    }
+
+    #[test]
+    fn cloud_provision_rejects_an_invalid_provider_name() {
+        let result = start_cloud_provision(
+            &Mutex::new(MarketDemoState::default()),
+            MarketProvisionCloudInput {
+                provider_name: Some("bad/provider".to_string()),
+                region: None,
+            },
+        );
+        assert!(result.is_err());
     }
 
     #[test]

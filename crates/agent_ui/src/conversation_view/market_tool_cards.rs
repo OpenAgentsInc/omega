@@ -12,17 +12,18 @@ use gpui::{AnyElement, App};
 use serde_json::Value;
 use ui::prelude::*;
 use ui::{
-    NetworkCard, PanoramaNetwork, PanoramaProvider, PanoramaRelay, PanoramaStats, PanoramaTrust,
-    SwapAsset, SwapCard, SwapStage, VizNodeState,
+    CloudProvisionCard, CloudProvisionStage, NetworkCard, PanoramaNetwork, PanoramaProvider,
+    PanoramaRelay, PanoramaStats, PanoramaTrust, SwapAsset, SwapCard, SwapStage, VizNodeState,
 };
 
 pub(crate) const MARKET_SCHEMA_PREFIX: &str = "omega.market-demo.";
 
-const MARKET_TOOL_NAMES: [&str; 4] = [
+const MARKET_TOOL_NAMES: [&str; 5] = [
     "market_network_status",
     "market_swap_quote",
     "market_execute_swap",
     "market_swap_status",
+    "market_provision_cloud",
 ];
 
 /// Cheap, context-free check used to keep market tool calls out of the
@@ -78,6 +79,9 @@ pub(crate) fn market_tool_card(tool_call: &ToolCall, cx: &App) -> Option<AnyElem
         }
         "omega.market-demo.quote.v1" | "omega.market-demo.swap.v1" => {
             Some(parse_swap_card(&payload)?.into_any_element())
+        }
+        "omega.market-demo.cloud-provision.v1" => {
+            Some(parse_cloud_provision_card(&payload)?.into_any_element())
         }
         _ => None,
     }
@@ -407,6 +411,33 @@ fn swap_stage(stage: &str) -> Option<SwapStage> {
     }
 }
 
+fn parse_cloud_provision_card(payload: &Value) -> Option<CloudProvisionCard> {
+    if payload.pointer("/billing/mode")?.as_str()? != "mock" {
+        return None;
+    }
+    Some(
+        CloudProvisionCard::new(
+            payload.get("provider_name")?.as_str()?,
+            payload.get("region")?.as_str()?,
+            payload.pointer("/relay/id")?.as_str()?,
+            payload.pointer("/provider/id")?.as_str()?,
+        )
+        .stage(parse_cloud_provision_stage(
+            payload.get("stage")?.as_str()?,
+        )?),
+    )
+}
+
+fn parse_cloud_provision_stage(stage: &str) -> Option<CloudProvisionStage> {
+    match stage {
+        "payment" => Some(CloudProvisionStage::Payment),
+        "relay" => Some(CloudProvisionStage::Relay),
+        "provider" => Some(CloudProvisionStage::Provider),
+        "connected" => Some(CloudProvisionStage::Connected),
+        _ => None,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -503,6 +534,26 @@ mod tests {
 
         swap["status_history"][2]["previous"] = Value::String("status-0".to_string());
         assert!(parse_swap_stage(&swap).is_none());
+    }
+
+    #[test]
+    fn cloud_provision_payload_parses_every_stage() {
+        for stage in ["payment", "relay", "provider", "connected"] {
+            let payload = serde_json::json!({
+                "schema": "omega.market-demo.cloud-provision.v1",
+                "provider_name": "Northstar",
+                "region": "us-central1",
+                "stage": stage,
+                "billing": {"mode": "mock", "status": "mock_paid"},
+                "relay": {"id": "mock-cloud-1-relay", "state": "ready"},
+                "provider": {"id": "mock-cloud-1-provider", "state": "ready"},
+                "connection": {"cloud": "OpenAgents cloud", "state": "connected"},
+            });
+            assert!(
+                parse_cloud_provision_card(&payload).is_some(),
+                "stage {stage} parses"
+            );
+        }
     }
 
     #[test]

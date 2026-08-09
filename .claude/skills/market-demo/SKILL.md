@@ -1,15 +1,16 @@
 ---
 name: market-demo
-description: Answer questions about the swap network and run demo asset swaps (LN, BTC, L-BTC) using Omega's market tools. Answer tool availability questions directly without a tool call or delegation. Use when the person asks what the network looks like, wants provider or fee information, or asks to swap sats between rails. Network status reads the live public regtest network (read-only); swaps are demo only — no real funds.
+description: Answer questions about the swap network, run demo asset swaps (LN, BTC, L-BTC), and mock-provision a paid provider node with a cloud relay using Omega's market tools. Answer tool availability questions directly without a tool call or delegation. Use when the person asks what the network looks like, wants provider or fee information, asks to swap sats between rails, or asks to create provider infrastructure. Network status reads the live public regtest network (read-only); swaps and provisioning are demo fixtures.
 ---
 
 # Swap market
 
 **Always use the market tools themselves** (`market_network_status`,
-`market_swap_quote`, `market_execute_swap`, `market_swap_status`) — in this
-app their results render as inline cards (the network map and the swap
-lifecycle card). Never run `scripts/market-demo-mcp.mjs` through the shell
-when the tools are available: shell output renders as plain text and the
+`market_swap_quote`, `market_execute_swap`, `market_swap_status`,
+`market_provision_cloud`) — in this
+app their results render as inline cards (the network map, swap lifecycle,
+and cloud provision card). Never run `scripts/market-demo-mcp.mjs` through
+the shell when the tools are available: shell output renders as plain text and the
 cards are lost. If the tools are missing from your session, say so instead
 of working around it. "Test the market components" means: call each tool
 and let the cards render.
@@ -38,6 +39,9 @@ conversation.
   settlement.
 - `market_swap_status` — reads the latest projected state for a `swap_id`.
   Reads never advance the swap.
+- `market_provision_cloud` — mock-checks a paid account, then streams one card
+  through `payment → relay → provider → connected`. It creates no payment or
+  infrastructure. The default region is `us-central1`.
 
 ## The flow
 
@@ -58,10 +62,15 @@ conversation.
    existing swap after execution.
 5. Relay each stage's `verification` caption faithfully: provider claims stay
    labeled unverified until the settled stage reports local verification.
+6. **Provider infrastructure request**: call `market_provision_cloud` once.
+   Use the person's provider name and region when given; otherwise use the
+   tool defaults. State once that this path is a mock and creates no bill or
+   infrastructure.
 
 ## Honesty rules
 
 - Never claim real funds moved; this is a fixture.
+- Never claim a mock cloud provision charged the person or created resources.
 - Never invent stages, fees, or providers beyond what the tools return.
 - If a tool errors (unknown quote or swap id), say so and restart from a
   fresh quote rather than guessing.

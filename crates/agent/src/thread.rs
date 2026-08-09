@@ -2535,12 +2535,13 @@ impl Thread {
         ));
         self.add_tool(WebSearchTool);
 
-        let (network_status, swap_quote, execute_swap, swap_status) =
+        let (network_status, swap_quote, execute_swap, swap_status, provision_cloud) =
             market_demo_tools(self.project.read(cx).client().http_client());
         self.add_tool(network_status);
         self.add_tool(swap_quote);
         self.add_tool(execute_swap);
         self.add_tool(swap_status);
+        self.add_tool(provision_cloud);
 
         self.add_tool(DiagnosticsTool::new(self.project.clone()));
 
