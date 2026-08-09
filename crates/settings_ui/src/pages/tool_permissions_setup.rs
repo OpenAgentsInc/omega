@@ -1419,10 +1419,13 @@ mod tests {
             "market_swap_quote",
             "market_execute_swap",
             "market_swap_status",
-            // Account and market data are read-only. The swap tool accepts the
-            // explicit user request as authorization and is signet-only.
+            // Account and market data are read-only. An explicit swap request
+            // authorizes the configured LN Markets network.
+            #[cfg(feature = "lnmarkets")]
             "lnmarkets_account",
+            #[cfg(feature = "lnmarkets")]
             "lnmarkets_market_data",
+            #[cfg(feature = "lnmarkets")]
             "lnmarkets_swap",
             "open",
             // The basic-profile read facade delegates any skill location to

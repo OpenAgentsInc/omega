@@ -28951,7 +28951,7 @@ mod tests {
         );
 
         let settings = without_comments(&read_repository_file(
-            "crates/settings_ui/src/pages/lnmarkets_settings_page.rs",
+            "crates/lnmarkets_ui/src/lnmarkets_ui.rs",
         ));
         for required in [
             "Save & Test",
@@ -28961,6 +28961,48 @@ mod tests {
             assert!(
                 settings.contains(required),
                 "OMEGA-DELTA-0241: the private credential handshake lost `{required}`"
+            );
+        }
+
+        let umbrella = without_comments(&read_repository_file("crates/lnmarkets/src/lnmarkets.rs"));
+        for required in [
+            "pub fn init(cx: &mut App)",
+            "lnmarkets_data::REGISTRATION",
+            "lnmarkets_trading::REGISTRATION",
+            "pub const MANIFEST",
+            "pub fn http_transport",
+        ] {
+            assert!(
+                umbrella.contains(required),
+                "OMEGA-DELTA-0241: the LN Markets plugin boundary lost `{required}`"
+            );
+        }
+
+        let omega_manifest = without_comments(&read_repository_file("crates/omega/Cargo.toml"));
+        for required in [
+            "default = [\"lnmarkets\"]",
+            "lnmarkets = [\"dep:lnmarkets\", \"agent/lnmarkets\", \"settings_ui/lnmarkets\"]",
+            "lnmarkets = { workspace = true, optional = true }",
+        ] {
+            assert!(
+                omega_manifest.contains(required),
+                "OMEGA-DELTA-0241: the app ship-or-omit feature lost `{required}`"
+            );
+        }
+        let agent_manifest = read_repository_file("crates/agent/Cargo.toml");
+        let settings_manifest = read_repository_file("crates/settings_ui/Cargo.toml");
+        assert!(!agent_manifest.contains("lnmarkets_client.workspace"));
+        assert!(!settings_manifest.contains("lnmarkets_client.workspace"));
+
+        let checks = read_repository_file("script/omega-checks");
+        for required in [
+            "cargo check -p omega --no-default-features",
+            "cargo test -p agent --no-default-features --lib",
+            "cargo test -p settings_ui --no-default-features --lib",
+        ] {
+            assert!(
+                checks.contains(required),
+                "OMEGA-DELTA-0241: CI lost the feature-off check `{required}`"
             );
         }
 

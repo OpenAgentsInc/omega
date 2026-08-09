@@ -817,6 +817,8 @@ fn main() {
         account_ui::init(cx);
         onboarding::init(cx);
         settings_ui::init(cx);
+        #[cfg(feature = "lnmarkets")]
+        lnmarkets::init(cx);
         json_schema_store::init(cx);
         #[cfg(target_os = "windows")]
         etw_tracing::init(cx);

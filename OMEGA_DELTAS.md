@@ -9925,6 +9925,15 @@ swap call names its network, and the tool refuses a request whose network does
 not match the configured credential before it sends anything. A matching
 mainnet request executes against LN Markets with real account funds.
 
+The LN Markets capability ships as five plugin-shaped crates. The pure
+`lnmarkets_client` crate has no dependency on an Omega crate. Data, strategy,
+and UI code have their own crates, and the `lnmarkets` umbrella owns the
+manifest, endpoint declarations, transport adapter, and one app registration
+entry point. Omega's default-on `lnmarkets` feature enables the agent and
+settings surfaces together. The feature-off build removes both surfaces and is
+part of `script/omega-checks`.
+
 - **Enforced by:** signer, retry, request-body, and credential tests in
   `lnmarkets_client`; `ln_markets_uses_one_local_direct_fail_closed_client` in
-  `omega_deltas`; and the endpoint declarations in `app_identity`.
+  `omega_deltas`; the feature-off checks in `script/omega-checks`; and the
+  endpoint declarations in `app_identity`.

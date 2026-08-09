@@ -5,10 +5,10 @@ use credentials_provider::CredentialsProvider;
 use gpui::{App, AsyncApp, Task};
 use http_client::HttpClient;
 use language_model::LanguageModelToolResultContent;
-use lnmarkets_client::{
+use lnmarkets::{
     AccountHistoryQuery, CREDENTIAL_STORAGE_URL, CandleResolution, CandlesQuery, Credentials,
     LightningDepositsQuery, LnMarketsClient, LnMarketsStreamClient, Network, NewSwapRequest,
-    NotificationsQuery, Pagination, StoredCredentials, StreamTopic,
+    NotificationsQuery, Pagination, StoredCredentials, StreamTopic, http_transport,
 };
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
@@ -64,7 +64,11 @@ impl ToolClient {
     async fn authenticated(&self, cx: &AsyncApp) -> Result<(LnMarketsClient, Network), String> {
         let (credentials, network) = self.credentials(cx).await?;
         Ok((
-            LnMarketsClient::authenticated(self.http_client.clone(), network, credentials),
+            LnMarketsClient::authenticated(
+                http_transport(self.http_client.clone()),
+                network,
+                credentials,
+            ),
             network,
         ))
     }
@@ -309,7 +313,10 @@ impl AgentTool for LnMarketsMarketDataTool {
             let network = Network::from(input.network);
             match input.request {
                 LnMarketsMarketDataRequest::Snapshot => {
-                    let client = LnMarketsClient::public(self.client.http_client.clone(), network);
+                    let client = LnMarketsClient::public(
+                        http_transport(self.client.http_client.clone()),
+                        network,
+                    );
                     let ping = client
                         .ping()
                         .await
@@ -352,7 +359,10 @@ impl AgentTool for LnMarketsMarketDataTool {
                 } => {
                     require_limit("history", limit, 1, 1_000)
                         .map_err(LnMarketsToolOutput::error)?;
-                    let client = LnMarketsClient::public(self.client.http_client.clone(), network);
+                    let client = LnMarketsClient::public(
+                        http_transport(self.client.http_client.clone()),
+                        network,
+                    );
                     let pagination = Pagination {
                         cursor: cursor.clone(),
                         from: Some(from.clone()),
@@ -693,7 +703,7 @@ fn require_limit(label: &str, value: u16, minimum: u16, maximum: u16) -> Result<
     ))
 }
 
-fn tool_section<T: Serialize>(result: Result<T, lnmarkets_client::Error>) -> Value {
+fn tool_section<T: Serialize>(result: Result<T, lnmarkets::Error>) -> Value {
     match result {
         Ok(data) => match serde_json::to_value(data) {
             Ok(data) => json!({ "ok": true, "data": data }),

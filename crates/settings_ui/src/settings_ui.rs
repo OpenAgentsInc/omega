@@ -57,9 +57,11 @@ use crate::components::{
     SettingsSectionHeader, font_picker, icon_theme_picker, text_field_a11y_state, theme_picker,
 };
 use crate::pages::{
-    CustomAgentForm, LlmProviderForm, LnMarketsSettingsPage, McpServerForm,
-    render_input_audio_device_dropdown, render_output_audio_device_dropdown,
+    CustomAgentForm, LlmProviderForm, McpServerForm, render_input_audio_device_dropdown,
+    render_output_audio_device_dropdown,
 };
+#[cfg(feature = "lnmarkets")]
+use lnmarkets::LnMarketsSettingsPage;
 
 const NAVBAR_CONTAINER_TAB_INDEX: isize = 0;
 const NAVBAR_GROUP_TAB_INDEX: isize = 1;
@@ -1109,6 +1111,7 @@ pub struct SettingsWindow {
     /// Cached configuration views per provider, created lazily.
     pub(crate) provider_configuration_views:
         HashMap<language_model::LanguageModelProviderId, gpui::AnyView>,
+    #[cfg(feature = "lnmarkets")]
     pub(crate) lnmarkets_settings_page: Entity<LnMarketsSettingsPage>,
     /// The provider whose configuration sub-page is currently open, if any.
     pub(crate) configuring_provider: Option<language_model::LanguageModelProviderId>,
@@ -2134,7 +2137,16 @@ impl SettingsWindow {
         let list_state = gpui::ListState::new(0, gpui::ListAlignment::Top, px(0.0)).measure_all();
         list_state.set_scroll_handler(|_, _, _| {});
 
-        let lnmarkets_settings_page = cx.new(|cx| LnMarketsSettingsPage::new(window, cx));
+        #[cfg(feature = "lnmarkets")]
+        let lnmarkets_settings_page = cx.new(|cx| {
+            LnMarketsSettingsPage::new(
+                lnmarkets::http_transport(cx.http_client()),
+                zed_credentials_provider::global(cx),
+                window,
+                cx,
+            )
+        });
+        #[cfg(feature = "lnmarkets")]
         lnmarkets_settings_page.update(cx, |page, cx| page.load(window, cx));
 
         let mut this = Self {
@@ -2187,6 +2199,7 @@ impl SettingsWindow {
             list_state,
             last_copied_link_path: None,
             provider_configuration_views: HashMap::default(),
+            #[cfg(feature = "lnmarkets")]
             lnmarkets_settings_page,
             configuring_provider: None,
             last_copied_skill_directory_path: None,
@@ -5879,7 +5892,15 @@ pub mod test {
         #[cfg(any(test, feature = "test-support"))]
         pub fn test(window: &mut Window, cx: &mut Context<Self>) -> Self {
             let search_bar = cx.new(|cx| Editor::single_line(window, cx));
-            let lnmarkets_settings_page = cx.new(|cx| LnMarketsSettingsPage::new(window, cx));
+            #[cfg(feature = "lnmarkets")]
+            let lnmarkets_settings_page = cx.new(|cx| {
+                LnMarketsSettingsPage::new(
+                    lnmarkets::http_transport(cx.http_client()),
+                    zed_credentials_provider::global(cx),
+                    window,
+                    cx,
+                )
+            });
             let dummy_page = SettingsPage {
                 title: "Test",
                 items: Box::new([]),
@@ -5929,6 +5950,7 @@ pub mod test {
                 sandbox_host_validation_error: None,
                 last_copied_link_path: None,
                 provider_configuration_views: HashMap::default(),
+                #[cfg(feature = "lnmarkets")]
                 lnmarkets_settings_page,
                 configuring_provider: None,
                 last_copied_skill_directory_path: None,
@@ -6031,7 +6053,15 @@ pub mod test {
             })
             .collect();
 
-        let lnmarkets_settings_page = cx.new(|cx| LnMarketsSettingsPage::new(window, cx));
+        #[cfg(feature = "lnmarkets")]
+        let lnmarkets_settings_page = cx.new(|cx| {
+            LnMarketsSettingsPage::new(
+                lnmarkets::http_transport(cx.http_client()),
+                zed_credentials_provider::global(cx),
+                window,
+                cx,
+            )
+        });
         let mut settings_window = SettingsWindow {
             kind: SettingsWindowKind::Legacy,
             embedded: false,
@@ -6077,6 +6107,7 @@ pub mod test {
             sandbox_host_validation_error: None,
             last_copied_link_path: None,
             provider_configuration_views: HashMap::default(),
+            #[cfg(feature = "lnmarkets")]
             lnmarkets_settings_page,
             configuring_provider: None,
             last_copied_skill_directory_path: None,

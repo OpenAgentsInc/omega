@@ -18,6 +18,7 @@ mod go_to_definition_tool;
 mod grep_tool;
 mod list_agents_and_models_tool;
 mod list_directory_tool;
+#[cfg(feature = "lnmarkets")]
 mod lnmarkets_tools;
 mod market_demo_tools;
 mod move_path_tool;
@@ -94,6 +95,7 @@ pub use go_to_definition_tool::*;
 pub use grep_tool::*;
 pub use list_agents_and_models_tool::*;
 pub use list_directory_tool::*;
+#[cfg(feature = "lnmarkets")]
 pub use lnmarkets_tools::*;
 pub use market_demo_tools::*;
 pub use move_path_tool::*;
@@ -114,10 +116,10 @@ pub use web_search_tool::*;
 pub use write_file_tool::*;
 
 macro_rules! tools {
-    ($($tool:ty),* $(,)?) => {
+    ($($(#[$meta:meta])* $tool:ty),* $(,)?) => {
         /// Every built-in tool name, determined at compile time.
         pub const ALL_TOOL_NAMES: &[&str] = &[
-            $(<$tool>::NAME,)*
+            $($(#[$meta])* <$tool>::NAME,)*
         ];
 
         const _: () = {
@@ -154,6 +156,7 @@ macro_rules! tools {
         /// Returns whether the tool with the given name supports the given provider.
         pub fn tool_supports_provider(name: &str, provider: &language_model::LanguageModelProviderId) -> bool {
             $(
+                $(#[$meta])*
                 if name == <$tool>::NAME {
                     return <$tool>::supports_provider(provider);
                 }
@@ -166,6 +169,7 @@ macro_rules! tools {
         /// considered allowed.
         pub fn tool_allowed_in_restricted_mode(name: &str) -> bool {
             $(
+                $(#[$meta])*
                 if name == <$tool>::NAME {
                     return <$tool>::allow_in_restricted_mode();
                 }
@@ -185,6 +189,7 @@ macro_rules! tools {
             }
             [
                 $(
+                    $(#[$meta])*
                     language_model_tool::<$tool>(),
                 )*
             ]
@@ -230,8 +235,11 @@ tools! {
     GrepTool,
     ListAgentsAndModelsTool,
     ListDirectoryTool,
+    #[cfg(feature = "lnmarkets")]
     LnMarketsAccountTool,
+    #[cfg(feature = "lnmarkets")]
     LnMarketsMarketDataTool,
+    #[cfg(feature = "lnmarkets")]
     LnMarketsSwapTool,
     MarketNetworkStatusTool,
     MarketProvisionCloudTool,
@@ -264,8 +272,11 @@ pub const BASIC_TOOL_NAMES: &[&str] = &[
     MarketSwapQuoteTool::NAME,
     MarketExecuteSwapTool::NAME,
     MarketSwapStatusTool::NAME,
+    #[cfg(feature = "lnmarkets")]
     LnMarketsAccountTool::NAME,
+    #[cfg(feature = "lnmarkets")]
     LnMarketsMarketDataTool::NAME,
+    #[cfg(feature = "lnmarkets")]
     LnMarketsSwapTool::NAME,
 ];
 
@@ -282,8 +293,11 @@ pub fn basic_tool_name(tool_name: &str) -> Option<&'static str> {
         MarketSwapQuoteTool::NAME => Some(MarketSwapQuoteTool::NAME),
         MarketExecuteSwapTool::NAME => Some(MarketExecuteSwapTool::NAME),
         MarketSwapStatusTool::NAME => Some(MarketSwapStatusTool::NAME),
+        #[cfg(feature = "lnmarkets")]
         LnMarketsAccountTool::NAME => Some(LnMarketsAccountTool::NAME),
+        #[cfg(feature = "lnmarkets")]
         LnMarketsMarketDataTool::NAME => Some(LnMarketsMarketDataTool::NAME),
+        #[cfg(feature = "lnmarkets")]
         LnMarketsSwapTool::NAME => Some(LnMarketsSwapTool::NAME),
         _ => None,
     }

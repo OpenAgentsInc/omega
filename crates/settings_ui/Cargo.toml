@@ -14,6 +14,7 @@ path = "src/settings_ui.rs"
 [features]
 default = []
 test-support = []
+lnmarkets = ["dep:lnmarkets"]
 
 [dependencies]
 agent.workspace = true
@@ -42,7 +43,7 @@ http_proxy.workspace = true
 itertools.workspace = true
 language.workspace = true
 language_model.workspace = true
-lnmarkets_client.workspace = true
+lnmarkets = { workspace = true, optional = true }
 log.workspace = true
 menu.workspace = true
 omega_harness.workspace = true

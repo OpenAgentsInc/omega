@@ -5356,10 +5356,27 @@ async fn test_basic_profile_exposes_named_tools(cx: &mut TestAppContext) {
     cx.run_until_parked();
 
     let completion = fake_model.pending_completions().pop().unwrap();
-    assert_eq!(
-        tool_names_for_completion(&completion),
-        vec!["bash", "delegate", "edit", "read", "resume_thread", "write"]
-    );
+    let mut expected_tool_names = vec![
+        "bash",
+        "delegate",
+        "edit",
+        "market_execute_swap",
+        "market_network_status",
+        "market_provision_cloud",
+        "market_swap_quote",
+        "market_swap_status",
+        "read",
+        "resume_thread",
+        "write",
+    ];
+    #[cfg(feature = "lnmarkets")]
+    expected_tool_names.extend([
+        "lnmarkets_account",
+        "lnmarkets_market_data",
+        "lnmarkets_swap",
+    ]);
+    expected_tool_names.sort_unstable();
+    assert_eq!(tool_names_for_completion(&completion), expected_tool_names);
 
     fake_model.send_last_completion_stream_text_chunk("Fixture coding turn complete.");
     fake_model.end_last_completion_stream();

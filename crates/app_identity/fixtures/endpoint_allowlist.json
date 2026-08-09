@@ -68,7 +68,7 @@
     },
     {
       "host": "api.signet.lnmarkets.com",
-      "purpose": "LN Markets v3 signet account data, public prices, and synthetic USD swaps requested in Omega",
+      "purpose": "LN Markets plugin v3 signet account, market-data, and trading requests",
       "owner": "OpenAgents",
       "disposition": "approved",
       "expiry": "none",
@@ -78,7 +78,7 @@
     },
     {
       "host": "api.lnmarkets.com",
-      "purpose": "LN Markets v3 mainnet account checks and public prices; Omega blocks mainnet effects",
+      "purpose": "LN Markets plugin v3 mainnet account, market-data, and explicitly requested trading calls",
       "owner": "OpenAgents",
       "disposition": "approved",
       "expiry": "none",
@@ -88,7 +88,7 @@
     },
     {
       "host": "stream.signet.lnmarkets.com",
-      "purpose": "Reserved LN Markets v1 signet market stream for the direct Rust client",
+      "purpose": "LN Markets plugin v1 signet market and account streams",
       "owner": "OpenAgents",
       "disposition": "approved",
       "expiry": "none",
@@ -98,7 +98,7 @@
     },
     {
       "host": "stream.lnmarkets.com",
-      "purpose": "Reserved LN Markets v1 mainnet market stream for the direct Rust client",
+      "purpose": "LN Markets plugin v1 mainnet market and account streams",
       "owner": "OpenAgents",
       "disposition": "approved",
       "expiry": "none",

@@ -19,6 +19,9 @@ run_style() {
 run_tests() {
   "$repository_root/script/clear-target-dir-if-larger-than" 350 200
   cargo nextest run --workspace --no-fail-fast --no-tests=warn
+  cargo check -p omega --no-default-features
+  cargo test -p agent --no-default-features --lib
+  cargo test -p settings_ui --no-default-features --lib
 }
 
 cd "$repository_root"

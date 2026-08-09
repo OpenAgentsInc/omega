@@ -318,7 +318,7 @@ dependencies = [
  "language",
  "language_model",
  "language_models",
- "lnmarkets_client",
+ "lnmarkets",
  "log",
  "lsp",
  "omega_agent_detect",
@@ -9294,6 +9294,21 @@ dependencies = [
 ]
 
 [[package]]
+name = "lnmarkets"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "futures 0.3.32",
+ "gpui",
+ "http 1.3.1",
+ "http_client",
+ "lnmarkets_client",
+ "lnmarkets_data",
+ "lnmarkets_trading",
+ "lnmarkets_ui",
+]
+
+[[package]]
 name = "lnmarkets_client"
 version = "0.1.0"
 dependencies = [
@@ -9301,9 +9316,10 @@ dependencies = [
  "async-io",
  "async-tungstenite",
  "base64 0.22.1",
+ "cargo_metadata 0.19.2",
  "futures 0.3.32",
  "hmac",
- "http_client",
+ "http 1.3.1",
  "rand 0.9.4",
  "serde",
  "serde_json",
@@ -9312,6 +9328,30 @@ dependencies = [
  "smol",
  "thiserror 2.0.17",
  "zeroize",
+]
+
+[[package]]
+name = "lnmarkets_data"
+version = "0.1.0"
+dependencies = [
+ "lnmarkets_client",
+]
+
+[[package]]
+name = "lnmarkets_trading"
+version = "0.1.0"
+
+[[package]]
+name = "lnmarkets_ui"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "credentials_provider",
+ "editor",
+ "gpui",
+ "lnmarkets_client",
+ "ui",
+ "util",
 ]
 
 [[package]]
@@ -11208,6 +11248,7 @@ dependencies = [
  "language_models",
  "language_tools",
  "languages",
+ "lnmarkets",
  "log",
  "lsp_locations",
  "markdown",
@@ -15732,7 +15773,7 @@ dependencies = [
  "itertools 0.14.0",
  "language",
  "language_model",
- "lnmarkets_client",
+ "lnmarkets",
  "log",
  "menu",
  "omega_actions",

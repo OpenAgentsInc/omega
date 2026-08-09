@@ -16,6 +16,8 @@ default-run = "omega"
 workspace = true
 
 [features]
+default = ["lnmarkets"]
+lnmarkets = ["dep:lnmarkets", "agent/lnmarkets", "settings_ui/lnmarkets"]
 tracy = ["ztracing/tracy"]
 # LEAK_BACKTRACE=1 cargo run --features omega/track-project-leak --profile release-fast
 track-project-leak = ["gpui/leak-detection"]
@@ -141,6 +143,7 @@ language_model.workspace = true
 language_models.workspace = true
 language_tools.workspace = true
 languages = { workspace = true, features = ["load-grammars"] }
+lnmarkets = { workspace = true, optional = true }
 log.workspace = true
 lsp_locations.workspace = true
 markdown.workspace = true

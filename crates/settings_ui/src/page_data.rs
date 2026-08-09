@@ -127,7 +127,9 @@ pub(crate) fn omega_settings_data(cx: &App) -> Vec<SettingsPage> {
         SettingsPageItem::SectionHeader("Providers"),
     ];
     items.extend(provider_items);
+    #[cfg(feature = "lnmarkets")]
     items.push(SettingsPageItem::SectionHeader("Trading"));
+    #[cfg(feature = "lnmarkets")]
     items.push(SettingsPageItem::SubPageLink(SubPageLink {
         title: "LN Markets".into(),
         r#type: Default::default(),

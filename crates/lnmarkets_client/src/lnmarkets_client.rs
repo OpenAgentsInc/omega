@@ -11,9 +11,9 @@ use async_tungstenite::{
     tungstenite::Message as WebSocketMessage,
 };
 use base64::{Engine as _, engine::general_purpose::STANDARD as BASE64_STANDARD};
-use futures::{AsyncReadExt as _, FutureExt as _, StreamExt as _, lock::Mutex, select};
+use futures::{FutureExt as _, StreamExt as _, future::BoxFuture, lock::Mutex, select};
 use hmac::{Hmac, Mac as _};
-use http_client::{AsyncBody, HttpClient, Method, Request, Response, StatusCode};
+use http::{HeaderMap, Method, Request, Response, StatusCode};
 use serde::{Deserialize, Serialize, de::DeserializeOwned};
 use serde_json::Number;
 use sha2::Sha256;
@@ -28,6 +28,13 @@ const AUTHENTICATED_REQUEST_INTERVAL: Duration = Duration::from_millis(50);
 const PUBLIC_REQUEST_INTERVAL: Duration = Duration::from_millis(250);
 
 type HmacSha256 = Hmac<Sha256>;
+
+pub trait HttpTransport: Send + Sync {
+    fn send(
+        &self,
+        request: Request<Vec<u8>>,
+    ) -> BoxFuture<'static, anyhow::Result<Response<Vec<u8>>>>;
+}
 
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
@@ -197,7 +204,7 @@ pub enum Error {
     #[error("invalid LN Markets amount: {0}")]
     InvalidAmount(String),
     #[error("failed to build LN Markets request: {0}")]
-    BuildRequest(#[source] http_client::http::Error),
+    BuildRequest(#[source] http::Error),
     #[error("failed to send LN Markets request: {0}")]
     Send(#[source] anyhow::Error),
     #[error("failed to read LN Markets response: {0}")]
@@ -705,7 +712,7 @@ pub struct NewSwapResult {
 }
 
 pub struct LnMarketsClient {
-    http_client: Arc<dyn HttpClient>,
+    http_transport: Arc<dyn HttpTransport>,
     network: Network,
     credentials: Option<Credentials>,
     next_authenticated_request: Arc<Mutex<Instant>>,
@@ -713,10 +720,10 @@ pub struct LnMarketsClient {
 }
 
 impl LnMarketsClient {
-    pub fn public(http_client: Arc<dyn HttpClient>, network: Network) -> Self {
+    pub fn public(http_transport: Arc<dyn HttpTransport>, network: Network) -> Self {
         let now = Instant::now();
         Self {
-            http_client,
+            http_transport,
             network,
             credentials: None,
             next_authenticated_request: Arc::new(Mutex::new(now)),
@@ -725,11 +732,11 @@ impl LnMarketsClient {
     }
 
     pub fn authenticated(
-        http_client: Arc<dyn HttpClient>,
+        http_transport: Arc<dyn HttpTransport>,
         network: Network,
         credentials: Credentials,
     ) -> Self {
-        let mut client = Self::public(http_client, network);
+        let mut client = Self::public(http_transport, network);
         client.credentials = Some(credentials);
         client
     }
@@ -965,7 +972,7 @@ impl LnMarketsClient {
                 &body,
                 credentials,
             )?;
-            match self.http_client.send(request).await {
+            match self.http_transport.send(request).await {
                 Ok(response) => {
                     if response.status().is_success() {
                         return parse_success_response(response).await;
@@ -1427,7 +1434,7 @@ fn build_request(
     query: &str,
     body: &[u8],
     credentials: Option<&Credentials>,
-) -> Result<Request<AsyncBody>, Error> {
+) -> Result<Request<Vec<u8>>, Error> {
     let canonical_path = format!("/v3{path}");
     let uri = format!("{}{}{}", network.rest_api_url(), path, query);
     let mut builder = Request::builder()
@@ -1457,9 +1464,7 @@ fn build_request(
             .header("LNM-ACCESS-TIMESTAMP", timestamp)
             .header("LNM-ACCESS-SIGNATURE", signature);
     }
-    builder
-        .body(AsyncBody::from(body.to_vec()))
-        .map_err(Error::BuildRequest)
+    builder.body(body.to_vec()).map_err(Error::BuildRequest)
 }
 
 fn current_timestamp_millis() -> Result<String, Error> {
@@ -1479,15 +1484,15 @@ fn encoded_query<T: Serialize>(value: &T) -> Result<String, Error> {
 }
 
 async fn parse_success_response<T: DeserializeOwned>(
-    mut response: Response<AsyncBody>,
+    response: Response<Vec<u8>>,
 ) -> Result<T, Error> {
-    let bytes = read_bounded_body(response.body_mut()).await?;
+    let bytes = read_bounded_body(response.body())?;
     serde_json::from_slice(&bytes).map_err(Error::Deserialize)
 }
 
-async fn parse_error_response(mut response: Response<AsyncBody>) -> Result<Error, Error> {
+async fn parse_error_response(response: Response<Vec<u8>>) -> Result<Error, Error> {
     let status = response.status();
-    let bytes = read_bounded_body(response.body_mut()).await?;
+    let bytes = read_bounded_body(response.body())?;
     let message = serde_json::from_slice::<serde_json::Value>(&bytes)
         .ok()
         .and_then(|value| {
@@ -1504,27 +1509,22 @@ async fn parse_error_response(mut response: Response<AsyncBody>) -> Result<Error
     })
 }
 
-async fn drain_response(mut response: Response<AsyncBody>) -> Result<(), Error> {
-    read_bounded_body(response.body_mut()).await.map(|_| ())
+async fn drain_response(response: Response<Vec<u8>>) -> Result<(), Error> {
+    read_bounded_body(response.body()).map(|_| ())
 }
 
-async fn read_bounded_body(body: &mut AsyncBody) -> Result<Vec<u8>, Error> {
-    let mut bytes = Vec::new();
-    body.take(MAX_RESPONSE_BYTES + 1)
-        .read_to_end(&mut bytes)
-        .await
-        .map_err(Error::ReadResponse)?;
-    if bytes.len() as u64 > MAX_RESPONSE_BYTES {
+fn read_bounded_body(body: &[u8]) -> Result<&[u8], Error> {
+    if body.len() as u64 > MAX_RESPONSE_BYTES {
         return Err(Error::ResponseTooLarge);
     }
-    Ok(bytes)
+    Ok(body)
 }
 
 fn is_retryable_status(status: StatusCode) -> bool {
     matches!(status.as_u16(), 429 | 502 | 503 | 504)
 }
 
-fn retry_delay(attempt: usize, headers: &http_client::http::HeaderMap) -> Duration {
+fn retry_delay(attempt: usize, headers: &HeaderMap) -> Duration {
     if let Some(seconds) = headers
         .get("retry-after")
         .and_then(|value| value.to_str().ok())
@@ -1553,17 +1553,69 @@ fn is_connection_error(error: &anyhow::Error) -> bool {
 
 #[cfg(test)]
 mod tests {
-    use std::sync::{Arc, Mutex as StdMutex};
-
-    use http_client::{FakeHttpClient, Response};
+    use std::{
+        future::Future,
+        sync::{Arc, Mutex as StdMutex},
+    };
 
     use super::*;
 
-    fn response(status: u16, body: &str) -> anyhow::Result<Response<AsyncBody>> {
+    #[test]
+    fn client_has_no_in_tree_dependencies() {
+        let metadata = cargo_metadata::MetadataCommand::new()
+            .no_deps()
+            .exec()
+            .expect("workspace metadata");
+        let package = metadata
+            .packages
+            .iter()
+            .find(|package| package.name.as_str() == "lnmarkets_client")
+            .expect("lnmarkets_client package");
+        let in_tree_dependencies = package
+            .dependencies
+            .iter()
+            .filter_map(|dependency| dependency.path.as_ref().map(|_| dependency.name.as_str()))
+            .collect::<Vec<_>>();
+        assert!(
+            in_tree_dependencies.is_empty(),
+            "lnmarkets_client must not depend on Omega crates: {in_tree_dependencies:?}"
+        );
+    }
+
+    type Handler = dyn Fn(Request<Vec<u8>>) -> BoxFuture<'static, anyhow::Result<Response<Vec<u8>>>>
+        + Send
+        + Sync;
+
+    struct FakeTransport {
+        handler: Arc<Handler>,
+    }
+
+    impl FakeTransport {
+        fn create<Callback, ResponseFuture>(callback: Callback) -> Arc<Self>
+        where
+            Callback: Fn(Request<Vec<u8>>) -> ResponseFuture + Send + Sync + 'static,
+            ResponseFuture: Future<Output = anyhow::Result<Response<Vec<u8>>>> + Send + 'static,
+        {
+            Arc::new(Self {
+                handler: Arc::new(move |request| callback(request).boxed()),
+            })
+        }
+    }
+
+    impl HttpTransport for FakeTransport {
+        fn send(
+            &self,
+            request: Request<Vec<u8>>,
+        ) -> BoxFuture<'static, anyhow::Result<Response<Vec<u8>>>> {
+            (self.handler)(request)
+        }
+    }
+
+    fn response(status: u16, body: &str) -> anyhow::Result<Response<Vec<u8>>> {
         Ok(Response::builder()
             .status(status)
             .header("Content-Type", "application/json")
-            .body(AsyncBody::from(body.as_bytes().to_vec()))?)
+            .body(body.as_bytes().to_vec())?)
     }
 
     #[test]
@@ -1579,7 +1631,7 @@ mod tests {
     #[test]
     fn authenticated_account_request_uses_v3_signature() {
         smol::block_on(async {
-            let client = FakeHttpClient::create(|request| async move {
+            let client = FakeTransport::create(|request| async move {
                 assert_eq!(request.method(), Method::GET);
                 assert_eq!(request.uri().path(), "/v3/account");
                 let timestamp = request
@@ -1606,7 +1658,7 @@ mod tests {
     #[test]
     fn public_ticker_parses_without_authentication_headers() {
         smol::block_on(async {
-            let client = FakeHttpClient::create(|request| async move {
+            let client = FakeTransport::create(|request| async move {
                 assert_eq!(request.method(), Method::GET);
                 assert_eq!(request.uri().path(), "/v3/futures/ticker");
                 assert!(request.headers().get("LNM-ACCESS-KEY").is_none());
@@ -1627,7 +1679,7 @@ mod tests {
     fn authentication_failure_is_not_retried() {
         smol::block_on(async {
             let requests = Arc::new(StdMutex::new(0));
-            let client = FakeHttpClient::create({
+            let client = FakeTransport::create({
                 let requests = requests.clone();
                 move |_| {
                     let requests = requests.clone();
@@ -1650,13 +1702,8 @@ mod tests {
     #[test]
     fn swap_body_and_signature_use_identical_compact_json() {
         smol::block_on(async {
-            let client = FakeHttpClient::create(|mut request| async move {
-                let mut body = String::new();
-                request
-                    .body_mut()
-                    .read_to_string(&mut body)
-                    .await
-                    .expect("body");
+            let client = FakeTransport::create(|request| async move {
+                let body = std::str::from_utf8(request.body()).expect("UTF-8 body");
                 assert_eq!(
                     body,
                     r#"{"inAmount":1000,"inAsset":"BTC","outAsset":"USD"}"#
@@ -1691,7 +1738,7 @@ mod tests {
     #[test]
     fn mainnet_swap_uses_the_production_api_host() {
         smol::block_on(async {
-            let client = FakeHttpClient::create(|request| async move {
+            let client = FakeTransport::create(|request| async move {
                 assert_eq!(request.method(), Method::POST);
                 assert_eq!(request.uri().scheme_str(), Some("https"));
                 assert_eq!(request.uri().host(), Some("api.lnmarkets.com"));
@@ -1715,7 +1762,7 @@ mod tests {
     fn a_swap_post_is_never_retried() {
         smol::block_on(async {
             let requests = Arc::new(StdMutex::new(0));
-            let client = FakeHttpClient::create({
+            let client = FakeTransport::create({
                 let requests = requests.clone();
                 move |_| {
                     let requests = requests.clone();
@@ -1739,7 +1786,7 @@ mod tests {
     #[test]
     fn candles_send_the_documented_cursor_query_and_parse_ohlcv() {
         smol::block_on(async {
-            let client = FakeHttpClient::create(|request| async move {
+            let client = FakeTransport::create(|request| async move {
                 assert_eq!(request.method(), Method::GET);
                 assert_eq!(request.uri().path(), "/v3/futures/candles");
                 assert_eq!(
@@ -1770,7 +1817,7 @@ mod tests {
     #[test]
     fn portfolio_reads_use_authenticated_v3_routes() {
         smol::block_on(async {
-            let client = FakeHttpClient::create(|request| async move {
+            let client = FakeTransport::create(|request| async move {
                 assert_eq!(request.method(), Method::GET);
                 assert_eq!(request.uri().path(), "/v3/futures/cross/position");
                 assert!(request.headers().get("LNM-ACCESS-SIGNATURE").is_some());
@@ -1790,7 +1837,7 @@ mod tests {
     #[test]
     fn account_history_reads_send_filters_and_parse_wallet_activity() {
         smol::block_on(async {
-            let client = FakeHttpClient::create(|request| async move {
+            let client = FakeTransport::create(|request| async move {
                 assert_eq!(request.method(), Method::GET);
                 assert_eq!(request.uri().path(), "/v3/account/withdrawals/lightning");
                 assert_eq!(request.uri().query(), Some("limit=25&status=processed"));

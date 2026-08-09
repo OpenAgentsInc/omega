@@ -1,3 +1,5 @@
+#[cfg(feature = "lnmarkets")]
+use crate::lnmarkets_tools;
 use crate::{
     ApplyCodeActionTool, CodeActionStore, ContextServerRegistry, CopyPathTool, CreateDirectoryTool,
     CreateThreadTool, DbLanguageModel, DbThread, DeletePathTool, DiagnosticsTool, EditFileTool,
@@ -12,8 +14,7 @@ use crate::{
     ThreadForkOrigin, ToolPermissionDecision, ToolResultArtifactRegistry, TranscriptBlock,
     TranscriptEntry, TranscriptRole, TranscriptWindowRequest,
     ValidateCandidateDiffApplicabilityTool, WebSearchTool, WriteFileTool,
-    decide_permission_from_settings, lnmarkets_tools, market_demo_tools,
-    tool_result_artifact_source,
+    decide_permission_from_settings, market_demo_tools, tool_result_artifact_source,
 };
 use acp_thread::{ClientUserMessageId, MentionUri, ToolResultArtifactStore};
 use action_log::ActionLog;
@@ -2544,12 +2545,15 @@ impl Thread {
         self.add_tool(swap_status);
         self.add_tool(provision_cloud);
 
-        let http_client = self.project.read(cx).client().http_client();
-        let (lnmarkets_account, lnmarkets_market_data, lnmarkets_swap) =
-            lnmarkets_tools(http_client, zed_credentials_provider::global(cx));
-        self.add_tool(lnmarkets_account);
-        self.add_tool(lnmarkets_market_data);
-        self.add_tool(lnmarkets_swap);
+        #[cfg(feature = "lnmarkets")]
+        {
+            let http_client = self.project.read(cx).client().http_client();
+            let (lnmarkets_account, lnmarkets_market_data, lnmarkets_swap) =
+                lnmarkets_tools(http_client, zed_credentials_provider::global(cx));
+            self.add_tool(lnmarkets_account);
+            self.add_tool(lnmarkets_market_data);
+            self.add_tool(lnmarkets_swap);
+        }
 
         self.add_tool(DiagnosticsTool::new(self.project.clone()));
 
