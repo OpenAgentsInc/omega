@@ -10040,3 +10040,24 @@ written to the venue-neutral ledger with strategy attribution.
 - **Enforced by:** `strategy_engine` and `trading_mandate` unit tests and
   `strategy_execution_is_deterministic_bounded_and_single_attempt` in
   `omega_deltas`.
+
+### OMEGA-DELTA-0248 — Collected evidence gates every live strategy configuration
+
+A strategy cannot start or adopt a changed configuration until the platform
+finds a passing backtest artifact for that exact strategy ID, strategy
+version, network, and serialized parameter set. The artifact is append-only,
+content-addressed, and records its collected-data range, policy, trade count,
+expectancy after measured costs, maximum drawdown, and cost-measurement
+provenance. The newest matching artifact controls the gate, including when it
+records a failure after an earlier pass.
+
+Backtests run the same model-free `StrategyProgram::on_tick` path used by the
+live engine. LN Markets replay input comes from stored hourly candles and
+funding settlements and invokes the existing feature derivation; either
+missing history makes the replay fail closed. The cost model applies taker
+fees, observed round-trip cost, and the recorded funding series. A bounded
+history query lets later review turns and operator surfaces inspect the
+reports without weakening the execution gate.
+
+- **Enforced by:** `strategy_engine` and `lnmarkets_data` unit tests and
+  `collected_backtests_gate_exact_live_strategy_parameters` in `omega_deltas`.

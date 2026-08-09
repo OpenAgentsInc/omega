@@ -12,6 +12,14 @@ use trading_mandate::{
     MandateDecision, MandateRefusal, MandateStore, TradingInstruction, TradingNetwork,
 };
 
+mod backtest;
+
+pub use backtest::{
+    BACKTEST_SCHEMA, BacktestApproval, BacktestCostModel, BacktestExecutionModel, BacktestGate,
+    BacktestOutcome, BacktestPolicy, BacktestReport, BacktestStore, BacktestTick, SimulatedTrade,
+    parameter_digest, run_backtest,
+};
+
 const ONE_HOUR_MS: i64 = 60 * 60 * 1_000;
 const ONE_DAY_MS: i64 = 24 * ONE_HOUR_MS;
 
@@ -143,6 +151,7 @@ pub trait StrategyProgram: Send + Sync + 'static {
     type Features: Clone + Send + Sync + 'static;
 
     fn strategy_id(&self) -> &'static str;
+    fn strategy_version(&self) -> &'static str;
     fn validate_config(&self, config: &Self::Config) -> Result<()>;
     fn initial_state(&self, config: &Self::Config) -> Result<Self::State>;
     fn on_tick(
@@ -241,6 +250,10 @@ pub enum StrategyLifecycleEvent {
         intent_id: String,
         venue_order_id: String,
     },
+    BacktestApproved {
+        strategy_id: String,
+        report_digest: String,
+    },
     LedgerEntryAppended {
         strategy_id: String,
         event_id: String,
@@ -308,7 +321,9 @@ where
 {
     program: Program,
     executor: Executor,
+    network: TradingNetwork,
     mandate: Arc<dyn MandateAuthority>,
+    backtests: Arc<dyn BacktestGate>,
     ledger: LedgerStore,
     lifecycle: Arc<dyn LifecycleSink>,
     wakeups: Arc<dyn WakeupSink>,
@@ -325,7 +340,9 @@ where
     pub fn new(
         program: Program,
         executor: Executor,
+        network: TradingNetwork,
         mandate: impl MandateAuthority,
+        backtests: impl BacktestGate,
         ledger: LedgerStore,
         lifecycle: Arc<dyn LifecycleSink>,
         wakeups: Arc<dyn WakeupSink>,
@@ -333,7 +350,9 @@ where
         Self {
             program,
             executor,
+            network,
             mandate: Arc::new(mandate),
+            backtests: Arc::new(backtests),
             ledger,
             lifecycle,
             wakeups,
@@ -354,12 +373,18 @@ where
     pub fn start(&mut self, config: Program::Config, at_ms: i64) -> Result<()> {
         validate_timestamp(at_ms)?;
         self.program.validate_config(&config)?;
+        let approval = self.require_backtest(&config)?;
         let state = self.program.initial_state(&config)?;
         self.config = Some(config);
         self.state = Some(state);
         self.status = StrategyStatus::Running {
             started_at_ms: at_ms,
         };
+        self.lifecycle
+            .publish(StrategyLifecycleEvent::BacktestApproved {
+                strategy_id: self.program.strategy_id().to_string(),
+                report_digest: approval.report_digest,
+            });
         self.lifecycle.publish(StrategyLifecycleEvent::Started {
             strategy_id: self.program.strategy_id().to_string(),
             at_ms,
@@ -372,7 +397,13 @@ where
             bail!("strategy must be running before its configuration can be adjusted");
         }
         self.program.validate_config(&config)?;
+        let approval = self.require_backtest(&config)?;
         self.config = Some(config);
+        self.lifecycle
+            .publish(StrategyLifecycleEvent::BacktestApproved {
+                strategy_id: self.program.strategy_id().to_string(),
+                report_digest: approval.report_digest,
+            });
         Ok(())
     }
 
@@ -455,6 +486,17 @@ where
                 now_ms,
                 StrategyHaltReason::VenueError {
                     message: format!("invalid risk preview: {error:#}"),
+                },
+            );
+        }
+        if preview.network != self.network {
+            return self.fail(
+                now_ms,
+                StrategyHaltReason::VenueError {
+                    message: format!(
+                        "risk preview used {:?} while the strategy runs on {:?}",
+                        preview.network, self.network
+                    ),
                 },
             );
         }
@@ -639,6 +681,16 @@ where
         Ok(())
     }
 
+    fn require_backtest(&self, config: &Program::Config) -> Result<BacktestApproval> {
+        let config = serde_json::to_value(config)?;
+        self.backtests.require_passing(
+            self.program.strategy_id(),
+            self.program.strategy_version(),
+            self.network,
+            &config,
+        )
+    }
+
     fn fail(&mut self, at_ms: i64, reason: StrategyHaltReason) -> Result<()> {
         let message = reason.summary();
         self.halt_inner(at_ms, reason);
@@ -771,6 +823,10 @@ mod tests {
 
         fn strategy_id(&self) -> &'static str {
             "test_strategy"
+        }
+
+        fn strategy_version(&self) -> &'static str {
+            "1"
         }
 
         fn validate_config(&self, _config: &Self::Config) -> Result<()> {
@@ -932,6 +988,28 @@ mod tests {
         max_orders_per_hour: u32,
     }
 
+    struct TestBacktestGate {
+        passing: bool,
+    }
+
+    impl BacktestGate for TestBacktestGate {
+        fn require_passing(
+            &self,
+            _strategy_id: &str,
+            _strategy_version: &str,
+            _network: TradingNetwork,
+            _config: &Value,
+        ) -> Result<BacktestApproval> {
+            if !self.passing {
+                bail!("no passing backtest artifact for this parameter set");
+            }
+            Ok(BacktestApproval {
+                report_digest: "0".repeat(64),
+                created_at_ms: 1,
+            })
+        }
+    }
+
     impl MandateAuthority for TestMandateAuthority {
         fn authorize(
             &self,
@@ -969,9 +1047,11 @@ mod tests {
         StrategyEngine::new(
             TestProgram,
             executor,
+            TradingNetwork::Signet,
             TestMandateAuthority {
                 max_orders_per_hour,
             },
+            TestBacktestGate { passing: true },
             ledger,
             Arc::new(lifecycle),
             Arc::new(wakeups),
@@ -992,6 +1072,30 @@ mod tests {
                 .on_tick(&config, &state, &tick)
                 .expect("second result")
         );
+    }
+
+    #[test]
+    fn strategy_cannot_start_without_passing_backtest_for_its_config() {
+        let executor = TestExecutor::successful();
+        let mut engine = StrategyEngine::new(
+            TestProgram,
+            executor.clone(),
+            TradingNetwork::Signet,
+            TestMandateAuthority {
+                max_orders_per_hour: 2,
+            },
+            TestBacktestGate { passing: false },
+            LedgerStore::in_memory().expect("ledger"),
+            Arc::new(MemoryLifecycleSink::default()),
+            Arc::new(MemoryWakeupSink::default()),
+        );
+
+        let error = engine
+            .start(TestConfig { protected: true }, 1)
+            .expect_err("missing backtest");
+        assert!(error.to_string().contains("no passing backtest"));
+        assert!(matches!(engine.status(), StrategyStatus::Idle));
+        assert_eq!(executor.calls(), 0);
     }
 
     #[test]

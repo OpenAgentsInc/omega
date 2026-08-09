@@ -218,6 +218,7 @@ pub const ENFORCED_DELTAS: &[&str] = &[
     "OMEGA-DELTA-0245",
     "OMEGA-DELTA-0246",
     "OMEGA-DELTA-0247",
+    "OMEGA-DELTA-0248",
 ];
 
 /// OMEGA-DELTA-0204. Every control the composer's bar offers, written twice:
@@ -29472,5 +29473,70 @@ mod tests {
                 "OMEGA-DELTA-0247: the LN Markets strategy seam lost `{required}`"
             );
         }
+    }
+
+    /// Live strategy parameters require exact, append-only evidence replayed
+    /// through the same strategy and feature paths.
+    #[test]
+    fn collected_backtests_gate_exact_live_strategy_parameters() {
+        let backtest = without_comments(&read_repository_file(
+            "crates/strategy_engine/src/backtest.rs",
+        ));
+        for required in [
+            "pub struct BacktestReport",
+            "pub measurement_source: String",
+            "pub fn run_backtest",
+            "program.on_tick(config, &state, &live_tick)",
+            "CREATE TRIGGER IF NOT EXISTS strategy_backtest_no_update",
+            "CREATE TRIGGER IF NOT EXISTS strategy_backtest_no_delete",
+            "pub fn reports(&self, strategy_id: Option<&str>, limit: usize)",
+            "latest_exact_parameter_artifact_controls_the_live_gate",
+            "replay_uses_strategy_code_and_measured_integer_costs",
+        ] {
+            assert!(
+                backtest.contains(required),
+                "OMEGA-DELTA-0248: the backtest evidence gate lost `{required}`"
+            );
+        }
+
+        let engine = without_comments(&read_repository_file(
+            "crates/strategy_engine/src/strategy_engine.rs",
+        ));
+        for required in [
+            "backtests: Arc<dyn BacktestGate>",
+            "network: TradingNetwork",
+            "self.backtests.require_passing(",
+            "StrategyLifecycleEvent::BacktestApproved",
+            "strategy_cannot_start_without_passing_backtest_for_its_config",
+        ] {
+            assert!(
+                engine.contains(required),
+                "OMEGA-DELTA-0248: live strategy admission lost `{required}`"
+            );
+        }
+
+        let data = without_comments(&read_repository_file(
+            "crates/lnmarkets_data/src/lnmarkets_data.rs",
+        ));
+        for required in [
+            "pub fn feature_replay(",
+            "if candles.is_empty()",
+            "if funding_settlements.is_empty()",
+            "derive_features(input.clone())",
+            "feature_replay_requires_both_histories_and_uses_live_derivation",
+        ] {
+            assert!(
+                data.contains(required),
+                "OMEGA-DELTA-0248: collected feature replay lost `{required}`"
+            );
+        }
+
+        let trading = without_comments(&read_repository_file(
+            "crates/lnmarkets_trading/src/lnmarkets_trading.rs",
+        ));
+        assert!(
+            trading.contains("pub fn collected_backtest_replay("),
+            "OMEGA-DELTA-0248: LN Markets lost its collected replay adapter"
+        );
     }
 }

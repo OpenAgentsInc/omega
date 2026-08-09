@@ -12,5 +12,7 @@ workspace = true
 path = "src/lnmarkets_trading.rs"
 
 [dependencies]
+anyhow.workspace = true
+lnmarkets_client.workspace = true
 lnmarkets_data.workspace = true
 strategy_engine.workspace = true

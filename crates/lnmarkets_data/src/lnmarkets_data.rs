@@ -167,6 +167,23 @@ pub struct FeatureSnapshot {
     pub account_drift: Option<AccountDriftFeatures>,
 }
 
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct FeatureReplayTick {
+    pub occurred_at_ms: i64,
+    pub features: FeatureSnapshot,
+}
+
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct FeatureReplayDataset {
+    pub schema: String,
+    pub network: Network,
+    pub from_ms: i64,
+    pub to_ms: i64,
+    pub candle_count: u64,
+    pub funding_settlement_count: u64,
+    pub ticks: Vec<FeatureReplayTick>,
+}
+
 pub fn derive_features(mut input: FeatureInput) -> Result<FeatureSnapshot> {
     input.prices.retain(valid_price);
     input.funding_rates.retain(valid_funding_rate);
@@ -680,6 +697,99 @@ impl MarketDataStore {
         snapshot_json
             .map(|snapshot| serde_json::from_str(&snapshot).map_err(Into::into))
             .transpose()
+    }
+
+    pub fn feature_replay(
+        &self,
+        network: Network,
+        from_ms: i64,
+        to_ms: i64,
+    ) -> Result<FeatureReplayDataset> {
+        if from_ms < 0 || to_ms < from_ms {
+            bail!("feature replay timestamps are invalid");
+        }
+        let candles = self.range(network, CANDLE_TOPIC, from_ms, Some(to_ms), 10_000)?;
+        if candles.is_empty() {
+            bail!("feature replay requires collected candles");
+        }
+        let funding_settlements = self.range(
+            network,
+            FUNDING_SETTLEMENT_TOPIC,
+            from_ms,
+            Some(to_ms),
+            10_000,
+        )?;
+        if funding_settlements.is_empty() {
+            bail!("feature replay requires collected funding settlements");
+        }
+
+        let candle_count =
+            u64::try_from(candles.len()).context("feature replay candle count overflowed")?;
+        let funding_settlement_count = u64::try_from(funding_settlements.len())
+            .context("feature replay funding count overflowed")?;
+        let mut changes = BTreeMap::<i64, (Vec<f64>, Vec<f64>)>::new();
+        for candle in candles {
+            let close = event_numeric_value(&candle.payload, &["close"]).with_context(|| {
+                format!("candle at {} has no close price", candle.event_time_ms)
+            })?;
+            changes
+                .entry(candle.event_time_ms)
+                .or_default()
+                .0
+                .push(close);
+        }
+        for settlement in funding_settlements {
+            let rate = funding_rate(&settlement.payload).with_context(|| {
+                format!(
+                    "funding settlement at {} has no funding rate",
+                    settlement.event_time_ms
+                )
+            })?;
+            changes
+                .entry(settlement.event_time_ms)
+                .or_default()
+                .1
+                .push(rate);
+        }
+
+        let mut input = FeatureInput::default();
+        let mut ticks = Vec::with_capacity(changes.len());
+        for (occurred_at_ms, (prices, rates)) in changes {
+            input
+                .prices
+                .extend(prices.into_iter().map(|value| TimedValue {
+                    time_ms: occurred_at_ms,
+                    value,
+                }));
+            input
+                .funding_rates
+                .extend(rates.into_iter().map(|value| TimedValue {
+                    time_ms: occurred_at_ms,
+                    value,
+                }));
+            if input.prices.len() > 1_000 {
+                input.prices.drain(..input.prices.len() - 1_000);
+            }
+            if input.funding_rates.len() > 1_000 {
+                input
+                    .funding_rates
+                    .drain(..input.funding_rates.len() - 1_000);
+            }
+            ticks.push(FeatureReplayTick {
+                occurred_at_ms,
+                features: derive_features(input.clone())?,
+            });
+        }
+
+        Ok(FeatureReplayDataset {
+            schema: "omega.lnmarkets.feature_replay.v1".into(),
+            network,
+            from_ms,
+            to_ms,
+            candle_count,
+            funding_settlement_count,
+            ticks,
+        })
     }
 
     fn refresh_features(&self, network: Network) -> Result<()> {
@@ -1458,6 +1568,58 @@ mod tests {
         assert_eq!(snapshot.funding.current_rate, Some(-0.01));
         assert_eq!(snapshot.funding.sign, FundingSign::Negative);
         assert_eq!(snapshot.funding.sign_flipped_at_ms, Some(3));
+    }
+
+    #[test]
+    fn feature_replay_requires_both_histories_and_uses_live_derivation() {
+        let store = MarketDataStore::in_memory(Duration::from_secs(60)).expect("store");
+        store
+            .insert_backfill_batch(
+                Network::Signet,
+                CANDLE_TOPIC,
+                &[
+                    (100, json!({"close": 100.0})),
+                    (300, json!({"close": 110.0})),
+                ],
+            )
+            .expect("candles");
+        let missing_funding = store
+            .feature_replay(Network::Signet, 0, 400)
+            .expect_err("funding history required");
+        assert!(
+            missing_funding
+                .to_string()
+                .contains("requires collected funding settlements")
+        );
+        store
+            .insert_backfill_batch(
+                Network::Signet,
+                FUNDING_SETTLEMENT_TOPIC,
+                &[
+                    (200, json!({"fundingRate": 0.01})),
+                    (400, json!({"fundingRate": -0.02})),
+                ],
+            )
+            .expect("funding");
+
+        let replay = store
+            .feature_replay(Network::Signet, 0, 400)
+            .expect("feature replay");
+        assert_eq!(replay.candle_count, 2);
+        assert_eq!(replay.funding_settlement_count, 2);
+        assert_eq!(
+            replay
+                .ticks
+                .iter()
+                .map(|tick| tick.occurred_at_ms)
+                .collect::<Vec<_>>(),
+            vec![100, 200, 300, 400]
+        );
+        let final_features = &replay.ticks.last().expect("final tick").features;
+        assert_eq!(final_features.volatility.price_points, 2);
+        assert_eq!(final_features.funding.current_rate, Some(-0.02));
+        assert_eq!(final_features.funding.sign, FundingSign::Negative);
+        assert_eq!(final_features.funding.sign_flipped_at_ms, Some(400));
     }
 
     #[test]

@@ -4,13 +4,48 @@ pub struct TradingRegistration;
 pub const REGISTRATION: TradingRegistration = TradingRegistration;
 
 pub use strategy_engine::{
-    LifecycleSink, MandateAuthority, OrderIntent, StrategyCommand, StrategyEngine,
+    BACKTEST_SCHEMA, BacktestApproval, BacktestCostModel, BacktestExecutionModel, BacktestGate,
+    BacktestOutcome, BacktestPolicy, BacktestReport, BacktestStore, BacktestTick, LifecycleSink,
+    MandateAuthority, OrderIntent, SimulatedTrade, StrategyCommand, StrategyEngine,
     StrategyHaltReason, StrategyLifecycleEvent, StrategyProgram, StrategyServiceHandle,
     StrategyStatus, StrategyStep, StrategyTick, VenueExecution, VenueExecutor, VenueRiskSnapshot,
-    WakeupSink, background_service,
+    WakeupSink, background_service, parameter_digest, run_backtest,
 };
 
 pub type LnMarketsStrategyTick = StrategyTick<lnmarkets_data::FeatureSnapshot>;
+pub type LnMarketsBacktestTick = BacktestTick<lnmarkets_data::FeatureSnapshot>;
+
+#[derive(Clone, Debug, PartialEq)]
+pub struct LnMarketsBacktestReplay {
+    pub schema: String,
+    pub network: lnmarkets_client::Network,
+    pub candle_count: u64,
+    pub funding_settlement_count: u64,
+    pub ticks: Vec<LnMarketsBacktestTick>,
+}
+
+pub fn collected_backtest_replay(
+    store: &lnmarkets_data::MarketDataStore,
+    network: lnmarkets_client::Network,
+    from_ms: i64,
+    to_ms: i64,
+) -> anyhow::Result<LnMarketsBacktestReplay> {
+    let replay = store.feature_replay(network, from_ms, to_ms)?;
+    Ok(LnMarketsBacktestReplay {
+        schema: replay.schema,
+        network: replay.network,
+        candle_count: replay.candle_count,
+        funding_settlement_count: replay.funding_settlement_count,
+        ticks: replay
+            .ticks
+            .into_iter()
+            .map(|tick| BacktestTick {
+                occurred_at_ms: tick.occurred_at_ms,
+                features: tick.features,
+            })
+            .collect(),
+    })
+}
 
 pub trait LnMarketsStrategy: StrategyProgram<Features = lnmarkets_data::FeatureSnapshot> {}
 

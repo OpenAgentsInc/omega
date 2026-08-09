@@ -9388,6 +9388,8 @@ dependencies = [
 name = "lnmarkets_trading"
 version = "0.1.0"
 dependencies = [
+ "anyhow",
+ "lnmarkets_client",
  "lnmarkets_data",
  "strategy_engine",
 ]
@@ -16351,8 +16353,11 @@ dependencies = [
  "async-trait",
  "futures 0.3.32",
  "parking_lot",
+ "paths",
+ "rusqlite",
  "serde",
  "serde_json",
+ "sha2 0.10.9",
  "trading_ledger",
  "trading_mandate",
 ]
