@@ -3,12 +3,14 @@ use std::{collections::VecDeque, future::Future, sync::Arc};
 use anyhow::{Context as _, Result, bail};
 use gpui::{AppContext as _, AsyncApp, Task};
 use lnmarkets_client::{LnMarketsClient, Network};
-use lnmarkets_data::FeatureSnapshot;
+use lnmarkets_data::{CollectorHandle, FeatureSnapshot};
 use lnmarkets_trading::{
     BacktestStore, FundingCarryConfig, FundingCarryExecutor, FundingCarryFeatures,
-    FundingCarryProgram, MemoryLifecycleSink, MemoryWakeupSink, RebalanceToTargetConfig,
-    RebalanceToTargetProgram, StrategyCommand, StrategyEngine, StrategyHaltReason,
-    StrategyLifecycleEvent, StrategyServiceHandle, SyntheticUsdExecutor, background_service,
+    FundingCarryInstrument, FundingCarryProgram, MemoryLifecycleSink, MemoryWakeupSink,
+    RebalanceToTargetConfig, RebalanceToTargetProgram, StrategyCommand, StrategyEngine,
+    StrategyHaltReason, StrategyLifecycleEvent, StrategyServiceHandle, StrategyTick,
+    SyntheticUsdExecutor, ThresholdSwingConfig, ThresholdSwingExecutor, ThresholdSwingProgram,
+    background_service, funding_carry_features,
 };
 use parking_lot::Mutex;
 use serde::Serialize;
@@ -23,9 +25,11 @@ use crate::{SoakLimitBreach, SoakReviewTurn, SoakWindow};
 
 const REBALANCE_STRATEGY_ID: &str = "rebalance_to_target";
 const FUNDING_STRATEGY_ID: &str = "funding_carry";
+const THRESHOLD_SWING_STRATEGY_ID: &str = "threshold_swing";
 
 type RebalanceHandle = StrategyServiceHandle<RebalanceToTargetConfig, FeatureSnapshot>;
 type FundingHandle = StrategyServiceHandle<FundingCarryConfig, FundingCarryFeatures>;
+type ThresholdSwingHandle = StrategyServiceHandle<ThresholdSwingConfig, FeatureSnapshot>;
 
 #[derive(Clone, Debug, PartialEq, Serialize)]
 pub struct StrategyRuntimeSnapshot {
@@ -64,6 +68,8 @@ pub struct TradingRuntime {
     review_session_id: Mutex<Option<String>>,
     rebalance: Mutex<Option<RebalanceHandle>>,
     funding: Mutex<Option<FundingHandle>>,
+    funding_instrument: Mutex<Option<FundingCarryInstrument>>,
+    threshold_swing: Mutex<Option<ThresholdSwingHandle>>,
 }
 
 impl TradingRuntime {
@@ -79,6 +85,8 @@ impl TradingRuntime {
             review_session_id: Mutex::new(None),
             rebalance: Mutex::new(None),
             funding: Mutex::new(None),
+            funding_instrument: Mutex::new(None),
+            threshold_swing: Mutex::new(None),
         })
     }
 
@@ -166,10 +174,14 @@ impl TradingRuntime {
     }
 
     pub fn strategy_snapshots(&self) -> Vec<StrategyRuntimeSnapshot> {
-        [REBALANCE_STRATEGY_ID, FUNDING_STRATEGY_ID]
-            .into_iter()
-            .map(|strategy_id| self.strategy_snapshot(strategy_id))
-            .collect()
+        [
+            REBALANCE_STRATEGY_ID,
+            FUNDING_STRATEGY_ID,
+            THRESHOLD_SWING_STRATEGY_ID,
+        ]
+        .into_iter()
+        .map(|strategy_id| self.strategy_snapshot(strategy_id))
+        .collect()
     }
 
     pub fn claim_review_session(&self, session_id: impl Into<String>) -> Result<()> {
@@ -398,9 +410,12 @@ impl TradingRuntime {
                 handle
             }
         };
+        let instrument = config.instrument;
         handle
             .request(StrategyCommand::Start { config, at_ms })
-            .await
+            .await?;
+        *self.funding_instrument.lock() = Some(instrument);
+        Ok(())
     }
 
     pub async fn adjust_funding(&self, config: FundingCarryConfig, at_ms: i64) -> Result<()> {
@@ -418,7 +433,10 @@ impl TradingRuntime {
             .lock()
             .clone()
             .context("funding_carry has not been started")?;
-        handle.request(StrategyCommand::Adjust { config }).await
+        let instrument = config.instrument;
+        handle.request(StrategyCommand::Adjust { config }).await?;
+        *self.funding_instrument.lock() = Some(instrument);
+        Ok(())
     }
 
     pub async fn halt_funding(&self, at_ms: i64, reason: String) -> Result<()> {
@@ -430,6 +448,153 @@ impl TradingRuntime {
         handle
             .request(StrategyCommand::Halt { at_ms, reason })
             .await
+    }
+
+    pub async fn start_threshold_swing(
+        &self,
+        client: LnMarketsClient,
+        config: ThresholdSwingConfig,
+        at_ms: i64,
+        cx: &AsyncApp,
+    ) -> Result<()> {
+        require_signet(&client, config.network)?;
+        self.require_strategy_mandate(
+            THRESHOLD_SWING_STRATEGY_ID,
+            at_ms,
+            config.maximum_position_usd_cents.div_ceil(100),
+            1,
+        )?;
+        let mut handle = match self.threshold_swing.lock().clone() {
+            Some(handle) => handle,
+            None => {
+                let executor = ThresholdSwingExecutor::new(client)?;
+                let engine = StrategyEngine::new(
+                    ThresholdSwingProgram,
+                    executor,
+                    TradingNetwork::Signet,
+                    self.mandate.clone(),
+                    self.backtests.clone(),
+                    self.ledger.clone(),
+                    Arc::new(self.lifecycle.clone()),
+                    Arc::new(self.wakeups.clone()),
+                );
+                let (handle, service) = background_service(engine);
+                spawn_service(THRESHOLD_SWING_STRATEGY_ID, service, cx);
+                *self.threshold_swing.lock() = Some(handle.clone());
+                handle
+            }
+        };
+        handle
+            .request(StrategyCommand::Start { config, at_ms })
+            .await
+    }
+
+    pub async fn adjust_threshold_swing(
+        &self,
+        config: ThresholdSwingConfig,
+        at_ms: i64,
+    ) -> Result<()> {
+        if config.network != Network::Signet {
+            bail!("automated LN Markets strategies are restricted to signet");
+        }
+        self.require_strategy_mandate(
+            THRESHOLD_SWING_STRATEGY_ID,
+            at_ms,
+            config.maximum_position_usd_cents.div_ceil(100),
+            1,
+        )?;
+        let mut handle = self
+            .threshold_swing
+            .lock()
+            .clone()
+            .context("threshold_swing has not been started")?;
+        handle.request(StrategyCommand::Adjust { config }).await
+    }
+
+    pub async fn halt_threshold_swing(&self, at_ms: i64, reason: String) -> Result<()> {
+        let mut handle = self
+            .threshold_swing
+            .lock()
+            .clone()
+            .context("threshold_swing has not been started")?;
+        handle
+            .request(StrategyCommand::Halt { at_ms, reason })
+            .await
+    }
+
+    pub async fn process_collected_tick(
+        &self,
+        collector: &CollectorHandle,
+        at_ms: i64,
+    ) -> Result<()> {
+        let rebalance_running = self.strategy_snapshot(REBALANCE_STRATEGY_ID).status == "running";
+        let threshold_running =
+            self.strategy_snapshot(THRESHOLD_SWING_STRATEGY_ID).status == "running";
+        let funding_running = self.strategy_snapshot(FUNDING_STRATEGY_ID).status == "running";
+        if !rebalance_running && !threshold_running && !funding_running {
+            return Ok(());
+        }
+        let features = collector
+            .features()?
+            .context("LN Markets collector has no feature snapshot")?;
+        let mut errors = Vec::new();
+
+        let rebalance_handle = self.rebalance.lock().clone();
+        if rebalance_running
+            && let Some(mut handle) = rebalance_handle
+            && let Err(error) = handle
+                .request(StrategyCommand::Tick(StrategyTick {
+                    occurred_at_ms: at_ms,
+                    features: features.clone(),
+                }))
+                .await
+        {
+            errors.push(format!("rebalance_to_target: {error:#}"));
+        }
+
+        let threshold_handle = self.threshold_swing.lock().clone();
+        if threshold_running
+            && let Some(mut handle) = threshold_handle
+            && let Err(error) = handle
+                .request(StrategyCommand::Tick(StrategyTick {
+                    occurred_at_ms: at_ms,
+                    features: features.clone(),
+                }))
+                .await
+        {
+            errors.push(format!("threshold_swing: {error:#}"));
+        }
+
+        if funding_running {
+            let instrument = *self
+                .funding_instrument
+                .lock()
+                .as_ref()
+                .context("running funding_carry has no configured instrument")?;
+            let network = collector.health().network;
+            match funding_carry_features(collector.store(), network, instrument) {
+                Ok(features) => {
+                    let funding_handle = self.funding.lock().clone();
+                    if let Some(mut handle) = funding_handle
+                        && let Err(error) = handle
+                            .request(StrategyCommand::Tick(StrategyTick {
+                                occurred_at_ms: at_ms,
+                                features,
+                            }))
+                            .await
+                    {
+                        errors.push(format!("funding_carry: {error:#}"));
+                    }
+                }
+                Err(error) => errors.push(format!("funding_carry features: {error:#}")),
+            }
+        }
+
+        if errors.is_empty() {
+            Ok(())
+        } else {
+            bail!("LN Markets strategy tick failed: {}", errors.join("; "))
+        }
     }
 
     fn strategy_snapshot(&self, strategy_id: &str) -> StrategyRuntimeSnapshot {

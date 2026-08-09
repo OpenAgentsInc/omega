@@ -126,7 +126,7 @@ impl LnMarketsSettingsPage {
                 cx,
             ),
             mandate_allowed_strategies: new_text_input(
-                "rebalance_to_target",
+                "rebalance_to_target,funding_carry,threshold_swing",
                 "Comma-separated strategy IDs",
                 window,
                 cx,

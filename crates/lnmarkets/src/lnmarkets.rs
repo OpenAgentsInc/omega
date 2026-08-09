@@ -1,4 +1,7 @@
-use std::sync::Arc;
+use std::{
+    sync::Arc,
+    time::{Duration, SystemTime, UNIX_EPOCH},
+};
 
 use futures::{AsyncReadExt as _, FutureExt as _, future::BoxFuture};
 use gpui::{App, AppContext as _, Global, Task};
@@ -29,11 +32,12 @@ pub use lnmarkets_client::*;
 pub use lnmarkets_data::{
     AccountAllocation, AccountDriftFeatures, CANDLE_TOPIC, CollectorHealth, CollectorHistory,
     CollectorStatus, FUNDING_SETTLEMENT_TOPIC, FeatureSnapshot, FundingFeatures, FundingSign,
-    LiquidityFeatures, ORACLE_INDEX_TOPIC, StoredMarketEvent, VolatilityFeatures,
+    IndexFeatures, LiquidityFeatures, ORACLE_INDEX_TOPIC, StoredMarketEvent, VolatilityFeatures,
 };
 pub use lnmarkets_trading::{
     FundingCarryConfig, FundingCarryInstrument, RebalanceCostMeasurement, RebalanceToTargetConfig,
-    StrategyLifecycleEvent,
+    StrategyLifecycleEvent, ThresholdSwingAction, ThresholdSwingBacktestModel,
+    ThresholdSwingConfig, ThresholdSwingPosition, ThresholdSwingState, ThresholdSwingWindow,
 };
 pub use lnmarkets_ui::LnMarketsSettingsPage;
 pub use trading_ledger::{LedgerEntry, LedgerQuery, LedgerStore, ProfitReport};
@@ -64,6 +68,7 @@ pub struct LnMarketsPlugin {
     collector: Arc<Mutex<Option<CollectorHandle>>>,
     trading_runtime: Result<Arc<TradingRuntime>, String>,
     _collector_task: Task<()>,
+    _strategy_tick_task: Task<()>,
 }
 
 impl Global for LnMarketsPlugin {}
@@ -74,6 +79,12 @@ pub fn init(http_client: Arc<dyn HttpClient>, cx: &mut App) {
         lnmarkets_trading::REGISTRATION,
     );
     let collector = Arc::new(Mutex::new(None));
+    let trading_runtime = TradingRuntime::open_default()
+        .map(Arc::new)
+        .map_err(|error| format!("could not open the LN Markets trading runtime: {error:#}"));
+    if let Err(error) = &trading_runtime {
+        log::error!("{error}");
+    }
     let collector_task = cx.spawn({
         let collector = collector.clone();
         let credentials_provider = zed_credentials_provider::global(cx);
@@ -132,16 +143,37 @@ pub fn init(http_client: Arc<dyn HttpClient>, cx: &mut App) {
             _cx.background_spawn(service.run()).await;
         }
     });
-    let trading_runtime = TradingRuntime::open_default()
-        .map(Arc::new)
-        .map_err(|error| format!("could not open the LN Markets trading runtime: {error:#}"));
-    if let Err(error) = &trading_runtime {
-        log::error!("{error}");
-    }
+    let strategy_tick_task = cx.background_spawn({
+        let collector = collector.clone();
+        let trading_runtime = trading_runtime.clone();
+        let executor = cx.background_executor().clone();
+        async move {
+            loop {
+                executor.timer(Duration::from_secs(5)).await;
+                let Some(collector) = collector.lock().clone() else {
+                    continue;
+                };
+                let Ok(runtime) = &trading_runtime else {
+                    return;
+                };
+                let at_ms = match SystemTime::now().duration_since(UNIX_EPOCH) {
+                    Ok(duration) => i64::try_from(duration.as_millis()).unwrap_or(i64::MAX),
+                    Err(error) => {
+                        log::error!("could not read the LN Markets strategy clock: {error}");
+                        continue;
+                    }
+                };
+                if let Err(error) = runtime.process_collected_tick(&collector, at_ms).await {
+                    log::warn!("LN Markets strategy tick was not processed: {error:#}");
+                }
+            }
+        }
+    });
     cx.set_global(LnMarketsPlugin {
         collector,
         trading_runtime,
         _collector_task: collector_task,
+        _strategy_tick_task: strategy_tick_task,
     });
     lnmarkets_ui::init_operator_panel(cx);
 }

@@ -384,22 +384,48 @@ fn step_without_order(
 pub struct SyntheticUsdExecutor {
     client: Arc<LnMarketsClient>,
     network: Network,
+    strategy_id: &'static str,
+    fill_schema: &'static str,
+    cost_schema: &'static str,
+    strategy_label: &'static str,
 }
 
 impl SyntheticUsdExecutor {
     pub fn new(client: LnMarketsClient, network: Network) -> Result<Self> {
+        Self::for_strategy(
+            client,
+            network,
+            STRATEGY_ID,
+            "omega.lnmarkets.rebalance_fill.v1",
+            "omega.lnmarkets.rebalance_cost.v1",
+            STRATEGY_ID,
+        )
+    }
+
+    pub(crate) fn for_strategy(
+        client: LnMarketsClient,
+        network: Network,
+        strategy_id: &'static str,
+        fill_schema: &'static str,
+        cost_schema: &'static str,
+        strategy_label: &'static str,
+    ) -> Result<Self> {
         if network != Network::Signet || client.network() != Network::Signet {
-            bail!("rebalance_to_target execution is restricted to a signet client");
+            bail!("{strategy_label} execution is restricted to a signet client");
         }
         Ok(Self {
             client: Arc::new(client),
             network,
+            strategy_id,
+            fill_schema,
+            cost_schema,
+            strategy_label,
         })
     }
 
     fn validate_intent<'a>(&self, intent: &'a OrderIntent) -> Result<&'a OrderQuantity> {
         if self.network != Network::Signet || self.client.network() != Network::Signet {
-            bail!("rebalance_to_target execution is restricted to signet");
+            bail!("{} execution is restricted to signet", self.strategy_label);
         }
         intent.validate()?;
         if intent.instrument != SYNTHETIC_USD_INSTRUMENT || intent.kind != OrderKind::Market {
@@ -456,11 +482,11 @@ impl VenueExecutor for SyntheticUsdExecutor {
         let mut ledger_entries = vec![LedgerEntryDraft {
             event_id: format!("lnmarkets-swap-fill:{digest}"),
             occurred_at_ms,
-            strategy_id: STRATEGY_ID.into(),
+            strategy_id: self.strategy_id.into(),
             kind: LedgerEntryKind::Fill,
             postings: Vec::new(),
             metadata: json!({
-                "schema": "omega.lnmarkets.rebalance_fill.v1",
+                "schema": self.fill_schema,
                 "intent_id": intent.intent_id,
                 "input_value_sats": measurement.input_value_sats,
                 "output_value_sats": measurement.output_value_sats,
@@ -475,7 +501,7 @@ impl VenueExecutor for SyntheticUsdExecutor {
             ledger_entries.push(LedgerEntryDraft {
                 event_id: format!("lnmarkets-swap-cost:{digest}"),
                 occurred_at_ms,
-                strategy_id: STRATEGY_ID.into(),
+                strategy_id: self.strategy_id.into(),
                 kind: LedgerEntryKind::Fee,
                 postings: vec![
                     LedgerPosting {
@@ -490,7 +516,7 @@ impl VenueExecutor for SyntheticUsdExecutor {
                     },
                 ],
                 metadata: json!({
-                    "schema": "omega.lnmarkets.rebalance_cost.v1",
+                    "schema": self.cost_schema,
                     "intent_id": intent.intent_id,
                     "input_value_sats": measurement.input_value_sats,
                     "realized_cost_sats": measurement.realized_cost_sats,
@@ -697,7 +723,9 @@ mod tests {
     use futures::{FutureExt as _, executor::block_on};
     use http::{Request, Response, StatusCode};
     use lnmarkets_client::{Credentials, HttpTransport, TransportFailure};
-    use lnmarkets_data::{FundingFeatures, FundingSign, LiquidityFeatures, VolatilityFeatures};
+    use lnmarkets_data::{
+        FundingFeatures, FundingSign, IndexFeatures, LiquidityFeatures, VolatilityFeatures,
+    };
 
     use super::*;
 
@@ -730,6 +758,13 @@ mod tests {
         FeatureSnapshot {
             schema: "omega.lnmarkets.features.v1".into(),
             as_of_ms: Some(100),
+            index: IndexFeatures {
+                current_price: Some(50_005.0),
+                one_hour_move: None,
+                six_hours_move: None,
+                one_day_move: None,
+                price_points: 1,
+            },
             volatility: VolatilityFeatures {
                 one_hour: None,
                 six_hours: None,
@@ -948,6 +983,37 @@ mod tests {
                 execution.ledger_entries[0].metadata["realized_cost_sats"],
                 21
             );
+        });
+    }
+
+    #[test]
+    fn shared_swap_executor_preserves_strategy_attribution_and_schema() {
+        block_on(async {
+            let transport = Arc::new(FakeTransport::new(vec![
+                response(r#"{"askPrice":50010,"bidPrice":50000}"#),
+                response(r#"{"inAmount":1000,"inAsset":"BTC","outAmount":0.49,"outAsset":"USD"}"#),
+            ]));
+            let executor = SyntheticUsdExecutor::for_strategy(
+                authenticated_client(transport.clone()),
+                Network::Signet,
+                "threshold_swing",
+                "omega.lnmarkets.threshold_swing_fill.v1",
+                "omega.lnmarkets.threshold_swing_cost.v1",
+                "threshold_swing",
+            )
+            .expect("threshold executor");
+            let execution = executor
+                .execute_once(&sell_intent())
+                .await
+                .expect("execution");
+
+            assert_eq!(transport.post_count(), 1);
+            assert!(execution.ledger_entries.iter().all(|entry| {
+                entry.strategy_id == "threshold_swing"
+                    && entry.metadata["schema"].as_str().is_some_and(|schema| {
+                        schema.starts_with("omega.lnmarkets.threshold_swing_")
+                    })
+            }));
         });
     }
 

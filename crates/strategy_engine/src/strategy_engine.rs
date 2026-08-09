@@ -163,6 +163,16 @@ pub trait StrategyProgram: Send + Sync + 'static {
         state: &Self::State,
         tick: &StrategyTick<Self::Features>,
     ) -> Result<StrategyStep<Self::State>>;
+
+    fn on_execution(
+        &self,
+        _config: &Self::Config,
+        state: &Self::State,
+        _intent: &OrderIntent,
+        _execution: &VenueExecution,
+    ) -> Result<Self::State> {
+        Ok(state.clone())
+    }
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -459,12 +469,13 @@ where
         let config = self
             .config
             .as_ref()
-            .context("running strategy has no configuration")?;
+            .context("running strategy has no configuration")?
+            .clone();
         let state = self
             .state
             .as_ref()
             .context("running strategy has no state")?;
-        let step = match self.program.on_tick(config, state, &tick) {
+        let step = match self.program.on_tick(&config, state, &tick) {
             Ok(step) => step,
             Err(error) => {
                 let reason = StrategyHaltReason::ProgramError {
@@ -485,14 +496,26 @@ where
         }
 
         let mut submitted_count = 0;
+        let mut next_state = step.next_state;
         for intent in &step.intents {
-            if let Err(error) = self.execute_intent(intent, tick.occurred_at_ms).await {
-                return Err(error);
-            }
+            let execution = self.execute_intent(intent, tick.occurred_at_ms).await?;
+            next_state = match self
+                .program
+                .on_execution(&config, &next_state, intent, &execution)
+            {
+                Ok(next_state) => next_state,
+                Err(error) => {
+                    let reason = StrategyHaltReason::ProgramError {
+                        message: format!("could not reconcile venue execution: {error:#}"),
+                    };
+                    self.halt_inner(tick.occurred_at_ms, reason.clone());
+                    return Err(anyhow!(reason.summary()));
+                }
+            };
             submitted_count += 1;
         }
-        let state_value = serde_json::to_value(&step.next_state)?;
-        self.state = Some(step.next_state);
+        let state_value = serde_json::to_value(&next_state)?;
+        self.state = Some(next_state);
         self.lifecycle
             .publish(StrategyLifecycleEvent::StateUpdated {
                 strategy_id: self.program.strategy_id().to_string(),
@@ -511,7 +534,11 @@ where
         })
     }
 
-    async fn execute_intent(&mut self, intent: &OrderIntent, now_ms: i64) -> Result<()> {
+    async fn execute_intent(
+        &mut self,
+        intent: &OrderIntent,
+        now_ms: i64,
+    ) -> Result<VenueExecution> {
         let preview = match self.executor.preview(intent).await {
             Ok(preview) => preview,
             Err(error) => {
@@ -640,7 +667,7 @@ where
                 },
             );
         }
-        for entry in execution.ledger_entries {
+        for entry in &execution.ledger_entries {
             if entry.strategy_id != self.program.strategy_id() {
                 return self.fail(
                     now_ms,
@@ -665,7 +692,7 @@ where
                     },
                 );
             }
-            if let Err(error) = self.append_ledger(entry) {
+            if let Err(error) = self.append_ledger(entry.clone()) {
                 return self.fail(
                     now_ms,
                     StrategyHaltReason::LedgerError {
@@ -678,9 +705,9 @@ where
             .publish(StrategyLifecycleEvent::OrderSubmitted {
                 strategy_id: self.program.strategy_id().to_string(),
                 intent_id: intent.intent_id.clone(),
-                venue_order_id: execution.venue_order_id,
+                venue_order_id: execution.venue_order_id.clone(),
             });
-        Ok(())
+        Ok(execution)
     }
 
     fn ledger_risk_totals(&self, now_ms: i64) -> Result<(u32, u64)> {
@@ -733,7 +760,7 @@ where
         )
     }
 
-    fn fail(&mut self, at_ms: i64, reason: StrategyHaltReason) -> Result<()> {
+    fn fail<T>(&mut self, at_ms: i64, reason: StrategyHaltReason) -> Result<T> {
         let message = reason.summary();
         self.halt_inner(at_ms, reason);
         Err(anyhow!(message))
@@ -884,6 +911,7 @@ mod tests {
     #[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
     struct TestState {
         ticks: u64,
+        executions: u64,
     }
 
     #[derive(Clone, Debug, PartialEq)]
@@ -977,6 +1005,21 @@ mod tests {
                 next_state,
                 intents,
             })
+        }
+
+        fn on_execution(
+            &self,
+            _config: &Self::Config,
+            state: &Self::State,
+            _intent: &OrderIntent,
+            _execution: &VenueExecution,
+        ) -> Result<Self::State> {
+            let mut next_state = state.clone();
+            next_state.executions = next_state
+                .executions
+                .checked_add(1)
+                .context("test execution count overflowed")?;
+            Ok(next_state)
         }
     }
 
@@ -1222,6 +1265,7 @@ mod tests {
             let report = engine.handle_tick(tick(100)).await.expect("tick");
             assert_eq!(report.submitted_count, 1);
             assert_eq!(executor.calls(), 1);
+            assert_eq!(engine.state().expect("state").executions, 1);
             assert_eq!(
                 ledger
                     .entries(&LedgerQuery::default())

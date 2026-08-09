@@ -106,6 +106,7 @@ impl AccountAllocation {
 #[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
 pub struct FeatureInput {
     pub prices: Vec<TimedValue>,
+    pub index_prices: Vec<TimedValue>,
     pub funding_rates: Vec<TimedValue>,
     pub liquidity_time_ms: Option<i64>,
     pub liquidity_tiers: Vec<LiquidityTier>,
@@ -125,6 +126,15 @@ pub struct VolatilityFeatures {
     pub one_hour: Option<f64>,
     pub six_hours: Option<f64>,
     pub one_day: Option<f64>,
+    pub price_points: usize,
+}
+
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
+pub struct IndexFeatures {
+    pub current_price: Option<f64>,
+    pub one_hour_move: Option<f64>,
+    pub six_hours_move: Option<f64>,
+    pub one_day_move: Option<f64>,
     pub price_points: usize,
 }
 
@@ -161,6 +171,8 @@ pub struct AccountDriftFeatures {
 pub struct FeatureSnapshot {
     pub schema: String,
     pub as_of_ms: Option<i64>,
+    #[serde(default)]
+    pub index: IndexFeatures,
     pub volatility: VolatilityFeatures,
     pub funding: FundingFeatures,
     pub liquidity: LiquidityFeatures,
@@ -180,16 +192,20 @@ pub struct FeatureReplayDataset {
     pub from_ms: i64,
     pub to_ms: i64,
     pub candle_count: u64,
+    pub oracle_index_count: u64,
     pub funding_settlement_count: u64,
     pub ticks: Vec<FeatureReplayTick>,
 }
 
 pub fn derive_features(mut input: FeatureInput) -> Result<FeatureSnapshot> {
     input.prices.retain(valid_price);
+    input.index_prices.retain(valid_price);
     input.funding_rates.retain(valid_funding_rate);
     input.prices.sort_by_key(|point| point.time_ms);
+    input.index_prices.sort_by_key(|point| point.time_ms);
     input.funding_rates.sort_by_key(|point| point.time_ms);
     input.prices.dedup_by_key(|point| point.time_ms);
+    input.index_prices.dedup_by_key(|point| point.time_ms);
     input.funding_rates.dedup_by_key(|point| point.time_ms);
     let account = input.account.map(AccountAllocation::validate).transpose()?;
     let as_of_ms = input
@@ -197,6 +213,7 @@ pub fn derive_features(mut input: FeatureInput) -> Result<FeatureSnapshot> {
         .last()
         .map(|point| point.time_ms)
         .into_iter()
+        .chain(input.index_prices.last().map(|point| point.time_ms))
         .chain(input.funding_rates.last().map(|point| point.time_ms))
         .chain(input.liquidity_time_ms)
         .max();
@@ -206,9 +223,20 @@ pub fn derive_features(mut input: FeatureInput) -> Result<FeatureSnapshot> {
         one_day: realized_volatility(&input.prices, as_of_ms, ONE_DAY_MS),
         price_points: input.prices.len(),
     };
+    let index = IndexFeatures {
+        current_price: input.index_prices.last().map(|point| point.value),
+        one_hour_move: window_move(&input.index_prices, as_of_ms, ONE_HOUR_MS),
+        six_hours_move: window_move(&input.index_prices, as_of_ms, SIX_HOURS_MS),
+        one_day_move: window_move(&input.index_prices, as_of_ms, ONE_DAY_MS),
+        price_points: input.index_prices.len(),
+    };
     let funding = funding_features(&input.funding_rates);
     let liquidity = liquidity_features(&input.liquidity_tiers);
-    let last_price = input.prices.last().map(|point| point.value);
+    let last_price = input
+        .index_prices
+        .last()
+        .or_else(|| input.prices.last())
+        .map(|point| point.value);
     let account_drift = match (account, last_price) {
         (Some(account), Some(last_price)) => account_drift(account, last_price),
         _ => None,
@@ -216,11 +244,23 @@ pub fn derive_features(mut input: FeatureInput) -> Result<FeatureSnapshot> {
     Ok(FeatureSnapshot {
         schema: "omega.lnmarkets.features.v1".into(),
         as_of_ms,
+        index,
         volatility,
         funding,
         liquidity,
         account_drift,
     })
+}
+
+fn window_move(prices: &[TimedValue], as_of_ms: Option<i64>, window_ms: i64) -> Option<f64> {
+    let cutoff = as_of_ms?.saturating_sub(window_ms);
+    let mut prices = prices
+        .iter()
+        .filter(|point| point.time_ms >= cutoff)
+        .map(|point| point.value);
+    let first = prices.next()?;
+    let last = prices.next_back()?;
+    Some((last / first).ln())
 }
 
 fn valid_price(point: &TimedValue) -> bool {
@@ -722,12 +762,19 @@ impl MarketDataStore {
         if funding_settlements.is_empty() {
             bail!("feature replay requires collected funding settlements");
         }
+        let oracle_indices =
+            self.range(network, ORACLE_INDEX_TOPIC, from_ms, Some(to_ms), 10_000)?;
+        if oracle_indices.is_empty() {
+            bail!("feature replay requires collected oracle indices");
+        }
 
         let candle_count =
             u64::try_from(candles.len()).context("feature replay candle count overflowed")?;
+        let oracle_index_count = u64::try_from(oracle_indices.len())
+            .context("feature replay oracle index count overflowed")?;
         let funding_settlement_count = u64::try_from(funding_settlements.len())
             .context("feature replay funding count overflowed")?;
-        let mut changes = BTreeMap::<i64, (Vec<f64>, Vec<f64>)>::new();
+        let mut changes = BTreeMap::<i64, (Vec<f64>, Vec<f64>, Vec<f64>)>::new();
         for candle in candles {
             let close = event_numeric_value(&candle.payload, &["close"]).with_context(|| {
                 format!("candle at {} has no close price", candle.event_time_ms)
@@ -751,10 +798,20 @@ impl MarketDataStore {
                 .1
                 .push(rate);
         }
+        for index in oracle_indices {
+            let value = event_numeric_value(&index.payload, &["index"]).with_context(|| {
+                format!("oracle index at {} has no index price", index.event_time_ms)
+            })?;
+            changes
+                .entry(index.event_time_ms)
+                .or_default()
+                .2
+                .push(value);
+        }
 
         let mut input = FeatureInput::default();
         let mut ticks = Vec::with_capacity(changes.len());
-        for (occurred_at_ms, (prices, rates)) in changes {
+        for (occurred_at_ms, (prices, rates, index_prices)) in changes {
             input
                 .prices
                 .extend(prices.into_iter().map(|value| TimedValue {
@@ -767,6 +824,12 @@ impl MarketDataStore {
                     time_ms: occurred_at_ms,
                     value,
                 }));
+            input
+                .index_prices
+                .extend(index_prices.into_iter().map(|value| TimedValue {
+                    time_ms: occurred_at_ms,
+                    value,
+                }));
             if input.prices.len() > 1_000 {
                 input.prices.drain(..input.prices.len() - 1_000);
             }
@@ -774,6 +837,9 @@ impl MarketDataStore {
                 input
                     .funding_rates
                     .drain(..input.funding_rates.len() - 1_000);
+            }
+            if input.index_prices.len() > 1_000 {
+                input.index_prices.drain(..input.index_prices.len() - 1_000);
             }
             ticks.push(FeatureReplayTick {
                 occurred_at_ms,
@@ -787,6 +853,7 @@ impl MarketDataStore {
             from_ms,
             to_ms,
             candle_count,
+            oracle_index_count,
             funding_settlement_count,
             ticks,
         })
@@ -839,6 +906,31 @@ impl MarketDataStore {
                     }),
             );
         }
+        let mut index_prices = self
+            .recent(network, ORACLE_INDEX_TOPIC, 1_000)?
+            .into_iter()
+            .filter_map(|event| {
+                event_numeric_value(&event.payload, &["index"]).map(|value| TimedValue {
+                    time_ms: event.event_time_ms,
+                    value,
+                })
+            })
+            .collect::<Vec<_>>();
+        for topic in [
+            "futures/inverse/btc_usd/index",
+            "futures/inverse/btc_usd/ticker",
+        ] {
+            index_prices.extend(
+                self.recent(network, topic, 1)?
+                    .into_iter()
+                    .filter_map(|event| {
+                        event_numeric_value(&event.payload, &["index"]).map(|value| TimedValue {
+                            time_ms: event.event_time_ms,
+                            value,
+                        })
+                    }),
+            );
+        }
         let funding_rates = self
             .recent(network, FUNDING_SETTLEMENT_TOPIC, 1_000)?
             .into_iter()
@@ -863,6 +955,7 @@ impl MarketDataStore {
             .transpose()?;
         Ok(FeatureInput {
             prices,
+            index_prices,
             funding_rates,
             liquidity_time_ms,
             liquidity_tiers,
@@ -1566,6 +1659,47 @@ mod tests {
     }
 
     #[test]
+    fn index_features_measure_log_moves_inside_each_window() {
+        let snapshot = derive_features(FeatureInput {
+            index_prices: vec![
+                TimedValue {
+                    time_ms: 0,
+                    value: 80.0,
+                },
+                TimedValue {
+                    time_ms: 23 * ONE_HOUR_MS + ONE_HOUR_MS / 2,
+                    value: 100.0,
+                },
+                TimedValue {
+                    time_ms: 24 * ONE_HOUR_MS + ONE_HOUR_MS / 2,
+                    value: 110.0,
+                },
+                TimedValue {
+                    time_ms: 25 * ONE_HOUR_MS,
+                    value: 121.0,
+                },
+            ],
+            ..FeatureInput::default()
+        })
+        .expect("features");
+
+        assert_eq!(snapshot.index.current_price, Some(121.0));
+        assert_close(
+            snapshot.index.one_hour_move.expect("one-hour move"),
+            (121.0_f64 / 110.0).ln(),
+        );
+        let longer_move = (121.0_f64 / 100.0).ln();
+        assert_close(
+            snapshot.index.six_hours_move.expect("six-hour move"),
+            longer_move,
+        );
+        assert_close(
+            snapshot.index.one_day_move.expect("one-day move"),
+            longer_move,
+        );
+    }
+
+    #[test]
     fn funding_features_pin_ema_sign_and_latest_flip() {
         let snapshot = derive_features(FeatureInput {
             funding_rates: vec![
@@ -1623,11 +1757,30 @@ mod tests {
                 ],
             )
             .expect("funding");
+        let missing_indices = store
+            .feature_replay(Network::Signet, 0, 400)
+            .expect_err("oracle index history required");
+        assert!(
+            missing_indices
+                .to_string()
+                .contains("requires collected oracle indices")
+        );
+        store
+            .insert_backfill_batch(
+                Network::Signet,
+                ORACLE_INDEX_TOPIC,
+                &[
+                    (100, json!({"index": 100.0})),
+                    (300, json!({"index": 110.0})),
+                ],
+            )
+            .expect("oracle indices");
 
         let replay = store
             .feature_replay(Network::Signet, 0, 400)
             .expect("feature replay");
         assert_eq!(replay.candle_count, 2);
+        assert_eq!(replay.oracle_index_count, 2);
         assert_eq!(replay.funding_settlement_count, 2);
         assert_eq!(
             replay
@@ -1639,6 +1792,8 @@ mod tests {
         );
         let final_features = &replay.ticks.last().expect("final tick").features;
         assert_eq!(final_features.volatility.price_points, 2);
+        assert_eq!(final_features.index.current_price, Some(110.0));
+        assert_eq!(final_features.index.price_points, 2);
         assert_eq!(final_features.funding.current_rate, Some(-0.02));
         assert_eq!(final_features.funding.sign, FundingSign::Negative);
         assert_eq!(final_features.funding.sign_flipped_at_ms, Some(400));

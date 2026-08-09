@@ -10211,3 +10211,25 @@ carry covers all recorded fees.
 - **Enforced by:** `lnmarkets_hedger` unit tests and
   `lnmarkets_provider_hedger_is_standalone_signet_and_ledger_backed` in
   `omega_deltas`.
+
+### OMEGA-DELTA-0256 — Threshold swing is bounded, feature-driven, and signet-only
+
+The threshold-swing strategy uses the collected LN Markets index, volatility,
+spread, account, and ladder features. It enters after a configured index move
+measured in volatility units and exits after the symmetric move. Both entry
+and exit must clear the measured round-trip cost plus margin. Position value,
+spread, and liquidity utilization have explicit configuration caps.
+
+Collected oracle-index history is part of deterministic replay. A passing
+backtest must show positive expectancy after costs for the exact configuration
+before the strategy can start. The program and executor refuse mainnet, and
+the active mandate remains the authority for position size and execution.
+
+The strategy is available through the same start, adjust, halt, lifecycle,
+and operator surfaces as the other bounded strategies. Its executions carry
+`threshold_swing` ledger attribution.
+
+- **Enforced by:** `lnmarkets_data`, `lnmarkets_trading`, `lnmarkets`, and
+  `agent` unit tests and
+  `threshold_swing_is_feature_driven_bounded_and_runtime_integrated` in
+  `omega_deltas`.

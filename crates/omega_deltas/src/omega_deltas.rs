@@ -226,6 +226,7 @@ pub const ENFORCED_DELTAS: &[&str] = &[
     "OMEGA-DELTA-0253",
     "OMEGA-DELTA-0254",
     "OMEGA-DELTA-0255",
+    "OMEGA-DELTA-0256",
 ];
 
 /// OMEGA-DELTA-0204. Every control the composer's bar offers, written twice:
@@ -30051,5 +30052,90 @@ mod tests {
                 "OMEGA-DELTA-0255: hedger decision lost `{required}`"
             );
         }
+    }
+
+    /// Threshold swing consumes collected index and volatility features, stays
+    /// bounded by measured cost and mandate limits, and is a runtime strategy.
+    #[test]
+    fn threshold_swing_is_feature_driven_bounded_and_runtime_integrated() {
+        let data = without_comments(&read_repository_file(
+            "crates/lnmarkets_data/src/lnmarkets_data.rs",
+        ));
+        for required in [
+            "pub struct IndexFeatures",
+            "pub index: IndexFeatures",
+            "window_move(&input.index_prices",
+            "requires collected oracle indices",
+            "oracle_index_count",
+        ] {
+            assert!(
+                data.contains(required),
+                "OMEGA-DELTA-0256: threshold index feature path lost `{required}`"
+            );
+        }
+
+        let strategy = without_comments(&read_repository_file(
+            "crates/lnmarkets_trading/src/threshold_swing.rs",
+        ));
+        for required in [
+            "openagents.omega.lnmarkets.threshold_swing.v1",
+            "threshold_swing is restricted to signet",
+            "threshold_volatility_units_milli",
+            "measured_round_trip_cost_bps",
+            "maximum_spread_bps",
+            "maximum_position_usd_cents",
+            "liquidity_utilization_bps",
+            "ThresholdSwingBacktestModel",
+            "report.expectancy_millisats > 0",
+            "BacktestOutcome::Passed",
+            "ThresholdSwingExecutor",
+        ] {
+            assert!(
+                strategy.contains(required),
+                "OMEGA-DELTA-0256: threshold strategy lost `{required}`"
+            );
+        }
+
+        let runtime = without_comments(&read_repository_file(
+            "crates/lnmarkets/src/trading_runtime.rs",
+        ));
+        for required in [
+            "threshold_swing: Mutex<Option<ThresholdSwingHandle>>",
+            "pub async fn start_threshold_swing(",
+            "pub async fn adjust_threshold_swing(",
+            "pub async fn halt_threshold_swing(",
+            "pub async fn process_collected_tick(",
+            "StrategyCommand::Tick(StrategyTick {",
+            "THRESHOLD_SWING_STRATEGY_ID",
+            "config.maximum_position_usd_cents.div_ceil(100)",
+        ] {
+            assert!(
+                runtime.contains(required),
+                "OMEGA-DELTA-0256: threshold runtime integration lost `{required}`"
+            );
+        }
+
+        let tools = without_comments(&read_repository_file(
+            "crates/agent/src/tools/lnmarkets_tools.rs",
+        ));
+        for required in [
+            "ThresholdSwing",
+            "start_threshold_swing(client, config, at_ms, cx)",
+            "runtime.adjust_threshold_swing(config, at_ms)",
+            "runtime.halt_threshold_swing(at_ms, reason)",
+        ] {
+            assert!(
+                tools.contains(required),
+                "OMEGA-DELTA-0256: threshold agent control lost `{required}`"
+            );
+        }
+
+        let cards = without_comments(&read_repository_file(
+            "crates/agent_ui/src/conversation_view/lnmarkets_tool_cards.rs",
+        ));
+        assert!(
+            cards.contains("{ \"strategy_id\": \"threshold_swing\", \"status\": \"idle\" }"),
+            "OMEGA-DELTA-0256: component gallery lost threshold_swing"
+        );
     }
 }

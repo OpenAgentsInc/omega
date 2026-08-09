@@ -368,6 +368,7 @@ impl Component for LnMarketsToolCardsPreview {
                             "strategies": [
                                 { "strategy_id": "rebalance_to_target", "status": status },
                                 { "strategy_id": "funding_carry", "status": "idle" },
+                                { "strategy_id": "threshold_swing", "status": "idle" },
                             ],
                         })
                     },

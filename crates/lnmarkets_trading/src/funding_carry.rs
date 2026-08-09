@@ -1448,7 +1448,8 @@ mod tests {
     use http::{Request, Response, StatusCode};
     use lnmarkets_client::{Credentials, HttpTransport, TransportFailure};
     use lnmarkets_data::{
-        AccountDriftFeatures, FundingFeatures, FundingSign, LiquidityFeatures, VolatilityFeatures,
+        AccountDriftFeatures, FundingFeatures, FundingSign, IndexFeatures, LiquidityFeatures,
+        VolatilityFeatures,
     };
     use strategy_engine::{BacktestCostModel, BacktestOutcome, BacktestPolicy, run_backtest};
 
@@ -1478,6 +1479,13 @@ mod tests {
         FeatureSnapshot {
             schema: "omega.lnmarkets.features.v1".into(),
             as_of_ms: Some(100),
+            index: IndexFeatures {
+                current_price: Some(50_005.0),
+                one_hour_move: None,
+                six_hours_move: None,
+                one_day_move: None,
+                price_points: 1,
+            },
             volatility: VolatilityFeatures {
                 one_hour: None,
                 six_hours: None,

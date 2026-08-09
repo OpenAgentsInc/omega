@@ -267,7 +267,7 @@ mod tests {
     use std::collections::BTreeSet;
 
     use lnmarkets_data::{
-        AccountDriftFeatures, FundingFeatures, LiquidityFeatures, VolatilityFeatures,
+        AccountDriftFeatures, FundingFeatures, IndexFeatures, LiquidityFeatures, VolatilityFeatures,
     };
     use trading_ledger::{LedgerAccount, LedgerEntry, LedgerEntryKind, LedgerPosting};
     use trading_mandate::{ReviewCadence, TradingMandate, TradingNetwork};
@@ -300,6 +300,13 @@ mod tests {
         FeatureSnapshot {
             schema: "omega.lnmarkets.features.v1".into(),
             as_of_ms: Some(9_900),
+            index: IndexFeatures {
+                current_price: Some(60_005.0),
+                one_hour_move: Some(-0.01),
+                six_hours_move: Some(0.02),
+                one_day_move: Some(0.03),
+                price_points: 100,
+            },
             volatility: VolatilityFeatures {
                 one_hour: Some(0.02),
                 six_hours: Some(0.03),

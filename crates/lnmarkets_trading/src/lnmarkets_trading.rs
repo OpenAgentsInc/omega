@@ -1,5 +1,6 @@
 mod funding_carry;
 mod rebalance_to_target;
+mod threshold_swing;
 
 pub use funding_carry::{
     FUNDING_CARRY_SCHEMA, FundingCarryAction, FundingCarryBacktestModel, FundingCarryConfig,
@@ -10,6 +11,11 @@ pub use funding_carry::{
 pub use rebalance_to_target::{
     REBALANCE_TO_TARGET_SCHEMA, RebalanceAction, RebalanceCostMeasurement, RebalanceToTargetConfig,
     RebalanceToTargetProgram, RebalanceToTargetState, SyntheticUsdExecutor, measure_rebalance_cost,
+};
+pub use threshold_swing::{
+    THRESHOLD_SWING_SCHEMA, ThresholdSwingAction, ThresholdSwingBacktestModel,
+    ThresholdSwingConfig, ThresholdSwingExecutor, ThresholdSwingPosition, ThresholdSwingProgram,
+    ThresholdSwingState, ThresholdSwingWindow,
 };
 
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
@@ -35,6 +41,7 @@ pub struct LnMarketsBacktestReplay {
     pub schema: String,
     pub network: lnmarkets_client::Network,
     pub candle_count: u64,
+    pub oracle_index_count: u64,
     pub funding_settlement_count: u64,
     pub ticks: Vec<LnMarketsBacktestTick>,
 }
@@ -50,6 +57,7 @@ pub fn collected_backtest_replay(
         schema: replay.schema,
         network: replay.network,
         candle_count: replay.candle_count,
+        oracle_index_count: replay.oracle_index_count,
         funding_settlement_count: replay.funding_settlement_count,
         ticks: replay
             .ticks

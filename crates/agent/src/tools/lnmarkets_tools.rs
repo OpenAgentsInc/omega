@@ -810,6 +810,7 @@ pub struct LnMarketsStrategyTool {
 pub enum LnMarketsStrategyName {
     RebalanceToTarget,
     FundingCarry,
+    ThresholdSwing,
 }
 
 impl LnMarketsStrategyName {
@@ -817,6 +818,7 @@ impl LnMarketsStrategyName {
         match self {
             Self::RebalanceToTarget => "rebalance_to_target",
             Self::FundingCarry => "funding_carry",
+            Self::ThresholdSwing => "threshold_swing",
         }
     }
 }
@@ -930,6 +932,16 @@ impl AgentTool for LnMarketsStrategyTool {
                             })?;
                             runtime.start_funding(client, config, at_ms, cx).await
                         }
+                        LnMarketsStrategyName::ThresholdSwing => {
+                            let config = serde_json::from_value(config).map_err(|error| {
+                                LnMarketsToolOutput::error(format!(
+                                    "invalid threshold_swing configuration: {error}"
+                                ))
+                            })?;
+                            runtime
+                                .start_threshold_swing(client, config, at_ms, cx)
+                                .await
+                        }
                     }
                 }
                 LnMarketsStrategyInput::Adjust { strategy, config } => {
@@ -954,6 +966,14 @@ impl AgentTool for LnMarketsStrategyTool {
                             })?;
                             runtime.adjust_funding(config, at_ms).await
                         }
+                        LnMarketsStrategyName::ThresholdSwing => {
+                            let config = serde_json::from_value(config).map_err(|error| {
+                                LnMarketsToolOutput::error(format!(
+                                    "invalid threshold_swing configuration: {error}"
+                                ))
+                            })?;
+                            runtime.adjust_threshold_swing(config, at_ms).await
+                        }
                     }
                 }
                 LnMarketsStrategyInput::Halt { strategy, reason } => {
@@ -967,6 +987,9 @@ impl AgentTool for LnMarketsStrategyTool {
                         }
                         LnMarketsStrategyName::FundingCarry => {
                             runtime.halt_funding(at_ms, reason).await
+                        }
+                        LnMarketsStrategyName::ThresholdSwing => {
+                            runtime.halt_threshold_swing(at_ms, reason).await
                         }
                     }
                 }
@@ -1287,6 +1310,20 @@ mod tests {
             input,
             LnMarketsStrategyInput::Start {
                 strategy: LnMarketsStrategyName::FundingCarry,
+                ..
+            }
+        ));
+
+        let threshold = serde_json::from_value::<LnMarketsStrategyInput>(json!({
+            "action": "adjust",
+            "strategy": "threshold_swing",
+            "config": { "network": "signet" },
+        }))
+        .expect("threshold strategy input");
+        assert!(matches!(
+            threshold,
+            LnMarketsStrategyInput::Adjust {
+                strategy: LnMarketsStrategyName::ThresholdSwing,
                 ..
             }
         ));
