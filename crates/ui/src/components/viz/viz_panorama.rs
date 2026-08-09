@@ -14,6 +14,7 @@ use crate::prelude::*;
 /// `· unpinned` suffix — never opacity alone.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum PanoramaTrust {
+    Fixture,
     Pinned,
     Discovered,
 }
@@ -363,7 +364,7 @@ impl RenderOnce for NetworkPanorama {
                                  role: VizNodeRole,
                                  radius: f32| {
                     let tier_opacity = match trust {
-                        PanoramaTrust::Pinned => 1.0,
+                        PanoramaTrust::Fixture | PanoramaTrust::Pinned => 1.0,
                         PanoramaTrust::Discovered => 0.55,
                     };
                     let opacity = tier_opacity
@@ -399,6 +400,7 @@ impl RenderOnce for NetworkPanorama {
                     );
                     let mut text = SceneText::new(text_size(8.5));
                     let suffix = match trust {
+                        PanoramaTrust::Fixture => " · fixture",
                         PanoramaTrust::Pinned => "",
                         PanoramaTrust::Discovered => " · unpinned",
                     };
@@ -580,6 +582,45 @@ pub fn live_shape_fixture() -> PanoramaNetwork {
             operator_fee_sat_24h: Some(16_830),
         },
         activity: 0.25,
+    }
+}
+
+pub(crate) fn demo_shape_fixture() -> PanoramaNetwork {
+    PanoramaNetwork {
+        name: "representative demo network".into(),
+        relays: vec![
+            PanoramaRelay {
+                label: "relay-a".into(),
+                state: VizNodeState::Ready,
+                trust: PanoramaTrust::Fixture,
+            },
+            PanoramaRelay {
+                label: "relay-b".into(),
+                state: VizNodeState::Ready,
+                trust: PanoramaTrust::Fixture,
+            },
+        ],
+        providers: vec![
+            PanoramaProvider {
+                label: "provider-b".into(),
+                state: VizNodeState::Ready,
+                trust: PanoramaTrust::Fixture,
+                relay_indices: vec![0, 1],
+                fee_bps: 22,
+                volume_sat_24h: 0,
+            },
+            PanoramaProvider {
+                label: "provider-c".into(),
+                state: VizNodeState::Ready,
+                trust: PanoramaTrust::Fixture,
+                relay_indices: vec![0, 1],
+                fee_bps: 34,
+                volume_sat_24h: 0,
+            },
+        ],
+        client_count: 1,
+        stats: PanoramaStats::default(),
+        activity: 0.2,
     }
 }
 
@@ -844,6 +885,19 @@ impl Component for NetworkCard {
                         ))
                         .into_any_element(),
                 )],
+            ))
+            .child(example_group_with_title(
+                "Network modes",
+                vec![
+                    single_example(
+                        "Deterministic demo fixture",
+                        NetworkCard::new(demo_shape_fixture()).into_any_element(),
+                    ),
+                    single_example(
+                        "Live public regtest shape",
+                        NetworkCard::new(live_shape_fixture()).into_any_element(),
+                    ),
+                ],
             ))
             .child(example_group_with_title(
                 "Outage drill",

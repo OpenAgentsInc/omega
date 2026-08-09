@@ -6009,6 +6009,9 @@ where
         cx: &mut App,
     ) -> Task<Result<Self::Output, Self::Output>>;
 
+    /// Migrates input saved by an older release when current replay deserialization fails.
+    fn migrate_input_for_replay(_input: &mut serde_json::Value) {}
+
     /// Emits events for a previous execution of the tool.
     fn replay(
         &self,
@@ -6190,12 +6193,18 @@ where
 
     fn replay(
         &self,
-        input: serde_json::Value,
+        mut input: serde_json::Value,
         output: serde_json::Value,
         event_stream: ToolCallEventStream,
         cx: &mut App,
     ) -> Result<()> {
-        let input = serde_json::from_value(input)?;
+        let input = match serde_json::from_value(input.clone()) {
+            Ok(input) => input,
+            Err(_) => {
+                T::migrate_input_for_replay(&mut input);
+                serde_json::from_value(input)?
+            }
+        };
         let output = serde_json::from_value(output)?;
         self.0.replay(input, output, event_stream, cx)
     }

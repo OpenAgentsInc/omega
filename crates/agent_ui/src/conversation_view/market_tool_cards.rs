@@ -12,8 +12,9 @@ use gpui::{AnyElement, App};
 use serde_json::Value;
 use ui::prelude::*;
 use ui::{
-    CloudProvisionCard, CloudProvisionStage, NetworkCard, PanoramaNetwork, PanoramaProvider,
-    PanoramaRelay, PanoramaStats, PanoramaTrust, SwapAsset, SwapCard, SwapStage, VizNodeState,
+    CloudProvisionCard, CloudProvisionStage, MarketWarningCard, NetworkCard, PanoramaNetwork,
+    PanoramaProvider, PanoramaRelay, PanoramaStats, PanoramaTrust, SwapAsset, SwapCard,
+    SwapNetwork, SwapQuoteKind, SwapStage, VizNodeState,
 };
 
 pub(crate) const MARKET_SCHEMA_PREFIX: &str = "omega.market-demo.";
@@ -83,35 +84,21 @@ pub(crate) fn market_tool_card(tool_call: &ToolCall, cx: &App) -> Option<AnyElem
         "omega.market-demo.cloud-provision.v1" => {
             Some(parse_cloud_provision_card(&payload)?.into_any_element())
         }
-        "omega.market-demo.warning.v1" => parse_market_warning(&payload, cx),
+        "omega.market-demo.warning.v1" => parse_market_warning(&payload),
         _ => None,
     }
 }
 
-fn parse_market_warning(payload: &Value, cx: &App) -> Option<AnyElement> {
-    let warning = payload.get("warning")?.as_str()?.to_string();
-    let network = payload.get("network")?.as_str()?;
+fn parse_market_warning(payload: &Value) -> Option<AnyElement> {
+    if payload.get("network")?.as_str()? != "mainnet" {
+        return None;
+    }
     Some(
-        v_flex()
-            .w(px(420.))
-            .my_1p5()
-            .gap_1()
-            .p_3()
-            .rounded_md()
-            .border_1()
-            .border_color(cx.theme().colors().border)
-            .bg(cx.theme().colors().editor_background)
-            .child(
-                Label::new(format!("{} blocked", network.to_uppercase()))
-                    .size(LabelSize::Small)
-                    .color(Color::Warning),
-            )
-            .child(
-                Label::new(warning)
-                    .size(LabelSize::Small)
-                    .color(Color::Muted),
-            )
-            .into_any_element(),
+        MarketWarningCard::new(
+            payload.get("operation")?.as_str()?.to_string(),
+            payload.get("warning")?.as_str()?.to_string(),
+        )
+        .into_any_element(),
     )
 }
 
@@ -256,6 +243,7 @@ fn parse_state(value: &Value) -> VizNodeState {
 
 fn parse_trust(value: &Value) -> PanoramaTrust {
     match value.as_str().unwrap_or_default() {
+        "fixture" => PanoramaTrust::Fixture,
         "discovered" => PanoramaTrust::Discovered,
         _ => PanoramaTrust::Pinned,
     }
@@ -357,8 +345,18 @@ fn parse_asset(value: &Value) -> Option<SwapAsset> {
     }
 }
 
+fn parse_swap_network(value: Option<&Value>) -> Option<SwapNetwork> {
+    match value.and_then(Value::as_str) {
+        None => Some(SwapNetwork::Demo),
+        Some("demo") => Some(SwapNetwork::Demo),
+        Some("regtest") => Some(SwapNetwork::Regtest),
+        _ => None,
+    }
+}
+
 fn parse_swap_card(payload: &Value) -> Option<SwapCard> {
-    let stage = if payload.get("schema")?.as_str()? == "omega.market-demo.quote.v1" {
+    let is_quote = payload.get("schema")?.as_str()? == "omega.market-demo.quote.v1";
+    let stage = if is_quote {
         SwapStage::Quote
     } else {
         parse_swap_stage(payload)?
@@ -377,6 +375,14 @@ fn parse_swap_card(payload: &Value) -> Option<SwapCard> {
             .unwrap_or("provider")
             .to_string(),
         fee_bps.unwrap_or_default(),
+    )
+    .network(parse_swap_network(payload.get("network"))?)
+    .quote_kind(
+        if is_quote && payload.get("kind").and_then(Value::as_str) == Some("indicative") {
+            SwapQuoteKind::Indicative
+        } else {
+            SwapQuoteKind::Firm
+        },
     )
     .stage(stage);
     Some(if fee_bps.is_some() {
@@ -521,9 +527,19 @@ mod tests {
     }
 
     #[test]
+    fn demo_fixture_trust_stays_explicit() {
+        assert_eq!(
+            parse_trust(&Value::String("fixture".to_string())),
+            PanoramaTrust::Fixture
+        );
+    }
+
+    #[test]
     fn swap_payloads_parse_for_quotes_and_every_stage() {
         let quote = serde_json::json!({
             "schema": "omega.market-demo.quote.v1",
+            "network": "demo",
+            "kind": "firm",
             "quote_id": "demo-quote-1",
             "from": "LN", "to": "BTC", "amount_sats": 50000,
             "provider": "provider-b", "fee_bps": 22,
@@ -532,6 +548,7 @@ mod tests {
         for stage in ["contract", "funding", "executing", "settled", "refunded"] {
             let swap = serde_json::json!({
                 "schema": "omega.market-demo.swap.v1",
+                "network": "demo",
                 "from": "LN", "to": "BTC", "amount_sats": 50000,
                 "provider": "provider-b", "fee_bps": 22, "stage": stage,
             });
@@ -539,9 +556,43 @@ mod tests {
         }
         let unknown_stage = serde_json::json!({
             "schema": "omega.market-demo.swap.v1",
+            "network": "demo",
             "from": "LN", "to": "BTC", "amount_sats": 50000, "stage": "melted",
         });
         assert!(parse_swap_card(&unknown_stage).is_none());
+    }
+
+    #[test]
+    fn swap_payloads_render_legacy_demo_and_reject_mainnet() {
+        let quote = serde_json::json!({
+            "schema": "omega.market-demo.quote.v1",
+            "quote_id": "demo-quote-1",
+            "from": "LN", "to": "BTC", "amount_sats": 50000,
+            "provider": "provider-b", "fee_bps": 22,
+        });
+        assert!(parse_swap_card(&quote).is_some());
+
+        let mut regtest_quote = quote.clone();
+        regtest_quote["network"] = Value::String("regtest".to_string());
+        assert!(parse_swap_card(&regtest_quote).is_some());
+
+        let mut mainnet_quote = quote;
+        mainnet_quote["network"] = Value::String("mainnet".to_string());
+        assert!(parse_swap_card(&mainnet_quote).is_none());
+    }
+
+    #[test]
+    fn only_mainnet_warning_payloads_render() {
+        let mut warning = serde_json::json!({
+            "schema": "omega.market-demo.warning.v1",
+            "network": "mainnet",
+            "operation": "market_execute_swap",
+            "blocked": true,
+            "warning": "Mainnet swap tools are blocked."
+        });
+        assert!(parse_market_warning(&warning).is_some());
+        warning["network"] = Value::String("demo".to_string());
+        assert!(parse_market_warning(&warning).is_none());
     }
 
     #[test]
