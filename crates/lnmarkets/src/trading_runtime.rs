@@ -14,7 +14,11 @@ use parking_lot::Mutex;
 use serde::Serialize;
 use serde_json::Value;
 use trading_ledger::{LedgerQuery, LedgerStore, ProfitReport};
-use trading_mandate::{MandateRevision, MandateSnapshot, MandateStore, TradingNetwork};
+use trading_mandate::{
+    MandateRevision, MandateSnapshot, MandateStore, ReviewCadence, TradingNetwork,
+};
+
+use crate::review_turn::{PortfolioReview, hourly_start};
 
 const REBALANCE_STRATEGY_ID: &str = "rebalance_to_target";
 const FUNDING_STRATEGY_ID: &str = "funding_carry";
@@ -22,7 +26,7 @@ const FUNDING_STRATEGY_ID: &str = "funding_carry";
 type RebalanceHandle = StrategyServiceHandle<RebalanceToTargetConfig, FeatureSnapshot>;
 type FundingHandle = StrategyServiceHandle<FundingCarryConfig, FundingCarryFeatures>;
 
-#[derive(Clone, Debug, Serialize)]
+#[derive(Clone, Debug, PartialEq, Serialize)]
 pub struct StrategyRuntimeSnapshot {
     pub strategy_id: String,
     pub status: String,
@@ -39,6 +43,7 @@ pub struct TradingRuntime {
     backtests: BacktestStore,
     lifecycle: MemoryLifecycleSink,
     wakeups: MemoryWakeupSink,
+    review_session_id: Mutex<Option<String>>,
     rebalance: Mutex<Option<RebalanceHandle>>,
     funding: Mutex<Option<FundingHandle>>,
 }
@@ -51,6 +56,7 @@ impl TradingRuntime {
             backtests: BacktestStore::open_default().context("could not open backtest reports")?,
             lifecycle: MemoryLifecycleSink::default(),
             wakeups: MemoryWakeupSink::default(),
+            review_session_id: Mutex::new(None),
             rebalance: Mutex::new(None),
             funding: Mutex::new(None),
         })
@@ -77,6 +83,80 @@ impl TradingRuntime {
             .into_iter()
             .map(|strategy_id| self.strategy_snapshot(strategy_id))
             .collect()
+    }
+
+    pub fn claim_review_session(&self, session_id: impl Into<String>) -> Result<()> {
+        let session_id = session_id.into();
+        if session_id.trim().is_empty() {
+            bail!("portfolio review session ID must not be empty");
+        }
+        *self.review_session_id.lock() = Some(session_id);
+        Ok(())
+    }
+
+    pub fn is_review_session(&self, session_id: &str) -> bool {
+        self.review_session_id
+            .lock()
+            .as_deref()
+            .is_some_and(|claimed| claimed == session_id)
+    }
+
+    pub fn review_cadence(&self, session_id: &str) -> Result<Option<ReviewCadence>> {
+        if !self.is_review_session(session_id) {
+            return Ok(None);
+        }
+        Ok(self
+            .mandate
+            .snapshot()?
+            .mandate
+            .map(|mandate| mandate.review_cadence))
+    }
+
+    pub fn pending_review_wakeup(
+        &self,
+        session_id: &str,
+    ) -> Option<(agent_wakeup::WakeupSource, String)> {
+        self.is_review_session(session_id)
+            .then(|| self.wakeups.pending())
+            .flatten()
+    }
+
+    pub fn acknowledge_review_wakeup(
+        &self,
+        session_id: &str,
+        source: &agent_wakeup::WakeupSource,
+        instruction: &str,
+    ) -> bool {
+        self.is_review_session(session_id) && self.wakeups.acknowledge(source, instruction)
+    }
+
+    pub fn portfolio_review(
+        &self,
+        now_ms: i64,
+        trigger: impl Into<String>,
+        feature_status: impl Into<String>,
+        features: Option<FeatureSnapshot>,
+    ) -> Result<PortfolioReview> {
+        let daily_query = LedgerQuery {
+            from_ms: Some(now_ms.saturating_sub(24 * 60 * 60 * 1_000).max(0)),
+            to_ms: Some(now_ms),
+            strategy_id: None,
+        };
+        let hourly_query = LedgerQuery {
+            from_ms: Some(hourly_start(now_ms)),
+            to_ms: Some(now_ms),
+            strategy_id: None,
+        };
+        Ok(PortfolioReview::build(
+            now_ms,
+            trigger,
+            feature_status,
+            features,
+            self.ledger.profit_report(&daily_query)?,
+            &self.ledger.entries(&hourly_query)?,
+            self.mandate.snapshot()?,
+            self.strategy_snapshots(),
+        ))
     }
 
     pub async fn start_rebalance(

@@ -6,8 +6,11 @@ use http_client::{AsyncBody, HttpClient};
 use lnmarkets_data::{Collector, CollectorConfig, CollectorHandle, MarketDataStore};
 use parking_lot::Mutex;
 
+mod review_turn;
 mod trading_runtime;
 
+pub use agent_wakeup::WakeupSource;
+pub use review_turn::{PORTFOLIO_REVIEW_SCHEMA, PORTFOLIO_REVIEW_TOKEN_BUDGET, PortfolioReview};
 pub use trading_runtime::{StrategyRuntimeSnapshot, TradingRuntime};
 
 pub use lnmarkets_client::*;
@@ -140,6 +143,61 @@ pub fn trading_runtime(cx: &App) -> Result<Arc<TradingRuntime>, String> {
         .ok_or_else(|| "LN Markets is not initialized".to_string())?
         .trading_runtime
         .clone()
+}
+
+pub fn portfolio_review_instruction(
+    session_id: &str,
+    now_ms: i64,
+    trigger: &str,
+    cx: &App,
+) -> Result<Option<String>, String> {
+    let runtime = trading_runtime(cx)?;
+    if !runtime.is_review_session(session_id) {
+        return Ok(None);
+    }
+    let (feature_status, features) = match collector(cx) {
+        None => ("collector_starting".to_string(), None),
+        Some(collector) => match collector.features() {
+            Ok(Some(features)) => ("ready".to_string(), Some(features)),
+            Ok(None) => ("collecting".to_string(), None),
+            Err(error) => (format!("error: {error:#}"), None),
+        },
+    };
+    runtime
+        .portfolio_review(now_ms, trigger, feature_status, features)
+        .and_then(|review| review.instruction().map_err(Into::into))
+        .map(Some)
+        .map_err(|error| format!("could not prepare LN Markets portfolio review: {error:#}"))
+}
+
+pub fn portfolio_review_cadence(
+    session_id: &str,
+    cx: &App,
+) -> Result<Option<ReviewCadence>, String> {
+    let Some(plugin) = cx.try_global::<LnMarketsPlugin>() else {
+        return Ok(None);
+    };
+    plugin
+        .trading_runtime
+        .clone()?
+        .review_cadence(session_id)
+        .map_err(|error| format!("could not read portfolio review cadence: {error:#}"))
+}
+
+pub fn pending_portfolio_wakeup(session_id: &str, cx: &App) -> Option<(WakeupSource, String)> {
+    trading_runtime(cx)
+        .ok()
+        .and_then(|runtime| runtime.pending_review_wakeup(session_id))
+}
+
+pub fn acknowledge_portfolio_wakeup(
+    session_id: &str,
+    source: &WakeupSource,
+    instruction: &str,
+    cx: &App,
+) -> bool {
+    trading_runtime(cx)
+        .is_ok_and(|runtime| runtime.acknowledge_review_wakeup(session_id, source, instruction))
 }
 
 struct OmegaHttpTransport {

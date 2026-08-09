@@ -2556,7 +2556,11 @@ impl Thread {
                 lnmarkets_ledger,
                 lnmarkets_strategy,
                 lnmarkets_mandate,
-            ) = lnmarkets_tools(http_client, zed_credentials_provider::global(cx));
+            ) = lnmarkets_tools(
+                http_client,
+                zed_credentials_provider::global(cx),
+                self.id().to_string(),
+            );
             self.add_tool(lnmarkets_account);
             self.add_tool(lnmarkets_market_data);
             self.add_tool(lnmarkets_swap);

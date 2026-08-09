@@ -880,26 +880,190 @@ impl NativeAgent {
                         .wakeups
                         .clone()
                 });
-                let wakeup = match agent.update(cx, |agent, _cx| {
-                    agent.wakeup_governor.scheduled_wakeup(
-                        &session_id.to_string(),
-                        now_ms,
-                        &settings,
-                    )
+                if !settings.enabled {
+                    continue;
+                }
+                let session_id_text = session_id.to_string();
+                #[cfg(feature = "lnmarkets")]
+                let portfolio_cadence = match cx.update(|cx| {
+                    lnmarkets::portfolio_review_cadence(&session_id_text, cx)
                 }) {
-                    Ok(wakeup) => wakeup,
+                    Ok(cadence) => cadence,
                     Err(error) => {
-                        log::error!("scheduled agent wakeup was rejected: {error}");
-                        continue;
+                        log::error!("could not read LN Markets portfolio review cadence: {error}");
+                        None
                     }
+                };
+                #[cfg(feature = "lnmarkets")]
+                let pending_portfolio_wakeup = cx.update(|cx| {
+                    lnmarkets::pending_portfolio_wakeup(&session_id_text, cx)
+                });
+                #[cfg(feature = "lnmarkets")]
+                let mut portfolio_acknowledgement = None;
+                #[cfg(feature = "lnmarkets")]
+                let event_wakeup = match pending_portfolio_wakeup {
+                    Some((source, event_instruction)) => {
+                        let now_ms_signed = match i64::try_from(now_ms) {
+                            Ok(now_ms) => now_ms,
+                            Err(error) => {
+                                log::error!("agent wakeup timestamp overflowed: {error}");
+                                continue;
+                            }
+                        };
+                        let trigger = format!(
+                            "{}: {}",
+                            source.transcript_label(),
+                            event_instruction.trim()
+                        );
+                        let instruction = match cx.update(|cx| {
+                            lnmarkets::portfolio_review_instruction(
+                                &session_id_text,
+                                now_ms_signed,
+                                &trigger,
+                                cx,
+                            )
+                        }) {
+                            Ok(Some(instruction)) => instruction,
+                            Ok(None) => {
+                                log::error!(
+                                    "LN Markets emitted a portfolio event without a claimed review session"
+                                );
+                                continue;
+                            }
+                            Err(error) => {
+                                log::error!(
+                                    "could not prepare event-triggered portfolio review: {error}"
+                                );
+                                continue;
+                            }
+                        };
+                        portfolio_acknowledgement =
+                            Some((source.clone(), event_instruction.clone()));
+                        Some(AgentWakeup::new(
+                            session_id_text.clone(),
+                            now_ms,
+                            settings
+                                .max_tokens_per_turn
+                                .min(lnmarkets::PORTFOLIO_REVIEW_TOKEN_BUDGET),
+                            source,
+                            instruction,
+                        ))
+                    }
+                    None => None,
+                };
+                #[cfg(not(feature = "lnmarkets"))]
+                let event_wakeup: Option<AgentWakeup> = None;
+
+                #[cfg(feature = "lnmarkets")]
+                let (effective_settings, schedule_portfolio_review) = {
+                    let mut effective_settings = settings.clone();
+                    if portfolio_cadence.is_some() {
+                        effective_settings.max_tokens_per_turn = effective_settings
+                            .max_tokens_per_turn
+                            .min(lnmarkets::PORTFOLIO_REVIEW_TOKEN_BUDGET);
+                    }
+                    let schedule_portfolio_review = match portfolio_cadence.as_ref() {
+                        Some(lnmarkets::ReviewCadence::FundingSettlement) => false,
+                        Some(lnmarkets::ReviewCadence::Interval { seconds }) => {
+                            effective_settings.interval_seconds = *seconds;
+                            effective_settings.poll_seconds =
+                                effective_settings.poll_seconds.min(*seconds);
+                            true
+                        }
+                        None => true,
+                    };
+                    (effective_settings, schedule_portfolio_review)
+                };
+                #[cfg(not(feature = "lnmarkets"))]
+                let effective_settings = settings.clone();
+                #[cfg(not(feature = "lnmarkets"))]
+                let schedule_portfolio_review = true;
+
+                let is_event_wakeup = event_wakeup.is_some();
+                let wakeup = if is_event_wakeup {
+                    event_wakeup
+                } else if schedule_portfolio_review {
+                    match agent.update(cx, |agent, _cx| {
+                        agent.wakeup_governor.scheduled_wakeup(
+                            &session_id_text,
+                            now_ms,
+                            &effective_settings,
+                        )
+                    }) {
+                        Ok(wakeup) => wakeup,
+                        Err(error) => {
+                            log::error!("scheduled agent wakeup was rejected: {error}");
+                            continue;
+                        }
+                    }
+                } else {
+                    None
+                };
+                #[cfg(feature = "lnmarkets")]
+                let wakeup = {
+                    let mut wakeup = wakeup;
+                    if !is_event_wakeup
+                        && portfolio_cadence.is_some()
+                        && let Some(scheduled_wakeup) = wakeup.as_mut()
+                    {
+                        let now_ms_signed = match i64::try_from(now_ms) {
+                            Ok(now_ms) => now_ms,
+                            Err(error) => {
+                                log::error!("agent wakeup timestamp overflowed: {error}");
+                                continue;
+                            }
+                        };
+                        let trigger = scheduled_wakeup.source.transcript_label();
+                        match cx.update(|cx| {
+                            lnmarkets::portfolio_review_instruction(
+                                &session_id_text,
+                                now_ms_signed,
+                                &trigger,
+                                cx,
+                            )
+                        }) {
+                            Ok(Some(instruction)) => scheduled_wakeup.instruction = instruction,
+                            Ok(None) => {
+                                log::error!(
+                                    "scheduled LN Markets review lost its claimed review session"
+                                );
+                                continue;
+                            }
+                            Err(error) => {
+                                log::error!("could not prepare scheduled portfolio review: {error}");
+                                continue;
+                            }
+                        }
+                    }
+                    wakeup
                 };
                 let Some(wakeup) = wakeup else {
                     continue;
                 };
                 let connection = NativeAgentConnection(agent);
                 let turn = cx.update(|cx| connection.publish_wakeup(wakeup, cx));
-                if let Err(error) = turn.await {
-                    log::error!("scheduled agent wakeup turn failed: {error:#}");
+                match turn.await {
+                    Ok(_) => {
+                        #[cfg(feature = "lnmarkets")]
+                        if let Some((source, instruction)) = portfolio_acknowledgement {
+                            let acknowledged = cx.update(|cx| {
+                                lnmarkets::acknowledge_portfolio_wakeup(
+                                    &session_id_text,
+                                    &source,
+                                    &instruction,
+                                    cx,
+                                )
+                            });
+                            if !acknowledged {
+                                log::error!(
+                                    "completed LN Markets review could not acknowledge its event"
+                                );
+                            }
+                        }
+                    }
+                    Err(error) => {
+                        log::error!("scheduled agent wakeup turn failed: {error:#}");
+                    }
                 }
             }
         });

@@ -12,6 +12,7 @@ workspace = true
 path = "src/lnmarkets.rs"
 
 [dependencies]
+agent_wakeup.workspace = true
 anyhow.workspace = true
 futures.workspace = true
 gpui.workspace = true

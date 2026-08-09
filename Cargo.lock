@@ -9324,6 +9324,7 @@ dependencies = [
 name = "lnmarkets"
 version = "0.1.0"
 dependencies = [
+ "agent_wakeup",
  "anyhow",
  "futures 0.3.32",
  "gpui",

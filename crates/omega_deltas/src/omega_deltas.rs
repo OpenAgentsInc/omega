@@ -29709,4 +29709,93 @@ mod tests {
             );
         }
     }
+
+    /// Portfolio review turns use local evidence, one claimed thread, and the
+    /// same bounded wakeup governor as other unattended turns.
+    #[test]
+    fn lnmarkets_portfolio_reviews_are_local_bounded_and_mandate_governed() {
+        let review = without_comments(&read_repository_file("crates/lnmarkets/src/review_turn.rs"));
+        for required in [
+            "pub const PORTFOLIO_REVIEW_SCHEMA",
+            "pub const PORTFOLIO_REVIEW_TOKEN_BUDGET: u64 = 1_024",
+            "omega.lnmarkets.portfolio_review.v1",
+            "pub struct PortfolioReview",
+            "pub struct LimitHeadroom",
+            "funding_carry",
+            "rebalance_to_target",
+            "threshold_swing",
+            "ladder_aware_sizing",
+            "cross_venue_rebalancing",
+            "immortal_spread_tuning",
+            "at most once",
+            "never place a raw order or swap",
+            "at most 120 words",
+            "review_contains_local_context_inventory_and_exact_headroom",
+        ] {
+            assert!(
+                review.contains(required),
+                "OMEGA-DELTA-0252: portfolio review contract lost `{required}`"
+            );
+        }
+
+        let runtime = without_comments(&read_repository_file(
+            "crates/lnmarkets/src/trading_runtime.rs",
+        ));
+        for required in [
+            "pub fn claim_review_session(",
+            "pub fn pending_review_wakeup(",
+            "pub fn acknowledge_review_wakeup(",
+            "pub fn portfolio_review(",
+            "self.ledger.profit_report(&daily_query)?",
+            "self.mandate.snapshot()?",
+            "self.strategy_snapshots()",
+        ] {
+            assert!(
+                runtime.contains(required),
+                "OMEGA-DELTA-0252: local portfolio runtime lost `{required}`"
+            );
+        }
+
+        let agent = without_comments(&read_repository_file("crates/agent/src/agent.rs"));
+        for required in [
+            "lnmarkets::pending_portfolio_wakeup(",
+            "lnmarkets::portfolio_review_instruction(",
+            "lnmarkets::portfolio_review_cadence(",
+            "lnmarkets::acknowledge_portfolio_wakeup(",
+            ".min(lnmarkets::PORTFOLIO_REVIEW_TOKEN_BUDGET)",
+        ] {
+            assert!(
+                agent.contains(required),
+                "OMEGA-DELTA-0252: portfolio wakeup integration lost `{required}`"
+            );
+        }
+
+        let engine = without_comments(&read_repository_file(
+            "crates/strategy_engine/src/strategy_engine.rs",
+        ));
+        for required in [
+            "pub fn pending(&self)",
+            "pub fn acknowledge(&self",
+            "memory_wakeup_events_remain_pending_until_exact_acknowledgement",
+        ] {
+            assert!(
+                engine.contains(required),
+                "OMEGA-DELTA-0252: durable in-process review events lost `{required}`"
+            );
+        }
+
+        let skill = read_repository_file(".agents/skills/market-demo/SKILL.md");
+        for required in [
+            "### Scheduled portfolio reviews",
+            "Do not fetch remote market or account data during that turn",
+            "`lnmarkets_strategy`",
+            "at most once",
+            "`lnmarkets_swap`",
+        ] {
+            assert!(
+                skill.contains(required),
+                "OMEGA-DELTA-0252: portfolio review skill lost `{required}`"
+            );
+        }
+    }
 }

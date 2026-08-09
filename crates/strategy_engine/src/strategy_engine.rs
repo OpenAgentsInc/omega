@@ -1,4 +1,4 @@
-use std::sync::Arc;
+use std::{collections::VecDeque, sync::Arc};
 
 use agent_wakeup::WakeupSource;
 use anyhow::{Context as _, Result, anyhow, bail};
@@ -301,18 +301,35 @@ impl LifecycleSink for MemoryLifecycleSink {
 
 #[derive(Clone, Default)]
 pub struct MemoryWakeupSink {
-    wakeups: Arc<Mutex<Vec<(WakeupSource, String)>>>,
+    wakeups: Arc<Mutex<VecDeque<(WakeupSource, String)>>>,
 }
 
 impl MemoryWakeupSink {
     pub fn wakeups(&self) -> Vec<(WakeupSource, String)> {
-        self.wakeups.lock().clone()
+        self.wakeups.lock().iter().cloned().collect()
+    }
+
+    pub fn pending(&self) -> Option<(WakeupSource, String)> {
+        self.wakeups.lock().front().cloned()
+    }
+
+    pub fn acknowledge(&self, source: &WakeupSource, instruction: &str) -> bool {
+        let mut wakeups = self.wakeups.lock();
+        if wakeups
+            .front()
+            .is_some_and(|pending| &pending.0 == source && pending.1 == instruction)
+        {
+            wakeups.pop_front();
+            true
+        } else {
+            false
+        }
     }
 }
 
 impl WakeupSink for MemoryWakeupSink {
     fn publish(&self, source: WakeupSource, instruction: String) {
-        self.wakeups.lock().push((source, instruction));
+        self.wakeups.lock().push_back((source, instruction));
     }
 }
 
@@ -875,6 +892,33 @@ mod tests {
     }
 
     struct TestProgram;
+
+    #[test]
+    fn memory_wakeup_events_remain_pending_until_exact_acknowledgement() {
+        let wakeups = MemoryWakeupSink::default();
+        let first_source = WakeupSource::StrategyHalt {
+            strategy: "funding_carry".into(),
+            reason: "funding flipped".into(),
+        };
+        let second_source = WakeupSource::VolatilityRegimeChange {
+            previous: "quiet".into(),
+            current: "active".into(),
+        };
+        wakeups.publish(first_source.clone(), "review funding".into());
+        wakeups.publish(second_source.clone(), "review volatility".into());
+
+        assert_eq!(
+            wakeups.pending(),
+            Some((first_source.clone(), "review funding".into()))
+        );
+        assert!(!wakeups.acknowledge(&second_source, "review volatility"));
+        assert_eq!(wakeups.wakeups().len(), 2);
+        assert!(wakeups.acknowledge(&first_source, "review funding"));
+        assert_eq!(
+            wakeups.pending(),
+            Some((second_source, "review volatility".into()))
+        );
+    }
 
     impl StrategyProgram for TestProgram {
         type Config = TestConfig;

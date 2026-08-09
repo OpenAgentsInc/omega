@@ -78,6 +78,18 @@ for current changes. Never claim a stream is still active after the tool
 returns. Report any per-section `ok: false` result from `portfolio`; it usually
 means the API key lacks that read scope.
 
+### Scheduled portfolio reviews
+
+When a strategy starts, its thread becomes the portfolio-review thread. A
+scheduled or event-triggered review already contains local feature, ledger,
+mandate, strategy-state, opportunity, and limit-headroom data. Do not fetch remote market or account data during that turn, and do not repeat the local
+feature or ledger reads. Rank the supplied opportunity inventory. Use
+`lnmarkets_strategy` at most once to start, adjust, or halt a supported
+strategy inside the active mandate. Never use `lnmarkets_swap` or another raw
+order path from a review turn. The strategy engine owns execution and enforces
+the mandate. End with one short reasoning note and the supplied daily profit,
+fees, funding, drawdown, and headroom figures.
+
 ## The flow
 
 1. **Network question** ("what does the network look like?"): call

@@ -802,6 +802,7 @@ impl AgentTool for LnMarketsMandateTool {
 
 pub struct LnMarketsStrategyTool {
     client: ToolClient,
+    session_id: String,
 }
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, JsonSchema)]
@@ -908,6 +909,9 @@ impl AgentTool for LnMarketsStrategyTool {
                             "automated LN Markets strategies are restricted to signet",
                         ));
                     }
+                    runtime
+                        .claim_review_session(self.session_id.clone())
+                        .map_err(|error| LnMarketsToolOutput::error(error.to_string()))?;
                     let at_ms = unix_timestamp_ms().map_err(LnMarketsToolOutput::error)?;
                     match strategy {
                         LnMarketsStrategyName::RebalanceToTarget => {
@@ -929,6 +933,9 @@ impl AgentTool for LnMarketsStrategyTool {
                     }
                 }
                 LnMarketsStrategyInput::Adjust { strategy, config } => {
+                    runtime
+                        .claim_review_session(self.session_id.clone())
+                        .map_err(|error| LnMarketsToolOutput::error(error.to_string()))?;
                     let at_ms = unix_timestamp_ms().map_err(LnMarketsToolOutput::error)?;
                     match strategy {
                         LnMarketsStrategyName::RebalanceToTarget => {
@@ -950,6 +957,9 @@ impl AgentTool for LnMarketsStrategyTool {
                     }
                 }
                 LnMarketsStrategyInput::Halt { strategy, reason } => {
+                    runtime
+                        .claim_review_session(self.session_id.clone())
+                        .map_err(|error| LnMarketsToolOutput::error(error.to_string()))?;
                     let at_ms = unix_timestamp_ms().map_err(LnMarketsToolOutput::error)?;
                     match strategy {
                         LnMarketsStrategyName::RebalanceToTarget => {
@@ -1142,6 +1152,7 @@ impl AgentTool for LnMarketsSwapTool {
 pub fn lnmarkets_tools(
     http_client: Arc<dyn HttpClient>,
     credentials_provider: Arc<dyn CredentialsProvider>,
+    session_id: String,
 ) -> (
     LnMarketsAccountTool,
     LnMarketsMarketDataTool,
@@ -1177,6 +1188,7 @@ pub fn lnmarkets_tools(
                 http_client,
                 credentials_provider,
             },
+            session_id,
         },
         LnMarketsMandateTool,
     )
