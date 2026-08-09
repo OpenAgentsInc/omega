@@ -9909,8 +9909,10 @@ the visual lane (which installs no gate). The full drawn set is now admitted.
 
 Omega connects to LN Markets without sending the account credential through
 the OpenAgents API. The new Rust client signs the exact v3 method, path, query,
-and compact JSON bytes that it sends. It rate-limits requests, retries only
-connection-phase failures and transient HTTP statuses, and never retries a 401.
+and compact JSON bytes that it sends. It rate-limits requests and retries only
+read-only requests after connection-phase failures or transient HTTP statuses.
+It never retries a 401 or a swap POST; a retry must not duplicate a mainnet
+conversion whose response was lost.
 
 The API Keys screen stores the key, secret, passphrase, and selected network in
 Omega's private channel-scoped credential store. Save & Test calls the signed
@@ -9918,9 +9920,10 @@ Omega's private channel-scoped credential store. Save & Test calls the signed
 redact their debug output and zero their owned strings when dropped.
 
 Omega Agent can read the configured account, read public ticker and synthetic
-USD prices, and request BTC/synthetic-USD swaps on signet. Mainnet account
-checks and public reads are available, but the swap tool refuses mainnet before
-it sends a request.
+USD prices, and request BTC/synthetic-USD swaps on signet or mainnet. Every
+swap call names its network, and the tool refuses a request whose network does
+not match the configured credential before it sends anything. A matching
+mainnet request executes against LN Markets with real account funds.
 
 - **Enforced by:** signer, retry, request-body, and credential tests in
   `lnmarkets_client`; `ln_markets_uses_one_local_direct_fail_closed_client` in

@@ -265,7 +265,7 @@ impl Render for LnMarketsSettingsPage {
                     .when(self.network == Network::Mainnet, |section| {
                         section.child(
                             Label::new(
-                                "Mainnet account checks are enabled. Mainnet swaps remain blocked.",
+                                "Mainnet swaps execute with real funds. The API key needs Trade permission.",
                             )
                             .size(LabelSize::Small)
                             .color(Color::Warning),

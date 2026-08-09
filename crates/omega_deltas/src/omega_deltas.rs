@@ -28927,14 +28927,19 @@ mod tests {
             "lnmarkets_account",
             "lnmarkets_market_data",
             "lnmarkets_swap",
-            "if network == Network::Mainnet",
-            "No request was sent",
+            "network: LnMarketsNetworkInput",
+            "require_matching_network(configured_network, requested_network)",
+            "No swap was sent",
         ] {
             assert!(
                 tools.contains(required),
                 "OMEGA-DELTA-0241: the LN Markets tool boundary lost `{required}`"
             );
         }
+        assert!(
+            !tools.contains("if network == Network::Mainnet"),
+            "OMEGA-DELTA-0241: mainnet LN Markets swaps were blocked again"
+        );
 
         let settings = without_comments(&read_repository_file(
             "crates/settings_ui/src/pages/lnmarkets_settings_page.rs",

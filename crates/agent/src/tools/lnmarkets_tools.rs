@@ -202,6 +202,8 @@ pub struct LnMarketsSwapTool {
 
 #[derive(Debug, Serialize, Deserialize, JsonSchema)]
 pub struct LnMarketsSwapInput {
+    /// LN Markets environment that will execute the swap. It must match the configured account.
+    network: LnMarketsNetworkInput,
     /// Asset the user is spending. BTC amounts are satoshis. USD amounts are cents.
     in_asset: LnMarketsSwapAsset,
     /// Positive whole-number amount. BTC must be at least 1,000 sats; USD is in cents.
@@ -220,7 +222,13 @@ impl AgentTool for LnMarketsSwapTool {
 
     fn initial_title(&self, input: Result<Self::Input, Value>, _cx: &mut App) -> SharedString {
         match input {
-            Ok(input) => format!("Swap {} {:?} on LN Markets", input.amount, input.in_asset).into(),
+            Ok(input) => format!(
+                "Swap {} {:?} on LN Markets {}",
+                input.amount,
+                input.in_asset,
+                Network::from(input.network).label()
+            )
+            .into(),
             Err(_) => "Swap on LN Markets".into(),
         }
     }
@@ -236,19 +244,14 @@ impl AgentTool for LnMarketsSwapTool {
                 .recv()
                 .await
                 .map_err(|error| LnMarketsToolOutput::error(error.to_string()))?;
-            let (client, network) = self
+            let requested_network = Network::from(input.network);
+            let (client, configured_network) = self
                 .client
                 .authenticated(cx)
                 .await
                 .map_err(LnMarketsToolOutput::error)?;
-            if network == Network::Mainnet {
-                return Ok(LnMarketsToolOutput::success(json!({
-                    "schema": "omega.lnmarkets.warning.v1",
-                    "network": "mainnet",
-                    "blocked": true,
-                    "warning": "Mainnet LN Markets swaps are blocked. No request was sent.",
-                })));
-            }
+            require_matching_network(configured_network, requested_network)
+                .map_err(LnMarketsToolOutput::error)?;
             let request = match input.in_asset {
                 LnMarketsSwapAsset::BTC => {
                     let amount_sats = input.amount.parse::<u64>().map_err(|_| {
@@ -271,7 +274,7 @@ impl AgentTool for LnMarketsSwapTool {
                 .map_err(|error| LnMarketsToolOutput::error(error.to_string()))?;
             Ok(LnMarketsToolOutput::success(json!({
                 "schema": "omega.lnmarkets.swap.v1",
-                "network": network,
+                "network": configured_network,
                 "status": "completed",
                 "swap": result,
             })))
@@ -304,4 +307,35 @@ pub fn lnmarkets_tools(
             },
         },
     )
+}
+
+fn require_matching_network(
+    configured_network: Network,
+    requested_network: Network,
+) -> Result<(), String> {
+    if configured_network == requested_network {
+        return Ok(());
+    }
+    Err(format!(
+        "LN Markets is configured for {}, but the swap requested {}. No swap was sent.",
+        configured_network.label(),
+        requested_network.label()
+    ))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn mainnet_swaps_are_admitted_when_the_configured_network_matches() {
+        assert!(require_matching_network(Network::Mainnet, Network::Mainnet).is_ok());
+    }
+
+    #[test]
+    fn a_network_mismatch_is_refused_before_execution() {
+        let error = require_matching_network(Network::Mainnet, Network::Signet)
+            .expect_err("a signet request must not use a mainnet account");
+        assert!(error.contains("No swap was sent"));
+    }
 }

@@ -493,6 +493,7 @@ impl LnMarketsClient {
         body: Vec<u8>,
         authenticated: bool,
     ) -> Result<T, Error> {
+        let may_retry = method == Method::GET;
         let credentials = if authenticated {
             Some(
                 self.credentials
@@ -518,7 +519,10 @@ impl LnMarketsClient {
                     if response.status().is_success() {
                         return parse_success_response(response).await;
                     }
-                    if is_retryable_status(response.status()) && attempt + 1 < MAX_ATTEMPTS {
+                    if may_retry
+                        && is_retryable_status(response.status())
+                        && attempt + 1 < MAX_ATTEMPTS
+                    {
                         let delay = retry_delay(attempt, response.headers());
                         drain_response(response).await?;
                         async_io::Timer::at(Instant::now() + delay).await;
@@ -526,7 +530,9 @@ impl LnMarketsClient {
                     }
                     return Err(parse_error_response(response).await?);
                 }
-                Err(error) if is_connection_error(&error) && attempt + 1 < MAX_ATTEMPTS => {
+                Err(error)
+                    if may_retry && is_connection_error(&error) && attempt + 1 < MAX_ATTEMPTS =>
+                {
                     async_io::Timer::at(Instant::now() + retry_delay(attempt, &Default::default()))
                         .await;
                 }
@@ -846,6 +852,54 @@ mod tests {
                 .await
                 .expect("result");
             assert_eq!(result.in_asset, Asset::BTC);
+        });
+    }
+
+    #[test]
+    fn mainnet_swap_uses_the_production_api_host() {
+        smol::block_on(async {
+            let client = FakeHttpClient::create(|request| async move {
+                assert_eq!(request.method(), Method::POST);
+                assert_eq!(request.uri().scheme_str(), Some("https"));
+                assert_eq!(request.uri().host(), Some("api.lnmarkets.com"));
+                assert_eq!(request.uri().path(), "/v3/synthetic-usd/swap");
+                response(
+                    200,
+                    r#"{"inAmount":1000,"inAsset":"BTC","outAmount":0.55,"outAsset":"USD"}"#,
+                )
+            });
+            let credentials = Credentials::new("key", "secret", "passphrase").expect("credentials");
+            let client = LnMarketsClient::authenticated(client, Network::Mainnet, credentials);
+            let result = client
+                .new_swap(&NewSwapRequest::bitcoin_to_synthetic_usd(1_000).expect("swap"))
+                .await
+                .expect("result");
+            assert_eq!(result.out_asset, Asset::USD);
+        });
+    }
+
+    #[test]
+    fn a_swap_post_is_never_retried() {
+        smol::block_on(async {
+            let requests = Arc::new(StdMutex::new(0));
+            let client = FakeHttpClient::create({
+                let requests = requests.clone();
+                move |_| {
+                    let requests = requests.clone();
+                    async move {
+                        *requests.lock().expect("request counter") += 1;
+                        response(503, r#"{"message":"Service unavailable"}"#)
+                    }
+                }
+            });
+            let credentials = Credentials::new("key", "secret", "passphrase").expect("credentials");
+            let client = LnMarketsClient::authenticated(client, Network::Mainnet, credentials);
+            let error = client
+                .new_swap(&NewSwapRequest::bitcoin_to_synthetic_usd(1_000).expect("swap"))
+                .await
+                .expect_err("503");
+            assert!(matches!(error, Error::Api { status, .. } if status.as_u16() == 503));
+            assert_eq!(*requests.lock().expect("request counter"), 1);
         });
     }
 
